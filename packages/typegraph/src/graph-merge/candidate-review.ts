@@ -37,6 +37,7 @@ import {
   mergeReviewPolicySchema,
   type MergeReviewRevalidation,
 } from "./review-schema";
+import { canUseSparseCandidatePlanning } from "./sparse-candidate-branch";
 import type { GraphDef } from "./typegraph-internal";
 
 export type PlanCandidateWriteSetReviewArgs<G extends GraphDef> =
@@ -71,13 +72,9 @@ export async function planCandidateWriteSetReview<G extends GraphDef>(
     const options = reviewOptionEvidence(args.options);
     const startingFence = await captureMergePlanTargetFence(args.target);
     const referenced = args.reviewScope === "candidate";
-    if (
-      referenced &&
-      (args.target.graph.identity !== undefined ||
-        !args.target.revisionTrackingEnabled)
-    ) {
+    if (referenced && !canUseSparseCandidatePlanning(args.target)) {
       throw new MergeReviewError(
-        "Candidate-scoped review requires an identity-disabled, revision-tracked target.",
+        "Candidate-scoped review requires a revision-tracked target without identity or cross-row constraints.",
       );
     }
     const fullBaseline =
@@ -178,10 +175,10 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
 
     if (
       review.baseline.scope === "referenced" &&
-      args.target.graph.identity !== undefined
+      !canUseSparseCandidatePlanning(args.target)
     ) {
       throw new MergeReviewError(
-        "Scoped review evidence requires an identity-disabled graph.",
+        "Scoped review evidence requires a revision-tracked graph without identity or cross-row constraints.",
       );
     }
     const baseline =

@@ -1,9 +1,11 @@
-import type { GraphBackend } from "@nicia-ai/typegraph";
+import type { GraphBackend, GraphDef, Store } from "@nicia-ai/typegraph";
 import {
   asNodeId,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
+  disjointWith,
 } from "@nicia-ai/typegraph";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -15,6 +17,7 @@ import {
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
+  planCandidateWriteSetReview,
   planMergeIncremental,
 } from "../../src/graph-merge";
 import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
@@ -45,6 +48,43 @@ const graph = defineGraph({
     },
   },
   edges: {},
+});
+const related = defineEdge("related", { schema: z.object({}) });
+const cardinalityGraph = defineGraph({
+  id: "candidate-cardinality",
+  nodes: { Person: { type: Person } },
+  edges: {
+    related: {
+      type: related,
+      from: [Person],
+      to: [Person],
+      cardinality: "one",
+    },
+  },
+});
+const Alias = defineNode("Alias", {
+  schema: z.object({ name: z.string(), externalKey: z.string() }),
+});
+const disjointGraph = defineGraph({
+  id: "candidate-disjoint",
+  nodes: { Person: { type: Person }, Alias: { type: Alias } },
+  edges: {},
+  ontology: [disjointWith(Person, Alias)],
+});
+const matched = defineEdge("matched", {
+  schema: z.object({ code: z.string() }),
+});
+const edgeIdentityGraph = defineGraph({
+  id: "candidate-edge-match-identity",
+  nodes: { Person: { type: Person } },
+  edges: {
+    matched: {
+      type: matched,
+      from: [Person],
+      to: [Person],
+      matchIdentity: { name: "code", fields: ["code"] },
+    },
+  },
 });
 
 describe("candidate write-set planning", () => {
@@ -90,6 +130,39 @@ describe("candidate write-set planning", () => {
     return { makeBackend: () => Promise.resolve(fixture.backend), close };
   }
 
+  async function fullCloneImportSucceeded<G extends GraphDef>(
+    target: Store<G>,
+    writeSet: CandidateWriteSet,
+    branchId: string,
+  ): Promise<boolean> {
+    const branch = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(branchId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        branch,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: writeSet.nodes,
+          edges: writeSet.edges,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      return imported.success;
+    } finally {
+      await branch.close();
+    }
+  }
+
   const options = {
     resolve: {
       Person: {
@@ -101,6 +174,161 @@ describe("candidate write-set planning", () => {
       },
     },
   };
+
+  it("matches full clone staging when an existing edge occupies cardinality one", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      {
+        revisionTracking: true,
+      },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const existing = await target.nodes.Person.create(
+      { name: "Existing", externalKey: "existing" },
+      { id: "existing" },
+    );
+    const proposed = await target.nodes.Person.create(
+      { name: "Proposed", externalKey: "proposed" },
+      { id: "proposed" },
+    );
+    await target.edges.related.create(source, existing, {}, { id: "old-edge" });
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "cardinality-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "related",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: proposed.id },
+          properties: {},
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    expect(
+      await fullCloneImportSucceeded(target, writeSet, "full-cardinality"),
+    ).toBe(false);
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(isErr(bounded)).toBe(true);
+  });
+
+  it("refuses candidate-scoped review on a graph requiring a complete clone", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      {
+        revisionTracking: true,
+      },
+    );
+    const review = await planCandidateWriteSetReview({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet: {
+        formatVersion: 1,
+        sourceId: "review-candidate",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [],
+      },
+      policy: { id: "review-policy", context: {} },
+      reviewScope: "candidate",
+    });
+    expect(isErr(review)).toBe(true);
+    if (isErr(review)) expect(review.error.code).toBe("GRAPH_MERGE_REVIEW");
+  });
+
+  it("matches full clone staging for a disjoint same-id sibling", async () => {
+    const [target] = await createStoreWithSchema(disjointGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    await target.nodes.Person.create(
+      { name: "Person", externalKey: "person" },
+      { id: "shared" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "disjoint-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [
+        {
+          kind: "Alias",
+          id: "shared",
+          properties: { name: "Alias", externalKey: "alias" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    };
+    expect(
+      await fullCloneImportSucceeded(target, writeSet, "full-disjoint"),
+    ).toBe(false);
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(isErr(bounded)).toBe(true);
+  });
+
+  it("matches full clone staging for an occupied durable edge identity", async () => {
+    const [target] = await createStoreWithSchema(
+      edgeIdentityGraph,
+      baseBackend,
+      {
+        revisionTracking: true,
+      },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.matched.create(
+      source,
+      peer,
+      { code: "shared" },
+      { id: "old-edge" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "edge-identity-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: { code: "shared" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    expect(
+      await fullCloneImportSucceeded(target, writeSet, "full-match-identity"),
+    ).toBe(false);
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(isErr(bounded)).toBe(true);
+  });
 
   it("returns a deterministic serialized property-conflict plan with source attribution", async () => {
     const { target, writeSet } = await setup();

@@ -558,7 +558,8 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
-For an identity-disabled, revision-tracked graph, pass
+For a revision-tracked graph without Operational Identity, ontology relations,
+or edge cardinality or match-identity constraints, pass
 `reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
 candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
 edge endpoints, resolved writes, and plan guards, including expected absences
@@ -568,8 +569,7 @@ without invalidating V2 when it cannot affect the fresh resolved plan; V1
 would report that row change. Applications whose approval policy needs the
 V1 whole-graph rule should omit `reviewScope`. The review artifact records
 its version and scope, so revalidation applies the rule originally reviewed.
-Candidate-scoped review refuses an identity-enabled or non-revision-tracked
-target.
+Candidate-scoped review refuses graphs outside those eligibility rules.
 
 Applicable store constraints still run during atomic application. Compatibility
 does not promise that apply will succeed: new rows may introduce constraint
@@ -1883,13 +1883,14 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-On revision-tracked graphs without Operational Identity, planning seeds only
-existing candidate rows and edge endpoints into the disposable working copy.
+On revision-tracked graphs without Operational Identity, ontology relations, or
+edge cardinality or match-identity constraints, planning seeds only existing
+candidate rows and edge endpoints into the disposable working copy.
 The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
-properties are refused. Identity-enabled and non-revision-tracked graphs use
-the complete clone path.
+properties are refused. Other graphs use the complete clone path so staging
+still checks constraints that can depend on rows beyond the candidate's ids.
 
 ```typescript
 import {

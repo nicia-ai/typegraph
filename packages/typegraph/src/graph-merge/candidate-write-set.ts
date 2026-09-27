@@ -22,6 +22,7 @@ import type { Result } from "./result";
 import { err, isErr } from "./result";
 import {
   boundedCandidateKeys,
+  canUseSparseCandidatePlanning,
   sparseCandidateWorkingCopyStrategy,
 } from "./sparse-candidate-branch";
 import type { GraphDef, Store } from "./typegraph-internal";
@@ -219,9 +220,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
-  const bounded =
-    args.target.graph.identity === undefined &&
-    args.target.revisionTrackingEnabled;
+  const bounded = canUseSparseCandidatePlanning(args.target);
   try {
     created = await ingestionBranch(
       args.target,

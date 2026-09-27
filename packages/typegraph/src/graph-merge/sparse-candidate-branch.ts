@@ -24,6 +24,26 @@ import { graphWithoutNodeUniqueness } from "./working-copy";
 
 type EntityReference = Readonly<{ kind: string; id: string }>;
 
+/**
+ * Only constraints whose import checks are local to the candidate's row ids
+ * can be checked against a sparse clone. Cardinality and durable edge match
+ * identity can inspect other edges, while ontology can add cross-kind claims.
+ */
+export function canUseSparseCandidatePlanning<G extends GraphDef>(
+  target: Store<G>,
+): boolean {
+  return (
+    target.revisionTrackingEnabled &&
+    target.graph.identity === undefined &&
+    target.graph.ontology.length === 0 &&
+    Object.values(target.graph.edges).every(
+      (edge) =>
+        (edge.cardinality ?? "many") === "many" &&
+        edge.matchIdentity === undefined,
+    )
+  );
+}
+
 function referenceKey(reference: EntityReference): string {
   return JSON.stringify([reference.kind, reference.id]);
 }
