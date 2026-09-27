@@ -17,6 +17,7 @@ import {
   createPostgresTables,
   type PostgresTableNames,
 } from "../../../src/backend/drizzle/schema/postgres";
+import { createPostgresWorkingCopyManager } from "../../../src/backend/postgres/working-copy";
 import type {
   TransactionBackend,
   TransactionOptions,
@@ -24,7 +25,6 @@ import type {
 import {
   branchDurable,
   computeBaseVersion,
-  createPostgresWorkingCopyManager,
   destroyDurableBranch,
   reopenDurableBranch,
 } from "../../../src/graph-merge";

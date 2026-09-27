@@ -105,7 +105,7 @@ export const DRIZZLE_SPECIFIER_PATTERN =
 /**
  * The published entrypoints that are EXPECTED to reach Drizzle, and how.
  *
- * The seven `./adapters/drizzle/*` entrypoints are `adapter-static`: each
+ * The eight `./adapters/drizzle/*` entrypoints are `adapter-static`: each
  * one's module tree imports a Drizzle package as a value, so it measures
  * dirty at both grains, in every mode and format. Six take a
  * caller-constructed Drizzle handle directly; `./adapters/drizzle/engine`'s
@@ -130,6 +130,7 @@ export const ADAPTER_ENTRYPOINTS: Readonly<
 > = {
   "./adapters/drizzle/sqlite": "adapter-static",
   "./adapters/drizzle/postgres": "adapter-static",
+  "./adapters/drizzle/postgres/working-copy": "adapter-static",
   "./adapters/drizzle/postgres/pglite": "adapter-static",
   "./adapters/drizzle/sqlite/local": "adapter-static",
   "./adapters/drizzle/sqlite/libsql": "adapter-static",

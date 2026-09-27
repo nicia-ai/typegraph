@@ -1458,10 +1458,10 @@ import {
   createPostgresBackend,
   createPostgresTables,
 } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createPostgresWorkingCopyManager } from "@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy";
 import {
   asBranchId,
   branchDurable,
-  createPostgresWorkingCopyManager,
   destroyDurableBranch,
   reopenDurableBranch,
   unwrap,

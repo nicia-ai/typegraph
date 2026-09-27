@@ -32,6 +32,7 @@ import {
   postgresContributions,
   quoteDdlIdentifier,
 } from "./ddl";
+import { postgresTableLockSql } from "./postgres-fence-sql";
 import {
   createPostgresTables,
   defaultPostgresTableNames,
@@ -284,12 +285,7 @@ async function cloneRelations(
   const sourceNames = source.map((contribution) => contribution.tableName);
   // A table lock on the pinned source transaction prevents writes between the
   // source token check and every INSERT ... SELECT. SHARE blocks ROW EXCLUSIVE.
-  await rows(
-    transaction,
-    sql.raw(
-      `LOCK TABLE ${sourceNames.map((name) => quoteDdlIdentifier(name)).join(", ")} IN SHARE MODE`,
-    ),
-  );
+  await rows(transaction, postgresTableLockSql(sourceNames, "share"));
   const sourceMarker = getTableName(sourceTables.baseSchemaVersions);
   const marker = await rows<Readonly<{ version: number }>>(
     transaction,

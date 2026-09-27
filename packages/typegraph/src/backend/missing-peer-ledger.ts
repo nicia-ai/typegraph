@@ -59,6 +59,9 @@ const SYNCHRONOUS_HANDLE_ADAPTER_REASON =
 const SYNCHRONOUS_CONNECTION_ADAPTER_REASON =
   "synchronous connection-owning adapter factory: deferring its Drizzle-backed implementation to translate the module-resolution failure would require an async signature change";
 
+const SYNCHRONOUS_WORKING_COPY_MANAGER_REASON =
+  "synchronous Drizzle-backed working-copy manager factory: deferring its implementation to translate the module-resolution failure would require an async signature change";
+
 const ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON =
   "explicit Drizzle-native adapter entrypoint: it eagerly exposes a Drizzle database alongside the GraphBackend, so a missing drizzle-orm fails at module evaluation with the raw resolution error";
 
@@ -71,7 +74,7 @@ const ASSEMBLED_PROFILE_MODULE_TREE_REASON =
 /**
  * Repo-root-relative, POSIX paths (matching `scripts/drizzle-claim-inventory.ts`'s
  * path grain) naming every file that states the peer's optionality and the
- * install command for the seven documented-resolution-error rows.
+ * install command for the eight documented-resolution-error rows.
  */
 const SYNCHRONOUS_ADAPTER_DOCUMENTED_IN: readonly string[] = [
   "README.md",
@@ -82,7 +85,7 @@ const SYNCHRONOUS_ADAPTER_DOCUMENTED_IN: readonly string[] = [
 /**
  * Every non-portable published entrypoint, in exactly one arm. The two
  * "batteries included" entrypoints get the typed refusal because their
- * factory owns the connection; the seven `./adapters/drizzle/*` entrypoints
+ * factory owns the connection; the eight `./adapters/drizzle/*` entrypoints
  * are the documented, accepted exemption. `tests/missing-peer-refusal.test.ts`
  * asserts this set equals `Object.keys(classifyEntrypoints())` minus the
  * portable entrypoints, both directions — so the covered set and the
@@ -111,6 +114,13 @@ export const MISSING_PEER_LEDGER = [
     arm: "documented-resolution-error",
     formats: ["import", "require"],
     reason: SYNCHRONOUS_HANDLE_ADAPTER_REASON,
+    documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
+  },
+  {
+    entrypoint: "./adapters/drizzle/postgres/working-copy",
+    arm: "documented-resolution-error",
+    formats: ["import", "require"],
+    reason: SYNCHRONOUS_WORKING_COPY_MANAGER_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
   {

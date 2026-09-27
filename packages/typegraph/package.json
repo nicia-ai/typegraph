@@ -77,6 +77,11 @@
       "import": "./dist/backend/postgres/index.js",
       "require": "./dist/backend/postgres/index.cjs"
     },
+    "./adapters/drizzle/postgres/working-copy": {
+      "types": "./dist/backend/postgres/working-copy.d.ts",
+      "import": "./dist/backend/postgres/working-copy.js",
+      "require": "./dist/backend/postgres/working-copy.cjs"
+    },
     "./adapters/drizzle/postgres/pglite": {
       "types": "./dist/backend/postgres/pglite.d.ts",
       "import": "./dist/backend/postgres/pglite.js",

@@ -127,6 +127,18 @@ const INVENTORY: readonly InventoryEntry[] = [
       "Trusted import runs its bulk path against the caller's transaction with the temporary-write members overridden; the rest of the transaction backend must stay reachable.",
   },
   {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const guarded = deriveBackend(backend, {",
+    reason:
+      "A table-backed working copy guards its exact allocated backend before exposing it as a Store while retaining the backend's transaction and resource identity.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const disposableBackend = wrapWithManagedClose(backend, () =>",
+    reason:
+      "An ephemeral working copy closes its derived connection and then discards only the tables owned by its allocation.",
+  },
+  {
     file: "backend/postgres/pglite.ts",
     line: "const managedBackend = wrapWithManagedClose(backend, async () => {",
     reason:

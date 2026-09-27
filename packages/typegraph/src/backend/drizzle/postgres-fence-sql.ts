@@ -108,7 +108,8 @@ export function postgresDdlLockStatement(key: string): string {
   return `PERFORM pg_advisory_xact_lock(hashtext('${key.replaceAll("'", "''")}'));`;
 }
 
-function lockTables(
+/** A table lock for bundled PostgreSQL lifecycle operations. */
+export function postgresTableLockSql(
   tables: readonly string[],
   mode: "share" | "share-row-exclusive" | "access-exclusive",
 ): SqlFragment {
@@ -130,7 +131,7 @@ function isolationFactExpression(): SqlFragment {
 
 /** The bundled PostgreSQL backend's {@link FenceSql} declaration. */
 export const postgresFenceSql: FenceSql = {
-  lockTables,
+  lockTables: postgresTableLockSql,
   advisoryLockExpression,
   isolationFactExpression,
 };
