@@ -126,8 +126,9 @@ describe("candidate review wire and coherent capture", () => {
 
   it("refuses a mixed-revision baseline even when the inner planner sees a stable newer target", async () => {
     const { args, backend } = await setup();
-    const findNodes = backend.findNodesByKind;
-    vi.spyOn(backend, "findNodesByKind").mockImplementationOnce(
+    const findNodes = backend.findNodesAcrossKinds;
+    if (findNodes === undefined) throw new Error("Expected cross-kind read");
+    vi.spyOn(backend, "findNodesAcrossKinds").mockImplementationOnce(
       async (query) => {
         const rows = await findNodes(query);
         await args.target.nodes.Artifact.create({
@@ -146,8 +147,9 @@ describe("candidate review wire and coherent capture", () => {
   it("refuses a write during revalidation baseline enumeration", async () => {
     const { args, backend } = await setup();
     const review = unwrap(await planCandidateWriteSetReview(args));
-    const findNodes = backend.findNodesByKind;
-    vi.spyOn(backend, "findNodesByKind").mockImplementationOnce(
+    const findNodes = backend.findNodesAcrossKinds;
+    if (findNodes === undefined) throw new Error("Expected cross-kind read");
+    vi.spyOn(backend, "findNodesAcrossKinds").mockImplementationOnce(
       async (query) => {
         const rows = await findNodes(query);
         await args.target.nodes.Artifact.create({

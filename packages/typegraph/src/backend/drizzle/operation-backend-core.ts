@@ -125,6 +125,7 @@ import type {
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
   GraphBackend,
   GraphCommand,
   GraphCommandResult,
@@ -565,10 +566,12 @@ export type CommonOperationBackend = Pick<
   | "edgeExistsBetween"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
+  | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
   | "findNodesByKind"
+  | "findNodesAcrossKinds"
   | "getActiveSchema"
   | "getEdge"
   | "getEdges"
@@ -1596,6 +1599,16 @@ export async function commitSchemaVersionIfKindsEmpty(
     status: "committed",
     row: await backend.commitSchemaVersion(params),
   };
+}
+
+function hasAcrossKindsPage(params: FindRowsAcrossKindsParams): boolean {
+  if (!Number.isSafeInteger(params.limit) || params.limit <= 0) {
+    throw new ConfigurationError(
+      "Cross-kind page limit must be a positive integer.",
+      { code: "INVALID_GRAPH_ENUMERATION_LIMIT", limit: params.limit },
+    );
+  }
+  return params.kinds.length > 0;
 }
 
 export function createCommonOperationBackend(
@@ -5051,6 +5064,15 @@ export function createCommonOperationBackend(
       return rows.map((row) => rowMappers.toNodeRow(row));
     },
 
+    async findNodesAcrossKinds(
+      params: FindRowsAcrossKindsParams,
+    ): Promise<readonly NodeRow[]> {
+      if (!hasAcrossKindsPage(params)) return [];
+      const query = operationStrategy.buildFindNodesAcrossKinds(params);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toNodeRow(row));
+    },
+
     async countNodesByKind(params: CountNodesByKindParams): Promise<number> {
       const query = operationStrategy.buildCountNodesByKind(params);
       const row = await execution.execGet<{ count: string | number }>(query);
@@ -5061,6 +5083,15 @@ export function createCommonOperationBackend(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
       const query = operationStrategy.buildFindEdgesByKind(params);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toEdgeRow(row));
+    },
+
+    async findEdgesAcrossKinds(
+      params: FindRowsAcrossKindsParams,
+    ): Promise<readonly EdgeRow[]> {
+      if (!hasAcrossKindsPage(params)) return [];
+      const query = operationStrategy.buildFindEdgesAcrossKinds(params);
       const rows = await execution.execAll<Record<string, unknown>>(query);
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },
