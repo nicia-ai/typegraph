@@ -1,5 +1,21 @@
 # @nicia-ai/typegraph
 
+## 0.71.0
+
+### Minor Changes
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Add `identity.classes({ kinds, cursor, limit })` to read visible identity classes in deterministic pages at the current or a historical coordinate. Pages include visible singleton classes and expose registered visible members of each matching class. Opaque cursors are bound to the graph, read coordinate, and kind filter.
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Add `identity.explainSame(a, b)` to return a shortest path of persisted same assertions and implicit same-ID folds at the facade's read coordinate.
+
+- [#750](https://github.com/nicia-ai/typegraph/pull/750) [`b305ad9`](https://github.com/nicia-ai/typegraph/commit/b305ad9e9b7f890a4d497135ad9fc38422ebf0e0) Thanks [@pdlug](https://github.com/pdlug)! - Make `IdentityReadFacade` and `IdentityFacade` the complete public identity surfaces, including `classes` and `explainSame`. Replace the exported `IdentityReadSurface` and `IdentitySurface` aliases with those facade types.
+  
+  Historical identity reads and traversals now agree on registered kinds, and `explainSame` cites an implicit same-ID fold only when both nodes existed at the requested coordinate. Class cursors keep a fixed size as kind filters grow. Identity invariant errors include graph details and an appropriate current or historical recovery hint.
+
+### Patch Changes
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Report exact JSON Pointers and before-and-after pattern values in schema migration diagnostics so validator changes can be located and reviewed precisely.
+
 ## 0.70.0
 
 ### Highlights
