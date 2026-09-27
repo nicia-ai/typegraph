@@ -1489,10 +1489,13 @@ import {
 const control = createPostgresBackend(drizzle(pool));
 const copies = createPostgresWorkingCopyManager<typeof graph>({
   control,
-  connect: (names) =>
+  connect: (names, allocation) =>
     Promise.resolve(
       createPostgresBackend(drizzle(pool), {
         tables: createPostgresTables(names),
+        ...(allocation === undefined ?
+          {}
+        : { vector: allocation.vectorStrategy }),
       }),
     ),
 });
@@ -1532,17 +1535,25 @@ status relations. The manager refuses missing or mismatched bindings with a
 allocation tables are created, so custom callbacks may inspect those tables;
 on binding failure, the manager removes the new tables and ledger row.
 
-The table-backed strategy supports bundled tsvector fulltext and declared
-PostgreSQL B-tree, GIN, and trigram graph indexes. It builds each declared index
-on the copy's private tables under a stable allocation-scoped physical name,
-while keeping the graph's logical index names and schema hash unchanged.
-`materializeIndexes()` can retry or repair these indexes after reopen; closing
-or destroying a copy removes its indexes with its tables. The copy has a fixed
-schema: `evolve`, kind removal, and deprecation refuse before mutation. Vector
-fields and custom fulltext strategies still need a host-level database fork.
-System index maintenance remains available. Source
-table locks cover the entire TypeGraph relation set while the SQL clone runs,
-so a large clone briefly blocks writes to other graphs in the same database.
+The table-backed strategy supports bundled tsvector fulltext, declared
+PostgreSQL B-tree, GIN, and trigram graph indexes, and pgvector sidecars. It
+builds each declared graph index on private tables under stable
+allocation-scoped physical names while keeping logical index names and schema
+hashes unchanged. `materializeIndexes()` can retry or repair indexes after
+reopen; destroy removes their owned tables and indexes. When `connect` receives
+an allocation vector strategy, pass it to `createPostgresBackend`; the strategy
+assigns stable table and index names to that allocation. Source vector sidecars
+are copied under the same transaction locks as TypeGraph relations, and their
+physical names are stored in the allocation ledger so destroy can remove them
+without a graph object. Reopening requires the graph's vector slots to match
+the persisted allocation manifest. A declared vector slot whose source sidecar
+is absent is refused because its contents cannot be snapshotted exactly.
+
+The copy has a fixed schema: `evolve`, kind removal, and deprecation refuse
+before mutation. Custom fulltext strategies still need a host-level database
+fork. System index maintenance remains available. Source table locks cover the
+entire TypeGraph relation set and vector sidecars while the SQL clone runs, so a
+large clone briefly blocks writes to other graphs in the same database.
 
 ### Forked working copies
 

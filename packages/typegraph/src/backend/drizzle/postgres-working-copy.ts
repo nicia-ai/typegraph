@@ -16,7 +16,10 @@ import type {
 } from "../../graph-merge/durable-branch";
 import { durableOriginsEqual } from "../../graph-merge/durable-branch";
 import { BranchError } from "../../graph-merge/errors";
-import { storeBackend, wrapWithManagedClose } from "../../graph-merge/typegraph-internal";
+import {
+  storeBackend,
+  wrapWithManagedClose,
+} from "../../graph-merge/typegraph-internal";
 import type { BaseVersion } from "../../graph-merge/types";
 import type { WorkingCopyStrategy } from "../../graph-merge/working-copy";
 import {
@@ -25,10 +28,22 @@ import {
 } from "../../indexes/physical-name";
 import { resolveSystemIndexNames } from "../../indexes/system";
 import { tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
+import {
+  createPgvectorStrategy,
+  isPgvectorStrategy,
+} from "../../query/dialect/vector/pgvector-strategy";
+import type {
+  VectorSlot,
+  VectorStrategy,
+} from "../../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { markFixedSchemaWorkingCopyBackend } from "../../store/fixed-schema-working-copy";
-import { createStore, createStoreWithSchema, type Store } from "../../store/store";
+import {
+  createStore,
+  createStoreWithSchema,
+  type Store,
+} from "../../store/store";
 import type { StoreOptions, WorkingCopyOptions } from "../../store/types";
 import { sha256Hex } from "../../utils/hash";
 import { deriveBackend } from "../derive-backend";
@@ -55,6 +70,15 @@ const DEFAULT_CLEANUP_LOCK_TIMEOUT_MS = 5000;
 
 type QuerySession = Pick<GraphBackend, "execute">;
 type AllocationState = "allocating" | "sealed" | "ephemeral";
+type VectorSlotManifest = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  fieldPath: string;
+  dimensions: number;
+  metric: string;
+  indexType: string;
+  tableName: string;
+}>;
 type AllocationRow = Readonly<{
   allocation_id: string;
   ownership_token: string;
@@ -62,6 +86,7 @@ type AllocationRow = Readonly<{
   origin: DurableBranchOrigin | undefined;
   history: boolean;
   revision_tracking: boolean;
+  vector_slots: readonly VectorSlotManifest[];
   created_at: string;
 }>;
 
@@ -80,12 +105,17 @@ export type PostgresUnsealedAllocation = Readonly<{
  * source. `connect` receives the complete generated name map and must bind a
  * new backend to those names. Source and connected backends must expose every
  * PostgreSQL table binding, including status relations, for attestation.
- * `connect` runs after allocation tables exist and may use any Drizzle
+ * `connect` runs after allocation tables exist. For vector graphs it also
+ * receives the allocation-scoped strategy and must pass it to
+ * `createPostgresBackend({ vector: vectorStrategy })`. It may use any Drizzle
  * PostgreSQL driver.
  */
 export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
   control: GraphBackend;
-  connect: (names: PostgresTableNames) => Promise<GraphBackend>;
+  connect: (
+    names: PostgresTableNames,
+    allocation?: Readonly<{ vectorStrategy: VectorStrategy }>,
+  ) => Promise<GraphBackend>;
   /** Names for source relations that the Store schema binding does not expose. */
   sourceTableNames?: Partial<PostgresTableNames>;
   /** Reattached process-local hooks and query options; physical names are owned here. */
@@ -127,6 +157,93 @@ function relationNamesForTables(tables: PostgresTables): readonly string[] {
   return postgresContributions(tables).map(
     (contribution) => contribution.tableName,
   );
+}
+
+function vectorSlotManifest(
+  slots: readonly VectorSlot[],
+  strategy: VectorStrategy,
+): readonly VectorSlotManifest[] {
+  return slots
+    .map((slot) => ({
+      graphId: slot.graphId,
+      nodeKind: slot.nodeKind,
+      fieldPath: slot.fieldPath,
+      dimensions: slot.dimensions,
+      metric: slot.metric,
+      indexType: slot.indexType,
+      tableName: strategy.tableName(
+        slot.graphId,
+        slot.nodeKind,
+        slot.fieldPath,
+      ),
+    }))
+    .toSorted((left, right) =>
+      left.tableName < right.tableName ? -1
+      : left.tableName > right.tableName ? 1
+      : 0,
+    );
+}
+
+function assertVectorManifestMatches(
+  graph: GraphDef,
+  allocationId: string,
+  persisted: readonly VectorSlotManifest[],
+): void {
+  const slots = resolveGraphVectorSlots(graph);
+  const strategy = createPgvectorStrategy(allocationId);
+  const expected = vectorSlotManifest(slots, strategy);
+  const toKey = (entry: VectorSlotManifest): string =>
+    [
+      entry.graphId,
+      entry.nodeKind,
+      entry.fieldPath,
+      entry.dimensions,
+      entry.metric,
+      entry.indexType,
+      entry.tableName,
+    ].join("\u0000");
+  if (
+    expected.map((entry) => toKey(entry)).join("\n") !==
+    persisted.map((entry) => toKey(entry)).join("\n")
+  ) {
+    throw new BranchError(
+      "Working-copy vector slots do not match the sealed allocation schema.",
+    );
+  }
+}
+
+function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
+  if (!Array.isArray(value)) {
+    throw new BranchError("Working-copy vector slot manifest is invalid.");
+  }
+  const manifest = value.map((entry) => {
+    if (typeof entry !== "object" || entry === null) {
+      throw new BranchError("Working-copy vector slot manifest is invalid.");
+    }
+    const row = entry as Record<string, unknown>;
+    if (
+      typeof row["graphId"] !== "string" ||
+      typeof row["nodeKind"] !== "string" ||
+      typeof row["fieldPath"] !== "string" ||
+      typeof row["dimensions"] !== "number" ||
+      !Number.isSafeInteger(row["dimensions"]) ||
+      typeof row["metric"] !== "string" ||
+      typeof row["indexType"] !== "string" ||
+      typeof row["tableName"] !== "string"
+    ) {
+      throw new BranchError("Working-copy vector slot manifest is invalid.");
+    }
+    return {
+      graphId: row["graphId"],
+      nodeKind: row["nodeKind"],
+      fieldPath: row["fieldPath"],
+      dimensions: row["dimensions"],
+      metric: row["metric"],
+      indexType: row["indexType"],
+      tableName: row["tableName"],
+    } satisfies VectorSlotManifest;
+  });
+  return manifest;
 }
 
 function allocationNames(allocationId: string): Promise<PostgresTableNames> {
@@ -306,8 +423,11 @@ function provisionedBackend(
 }
 
 function cloneOptions<G extends GraphDef>(source: Store<G>): StoreOptions {
-  const { schema: _schema, recordedRead, ...options } =
-    source.workingCopyOptions;
+  const {
+    schema: _schema,
+    recordedRead,
+    ...options
+  } = source.workingCopyOptions;
   if (recordedRead !== undefined) {
     throw new BranchError(
       "Table-backed PostgreSQL working copies cannot copy an external recorded-read relation.",
@@ -365,6 +485,9 @@ async function cloneRelations(
   sourceTables: PostgresTables,
   targetTables: PostgresTables,
   graphId: string,
+  vectorSlots: readonly VectorSlot[],
+  sourceVectorStrategy: VectorStrategy | undefined,
+  targetVectorStrategy: VectorStrategy | undefined,
   assertSourceVersion: (transaction: TransactionBackend) => Promise<void>,
 ): Promise<void> {
   const source = postgresContributions(sourceTables);
@@ -372,7 +495,25 @@ async function cloneRelations(
   const sourceNames = source.map((contribution) => contribution.tableName);
   // A table lock on the pinned source transaction prevents writes between the
   // source token check and every INSERT ... SELECT. SHARE blocks ROW EXCLUSIVE.
-  await rows(transaction, postgresTableLockSql(sourceNames, "share"));
+  const sourceVectorNames = vectorSlots.map((slot) => {
+    if (sourceVectorStrategy === undefined) {
+      throw new BranchError(
+        "A vector working copy requires the source vector storage strategy.",
+      );
+    }
+    return sourceVectorStrategy.tableName(
+      slot.graphId,
+      slot.nodeKind,
+      slot.fieldPath,
+    );
+  });
+  await rows(
+    transaction,
+    postgresTableLockSql(
+      [...sourceNames, ...sourceVectorNames.toSorted()],
+      "share",
+    ),
+  );
   await assertSourceVersion(transaction);
   const sourceMarker = getTableName(sourceTables.baseSchemaVersions);
   const marker = await rows<Readonly<{ version: number }>>(
@@ -422,6 +563,40 @@ async function cloneRelations(
       );
     }
   }
+  for (const slot of vectorSlots) {
+    if (
+      sourceVectorStrategy === undefined ||
+      targetVectorStrategy === undefined
+    ) {
+      throw new BranchError(
+        "A vector working copy requires source and allocation vector strategies.",
+      );
+    }
+    const from = sourceVectorStrategy.tableName(
+      slot.graphId,
+      slot.nodeKind,
+      slot.fieldPath,
+    );
+    const to = targetVectorStrategy.tableName(
+      slot.graphId,
+      slot.nodeKind,
+      slot.fieldPath,
+    );
+    const names = await columns(transaction, from);
+    if (!names.includes("graph_id")) {
+      throw new BranchError(
+        `Vector sidecar ${from} has no graph_id column and cannot be cloned safely.`,
+      );
+    }
+    const selected = sql.join(
+      names.map((name) => sqlName(name)),
+      sql`, `,
+    );
+    await rows(
+      transaction,
+      sql`INSERT INTO ${sqlName(to)} (${selected}) SELECT ${selected} FROM ${sqlName(from)} WHERE graph_id = ${graphId}`,
+    );
+  }
 }
 
 function readAllocation(
@@ -430,7 +605,7 @@ function readAllocation(
 ): Promise<AllocationRow | undefined> {
   return rows<AllocationRow>(
     control,
-    sql`SELECT allocation_id, ownership_token, state, origin, history, revision_tracking, created_at::text FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+    sql`SELECT allocation_id, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
   ).then((found) => found[0]);
 }
 
@@ -476,8 +651,12 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       origin jsonb,
       history boolean NOT NULL,
       revision_tracking boolean NOT NULL,
+      vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb,
       created_at timestamptz NOT NULL DEFAULT now()
     )`);
+    await control.executeDdl?.(
+      `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb`,
+    );
   }
 
   async function dropAllocation(
@@ -492,7 +671,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       );
       const found = await rows<AllocationRow>(
         transaction,
-        sql`SELECT allocation_id, ownership_token, state, origin, history, revision_tracking, created_at::text FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId} FOR UPDATE`,
+        sql`SELECT allocation_id, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId} FOR UPDATE`,
       );
       const row = found[0];
       if (row === undefined)
@@ -515,6 +694,25 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
       }
       const names = await allocationNames(allocationId);
+      const vectorSlots = parseVectorManifest(row.vector_slots);
+      const vectorStrategy = createPgvectorStrategy(allocationId);
+      for (const slot of vectorSlots) {
+        if (
+          vectorStrategy.tableName(
+            slot.graphId,
+            slot.nodeKind,
+            slot.fieldPath,
+          ) !== slot.tableName
+        ) {
+          throw new BranchError(
+            "Working-copy vector slot manifest does not match its allocation.",
+          );
+        }
+        await rows(
+          transaction,
+          sql.raw(`DROP TABLE IF EXISTS ${quoteDdlIdentifier(slot.tableName)}`),
+        );
+      }
       await rows(
         transaction,
         sql.raw(generatePostgresDropSQL(createPostgresTables(names))),
@@ -539,9 +737,13 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     // External recorded reads can name relations outside the bundled inventory.
     // Refuse before writing the ledger or provisioning any target table.
     const inheritedOptions = cloneOptions(source);
-    if (resolveGraphVectorSlots(source.graph).length > 0) {
+    if (
+      resolveGraphVectorSlots(source.graph).length > 0 &&
+      (sourceBackend.vectorStrategy === undefined ||
+        !isPgvectorStrategy(sourceBackend.vectorStrategy))
+    ) {
       throw new BranchError(
-        "Table-backed PostgreSQL working copies cannot isolate graph-scoped vector tables; use a native database fork for this graph.",
+        "Table-backed PostgreSQL working copies require the bundled pgvector strategy for graph-scoped vector tables.",
       );
     }
     if (sourceBackend.fulltextStrategy !== tsvectorStrategy) {
@@ -554,13 +756,23 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       ...options.sourceTableNames,
     });
     assertSourceBindings(source, sourceTables);
+    const vectorSlots = resolveGraphVectorSlots(source.graph);
+    const sourceVectorStrategy = sourceBackend.vectorStrategy;
+    const targetVectorStrategy =
+      vectorSlots.length === 0 ?
+        undefined
+      : createPgvectorStrategy(allocationId);
+    const vectorManifest =
+      targetVectorStrategy === undefined ?
+        []
+      : vectorSlotManifest(vectorSlots, targetVectorStrategy);
     const names = await allocationNames(allocationId);
     const targetTables = createPostgresTables(names);
     const indexNames = await allocationIndexNames(source.graph, names);
     await ensureLedger();
     const existing = await rows<Readonly<{ name: string }>>(
       control,
-      sql`SELECT name FROM unnest(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values()])]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
+      sql`SELECT name FROM unnest(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values(), ...vectorManifest.map((slot) => slot.tableName)])]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
     );
     if (existing.length > 0) {
       throw new BranchError(
@@ -571,7 +783,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     const ownershipToken = globalThis.crypto.randomUUID();
     await rows(
       control,
-      sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${source.historyEnabled}, ${source.revisionTrackingEnabled})`,
+      sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${source.historyEnabled}, ${source.revisionTrackingEnabled}, ${JSON.stringify(vectorManifest)}::jsonb)`,
     );
     let backend: GraphBackend | undefined;
     let provisioned = false;
@@ -589,14 +801,42 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
             await rows(transaction, sql.raw(strictDdl));
           }
         }
-        await rows(transaction, sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)));
+        await rows(
+          transaction,
+          sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)),
+        );
       });
       provisioned = true;
       // Refuse partial custom bindings before clone or Store writes can use
       // shared default tables; the catch path removes this allocation.
-      backend = await connect(names);
+      const connectedBackend =
+        targetVectorStrategy === undefined ?
+          await connect(names)
+        : await connect(names, { vectorStrategy: targetVectorStrategy });
+      backend = connectedBackend;
       assertTargetBindings(backend, names);
+      if (
+        targetVectorStrategy !== undefined &&
+        (backend.vectorStrategy !== targetVectorStrategy ||
+          backend.upsertEmbedding === undefined ||
+          backend.capabilities.vector?.supported !== true)
+      ) {
+        throw new BranchError(
+          "Working-copy connection does not expose PostgreSQL vector operations.",
+        );
+      }
       await assertAllocationSession(backend, allocationId, ownershipToken);
+      if (targetVectorStrategy !== undefined) {
+        await backend.transaction(async (transaction) => {
+          for (const slot of vectorSlots) {
+            for (const contribution of targetVectorStrategy.ownedTables(slot)) {
+              for (const ddl of contribution.createDdl) {
+                await rows(transaction, sql.raw(ddl));
+              }
+            }
+          }
+        });
+      }
       await sourceBackend.transaction(async (transaction) => {
         await assertAllocationSession(
           transaction,
@@ -608,6 +848,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           sourceTables,
           targetTables,
           source.graphId,
+          vectorSlots,
+          sourceVectorStrategy,
+          targetVectorStrategy,
           async (lockedTransaction) => {
             const comparison = await compareBaseVersionAtTarget(
               source,
@@ -717,9 +960,28 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       }
       const names = await allocationNames(descriptor.allocationId);
       const indexNames = await allocationIndexNames(graph, names);
-      const backend = await connect(names);
+      const vectorSlots = parseVectorManifest(row.vector_slots);
+      assertVectorManifestMatches(graph, descriptor.allocationId, vectorSlots);
+      const vectorStrategy =
+        vectorSlots.length === 0 ?
+          undefined
+        : createPgvectorStrategy(descriptor.allocationId);
+      const backend =
+        vectorStrategy === undefined ?
+          await connect(names)
+        : await connect(names, { vectorStrategy });
       try {
         assertTargetBindings(backend, names);
+        if (
+          vectorStrategy !== undefined &&
+          (backend.vectorStrategy !== vectorStrategy ||
+            backend.upsertEmbedding === undefined ||
+            backend.capabilities.vector?.supported !== true)
+        ) {
+          throw new BranchError(
+            "Working-copy connection did not bind its allocation-scoped vector strategy.",
+          );
+        }
         await assertAllocationSession(
           backend,
           descriptor.allocationId,
@@ -758,11 +1020,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         await allocationIndexNames(source.graph, await allocationNames(allocationId)),
       );
       markFixedSchemaWorkingCopyBackend(disposableBackend);
-      return createStore(
-        source.graph,
-        disposableBackend,
-        cloneOptions(source),
-      );
+      return createStore(source.graph, disposableBackend, cloneOptions(source));
     },
   };
 
@@ -778,7 +1036,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       await ensureLedger();
       const found = await rows<AllocationRow>(
         control,
-        sql`SELECT allocation_id, ownership_token, state, origin, history, revision_tracking, created_at::text FROM ${sqlName(LEDGER)} WHERE state IN ('allocating', 'ephemeral') AND allocation_id > ${after} ORDER BY allocation_id LIMIT ${limit}`,
+        sql`SELECT allocation_id, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text FROM ${sqlName(LEDGER)} WHERE state IN ('allocating', 'ephemeral') AND allocation_id > ${after} ORDER BY allocation_id LIMIT ${limit}`,
       );
       return found.map((row) => ({
         allocationId: row.allocation_id,

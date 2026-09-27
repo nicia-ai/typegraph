@@ -37,11 +37,31 @@ import {
   recordedRelation,
 } from "../../../src/query/compiler/schema";
 import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
+import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { storeBackend } from "../../../src/store/runtime-port";
 import { createStore, createStoreWithSchema } from "../../../src/store/store";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+
+function createLatch(): Readonly<{
+  promise: Promise<void>;
+  release: () => void;
+}> {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = () => {
+      resolve();
+    };
+  });
+  function release(): void {
+    if (resolvePromise === undefined) {
+      throw new Error("Latch resolver was not initialized.");
+    }
+    resolvePromise();
+  }
+  return { promise, release };
+}
 
 const Person = defineNode("Person", {
   schema: z.object({ name: searchable({ language: "english" }) }),
@@ -401,39 +421,296 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
-    it("refuses graph-scoped vector storage before allocating tables", async () => {
+    it("clones, reopens and destroys allocation-scoped pgvector sidecars", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
+        await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
         const VectorNode = defineNode("VectorNode", {
           schema: z.object({ vector: embedding(3) }),
         });
         const vectorGraph = defineGraph({
-          id: "postgres-working-copy-vector-refusal",
+          id: "postgres-working-copy-vector-lifecycle",
           nodes: { VectorNode: { type: VectorNode } },
           edges: {},
         });
         const control = createPostgresBackend(drizzle(pool));
-        const source = createStore(vectorGraph, control);
+        const [source] = await createStoreWithSchema(vectorGraph, control, {
+          history: true,
+          revisionTracking: true,
+        });
+        const sourceNode = await source.nodes.VectorNode.create({
+          vector: [0.1, 0.2, 0.3],
+        });
+        const sourceStrategy = control.vectorStrategy;
+        if (sourceStrategy === undefined)
+          throw new Error("Source Postgres backend has no vector strategy.");
+        const sourceTable = sourceStrategy.tableName(
+          vectorGraph.id,
+          "VectorNode",
+          "vector",
+        );
         const manager = createPostgresWorkingCopyManager<typeof vectorGraph>({
           control,
-          connect: (names) =>
+          connect: (names, allocation) =>
             Promise.resolve(
               createPostgresBackend(drizzle(pool), {
                 tables: createPostgresTables(names),
+                ...(allocation === undefined ?
+                  {}
+                : { vector: allocation.vectorStrategy }),
               }),
             ),
         });
-        await expect(
-          manager.ephemeral.create(source, asBaseVersion("unused")),
-        ).rejects.toThrow(/vector tables/);
+        const created = await branchDurable(source, manager.durable, {
+          id: asBranchId("vector-copy"),
+          allocationId: "vector-copy-allocation",
+        });
+        if (!isOk(created)) throw created.error;
+        const { branch, descriptor } = unwrap(created);
+        const branchBackend = storeBackend(branch.store);
+        const branchStrategy = branchBackend.vectorStrategy;
+        if (branchStrategy === undefined)
+          throw new Error("Branch Postgres backend has no vector strategy.");
+        const branchTable = branchStrategy.tableName(
+          vectorGraph.id,
+          "VectorNode",
+          "vector",
+        );
+        expect(branchTable).not.toBe(sourceTable);
+        const sourceRows = await pool.query<{
+          node_id: string;
+          embedding: string;
+        }>(
+          'SELECT node_id, embedding::text AS embedding FROM "' +
+            sourceTable +
+            '" WHERE graph_id = $1',
+          [vectorGraph.id],
+        );
+        const branchRows = await pool.query<{
+          node_id: string;
+          embedding: string;
+        }>(
+          'SELECT node_id, embedding::text AS embedding FROM "' +
+            branchTable +
+            '" WHERE graph_id = $1',
+          [vectorGraph.id],
+        );
+        expect(branchRows.rows).toEqual(sourceRows.rows);
+        if (branchBackend.upsertEmbedding === undefined)
+          throw new Error("Branch backend has no vector upsert operation.");
+        await branchBackend.upsertEmbedding({
+          graphId: vectorGraph.id,
+          nodeKind: "VectorNode",
+          nodeId: sourceNode.id,
+          fieldPath: "vector",
+          embedding: [0.7, 0.8, 0.9],
+          dimensions: 3,
+          metric: "cosine",
+          indexType: "hnsw",
+        });
+        const isolatedSource = await pool.query<{ embedding: string }>(
+          'SELECT embedding::text AS embedding FROM "' +
+            sourceTable +
+            '" WHERE graph_id = $1 AND node_id = $2',
+          [vectorGraph.id, sourceNode.id],
+        );
+        expect(isolatedSource.rows[0]?.embedding).toContain("0.1");
+        await branch.close();
         const vectorDisabled = createStore(
           vectorGraph,
           createPostgresBackend(drizzle(pool), { vector: false }),
         );
         await expect(
           manager.ephemeral.create(vectorDisabled, asBaseVersion("unused")),
-        ).rejects.toThrow(/vector tables/);
+        ).rejects.toThrow(/bundled pgvector strategy/u);
         expect(await manager.listUnsealedAllocations()).toEqual([]);
+        const reopened = await reopenDurableBranch(
+          vectorGraph,
+          descriptor,
+          manager.durable,
+        );
+        expect(isOk(reopened)).toBe(true);
+        const reopenedBranch = unwrap(reopened);
+        const reopenedStrategy = storeBackend(
+          reopenedBranch.store,
+        ).vectorStrategy;
+        expect(
+          reopenedStrategy?.tableName(vectorGraph.id, "VectorNode", "vector"),
+        ).toBe(branchTable);
+        const isolatedBranch = await pool.query<{ embedding: string }>(
+          'SELECT embedding::text AS embedding FROM "' +
+            branchTable +
+            '" WHERE graph_id = $1 AND node_id = $2',
+          [vectorGraph.id, sourceNode.id],
+        );
+        expect(isolatedBranch.rows[0]?.embedding).toContain("0.7");
+        await reopenedBranch.close();
+        expect(
+          isOk(await destroyDurableBranch(descriptor, manager.durable)),
+        ).toBe(true);
+        const droppedVector = await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass($1)::text AS relation",
+          [branchTable],
+        );
+        expect(droppedVector.rows[0]?.relation).toBeNull();
+        const dropSourceStorage = sourceStrategy.buildDropStorage({
+          graphId: vectorGraph.id,
+          nodeKind: "VectorNode",
+          fieldPath: "vector",
+          dimensions: 3,
+          metric: "cosine",
+          indexType: "hnsw",
+        });
+        for (const ddl of dropSourceStorage) {
+          await control.executeDdl?.(ddl);
+        }
+        const missingSidecar = await branchDurable(source, manager.durable, {
+          id: asBranchId("missing-vector-copy"),
+          allocationId: "missing-vector-copy-allocation",
+        });
+        expect(isOk(missingSidecar)).toBe(false);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("holds vector sidecars stable across the clone snapshot", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+        const VectorNode = defineNode("VectorNode", {
+          schema: z.object({ vector: embedding(3) }),
+        });
+        const vectorGraph = defineGraph({
+          id: "postgres-working-copy-vector-fence",
+          nodes: { VectorNode: { type: VectorNode } },
+          edges: {},
+        });
+        const control = createPostgresBackend(drizzle(pool));
+        let blockNextLock = false;
+        const lockAcquiredLatch = createLatch();
+        const lockReleasedLatch = createLatch();
+        const lockAcquired: Promise<void> = lockAcquiredLatch.promise;
+        const lockReleased: Promise<void> = lockReleasedLatch.promise;
+        const signalLockAcquired: () => void = lockAcquiredLatch.release;
+        const signalLockReleased: () => void = lockReleasedLatch.release;
+        const sourceBackend = deriveBackend(control, {
+          transaction: async <T>(
+            operation: (transaction: TransactionBackend) => Promise<T>,
+            transactionOptions?: TransactionOptions,
+          ): Promise<T> =>
+            control.transaction(async (transaction) => {
+              const observedTransaction = deriveBackend(transaction, {
+                execute: async <T>(
+                  query: CompiledRowsSql,
+                ): Promise<readonly T[]> => {
+                  const result = await transaction.execute<T>(query);
+                  const queryText = query.chunks
+                    .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
+                    .join("");
+                  if (blockNextLock && queryText.includes("LOCK TABLE")) {
+                    blockNextLock = false;
+                    signalLockAcquired();
+                    await lockReleased;
+                  }
+                  return result;
+                },
+              });
+              return operation(observedTransaction);
+            }, transactionOptions),
+        });
+        const [source] = await createStoreWithSchema(
+          vectorGraph,
+          sourceBackend,
+          { history: true, revisionTracking: true },
+        );
+        const sourceNode = await source.nodes.VectorNode.create({
+          vector: [0.1, 0.2, 0.3],
+        });
+        const manager = createPostgresWorkingCopyManager<typeof vectorGraph>({
+          control,
+          connect: (names, allocation) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+                ...(allocation === undefined ?
+                  {}
+                : { vector: allocation.vectorStrategy }),
+              }),
+            ),
+        });
+        blockNextLock = true;
+        const lockReleaseTimeout = setTimeout(signalLockReleased, 10_000);
+        const clonePromise = branchDurable(source, manager.durable, {
+          id: asBranchId("vector-fenced-copy"),
+          allocationId: "vector-fenced-copy-allocation",
+        });
+        await lockAcquired;
+        const sourceStrategy = control.vectorStrategy;
+        if (sourceStrategy === undefined)
+          throw new Error("Source Postgres backend has no vector strategy.");
+        const slot = {
+          graphId: vectorGraph.id,
+          nodeKind: "VectorNode",
+          nodeId: sourceNode.id,
+          fieldPath: "vector",
+          embedding: [0.8, 0.9, 1],
+          dimensions: 3,
+          metric: "cosine",
+          indexType: "hnsw",
+        } as const;
+        if (control.upsertEmbedding === undefined)
+          throw new Error(
+            "Source Postgres backend has no vector upsert operation.",
+          );
+        const sourceWrite = control.upsertEmbedding(slot);
+        const finishedWhileLocked = await Promise.race([
+          sourceWrite.then(() => true),
+          new Promise<boolean>((resolve) =>
+            setTimeout(() => {
+              resolve(false);
+            }, 50),
+          ),
+        ]);
+        expect(finishedWhileLocked).toBe(false);
+        signalLockReleased();
+        const cloned = await clonePromise;
+        clearTimeout(lockReleaseTimeout);
+        await sourceWrite;
+        const { branch, descriptor } = unwrap(cloned);
+        const branchBackend = storeBackend(branch.store);
+        const branchStrategy = branchBackend.vectorStrategy;
+        if (branchStrategy === undefined)
+          throw new Error("Branch Postgres backend has no vector strategy.");
+        const branchTable = branchStrategy.tableName(
+          vectorGraph.id,
+          "VectorNode",
+          "vector",
+        );
+        const sourceTable = sourceStrategy.tableName(
+          vectorGraph.id,
+          "VectorNode",
+          "vector",
+        );
+        const branchRows = await pool.query<{ embedding: string }>(
+          'SELECT embedding::text AS embedding FROM "' +
+            branchTable +
+            '" WHERE graph_id = $1 AND node_id = $2',
+          [vectorGraph.id, sourceNode.id],
+        );
+        const sourceRows = await pool.query<{ embedding: string }>(
+          'SELECT embedding::text AS embedding FROM "' +
+            sourceTable +
+            '" WHERE graph_id = $1 AND node_id = $2',
+          [vectorGraph.id, sourceNode.id],
+        );
+        expect(branchRows.rows[0]?.embedding).toContain("0.1");
+        expect(sourceRows.rows[0]?.embedding).toContain("0.8");
+        await branch.close();
+        expect(
+          isOk(await destroyDurableBranch(descriptor, manager.durable)),
+        ).toBe(true);
       } finally {
         await pool.end();
       }
