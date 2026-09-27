@@ -4638,6 +4638,9 @@ type FulltextStrategy = Readonly<{
 export function generatePostgresDDL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy | false): string[];
 
 // @public
+export function generatePostgresDropSQL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy | false): string;
+
+// @public
 export function generatePostgresMigrationSQL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy | false): string;
 
 // @public (undocumented)
