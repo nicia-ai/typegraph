@@ -1,5 +1,33 @@
 # @nicia-ai/typegraph
 
+## 0.71.0
+
+### Highlights
+
+TypeGraph 0.71 makes identity groups easier to inspect. `identity.classes()` pages through visible classes, including singletons, at current or historical read coordinates. `identity.explainSame(a, b)` returns a shortest proof through persisted `same` assertions and eligible same-ID folds, so applications can show why two references belong together. Cursors are bound to the graph, coordinate, and kind scope, and remain compact as the graph schema grows.
+
+Historical identity reads and traversals now agree on which kinds belong to the current graph. Explanations at a historical coordinate use only folds that existed then. Schema migration errors also identify changed validators with exact JSON Pointers and before-and-after patterns, making a blocked migration easier to diagnose.
+
+### Upgrade notes
+
+- Replace `IdentityReadSurface<G>` with `IdentityReadFacade<G>` and `IdentitySurface<G>` with `IdentityFacade<G>`. The surface aliases are no longer exported. If you implement `IdentityReadFacade<G>` yourself, add `classes` and `explainSame`; these methods are also part of merge callback read contexts.
+- Before removing a node kind that connects retained identities through `same` assertions, move the needed assertions to retained kinds if those identities should remain joined. Historical identity reads and identity-expanded traversals now exclude kinds absent from the current graph.
+- To use current-coordinate `identity.classes()` with a custom backend, provide SQL window-function support and declare `capabilities.windowFunctions: true`. A backend profile that declares `false` raises `ConfigurationError` for this read.
+
+### Minor Changes
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Add `identity.classes({ kinds, cursor, limit })` to read visible identity classes in deterministic pages at the current or a historical coordinate. Pages include visible singleton classes and expose registered visible members of each matching class. Opaque cursors are bound to the graph, read coordinate, and kind filter.
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Add `identity.explainSame(a, b)` to return a shortest path of persisted same assertions and implicit same-ID folds at the facade's read coordinate.
+
+- [#750](https://github.com/nicia-ai/typegraph/pull/750) [`b305ad9`](https://github.com/nicia-ai/typegraph/commit/b305ad9e9b7f890a4d497135ad9fc38422ebf0e0) Thanks [@pdlug](https://github.com/pdlug)! - Make `IdentityReadFacade` and `IdentityFacade` the complete public identity surfaces, including `classes` and `explainSame`. Replace the exported `IdentityReadSurface` and `IdentitySurface` aliases with those facade types.
+  
+  Historical identity reads and traversals now agree on registered kinds, and `explainSame` cites an implicit same-ID fold only when both nodes existed at the requested coordinate. Class cursors keep a fixed size as kind filters grow. Identity invariant errors include graph details and an appropriate current or historical recovery hint.
+
+### Patch Changes
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Report exact JSON Pointers and before-and-after pattern values in schema migration diagnostics so validator changes can be located and reviewed precisely.
+
 ## 0.70.0
 
 ### Highlights
