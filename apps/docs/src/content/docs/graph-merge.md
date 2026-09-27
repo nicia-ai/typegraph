@@ -1558,7 +1558,11 @@ snapshotted exactly.
 
 The copy has a fixed schema: `evolve`, kind removal, and deprecation refuse
 before mutation. Custom fulltext strategies still need a host-level database
-fork. System index maintenance remains available. Source table locks cover the
+fork. The source and every copy connection, including durable reopen, must use
+the bundled `tsvectorStrategy`: a custom strategy may own additional physical
+tables whose rows cannot be copied safely from the generic contribution
+inventory. A connection with fulltext disabled is refused for the same reason.
+System index maintenance remains available. Source table locks cover the
 entire TypeGraph relation set and vector sidecars while the SQL clone runs, so a
 large clone briefly blocks writes to other graphs in the same database.
 
