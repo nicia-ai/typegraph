@@ -265,16 +265,13 @@ async function allocationIndexNames(
   const prefix = names.nodes.slice(0, -"nodes".length);
   const reserved = resolveSystemIndexNames(names);
   const entries = await Promise.all(
-    (graph.indexes ?? []).map(async (declaration) => {
-      if (declaration.entity === "vector") {
-        throw new BranchError(
-          "Table-backed PostgreSQL working copies cannot own vector indexes.",
-        );
-      }
+    (graph.indexes ?? [])
+      .filter((declaration) => declaration.entity !== "vector")
+      .map(async (declaration) => {
       const identity = relationalIndexIdentity(declaration);
       const digest = await sha256Hex(identity, 12);
       return [identity, `${prefix}gix_${digest}`] as const;
-    }),
+      }),
   );
   const result = new Map<string, string>();
   const physicalNames = new Set<string>();
