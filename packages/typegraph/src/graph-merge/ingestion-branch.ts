@@ -65,6 +65,15 @@ export async function ingestionBranch<G extends GraphDef>(
   baseStore: GraphBranch<G>["store"],
   makeBackend: MakeBackend,
   options?: BranchOptions,
+): Promise<Result<IngestionBranch<G>, BranchError>> {
+  return ingestionBranchWithStrategy(baseStore, makeBackend, options);
+}
+
+/** Internal candidate path with a bounded working-copy strategy. */
+export async function ingestionBranchWithStrategy<G extends GraphDef>(
+  baseStore: GraphBranch<G>["store"],
+  makeBackend: MakeBackend,
+  options?: BranchOptions,
   strategy?: WorkingCopyStrategy<G>,
 ): Promise<Result<IngestionBranch<G>, BranchError>> {
   try {

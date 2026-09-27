@@ -10,7 +10,10 @@ import { isCanonicalIsoDate } from "../utils/date";
 import { computeSchemaComponent } from "./base-version";
 import { CandidateWriteSetError, MergeError } from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
-import { ingestionBranch } from "./ingestion-branch";
+import {
+  ingestionBranch,
+  ingestionBranchWithStrategy,
+} from "./ingestion-branch";
 import {
   captureMergePlanTargetFence,
   planMergeIncremental,
@@ -222,7 +225,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
   const bounded = canUseSparseCandidatePlanning(args.target);
   try {
-    created = await ingestionBranch(
+    created = await ingestionBranchWithStrategy(
       args.target,
       args.makeBackend,
       {

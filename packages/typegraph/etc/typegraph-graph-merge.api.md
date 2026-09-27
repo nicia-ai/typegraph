@@ -4735,7 +4735,7 @@ export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 export const MERGE_PLAN_FORMAT_VERSION: 1;
 
 // @public (undocumented)
-export const MERGE_REVIEW_FORMAT_VERSION: 1;
+export const MERGE_REVIEW_FORMAT_VERSION: 2;
 
 // @public
 export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
@@ -5198,7 +5198,7 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
 
 // @public
 export type MergeReviewArtifact = Readonly<{
-    formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION;
+    formatVersion: 1 | typeof MERGE_REVIEW_FORMAT_VERSION;
     kind: "candidate-write-set";
     digest: MergePlanDigest;
     writeSet: CandidateWriteSet;
@@ -5212,6 +5212,7 @@ export type MergeReviewArtifact = Readonly<{
 export type MergeReviewBaseline = Readonly<{
     rows: readonly MergeReviewRow[];
     identityDigest: string;
+    scope?: "referenced" | undefined;
 }>;
 
 // @public
@@ -5990,6 +5991,7 @@ export function planCandidateWriteSetReview<G extends GraphDef>(args: PlanCandid
 // @public (undocumented)
 export type PlanCandidateWriteSetReviewArgs<G extends GraphDef> = PlanCandidateWriteSetArgs<G> & Readonly<{
     policy: MergeReviewPolicy;
+    reviewScope?: "candidate";
 }>;
 
 // @public
@@ -6876,7 +6878,7 @@ export type Result<T, E = Error> = Readonly<{
 export function revalidateCandidateWriteSetReview<G extends GraphDef>(args: RevalidateCandidateWriteSetReviewArgs<G>): Promise<Result<MergeReviewRevalidation, MergeError>>;
 
 // @public (undocumented)
-export type RevalidateCandidateWriteSetReviewArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetReviewArgs<G>, "writeSet"> & Readonly<{
+export type RevalidateCandidateWriteSetReviewArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetReviewArgs<G>, "writeSet" | "reviewScope"> & Readonly<{
     review: unknown;
 }>;
 
