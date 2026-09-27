@@ -74,8 +74,8 @@ export type PostgresAbandonedAllocation = Readonly<{
 export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
   control: GraphBackend;
   connect: (names: PostgresTableNames) => Promise<GraphBackend>;
-  /** Required when source status-table names differ from bundled defaults. */
-  sourceTables?: PostgresTables;
+  /** Names for source relations that the Store schema binding does not expose. */
+  sourceTableNames?: Partial<PostgresTableNames>;
   /** Reattached process-local hooks and query options; physical names are owned here. */
   reopenOptions?: (graph: G) => PostgresWorkingCopyReopenOptions;
   /** A disposable clone skips ANALYZE by default. */
@@ -470,9 +470,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         "Table-backed PostgreSQL working copies cannot isolate graph-declared index names in the same database; use a native database fork.",
       );
     }
-    const sourceTables =
-      options.sourceTables ??
-      createPostgresTables(source.revisionSchema.tables);
+    const sourceTables = createPostgresTables({
+      ...source.revisionSchema.tables,
+      ...options.sourceTableNames,
+    });
     assertSourceBindings(source, sourceTables);
     const names = await allocationNames(allocationId);
     const targetTables = createPostgresTables(names);

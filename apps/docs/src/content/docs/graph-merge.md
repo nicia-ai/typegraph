@@ -1497,7 +1497,7 @@ The same manager exposes `ephemeral` for `branch()`; closing that branch drops
 its tables. `listAbandoned({ after, limit })` pages through unsealed durable
 and crashed ephemeral allocations, and `abortAllocation(id)` explicitly
 removes one. A durable branch's descriptor contains only the allocation ID,
-not connection credentials. Pass `sourceTables` when the source backend uses
+not connection credentials. Pass `sourceTableNames` when the source backend uses
 custom status table names; pass `reopenOptions` to restore process-local hooks
 or query options on a later process. An external `recordedRead` binding is
 refused because its relation is outside the owned table inventory. Reopen

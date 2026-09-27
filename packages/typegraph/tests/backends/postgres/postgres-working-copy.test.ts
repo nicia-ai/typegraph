@@ -231,7 +231,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const person = await source.nodes.Person.create({ name: "Before" });
         const manager = createPostgresWorkingCopyManager<typeof customGraph>({
           control: sourceBackend,
-          sourceTables,
+          sourceTableNames: { nodes: "WcCustomNodes" },
           connect: (names) =>
             Promise.resolve(
               createPostgresBackend(drizzle(pool), {
@@ -251,7 +251,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           typeof customGraph
         >({
           control: sourceBackend,
-          sourceTables,
+          sourceTableNames: { nodes: "WcCustomNodes" },
           connect: async (names) => {
             await source.nodes.Person.update(person.id, {
               name: "Changed during allocation",

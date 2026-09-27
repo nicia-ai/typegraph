@@ -1333,6 +1333,9 @@ type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export function createPostgresWorkingCopyManager<G extends GraphDef>(options: PostgresWorkingCopyOptions<G>): PostgresWorkingCopyManager<G>;
+
+// @public
 type CreateVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -6026,6 +6029,68 @@ type PointerSegmentsForObject<T, Current extends Depth> = {
 type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
     count: number;
 }>;
+
+// @public
+export type PostgresAbandonedAllocation = Readonly<{
+    allocationId: string;
+    createdAt: string;
+    state: "allocating" | "ephemeral";
+}>;
+
+// @public
+export type PostgresTableNames = Readonly<{
+    nodes: string;
+    edges: string;
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedClock: string;
+    revisionOrigins: string;
+    revisionChanges: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+    uniques: string;
+    edgeClaims: string;
+    baseSchemaVersions: string;
+    schemaVersions: string;
+    graphTemplates: string;
+    fulltext: string;
+    indexMaterializations: string;
+    contributionMaterializations: string;
+    kindRemovals: string;
+    reconciliationMarkers: string;
+    fences: string;
+}>;
+
+// @public
+export type PostgresWorkingCopyLocator = Readonly<{
+    allocationId: string;
+}>;
+
+// @public (undocumented)
+export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
+    ephemeral: WorkingCopyStrategy<G>;
+    durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator>;
+    listAbandoned: (options?: Readonly<{
+        after?: string;
+        limit?: number;
+    }>) => Promise<readonly PostgresAbandonedAllocation[]>;
+    abortAllocation: (allocationId: string) => Promise<void>;
+}>;
+
+// @public
+export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
+    control: GraphBackend;
+    connect: (names: PostgresTableNames) => Promise<GraphBackend>;
+    sourceTableNames?: Partial<PostgresTableNames>;
+    reopenOptions?: (graph: G) => PostgresWorkingCopyReopenOptions;
+    refreshStatistics?: boolean;
+    cleanupLockTimeoutMs?: number;
+}>;
+
+// @public
+export type PostgresWorkingCopyReopenOptions = Omit<WorkingCopyOptions, "schema" | "recordedRead">;
 
 // @public
 type Predicate = Readonly<{

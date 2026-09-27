@@ -14,8 +14,10 @@ export type {
   PostgresWorkingCopyLocator,
   PostgresWorkingCopyManager,
   PostgresWorkingCopyOptions,
+  PostgresWorkingCopyReopenOptions,
 } from "../backend/drizzle/postgres-working-copy";
 export { createPostgresWorkingCopyManager } from "../backend/drizzle/postgres-working-copy";
+export type { PostgresTableNames } from "../backend/drizzle/schema/postgres";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
