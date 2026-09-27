@@ -73,6 +73,7 @@ import {
 } from "../../query/dialect/fulltext-strategy";
 import {
   assertPgvectorEfSearch,
+  isPgvectorStrategy,
   pgvectorStrategy,
 } from "../../query/dialect/vector/pgvector-strategy";
 import {
@@ -332,7 +333,9 @@ export type PostgresBackendOptions = Readonly<{
    * ANN index lifecycle — and advertises `strategy.capabilities` as
    * `capabilities.vector`. Pass a custom strategy to swap the entire
    * vector stack for an alternate Postgres extension without forking
-   * TypeGraph.
+   * TypeGraph. For multiple TypeGraph allocations sharing a database,
+   * `createPgvectorStrategy(allocationId)` gives each allocation its own
+   * physical table and index namespace.
    *
    * Pass `false` to disable vector support entirely. The backend then
    * advertises no `capabilities.vector` and omits the embedding/search
@@ -928,7 +931,7 @@ export async function runPostgresVectorIndexBuild(
   indexStatement: ExecutableSql,
   dropStatement?: ExecutableSql,
 ): Promise<void> {
-  if (vectorStrategy !== pgvectorStrategy) {
+  if (!isPgvectorStrategy(vectorStrategy)) {
     await execute(indexStatement);
     return;
   }

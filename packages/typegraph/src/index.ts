@@ -261,7 +261,10 @@ export {
 // ============================================================
 
 export { libsqlVectorStrategy } from "./query/dialect/vector/libsql-strategy";
-export { pgvectorStrategy } from "./query/dialect/vector/pgvector-strategy";
+export {
+  createPgvectorStrategy,
+  pgvectorStrategy,
+} from "./query/dialect/vector/pgvector-strategy";
 export { sqliteVecStrategy } from "./query/dialect/vector/sqlite-vec-strategy";
 export {
   buildVectorCapabilities,
