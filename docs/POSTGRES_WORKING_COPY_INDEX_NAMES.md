@@ -1,80 +1,57 @@
 # Allocation-scoped PostgreSQL graph indexes
 
-Issue #755's table-backed manager currently refuses graphs with declared indexes.
-The refusal is necessary even when each copy has distinct table names:
-PostgreSQL index names are unique within a schema. The accompanying PostgreSQL
-test creates the same declared index on two prefixed tables using the current
-runtime DDL. `CREATE INDEX IF NOT EXISTS` reports success for both statements,
-but the index exists only on the first table. `createPostgresTables(...,
-{ indexes })` also emits the declaration's name for both tables.
+PostgreSQL index names are unique within a schema, even when two working
+copies use distinct tables. The accompanying collision test proves that
+issuing default `CREATE INDEX IF NOT EXISTS` DDL for the same declaration on
+two prefixed tables reports success twice but creates only the first index.
+The table-backed manager therefore binds distinct physical names to each
+allocation. Ordinary backends retain their existing logical names.
 
-## Required name contract
+## Name contract
 
-Keep `IndexDeclaration.name` as the graph's **logical** name. Schema
+`IndexDeclaration.name` remains the graph's logical name. Schema
 serialization, schema hashes, graph diffs, `MaterializeIndexesEntry.indexName`,
-and application-facing errors must continue to use it. A manager-owned
-resolver must map `(allocation identity, entity, kind, logical name)` to a
-stable **physical** PostgreSQL identifier of at most 63 bytes. Generate it
-from the attested allocation prefix and a collision-resistant digest; reject
-duplicate resolved names and collisions with the allocated tables' system
-indexes before provisioning. The mapping must be reproducible from the ledger
-on reopen and must never depend on a process-local counter. Only the manager's
-exact backend object and its intentionally derived close wrapper may carry
-this allocation binding.
+and application-facing errors continue to use it. The manager maps the
+allocation prefix and `(entity, kind, logical name)` to a stable physical
+PostgreSQL identifier. It uses a digest, checks the 63-byte identifier limit,
+and rejects duplicate resolved names and system-index collisions before
+provisioning. Reopen recomputes the map from the allocation ID and attested
+graph. The manager binds it only to the exact provisioned, fixed-schema, and
+managed-close backend objects that may materialize the copy's indexes.
 
-One resolver must decide every physical graph-index name. The relevant consumers are:
-
-| Surface | Current use of the logical name | Required use of the resolved name |
+| Surface | Ordinary backend | Managed copy |
 | --- | --- | --- |
-| `indexes/ddl.ts` | `CREATE INDEX` for B-tree and GIN-family indexes | DDL identifier, with declaration unchanged |
-| `indexes/drizzle.ts` and `createPostgresTables` | Drizzle bootstrap index builders | Builder identifier when an allocation namespace is supplied |
-| `store/materialize-indexes.ts` | Catalog preloads, INVALID-leftover checks, cleanup, claim and status keys | The same physical key throughout check, build, record, retry, and drop |
-| `graph-merge/namespace-fork.ts` | Resolves copied status rows and replays relational DDL | Resolve source status keys and target DDL against their respective backend bindings |
-| PostgreSQL copy manager | Skips source `indexMaterializations` rows | Rebuild all target indexes under resolved names before sealing; fail and clean up on any failed entry |
+| `indexes/ddl.ts` | Logical declaration name | Physical DDL identifier; declaration unchanged |
+| `indexes/drizzle.ts` and `createPostgresTables` | Logical bootstrap builder name | Optional physical builder name when supplied |
+| `store/materialize-indexes.ts` | Logical catalog and status key | One physical key through lookup, build, claim, retry, and repair |
+| PostgreSQL copy manager | No allocation | Builds all declared relational indexes before sealing and aborts on failure |
 
-The status row should use the physical name as its key for a table-backed copy.
-This keeps the claim lease, status preload, catalog lookup, and invalid-index
-repair on one identity. User-facing results still report the logical
-declaration name. `computeIndexSignature` already includes the physical target
-table and the canonical declaration; it must continue to detect shape drift
-without rewriting the graph schema. Vector indexes remain a separate storage
-problem.
+The status row uses the physical name as its key for a table-backed copy. The
+claim lease, status preload, catalog lookup, and repair therefore use one
+identity. `computeIndexSignature` still hashes the physical target table and
+canonical declaration, so a schema change cannot be hidden by renaming an
+index. Vector indexes remain a separate storage concern.
 
-## Lifecycle checks before enabling indexes
+## Lifecycle boundaries
 
-1. Provision only owned base tables and system indexes. Do not let a caller's
-   Drizzle `indexes` extras create graph indexes under global logical names
-   during bootstrap. Bind the physical resolver to the actual target backend
-   before any TypeGraph materialization call.
-2. Clone graph-scoped rows as today, leaving source physical-name
-   materialization rows behind. Materialize every declared relational index
-   on the target tables before returning or sealing the copy. Treat `failed`
-   or `skipped` entries as allocation failure and run the existing abort cleanup.
-3. On durable reopen, derive the same resolver from the ledger, verify the
-   connected backend's table map and allocation database, and check that any
-   recorded index name belongs to the allocated node or edge table. Dropping
-   an allocation's tables must remove its physical indexes; the ledger
-   remains the authority for recovery.
-4. Keep the fixed-schema guard. Later `Store.materializeIndexes()` may retry
-   or repair **only** the indexes declared in the attested schema. An
-   undeclared logical name must refuse before DDL or status writes. Schema
-   evolution and kind removal still refuse until their new physical-storage
-   lifecycle is designed.
+1. The allocator provisions its owned base tables and system indexes. It
+   suppresses a connected backend's bootstrap DDL, so Drizzle graph-index
+   extras cannot introduce globally named indexes on the private tables.
+2. The clone leaves source materialization rows behind. It materializes every
+   declared relational index on the target. Any `failed` or `skipped` entry
+   aborts allocation and removes its owned tables.
+3. Durable reopen rebinds the same map to a fresh backend after checking its
+   table bindings and database ownership token. `materializeIndexes()` can
+   repair an absent or invalid index under the existing claim protocol.
+4. The fixed-schema guard still refuses evolution and kind removal. The copy
+   may retry only indexes declared in its fixed graph. Destroy drops the
+   owned tables and their indexes together.
 
-## Conformance cases
-
-Two live copies of the same graph must each have a distinct physical index on
-its own prefixed table and still report the same logical declaration and schema
-hash. Cover B-tree and GIN-family declarations, custom or long quoted names,
-index name collisions, source indexes already materialized, a fresh target with
-no source status row, idempotent retries, interrupted concurrent builds with
-INVALID leftovers, durable close/reopen, abort/destroy cleanup, and
-namespace-fork replay from a managed copy. Mutation checks should show that
-replacing a resolved name with `declaration.name` in either DDL or
-catalog/status handling fails a focused test. The default backend and SQLite
-paths must retain their existing names and behavior.
-
-Until these surfaces share one resolver and the lifecycle cases pass, the
-table-backed manager's graph-index refusal remains in place. A host-level
-database fork preserves the source's physical indexes without renaming them,
-subject to that host's fork and connection isolation guarantees.
+The PostgreSQL suite covers two copies of one graph, B-tree and GIN
+declarations, long and quoted logical names, source indexes already
+materialized, fresh-manager durable reopen, idempotent retry, repair after a
+physical index is dropped, independent destroy, ephemeral cleanup, and failed
+DDL cleanup. The default PostgreSQL backend and SQLite retain their existing
+names. Namespace-fork preparation still requires default table bindings; it
+does not accept a table-backed copy as its source or target. Vector tables and
+indexes remain outside this allocation-scoped relational-index contract.

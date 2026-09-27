@@ -5880,7 +5880,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeIndexes(
     options?: MaterializeIndexesOptions,
   ): Promise<MaterializeIndexesResult> {
-    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "materializeIndexes");
     const { activeRow, baseline } = await this.#loadCaughtUp("materialize");
     return materializeIndexesImpl(
       {

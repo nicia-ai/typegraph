@@ -4032,6 +4032,7 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
 // @public (undocumented)
 type CreatePostgresTablesOptions = Readonly<{
     indexes?: readonly IndexDeclaration[] | undefined;
+    physicalIndexName?: ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
 // @public

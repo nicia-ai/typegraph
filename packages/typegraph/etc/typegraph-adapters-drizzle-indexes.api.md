@@ -9,10 +9,10 @@ import { IndexBuilder as IndexBuilder_2 } from 'drizzle-orm/sqlite-core';
 import { SQLWrapper } from 'drizzle-orm';
 
 // @public (undocumented)
-export function buildPostgresEdgeIndexBuilders(table: EdgeIndexTable, indexes: readonly IndexDeclaration[]): readonly IndexBuilder[];
+export function buildPostgresEdgeIndexBuilders(table: EdgeIndexTable, indexes: readonly IndexDeclaration[], physicalName?: (index: EdgeIndexDeclaration) => string): readonly IndexBuilder[];
 
 // @public (undocumented)
-export function buildPostgresNodeIndexBuilders(table: NodeIndexTable, indexes: readonly IndexDeclaration[]): readonly IndexBuilder[];
+export function buildPostgresNodeIndexBuilders(table: NodeIndexTable, indexes: readonly IndexDeclaration[], physicalName?: (index: NodeIndexDeclaration) => string): readonly IndexBuilder[];
 
 // @public (undocumented)
 export function buildSqliteEdgeIndexBuilders(table: EdgeIndexTable, indexes: readonly IndexDeclaration[]): readonly IndexBuilder_2[];

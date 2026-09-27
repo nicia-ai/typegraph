@@ -3576,6 +3576,7 @@ export function createPostgresTables(names?: Partial<PostgresTableNames>, option
 // @public (undocumented)
 export type CreatePostgresTablesOptions = Readonly<{
     indexes?: readonly IndexDeclaration[] | undefined;
+    physicalIndexName?: ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
 // @public

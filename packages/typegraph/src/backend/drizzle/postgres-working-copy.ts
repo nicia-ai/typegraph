@@ -19,6 +19,11 @@ import { BranchError } from "../../graph-merge/errors";
 import { storeBackend, wrapWithManagedClose } from "../../graph-merge/typegraph-internal";
 import type { BaseVersion } from "../../graph-merge/types";
 import type { WorkingCopyStrategy } from "../../graph-merge/working-copy";
+import {
+  bindRelationalIndexNames,
+  relationalIndexIdentity,
+} from "../../indexes/physical-name";
+import { resolveSystemIndexNames } from "../../indexes/system";
 import { tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
@@ -136,6 +141,43 @@ function allocationNames(allocationId: string): Promise<PostgresTableNames> {
   );
 }
 
+async function allocationIndexNames(
+  graph: GraphDef,
+  names: PostgresTableNames,
+): Promise<ReadonlyMap<string, string>> {
+  const prefix = names.nodes.slice(0, -"nodes".length);
+  const reserved = resolveSystemIndexNames(names);
+  const entries = await Promise.all(
+    (graph.indexes ?? []).map(async (declaration) => {
+      if (declaration.entity === "vector") {
+        throw new BranchError(
+          "Table-backed PostgreSQL working copies cannot own vector indexes.",
+        );
+      }
+      const identity = relationalIndexIdentity(declaration);
+      const digest = await sha256Hex(identity, 12);
+      return [identity, `${prefix}gix_${digest}`] as const;
+    }),
+  );
+  const result = new Map<string, string>();
+  const physicalNames = new Set<string>();
+  for (const [identity, physicalName] of entries) {
+    if (
+      result.has(identity) ||
+      physicalNames.has(physicalName) ||
+      reserved.has(physicalName) ||
+      physicalName.length > 63
+    ) {
+      throw new BranchError(
+        "Working-copy graph index names collide in the allocated PostgreSQL namespace.",
+      );
+    }
+    result.set(identity, physicalName);
+    physicalNames.add(physicalName);
+  }
+  return result;
+}
+
 function assertPostgresBackend(backend: GraphBackend): void {
   if (backend.dialect !== "postgres") {
     throw new BranchError(
@@ -204,7 +246,10 @@ function fixedSchemaError(operation: string): BranchError {
   );
 }
 
-function fixedSchemaBackend(backend: GraphBackend): GraphBackend {
+function fixedSchemaBackend(
+  backend: GraphBackend,
+  indexNames: ReadonlyMap<string, string>,
+): GraphBackend {
   const guarded = deriveBackend(backend, {
     commitSchemaVersion: () =>
       Promise.reject(fixedSchemaError("commitSchemaVersion")),
@@ -242,7 +287,22 @@ function fixedSchemaBackend(backend: GraphBackend): GraphBackend {
       }),
   });
   markFixedSchemaWorkingCopyBackend(guarded);
+  bindRelationalIndexNames(guarded, indexNames);
   return guarded;
+}
+
+function provisionedBackend(
+  backend: GraphBackend,
+  indexNames: ReadonlyMap<string, string>,
+): GraphBackend {
+  // Allocation already installed the complete table inventory. A connect
+  // callback may carry Drizzle graph-index extras with global logical names;
+  // never replay its bootstrap DDL onto these private tables.
+  const provisioned = deriveBackend(backend, {
+    bootstrapTables: () => Promise.resolve(),
+  });
+  bindRelationalIndexNames(provisioned, indexNames);
+  return provisioned;
 }
 
 function cloneOptions<G extends GraphDef>(source: Store<G>): StoreOptions {
@@ -489,11 +549,6 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         "Table-backed PostgreSQL working copies require the bundled tsvector fulltext strategy.",
       );
     }
-    if ((source.graph.indexes?.length ?? 0) > 0) {
-      throw new BranchError(
-        "Table-backed PostgreSQL working copies cannot isolate graph-declared index names in the same database; use a native database fork.",
-      );
-    }
     const sourceTables = createPostgresTables({
       ...source.revisionSchema.tables,
       ...options.sourceTableNames,
@@ -501,10 +556,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     assertSourceBindings(source, sourceTables);
     const names = await allocationNames(allocationId);
     const targetTables = createPostgresTables(names);
+    const indexNames = await allocationIndexNames(source.graph, names);
     await ensureLedger();
     const existing = await rows<Readonly<{ name: string }>>(
       control,
-      sql`SELECT name FROM unnest(${[...new Set(relationNamesForTables(targetTables))]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
+      sql`SELECT name FROM unnest(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values()])]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
     );
     if (existing.length > 0) {
       throw new BranchError(
@@ -575,15 +631,32 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       // Rebuild physical-name materialization markers for the new relations.
       // The base-schema marker is already current, so this does not replay
       // adoption DDL; it does install graph-scoped fulltext projections.
+      const ownedBackend = provisionedBackend(backend, indexNames);
       const [store] = await createStoreWithSchema(
         source.graph,
-        backend,
+        ownedBackend,
         inheritedOptions,
       );
+      if ((source.graph.indexes?.length ?? 0) > 0) {
+        const materialized = await store.materializeIndexes({
+          stopOnError: true,
+          refreshStatistics: false,
+        });
+        const failed = materialized.results.find(
+          (result) =>
+            result.status === "failed" || result.status === "skipped",
+        );
+        if (failed !== undefined) {
+          throw new BranchError(
+            `Working-copy graph index "${failed.indexName}" was ${failed.status}; allocation was aborted.`,
+            { cause: failed.error },
+          );
+        }
+      }
       if (options.refreshStatistics === true) await store.refreshStatistics();
       const [fixedStore] = await createStoreWithSchema(
         source.graph,
-        fixedSchemaBackend(backend),
+        fixedSchemaBackend(ownedBackend, indexNames),
         inheritedOptions,
       );
       return { store: fixedStore, descriptor: { allocationId } };
@@ -643,6 +716,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         throw new BranchError("PostgreSQL working copy is absent or unsealed.");
       }
       const names = await allocationNames(descriptor.allocationId);
+      const indexNames = await allocationIndexNames(graph, names);
       const backend = await connect(names);
       try {
         assertTargetBindings(backend, names);
@@ -653,7 +727,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
         const store = createStore(
           graph,
-          fixedSchemaBackend(backend),
+          fixedSchemaBackend(provisionedBackend(backend, indexNames), indexNames),
           reopenedOptions(graph, row, options.reopenOptions),
         );
         return { store, origin: row.origin, access: { kind: "engine-fenced" } };
@@ -678,6 +752,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       const backend = storeBackend(created.store);
       const disposableBackend = wrapWithManagedClose(backend, () =>
         dropAllocation(allocationId),
+      );
+      bindRelationalIndexNames(
+        disposableBackend,
+        await allocationIndexNames(source.graph, await allocationNames(allocationId)),
       );
       markFixedSchemaWorkingCopyBackend(disposableBackend);
       return createStore(

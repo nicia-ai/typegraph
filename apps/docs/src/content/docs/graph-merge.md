@@ -1532,14 +1532,15 @@ status relations. The manager refuses missing or mismatched bindings with a
 allocation tables are created, so custom callbacks may inspect those tables;
 on binding failure, the manager removes the new tables and ledger row.
 
-The table-backed strategy supports the bundled tsvector fulltext storage and
-rebuilds physical-name materialization markers for the copied relations.
-It refuses graphs with declared indexes or enabled vector fields because their
-current physical names are database-global or graph-scoped rather than
-allocation-scoped. The copy has a fixed schema: `evolve`, kind removal and
-deprecation, and graph-index materialization refuse before mutation. System
-index maintenance remains available. Use a host-level database fork when
-schema evolution or those physical storage features are needed. Source
+The table-backed strategy supports bundled tsvector fulltext and declared
+PostgreSQL B-tree, GIN, and trigram graph indexes. It builds each declared index
+on the copy's private tables under a stable allocation-scoped physical name,
+while keeping the graph's logical index names and schema hash unchanged.
+`materializeIndexes()` can retry or repair these indexes after reopen; closing
+or destroying a copy removes its indexes with its tables. The copy has a fixed
+schema: `evolve`, kind removal, and deprecation refuse before mutation. Vector
+fields and custom fulltext strategies still need a host-level database fork.
+System index maintenance remains available. Source
 table locks cover the entire TypeGraph relation set while the SQL clone runs,
 so a large clone briefly blocks writes to other graphs in the same database.
 

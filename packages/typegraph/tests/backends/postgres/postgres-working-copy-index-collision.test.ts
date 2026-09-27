@@ -31,6 +31,18 @@ describe.runIf(process.env["POSTGRES_URL"])(
       const secondBootstrap = generatePostgresDDL(
         createPostgresTables({ nodes: secondTable }, { indexes: [nameIndex] }),
       ).join("\n");
+      const firstPhysicalName = `${nameIndex.name}_a`;
+      const secondPhysicalName = `${nameIndex.name}_b`;
+      const isolatedBootstrap = generatePostgresDDL(
+        createPostgresTables(
+          { nodes: secondTable },
+          {
+            indexes: [nameIndex],
+            physicalIndexName: () => secondPhysicalName,
+          },
+        ),
+      ).join("\n");
+      expect(isolatedBootstrap).toContain(`"${secondPhysicalName}"`);
 
       // Bootstrap and runtime DDL both reuse the graph's logical name, even
       // though PostgreSQL index names are global within a schema.
@@ -61,6 +73,29 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(indexes.rows).toEqual([
           { tablename: firstTable, indexname: nameIndex.name },
+        ]);
+        await pool.query(
+          generateIndexDDL(nameIndex, "postgres", {
+            nodesTableName: firstTable,
+            physicalName: firstPhysicalName,
+          }),
+        );
+        await pool.query(
+          generateIndexDDL(nameIndex, "postgres", {
+            nodesTableName: secondTable,
+            physicalName: secondPhysicalName,
+          }),
+        );
+        const isolated = await pool.query<{
+          tablename: string;
+          indexname: string;
+        }>(
+          "SELECT tablename, indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = ANY($1::text[]) ORDER BY tablename",
+          [[firstPhysicalName, secondPhysicalName]],
+        );
+        expect(isolated.rows).toEqual([
+          { tablename: firstTable, indexname: firstPhysicalName },
+          { tablename: secondTable, indexname: secondPhysicalName },
         ]);
       } finally {
         await pool.end();

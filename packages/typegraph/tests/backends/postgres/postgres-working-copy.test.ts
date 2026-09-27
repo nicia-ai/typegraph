@@ -525,30 +525,222 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
-    it("refuses graph-declared indexes before allocating tables", async () => {
+    it("isolates graph indexes across copies and rebinds them on durable reopen", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        const IndexedPerson = defineNode("IndexedPerson", {
+          schema: z.object({ name: z.string(), tags: z.array(z.string()) }),
+        });
+        const logicalNames = [
+          'logical "quoted" name',
+          "logical-gin-name-with-a-long-descriptive-suffix-for-this-graph",
+        ];
+        const indexedGraph = defineGraph({
+          id: "postgres-working-copy-index-isolation",
+          nodes: { IndexedPerson: { type: IndexedPerson } },
+          edges: {},
+          indexes: [
+            defineNodeIndex(IndexedPerson, {
+              fields: ["name"],
+              name: logicalNames[0],
+            }),
+            defineNodeIndex(IndexedPerson, {
+              fields: ["tags"],
+              method: "gin",
+              name: logicalNames[1],
+            }),
+          ],
+        });
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(indexedGraph, control, {
+          revisionTracking: true,
+        });
+        await source.nodes.IndexedPerson.create({
+          name: "Source",
+          tags: ["alpha"],
+        });
+        const sourceIndexes = await source.materializeIndexes();
+        expect(sourceIndexes.results.map((result) => result.status)).toEqual([
+          "created",
+          "created",
+        ]);
+        const connectedNames: PostgresTableNames[] = [];
+        function manager() {
+          return createPostgresWorkingCopyManager<typeof indexedGraph>({
+            control,
+            connect: (names) => {
+              connectedNames.push(names);
+              return Promise.resolve(
+                createPostgresBackend(drizzle(pool), {
+                  // Even a caller-supplied Drizzle schema with logical index
+                  // extras cannot replay those global names during bootstrap.
+                  tables: createPostgresTables(names, {
+                    indexes: indexedGraph.indexes,
+                  }),
+                }),
+              );
+            },
+          });
+        }
+        const firstManager = manager();
+        const first = unwrap(
+          await branchDurable(source, firstManager.durable, {
+            id: asBranchId("indexed-copy-one"),
+            allocationId: "indexed-allocation-one",
+          }),
+        );
+        const second = unwrap(
+          await branchDurable(source, firstManager.durable, {
+            id: asBranchId("indexed-copy-two"),
+            allocationId: "indexed-allocation-two",
+          }),
+        );
+        const firstNames = connectedNames[0];
+        const secondNames = connectedNames[1];
+        if (firstNames === undefined || secondNames === undefined)
+          throw new Error("Missing indexed copy table bindings.");
+        const physical = await pool.query<{
+          tablename: string;
+          indexname: string;
+        }>(
+          "SELECT tablename, indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = ANY($1::text[]) AND indexname LIKE 'tgw_%_gix_%' ORDER BY tablename, indexname",
+          [[firstNames.nodes, secondNames.nodes]],
+        );
+        expect(physical.rows).toHaveLength(4);
+        expect(new Set(physical.rows.map((row) => row.indexname)).size).toBe(4);
+        expect(
+          physical.rows.filter((row) => row.tablename === firstNames.nodes),
+        ).toHaveLength(2);
+        expect(
+          physical.rows.filter((row) => row.tablename === secondNames.nodes),
+        ).toHaveLength(2);
+        expect(
+          first.branch.store.graph.indexes?.map((index) => index.name),
+        ).toEqual(logicalNames);
+        const firstIndexes = await first.branch.store.materializeIndexes();
+        expect(
+          firstIndexes.results.map((result) => [
+            result.indexName,
+            result.status,
+          ]),
+        ).toEqual(logicalNames.map((name) => [name, "alreadyMaterialized"]));
+        const statuses = await pool.query<{ index_name: string }>(
+          `SELECT index_name FROM "${firstNames.indexMaterializations}" WHERE graph_id = $1 ORDER BY index_name`,
+          [indexedGraph.id],
+        );
+        expect(statuses.rows.map((row) => row.index_name)).toEqual(
+          physical.rows
+            .filter((row) => row.tablename === firstNames.nodes)
+            .map((row) => row.indexname),
+        );
+        await first.branch.close();
+        const freshManager = manager();
+        const reopened = unwrap(
+          await reopenDurableBranch(
+            indexedGraph,
+            first.descriptor,
+            freshManager.durable,
+          ),
+        );
+        const reopenedIndexes = await reopened.store.materializeIndexes();
+        expect(reopenedIndexes.results.map((result) => result.status)).toEqual([
+          "alreadyMaterialized",
+          "alreadyMaterialized",
+        ]);
+        const removedName = physical.rows.find(
+          (row) => row.tablename === firstNames.nodes,
+        )?.indexname;
+        if (removedName === undefined)
+          throw new Error("Missing physical graph index to repair.");
+        await pool.query(`DROP INDEX "${removedName}"`);
+        const repairedIndexes = await reopened.store.materializeIndexes();
+        expect(
+          repairedIndexes.results.map((result) => result.status).toSorted(),
+        ).toEqual(["alreadyMaterialized", "created"]);
+        const repairedRetry = await reopened.store.materializeIndexes();
+        expect(repairedRetry.results.map((result) => result.status)).toEqual([
+          "alreadyMaterialized",
+          "alreadyMaterialized",
+        ]);
+        await reopened.close();
+        await second.branch.close();
+        expect(
+          isOk(
+            await destroyDurableBranch(first.descriptor, freshManager.durable),
+          ),
+        ).toBe(true);
+        const remaining = await pool.query<{ indexname: string }>(
+          "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1 AND indexname LIKE 'tgw_%_gix_%'",
+          [secondNames.nodes],
+        );
+        expect(remaining.rows).toHaveLength(2);
+        expect(
+          isOk(
+            await destroyDurableBranch(second.descriptor, firstManager.durable),
+          ),
+        ).toBe(true);
+        const ephemeral = await firstManager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        const ephemeralIndexes = await ephemeral.materializeIndexes();
+        expect(ephemeralIndexes.results.map((result) => result.status)).toEqual(
+          ["alreadyMaterialized", "alreadyMaterialized"],
+        );
+        await storeBackend(ephemeral).close();
+        expect(await firstManager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 120_000);
+
+    it("removes all owned relations when graph-index materialization fails", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
         const indexedGraph = defineGraph({
-          id: "postgres-working-copy-index-refusal",
+          id: "postgres-working-copy-index-ddl-failure",
           nodes: { Person: { type: Person } },
           edges: {},
           indexes: [defineNodeIndex(Person, { fields: ["name"] })],
         });
         const control = createPostgresBackend(drizzle(pool));
-        const source = createStore(indexedGraph, control);
+        const [source] = await createStoreWithSchema(indexedGraph, control, {
+          revisionTracking: true,
+        });
+        const connectedNames: PostgresTableNames[] = [];
         const manager = createPostgresWorkingCopyManager<typeof indexedGraph>({
           control,
-          connect: (names) =>
-            Promise.resolve(
-              createPostgresBackend(drizzle(pool), {
-                tables: createPostgresTables(names),
+          connect: (names) => {
+            connectedNames.push(names);
+            const backend = createPostgresBackend(drizzle(pool), {
+              tables: createPostgresTables(names),
+            });
+            return Promise.resolve(
+              deriveBackend(backend, {
+                executeDdl: (statement) =>
+                  statement.includes("_gix_") ?
+                    Promise.reject(
+                      new Error("injected graph-index DDL failure"),
+                    )
+                  : (backend.executeDdl?.(statement) ?? Promise.resolve()),
               }),
-            ),
+            );
+          },
         });
-        await expect(
-          manager.ephemeral.create(source, asBaseVersion("unused")),
-        ).rejects.toThrow(/index names/);
+        const outcome = await branchDurable(source, manager.durable, {
+          id: asBranchId("failed-indexed-copy"),
+          allocationId: "failed-indexed-allocation",
+        });
+        expect(isOk(outcome)).toBe(false);
         expect(await manager.listUnsealedAllocations()).toEqual([]);
+        const names = connectedNames[0];
+        if (names === undefined)
+          throw new Error("Missing failed allocation names.");
+        const remaining = await pool.query<{ present: string | null }>(
+          "SELECT to_regclass($1)::text AS present",
+          [`"${names.nodes}"`],
+        );
+        expect(remaining.rows[0]?.present).toBeNull();
       } finally {
         await pool.end();
       }
@@ -600,9 +792,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(copy.evolve(extension)).rejects.toMatchObject({
           details: { code: "WORKING_COPY_SCHEMA_EVOLUTION_UNSUPPORTED" },
         });
-        await expect(copy.materializeIndexes()).rejects.toMatchObject({
-          details: { code: "WORKING_COPY_SCHEMA_EVOLUTION_UNSUPPORTED" },
-        });
+        expect(await copy.materializeIndexes()).toEqual({ results: [] });
         await expect(
           storeBackend(copy).setActiveVersion({
             graphId: graph.id,
