@@ -1614,12 +1614,21 @@ await worker.close();
 ```
 
 `TFork` must extend `ForkHandle` (`{ dispose?: () => Promise<void> }`).
-For a hosted PostgreSQL branch such as Neon, `connect` must bind every
-checkout and transaction to that branch, and durable reopen must attest its
-origin from the host's persisted allocation record. Doltgres exposes native
-branch and merge commands, but TypeGraph continues to use its own merge
-planner and apply path; native merge and Doltgres backend support require
-separate conformance testing.
+`forkedWorkingCopyStrategy` supplies ephemeral copies only. Its base-version
+comparison checks the graph's schema and revision or live-content anchor;
+the host fork must preserve the full physical database, including TypeGraph
+sidecars and extensions. A durable host strategy must persist its branch ID
+and attest the sealed origin when reopening it.
+
+For a hosted PostgreSQL branch such as [Neon](https://neon.com/docs/get-started-with-neon/workflow-primer),
+`connect` must use that branch's connection string and compute endpoint for
+every pooled checkout and transaction. Reusing the source pool can appear to
+pass a base-version check while writing to the source. Doltgres can pin a
+connection through a [database revision specifier](https://www.doltgres.com/docs/reference/version-control/branches/);
+avoid session-level branch switching on a pool whose checkouts may retain
+different branch state. Doltgres exposes native branch and merge commands,
+but TypeGraph continues to use its own merge planner and apply path; native
+merge and Doltgres backend support require separate conformance testing.
 `create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
 backend's `close` is composed with the fork's `dispose` through `deriveBackend`
 (never a spread), so `worker.close()` — the branch's public release call —
