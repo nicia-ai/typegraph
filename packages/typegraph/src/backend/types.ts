@@ -645,6 +645,8 @@ export type GraphReadBackend = Pick<
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
+  | "findNodesAcrossKinds"
+  | "findEdgesAcrossKinds"
   | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
 >;
@@ -2413,6 +2415,11 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindNodesByKindParams,
   ) => Promise<readonly NodeRow[]>;
+  /** Optional graph-wide keyset read for merge and interchange. */
+  findNodesAcrossKinds?: (
+    this: void,
+    params: FindRowsAcrossKindsParams,
+  ) => Promise<readonly NodeRow[]>;
   countNodesByKind: (
     this: void,
     params: CountNodesByKindParams,
@@ -2420,6 +2427,11 @@ export type GraphBackend = Readonly<{
   findEdgesByKind: (
     this: void,
     params: FindEdgesByKindParams,
+  ) => Promise<readonly EdgeRow[]>;
+  /** Optional graph-wide keyset read for merge and interchange. */
+  findEdgesAcrossKinds?: (
+    this: void,
+    params: FindRowsAcrossKindsParams,
   ) => Promise<readonly EdgeRow[]>;
   /**
    * Reads the edges of a SET of endpoints in one statement per bind-budget
@@ -3668,7 +3680,11 @@ export type BackendIdentity = Pick<
 
 export type NodeEntityReadBackend = Pick<
   GraphBackend,
-  "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind"
+  | "getNode"
+  | "getNodes"
+  | "findNodesByKind"
+  | "findNodesAcrossKinds"
+  | "countNodesByKind"
 >;
 
 export type NodeEntityWriteBackend = Pick<
@@ -3698,6 +3714,7 @@ export type EdgeEntityReadBackend = Pick<
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
+  | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
   | "countEdgesByKind"
@@ -3946,6 +3963,8 @@ export function createTransactionReadBackend(
 ): TransactionReadBackend {
   const getNodes = backend.getNodes;
   const getEdges = backend.getEdges;
+  const findNodesAcrossKinds = backend.findNodesAcrossKinds;
+  const findEdgesAcrossKinds = backend.findEdgesAcrossKinds;
   const compileSql = backend.compileSql;
 
   return Object.freeze({
@@ -3978,8 +3997,20 @@ export function createTransactionReadBackend(
     edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
     findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
     findNodesByKind: (params) => backend.findNodesByKind(params),
+    ...(findNodesAcrossKinds === undefined ?
+      {}
+    : {
+        findNodesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
+          findNodesAcrossKinds(params),
+      }),
     countNodesByKind: (params) => backend.countNodesByKind(params),
     findEdgesByKind: (params) => backend.findEdgesByKind(params),
+    ...(findEdgesAcrossKinds === undefined ?
+      {}
+    : {
+        findEdgesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
+          findEdgesAcrossKinds(params),
+      }),
     countEdgesByKind: (params) => backend.countEdgesByKind(params),
     getActiveSchema: (graphId) => backend.getActiveSchema(graphId),
     getSchemaVersion: (graphId, version) =>
@@ -4424,6 +4455,15 @@ export type FindNodesByKindParams = Readonly<{
    * exclusive with `offset` — callers pick one.
    */
   after?: string;
+}>;
+
+/** Keyset page ordered by `(kind, id)` in the backend's own collation. */
+export type FindRowsAcrossKindsParams = Readonly<{
+  graphId: string;
+  kinds: readonly string[];
+  limit: number;
+  after?: Readonly<{ kind: string; id: string }>;
+  excludeDeleted?: boolean;
 }>;
 
 /**

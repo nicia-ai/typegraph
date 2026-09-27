@@ -362,6 +362,7 @@ export type {
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
   FulltextBatchRow,
   FulltextCapabilities,
   FulltextOperationBackend,

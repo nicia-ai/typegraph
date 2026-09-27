@@ -8,6 +8,7 @@ import type {
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
 } from "../../types";
 import type { Tables } from "./shared";
 
@@ -106,6 +107,25 @@ export function buildFindNodesByKind(
     WHERE ${whereClause}
     ORDER BY ${orderByClause}
   `;
+}
+
+/** One keyset page across declared kinds, including tombstones when requested. */
+export function buildFindNodesAcrossKinds(
+  tables: Tables,
+  params: FindRowsAcrossKindsParams,
+): SQL {
+  const { nodes } = tables;
+  const conditions: SQL[] = [
+    sql`${nodes.graphId} = ${params.graphId}`,
+    buildIdSetCondition(nodes.kind, params.kinds),
+    ...buildTemporalConditions(nodes, params),
+  ];
+  if (params.after !== undefined) {
+    conditions.push(
+      sql`(${nodes.kind} > ${params.after.kind} OR (${nodes.kind} = ${params.after.kind} AND ${nodes.id} > ${params.after.id}))`,
+    );
+  }
+  return sql`SELECT * FROM ${nodes} WHERE ${sql.join(conditions, sql` AND `)} ORDER BY ${nodes.kind} ASC, ${nodes.id} ASC LIMIT ${params.limit}`;
 }
 
 /**
@@ -235,6 +255,25 @@ export function buildFindEdgesByKind(
     WHERE ${whereClause}
     ORDER BY ${orderByClause}
   `;
+}
+
+/** One keyset page across declared edge kinds. */
+export function buildFindEdgesAcrossKinds(
+  tables: Tables,
+  params: FindRowsAcrossKindsParams,
+): SQL {
+  const { edges } = tables;
+  const conditions: SQL[] = [
+    sql`${edges.graphId} = ${params.graphId}`,
+    buildIdSetCondition(edges.kind, params.kinds),
+    ...buildTemporalConditions(edges, params),
+  ];
+  if (params.after !== undefined) {
+    conditions.push(
+      sql`(${edges.kind} > ${params.after.kind} OR (${edges.kind} = ${params.after.kind} AND ${edges.id} > ${params.after.id}))`,
+    );
+  }
+  return sql`SELECT * FROM ${edges} WHERE ${sql.join(conditions, sql` AND `)} ORDER BY ${edges.kind} ASC, ${edges.id} ASC LIMIT ${params.limit}`;
 }
 
 /**

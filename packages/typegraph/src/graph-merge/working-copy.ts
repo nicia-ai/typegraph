@@ -187,11 +187,15 @@ async function assertWorkingCopyMatchesBase<G extends GraphDef>(
  *   built on.
  * @param options - Set `revisionJournal: false` when the clone does not need
  *   journal-backed changed-key lineage. This avoids installing journal
- *   triggers on its tables.
+ *   triggers on its tables. Set `refreshStatistics: false` for a short-lived
+ *   copy that will not benefit from refreshed query statistics.
  */
 export function cloneWorkingCopyStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
-  options: Readonly<{ revisionJournal?: false }> = {},
+  options: Readonly<{
+    revisionJournal?: false;
+    refreshStatistics?: false;
+  }> = {},
 ): WorkingCopyStrategy<G> {
   return cloneWorkingCopyWithGraphStrategy(
     makeBackend,
@@ -214,14 +218,17 @@ export function cloneIngestionWorkingCopyStrategy<G extends GraphDef>(
   return cloneWorkingCopyWithGraphStrategy(
     makeBackend,
     (baseStore) => graphWithoutNodeUniqueness(baseStore.graph),
-    { revisionJournal: false },
+    { revisionJournal: false, refreshStatistics: false },
   );
 }
 
 function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
   graphForClone: (baseStore: Store<G>) => G,
-  options: Readonly<{ revisionJournal?: false }> = {},
+  options: Readonly<{
+    revisionJournal?: false;
+    refreshStatistics?: false;
+  }> = {},
 ): WorkingCopyStrategy<G> {
   return {
     create: async (baseStore: Store<G>): Promise<Store<G>> => {
@@ -264,6 +271,9 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           onUnknownProperty: "allow",
           validateReferences: true,
           batchSize: CLONE_IMPORT_BATCH_SIZE,
+          ...(options.refreshStatistics === false ?
+            { refreshStatistics: false as const }
+          : {}),
         } as const;
         // When the fresh backend writes through the connection the base's
         // snapshot export would hold, streaming is exactly what the import

@@ -8,7 +8,10 @@ import type {
   MergeReviewDifference,
   MergeReviewRow,
 } from "./review-schema";
-import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
+import {
+  createGraphEdgeKindReader,
+  createGraphNodeKindReader,
+} from "./state-diff";
 import type { GraphDef, Store } from "./typegraph-internal";
 import {
   getEdgeKinds,
@@ -27,8 +30,13 @@ export async function captureReviewBaseline<G extends GraphDef>(
 ): Promise<MergeReviewBaseline> {
   const backend = storeBackend(target);
   const rows: MergeReviewRow[] = [];
+  const readNodes = createGraphNodeKindReader(
+    backend,
+    target.graphId,
+    getNodeKinds(target.graph),
+  );
   for (const kind of getNodeKinds(target.graph)) {
-    for (const row of await enumerateAllNodes(backend, target.graphId, kind)) {
+    for (const row of await readNodes(kind)) {
       rows.push({
         role: "node",
         kind,
@@ -37,8 +45,13 @@ export async function captureReviewBaseline<G extends GraphDef>(
       });
     }
   }
+  const readEdges = createGraphEdgeKindReader(
+    backend,
+    target.graphId,
+    getEdgeKinds(target.graph),
+  );
   for (const kind of getEdgeKinds(target.graph)) {
-    for (const row of await enumerateAllEdges(backend, target.graphId, kind)) {
+    for (const row of await readEdges(kind)) {
       rows.push({
         role: "edge",
         kind,

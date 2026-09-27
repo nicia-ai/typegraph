@@ -730,8 +730,11 @@ This unlocks:
 
 Streaming removes the graph-sized heap spike, but a physical working copy still
 copies `O(graph)` rows and snapshot merge staging still compares branch state to
-the base. Copy-on-write logical branches and delta-only staging remain the next
-larger architectural step; they are not hidden behind a micro-optimization.
+the base. Bundled backends page those comparisons across declared kinds, so
+unused kinds do not each cost a database statement; custom backends without the
+cross-kind read retain per-kind keyset pagination. Disposable candidate clones
+also skip statistics refresh. Copy-on-write logical branches and delta-only
+staging remain the next larger architectural step.
 
 Revision tracking covers writes through the Store API. Direct backend writes and
 raw graph-table writes through `tx.sql` bypass the anchor, so applications using

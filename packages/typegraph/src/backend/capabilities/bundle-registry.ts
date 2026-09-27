@@ -889,6 +889,18 @@ export type UnbundledOptionalMember =
  * 16 + 84 = 100 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  findNodesAcrossKinds: {
+    kind: "reasoned",
+    reason:
+      "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.",
+    accesses: 2,
+  },
+  findEdgesAcrossKinds: {
+    kind: "reasoned",
+    reason:
+      "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.",
+    accesses: 2,
+  },
   clearGraphPreservingContributionMaterializations: {
     kind: "reasoned",
     reason:

@@ -48,7 +48,10 @@
 import type { SqlSchema } from "../query/compiler/schema";
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
-import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
+import {
+  createGraphEdgeKindReader,
+  createGraphNodeKindReader,
+} from "./state-diff";
 import type {
   EngineRevision,
   GraphBackend,
@@ -206,8 +209,9 @@ export async function computeContentComponent<G extends GraphDef>(
     validTo: string | undefined;
     props: string;
   }>[] = [];
+  const readNodes = createGraphNodeKindReader(backend, graphId, nodeKinds);
   for (const kind of nodeKinds) {
-    const rows = await enumerateAllNodes(backend, graphId, kind);
+    const rows = await readNodes(kind);
     for (const row of rows) {
       if (row.deleted_at === undefined) {
         nodeDigest.push({
@@ -232,8 +236,9 @@ export async function computeContentComponent<G extends GraphDef>(
     validTo: string | undefined;
     props: string;
   }>[] = [];
+  const readEdges = createGraphEdgeKindReader(backend, graphId, edgeKinds);
   for (const kind of edgeKinds) {
-    const rows = await enumerateAllEdges(backend, graphId, kind);
+    const rows = await readEdges(kind);
     for (const row of rows) {
       if (row.deleted_at === undefined) {
         edgeDigest.push({

@@ -40,6 +40,7 @@ import type {
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
@@ -78,9 +79,11 @@ import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
+  buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,
   buildFindEdgesByKind,
+  buildFindNodesAcrossKinds,
   buildFindNodesByKind,
 } from "./collections";
 import {
@@ -508,8 +511,10 @@ export type CommonOperationStrategy = Readonly<{
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
+  buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
+  buildFindEdgesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   /**
    * Interface member rather than an optional one: every dialect must supply
    * an endpoint-set read, so the operation can never be silently skipped by a
@@ -710,8 +715,10 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
   buildFindNodesByKind,
+  buildFindNodesAcrossKinds,
   buildCountNodesByKind,
   buildFindEdgesByKind,
+  buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,
   buildCountEdgesByKind,

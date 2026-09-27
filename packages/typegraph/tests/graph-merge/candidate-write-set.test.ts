@@ -163,6 +163,23 @@ describe("candidate write-set planning", () => {
     ).toMatchObject({ name: "Accepted", externalKey: "shared" });
   });
 
+  it("does not refresh statistics for a disposable ingestion clone", async () => {
+    const { target, writeSet } = await setup();
+    const fixture = createSqliteMergeBackend();
+    const refreshStatistics = vi.spyOn(fixture.backend, "refreshStatistics");
+
+    unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: () => Promise.resolve(fixture.backend),
+        writeSet,
+        options,
+      }),
+    );
+
+    expect(refreshStatistics).not.toHaveBeenCalled();
+  });
+
   it("returns typed validation and schema-target refusals before provisioning", async () => {
     const { target, writeSet } = await setup();
     const makeBackend = vi.fn(() => {
