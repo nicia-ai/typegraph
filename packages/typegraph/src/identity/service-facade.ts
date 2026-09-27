@@ -655,6 +655,9 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
       )
     `;
   const pageLimit = limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1;
+  // Ranking, kind eligibility, and page expansion all consume class_members.
+  // Without MATERIALIZED, SQLite may inline its node scan into the correlated
+  // eligibility check for every representative.
   const rows = await ctx.backend.execute<CurrentIdentityClassPageRow>(
     asCompiledRowsSql(sql`
       WITH node_snapshot AS (${nodeSource}), visible_nodes AS (
@@ -662,7 +665,7 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
         FROM node_snapshot n
         WHERE n.kind IN (${registeredKindValues})
           AND ${identityNodeVisibilitySql(coordinate, "n")}
-      ), class_members AS (
+      ), class_members AS MATERIALIZED (
         SELECT
           COALESCE(anchor.class_kind, visible.kind) AS class_kind,
           COALESCE(anchor.class_id, visible.id) AS class_id,
