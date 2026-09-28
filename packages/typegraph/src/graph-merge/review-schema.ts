@@ -12,8 +12,10 @@ import type {
 import { mergePlanArtifactV1Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_REVIEW_FORMAT_VERSION_V1 = 1 as const;
-export const MERGE_REVIEW_FORMAT_VERSION = 2 as const;
+/** Default review format, retained for callers that validate V1 artifacts. */
+export const MERGE_REVIEW_FORMAT_VERSION = 1 as const;
+export const MERGE_REVIEW_FORMAT_VERSION_V1 = MERGE_REVIEW_FORMAT_VERSION;
+export const MERGE_REVIEW_FORMAT_VERSION_V2 = 2 as const;
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
 export type MergeReviewPolicy = Readonly<{
@@ -48,7 +50,8 @@ export type MergeReviewBaseline = Readonly<{
  */
 export type MergeReviewArtifact = Readonly<{
   formatVersion:
-    typeof MERGE_REVIEW_FORMAT_VERSION_V1 | typeof MERGE_REVIEW_FORMAT_VERSION;
+    | typeof MERGE_REVIEW_FORMAT_VERSION_V1
+    | typeof MERGE_REVIEW_FORMAT_VERSION_V2;
   kind: "candidate-write-set";
   digest: MergePlanDigest;
   writeSet: CandidateWriteSet;
@@ -93,7 +96,7 @@ export const mergeReviewArtifactSchema = z
   .object({
     formatVersion: z.union([
       z.literal(MERGE_REVIEW_FORMAT_VERSION_V1),
-      z.literal(MERGE_REVIEW_FORMAT_VERSION),
+      z.literal(MERGE_REVIEW_FORMAT_VERSION_V2),
     ]),
     kind: z.literal("candidate-write-set"),
     digest: z

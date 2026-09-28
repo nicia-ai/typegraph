@@ -4734,11 +4734,14 @@ export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 // @public (undocumented)
 export const MERGE_PLAN_FORMAT_VERSION: 1;
 
-// @public (undocumented)
-export const MERGE_REVIEW_FORMAT_VERSION: 2;
+// @public
+export const MERGE_REVIEW_FORMAT_VERSION: 1;
 
 // @public (undocumented)
 export const MERGE_REVIEW_FORMAT_VERSION_V1: 1;
+
+// @public (undocumented)
+export const MERGE_REVIEW_FORMAT_VERSION_V2: 2;
 
 // @public
 export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
@@ -5201,7 +5204,7 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
 
 // @public
 export type MergeReviewArtifact = Readonly<{
-    formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION_V1 | typeof MERGE_REVIEW_FORMAT_VERSION;
+    formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION_V1 | typeof MERGE_REVIEW_FORMAT_VERSION_V2;
     kind: "candidate-write-set";
     digest: MergePlanDigest;
     writeSet: CandidateWriteSet;

@@ -8,6 +8,7 @@ import {
   defineNode,
 } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import { MERGE_REVIEW_FORMAT_VERSION } from "../../src/graph-merge";
 import {
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
@@ -99,6 +100,15 @@ describe("candidate-scoped V2 review baseline", () => {
     };
     const review = unwrap(await planCandidateWriteSetReview(args));
     expect(review.formatVersion).toBe(2);
+    const defaultReview = unwrap(
+      await planCandidateWriteSetReview({
+        target: store,
+        makeBackend,
+        writeSet,
+        policy: args.policy,
+      }),
+    );
+    expect(defaultReview.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
     expect(review.baseline.scope).toBe("referenced");
     expect(review.baseline.identityReferences).toContainEqual({
       kind: "Person",

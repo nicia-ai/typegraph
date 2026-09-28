@@ -30,8 +30,8 @@ import {
   reviewOptionEvidence,
 } from "./review-evidence";
 import {
-  MERGE_REVIEW_FORMAT_VERSION,
   MERGE_REVIEW_FORMAT_VERSION_V1,
+  MERGE_REVIEW_FORMAT_VERSION_V2,
   type MergeReviewArtifact,
   mergeReviewArtifactSchema,
   type MergeReviewDifference,
@@ -118,7 +118,7 @@ export async function planCandidateWriteSetReview<G extends GraphDef>(
     const input = {
       formatVersion:
         candidateScope ?
-          MERGE_REVIEW_FORMAT_VERSION
+          MERGE_REVIEW_FORMAT_VERSION_V2
         : MERGE_REVIEW_FORMAT_VERSION_V1,
       kind: "candidate-write-set" as const,
       writeSet,
@@ -169,7 +169,7 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
     }
     const startingFence = await captureMergePlanTargetFence(args.target);
     if (
-      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
+      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
       startingFence.revision.revision === null
     ) {
       throw new MergeReviewError(
@@ -284,7 +284,7 @@ async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
   const review = mergeReviewArtifactSchema.parse(input);
   if (
     (review.formatVersion === 1 && review.baseline.scope !== undefined) ||
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
       review.baseline.scope !== "referenced")
   ) {
     throw new MergeReviewError(
@@ -345,7 +345,7 @@ async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
     );
   }
   if (
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
       (review.baseline.scope !== "referenced" ||
         (review.baseline.identityReferences === undefined) !==
           (review.baseline.identityAssertionIds === undefined))) ||
