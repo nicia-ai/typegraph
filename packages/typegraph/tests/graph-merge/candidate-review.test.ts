@@ -74,6 +74,19 @@ async function rehash(
 }
 
 describe("candidate review wire and coherent capture", () => {
+  it("refuses an unsupported review scope before planning", async () => {
+    const { args } = await setup();
+    const makeBackend = vi.fn(args.makeBackend);
+    const result = await planCandidateWriteSetReview({
+      ...args,
+      makeBackend,
+      reviewScope: "unexpected" as "candidate",
+    });
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) expect(result.error).toBeInstanceOf(MergeReviewError);
+    expect(makeBackend).not.toHaveBeenCalled();
+  });
+
   it("produces deterministic JSON evidence and validates it after persistence", async () => {
     const { args } = await setup();
     const first = unwrap(await planCandidateWriteSetReview(args));

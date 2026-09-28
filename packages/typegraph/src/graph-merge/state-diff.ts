@@ -920,10 +920,12 @@ function byId<T extends Readonly<{ id: string }>>(left: T, right: T): number {
  *   both sides (see the property test asserting this), so restricting reads
  *   to the union is lossless. `undefined` or `{ kind: "unbounded" }` runs the
  *   full enumeration, exactly as when this parameter is omitted. When
- *   `captureForkState` is also true, a live-store ancestor still enumerates
- *   the fork IN FULL for its lost-update baseline. A recorded ancestor captures
- *   only the bounded delta; the incremental planner later fills any additional
- *   plan-touched target baselines by id before its commit guard is built.
+ *   `captureForkState` is also true, a distinct live-store fork still
+ *   enumerates in full for its lost-update baseline. When the fork and base
+ *   are the same Store, the bounded point reads serve both sides and capture
+ *   only those keys. A recorded ancestor likewise captures only the bounded
+ *   delta; the incremental planner fills any additional plan-touched target
+ *   baselines by id before its commit guard is built.
  */
 export async function diffAgainstBase<G extends GraphDef>(
   baseStore: Store<G>,
@@ -940,8 +942,10 @@ export async function diffAgainstBase<G extends GraphDef>(
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
   const sameStore = baseReader === undefined && baseStore === forkStore;
-  const reuseRows =
-    sameStore && (prunedKeys === undefined || !captureForkState);
+  // A same-store diff has identical rows on both sides even when the caller
+  // requests a bounded fork-state snapshot. Reuse the point reads so that
+  // snapshot stays proportional to the requested keys.
+  const reuseRows = sameStore;
   // Branch clones export current identity state, not historical rows. Compare
   // that seed against the fork's archival rows so branch-authored endings keep
   // their `endedBy` stamps without treating assertions that were already ended

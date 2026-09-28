@@ -683,7 +683,7 @@ export function forkedWorkingCopyStrategy<
  * on the clone during staging. `tests/graph-merge/ingestion-branch.test.ts`
  * asserts that split through `nodeClaimEntries` itself rather than restating it.
  */
-function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
+export function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
   const nodes = Object.fromEntries(
     Object.entries(graph.nodes).map(([name, registration]) => {
       const { unique: _omitted, ...withoutUnique } = registration;

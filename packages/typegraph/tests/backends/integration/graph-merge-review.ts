@@ -63,6 +63,11 @@ const graph = defineGraph({
     },
   },
 });
+const boundedGraph = defineGraph({
+  id: "bounded_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {},
+});
 const policy = {
   id: "review-policy-v1",
   context: { minimumApprovals: 1 },
@@ -102,6 +107,57 @@ export function registerGraphMergeReviewIntegrationTests(
     return { target, writeSet: await candidate(target), makeBackend, policy };
   }
   describe("durable merge review", () => {
+    it("keeps scoped review evidence stable across unrelated target growth", async () => {
+      const target = await context.createHistoryStore(boundedGraph);
+      const existing = await target.nodes.Item.create(
+        { label: "Existing", status: "proposed", group: "one" },
+        { id: "existing", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "bounded-source",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "Item",
+            id: "existing",
+            properties: {
+              label: "Updated",
+              status: "accepted",
+              group: "one",
+            },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.formatVersion).toBe(2);
+      expect(review.baseline.scope).toBe("referenced");
+      expect(await target.nodes.Item.getById(existing.id)).toMatchObject({
+        label: "Existing",
+      });
+      await target.nodes.Artifact.create(
+        { content: JSON.stringify(review) },
+        { id: "unrelated-review", validFrom },
+      );
+      expect(
+        unwrap(await revalidateCandidateWriteSetReview({ ...args, review }))
+          .status,
+      ).toBe("compatible");
+      await target.nodes.Item.update(existing.id, { label: "Changed" });
+      expect(
+        unwrap(await revalidateCandidateWriteSetReview({ ...args, review }))
+          .status,
+      ).toBe("changed");
+    });
     it("persists immutable review and approval evidence in the target before applying the fresh plan", async () => {
       const args = await setup();
       const proposed = await args.target.nodes.Item.create(

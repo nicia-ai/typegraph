@@ -374,6 +374,7 @@ export async function stageBranches<G extends GraphDef>(
   branches: readonly GraphBranch<G>[],
   captureTargetStateFor?: BranchId,
   baseReader?: StateDiffBaseReader,
+  explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
 ): Promise<StagingSet> {
   const newNodes: (StagedNewNode & { kind: string; id: string })[] = [];
   const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] =
@@ -400,9 +401,10 @@ export async function stageBranches<G extends GraphDef>(
   for (const branch of branches) {
     const branchId = branch.id;
     const pruneTo =
-      baseReader === undefined ?
+      explicitPruneTo?.get(branchId) ??
+      (baseReader === undefined ?
         await branchPruneTo(baseStore, branch)
-      : await branchPruneFromRecordedAncestor(branch);
+      : await branchPruneFromRecordedAncestor(branch));
     const diff = await diffAgainstBase(baseStore, branch.store, {
       captureForkState: branchId === captureTargetStateFor,
       pruneTo,

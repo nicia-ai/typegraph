@@ -10,15 +10,24 @@ import { isCanonicalIsoDate } from "../utils/date";
 import { computeSchemaComponent } from "./base-version";
 import { CandidateWriteSetError, MergeError } from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
-import { ingestionBranch } from "./ingestion-branch";
+import {
+  ingestionBranch,
+  ingestionBranchWithStrategy,
+} from "./ingestion-branch";
 import {
   captureMergePlanTargetFence,
   planMergeIncremental,
   planMergeIncrementalForEvolution,
+  planMergeIncrementalWithCandidateKeys,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
+import {
+  boundedCandidateKeys,
+  canUseSparseCandidatePlanning,
+  sparseCandidateWorkingCopyStrategy,
+} from "./sparse-candidate-branch";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { storeBackend } from "./typegraph-internal";
 import type { MergeOptions } from "./types";
@@ -214,10 +223,18 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
+  const bounded = canUseSparseCandidatePlanning(args.target);
   try {
-    created = await ingestionBranch(args.target, args.makeBackend, {
-      id: asBranchId(writeSet.sourceId),
-    });
+    created = await ingestionBranchWithStrategy(
+      args.target,
+      args.makeBackend,
+      {
+        id: asBranchId(writeSet.sourceId),
+      },
+      bounded ?
+        sparseCandidateWorkingCopyStrategy(writeSet, args.makeBackend)
+      : undefined,
+    );
   } catch (error) {
     return err(
       new CandidateWriteSetError(
@@ -254,12 +271,18 @@ export async function planCandidateWriteSet<G extends GraphDef>(
         ),
       );
     }
-    return await planMergeIncremental({
+    const mergeArgs = {
       forkPoint: args.target,
       target: args.target,
       branches: [candidate],
       ...(args.options === undefined ? {} : { options: args.options }),
-    });
+    };
+    return bounded ?
+        await planMergeIncrementalWithCandidateKeys(
+          mergeArgs,
+          boundedCandidateKeys(writeSet),
+        )
+      : await planMergeIncremental(mergeArgs);
   } catch (error) {
     return err(
       error instanceof CandidateWriteSetError ? error : (

@@ -1,22 +1,34 @@
-import type { GraphBackend } from "@nicia-ai/typegraph";
+import type { GraphBackend, GraphDef, Store } from "@nicia-ai/typegraph";
 import {
   asNodeId,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
+  disjointWith,
 } from "@nicia-ai/typegraph";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../../src/backend/derive-backend";
 import {
+  BaseVersionMismatchError,
   BranchError,
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
+  planCandidateWriteSetReview,
+  planMergeIncremental,
 } from "../../src/graph-merge";
+import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
+import { asBranchId } from "../../src/graph-merge/types";
+import { importGraph } from "../../src/interchange";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, getStoreBackend } from "./test-utils";
 
@@ -41,6 +53,43 @@ const graph = defineGraph({
   },
   edges: {},
 });
+const related = defineEdge("related", { schema: z.object({}) });
+const cardinalityGraph = defineGraph({
+  id: "candidate-cardinality",
+  nodes: { Person: { type: Person } },
+  edges: {
+    related: {
+      type: related,
+      from: [Person],
+      to: [Person],
+      cardinality: "one",
+    },
+  },
+});
+const Alias = defineNode("Alias", {
+  schema: z.object({ name: z.string(), externalKey: z.string() }),
+});
+const disjointGraph = defineGraph({
+  id: "candidate-disjoint",
+  nodes: { Person: { type: Person }, Alias: { type: Alias } },
+  edges: {},
+  ontology: [disjointWith(Person, Alias)],
+});
+const matched = defineEdge("matched", {
+  schema: z.object({ code: z.string() }),
+});
+const edgeIdentityGraph = defineGraph({
+  id: "candidate-edge-match-identity",
+  nodes: { Person: { type: Person } },
+  edges: {
+    matched: {
+      type: matched,
+      from: [Person],
+      to: [Person],
+      matchIdentity: { name: "code", fields: ["code"] },
+    },
+  },
+});
 
 describe("candidate write-set planning", () => {
   let baseBackend: GraphBackend;
@@ -54,8 +103,8 @@ describe("candidate write-set planning", () => {
 
   afterEach(async () => cleanupBase());
 
-  async function setup() {
-    const [target] = await createStoreWithSchema(graph, baseBackend, {
+  async function setup(backend = baseBackend) {
+    const [target] = await createStoreWithSchema(graph, backend, {
       revisionTracking: true,
     });
     await requireDefined(target.nodes.Person).create(
@@ -85,6 +134,39 @@ describe("candidate write-set planning", () => {
     return { makeBackend: () => Promise.resolve(fixture.backend), close };
   }
 
+  async function fullCloneImportSucceeded<G extends GraphDef>(
+    target: Store<G>,
+    writeSet: CandidateWriteSet,
+    branchId: string,
+  ): Promise<boolean> {
+    const branch = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(branchId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        branch,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: writeSet.nodes,
+          edges: writeSet.edges,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      return imported.success;
+    } finally {
+      await branch.close();
+    }
+  }
+
   const options = {
     resolve: {
       Person: {
@@ -96,6 +178,235 @@ describe("candidate write-set planning", () => {
       },
     },
   };
+
+  it("matches full clone staging when an existing edge occupies cardinality one", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      {
+        revisionTracking: true,
+      },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const existing = await target.nodes.Person.create(
+      { name: "Existing", externalKey: "existing" },
+      { id: "existing" },
+    );
+    const proposed = await target.nodes.Person.create(
+      { name: "Proposed", externalKey: "proposed" },
+      { id: "proposed" },
+    );
+    await target.edges.related.create(source, existing, {}, { id: "old-edge" });
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "cardinality-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "related",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: proposed.id },
+          properties: {},
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    expect(
+      await fullCloneImportSucceeded(target, writeSet, "full-cardinality"),
+    ).toBe(false);
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(isErr(bounded)).toBe(true);
+  });
+
+  it("plans an unrelated candidate on a constrained graph", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.related.create(source, peer, {}, { id: "old-edge" });
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "unrelated-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [
+        {
+          kind: "Person",
+          id: "new",
+          properties: { name: "New", externalKey: "new" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    };
+    const full = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(writeSet.sourceId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        full,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: writeSet.nodes,
+          edges: writeSet.edges,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      expect(imported.success).toBe(true);
+      const expected = unwrap(
+        await planMergeIncremental({
+          forkPoint: target,
+          target,
+          branches: [full],
+        }),
+      );
+      const actual = unwrap(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      );
+      expect(canonicalMergePlanJson(actual)).toBe(
+        canonicalMergePlanJson(expected),
+      );
+    } finally {
+      await full.close();
+    }
+  });
+
+  it("refuses candidate-scoped review on a graph requiring a complete clone", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      {
+        revisionTracking: true,
+      },
+    );
+    const review = await planCandidateWriteSetReview({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet: {
+        formatVersion: 1,
+        sourceId: "review-candidate",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [],
+      },
+      policy: { id: "review-policy", context: {} },
+      reviewScope: "candidate",
+    });
+    expect(isErr(review)).toBe(true);
+    if (isErr(review)) expect(review.error.code).toBe("GRAPH_MERGE_REVIEW");
+  });
+
+  it("matches full clone staging for a disjoint same-id sibling", async () => {
+    const [target] = await createStoreWithSchema(disjointGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    await target.nodes.Person.create(
+      { name: "Person", externalKey: "person" },
+      { id: "shared" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "disjoint-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [
+        {
+          kind: "Alias",
+          id: "shared",
+          properties: { name: "Alias", externalKey: "alias" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    };
+    expect(
+      await fullCloneImportSucceeded(target, writeSet, "full-disjoint"),
+    ).toBe(false);
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(isErr(bounded)).toBe(true);
+  });
+
+  it("matches full clone staging for an occupied durable edge identity", async () => {
+    const [target] = await createStoreWithSchema(
+      edgeIdentityGraph,
+      baseBackend,
+      {
+        revisionTracking: true,
+      },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.matched.create(
+      source,
+      peer,
+      { code: "shared" },
+      { id: "old-edge" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "edge-identity-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: { code: "shared" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    expect(
+      await fullCloneImportSucceeded(target, writeSet, "full-match-identity"),
+    ).toBe(false);
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(isErr(bounded)).toBe(true);
+  });
 
   it("returns a deterministic serialized property-conflict plan with source attribution", async () => {
     const { target, writeSet } = await setup();
@@ -161,6 +472,170 @@ describe("candidate write-set planning", () => {
     expect(
       await people.getById(asNodeId<typeof Person>("accepted")),
     ).toMatchObject({ name: "Accepted", externalKey: "shared" });
+  });
+
+  it("matches the full clone for overlapping and unrelated target rows", async () => {
+    const { target, writeSet } = await setup();
+    await target.nodes.Person.create(
+      { name: "Unrelated", externalKey: "unrelated" },
+      { id: "unrelated", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const updated = {
+      ...writeSet,
+      nodes: [
+        ...writeSet.nodes,
+        {
+          kind: "Person",
+          id: "accepted",
+          properties: { name: "Changed", externalKey: "shared" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    } satisfies CandidateWriteSet;
+    const bounded = unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: candidateBackend().makeBackend,
+        writeSet: updated,
+        options,
+      }),
+    );
+    const fullBranch = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(updated.sourceId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        fullBranch,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: updated.nodes,
+          edges: updated.edges,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      expect(imported.success).toBe(true);
+      const full = unwrap(
+        await planMergeIncremental({
+          forkPoint: target,
+          target,
+          branches: [fullBranch],
+          options,
+        }),
+      );
+      expect(canonicalMergePlanJson(bounded)).toBe(
+        canonicalMergePlanJson(full),
+      );
+    } finally {
+      await fullBranch.close();
+    }
+  });
+
+  it("refuses a target write during bounded point reads", async () => {
+    const { target, writeSet } = await setup();
+    const getNodes = baseBackend.getNodes;
+    if (getNodes === undefined) throw new Error("Expected batched point read");
+    vi.spyOn(baseBackend, "getNodes").mockImplementationOnce(
+      async (graphId, kind, ids) => {
+        const rows = await getNodes(graphId, kind, ids);
+        await target.nodes.Person.create(
+          { name: "Concurrent", externalKey: "concurrent" },
+          { id: "concurrent" },
+        );
+        return rows;
+      },
+    );
+    const result = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+      options,
+    });
+    expect(isErr(result)).toBe(true);
+    if (isErr(result))
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    expect(
+      await target.nodes.Person.getById(asNodeId<typeof Person>("candidate")),
+    ).toBeUndefined();
+  });
+
+  it("keeps planning reads and staging writes bounded as unrelated rows grow", async () => {
+    const { target, writeSet } = await setup();
+    async function measure() {
+      const getNodes = baseBackend.getNodes;
+      if (getNodes === undefined)
+        throw new Error("Expected batched point read");
+      let requestedIds = 0;
+      let returnedRows = 0;
+      const pointRead = vi
+        .spyOn(baseBackend, "getNodes")
+        .mockImplementation(async (graphId, kind, ids) => {
+          requestedIds += ids.length;
+          const rows = await getNodes(graphId, kind, ids);
+          returnedRows += rows.length;
+          return rows;
+        });
+      const nodeScan = vi.spyOn(baseBackend, "findNodesByKind");
+      const edgeScan = vi.spyOn(baseBackend, "findEdgesByKind");
+      const acrossKinds = baseBackend.findNodesAcrossKinds;
+      const acrossKindsScan =
+        acrossKinds === undefined ? undefined : (
+          vi.spyOn(baseBackend, "findNodesAcrossKinds")
+        );
+      const targetWrite = vi.spyOn(baseBackend, "insertNode");
+      const fixture = createSqliteMergeBackend();
+      const stagingWrite = vi.spyOn(fixture.backend, "insertNode");
+      try {
+        unwrap(
+          await planCandidateWriteSet({
+            target,
+            makeBackend: () => Promise.resolve(fixture.backend),
+            writeSet,
+            options,
+          }),
+        );
+        return {
+          requestedIds,
+          returnedRows,
+          nodeScans: nodeScan.mock.calls.length,
+          edgeScans: edgeScan.mock.calls.length,
+          acrossKindsScans: acrossKindsScan?.mock.calls.length ?? 0,
+          targetWrites: targetWrite.mock.calls.length,
+          stagingWrites: stagingWrite.mock.calls.length,
+        };
+      } finally {
+        pointRead.mockRestore();
+        nodeScan.mockRestore();
+        edgeScan.mockRestore();
+        acrossKindsScan?.mockRestore();
+        targetWrite.mockRestore();
+        stagingWrite.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 60; index += 1) {
+      await target.nodes.Person.create(
+        { name: `Unrelated ${index}`, externalKey: `unrelated-${index}` },
+        { id: `unrelated-${index}` },
+      );
+    }
+    const after = await measure();
+    expect(after).toEqual(before);
+    expect(after).toMatchObject({
+      nodeScans: 0,
+      edgeScans: 0,
+      acrossKindsScans: 0,
+      targetWrites: 0,
+    });
+    expect(after.returnedRows).toBeLessThanOrEqual(2);
   });
 
   it("does not refresh statistics for a disposable ingestion clone", async () => {
@@ -232,6 +707,90 @@ describe("candidate write-set planning", () => {
         "Unable to create the transient candidate staging store.",
       );
       expect(result.error.cause).toBeInstanceOf(BranchError);
+    }
+  });
+
+  it("refuses a candidate backend that is the target backend without closing the target", async () => {
+    const { target, writeSet } = await setup();
+    const targetBackend = getStoreBackend(target);
+    const close = vi.spyOn(targetBackend, "close");
+
+    const result = await planCandidateWriteSet({
+      target,
+      writeSet,
+      makeBackend: () => Promise.resolve(targetBackend),
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+    }
+    expect(close).not.toHaveBeenCalled();
+    expect(await target.nodes.Person.count()).toBe(1);
+    await target.nodes.Person.create({
+      name: "Still usable",
+      externalKey: "still-usable",
+    });
+    expect(await target.nodes.Person.count()).toBe(2);
+  });
+
+  it("refuses a candidate backend derived from the target without closing it", async () => {
+    const { target, writeSet } = await setup();
+    const targetBackend = getStoreBackend(target);
+    const close = vi.spyOn(targetBackend, "close");
+    const candidateBackend = deriveBackend(targetBackend, {});
+
+    const result = await planCandidateWriteSet({
+      target,
+      writeSet,
+      makeBackend: () => Promise.resolve(candidateBackend),
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+    }
+    expect(close).not.toHaveBeenCalled();
+    expect(await target.nodes.Person.count()).toBe(1);
+    await target.nodes.Person.create({
+      name: "Still usable",
+      externalKey: "still-usable",
+    });
+    expect(await target.nodes.Person.count()).toBe(2);
+  });
+
+  it("refuses a second candidate wrapper over the target's serialized connection without closing it", async () => {
+    const sqlite = new Database(":memory:");
+    const targetBackend = createSqliteBackend(drizzle(sqlite), {
+      executionProfile: { isSync: true },
+    });
+    try {
+      const { target, writeSet } = await setup(targetBackend);
+      const candidateBackend = createSqliteBackend(drizzle(sqlite), {
+        executionProfile: { isSync: true },
+      });
+      const close = vi.spyOn(candidateBackend, "close");
+
+      const result = await planCandidateWriteSet({
+        target,
+        writeSet,
+        makeBackend: () => Promise.resolve(candidateBackend),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+      }
+      expect(close).not.toHaveBeenCalled();
+      expect(await target.nodes.Person.count()).toBe(1);
+      await target.nodes.Person.create({
+        name: "Still usable",
+        externalKey: "still-usable",
+      });
+      expect(await target.nodes.Person.count()).toBe(2);
+    } finally {
+      await targetBackend.close();
+      sqlite.close();
     }
   });
 
