@@ -291,6 +291,10 @@ function createPgvectorStrategyWithPrefixes(
           tableName: table,
           createDdl,
           runtimeEnsure: true,
+          workingCopyClonePolicy: {
+            kind: "graphRows",
+            graphIdColumn: "graph_id",
+          },
         },
       ];
     },

@@ -5399,6 +5399,21 @@ type TableContribution = Readonly<{
     createDdl: readonly string[];
     dropDdl?: readonly string[];
     runtimeEnsure: boolean;
+    workingCopyClonePolicy?: Readonly<{
+        kind: "graphRows";
+        graphIdColumn: string;
+    }> | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+    }> | Readonly<{
+        kind: "freshSeed";
+    }> | Readonly<{
+        kind: "rebuildAfterClone";
+    }> | Readonly<{
+        kind: "unsupported";
+        reason: string;
+    }>;
 }>;
 
 // @public

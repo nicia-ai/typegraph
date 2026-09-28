@@ -1692,7 +1692,7 @@ type EdgeEndpointPairTypes = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2910,6 +2910,20 @@ type GraphBackend = Readonly<{
     findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findActiveEdgesBySourceV1?: (this: void, params: Readonly<{
+        graphId: string;
+        edgeKind: string;
+        fromKind: string;
+        fromId: string;
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesByMatchIdentity?: (this: void, params: Readonly<{
+        graphId: string;
+        identities: readonly Readonly<{
+            kind: string;
+            name: string;
+            key: string;
+        }>[];
+    }>) => Promise<readonly EdgeRow[]>;
     findEdgesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly EdgeRow[]>;
     findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
@@ -6213,6 +6227,49 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
+    identityAssertionsTouchingAtTarget?: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[], mode?: "state" | "archival", options?: Readonly<{
+        includeDeleted?: boolean;
+    }>) => Promise<readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
+    }>[]>;
+    interchangeIdentityAssertionsByIdsAtTarget?: (target: GraphBackend | TransactionBackend, ids: readonly string[], mode: "state" | "archival", options?: Readonly<{
+        includeDeleted?: boolean;
+    }>) => Promise<readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
+    }>[]>;
     readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;
@@ -6591,6 +6648,21 @@ type TableContribution = Readonly<{
     createDdl: readonly string[];
     dropDdl?: readonly string[];
     runtimeEnsure: boolean;
+    workingCopyClonePolicy?: Readonly<{
+        kind: "graphRows";
+        graphIdColumn: string;
+    }> | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+    }> | Readonly<{
+        kind: "freshSeed";
+    }> | Readonly<{
+        kind: "rebuildAfterClone";
+    }> | Readonly<{
+        kind: "unsupported";
+        reason: string;
+    }>;
 }>;
 
 // @public
