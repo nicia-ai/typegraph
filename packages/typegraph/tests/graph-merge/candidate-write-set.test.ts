@@ -25,6 +25,7 @@ import {
   planMergeIncremental,
 } from "../../src/graph-merge";
 import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
+import { captureMergePlanTargetFence } from "../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import { canUseSparseCandidatePlanning } from "../../src/graph-merge/sparse-candidate-branch";
@@ -902,7 +903,79 @@ describe("candidate write-set planning", () => {
       makeBackend: candidateBackend().makeBackend,
       writeSet,
     });
+    expect(canUseSparseCandidatePlanning(target)).toBe(true);
     expect(isErr(bounded)).toBe(true);
+  });
+
+  it("keeps ontology peer reads bounded as unrelated nodes grow", async () => {
+    const [target] = await createStoreWithSchema(disjointGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    await target.nodes.Person.create(
+      { name: "Original", externalKey: "subject" },
+      { id: "subject", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "ontology-budget",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [
+        {
+          kind: "Person",
+          id: "subject",
+          properties: { name: "Updated", externalKey: "subject" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    };
+    async function measure() {
+      const originalExecute = baseBackend.execute;
+      let statements = 0;
+      let returnedRows = 0;
+      const read = vi
+        .spyOn(baseBackend, "execute")
+        .mockImplementation(async <T>(query: CompiledRowsSql) => {
+          const rows = await originalExecute<T>(query);
+          statements += 1;
+          returnedRows += rows.length;
+          return rows;
+        });
+      const targetWrite = vi.spyOn(baseBackend, "insertNode");
+      try {
+        const revision = await captureMergePlanTargetFence(target);
+        unwrap(
+          await planCandidateWriteSet({
+            target,
+            makeBackend: candidateBackend().makeBackend,
+            writeSet,
+          }),
+        );
+        return {
+          statements,
+          returnedRows,
+          targetWrites: targetWrite.mock.calls.length,
+          revisionUnchanged:
+            JSON.stringify(await captureMergePlanTargetFence(target)) ===
+            JSON.stringify(revision),
+        };
+      } finally {
+        read.mockRestore();
+        targetWrite.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 40; index += 1)
+      await target.nodes.Alias.create(
+        { name: `Unrelated ${index}`, externalKey: `other-${index}` },
+        { id: `other-${index}` },
+      );
+    const after = await measure();
+    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    expect(after.statements).toBeLessThanOrEqual(before.statements);
+    expect(after.returnedRows).toBe(before.returnedRows);
+    expect(after.targetWrites).toBe(0);
+    expect(after.revisionUnchanged).toBe(true);
   });
 
   it("matches full clone staging for an occupied durable edge identity", async () => {
