@@ -67,6 +67,19 @@ const POSTGRES_UNDEFINED_RELATION_PATTERN =
 const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
 const POSTGRES_NOT_NULL_VIOLATION_CODE = "23502";
+const POSTGRES_FAILED_TRANSACTION_CODE = "25P02";
+
+/** A later statement was refused because an earlier PostgreSQL statement failed. */
+export function isPostgresFailedTransactionError(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === POSTGRES_FAILED_TRANSACTION_CODE
+    )
+      return true;
+  }
+  return false;
+}
 
 /**
  * SQLSTATEs a racing IDEMPOTENT DDL statement loses with — the ones that mean

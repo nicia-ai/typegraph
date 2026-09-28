@@ -293,6 +293,27 @@ describe("atomic node replacement", () => {
     }
   });
 
+  it("reports a replacement's unique conflict rather than its own existing ID", async () => {
+    const fixture = await createFixture();
+    try {
+      await fixture.store.nodes.Document.bulkInsert([
+        { id: "a", props: { slug: "a", title: "Before A" } },
+        { id: "b", props: { slug: "b", title: "Before B" } },
+      ]);
+
+      await expect(
+        fixture.store.nodes.Document.bulkReplaceById([
+          { id: "a", props: { slug: "b", title: "After A" } },
+        ]),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      await expect(
+        fixture.store.nodes.Document.getById("a" as never),
+      ).resolves.toMatchObject({ slug: "a", title: "Before A" });
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
   it("rolls replacements and sidecars back on a stale schema fence", async () => {
     const fixture = await createFixture();
     try {
