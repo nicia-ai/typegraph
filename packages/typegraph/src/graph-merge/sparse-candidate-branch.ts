@@ -31,9 +31,11 @@ import { graphWithoutNodeUniqueness } from "./working-copy";
 type EntityReference = Readonly<{ kind: string; id: string }>;
 
 /**
- * Only constraints whose import checks are local to the candidate's row ids
- * can be checked against a sparse clone. Cardinality and durable edge match
- * identity can inspect other edges, while ontology can add cross-kind claims.
+ * `one` and `unique` cardinality peers are keyed by source or endpoint pair.
+ * `oneActive` can have arbitrarily many ended rows from one source, so it
+ * requires an active-only keyed read before sparse seeding can be bounded.
+ * Durable edge match identity has no keyed owner read, while ontology can add
+ * cross-kind claims outside the candidate's references.
  */
 export function canUseSparseCandidatePlanning<G extends GraphDef>(
   target: Store<G>,
@@ -45,8 +47,7 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
     target.graph.ontology.length === 0 &&
     Object.values(target.graph.edges).every(
       (edge) =>
-        (edge.cardinality ?? "many") === "many" &&
-        edge.matchIdentity === undefined,
+        edge.cardinality !== "oneActive" && edge.matchIdentity === undefined,
     )
   );
 }
@@ -88,6 +89,38 @@ async function sparseBaseDocument<G extends GraphDef>(
     target.graphId,
     writeSet.edges.map((edge) => edge.id),
   );
+  const cardinalityReads = new Map<
+    string,
+    Parameters<GraphBackend["findEdgesByKind"]>[0]
+  >();
+  for (const edge of writeSet.edges) {
+    const cardinality = target.graph.edges[edge.kind]?.cardinality ?? "many";
+    if (cardinality === "many") continue;
+    const exactPair = cardinality === "unique";
+    const read = {
+      graphId: target.graphId,
+      kind: edge.kind,
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      ...(exactPair ? { toKind: edge.to.kind, toId: edge.to.id } : {}),
+      excludeDeleted: true,
+      orderBy: "id" as const,
+    };
+    cardinalityReads.set(
+      JSON.stringify([
+        edge.kind,
+        edge.from.kind,
+        edge.from.id,
+        ...(exactPair ? [edge.to.kind, edge.to.id] : []),
+      ]),
+      read,
+    );
+  }
+  const relevantEdgesById = new Map(edgesById);
+  for (const read of cardinalityReads.values()) {
+    for (const edge of await backend.findEdgesByKind(read))
+      relevantEdgesById.set(edge.id, edge);
+  }
   const references = new Map<string, EntityReference>();
   function add(reference: EntityReference): void {
     references.set(referenceKey(reference), reference);
@@ -97,7 +130,7 @@ async function sparseBaseDocument<G extends GraphDef>(
     add(edge.from);
     add(edge.to);
   }
-  for (const edge of edgesById.values()) {
+  for (const edge of relevantEdgesById.values()) {
     if (edge.deleted_at !== undefined) continue;
     add({ kind: edge.from_kind, id: edge.from_id });
     add({ kind: edge.to_kind, id: edge.to_id });
@@ -160,7 +193,7 @@ async function sparseBaseDocument<G extends GraphDef>(
     }
   }
   const edges: GraphData["edges"] = [];
-  for (const row of edgesById.values()) {
+  for (const row of relevantEdgesById.values()) {
     if (row.deleted_at !== undefined) continue;
     edges.push({
       kind: row.kind,

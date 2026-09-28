@@ -41,11 +41,151 @@ const identityGraph = defineGraph({
   nodes: { Person: { type: Person }, Alias: { type: Alias } },
   edges: {},
 });
+const cardinalityGraph = defineGraph({
+  id: "candidate-bounded-cardinality-property",
+  nodes: { Person: { type: Person } },
+  edges: {
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "unique",
+    },
+  },
+});
 
 const FROM = "2026-01-01T00:00:00.000Z";
 const END = "2028-01-01T00:00:00.000Z";
 
 describe("bounded candidate planning", () => {
+  it("matches full-clone unique decisions across temporal peers and unrelated growth", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          unrelatedCount: fc.integer({ min: 0, max: 5 }),
+          samePair: fc.boolean(),
+          endedPeer: fc.boolean(),
+        }),
+        async ({ unrelatedCount, samePair, endedPeer }) => {
+          const fixture = createSqliteMergeBackend();
+          try {
+            const [target] = await createStoreWithSchema(
+              cardinalityGraph,
+              fixture.backend,
+              { revisionTracking: true },
+            );
+            const source = await target.nodes.Person.create(
+              { name: "Source" },
+              { id: "source", validFrom: FROM },
+            );
+            const existing = await target.nodes.Person.create(
+              { name: "Existing" },
+              { id: "existing", validFrom: FROM },
+            );
+            const proposed = await target.nodes.Person.create(
+              { name: "Proposed" },
+              { id: "proposed", validFrom: FROM },
+            );
+            await target.edges.knows.create(
+              source,
+              samePair ? proposed : existing,
+              { since: "original" },
+              {
+                id: "peer-edge",
+                validFrom: FROM,
+                ...(endedPeer ? { validTo: END } : {}),
+              },
+            );
+            for (let index = 0; index < unrelatedCount; index += 1) {
+              const otherSource = await target.nodes.Person.create(
+                { name: `Other source ${index}` },
+                { id: `other-source-${index}`, validFrom: FROM },
+              );
+              const otherTarget = await target.nodes.Person.create(
+                { name: `Other target ${index}` },
+                { id: `other-target-${index}`, validFrom: FROM },
+              );
+              await target.edges.knows.create(
+                otherSource,
+                otherTarget,
+                { since: "other" },
+                { id: `other-edge-${index}`, validFrom: FROM },
+              );
+            }
+            const writeSet: CandidateWriteSet = {
+              formatVersion: 1,
+              sourceId: "cardinality-property-source",
+              target: await captureCandidateWriteSetTarget(target),
+              nodes: [],
+              edges: [
+                {
+                  kind: "knows",
+                  id: "candidate-edge",
+                  from: { kind: "Person", id: source.id },
+                  to: { kind: "Person", id: proposed.id },
+                  properties: { since: "candidate" },
+                  validFrom: FROM,
+                },
+              ],
+            };
+            const full = unwrap(
+              await ingestionBranch(
+                target,
+                async () => createSqliteMergeBackend().backend,
+                { id: asBranchId(writeSet.sourceId) },
+              ),
+            );
+            try {
+              const imported = await importGraph(
+                full,
+                {
+                  formatVersion: "2.0",
+                  exportedAt: "1970-01-01T00:00:00.000Z",
+                  source: { type: "external" },
+                  nodes: writeSet.nodes,
+                  edges: writeSet.edges,
+                },
+                {
+                  onConflict: "update",
+                  onUnknownProperty: "error",
+                  validateReferences: true,
+                  refreshStatistics: false,
+                },
+              );
+              const bounded = await planCandidateWriteSet({
+                target,
+                makeBackend: async () => createSqliteMergeBackend().backend,
+                writeSet,
+              });
+              expect(imported.success).toBe(!samePair);
+              if (!imported.success) {
+                expect(isErr(bounded)).toBe(true);
+                return;
+              }
+              const expected = unwrap(
+                await planMergeIncremental({
+                  forkPoint: target,
+                  target,
+                  branches: [full],
+                }),
+              );
+              expect(isErr(bounded)).toBe(false);
+              if (!isErr(bounded))
+                expect(canonicalMergePlanJson(bounded.data)).toBe(
+                  canonicalMergePlanJson(expected),
+                );
+            } finally {
+              await full.close();
+            }
+          } finally {
+            await fixture.cleanup();
+          }
+        },
+      ),
+      { numRuns: 20 },
+    );
+  });
+
   it("matches full-clone identity planning across classes, folded ids, and unrelated assertions", async () => {
     let successfulPlans = 0;
     await fc.assert(

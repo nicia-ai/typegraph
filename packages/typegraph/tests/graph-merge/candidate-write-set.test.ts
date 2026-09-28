@@ -27,6 +27,7 @@ import {
 import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
+import { canUseSparseCandidatePlanning } from "../../src/graph-merge/sparse-candidate-branch";
 import { asBranchId } from "../../src/graph-merge/types";
 import { importGraph } from "../../src/interchange";
 import type { CompiledRowsSql } from "../../src/query/sql-intent";
@@ -65,6 +66,21 @@ const cardinalityGraph = defineGraph({
       from: [Person],
       to: [Person],
       cardinality: "one",
+    },
+  },
+});
+const activeRelated = defineEdge("activeRelated", {
+  schema: z.object({}),
+});
+const oneActiveGraph = defineGraph({
+  id: "candidate-one-active",
+  nodes: { Person: { type: Person } },
+  edges: {
+    activeRelated: {
+      type: activeRelated,
+      from: [Person],
+      to: [Person],
+      cardinality: "oneActive",
     },
   },
 });
@@ -236,6 +252,154 @@ describe("candidate write-set planning", () => {
       writeSet,
     });
     expect(isErr(bounded)).toBe(true);
+  });
+
+  it("bounds cardinality peer reads as unrelated edges grow", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const existing = await target.nodes.Person.create(
+      { name: "Existing", externalKey: "existing" },
+      { id: "existing", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const proposed = await target.nodes.Person.create(
+      { name: "Proposed", externalKey: "proposed" },
+      { id: "proposed", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    await target.edges.related.create(source, existing, {}, { id: "peer" });
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "cardinality-budget",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "related",
+          id: "candidate-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: proposed.id },
+          properties: {},
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    async function measure() {
+      const targetBefore = await captureCandidateWriteSetTarget(target);
+      const originalRead = baseBackend.findEdgesByKind;
+      const originalExecute = baseBackend.execute;
+      let peerReads = 0;
+      let peerRows = 0;
+      let statements = 0;
+      let returnedRows = 0;
+      const read = vi
+        .spyOn(baseBackend, "findEdgesByKind")
+        .mockImplementation(async (params) => {
+          const rows = await originalRead(params);
+          peerReads += 1;
+          peerRows += rows.length;
+          expect(params.fromId).toBe(source.id);
+          return rows;
+        });
+      const execute = vi
+        .spyOn(baseBackend, "execute")
+        .mockImplementation(async <T>(query: CompiledRowsSql) => {
+          const rows = await originalExecute<T>(query);
+          statements += 1;
+          returnedRows += rows.length;
+          return rows;
+        });
+      const targetNodeWrite = vi.spyOn(baseBackend, "insertNode");
+      const targetEdgeWrite = vi.spyOn(baseBackend, "insertEdge");
+      try {
+        const planned = await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        });
+        expect(isErr(planned)).toBe(true);
+        const measured = {
+          peerReads,
+          peerRows,
+          statements: statements + peerReads,
+          returnedRows: returnedRows + peerRows,
+          targetWrites:
+            targetNodeWrite.mock.calls.length +
+            targetEdgeWrite.mock.calls.length,
+        };
+        expect(await captureCandidateWriteSetTarget(target)).toEqual(
+          targetBefore,
+        );
+        return measured;
+      } finally {
+        read.mockRestore();
+        execute.mockRestore();
+        targetNodeWrite.mockRestore();
+        targetEdgeWrite.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 40; index += 1) {
+      const unrelatedSource = await target.nodes.Person.create(
+        { name: `Unrelated ${index}`, externalKey: `source-${index}` },
+        { id: `source-${index}` },
+      );
+      const unrelatedTarget = await target.nodes.Person.create(
+        { name: `Target ${index}`, externalKey: `target-${index}` },
+        { id: `target-${index}` },
+      );
+      await target.edges.related.create(
+        unrelatedSource,
+        unrelatedTarget,
+        {},
+        {
+          id: `unrelated-edge-${index}`,
+        },
+      );
+    }
+    const after = await measure();
+    expect(before.peerReads).toBe(1);
+    expect(before.peerRows).toBe(1);
+    expect(after.statements).toBeLessThanOrEqual(before.statements);
+    expect(after.returnedRows).toBe(before.returnedRows);
+    expect(after.peerReads).toBe(before.peerReads);
+    expect(after.peerRows).toBe(before.peerRows);
+    expect(after.targetWrites).toBe(0);
+  });
+
+  it("keeps oneActive on complete-clone staging", async () => {
+    const [target] = await createStoreWithSchema(oneActiveGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    expect(canUseSparseCandidatePlanning(target)).toBe(false);
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "one-active-fallback",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [],
+    };
+    unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: candidateBackend().makeBackend,
+        writeSet,
+      }),
+    );
+    const review = await planCandidateWriteSetReview({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+      policy: { id: "one-active-review", context: {} },
+      reviewScope: "candidate",
+    });
+    expect(isErr(review)).toBe(true);
+    if (isErr(review)) expect(review.error.code).toBe("GRAPH_MERGE_REVIEW");
   });
 
   it("plans an unrelated candidate on a constrained graph", async () => {
@@ -685,7 +849,7 @@ describe("candidate write-set planning", () => {
 
   it("refuses candidate-scoped review on a graph requiring a complete clone", async () => {
     const [target] = await createStoreWithSchema(
-      cardinalityGraph,
+      edgeIdentityGraph,
       baseBackend,
       {
         revisionTracking: true,
