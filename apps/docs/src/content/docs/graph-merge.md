@@ -446,9 +446,11 @@ candidate reference's id across kinds, so disjointness sees the same peers as a
 complete clone. Ontology subtype relationships remain graph metadata.
 The candidate diff and its target baseline are bounded to that dependency set and
 any committed rows recalled by configured unique or index sources. Planning
-still fences the target revision before and after these reads. Edge
-match-identity constraints and targets without revision tracking continue to
-use the complete clone path. A custom backend lacking the optional
+still fences the target revision before and after these reads. With edge
+match-identity constraints, a backend offering `findEdgesByMatchIdentity`
+seeds the exact durable owners named by the candidate. A missing keyed read,
+an owner excluded from the clone projection, or a target without revision
+tracking uses the complete clone path. A custom backend lacking the optional
 `findActiveEdgesBySourceV1` read also uses that path for `oneActive` graphs.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
@@ -569,7 +571,7 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
-For a revision-tracked graph without edge match-identity constraints, pass
+For an eligible revision-tracked graph, pass
 `reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
 candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
 edge endpoints, resolved writes, and plan guards, including expected absences
@@ -2022,7 +2024,7 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-On revision-tracked graphs without edge match-identity constraints, planning
+On eligible revision-tracked graphs, planning
 seeds existing candidate rows, edge
 endpoints, cardinality peers, live same-id ontology peers, and any reachable
 current identity component into the disposable working copy.
@@ -2030,7 +2032,9 @@ The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
 properties are refused. A custom backend without the active-only source read
-uses the complete clone path for `oneActive` graphs. Other ineligible graphs use
+uses the complete clone path for `oneActive` graphs. A custom backend without
+the keyed match-identity owner read, or a candidate whose owner is excluded
+from the clone projection, also uses that path. Other ineligible graphs use
 the complete clone path so staging
 still checks constraints that can depend on rows beyond the candidate's ids.
 
