@@ -1,5 +1,7 @@
 import type { GraphData } from "../interchange";
 import { EDGE_CARDINALITY_SPECS } from "../store/claims/edge-claims";
+import type { EdgeRow } from "../backend/types";
+import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import {
   type CandidateIdentityScope,
   readCandidateIdentityClosure,
@@ -34,8 +36,8 @@ type EntityReference = Readonly<{ kind: string; id: string }>;
 /**
  * Cardinality peers use the exact claim key and holder liveness. `oneActive`
  * needs the optional active-only source read so ended history cannot make a
- * candidate lookup grow with the graph. Durable edge match identity still
- * needs a keyed owner read. Ontology disjointness uses live same-id siblings.
+ * candidate lookup grow with the graph. Durable match identity requires an
+ * exact keyed owner read. Ontology disjointness uses live same-id siblings.
  */
 export function canUseSparseCandidatePlanning<G extends GraphDef>(
   target: Store<G>,
@@ -48,10 +50,74 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
       hasScopedIdentityReads(storeRuntime(target))) &&
     Object.values(target.graph.edges).every(
       (edge) =>
-        edge.matchIdentity === undefined &&
-        (edge.cardinality !== "oneActive" || hasActiveSourceRead),
-    )
+        (edge.cardinality !== "oneActive" || hasActiveSourceRead) &&
+        (edge.matchIdentity === undefined ||
+          storeBackend(target).findEdgesByMatchIdentity !== undefined),
+    ),
   );
+}
+
+/**
+ * Reads only the durable owners named by candidate edges. `undefined` means
+ * the exact lookup cannot be performed safely (for example, a custom backend
+ * omits the optional capability or a candidate key cannot be derived).
+ */
+export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
+  target: Store<G>,
+  writeSet: CandidateWriteSet,
+): Promise<readonly EdgeRow[] | undefined> {
+  const backend = storeBackend(target);
+  const readOwners = backend.findEdgesByMatchIdentity;
+  if (readOwners === undefined) {
+    return (
+        Object.values(target.graph.edges).some(
+          (edge) => edge.matchIdentity !== undefined,
+        )
+      ) ?
+        undefined
+      : [];
+  }
+  const identities = new Map<
+    string,
+    Readonly<{ kind: string; name: string; key: string }>
+  >();
+  try {
+    for (const edge of writeSet.edges) {
+      const registration = target.graph.edges[edge.kind];
+      const identity = resolveEdgeMatchIdentityStorage(
+        registration?.matchIdentity,
+        {
+          fromKind: edge.from.kind,
+          fromId: edge.from.id,
+          toKind: edge.to.kind,
+          toId: edge.to.id,
+          props: edge.properties,
+        },
+        { graphId: target.graphId, edgeKind: edge.kind },
+      );
+      if (identity === undefined) continue;
+      identities.set(JSON.stringify([edge.kind, identity.name, identity.key]), {
+        kind: edge.kind,
+        name: identity.name,
+        key: identity.key,
+      });
+    }
+  } catch {
+    // Let the full-clone/import path own malformed candidate validation.
+    return undefined;
+  }
+  if (identities.size === 0) return [];
+  return readOwners({
+    graphId: target.graphId,
+    identities: [...identities.values()],
+  });
+}
+
+/** Whether every returned owner is included in the default clone projection. */
+export function matchIdentityOwnersAreCloneVisible(
+  owners: readonly EdgeRow[],
+): boolean {
+  return owners.every((owner) => owner.deleted_at === undefined);
 }
 
 function referenceKey(reference: EntityReference): string {
@@ -80,6 +146,7 @@ function candidateKeys(writeSet: CandidateWriteSet): LineageDelta {
 async function sparseBaseDocument<G extends GraphDef>(
   target: Store<G>,
   writeSet: CandidateWriteSet,
+  matchIdentityOwners: readonly EdgeRow[],
 ): Promise<
   Readonly<{ document: GraphData; identityScope?: CandidateIdentityScope }>
 > {
@@ -144,6 +211,9 @@ async function sparseBaseDocument<G extends GraphDef>(
       addActiveRead(edge.kind, edge.from_kind, edge.from_id);
   }
   const relevantEdgesById = new Map(edgesById);
+  for (const edge of matchIdentityOwners) {
+    relevantEdgesById.set(edge.id, edge);
+  }
   for (const read of cardinalityReads.values()) {
     for (const edge of await backend.findEdgesByKind(read))
       relevantEdgesById.set(edge.id, edge);
@@ -313,6 +383,7 @@ function assertIndependentBackend(
 export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
   writeSet: CandidateWriteSet,
   makeBackend: MakeBackend,
+  matchIdentityOwners: readonly EdgeRow[],
 ): Readonly<{
   strategy: WorkingCopyStrategy<G>;
   identityScope: () => CandidateIdentityScope | undefined;
@@ -324,6 +395,7 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
         const { document, identityScope } = await sparseBaseDocument(
           target,
           writeSet,
+          matchIdentityOwners,
         );
         scopedIdentity = identityScope;
         const backend = await makeBackend();

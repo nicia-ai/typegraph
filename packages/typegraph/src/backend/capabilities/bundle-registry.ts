@@ -910,8 +910,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   findEdgesByMatchIdentity: {
     kind: "reasoned",
     reason:
-      "Optional bounded lookup for durable edge identity owners, including tombstones. Merge planning does not consume the capability yet, so its omission keeps the portable full-clone path.",
-    accesses: 0,
+      "Optional exact lookup for durable edge identity owners, including tombstones. Candidate planning uses it to seed active owners and falls back to full clone when the capability is absent or the owner is tombstoned.",
+    accesses: 2,
   },
   clearGraphPreservingContributionMaterializations: {
     kind: "reasoned",
