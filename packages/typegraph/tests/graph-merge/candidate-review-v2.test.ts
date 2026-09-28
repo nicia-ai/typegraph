@@ -21,6 +21,9 @@ import {
   compareReviewBaseline,
 } from "../../src/graph-merge/review-baseline";
 import { reviewDigest } from "../../src/graph-merge/review-evidence";
+import { sql } from "../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../src/query/sql-intent";
+import { storeRuntime } from "../../src/store/runtime-port";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const Company = defineNode("Company", {
@@ -53,6 +56,48 @@ async function setup() {
 }
 
 describe("candidate-scoped V2 review baseline", () => {
+  it("includes future-start open assertions with the interchange state predicate", async () => {
+    const { backend } = createLocalSqliteBackend();
+    cleanups.push(() => backend.close());
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const seed = await store.nodes.Person.create(
+      { name: "seed" },
+      { id: "seed", validFrom: "2020-01-01T00:00:00.000Z" },
+    );
+    const other = await store.nodes.Person.create(
+      { name: "other" },
+      { id: "other", validFrom: "2020-01-01T00:00:00.000Z" },
+    );
+    const { assertion } = await store.identity.assertSame(seed, other);
+    const references = [{ kind: "Person", id: seed.id }] as const;
+    const rows = [{ role: "node", kind: "Person", id: seed.id }] as const;
+    const before = await captureReferencedReviewBaseline(
+      store,
+      rows,
+      references,
+    );
+    const executeStatement = backend.executeStatement;
+    if (executeStatement === undefined)
+      throw new Error("Bundled backend must execute test statements.");
+    await executeStatement(
+      asCompiledStatementSql(
+        sql`UPDATE typegraph_identity_assertions SET valid_from = ${"2099-01-01T00:00:00.000Z"} WHERE graph_id = ${store.graphId} AND id = ${assertion.id}`,
+      ),
+    );
+    const state =
+      await storeRuntime(store).readCurrentIdentityAssertions("state");
+    expect(state.map((row) => row.id)).toEqual([assertion.id]);
+    const after = await captureReferencedReviewBaseline(
+      store,
+      rows,
+      references,
+    );
+    expect(after.identityDigest).toBe(await reviewDigest(state));
+    expect(after.identityDigest).not.toBe(before.identityDigest);
+  });
+
   it("captures format V2 and requires renewed review after connected identity changes", async () => {
     const store = await setup();
     const seed = await store.nodes.Person.create(

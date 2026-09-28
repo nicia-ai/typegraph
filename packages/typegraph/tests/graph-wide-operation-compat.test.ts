@@ -54,24 +54,31 @@ function operationBackend(strategy: CommonOperationStrategy) {
   });
 }
 
-describe("graph-wide operation compatibility", () => {
+describe("optional operation read compatibility", () => {
   it("omits optional reads when a custom strategy has no builders", () => {
     const bundled = createSqliteOperationStrategy(
       createSqliteTables(),
       undefined,
     );
-    const { buildFindNodesAcrossKinds, buildFindEdgesAcrossKinds, ...legacy } =
-      bundled;
+    const {
+      buildFindNodesAcrossKinds,
+      buildFindEdgesAcrossKinds,
+      buildFindActiveEdgesBySourceV1,
+      ...legacy
+    } = bundled;
     expect(buildFindNodesAcrossKinds).toBeTypeOf("function");
     expect(buildFindEdgesAcrossKinds).toBeTypeOf("function");
+    expect(buildFindActiveEdgesBySourceV1).toBeTypeOf("function");
     const legacyStrategy: CommonOperationStrategy = legacy;
 
     const legacyBackend = operationBackend(legacyStrategy);
     expect(legacyBackend.findNodesAcrossKinds).toBeUndefined();
     expect(legacyBackend.findEdgesAcrossKinds).toBeUndefined();
+    expect(legacyBackend.findActiveEdgesBySourceV1).toBeUndefined();
 
     const bundledBackend = operationBackend(bundled);
     expect(bundledBackend.findNodesAcrossKinds).toBeTypeOf("function");
     expect(bundledBackend.findEdgesAcrossKinds).toBeTypeOf("function");
+    expect(bundledBackend.findActiveEdgesBySourceV1).toBeTypeOf("function");
   });
 });

@@ -23,6 +23,7 @@ import {
   planCandidateWriteSet,
   planCandidateWriteSetReview,
   planMergeIncremental,
+  revalidateCandidateWriteSetReview,
 } from "../../src/graph-merge";
 import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
 import { captureMergePlanTargetFence } from "../../src/graph-merge/merge";
@@ -373,14 +374,14 @@ describe("candidate write-set planning", () => {
     expect(after.targetWrites).toBe(0);
   });
 
-  it("keeps oneActive on complete-clone staging", async () => {
+  it("uses bounded oneActive planning only with the active source read", async () => {
     const [target] = await createStoreWithSchema(oneActiveGraph, baseBackend, {
       revisionTracking: true,
     });
-    expect(canUseSparseCandidatePlanning(target)).toBe(false);
+    expect(canUseSparseCandidatePlanning(target)).toBe(true);
     const writeSet: CandidateWriteSet = {
       formatVersion: 1,
-      sourceId: "one-active-fallback",
+      sourceId: "one-active-capability",
       target: await captureCandidateWriteSetTarget(target),
       nodes: [],
       edges: [],
@@ -399,8 +400,156 @@ describe("candidate write-set planning", () => {
       policy: { id: "one-active-review", context: {} },
       reviewScope: "candidate",
     });
-    expect(isErr(review)).toBe(true);
-    if (isErr(review)) expect(review.error.code).toBe("GRAPH_MERGE_REVIEW");
+    expect(isErr(review)).toBe(false);
+
+    const descriptor = Object.getOwnPropertyDescriptor(
+      baseBackend,
+      "findActiveEdgesBySourceV1",
+    );
+    expect(descriptor).toBeDefined();
+    Reflect.deleteProperty(baseBackend, "findActiveEdgesBySourceV1");
+    try {
+      expect(canUseSparseCandidatePlanning(target)).toBe(false);
+      unwrap(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      );
+      const refused = await planCandidateWriteSetReview({
+        target,
+        makeBackend: candidateBackend().makeBackend,
+        writeSet,
+        policy: { id: "one-active-review", context: {} },
+        reviewScope: "candidate",
+      });
+      expect(isErr(refused)).toBe(true);
+      if (isErr(refused)) expect(refused.error.code).toBe("GRAPH_MERGE_REVIEW");
+    } finally {
+      if (descriptor)
+        Object.defineProperty(
+          baseBackend,
+          "findActiveEdgesBySourceV1",
+          descriptor,
+        );
+    }
+  });
+
+  it("keeps oneActive peer reads bounded as ended history grows", async () => {
+    const [target] = await createStoreWithSchema(oneActiveGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const existing = await target.nodes.Person.create(
+      { name: "Existing", externalKey: "existing" },
+      { id: "existing" },
+    );
+    const proposed = await target.nodes.Person.create(
+      { name: "Proposed", externalKey: "proposed" },
+      { id: "proposed" },
+    );
+    await target.edges.activeRelated.create(
+      source,
+      existing,
+      {},
+      { id: "peer" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "one-active-budget",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "activeRelated",
+          id: "candidate-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: proposed.id },
+          properties: {},
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    async function measure() {
+      const targetBefore = await captureCandidateWriteSetTarget(target);
+      const originalRead = baseBackend.findActiveEdgesBySourceV1;
+      if (originalRead === undefined)
+        throw new Error("Bundled backend must support active source reads.");
+      const originalExecute = baseBackend.execute;
+      let activeReads = 0;
+      let activeRows = 0;
+      let statements = 0;
+      let returnedRows = 0;
+      const read = vi
+        .spyOn(baseBackend, "findActiveEdgesBySourceV1")
+        .mockImplementation(async (params) => {
+          const rows = await originalRead(params);
+          activeReads += 1;
+          activeRows += rows.length;
+          expect(params.fromId).toBe(source.id);
+          return rows;
+        });
+      const execute = vi
+        .spyOn(baseBackend, "execute")
+        .mockImplementation(async <T>(query: CompiledRowsSql) => {
+          const rows = await originalExecute<T>(query);
+          statements += 1;
+          returnedRows += rows.length;
+          return rows;
+        });
+      const targetNodeWrite = vi.spyOn(baseBackend, "insertNode");
+      const targetEdgeWrite = vi.spyOn(baseBackend, "insertEdge");
+      try {
+        const planned = await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        });
+        expect(isErr(planned)).toBe(true);
+        expect(await captureCandidateWriteSetTarget(target)).toEqual(
+          targetBefore,
+        );
+        return {
+          activeReads,
+          activeRows,
+          statements: statements + activeReads,
+          returnedRows: returnedRows + activeRows,
+          targetWrites:
+            targetNodeWrite.mock.calls.length +
+            targetEdgeWrite.mock.calls.length,
+        };
+      } finally {
+        read.mockRestore();
+        execute.mockRestore();
+        targetNodeWrite.mockRestore();
+        targetEdgeWrite.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 40; index += 1) {
+      await target.edges.activeRelated.create(
+        source,
+        existing,
+        {},
+        {
+          id: `ended-${index}`,
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+    }
+    const after = await measure();
+    expect(before.activeReads).toBe(1);
+    expect(before.activeRows).toBe(1);
+    expect(after.statements).toBeLessThanOrEqual(before.statements);
+    expect(after.returnedRows).toBe(before.returnedRows);
+    expect(after.activeReads).toBe(before.activeReads);
+    expect(after.activeRows).toBe(before.activeRows);
+    expect(after.targetWrites).toBe(0);
   });
 
   it("plans an unrelated candidate on a constrained graph", async () => {
@@ -795,6 +944,111 @@ describe("candidate write-set planning", () => {
     expect(after.statements).toBeLessThanOrEqual(before.statements);
     expect(after.returnedRows).toBe(before.returnedRows);
     expect(after.targetWrites).toBe(0);
+  });
+
+  it("bounds V2 identity review capture and revalidation as unrelated assertions grow", async () => {
+    const [target] = await createStoreWithSchema(identityGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    const first = await target.nodes.Person.create(
+      { name: "First", externalKey: "first" },
+      { id: "first", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const second = await target.nodes.Person.create(
+      { name: "Second", externalKey: "second" },
+      { id: "second", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "v2-identity-budget",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "candidate-same",
+            relation: "same",
+            a: { kind: "Person", id: first.id },
+            b: { kind: "Person", id: second.id },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    const makeBackend = () => candidateBackend().makeBackend();
+    const policy = { id: "v2-identity-budget", context: {} };
+    async function measure<T>(run: () => Promise<T>) {
+      const originalExecute = baseBackend.execute;
+      let statements = 0;
+      let returnedRows = 0;
+      const execute = vi
+        .spyOn(baseBackend, "execute")
+        .mockImplementation(async <TRow>(query: CompiledRowsSql) => {
+          const rows = await originalExecute<TRow>(query);
+          statements += 1;
+          returnedRows += rows.length;
+          return rows;
+        });
+      const targetWrite = vi.spyOn(baseBackend, "insertNode");
+      const targetBefore = await captureMergePlanTargetFence(target);
+      try {
+        const value = await run();
+        expect(await captureMergePlanTargetFence(target)).toEqual(targetBefore);
+        return {
+          value,
+          statements,
+          returnedRows,
+          targetWrites: targetWrite.mock.calls.length,
+        };
+      } finally {
+        execute.mockRestore();
+        targetWrite.mockRestore();
+      }
+    }
+    const capture = () =>
+      planCandidateWriteSetReview({
+        target,
+        makeBackend,
+        writeSet,
+        policy,
+        reviewScope: "candidate",
+      });
+    const before = await measure(capture);
+    const review = unwrap(before.value);
+    expect(review.baseline.scope).toBe("referenced");
+    for (let index = 0; index < 40; index += 1) {
+      const left = await target.nodes.Person.create(
+        { name: `Left ${index}`, externalKey: `left-${index}` },
+        { id: `left-${index}` },
+      );
+      const right = await target.nodes.Person.create(
+        { name: `Right ${index}`, externalKey: `right-${index}` },
+        { id: `right-${index}` },
+      );
+      await target.identity.assertDifferent(left, right);
+    }
+    const after = await measure(capture);
+    if (isErr(after.value)) throw after.value.error;
+    expect(after.statements).toBeLessThanOrEqual(before.statements);
+    expect(after.returnedRows).toBe(before.returnedRows);
+    expect(after.targetWrites).toBe(0);
+    const revalidation = await measure(() =>
+      revalidateCandidateWriteSetReview({
+        target,
+        makeBackend,
+        policy,
+        review,
+      }),
+    );
+    expect(unwrap(revalidation.value).status).toBe("compatible");
+    expect(revalidation.statements).toBeLessThanOrEqual(after.statements * 2);
+    expect(revalidation.returnedRows).toBeLessThanOrEqual(
+      after.returnedRows * 2,
+    );
+    expect(revalidation.targetWrites).toBe(0);
   });
 
   it("rejects a candidate assertion contradicting a target identity class", async () => {

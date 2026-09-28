@@ -42,7 +42,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Readiness-first journal installation adds one guarded backend member access.
 // The managed PostgreSQL copy checks target names and guards five optional
 // schema-writing ports before handing its backend to a fixed-schema Store.
-const REASONED_FLOOR = 119;
+// Candidate one-active planning adds two more guarded accesses.
+const REASONED_FLOOR = 121;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -62,7 +63,7 @@ const REASONED_FLOOR = 119;
 const DEFERRED_LIVE_TOTAL = 237;
 const DEFERRED_DECLARED_TOTAL = 241;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 370;
+const TOTAL_ROW_COUNT = 372;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

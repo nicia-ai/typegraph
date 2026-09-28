@@ -67,6 +67,7 @@ const READ_MEMBERS = [
   "edgeExistsBetween",
   "findEdgesConnectedTo",
   "findEdgesByKind",
+  "findActiveEdgesBySourceV1",
   "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",

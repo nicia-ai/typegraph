@@ -79,6 +79,7 @@ import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
+  buildFindActiveEdgesBySourceV1,
   buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,
@@ -514,6 +515,14 @@ export type CommonOperationStrategy = Readonly<{
   buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
+  buildFindActiveEdgesBySourceV1?: (
+    params: Readonly<{
+      graphId: string;
+      edgeKind: string;
+      fromKind: string;
+      fromId: string;
+    }>,
+  ) => SQL;
   buildFindEdgesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   /**
    * Interface member rather than an optional one: every dialect must supply
@@ -718,6 +727,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildFindNodesAcrossKinds,
   buildCountNodesByKind,
   buildFindEdgesByKind,
+  buildFindActiveEdgesBySourceV1,
   buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,

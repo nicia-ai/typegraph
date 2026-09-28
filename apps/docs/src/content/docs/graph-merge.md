@@ -437,16 +437,19 @@ edge endpoints by key, then seeds only those rows in the transient working
 copy. On identity-enabled graphs, it also follows live same-id peers and
 current identity assertions from those references to a fixed point. The
 planner reads peers of a candidate edge with `one` cardinality by source,
-and peers of a `unique` edge by its endpoint pair. These reads
+peers of a `unique` edge by its endpoint pair, and the active peer of a
+`oneActive` edge by source. The active-only read checks an open `validTo` even
+when `validFrom` is in the future, and does not return ended history. These reads
 let the transient copy enforce the same cardinality rule as a complete clone.
 On graphs with ontology relations, it also reads live nodes sharing each
 candidate reference's id across kinds, so disjointness sees the same peers as a
 complete clone. Ontology subtype relationships remain graph metadata.
 The candidate diff and its target baseline are bounded to that dependency set and
 any committed rows recalled by configured unique or index sources. Planning
-still fences the target revision before and after these reads. Graphs with
-`oneActive` or edge match-identity constraints, or no
-revision tracking continue to use the complete clone path.
+still fences the target revision before and after these reads. Edge
+match-identity constraints and targets without revision tracking continue to
+use the complete clone path. A custom backend lacking the optional
+`findActiveEdgesBySourceV1` read also uses that path for `oneActive` graphs.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
@@ -566,8 +569,7 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
-For a revision-tracked graph without `oneActive` or edge
-match-identity constraints, pass
+For a revision-tracked graph without edge match-identity constraints, pass
 `reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
 candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
 edge endpoints, resolved writes, and plan guards, including expected absences
@@ -580,6 +582,9 @@ would report that row change. Applications whose approval policy needs the
 V1 whole-graph rule should omit `reviewScope`. The review artifact records
 its version and scope, so revalidation applies the rule originally reviewed.
 Candidate-scoped review refuses graphs outside those eligibility rules.
+On a `oneActive` graph, a custom backend must expose
+`findActiveEdgesBySourceV1` for candidate-scoped review; the complete-clone
+candidate planner and V1 review remain available when it does not.
 On an Operational Identity graph, a custom Store runtime must also expose
 endpoint-scoped and assertion-ID-scoped identity reads. Without both reads,
 ordinary candidate planning uses the complete working-copy clone and V1 review
@@ -2017,14 +2022,16 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-On revision-tracked graphs without `oneActive` or edge
-match-identity constraints, planning seeds existing candidate rows, edge
+On revision-tracked graphs without edge match-identity constraints, planning
+seeds existing candidate rows, edge
 endpoints, cardinality peers, live same-id ontology peers, and any reachable
 current identity component into the disposable working copy.
 The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
-properties are refused. Other graphs use the complete clone path so staging
+properties are refused. A custom backend without the active-only source read
+uses the complete clone path for `oneActive` graphs. Other ineligible graphs use
+the complete clone path so staging
 still checks constraints that can depend on rows beyond the candidate's ids.
 
 ```typescript

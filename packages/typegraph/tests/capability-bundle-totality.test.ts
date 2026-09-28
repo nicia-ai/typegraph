@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 89 unbundled = 105, with no member counted twice", () => {
+  it("16 pilot + 90 unbundled = 106, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(89);
+    expect(unbundledNames.length).toBe(90);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(105);
+    expect(bundledSet.size + unbundledNames.length).toBe(106);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("39 reasoned entries sum to 119 accesses; 50 deferred entries sum to 233", () => {
+  it("40 reasoned entries sum to 121 accesses; 50 deferred entries sum to 241", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(39);
+    expect(reasoned.length).toBe(40);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -160,8 +160,8 @@ describe("capability bundle totality (T9)", () => {
     // Revision-change storage resolution adds one tableNames access: 102 -> 103.
     // Readiness-first journal installation adds one guarded access. The
     // managed PostgreSQL copy adds six probes for table bindings and schema
-    // provisioning: 113 -> 119.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(119);
+    // provisioning. Candidate one-active planning adds two more accesses.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(121);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
