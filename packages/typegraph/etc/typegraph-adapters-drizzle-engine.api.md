@@ -469,7 +469,7 @@ type CommonOperationStrategy = Readonly<{
     buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
     buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
     buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
-    buildFindActiveEdgesBySourceV1: (params: Readonly<{
+    buildFindActiveEdgesBySourceV1?: (params: Readonly<{
         graphId: string;
         edgeKind: string;
         fromKind: string;

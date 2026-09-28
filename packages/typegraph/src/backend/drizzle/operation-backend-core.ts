@@ -4538,6 +4538,8 @@ export function createCommonOperationBackend(
 
   const buildFindNodesAcrossKinds = operationStrategy.buildFindNodesAcrossKinds;
   const buildFindEdgesAcrossKinds = operationStrategy.buildFindEdgesAcrossKinds;
+  const buildFindActiveEdgesBySourceV1 =
+    operationStrategy.buildFindActiveEdgesBySourceV1;
 
   return {
     tableExists,
@@ -5096,13 +5098,17 @@ export function createCommonOperationBackend(
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },
 
-    async findActiveEdgesBySourceV1(
-      params: FindActiveEdgesBySourceV1Params,
-    ): Promise<readonly EdgeRow[]> {
-      const query = operationStrategy.buildFindActiveEdgesBySourceV1(params);
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      return rows.map((row) => rowMappers.toEdgeRow(row));
-    },
+    ...(buildFindActiveEdgesBySourceV1 === undefined ?
+      {}
+    : {
+        async findActiveEdgesBySourceV1(
+          params: FindActiveEdgesBySourceV1Params,
+        ): Promise<readonly EdgeRow[]> {
+          const query = buildFindActiveEdgesBySourceV1(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toEdgeRow(row));
+        },
+      }),
 
     ...(buildFindEdgesAcrossKinds === undefined ?
       {}
