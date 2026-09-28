@@ -370,6 +370,60 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
+    it("skips clone statistics refresh unless requested", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(graph, control, {
+          autoRefreshStatistics: 1,
+          revisionTracking: true,
+        });
+        await source.nodes.Person.create({ name: "Source" });
+        const refreshes: string[] = [];
+        const connect = (names: PostgresTableNames) =>
+          Promise.resolve(
+            deriveBackend(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+              {
+                refreshStatistics: () => {
+                  refreshes.push(names.nodes);
+                  return Promise.resolve();
+                },
+              },
+            ),
+          );
+
+        const defaultManager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          connect,
+        });
+        const defaultCopy = await defaultManager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        expect(refreshes).toEqual([]);
+        await storeBackend(defaultCopy).close();
+
+        const refreshingManager = createPostgresWorkingCopyManager<
+          typeof graph
+        >({
+          control,
+          connect,
+          refreshStatistics: true,
+        });
+        const refreshingCopy = await refreshingManager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        expect(refreshes).toHaveLength(1);
+        await storeBackend(refreshingCopy).close();
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
     it("supports custom quoted source names and refuses a stale source", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
@@ -427,6 +481,51 @@ describe.runIf(process.env["POSTGRES_URL"])(
         });
         expect(isOk(stale)).toBe(false);
         expect(await staleManager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("allocates vector storage when automatic indexing is opted out", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+        const VectorNode = defineNode("VectorNode", {
+          schema: z.object({ vector: embedding(3, { indexType: "none" }) }),
+        });
+        const vectorGraph = defineGraph({
+          id: "postgres-working-copy-vector-no-index",
+          nodes: { VectorNode: { type: VectorNode } },
+          edges: {},
+        });
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(vectorGraph, control, {
+          history: true,
+          revisionTracking: true,
+        });
+        const sourceNode = await source.nodes.VectorNode.create({
+          vector: [0.1, 0.2, 0.3],
+        });
+        const manager = createPostgresWorkingCopyManager<typeof vectorGraph>({
+          control,
+          connect: (names, allocation) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+                ...(allocation === undefined ?
+                  {}
+                : { vector: allocation.vectorStrategy }),
+              }),
+            ),
+        });
+        const copy = await manager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        expect(
+          await copy.nodes.VectorNode.getById(sourceNode.id),
+        ).toBeDefined();
+        await storeBackend(copy).close();
       } finally {
         await pool.end();
       }

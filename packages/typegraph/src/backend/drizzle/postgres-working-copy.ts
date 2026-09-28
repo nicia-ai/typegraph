@@ -379,6 +379,17 @@ function assertPostgresBackend(backend: GraphBackend): void {
   }
 }
 
+function assertBundledFulltextStrategy(
+  backend: GraphBackend,
+  role: "source" | "target",
+): void {
+  if (backend.fulltextStrategy !== tsvectorStrategy) {
+    throw new BranchError(
+      `Table-backed PostgreSQL working-copy ${role} requires the bundled tsvector fulltext strategy; custom fulltext storage needs a native database fork.`,
+    );
+  }
+}
+
 function assertSourceBindings<G extends GraphDef>(
   source: Store<G>,
   sourceTables: PostgresTables,
@@ -431,6 +442,7 @@ function assertTargetBindings(
   names: PostgresTableNames,
 ): void {
   assertBackendBindings(backend, names, "Working-copy");
+  assertBundledFulltextStrategy(backend, "target");
 }
 
 function fixedSchemaError(operation: string): BranchError {
@@ -852,11 +864,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         "Table-backed PostgreSQL working copies require the bundled pgvector strategy for graph-scoped vector tables.",
       );
     }
-    if (sourceBackend.fulltextStrategy !== tsvectorStrategy) {
-      throw new BranchError(
-        "Table-backed PostgreSQL working copies require the bundled tsvector fulltext strategy.",
-      );
-    }
+    assertBundledFulltextStrategy(sourceBackend, "source");
     const sourceTables = createPostgresTables({
       ...source.revisionSchema.tables,
       ...options.sourceTableNames,
@@ -991,7 +999,15 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         });
         const failed = materialized.results.find(
           (result) =>
-            result.status === "failed" || result.status === "skipped",
+            result.status === "failed" ||
+            (result.status === "skipped" &&
+              !source.graph.indexes?.some(
+                (declaration) =>
+                  declaration.entity === "vector" &&
+                  declaration.indexType === "none" &&
+                  declaration.name === result.indexName &&
+                  declaration.kind === result.kind,
+              )),
         );
         if (failed !== undefined) {
           throw new BranchError(
@@ -1089,7 +1105,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
         const store = createStore(
           graph,
-          fixedSchemaBackend(provisionedBackend(backend, indexNames), indexNames),
+          fixedSchemaBackend(
+            provisionedBackend(backend, indexNames),
+            indexNames,
+          ),
           reopenedOptions(graph, row, options.reopenOptions),
         );
         return { store, origin: row.origin, access: { kind: "engine-fenced" } };
@@ -1117,7 +1136,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       );
       bindRelationalIndexNames(
         disposableBackend,
-        await allocationIndexNames(source.graph, await allocationNames(allocationId)),
+        await allocationIndexNames(
+          source.graph,
+          await allocationNames(allocationId),
+        ),
       );
       markFixedSchemaWorkingCopyBackend(disposableBackend);
       return createStore(source.graph, disposableBackend, cloneOptions(source));
