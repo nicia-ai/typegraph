@@ -1,9 +1,14 @@
 import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
 import { type TemporalMode } from "../../../core/types";
+import {
+  EDGE_CARDINALITY_SPECS,
+  type EdgeCardinalitySpec,
+} from "../../../store/claims/edge-claims";
 import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
+  FindActiveEdgesBySourceV1Params,
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
@@ -254,6 +259,33 @@ export function buildFindEdgesByKind(
     SELECT * FROM ${edges}
     WHERE ${whereClause}
     ORDER BY ${orderByClause}
+  `;
+}
+
+/**
+ * Reads the exact holder population for a `oneActive` source claim. Validity
+ * starts do not affect a claim: a future-start row with an open upper bound is
+ * active, while any ended row is outside the population.
+ */
+export function buildFindActiveEdgesBySourceV1(
+  tables: Tables,
+  params: FindActiveEdgesBySourceV1Params,
+): SQL {
+  const { edges } = tables;
+  const spec: EdgeCardinalitySpec = EDGE_CARDINALITY_SPECS.oneActive;
+  const activeCondition =
+    spec.holderLiveness === "liveAndActive" ?
+      sql`AND ${edges.validTo} IS NULL`
+    : sql.empty();
+  return sql`
+    SELECT * FROM ${edges}
+    WHERE ${edges.graphId} = ${params.graphId}
+      AND ${edges.kind} = ${params.edgeKind}
+      AND ${edges.fromKind} = ${params.fromKind}
+      AND ${edges.fromId} = ${params.fromId}
+      AND ${edges.deletedAt} IS NULL
+      ${activeCondition}
+    ORDER BY ${edges.id} ASC
   `;
 }
 

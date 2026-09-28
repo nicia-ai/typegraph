@@ -55,6 +55,7 @@ const evidence = defineEdge("evidence", {
 const primary = defineEdge("primary", { schema: z.object({}) });
 const limited = defineEdge("limited", { schema: z.object({}) });
 const paired = defineEdge("paired", { schema: z.object({}) });
+const activeLimited = defineEdge("activeLimited", { schema: z.object({}) });
 const graph = defineGraph({
   id: "durable_merge_review",
   identity: { sameIdAcrossKinds: "fold" },
@@ -100,6 +101,18 @@ const boundedCardinalityGraph = defineGraph({
       from: [Item],
       to: [Artifact],
       cardinality: "unique",
+    },
+  },
+});
+const boundedActiveCardinalityGraph = defineGraph({
+  id: "bounded_active_cardinality_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {
+    activeLimited: {
+      type: activeLimited,
+      from: [Item],
+      to: [Artifact],
+      cardinality: "oneActive",
     },
   },
 });
@@ -500,6 +513,140 @@ export function registerGraphMergeReviewIntegrationTests(
               validateReferences: true,
               refreshStatistics: false,
             },
+          );
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it.each([
+      "occupied",
+      "available",
+      "ended",
+      "deleted",
+      "future-open",
+    ] as const)(
+      "matches full-clone oneActive decisions with a %s peer",
+      async (peerState) => {
+        const target = await context.createHistoryStore(
+          boundedActiveCardinalityGraph,
+        );
+        const source = await target.nodes.Item.create(itemProps("source"), {
+          id: "source",
+          validFrom,
+        });
+        const otherSource = await target.nodes.Item.create(
+          itemProps("other-source"),
+          { id: "other-source", validFrom },
+        );
+        const existing = await target.nodes.Artifact.create(
+          { content: "existing" },
+          { id: "existing", validFrom },
+        );
+        const proposed = await target.nodes.Artifact.create(
+          { content: "proposed" },
+          { id: "proposed", validFrom },
+        );
+        const peer = await target.edges.activeLimited.create(
+          peerState === "available" ? otherSource : source,
+          existing,
+          {},
+          {
+            id: "existing-edge",
+            validFrom:
+              peerState === "future-open" ?
+                "2099-01-01T00:00:00.000Z"
+              : validFrom,
+            ...(peerState === "ended" ?
+              { validTo: "2026-02-01T00:00:00.000Z" }
+            : {}),
+          },
+        );
+        if (peerState === "deleted")
+          await target.edges.activeLimited.delete(
+            asEdgeId<typeof activeLimited>(peer.id),
+          );
+        const readActive = target.backend.findActiveEdgesBySourceV1;
+        expect(readActive).toBeDefined();
+        if (readActive === undefined)
+          throw new Error("Bundled backend lacks active source read.");
+        const activeRows = await readActive({
+          graphId: target.graphId,
+          edgeKind: "activeLimited",
+          fromKind: "Item",
+          fromId: source.id,
+        });
+        expect(activeRows.map((row) => row.id)).toEqual(
+          peerState === "occupied" || peerState === "future-open" ?
+            [peer.id]
+          : [],
+        );
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `one-active-${peerState}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [],
+          edges: [
+            {
+              kind: "activeLimited",
+              id: "candidate-edge",
+              from: { kind: "Item", id: source.id },
+              to: { kind: "Artifact", id: proposed.id },
+              properties: {},
+              validFrom,
+            },
+          ],
+        };
+        expect(canUseSparseCandidatePlanning(target)).toBe(true);
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: writeSet.nodes,
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          const occupied =
+            peerState === "occupied" || peerState === "future-open";
+          expect(imported.success).toBe(!occupied);
+          const importError =
+            imported.success ? undefined : imported.errors[0]?.error;
+          expect(importError ?? "").toEqual(
+            expect.stringContaining(occupied ? "oneActive" : ""),
           );
           const bounded = await planCandidateWriteSet({
             target,

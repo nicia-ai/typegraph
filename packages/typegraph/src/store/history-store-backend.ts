@@ -78,6 +78,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "execute",
   "executeTemporaryStatement",
   "findEdgesByKind",
+  "findActiveEdgesBySourceV1",
   "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",

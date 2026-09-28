@@ -1,4 +1,5 @@
 import type { GraphData } from "../interchange";
+import { EDGE_CARDINALITY_SPECS } from "../store/claims/edge-claims";
 import {
   type CandidateIdentityScope,
   readCandidateIdentityClosure,
@@ -31,22 +32,24 @@ import { graphWithoutNodeUniqueness } from "./working-copy";
 type EntityReference = Readonly<{ kind: string; id: string }>;
 
 /**
- * `one` and `unique` cardinality peers are keyed by source or endpoint pair.
- * `oneActive` can have arbitrarily many ended rows from one source, so it
- * requires an active-only keyed read before sparse seeding can be bounded.
- * Durable edge match identity has no keyed owner read. Ontology disjointness
- * can inspect live same-id siblings, which sparse seeding includes below.
+ * Cardinality peers use the exact claim key and holder liveness. `oneActive`
+ * needs the optional active-only source read so ended history cannot make a
+ * candidate lookup grow with the graph. Durable edge match identity still
+ * needs a keyed owner read. Ontology disjointness uses live same-id siblings.
  */
 export function canUseSparseCandidatePlanning<G extends GraphDef>(
   target: Store<G>,
 ): boolean {
+  const hasActiveSourceRead =
+    storeBackend(target).findActiveEdgesBySourceV1 !== undefined;
   return (
     target.revisionTrackingEnabled &&
     (target.graph.identity === undefined ||
       hasScopedIdentityReads(storeRuntime(target))) &&
     Object.values(target.graph.edges).every(
       (edge) =>
-        edge.cardinality !== "oneActive" && edge.matchIdentity === undefined,
+        edge.matchIdentity === undefined &&
+        (edge.cardinality !== "oneActive" || hasActiveSourceRead),
     )
   );
 }
@@ -92,10 +95,31 @@ async function sparseBaseDocument<G extends GraphDef>(
     string,
     Parameters<GraphBackend["findEdgesByKind"]>[0]
   >();
+  const activeReads = new Map<
+    string,
+    Parameters<NonNullable<GraphBackend["findActiveEdgesBySourceV1"]>>[0]
+  >();
+  function addActiveRead(
+    edgeKind: string,
+    fromKind: string,
+    fromId: string,
+  ): void {
+    activeReads.set(JSON.stringify([edgeKind, fromKind, fromId]), {
+      graphId: target.graphId,
+      edgeKind,
+      fromKind,
+      fromId,
+    });
+  }
   for (const edge of writeSet.edges) {
     const cardinality = target.graph.edges[edge.kind]?.cardinality ?? "many";
     if (cardinality === "many") continue;
-    const exactPair = cardinality === "unique";
+    const spec = EDGE_CARDINALITY_SPECS[cardinality];
+    if (spec.holderLiveness === "liveAndActive") {
+      addActiveRead(edge.kind, edge.from.kind, edge.from.id);
+      continue;
+    }
+    const exactPair = spec.keyShape === "fromAndTo";
     const read = {
       graphId: target.graphId,
       kind: edge.kind,
@@ -115,10 +139,26 @@ async function sparseBaseDocument<G extends GraphDef>(
       read,
     );
   }
+  for (const edge of edgesById.values()) {
+    if (target.graph.edges[edge.kind]?.cardinality === "oneActive")
+      addActiveRead(edge.kind, edge.from_kind, edge.from_id);
+  }
   const relevantEdgesById = new Map(edgesById);
   for (const read of cardinalityReads.values()) {
     for (const edge of await backend.findEdgesByKind(read))
       relevantEdgesById.set(edge.id, edge);
+  }
+  const readActive = backend.findActiveEdgesBySourceV1;
+  if (readActive === undefined) {
+    if (activeReads.size > 0)
+      throw new CandidateWriteSetError(
+        "Bounded oneActive planning requires an active-only source read.",
+      );
+  } else {
+    for (const read of activeReads.values()) {
+      for (const edge of await readActive(read))
+        relevantEdgesById.set(edge.id, edge);
+    }
   }
   const references = new Map<string, EntityReference>();
   function add(reference: EntityReference): void {

@@ -120,6 +120,7 @@ import type {
   EdgeCreateCommandResult,
   EdgeExistsBetweenParams,
   EdgeRow,
+  FindActiveEdgesBySourceV1Params,
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
@@ -566,6 +567,7 @@ export type CommonOperationBackend = Pick<
   | "edgeExistsBetween"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
   | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
@@ -5090,6 +5092,14 @@ export function createCommonOperationBackend(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
       const query = operationStrategy.buildFindEdgesByKind(params);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toEdgeRow(row));
+    },
+
+    async findActiveEdgesBySourceV1(
+      params: FindActiveEdgesBySourceV1Params,
+    ): Promise<readonly EdgeRow[]> {
+      const query = operationStrategy.buildFindActiveEdgesBySourceV1(params);
       const rows = await execution.execAll<Record<string, unknown>>(query);
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },

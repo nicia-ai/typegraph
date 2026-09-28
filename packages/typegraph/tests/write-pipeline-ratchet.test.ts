@@ -126,8 +126,9 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * `upsertHeterogeneousNodes` (131→132) is the exact-session, closed node
  * program and follows the same recorded-capture classification. The clear
  * preservation capability (133→134) remains in the lifecycle class.
+ * `findActiveEdgesBySourceV1` (137→138) is an optional graph-entity read.
  */
-const MEMBER_COUNT = 137;
+const MEMBER_COUNT = 138;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

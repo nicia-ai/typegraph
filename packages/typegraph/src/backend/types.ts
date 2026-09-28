@@ -645,6 +645,7 @@ export type GraphReadBackend = Pick<
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
   | "findNodesAcrossKinds"
   | "findEdgesAcrossKinds"
   | "findEdgesByHeterogeneousEndpointSet"
@@ -2428,6 +2429,21 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindEdgesByKindParams,
   ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Optional V1 keyed read for the `oneActive` claim population. Returns only
+   * undeleted edges with `valid_to IS NULL`, including future `valid_from`.
+   * An absent custom-backend method makes bounded candidate planning use its
+   * complete-clone path.
+   */
+  findActiveEdgesBySourceV1?: (
+    this: void,
+    params: Readonly<{
+      graphId: string;
+      edgeKind: string;
+      fromKind: string;
+      fromId: string;
+    }>,
+  ) => Promise<readonly EdgeRow[]>;
   /** Optional graph-wide keyset read for merge and interchange. */
   findEdgesAcrossKinds?: (
     this: void,
@@ -3714,6 +3730,7 @@ export type EdgeEntityReadBackend = Pick<
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
   | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
@@ -3965,6 +3982,7 @@ export function createTransactionReadBackend(
   const getEdges = backend.getEdges;
   const findNodesAcrossKinds = backend.findNodesAcrossKinds;
   const findEdgesAcrossKinds = backend.findEdgesAcrossKinds;
+  const findActiveEdgesBySourceV1 = backend.findActiveEdgesBySourceV1;
   const compileSql = backend.compileSql;
 
   return Object.freeze({
@@ -4005,6 +4023,12 @@ export function createTransactionReadBackend(
       }),
     countNodesByKind: (params) => backend.countNodesByKind(params),
     findEdgesByKind: (params) => backend.findEdgesByKind(params),
+    ...(findActiveEdgesBySourceV1 === undefined ?
+      {}
+    : {
+        findActiveEdgesBySourceV1: (params: FindActiveEdgesBySourceV1Params) =>
+          findActiveEdgesBySourceV1(params),
+      }),
     ...(findEdgesAcrossKinds === undefined ?
       {}
     : {
@@ -4404,6 +4428,14 @@ export type CountEdgesFromParams = Readonly<{
   fromId: string;
   /** If true, only count edges where valid_to IS NULL */
   activeOnly?: boolean;
+}>;
+
+/** Exact source key of an active `oneActive` edge population. */
+export type FindActiveEdgesBySourceV1Params = Readonly<{
+  graphId: string;
+  edgeKind: string;
+  fromKind: string;
+  fromId: string;
 }>;
 
 /**

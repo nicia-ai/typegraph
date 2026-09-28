@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 16 of the 98 optional
- * `GraphBackend` members are bundled here; the other 82 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 16 of the 106 optional
+ * `GraphBackend` members are bundled here; the other 90 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -46,7 +46,7 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 /**
- * Every optional `GraphBackend` member — 98 of them, verified equal to the
+ * Every optional `GraphBackend` member — 106 of them, verified equal to the
  * names parsed from `etc/typegraph-backend.api.md` (§Baselines). Derived,
  * never hand-written: a member added or removed from `GraphBackend` changes
  * this type automatically, and the totality proof below fails loudly if the
@@ -817,7 +817,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 82, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 90, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -858,7 +858,7 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 32 `reasoned` + 49 `deferred` members
+ * The current 40 `reasoned` + 50 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
  * access; resolving the write-fence spelling through the fence plan then
@@ -889,6 +889,12 @@ export type UnbundledOptionalMember =
  * 16 + 84 = 100 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  findActiveEdgesBySourceV1: {
+    kind: "reasoned",
+    reason:
+      "Versioned active-only source read for bounded oneActive candidate planning. Custom backends without it keep the complete-clone path.",
+    accesses: 2,
+  },
   findNodesAcrossKinds: {
     kind: "reasoned",
     reason:
