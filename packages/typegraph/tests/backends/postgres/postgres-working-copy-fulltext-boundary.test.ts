@@ -93,7 +93,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
             await computeBaseVersion(source),
           ),
         ).rejects.toThrow(BranchError);
-        expect(await disabledTarget.listAbandoned()).toEqual([]);
+        expect(await disabledTarget.listUnsealedAllocations()).toEqual([]);
         const failedNodes = namesSeen.at(-1);
         if (failedNodes === undefined)
           throw new Error("Missing failed allocation's table name.");
@@ -133,7 +133,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         ).rejects.toThrow(
           "source requires the bundled tsvector fulltext strategy",
         );
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }

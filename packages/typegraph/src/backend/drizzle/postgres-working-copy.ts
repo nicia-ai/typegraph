@@ -998,7 +998,16 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           refreshStatistics: false,
         });
         const failed = materialized.results.find(
-          (result) => result.status === "failed" || result.status === "skipped",
+          (result) =>
+            result.status === "failed" ||
+            (result.status === "skipped" &&
+              !source.graph.indexes?.some(
+                (declaration) =>
+                  declaration.entity === "vector" &&
+                  declaration.indexType === "none" &&
+                  declaration.name === result.indexName &&
+                  declaration.kind === result.kind,
+              )),
         );
         if (failed !== undefined) {
           throw new BranchError(

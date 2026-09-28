@@ -486,6 +486,51 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
+    it("allocates vector storage when automatic indexing is opted out", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+        const VectorNode = defineNode("VectorNode", {
+          schema: z.object({ vector: embedding(3, { indexType: "none" }) }),
+        });
+        const vectorGraph = defineGraph({
+          id: "postgres-working-copy-vector-no-index",
+          nodes: { VectorNode: { type: VectorNode } },
+          edges: {},
+        });
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(vectorGraph, control, {
+          history: true,
+          revisionTracking: true,
+        });
+        const sourceNode = await source.nodes.VectorNode.create({
+          vector: [0.1, 0.2, 0.3],
+        });
+        const manager = createPostgresWorkingCopyManager<typeof vectorGraph>({
+          control,
+          connect: (names, allocation) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+                ...(allocation === undefined ?
+                  {}
+                : { vector: allocation.vectorStrategy }),
+              }),
+            ),
+        });
+        const copy = await manager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        expect(
+          await copy.nodes.VectorNode.getById(sourceNode.id),
+        ).toBeDefined();
+        await storeBackend(copy).close();
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
     it("clones, reopens and destroys allocation-scoped pgvector sidecars", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
