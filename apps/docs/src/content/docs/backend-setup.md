@@ -1237,6 +1237,7 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
+- `@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy` — PostgreSQL table-backed working-copy manager
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
 - `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend`, `deriveEngineProfile`, the bundled builders, `SqlEngineProfile`
 

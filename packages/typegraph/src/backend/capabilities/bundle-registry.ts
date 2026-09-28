@@ -958,12 +958,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
-    // 26, including the namespace fork's backend table-name probe. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+    // 27, including the namespace fork's and managed PostgreSQL copy's backend table-name probes. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
-    // forked working-copy strategy reads the connected backend's names to
-    // fence them against the base store's resolved schema.
-    accesses: 26,
+    // forked working-copy strategy and managed PostgreSQL copy read the
+    // connected backend's names to fence physical target bindings.
+    accesses: 27,
   },
   fenceSql: {
     kind: "reasoned",
@@ -975,13 +975,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.",
-    accesses: 2,
+    accesses: 3,
   },
   commitSchemaVersionWithPreflight: {
     kind: "reasoned",
     reason:
       "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.",
-    accesses: 3,
+    accesses: 4,
   },
   lockSchemaVersionForWrite: {
     kind: "reasoned",
@@ -999,19 +999,19 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.",
-    accesses: 4,
+    accesses: 5,
   },
   registerGraphTemplate: {
     kind: "reasoned",
     reason:
       "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.",
-    accesses: 1,
+    accesses: 2,
   },
   instantiateGraphTemplate: {
     kind: "reasoned",
     reason:
       "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.",
-    accesses: 1,
+    accesses: 2,
   },
   ensureIdentityTables: {
     kind: "reasoned",
@@ -1255,7 +1255,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "ddlExecution",
-    ceiling: 13,
+    // The managed PostgreSQL copy provisions and removes its owned tables.
+    ceiling: 15,
   },
   executeRaw: {
     kind: "deferred",
@@ -1289,7 +1290,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "fulltextOperations",
-    ceiling: 2,
+    // The managed PostgreSQL copy refuses unsupported custom strategies.
+    ceiling: 3,
   },
   getIndexMaterialization: {
     kind: "deferred",

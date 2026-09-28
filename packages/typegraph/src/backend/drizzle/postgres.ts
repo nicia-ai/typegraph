@@ -276,6 +276,7 @@ import {
 } from "./postgres-fence-sql";
 import {
   createPostgresTables as buildPostgresTables,
+  type PostgresTableNames,
   type PostgresTables,
   tables as defaultTables,
 } from "./schema/postgres";
@@ -1219,7 +1220,13 @@ function buildPostgresEngineProfileInternal(
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
     fences: getTableName(tables.fences),
-  } satisfies ResolvedSqlTableNames;
+    baseSchemaVersions: getTableName(tables.baseSchemaVersions),
+    graphTemplates: getTableName(tables.graphTemplates),
+    indexMaterializations: getTableName(tables.indexMaterializations),
+    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    kindRemovals: getTableName(tables.kindRemovals),
+    reconciliationMarkers: getTableName(tables.reconciliationMarkers),
+  } satisfies PostgresTableNames;
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations
   // are ANALYZEd separately under an existence guard (see refreshStatistics):

@@ -65,6 +65,7 @@ import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import {
   encodeRecordedLineageRevision,
   ensureRevisionOrigin,
+  readRecordedClock,
   readRevisionOrigin,
   recordedRelationsLineage,
   recordedRevisionOriginsVerdict,
@@ -108,6 +109,10 @@ const CONTENT_ORIGIN_PREFIX = "origin:";
  * the token's `#s` component carries it to fence schema round-trips.
  */
 const FALLBACK_SCHEMA_VERSION = 1;
+
+function versionedSchemaComponent(schemaHash: string, version: number): string {
+  return `${schemaHash}${SCHEMA_VERSION_TAG}${version}`;
+}
 
 /**
  * Reads the active schema version from the backend, defaulting when absent. The
@@ -300,7 +305,7 @@ export async function computeBaseVersion<G extends GraphDef>(
     // The content branch below carries this version too, because an
     // otherwise identical schema round-trip still changes the committed cut.
     return asBaseVersion(
-      `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
+      `${versionedSchemaComponent(schemaComponent, activeVersion)}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
   // Without TypeGraph revision tracking, the complete graph fingerprint is
@@ -329,8 +334,118 @@ export async function computeBaseVersion<G extends GraphDef>(
       `${CONTENT_ORIGIN_PREFIX}${origin}:${contentComponent}`
     );
   return asBaseVersion(
-    `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${contentAnchor}`,
+    `${versionedSchemaComponent(schemaComponent, activeVersion)}${TOKEN_SEPARATOR}${contentAnchor}`,
   );
+}
+
+/** The observed component that disagrees with a stamped base version. */
+export type BaseVersionTargetComparison =
+  | Readonly<{ matches: true }>
+  | Readonly<{
+      matches: false;
+      kind: "schema";
+      expected: string;
+      live: string;
+      expectedActiveVersion: number | undefined;
+      liveActiveVersion: number;
+    }>
+  | Readonly<{
+      matches: false;
+      kind: "revision-origin" | "revision" | "content-origin" | "content";
+      expected: string | undefined;
+      live: string | undefined;
+    }>;
+
+/**
+ * Compares a base token with graph state read through one pinned transaction.
+ * The caller establishes the needed graph locks before invoking this reader.
+ * Reading through `target` also avoids opening a second pool session while the
+ * caller holds those locks.
+ */
+export async function compareBaseVersionAtTarget<G extends GraphDef>(
+  store: Store<G>,
+  target: TransactionBackend,
+  expected: BaseVersion,
+): Promise<BaseVersionTargetComparison> {
+  const activeVersion = await readActiveSchemaVersion(target, store.graphId);
+  const schemaHash = await computeSchemaHash(
+    serializeSchema(store.graph, activeVersion),
+  );
+  const liveSchema = versionedSchemaComponent(schemaHash, activeVersion);
+  const expectedSchema = schemaComponentOf(expected);
+  if (liveSchema !== expectedSchema) {
+    return {
+      matches: false,
+      kind: "schema",
+      expected: expectedSchema,
+      live: liveSchema,
+      expectedActiveVersion: schemaActiveVersionOf(expected),
+      liveActiveVersion: activeVersion,
+    };
+  }
+
+  if (hasRevisionAnchor(expected)) {
+    const originMatch = await revisionOriginMatch(
+      target,
+      store.revisionSchema,
+      store.graphId,
+      expected,
+    );
+    if (!originMatch.matches) {
+      return {
+        matches: false,
+        kind: "revision-origin",
+        expected: originMatch.expectedOrigin,
+        live: originMatch.liveOrigin,
+      };
+    }
+    const expectedRevision = revisionAnchorOf(expected);
+    const liveRevision = await readRecordedClock(
+      target,
+      store.revisionSchema,
+      store.graphId,
+    );
+    return liveRevision === expectedRevision ?
+        { matches: true }
+      : {
+          matches: false,
+          kind: "revision",
+          expected: expectedRevision,
+          live: liveRevision,
+        };
+  }
+
+  const expectedOrigin = contentOriginOf(expected);
+  if (expectedOrigin !== undefined) {
+    const liveOrigin = await readRevisionOrigin(
+      target,
+      store.revisionSchema,
+      store.graphId,
+    );
+    if (liveOrigin !== expectedOrigin) {
+      return {
+        matches: false,
+        kind: "content-origin",
+        expected: expectedOrigin,
+        live: liveOrigin,
+      };
+    }
+  }
+  const liveContent = await computeContentComponent(
+    target,
+    store.graphId,
+    store.graph,
+    await storeRuntime(store).identityAssertionsAtTarget(target, "state"),
+  );
+  const expectedContent = contentFingerprintOf(expected);
+  return liveContent === expectedContent ?
+      { matches: true }
+    : {
+        matches: false,
+        kind: "content",
+        expected: expectedContent,
+        live: liveContent,
+      };
 }
 
 /** Parses the durable origin carried by a content-fingerprinted base token. */
@@ -344,7 +459,7 @@ export function contentOriginOf(version: BaseVersion): string | undefined {
 }
 
 /** Returns the graph-content digest from a content-fingerprinted token. */
-export function contentFingerprintOf(version: BaseVersion): string {
+function contentFingerprintOf(version: BaseVersion): string {
   const component = contentComponentOf(version);
   if (!component.startsWith(CONTENT_ORIGIN_PREFIX)) return component;
   const separator = component.indexOf(":", CONTENT_ORIGIN_PREFIX.length);
@@ -473,7 +588,7 @@ export function revisionOriginOf(version: BaseVersion): string | undefined {
  * on a mismatch embeds both in its own error `details` without a second
  * read.
  */
-export async function revisionOriginMatch(
+async function revisionOriginMatch(
   backend: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,

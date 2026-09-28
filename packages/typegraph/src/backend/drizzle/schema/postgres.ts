@@ -50,6 +50,7 @@ import {
 } from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
+import { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
  * Table name configuration.
@@ -89,30 +90,10 @@ export type CreatePostgresTablesOptions = Readonly<{
   indexes?: readonly IndexDeclaration[] | undefined;
 }>;
 
-const DEFAULT_TABLE_NAMES: PostgresTableNames = {
-  nodes: "typegraph_nodes",
-  edges: "typegraph_edges",
-  recordedNodes: "typegraph_recorded_nodes",
-  recordedEdges: "typegraph_recorded_edges",
-  recordedClock: "typegraph_recorded_clock",
-  revisionOrigins: "typegraph_revision_origins",
-  revisionChanges: "typegraph_revision_changes",
-  identityAssertions: "typegraph_identity_assertions",
-  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
-  identityClosure: "typegraph_identity_closure",
-  identitySeparation: "typegraph_identity_separation",
-  uniques: "typegraph_node_uniques",
-  edgeClaims: "typegraph_edge_claims",
-  baseSchemaVersions: "typegraph_base_schema_versions",
-  schemaVersions: "typegraph_schema_versions",
-  graphTemplates: "typegraph_graph_templates",
-  fulltext: "typegraph_node_fulltext",
-  indexMaterializations: "typegraph_index_materializations",
-  contributionMaterializations: "typegraph_contribution_materializations",
-  kindRemovals: "typegraph_kind_removals",
-  reconciliationMarkers: "typegraph_reconciliation_markers",
-  fences: "typegraph_fences",
-};
+const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
+
+/** The bundled physical names, shared with working-copy allocation. */
+export { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
  * Creates PostgreSQL table definitions with customizable table names.

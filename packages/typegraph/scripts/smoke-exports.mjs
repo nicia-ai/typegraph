@@ -54,6 +54,10 @@ const PUBLIC_SUBPATHS = [
     expectedExport: "createPostgresBackend",
   },
   {
+    subpath: "/adapters/drizzle/postgres/working-copy",
+    expectedExport: "createPostgresWorkingCopyManager",
+  },
+  {
     subpath: "/adapters/drizzle/postgres/pglite",
     expectedExport: "createLocalPgliteBackend",
   },

@@ -298,6 +298,9 @@ describe("missing-peer-ledger", () => {
         documentedResolutionReason("./adapters/drizzle/postgres"),
       ).toContain("pass-a-Drizzle-handle");
       expect(
+        documentedResolutionReason("./adapters/drizzle/postgres/working-copy"),
+      ).toContain("working-copy manager factory");
+      expect(
         documentedResolutionReason("./adapters/drizzle/sqlite/local"),
       ).toContain("connection-owning");
       expect(

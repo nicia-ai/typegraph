@@ -4302,7 +4302,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.";
-        readonly accesses: 26;
+        readonly accesses: 27;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
@@ -4312,12 +4312,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly commitSchemaVersionIfKindsEmpty: {
         readonly kind: "reasoned";
         readonly reason: "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.";
-        readonly accesses: 2;
+        readonly accesses: 3;
     };
     readonly commitSchemaVersionWithPreflight: {
         readonly kind: "reasoned";
         readonly reason: "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.";
-        readonly accesses: 3;
+        readonly accesses: 4;
     };
     readonly lockSchemaVersionForWrite: {
         readonly kind: "reasoned";
@@ -4332,17 +4332,17 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly schemaWriteTransaction: {
         readonly kind: "reasoned";
         readonly reason: "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.";
-        readonly accesses: 4;
+        readonly accesses: 5;
     };
     readonly registerGraphTemplate: {
         readonly kind: "reasoned";
         readonly reason: "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.";
-        readonly accesses: 1;
+        readonly accesses: 2;
     };
     readonly instantiateGraphTemplate: {
         readonly kind: "reasoned";
         readonly reason: "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.";
-        readonly accesses: 1;
+        readonly accesses: 2;
     };
     readonly ensureIdentityTables: {
         readonly kind: "reasoned";
@@ -4563,7 +4563,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "ddlExecution";
-        readonly ceiling: 13;
+        readonly ceiling: 15;
     };
     readonly executeRaw: {
         readonly kind: "deferred";
@@ -4593,7 +4593,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "fulltextOperations";
-        readonly ceiling: 2;
+        readonly ceiling: 3;
     };
     readonly getIndexMaterialization: {
         readonly kind: "deferred";

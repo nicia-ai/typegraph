@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("39 reasoned entries sum to 113 accesses; 50 deferred entries sum to 230", () => {
+  it("39 reasoned entries sum to 119 accesses; 50 deferred entries sum to 233", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -158,15 +158,18 @@ describe("capability bundle totality (T9)", () => {
     // The exact-session heterogeneous node upsert adds six guarded backend
     // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
     // Revision-change storage resolution adds one tableNames access: 102 -> 103.
-    // Readiness-first journal installation adds one guarded access.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(113);
+    // Readiness-first journal installation adds one guarded access. The
+    // managed PostgreSQL copy adds six probes for table bindings and schema
+    // provisioning: 113 -> 119.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(119);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
     // The resolved-node batch update adds one optional member with a ceiling
     // of six live access sites: 223 -> 229.
     // IVFFlat materialization drops an unrecorded leftover index before
-    // building it: dropVectorIndex 0 -> 1, 229 -> 230.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(230);
+    // building it: dropVectorIndex 0 -> 1, 229 -> 230. Managed PostgreSQL
+    // copies add two owned DDL paths and one fulltext strategy probe: 230 -> 233.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(233);
   });
 });

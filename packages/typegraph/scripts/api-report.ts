@@ -682,6 +682,14 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 266,
     sha256: "d8fd2a3b26a54ffd093c05e0cc46fa3f929035192641458eb0f3cbe90558f103",
   },
+  // The dedicated working-copy adapter exposes Store and durable strategy
+  // signatures, making their portable implementation types transitively
+  // visible here. Keep that large type graph isolated from the established
+  // PostgreSQL adapter and pin its exact symbol set.
+  "./adapters/drizzle/postgres/working-copy": {
+    count: 875,
+    sha256: "f2b80fac099e4bdefa511ca56b100500424aded7a185b8f97ea1eed39580fe1d",
+  },
   "./adapters/drizzle/postgres/pglite": {
     count: 270,
     sha256: "4e5b09c9a0259e3e64ce8587662a3800bd1849be18556dd60872ee8fd718e58b",
