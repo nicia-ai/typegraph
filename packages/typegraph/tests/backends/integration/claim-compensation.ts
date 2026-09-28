@@ -16,15 +16,23 @@
  * compensation. Here the caller catches inside a live transaction and keeps
  * writing, so the only thing that can free the key is the give-back itself.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { createStore, defineGraph, defineNode, subClassOf } from "../../../src";
+import {
+  createStore,
+  defineGraph,
+  defineNode,
+  ENTITY_ALREADY_EXISTS_CODE,
+  subClassOf,
+  ValidationError,
+} from "../../../src";
 import {
   deriveBackend,
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
+import * as idUtilities from "../../../src/utils/id";
 import { type IntegrationTestContext } from "./test-context";
 
 const COMPENSATION_EMAIL_UNIQUE = {
@@ -111,6 +119,38 @@ export function registerClaimCompensationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("a pre-insert claim is given back when its row does not land", () => {
+    for (const method of ["bulkCreate", "bulkInsert"] as const) {
+      it(`${method} preserves a generated ID collision across backends`, async () => {
+        const store = await context.createStore(compensationGraph);
+        await store.nodes.CompEmployee.create(
+          { email: "original@compensation.example" },
+          { id: "generated-collision" },
+        );
+        const portableStore = createStore(
+          compensationGraph,
+          backendFailingOneInsert(store.backend),
+        );
+        const generatedId = vi
+          .spyOn(idUtilities, "generateId")
+          .mockReturnValue("generated-collision");
+        try {
+          const failure = await portableStore.nodes.CompEmployee[method]([
+            { props: { email: "new@compensation.example" } },
+          ]).catch((error: unknown) => error);
+          expect(failure).toBeInstanceOf(ValidationError);
+          if (!(failure instanceof ValidationError)) return;
+          expect(failure.details.issues).toContainEqual(
+            expect.objectContaining({
+              path: "id",
+              code: ENTITY_ALREADY_EXISTS_CODE,
+            }),
+          );
+        } finally {
+          generatedId.mockRestore();
+        }
+      });
+    }
+
     it("frees the key for a sibling kind inside the same transaction", async () => {
       const store = await context.createStore(compensationGraph);
       const doomedStore = createStore(

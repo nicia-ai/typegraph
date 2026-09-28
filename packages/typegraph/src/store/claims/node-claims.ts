@@ -36,6 +36,7 @@ import {
 } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
+import { isPostgresFailedTransactionError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { constraintFenceRefusal } from "../operations/write-transaction";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -815,14 +816,21 @@ async function claimGroupThenWrite<T>(
     });
     return await gatedWrite();
   } catch (error) {
-    for (const claim of issued.toReversed()) {
-      await releaseClaimedUniqueKeys(ctx, claim.item.kind, claim.item.id, [
-        {
-          axis: claim.entry.axis,
-          constraintName: claim.entry.constraintName,
-          key: claim.entry.key,
-        },
-      ]);
+    try {
+      for (const claim of issued.toReversed()) {
+        await releaseClaimedUniqueKeys(ctx, claim.item.kind, claim.item.id, [
+          {
+            axis: claim.entry.axis,
+            constraintName: claim.entry.constraintName,
+            key: claim.entry.key,
+          },
+        ]);
+      }
+    } catch (compensationError) {
+      // PostgreSQL has already doomed the transaction. Rollback removes the
+      // reservations, and its 25P02 must not replace the insert's diagnosis.
+      if (!isPostgresFailedTransactionError(compensationError))
+        throw compensationError;
     }
     throw error;
   }
@@ -1289,7 +1297,12 @@ async function claimUniqueKeysThen<T>(
     // error that then surfaces is a raw backend failure no per-row consumer
     // catches — the enclosing transaction aborts, which is the only honest
     // outcome left.
-    await releaseClaimedUniqueKeys(ctx, kind, id, claimed);
+    try {
+      await releaseClaimedUniqueKeys(ctx, kind, id, claimed);
+    } catch (compensationError) {
+      if (!isPostgresFailedTransactionError(compensationError))
+        throw compensationError;
+    }
     throw error;
   }
 }
