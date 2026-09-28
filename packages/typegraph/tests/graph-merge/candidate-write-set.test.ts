@@ -7,9 +7,13 @@ import {
   defineNode,
   disjointWith,
 } from "@nicia-ai/typegraph";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../../src/backend/derive-backend";
 import {
   BaseVersionMismatchError,
   BranchError,
@@ -99,8 +103,8 @@ describe("candidate write-set planning", () => {
 
   afterEach(async () => cleanupBase());
 
-  async function setup() {
-    const [target] = await createStoreWithSchema(graph, baseBackend, {
+  async function setup(backend = baseBackend) {
+    const [target] = await createStoreWithSchema(graph, backend, {
       revisionTracking: true,
     });
     await requireDefined(target.nodes.Person).create(
@@ -703,6 +707,90 @@ describe("candidate write-set planning", () => {
         "Unable to create the transient candidate staging store.",
       );
       expect(result.error.cause).toBeInstanceOf(BranchError);
+    }
+  });
+
+  it("refuses a candidate backend that is the target backend without closing the target", async () => {
+    const { target, writeSet } = await setup();
+    const targetBackend = getStoreBackend(target);
+    const close = vi.spyOn(targetBackend, "close");
+
+    const result = await planCandidateWriteSet({
+      target,
+      writeSet,
+      makeBackend: () => Promise.resolve(targetBackend),
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+    }
+    expect(close).not.toHaveBeenCalled();
+    expect(await target.nodes.Person.count()).toBe(1);
+    await target.nodes.Person.create({
+      name: "Still usable",
+      externalKey: "still-usable",
+    });
+    expect(await target.nodes.Person.count()).toBe(2);
+  });
+
+  it("refuses a candidate backend derived from the target without closing it", async () => {
+    const { target, writeSet } = await setup();
+    const targetBackend = getStoreBackend(target);
+    const close = vi.spyOn(targetBackend, "close");
+    const candidateBackend = deriveBackend(targetBackend, {});
+
+    const result = await planCandidateWriteSet({
+      target,
+      writeSet,
+      makeBackend: () => Promise.resolve(candidateBackend),
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+    }
+    expect(close).not.toHaveBeenCalled();
+    expect(await target.nodes.Person.count()).toBe(1);
+    await target.nodes.Person.create({
+      name: "Still usable",
+      externalKey: "still-usable",
+    });
+    expect(await target.nodes.Person.count()).toBe(2);
+  });
+
+  it("refuses a second candidate wrapper over the target's serialized connection without closing it", async () => {
+    const sqlite = new Database(":memory:");
+    const targetBackend = createSqliteBackend(drizzle(sqlite), {
+      executionProfile: { isSync: true },
+    });
+    try {
+      const { target, writeSet } = await setup(targetBackend);
+      const candidateBackend = createSqliteBackend(drizzle(sqlite), {
+        executionProfile: { isSync: true },
+      });
+      const close = vi.spyOn(candidateBackend, "close");
+
+      const result = await planCandidateWriteSet({
+        target,
+        writeSet,
+        makeBackend: () => Promise.resolve(candidateBackend),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+      }
+      expect(close).not.toHaveBeenCalled();
+      expect(await target.nodes.Person.count()).toBe(1);
+      await target.nodes.Person.create({
+        name: "Still usable",
+        externalKey: "still-usable",
+      });
+      expect(await target.nodes.Person.count()).toBe(2);
+    } finally {
+      await targetBackend.close();
+      sqlite.close();
     }
   });
 

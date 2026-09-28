@@ -189,8 +189,10 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
     create: async (target) => {
       const document = await sparseBaseDocument(target, writeSet);
       const backend = await makeBackend();
+      // An aliased backend still belongs to the target. Refuse it before the
+      // cleanup scope takes ownership of independently allocated backends.
+      assertIndependentBackend(storeBackend(target), backend);
       try {
-        assertIndependentBackend(storeBackend(target), backend);
         const [store] = await createStoreWithSchema(
           graphWithoutNodeUniqueness(target.graph),
           backend,
