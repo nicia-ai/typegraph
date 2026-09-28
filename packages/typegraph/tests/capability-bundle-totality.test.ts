@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("40 reasoned entries sum to 123 accesses; 50 deferred entries sum to 241", () => {
+  it("40 reasoned entries sum to 121 accesses; 50 deferred entries sum to 241", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -160,8 +160,8 @@ describe("capability bundle totality (T9)", () => {
     // Revision-change storage resolution adds one tableNames access: 102 -> 103.
     // Readiness-first journal installation adds one guarded access. The
     // managed PostgreSQL copy adds six probes for table bindings and schema
-    // provisioning. Candidate one-active planning adds four more accesses.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(123);
+    // provisioning. Candidate one-active planning adds two more accesses.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(121);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
