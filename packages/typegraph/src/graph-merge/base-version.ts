@@ -459,7 +459,7 @@ export function contentOriginOf(version: BaseVersion): string | undefined {
 }
 
 /** Returns the graph-content digest from a content-fingerprinted token. */
-export function contentFingerprintOf(version: BaseVersion): string {
+function contentFingerprintOf(version: BaseVersion): string {
   const component = contentComponentOf(version);
   if (!component.startsWith(CONTENT_ORIGIN_PREFIX)) return component;
   const separator = component.indexOf(":", CONTENT_ORIGIN_PREFIX.length);
@@ -588,7 +588,7 @@ export function revisionOriginOf(version: BaseVersion): string | undefined {
  * on a mismatch embeds both in its own error `details` without a second
  * read.
  */
-export async function revisionOriginMatch(
+async function revisionOriginMatch(
   backend: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,
