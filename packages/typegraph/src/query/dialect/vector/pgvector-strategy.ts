@@ -207,6 +207,24 @@ export function createPgvectorStrategy(namespace: string): VectorStrategy {
   );
 }
 
+/**
+ * Bind vector storage to a working copy's ledger-reserved physical prefix.
+ * The prefix is included verbatim, so two distinct reserved prefixes cannot
+ * alias through the generic strategy's short namespace hash.
+ */
+export function createPgvectorStrategyForAllocation(
+  physicalPrefix: string,
+): VectorStrategy {
+  if (!/^tgw_[0-9a-f]{24}_$/u.test(physicalPrefix)) {
+    throw new Error("Invalid PostgreSQL working-copy physical prefix.");
+  }
+  const namespace = physicalPrefix.slice(0, -1);
+  return createPgvectorStrategyWithPrefixes(
+    `${TABLE_PREFIX}_${namespace}`,
+    `${INDEX_PREFIX}_${namespace}`,
+  );
+}
+
 function createPgvectorStrategyWithPrefixes(
   tablePrefix: string,
   indexPrefix: string,

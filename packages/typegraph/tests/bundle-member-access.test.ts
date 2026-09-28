@@ -56,10 +56,13 @@ const REASONED_FLOOR = 119;
 // The managed PostgreSQL copy uses its own ledger DDL executor, validates the
 // source and reopened allocation vector strategies, and verifies allocation
 // vector operations before exposing either copy.
-const DEFERRED_LIVE_TOTAL = 240;
+// Ledger creation and its legacy-column migration now use one transaction
+// session, removing two optional executeDdl accesses from the live scan. The
+// control backend no longer needs an executeDdl gate, removing a third.
+const DEFERRED_LIVE_TOTAL = 237;
 const DEFERRED_DECLARED_TOTAL = 241;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 373;
+const TOTAL_ROW_COUNT = 370;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -206,7 +209,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 373)", () => {
+  it("the class partition covers every scanned row (total 370)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

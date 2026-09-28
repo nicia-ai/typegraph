@@ -10,14 +10,20 @@ import {
   embedding,
   searchable,
 } from "../../../src";
-import { deriveBackend } from "../../../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../../src/backend/derive-backend";
 import { generateVectorlessPostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import {
   createPostgresTables,
   type PostgresTableNames,
 } from "../../../src/backend/drizzle/schema/postgres";
-import { createPostgresWorkingCopyManager } from "../../../src/backend/postgres/working-copy";
+import {
+  createPostgresWorkingCopyManager,
+  type PostgresWorkingCopyManager,
+} from "../../../src/backend/postgres/working-copy";
 import type {
   TransactionBackend,
   TransactionOptions,
@@ -36,10 +42,15 @@ import {
   createSqlSchema,
   recordedRelation,
 } from "../../../src/query/compiler/schema";
-import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
+import {
+  createPgvectorStrategy,
+  createPgvectorStrategyForAllocation,
+  pgvectorStrategy,
+} from "../../../src/query/dialect/vector/pgvector-strategy";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { storeBackend } from "../../../src/store/runtime-port";
 import { createStore, createStoreWithSchema } from "../../../src/store/store";
+import { sha256Hex } from "../../../src/utils/hash";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -594,6 +605,263 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
+    it("keeps simultaneous allocations separate when their short vector hashes collide", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const allocationA = "collision-scope-3615";
+      const allocationB = "collision-scope-79660";
+      const firstAtConnect = createLatch();
+      const releaseFirst = createLatch();
+      const VectorNode = defineNode("VectorNode", {
+        schema: z.object({ vector: embedding(3) }),
+      });
+      const vectorGraph = defineGraph({
+        id: "postgres-working-copy-vector-collision",
+        nodes: { VectorNode: { type: VectorNode } },
+        edges: {},
+      });
+      type Created = Awaited<
+        ReturnType<
+          PostgresWorkingCopyManager<typeof vectorGraph>["durable"]["create"]
+        >
+      >;
+      let firstCreated: Created | undefined;
+      let secondCreated: Created | undefined;
+      let firstPromise: Promise<Created> | undefined;
+      try {
+        await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+        expect(
+          createPgvectorStrategy(allocationA).tableName(
+            vectorGraph.id,
+            "VectorNode",
+            "vector",
+          ),
+        ).toBe(
+          createPgvectorStrategy(allocationB).tableName(
+            vectorGraph.id,
+            "VectorNode",
+            "vector",
+          ),
+        );
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(vectorGraph, control, {
+          revisionTracking: true,
+        });
+        await source.nodes.VectorNode.create({ vector: [0.1, 0.2, 0.3] });
+        const base = await computeBaseVersion(source);
+        let connectionCount = 0;
+        const manager = createPostgresWorkingCopyManager<typeof vectorGraph>({
+          control: projectBackendWithout(control, ["executeDdl"]),
+          connect: async (names, allocation) => {
+            connectionCount += 1;
+            if (connectionCount === 1) {
+              firstAtConnect.release();
+              await releaseFirst.promise;
+            }
+            return createPostgresBackend(drizzle(pool), {
+              tables: createPostgresTables(names),
+              ...(allocation === undefined ?
+                {}
+              : { vector: allocation.vectorStrategy }),
+            });
+          },
+        });
+        firstPromise = manager.durable.create(
+          source,
+          base,
+          asBranchId("vector-collision-a"),
+          allocationA,
+        );
+        await firstAtConnect.promise;
+        await expect(
+          manager.durable.create(
+            source,
+            base,
+            asBranchId("vector-collision-duplicate"),
+            allocationA,
+          ),
+        ).rejects.toThrow(/already owned/u);
+        const firstClaim = await pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM typegraph_working_copy_allocations WHERE allocation_id = $1",
+          [allocationA],
+        );
+        expect(firstClaim.rows[0]?.count).toBe(1);
+        try {
+          secondCreated = await manager.durable.create(
+            source,
+            base,
+            asBranchId("vector-collision-b"),
+            allocationB,
+          );
+        } finally {
+          releaseFirst.release();
+        }
+        firstCreated = await firstPromise;
+        const firstStrategy = storeBackend(firstCreated.store).vectorStrategy;
+        const secondStrategy = storeBackend(secondCreated.store).vectorStrategy;
+        if (firstStrategy === undefined || secondStrategy === undefined) {
+          throw new Error("Allocated PostgreSQL copy has no vector strategy.");
+        }
+        const tableA = firstStrategy.tableName(
+          vectorGraph.id,
+          "VectorNode",
+          "vector",
+        );
+        const tableB = secondStrategy.tableName(
+          vectorGraph.id,
+          "VectorNode",
+          "vector",
+        );
+        expect(tableA).not.toBe(tableB);
+        await firstCreated.store.materializeIndexes();
+        await secondCreated.store.materializeIndexes();
+        const annIndexes = await pool.query<{
+          tablename: string;
+          indexname: string;
+        }>(
+          "SELECT tablename, indexname FROM pg_indexes WHERE tablename = ANY($1::text[]) AND indexdef LIKE '%USING hnsw%'",
+          [[tableA, tableB]],
+        );
+        expect(annIndexes.rows).toHaveLength(2);
+        expect(new Set(annIndexes.rows.map((row) => row.indexname)).size).toBe(
+          2,
+        );
+        await secondCreated.store.close();
+        await manager.durable.abort(secondCreated.descriptor);
+        secondCreated = undefined;
+        const remaining = await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass($1)::text AS relation",
+          [tableA],
+        );
+        expect(remaining.rows[0]?.relation).not.toBeNull();
+        const remainingIndex = await pool.query<{ indexname: string }>(
+          "SELECT indexname FROM pg_indexes WHERE tablename = $1 AND indexdef LIKE '%USING hnsw%'",
+          [tableA],
+        );
+        expect(remainingIndex.rows).toHaveLength(1);
+        const rows = await pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM "${tableA}" WHERE graph_id = $1`,
+          [vectorGraph.id],
+        );
+        expect(rows.rows[0]?.count).toBe("1");
+        await firstCreated.store.close();
+        await manager.durable.abort(firstCreated.descriptor);
+        firstCreated = undefined;
+      } finally {
+        releaseFirst.release();
+        if (firstPromise !== undefined)
+          await Promise.allSettled([firstPromise]);
+        await firstCreated?.store.close();
+        await secondCreated?.store.close();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("rolls back its ledger and tables when a vector relation appears after preflight", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const allocationId = "vector-preflight-race";
+      const physicalPrefix = `tgw_${await sha256Hex(allocationId, 12)}_`;
+      const VectorNode = defineNode("VectorNode", {
+        schema: z.object({ vector: embedding(3) }),
+      });
+      const vectorGraph = defineGraph({
+        id: "postgres-working-copy-vector-preflight-race",
+        nodes: { VectorNode: { type: VectorNode } },
+        edges: {},
+      });
+      const vectorTable = createPgvectorStrategyForAllocation(
+        physicalPrefix,
+      ).tableName(vectorGraph.id, "VectorNode", "vector");
+      try {
+        await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+        const sourceBackend = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(
+          vectorGraph,
+          sourceBackend,
+          {
+            revisionTracking: true,
+          },
+        );
+        let injected = false;
+        const control = deriveBackend(sourceBackend, {
+          transaction: async <T>(
+            operation: (transaction: TransactionBackend) => Promise<T>,
+            transactionOptions?: TransactionOptions,
+          ): Promise<T> =>
+            sourceBackend.transaction(async (transaction) => {
+              const observed = deriveBackend(transaction, {
+                execute: async <T>(
+                  query: CompiledRowsSql,
+                ): Promise<readonly T[]> => {
+                  const result = await transaction.execute<T>(query);
+                  const queryText = query.chunks
+                    .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
+                    .join("");
+                  if (
+                    !injected &&
+                    queryText.includes("SELECT name FROM unnest")
+                  ) {
+                    injected = true;
+                    await pool.query(
+                      `CREATE TABLE "${vectorTable}" (sentinel integer)`,
+                    );
+                  }
+                  return result;
+                },
+              });
+              return operation(observed);
+            }, transactionOptions),
+        });
+        const manager = createPostgresWorkingCopyManager<typeof vectorGraph>({
+          control,
+          connect: (names, allocation) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+                ...(allocation === undefined ?
+                  {}
+                : { vector: allocation.vectorStrategy }),
+              }),
+            ),
+        });
+        let failure: unknown;
+        let created:
+          Awaited<ReturnType<typeof manager.durable.create>> | undefined;
+        try {
+          created = await manager.durable.create(
+            source,
+            await computeBaseVersion(source),
+            asBranchId("vector-preflight-race"),
+            allocationId,
+          );
+        } catch (error) {
+          failure = error;
+        }
+        if (created !== undefined) {
+          await created.store.close();
+          await manager.abortAllocation(allocationId);
+        }
+        expect(injected).toBe(true);
+        expect(failure).toBeDefined();
+        const ownership = await pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM typegraph_working_copy_allocations WHERE allocation_id = $1",
+          [allocationId],
+        );
+        expect(ownership.rows[0]?.count).toBe(0);
+        const relations = await pool.query<{
+          bundled: string | null;
+          external: string | null;
+        }>(
+          "SELECT to_regclass($1)::text AS bundled, to_regclass($2)::text AS external",
+          [`${physicalPrefix}nodes`, vectorTable],
+        );
+        expect(relations.rows[0]?.bundled).toBeNull();
+        expect(relations.rows[0]?.external).not.toBeNull();
+      } finally {
+        await pool.query(`DROP TABLE IF EXISTS "${vectorTable}"`);
+        await pool.end();
+      }
+    }, 60_000);
+
     it("holds vector sidecars stable across the clone snapshot", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
@@ -1124,6 +1392,84 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await storeBackend(copy).close();
         expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("bounds ledger migration locks and accepts concurrent legacy upgrades", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      const lockClient = await pool.connect();
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const manager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          cleanupLockTimeoutMs: 75,
+          connect: (names) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+            ),
+        });
+        await manager.listUnsealedAllocations();
+        await pool.query(
+          "INSERT INTO typegraph_working_copy_allocations (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking) VALUES ($1, $2, $3, 'sealed', false, false)",
+          ["legacy-ledger-row", "legacy_reserved_prefix_", "legacy-token"],
+        );
+        await pool.query(
+          "ALTER TABLE typegraph_working_copy_allocations DROP COLUMN vector_slots",
+        );
+        await lockClient.query("BEGIN");
+        await lockClient.query(
+          "LOCK TABLE typegraph_working_copy_allocations IN ACCESS EXCLUSIVE MODE",
+        );
+        try {
+          let failure: unknown;
+          try {
+            await manager.listUnsealedAllocations();
+          } catch (error) {
+            failure = error;
+          }
+          expect(failure).toMatchObject({ cause: { code: "55P03" } });
+        } finally {
+          await lockClient.query("ROLLBACK");
+        }
+        const otherManager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          connect: (names) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+            ),
+        });
+        const inventories = await Promise.all([
+          manager.listUnsealedAllocations(),
+          otherManager.listUnsealedAllocations(),
+        ]);
+        expect(inventories).toEqual([[], []]);
+        const column = await pool.query<{ present: boolean }>(
+          "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass('typegraph_working_copy_allocations') AND attname = 'vector_slots' AND attnum > 0 AND NOT attisdropped) AS present",
+        );
+        expect(column.rows[0]?.present).toBe(true);
+        const legacyRow = await pool.query<{ slots: unknown }>(
+          "SELECT vector_slots AS slots FROM typegraph_working_copy_allocations WHERE allocation_id = 'legacy-ledger-row'",
+        );
+        expect(legacyRow.rows[0]?.slots).toEqual([]);
+        await lockClient.query("BEGIN");
+        await lockClient.query(
+          "LOCK TABLE typegraph_working_copy_allocations IN ACCESS SHARE MODE",
+        );
+        try {
+          await expect(manager.listUnsealedAllocations()).resolves.toEqual([]);
+        } finally {
+          await lockClient.query("ROLLBACK");
+        }
+        await pool.query(
+          "DELETE FROM typegraph_working_copy_allocations WHERE allocation_id = 'legacy-ledger-row'",
+        );
+      } finally {
+        lockClient.release();
         await pool.end();
       }
     }, 60_000);

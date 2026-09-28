@@ -1470,6 +1470,8 @@ source graph with fenced `INSERT ... SELECT` statements, and records ownership
 in `typegraph_working_copy_allocations`. The control backend, source backend,
 and backends returned by `connect` must all reach the same database. TypeGraph
 checks the allocation's private ownership token through each connection.
+The control backend must execute DDL inside its PostgreSQL transactions;
+its root `executeDdl` port is not required.
 
 ```typescript
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -1542,7 +1544,9 @@ allocation-scoped physical names while keeping logical index names and schema
 hashes unchanged. `materializeIndexes()` can retry or repair indexes after
 reopen; destroy removes their owned tables and indexes. When `connect` receives
 an allocation vector strategy, pass it to `createPostgresBackend`; the strategy
-assigns stable table and index names to that allocation. Source vector sidecars
+assigns stable table and index names from the ledger-reserved physical prefix.
+Allocation claims and all initial table and vector DDL commit together, so a
+colliding or failed provision leaves no partly owned sidecars. Source vector sidecars
 are copied under the same transaction locks as TypeGraph relations. The ledger
 stores every relation name declared by each slot's `ownedTables()` contribution,
 so destroy can remove them in reverse declaration order without a graph object.
