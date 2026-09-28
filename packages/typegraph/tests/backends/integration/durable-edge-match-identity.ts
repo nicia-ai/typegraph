@@ -122,5 +122,75 @@ export function registerDurableEdgeMatchIdentityIntegrationTests(
         edge: { id: original.id, label: "same", note: "resurrected" },
       });
     });
+
+    it("reads the exact durable owner including its tombstone", async () => {
+      const store = await context.createStore(
+        durableIdentityGraph("durable_identity_owner_read"),
+      );
+      const from = await store.nodes.Person.create({ name: "From" });
+      const to = await store.nodes.Person.create({ name: "To" });
+      const edge = await store.edges.knows.create(
+        from,
+        to,
+        { label: "owner" },
+        { id: "owner" },
+      );
+      await store.edges.knows.create(
+        from,
+        to,
+        { label: "unrelated" },
+        { id: "unrelated" },
+      );
+      const backend = store.backend;
+      expect(backend.findEdgesByMatchIdentity).toBeDefined();
+      const storedRows = await backend.findEdgesByKind({
+        graphId: store.graphId,
+        kind: "knows",
+        excludeDeleted: false,
+        orderBy: "id",
+      });
+      const stored = storedRows.find((row) => row.id === edge.id);
+      expect(stored?.match_identity_key).toEqual(expect.any(String));
+      await store.edges.knows.delete(edge.id);
+
+      const owners = await backend.findEdgesByMatchIdentity?.({
+        graphId: store.graphId,
+        identities: [
+          {
+            kind: "knows",
+            name: "knows-label",
+            key: stored?.match_identity_key ?? "missing",
+          },
+        ],
+      });
+
+      expect(owners).toHaveLength(1);
+      expect(owners?.[0]).toMatchObject({ id: edge.id, kind: "knows" });
+      expect(owners?.[0]?.deleted_at).toBeDefined();
+      await expect(
+        backend.findEdgesByMatchIdentity?.({
+          graphId: store.graphId,
+          identities: [
+            {
+              kind: "knows",
+              name: "wrong-name",
+              key: stored?.match_identity_key ?? "missing",
+            },
+          ],
+        }),
+      ).resolves.toEqual([]);
+      await expect(
+        backend.findEdgesByMatchIdentity?.({
+          graphId: store.graphId,
+          identities: [
+            {
+              kind: "wrong-kind",
+              name: "knows-label",
+              key: stored?.match_identity_key ?? "missing",
+            },
+          ],
+        }),
+      ).resolves.toEqual([]);
+    });
   });
 }

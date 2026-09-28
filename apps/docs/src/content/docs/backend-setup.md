@@ -779,6 +779,14 @@ declared durable edge `matchIdentity` is different for endpoint convergence:
 its canonical key has a database arbiter, so the eligible root create/found
 command can be authoritative in one statement.
 
+Backend implementations may also expose the optional
+`findEdgesByMatchIdentity` read capability for bounded merge planning. It must
+match the complete `(graphId, kind, name, key)` tuple and return tombstoned
+owners as well as active rows; omitting it keeps the portable full-clone path.
+Custom Drizzle operation strategies can opt in by supplying the corresponding
+owner-query builder. A strategy without that builder does not expose the
+capability, so callers can detect and retain the portable path.
+
 ### Connection Pooling
 
 For production, always use connection pooling:

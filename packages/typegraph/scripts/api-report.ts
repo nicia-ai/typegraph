@@ -665,6 +665,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // Graph-wide keyset reads make FindRowsAcrossKindsParams transitively reachable
 // through GraphBackend at 14 entrypoints. Removing exactly that name from each
 // measured set reproduces its previous fingerprint; ./backend exports it.
+// Durable edge owner reads expose their inline key shape through the
+// GraphBackend/engine strategy surfaces. Internal query-builder aliases are
+// intentionally not re-exported from the backend barrel; the engine's exact
+// transitive forgotten-export set is recorded here.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 499,

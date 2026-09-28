@@ -84,6 +84,7 @@ import {
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,
   buildFindEdgesByKind,
+  buildFindEdgesByMatchIdentity,
   buildFindNodesAcrossKinds,
   buildFindNodesByKind,
 } from "./collections";
@@ -523,6 +524,16 @@ export type CommonOperationStrategy = Readonly<{
       fromId: string;
     }>,
   ) => SQL;
+  buildFindEdgesByMatchIdentity?: (
+    params: Readonly<{
+      graphId: string;
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[];
+    }>,
+  ) => SQL;
   buildFindEdgesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   /**
    * Interface member rather than an optional one: every dialect must supply
@@ -728,6 +739,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildCountNodesByKind,
   buildFindEdgesByKind,
   buildFindActiveEdgesBySourceV1,
+  buildFindEdgesByMatchIdentity,
   buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,

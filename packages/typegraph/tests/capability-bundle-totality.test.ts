@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 90 unbundled = 106, with no member counted twice", () => {
+  it("16 pilot + 91 unbundled = 107, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(90);
+    expect(unbundledNames.length).toBe(91);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(106);
+    expect(bundledSet.size + unbundledNames.length).toBe(107);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("40 reasoned entries sum to 121 accesses; 50 deferred entries sum to 241", () => {
+  it("41 reasoned entries sum to 123 accesses; 50 deferred entries sum to 241", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(40);
+    expect(reasoned.length).toBe(41);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -153,6 +153,9 @@ describe("capability bundle totality (T9)", () => {
     // or off `EngineProvisioning`, never off a `GraphBackend`/
     // `TransactionBackend`-typed receiver — still 93.
     // The checked-read schema binding adds one tableNames access: 93 -> 94.
+    // The optional durable identity owner lookup adds two bounded
+    // candidate-planning reads, increasing the active-only baseline from 115
+    // to 117. Custom backends without the method retain full-clone planning.
     // Adopted evolution hands the identity DDL factory into the transaction
     // and inspects its required storage on that session: 94 -> 96.
     // The exact-session heterogeneous node upsert adds six guarded backend
@@ -160,8 +163,9 @@ describe("capability bundle totality (T9)", () => {
     // Revision-change storage resolution adds one tableNames access: 102 -> 103.
     // Readiness-first journal installation adds one guarded access. The
     // managed PostgreSQL copy adds six probes for table bindings and schema
-    // provisioning. Candidate one-active planning adds two more accesses.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(121);
+    // provisioning. Candidate one-active and durable edge identity planning
+    // add four accesses.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(123);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

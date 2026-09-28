@@ -13,7 +13,10 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { deriveBackend } from "../../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../src/backend/derive-backend";
 import {
   BaseVersionMismatchError,
   BranchError,
@@ -29,7 +32,11 @@ import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
 import { captureMergePlanTargetFence } from "../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
-import { canUseSparseCandidatePlanning } from "../../src/graph-merge/sparse-candidate-branch";
+import {
+  canUseSparseCandidatePlanning,
+  matchIdentityOwnersAreCloneVisible,
+  readCandidateMatchIdentityOwners,
+} from "../../src/graph-merge/sparse-candidate-branch";
 import { asBranchId } from "../../src/graph-merge/types";
 import { importGraph } from "../../src/interchange";
 import type { CompiledRowsSql } from "../../src/query/sql-intent";
@@ -96,7 +103,7 @@ const disjointGraph = defineGraph({
   ontology: [disjointWith(Person, Alias)],
 });
 const matched = defineEdge("matched", {
-  schema: z.object({ code: z.string() }),
+  schema: z.object({ code: z.string().default("shared") }),
 });
 const edgeIdentityGraph = defineGraph({
   id: "candidate-edge-match-identity",
@@ -1102,7 +1109,7 @@ describe("candidate write-set planning", () => {
     ).toBe(true);
   });
 
-  it("refuses candidate-scoped review on a graph requiring a complete clone", async () => {
+  it("supports candidate-scoped review for durable edge match identity", async () => {
     const [target] = await createStoreWithSchema(
       edgeIdentityGraph,
       baseBackend,
@@ -1123,8 +1130,7 @@ describe("candidate write-set planning", () => {
       policy: { id: "review-policy", context: {} },
       reviewScope: "candidate",
     });
-    expect(isErr(review)).toBe(true);
-    if (isErr(review)) expect(review.error.code).toBe("GRAPH_MERGE_REVIEW");
+    expect(isErr(review)).toBe(false);
   });
 
   it("matches full clone staging for a disjoint same-id sibling", async () => {
@@ -1279,6 +1285,270 @@ describe("candidate write-set planning", () => {
       writeSet,
     });
     expect(isErr(bounded)).toBe(true);
+  });
+
+  it("normalizes match identity keys with the same schema defaults as import", async () => {
+    const [target] = await createStoreWithSchema(
+      edgeIdentityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.matched.create(
+      source,
+      peer,
+      { code: "shared" },
+      { id: "old-edge" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "edge-identity-default-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: {},
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    expect(
+      await fullCloneImportSucceeded(
+        target,
+        writeSet,
+        "full-match-identity-default",
+      ),
+    ).toBe(false);
+    expect(
+      isErr(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("uses full-clone fallback when a custom backend lacks owner reads", async () => {
+    const backend = projectBackendWithout(baseBackend, [
+      "findEdgesByMatchIdentity",
+    ]);
+    const [target] = await createStoreWithSchema(edgeIdentityGraph, backend, {
+      revisionTracking: true,
+    });
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.matched.create(
+      source,
+      peer,
+      { code: "shared" },
+      { id: "old-edge" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "custom-backend-edge-identity",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: { code: "shared" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    expect(canUseSparseCandidatePlanning(target)).toBe(false);
+    expect(
+      await fullCloneImportSucceeded(
+        target,
+        writeSet,
+        "full-match-identity-custom",
+      ),
+    ).toBe(false);
+    expect(
+      isErr(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps exact owner reads bounded as unrelated durable edges grow", async () => {
+    const [target] = await createStoreWithSchema(
+      edgeIdentityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.matched.create(
+      source,
+      peer,
+      { code: "accepted" },
+      { id: "accepted-edge" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "match-identity-budget",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "candidate-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: { code: "candidate" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    async function measure() {
+      const originalExecute = baseBackend.execute;
+      let statements = 0;
+      let returnedRows = 0;
+      const read = vi
+        .spyOn(baseBackend, "execute")
+        .mockImplementation(async <T>(query: CompiledRowsSql) => {
+          const rows = await originalExecute<T>(query);
+          statements += 1;
+          returnedRows += rows.length;
+          return rows;
+        });
+      try {
+        const revision = await captureMergePlanTargetFence(target);
+        unwrap(
+          await planCandidateWriteSet({
+            target,
+            makeBackend: candidateBackend().makeBackend,
+            writeSet,
+          }),
+        );
+        return {
+          statements,
+          returnedRows,
+          revisionUnchanged:
+            JSON.stringify(await captureMergePlanTargetFence(target)) ===
+            JSON.stringify(revision),
+        };
+      } finally {
+        read.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 30; index += 1) {
+      const unrelatedFrom = await target.nodes.Person.create(
+        { name: `Unrelated from ${index}`, externalKey: `from-${index}` },
+        { id: `from-${index}` },
+      );
+      const unrelatedTo = await target.nodes.Person.create(
+        { name: `Unrelated to ${index}`, externalKey: `to-${index}` },
+        { id: `to-${index}` },
+      );
+      await target.edges.matched.create(
+        unrelatedFrom,
+        unrelatedTo,
+        { code: `unrelated-${index}` },
+        { id: `unrelated-edge-${index}` },
+      );
+    }
+    const after = await measure();
+    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    expect(after.statements).toBeLessThanOrEqual(before.statements);
+    expect(after.returnedRows).toBe(before.returnedRows);
+    expect(after.revisionUnchanged).toBe(true);
+  });
+
+  it("falls back to full clone when a durable identity owner is tombstoned", async () => {
+    const [target] = await createStoreWithSchema(
+      edgeIdentityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    const deletedOwner = await target.edges.matched.create(
+      source,
+      peer,
+      { code: "reusable" },
+      { id: "deleted-owner" },
+    );
+    await target.edges.matched.delete(deletedOwner.id);
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "edge-identity-tombstone-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "new-owner",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: { code: "reusable" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    expect(
+      await fullCloneImportSucceeded(
+        target,
+        writeSet,
+        "full-match-identity-tombstone",
+      ),
+    ).toBe(true);
+    const owners = await readCandidateMatchIdentityOwners(target, writeSet);
+    expect(owners).toHaveLength(1);
+    expect(owners?.[0]?.deleted_at).toBeDefined();
+    if (owners === undefined) throw new Error("Expected the exact owner read");
+    expect(matchIdentityOwnersAreCloneVisible(owners)).toBe(false);
+
+    const bounded = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+    });
+    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    // The capability sees the durable tombstone, so planning must use the
+    // same state projection as the full clone rather than seed the tombstone.
+    expect(isErr(bounded)).toBe(false);
   });
 
   it("returns a deterministic serialized property-conflict plan with source attribution", async () => {

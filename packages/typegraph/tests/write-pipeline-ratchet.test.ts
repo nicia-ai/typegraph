@@ -127,8 +127,10 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * program and follows the same recorded-capture classification. The clear
  * preservation capability (133→134) remains in the lifecycle class.
  * `findActiveEdgesBySourceV1` (137→138) is an optional graph-entity read.
+ * The optional durable edge identity owner read (138→139) joins the read
+ * surface: it is a bounded lookup and never mutates rows.
  */
-const MEMBER_COUNT = 138;
+const MEMBER_COUNT = 139;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 
