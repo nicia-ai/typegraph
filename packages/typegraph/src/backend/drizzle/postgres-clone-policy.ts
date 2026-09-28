@@ -1,7 +1,7 @@
 import { BranchError } from "../../graph-merge/errors";
 import type { TableContribution } from "../table-contribution";
 
-export type WorkingCopyClonePolicy = NonNullable<
+type WorkingCopyClonePolicy = NonNullable<
   TableContribution["workingCopyClonePolicy"]
 >;
 
