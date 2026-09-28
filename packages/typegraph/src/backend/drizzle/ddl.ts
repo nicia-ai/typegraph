@@ -76,7 +76,9 @@ ON CONFLICT (${installation}) DO NOTHING;`;
 }
 
 /** Current marker statement shared by fresh installation and working copies. */
-export function generatePostgresBaseSchemaMarkerSQL(tables: PostgresTables): string {
+export function generatePostgresBaseSchemaMarkerSQL(
+  tables: PostgresTables,
+): string {
   return generateBaseSchemaVersionMarkerSQL(
     getPgTableConfig(tables.baseSchemaVersions).name,
     tables.baseSchemaVersions,
@@ -136,9 +138,7 @@ function generateSqliteEdgeMatchIdentityColumnDDL(
   return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
 }
 
-function generateSqliteEdgeMatchIdentityIndexDDL(
-  tableName: string,
-): string {
+function generateSqliteEdgeMatchIdentityIndexDDL(tableName: string): string {
   return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
 }
 
@@ -648,6 +648,44 @@ function isPgTable(
   return is(value, PgTable);
 }
 
+/** The clone decision is owned beside the PostgreSQL base-table DDL inventory. */
+const POSTGRES_BASE_CLONE_POLICIES = {
+  nodes: { kind: "graphRows", graphIdColumn: "graph_id" },
+  edges: { kind: "graphRows", graphIdColumn: "graph_id" },
+  recordedNodes: { kind: "graphRows", graphIdColumn: "graph_id" },
+  recordedEdges: { kind: "graphRows", graphIdColumn: "graph_id" },
+  recordedClock: { kind: "graphRows", graphIdColumn: "graph_id" },
+  revisionOrigins: { kind: "graphRows", graphIdColumn: "graph_id" },
+  revisionChanges: { kind: "graphRows", graphIdColumn: "graph_id" },
+  identityAssertions: { kind: "graphRows", graphIdColumn: "graph_id" },
+  recordedIdentityAssertions: { kind: "graphRows", graphIdColumn: "graph_id" },
+  identityClosure: { kind: "graphRows", graphIdColumn: "graph_id" },
+  identitySeparation: { kind: "graphRows", graphIdColumn: "graph_id" },
+  uniques: { kind: "graphRows", graphIdColumn: "graph_id" },
+  edgeClaims: { kind: "graphRows", graphIdColumn: "graph_id" },
+  fences: { kind: "freshSeed" },
+  baseSchemaVersions: { kind: "freshSeed" },
+  schemaVersions: { kind: "graphRows", graphIdColumn: "graph_id" },
+  graphTemplates: {
+    kind: "graphDocument",
+    documentColumn: "schema_doc",
+    graphIdKey: "graphId",
+  },
+  indexMaterializations: { kind: "rebuildAfterClone" },
+  contributionMaterializations: { kind: "rebuildAfterClone" },
+  kindRemovals: { kind: "graphRows", graphIdColumn: "graph_id" },
+  reconciliationMarkers: { kind: "graphRows", graphIdColumn: "graph_id" },
+} as const satisfies Record<
+  Exclude<keyof PostgresTables, "fulltext" | "fulltextTableName">,
+  NonNullable<TableContribution["workingCopyClonePolicy"]>
+>;
+
+function isPostgresBaseContributionName(
+  name: string,
+): name is keyof typeof POSTGRES_BASE_CLONE_POLICIES {
+  return Object.hasOwn(POSTGRES_BASE_CLONE_POLICIES, name);
+}
+
 /**
  * The authoritative set of tables the PostgreSQL backend owns: every
  * base/status Drizzle table plus the resolved fulltext-strategy
@@ -674,6 +712,11 @@ export function postgresContributions(
     // can't reproduce its generated tsvector column); the strategy
     // declaration below is the authoritative fulltext contribution.
     if (table === tables.fulltext) continue;
+    if (!isPostgresBaseContributionName(key)) {
+      throw new Error(
+        `PostgreSQL table ${key} lacks a working-copy clone policy.`,
+      );
+    }
     // Stable factory key (`nodes`, `edges`, …) is the logicalName so
     // the #135 materialization identity survives custom table-name
     // overrides; the resolved SQL name is only the physical tableName.
@@ -686,6 +729,7 @@ export function postgresContributions(
         ...generatePgCreateIndexSQL(table),
       ],
       runtimeEnsure: false,
+      workingCopyClonePolicy: POSTGRES_BASE_CLONE_POLICIES[key],
     });
   }
   // `false` (`fulltext: false`) contributes no fulltext table at all.

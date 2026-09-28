@@ -56,6 +56,10 @@ import {
   postgresContributions,
   quoteDdlIdentifier,
 } from "./ddl";
+import {
+  type PostgresCloneAction,
+  resolvePostgresCloneActions,
+} from "./postgres-clone-policy";
 import { postgresTableLockSql } from "./postgres-fence-sql";
 import {
   createPostgresTables,
@@ -177,16 +181,19 @@ function ownedVectorTableNames(
   strategy: VectorStrategy,
 ): readonly string[] {
   const tableNames = strategy.ownedTables(slot).map((item) => item.tableName);
-  if (tableNames.length === 0 || new Set(tableNames).size !== tableNames.length) {
+  if (
+    tableNames.length === 0 ||
+    new Set(tableNames).size !== tableNames.length
+  ) {
     throw new BranchError(
       "PostgreSQL working-copy vector strategy returned an empty or duplicate owned-table inventory.",
     );
   }
-  if (!tableNames.includes(strategy.tableName(
-    slot.graphId,
-    slot.nodeKind,
-    slot.fieldPath,
-  ))) {
+  if (
+    !tableNames.includes(
+      strategy.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    )
+  ) {
     throw new BranchError(
       "PostgreSQL working-copy vector strategy omitted its primary slot table from the owned-table inventory.",
     );
@@ -206,7 +213,9 @@ function vectorSlotManifest(
       dimensions: slot.dimensions,
       metric: slot.metric,
       indexType: slot.indexType,
-      ...(slot.indexParams === undefined ? {} : { indexParams: slot.indexParams }),
+      ...(slot.indexParams === undefined ?
+        {}
+      : { indexParams: slot.indexParams }),
       tableName: strategy.tableName(
         slot.graphId,
         slot.nodeKind,
@@ -241,7 +250,7 @@ function assertVectorManifestMatches(
       ...entry.ownedTableNames,
     ].join("\u0000");
   if (
-        expected.map((entry) => toKey(entry)).join("\n") !==
+    expected.map((entry) => toKey(entry)).join("\n") !==
     persisted.map((entry) => toKey(entry)).join("\n")
   ) {
     throw new BranchError(
@@ -264,16 +273,18 @@ function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
     const indexParams = row["indexParams"];
     if (
       indexParams !== undefined &&
-      (typeof indexParams !== "object" || indexParams === null || Array.isArray(indexParams))
+      (typeof indexParams !== "object" ||
+        indexParams === null ||
+        Array.isArray(indexParams))
     ) {
       throw new BranchError("Working-copy vector slot manifest is invalid.");
     }
     const validIndexParams =
-      indexParams === undefined ?
-        true
-      : Object.values(indexParams).every(
+      indexParams === undefined ? true : (
+        Object.values(indexParams).every(
           (value) => typeof value === "number" && Number.isSafeInteger(value),
-        );
+        )
+      );
     if (
       typeof row["graphId"] !== "string" ||
       typeof row["nodeKind"] !== "string" ||
@@ -281,7 +292,11 @@ function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
       typeof row["dimensions"] !== "number" ||
       !Number.isSafeInteger(row["dimensions"]) ||
       !(metric === "cosine" || metric === "l2" || metric === "inner_product") ||
-      !(indexType === "hnsw" || indexType === "ivfflat" || indexType === "none") ||
+      !(
+        indexType === "hnsw" ||
+        indexType === "ivfflat" ||
+        indexType === "none"
+      ) ||
       !validIndexParams ||
       typeof row["tableName"] !== "string" ||
       (row["ownedTableNames"] !== undefined &&
@@ -301,8 +316,7 @@ function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
       tableName: row["tableName"],
       // Rows written before the owned-table inventory used one table per
       // slot; preserve their cleanup and reopen behavior.
-      ownedTableNames:
-        row["ownedTableNames"] ?? [row["tableName"]],
+      ownedTableNames: row["ownedTableNames"] ?? [row["tableName"]],
     } satisfies VectorSlotManifest;
   });
   return manifest;
@@ -347,9 +361,9 @@ async function allocationIndexNames(
     (graph.indexes ?? [])
       .filter((declaration) => declaration.entity !== "vector")
       .map(async (declaration) => {
-      const identity = relationalIndexIdentity(declaration);
-      const digest = await sha256Hex(identity, 12);
-      return [identity, `${prefix}gix_${digest}`] as const;
+        const identity = relationalIndexIdentity(declaration);
+        const digest = await sha256Hex(identity, 12);
+        return [identity, `${prefix}gix_${digest}`] as const;
       }),
   );
   const result = new Map<string, string>();
@@ -568,6 +582,34 @@ async function columns(
   return result.map((column) => column.name);
 }
 
+async function applyCloneAction(
+  transaction: TransactionBackend,
+  action: PostgresCloneAction,
+  graphId: string,
+): Promise<void> {
+  const { source, target, policy } = action;
+  const names = await columns(transaction, source.tableName);
+  const scopeColumn =
+    policy.kind === "graphRows" ? policy.graphIdColumn : policy.documentColumn;
+  if (!names.includes(scopeColumn)) {
+    throw new BranchError(
+      `Working-copy relation ${source.tableName} lacks declared clone scope column ${scopeColumn}.`,
+    );
+  }
+  const selected = sql.join(
+    names.map((name) => sqlName(name)),
+    sql`, `,
+  );
+  const selection =
+    policy.kind === "graphRows" ?
+      sql`${sqlName(policy.graphIdColumn)} = ${graphId}`
+    : sql`${sqlName(policy.documentColumn)}->>${policy.graphIdKey} = ${graphId}`;
+  await rows(
+    transaction,
+    sql`INSERT INTO ${sqlName(target.tableName)} (${selected}) SELECT ${selected} FROM ${sqlName(source.tableName)} WHERE ${selection}`,
+  );
+}
+
 async function cloneRelations(
   transaction: TransactionBackend,
   sourceTables: PostgresTables,
@@ -580,6 +622,7 @@ async function cloneRelations(
 ): Promise<void> {
   const source = postgresContributions(sourceTables);
   const target = postgresContributions(targetTables);
+  const actions = resolvePostgresCloneActions(source, target);
   const sourceNames = source.map((contribution) => contribution.tableName);
   // A table lock on the pinned source transaction prevents writes between the
   // source token check and every INSERT ... SELECT. SHARE blocks ROW EXCLUSIVE.
@@ -607,45 +650,8 @@ async function cloneRelations(
   if (marker[0]?.version !== CURRENT_BASE_SCHEMA_VERSION) {
     throw new BranchError("Source base schema marker is not current.");
   }
-  for (const [index, contribution] of source.entries()) {
-    const from = contribution.tableName;
-    // These are installation or physical-index state, not graph content.
-    // The destination DDL seeds the base marker and indexes; fences begin
-    // empty. Physical materialization keys cannot be carried across names.
-    if (
-      from === sourceMarker ||
-      contribution.logicalName === "fences" ||
-      contribution.logicalName === "indexMaterializations" ||
-      contribution.logicalName === "contributionMaterializations"
-    )
-      continue;
-    const to = target[index]?.tableName;
-    if (
-      to === undefined ||
-      target[index]?.logicalName !== contribution.logicalName
-    ) {
-      throw new BranchError("Working-copy inventory changed during clone.");
-    }
-    const names = await columns(transaction, from);
-    const selected = sql.join(
-      names.map((name) => sqlName(name)),
-      sql`, `,
-    );
-    if (contribution.logicalName === "graphTemplates") {
-      await rows(
-        transaction,
-        sql`INSERT INTO ${sqlName(to)} (${selected}) SELECT ${selected} FROM ${sqlName(from)} WHERE schema_doc->>'graphId' = ${graphId}`,
-      );
-    } else if (names.includes("graph_id")) {
-      await rows(
-        transaction,
-        sql`INSERT INTO ${sqlName(to)} (${selected}) SELECT ${selected} FROM ${sqlName(from)} WHERE graph_id = ${graphId}`,
-      );
-    } else {
-      throw new BranchError(
-        `Working-copy relation ${from} has no graph scope.`,
-      );
-    }
+  for (const action of actions) {
+    await applyCloneAction(transaction, action, graphId);
   }
   for (const slot of vectorSlots) {
     if (
@@ -656,39 +662,11 @@ async function cloneRelations(
         "A vector working copy requires source and allocation vector strategies.",
       );
     }
-    const sourceContributions = sourceVectorStrategy.ownedTables(slot);
-    const targetContributions = targetVectorStrategy.ownedTables(slot);
-    if (
-      sourceContributions.length !== targetContributions.length ||
-      sourceContributions.some(
-        (contribution, index) =>
-          contribution.logicalName !== targetContributions[index]?.logicalName,
-      )
-    ) {
-      throw new BranchError(
-        "Source and allocation vector contribution inventories differ.",
-      );
-    }
-    for (const [index, sourceContribution] of sourceContributions.entries()) {
-      const targetContribution = targetContributions[index];
-      if (targetContribution === undefined)
-        throw new BranchError("Working-copy vector inventory changed during clone.");
-      const from = sourceContribution.tableName;
-      const to = targetContribution.tableName;
-      const names = await columns(transaction, from);
-      if (!names.includes("graph_id")) {
-        throw new BranchError(
-          `Vector sidecar ${from} has no graph_id column and cannot be cloned safely.`,
-        );
-      }
-      const selected = sql.join(
-        names.map((name) => sqlName(name)),
-        sql`, `,
-      );
-      await rows(
-        transaction,
-        sql`INSERT INTO ${sqlName(to)} (${selected}) SELECT ${selected} FROM ${sqlName(from)} WHERE graph_id = ${graphId}`,
-      );
+    for (const action of resolvePostgresCloneActions(
+      sourceVectorStrategy.ownedTables(slot),
+      targetVectorStrategy.ownedTables(slot),
+    )) {
+      await applyCloneAction(transaction, action, graphId);
     }
   }
 }
@@ -737,7 +715,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         transaction,
         sql`SELECT set_config('lock_timeout', ${`${cleanupLockTimeoutMs}ms`}, true)`,
       );
-      await rows(transaction, sql.raw(`CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(LEDGER)} (
+      await rows(
+        transaction,
+        sql.raw(`CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(LEDGER)} (
       allocation_id text PRIMARY KEY,
       physical_prefix text NOT NULL UNIQUE,
       ownership_token text NOT NULL,
@@ -747,7 +727,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       revision_tracking boolean NOT NULL,
       vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb,
       created_at timestamptz NOT NULL DEFAULT now()
-    )`));
+    )`),
+      );
       const column = await rows<Readonly<{ present: boolean }>>(
         transaction,
         sql`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${LEDGER}) AND attname = 'vector_slots' AND attnum > 0 AND NOT attisdropped) AS present`,
@@ -757,7 +738,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         // guarded ALTER lets the later holder observe the first holder's DDL.
         await rows(
           transaction,
-          sql.raw(`ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb`),
+          sql.raw(
+            `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb`,
+          ),
         );
       }
     });
@@ -800,7 +783,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       const names = await allocationNames(allocationId);
       const physicalPrefix = assertAllocationPrefix(row, names);
       const vectorSlots = parseVectorManifest(row.vector_slots);
-      const vectorStrategy = createPgvectorStrategyForAllocation(physicalPrefix);
+      const vectorStrategy =
+        createPgvectorStrategyForAllocation(physicalPrefix);
       for (const slot of vectorSlots) {
         const slotDescriptor: VectorSlot = {
           graphId: slot.graphId,
@@ -809,7 +793,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           dimensions: slot.dimensions,
           metric: slot.metric,
           indexType: slot.indexType,
-          ...(slot.indexParams === undefined ? {} : { indexParams: slot.indexParams }),
+          ...(slot.indexParams === undefined ?
+            {}
+          : { indexParams: slot.indexParams }),
         };
         if (
           vectorStrategy.tableName(

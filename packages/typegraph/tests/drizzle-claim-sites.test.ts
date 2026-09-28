@@ -111,7 +111,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "packages/typegraph/tests/table-contribution.test.ts",
-    line: 126,
+    line: 264,
     text:
       "// through `ownedTables` (" +
       CLAIM_WORD +
