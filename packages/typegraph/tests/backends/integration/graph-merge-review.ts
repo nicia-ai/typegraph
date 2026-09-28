@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -33,6 +33,7 @@ import { isErr, unwrap } from "../../../src/graph-merge/result";
 import { canUseSparseCandidatePlanning } from "../../../src/graph-merge/sparse-candidate-branch";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { importGraph } from "../../../src/interchange";
+import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -919,6 +920,143 @@ export function registerGraphMergeReviewIntegrationTests(
         unwrap(await revalidateCandidateWriteSetReview({ ...args, review }))
           .status,
       ).toBe("changed");
+    });
+    it("preserves V1 and V2 approval decisions for an unrelated original row update", async () => {
+      const target = await context.createHistoryStore(boundedGraph);
+      const candidate = await target.nodes.Item.create(itemProps("candidate"), {
+        id: "candidate",
+        validFrom,
+      });
+      const unrelated = await target.nodes.Artifact.create(
+        { content: "original" },
+        { id: "unrelated", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "review-scope-decision",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "Item",
+            id: candidate.id,
+            properties: { ...itemProps("candidate"), label: "accepted" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = { target, writeSet, makeBackend, policy };
+      const v1 = unwrap(await planCandidateWriteSetReview(args));
+      const v2 = unwrap(
+        await planCandidateWriteSetReview({
+          ...args,
+          reviewScope: "candidate",
+        }),
+      );
+      expect(v1.formatVersion).toBe(1);
+      expect(v2.formatVersion).toBe(2);
+      expect(v2.plan.writes).toEqual(v1.plan.writes);
+
+      await target.nodes.Artifact.update(unrelated.id, { content: "revised" });
+      const v1Decision = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review: v1 }),
+      );
+      const v2Decision = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review: v2 }),
+      );
+      expect(v1Decision).toMatchObject({
+        status: "changed",
+        differences: [
+          {
+            category: "baseline",
+            path: "baseline.rows",
+            entity: { role: "node", kind: "Artifact", id: unrelated.id },
+          },
+        ],
+      });
+      expect(v2Decision.status).toBe("compatible");
+    });
+    it("bounds V2 review reads across unrelated rows and identity assertions", async () => {
+      const target = await context.createHistoryStore(boundedIdentityGraph);
+      const candidate = await target.nodes.Item.create(itemProps("candidate"), {
+        id: "candidate",
+        validFrom,
+      });
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "review-scope-budget",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "Item",
+            id: candidate.id,
+            properties: { ...itemProps("candidate"), label: "accepted" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      async function measure<T>(run: () => Promise<T>) {
+        const backend = context.getBackend();
+        const originalExecute = backend.execute;
+        const startingFence = await captureMergePlanTargetFence(target);
+        let statements = 0;
+        let returnedRows = 0;
+        const execute = vi
+          .spyOn(backend, "execute")
+          .mockImplementation(async <TRow>(query: CompiledRowsSql) => {
+            const rows = await originalExecute<TRow>(query);
+            statements += 1;
+            returnedRows += rows.length;
+            return rows;
+          });
+        try {
+          const value = await run();
+          return { value, statements, returnedRows };
+        } finally {
+          execute.mockRestore();
+          expect(await captureMergePlanTargetFence(target)).toEqual(
+            startingFence,
+          );
+        }
+      }
+      const before = await measure(() => planCandidateWriteSetReview(args));
+      const review = unwrap(before.value);
+      expect(review.baseline.scope).toBe("referenced");
+      for (let index = 0; index < 12; index += 1) {
+        const left = await target.nodes.Item.create(
+          itemProps(`left-${index}`),
+          {
+            id: `left-${index}`,
+            validFrom,
+          },
+        );
+        const right = await target.nodes.Item.create(
+          itemProps(`right-${index}`),
+          { id: `right-${index}`, validFrom },
+        );
+        await target.identity.assertDifferent(left, right, { validFrom });
+      }
+      const after = await measure(() => planCandidateWriteSetReview(args));
+      unwrap(after.value);
+      expect(after.statements).toBeLessThanOrEqual(before.statements);
+      expect(after.returnedRows).toBe(before.returnedRows);
+
+      const revalidation = await measure(() =>
+        revalidateCandidateWriteSetReview({ ...args, review }),
+      );
+      expect(unwrap(revalidation.value).status).toBe("compatible");
+      expect(revalidation.statements).toBeLessThanOrEqual(after.statements * 2);
+      expect(revalidation.returnedRows).toBeLessThanOrEqual(
+        after.returnedRows * 2,
+      );
     });
     it("persists immutable review and approval evidence in the target before applying the fresh plan", async () => {
       const args = await setup();
