@@ -26,10 +26,10 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 16 of the 106 optional
- * `GraphBackend` members are bundled here; the other 90 are classified in
- * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
- * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
+ * The bundles and {@link UNBUNDLED_OPTIONAL_MEMBERS} classify every optional
+ * `GraphBackend` member. Unbundled members are either `reasoned` (no bundle
+ * should own them) or `deferred` (a future bundle candidate with a measured
+ * access ceiling). The type assertion below enforces complete coverage.
  */
 import { type SqlDialect } from "../../query/dialect/types";
 import { type Assert, type Equal } from "../../utils/type-assert";
@@ -857,37 +857,7 @@ export type DeferredUnbundledMember = Readonly<{
 export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
-/**
- * The current 40 `reasoned` + 50 `deferred` members
- * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
- * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access; resolving the write-fence spelling through the fence plan then
- * added `fenceSql` with two accesses; the catalog-introspection bag then
- * added `catalog`, a reasoned member with zero measured accesses — its own
- * absence refusal lives in this directory, which the live scanner excludes
- * wholesale; the forked working-copy strategy then reads the connected
- * backend's `tableNames` to fence them against the base store's resolved
- * schema — 90 → 91; the lineage capability then added `lineage`, a
- * reasoned member with two live accesses (`resolveLineage`'s two reads of
- * the backend's own member) — 91 → 93. A later fix briefly grew this to 95
- * by re-deriving `resolveLineage(target)`'s resolution and comparing it
- * against the transaction handle's own `lineage` by identity inside
- * `assertTargetUnchanged` — a dead read, since `LineageMembers` took no
- * session argument and the comparison never actually pinned anything to
- * the transaction. Giving `revision`/`changesSince` a real `session`
- * parameter made that comparison unnecessary — `assertTargetUnchanged` now
- * reaches `lineage` through `requireLineage(txBackend, …)`, a call the
- * live scanner does not see (it reads `.lineage` inside
- * `backend/capabilities/`, outside the scanned scope) — back to 93. The
- * engine-native recorded-time capability then added `recordedTime`, a
- * reasoned member with zero measured accesses: its own absence refusal
- * (`requireRecordedTime`) lives in the excluded `backend/capabilities/`
- * directory, and every other current read
- * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
- * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
- * type the receiver test's arm (b) does not recognize by name — still 93,
- * 16 + 84 = 100 members total.
- */
+/** Optional members without a bundle owner and their measured access ceiling. */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   findActiveEdgesBySourceV1: {
     kind: "reasoned",
@@ -1583,7 +1553,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 98 optional members.
+// (i) Totality: the three-way partition covers every optional member.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,
