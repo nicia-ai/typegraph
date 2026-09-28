@@ -14,7 +14,7 @@ import type { JsonValue } from "./typegraph-internal";
 
 /** Default review format, retained for callers that validate V1 artifacts. */
 export const MERGE_REVIEW_FORMAT_VERSION = 1 as const;
-export const MERGE_REVIEW_FORMAT_VERSION_V1 = MERGE_REVIEW_FORMAT_VERSION;
+export const MERGE_REVIEW_FORMAT_VERSION_V1 = 1 as const;
 export const MERGE_REVIEW_FORMAT_VERSION_V2 = 2 as const;
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
