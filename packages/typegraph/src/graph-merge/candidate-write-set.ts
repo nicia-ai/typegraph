@@ -16,8 +16,8 @@ import {
   ingestionBranchWithStrategy,
 } from "./ingestion-branch";
 import {
-  captureMergePlanTargetFence,
   assertPlanningFenceUnchanged,
+  captureMergePlanTargetFence,
   planMergeIncremental,
   planMergeIncrementalForEvolution,
   planMergeIncrementalWithCandidateKeys,

@@ -310,7 +310,7 @@ export function buildFindEdgesByMatchIdentity(
        WHERE ${edges.graphId} = ${params.graphId}
        AND (${sql.join(predicates, sql` OR `)})
        ORDER BY ${edges.id} ASC
-    `;
+  `;
   }
 
 /** One keyset page across declared edge kinds. */

@@ -1,6 +1,6 @@
+import type { EdgeRow } from "../backend/types";
 import type { GraphData } from "../interchange";
 import { EDGE_CARDINALITY_SPECS } from "../store/claims/edge-claims";
-import type { EdgeRow } from "../backend/types";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import {
   type CandidateIdentityScope,
