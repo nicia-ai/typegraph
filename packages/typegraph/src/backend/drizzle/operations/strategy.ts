@@ -522,6 +522,8 @@ export type CommonOperationStrategy = Readonly<{
       edgeKind: string;
       fromKind: string;
       fromId: string;
+    }>,
+  ) => SQL;
   buildFindEdgesByMatchIdentity?: (
     params: Readonly<{
       graphId: string;

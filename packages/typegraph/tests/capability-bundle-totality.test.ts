@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 90 unbundled = 106, with no member counted twice", () => {
+  it("16 pilot + 91 unbundled = 107, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(90);
+    expect(unbundledNames.length).toBe(91);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(106);
+    expect(bundledSet.size + unbundledNames.length).toBe(107);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -153,9 +153,9 @@ describe("capability bundle totality (T9)", () => {
     // or off `EngineProvisioning`, never off a `GraphBackend`/
     // `TransactionBackend`-typed receiver — still 93.
     // The checked-read schema binding adds one tableNames access: 93 -> 94.
-    // The optional durable identity owner lookup adds one reasoned capability
-    // with zero reads until merge planning consumes it; custom backends that
-    // omit it retain the full-clone path, so the access floor stays 113.
+    // The optional durable identity owner lookup adds two bounded
+    // candidate-planning reads, increasing the active-only baseline from 115
+    // to 117. Custom backends without the method retain full-clone planning.
     // Adopted evolution hands the identity DDL factory into the transaction
     // and inspects its required storage on that session: 94 -> 96.
     // The exact-session heterogeneous node upsert adds six guarded backend

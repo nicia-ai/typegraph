@@ -53,7 +53,7 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
         (edge.cardinality !== "oneActive" || hasActiveSourceRead) &&
         (edge.matchIdentity === undefined ||
           storeBackend(target).findEdgesByMatchIdentity !== undefined),
-    ),
+    )
   );
 }
 
