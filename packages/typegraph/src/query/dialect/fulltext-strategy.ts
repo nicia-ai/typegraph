@@ -447,6 +447,10 @@ export const tsvectorStrategy: FulltextStrategy = {
         // would break the moment a future createDdl renames one).
         dropDdl: [`DROP TABLE IF EXISTS ${name};`],
         runtimeEnsure: true,
+        workingCopyClonePolicy: {
+          kind: "graphRows",
+          graphIdColumn: "graph_id",
+        },
       },
     ];
   },
