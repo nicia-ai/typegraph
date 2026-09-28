@@ -34,6 +34,7 @@ import { sql, type SqlFragment } from "../../sql-fragment";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
+  shortHash,
   VECTOR_CONTRIBUTION_PREFIX,
   vectorMinScoreCondition,
   vectorPhysicalName,
@@ -183,29 +184,87 @@ function distanceExpression(
   }
 }
 
-function tableName(
-  graphId: string,
-  nodeKind: string,
-  fieldPath: string,
-): string {
-  return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
+const pgvectorStrategies = new WeakSet<VectorStrategy>();
+
+/**
+ * Creates a pgvector strategy whose physical table and ANN index names are
+ * isolated under an allocation-specific prefix. Keep `namespace` stable for
+ * the lifetime of the allocation. The singleton strategy retains the legacy
+ * `tg_vec` / `tg_vecidx` names.
+ */
+export function createPgvectorStrategy(namespace: string): VectorStrategy {
+  if (typeof namespace !== "string" || namespace.trim().length === 0) {
+    throw new Error("pgvector namespace must not be empty");
+  }
+  const readableNamespace = namespace
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_]/g, "_")
+    .slice(0, 12);
+  const namespacePrefix = `${readableNamespace}_${shortHash(namespace)}`;
+  return createPgvectorStrategyWithPrefixes(
+    `${TABLE_PREFIX}_${namespacePrefix}`,
+    `${INDEX_PREFIX}_${namespacePrefix}`,
+  );
 }
 
-export const pgvectorStrategy: VectorStrategy = {
-  name: "pgvector",
-  capabilities: PGVECTOR_CAPABILITIES,
+/**
+ * Bind vector storage to a working copy's ledger-reserved physical prefix.
+ * The prefix is included verbatim, so two distinct reserved prefixes cannot
+ * alias through the generic strategy's short namespace hash.
+ */
+export function createPgvectorStrategyForAllocation(
+  physicalPrefix: string,
+): VectorStrategy {
+  if (!/^tgw_[0-9a-f]{24}_$/u.test(physicalPrefix)) {
+    throw new Error("Invalid PostgreSQL working-copy physical prefix.");
+  }
+  const namespace = physicalPrefix.slice(0, -1);
+  return createPgvectorStrategyWithPrefixes(
+    `${TABLE_PREFIX}_${namespace}`,
+    `${INDEX_PREFIX}_${namespace}`,
+  );
+}
 
-  tableName,
+function createPgvectorStrategyWithPrefixes(
+  tablePrefix: string,
+  indexPrefix: string,
+): VectorStrategy {
+  function strategyTableName(
+    graphId: string,
+    nodeKind: string,
+    fieldPath: string,
+  ): string {
+    return vectorPhysicalName(tablePrefix, graphId, nodeKind, fieldPath);
+  }
 
-  ownedTables(slot): readonly StrategyTableContribution[] {
-    const table = tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
-    const name = quoteIdentifier(table);
+  function strategyIndexName(slot: VectorSlot): string {
+    return vectorPhysicalName(
+      indexPrefix,
+      slot.graphId,
+      slot.nodeKind,
+      slot.fieldPath,
+    );
+  }
 
-    // No standalone graph_id index: the PRIMARY KEY (graph_id, node_id) already
-    // covers `WHERE graph_id = ?` via its leading column, so a separate index
-    // would be pure write amplification.
-    const createDdl = [
-      `CREATE TABLE IF NOT EXISTS ${name} (
+  const strategy: VectorStrategy = {
+    name: "pgvector",
+    capabilities: PGVECTOR_CAPABILITIES,
+
+    tableName: strategyTableName,
+
+    ownedTables(slot): readonly StrategyTableContribution[] {
+      const table = strategyTableName(
+        slot.graphId,
+        slot.nodeKind,
+        slot.fieldPath,
+      );
+      const name = quoteIdentifier(table);
+
+      // No standalone graph_id index: the PRIMARY KEY (graph_id, node_id) already
+      // covers `WHERE graph_id = ?` via its leading column, so a separate index
+      // would be pure write amplification.
+      const createDdl = [
+        `CREATE TABLE IF NOT EXISTS ${name} (
   "graph_id" TEXT NOT NULL,
   "node_id" TEXT NOT NULL,
   "embedding" vector(${slot.dimensions}) NOT NULL,
@@ -213,58 +272,62 @@ export const pgvectorStrategy: VectorStrategy = {
   "updated_at" TIMESTAMPTZ NOT NULL,
   PRIMARY KEY ("graph_id", "node_id")
 );`,
-    ];
+      ];
 
-    // The HNSW/IVFFlat index is intentionally NOT created here. pgvector
-    // similarity SQL is planner-driven (`ORDER BY embedding <=> q LIMIT k`
-    // uses the index when present, sequential-scans when not), so the index
-    // is a pure materialization concern: `buildCreateIndex` builds it through
-    // `materializeIndexes()` with the field's declared `m`/`ef_construction`/
-    // `lists`. Building it eagerly here would bake in default tuning (the
-    // write-ensure slot has no `indexParams`) and `CREATE INDEX IF NOT EXISTS`
-    // would then mask the tuned index materialization would emit.
+      // The HNSW/IVFFlat index is intentionally NOT created here. pgvector
+      // similarity SQL is planner-driven (`ORDER BY embedding <=> q LIMIT k`
+      // uses the index when present, sequential-scans when not), so the index
+      // is a pure materialization concern: `buildCreateIndex` builds it through
+      // `materializeIndexes()` with the field's declared `m`/`ef_construction`/
+      // `lists`. Building it eagerly here would bake in default tuning (the
+      // write-ensure slot has no `indexParams`) and `CREATE INDEX IF NOT EXISTS`
+      // would then mask the tuned index materialization would emit.
 
-    return [
-      {
-        scope: "graph",
-        logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
-        owner: "pgvector",
-        tableName: table,
-        createDdl,
-        runtimeEnsure: true,
-      },
-    ];
-  },
+      return [
+        {
+          scope: "graph",
+          logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
+          owner: "pgvector",
+          tableName: table,
+          createDdl,
+          runtimeEnsure: true,
+        },
+      ];
+    },
 
-  buildUpsert(
-    slot,
-    params: UpsertEmbeddingParams,
-    timestamp,
-  ): readonly SqlFragment[] {
-    const table = sql.identifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    const value = vectorLiteral(params.embedding, "embedding");
-    return [
-      sql`
+    buildUpsert(
+      slot,
+      params: UpsertEmbeddingParams,
+      timestamp,
+    ): readonly SqlFragment[] {
+      const table = sql.identifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      );
+      const value = vectorLiteral(params.embedding, "embedding");
+      return [
+        // The captured SQL indentation is part of the engine-profile parity contract.
+        // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+        sql`
         INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
         VALUES (${params.graphId}, ${params.nodeId}, ${value}, ${timestamp}, ${timestamp})
         ON CONFLICT ("graph_id", "node_id")
         DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
       `,
-    ];
-  },
+      ];
+    },
 
-  buildUpsertFromInsertedNode(slot, sourceAlias, embedding, timestamp) {
-    const table = sql.identifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    const source = sql.identifier(sourceAlias);
-    const sourceColumn = (name: string): SqlFragment =>
-      sql`${source}.${sql.identifier(name)}`;
-    const value = vectorLiteral(embedding, "embedding");
+    buildUpsertFromInsertedNode(slot, sourceAlias, embedding, timestamp) {
+      const table = sql.identifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      );
+      const source = sql.identifier(sourceAlias);
+      const sourceColumn = (name: string): SqlFragment =>
+        sql`${source}.${sql.identifier(name)}`;
+      const value = vectorLiteral(embedding, "embedding");
 
-    return sql`
+      // The captured SQL indentation is part of the engine-profile parity contract.
+      // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+      return sql`
       INSERT INTO ${table}
         ("graph_id", "node_id", "embedding", "created_at", "updated_at")
       SELECT
@@ -277,172 +340,188 @@ export const pgvectorStrategy: VectorStrategy = {
         "updated_at" = EXCLUDED."updated_at"
       RETURNING 1
     `;
-  },
+    },
 
-  buildUpsertBatch(
-    slot,
-    params: UpsertEmbeddingBatchParams,
-    timestamp,
-  ): readonly SqlFragment[] {
-    const table = sql.identifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    const valueRows = sql.join(
-      params.rows.map(
-        (row) =>
-          sql`(${params.graphId}, ${row.nodeId}, ${vectorLiteral(row.embedding, "embedding")}, ${timestamp}, ${timestamp})`,
-      ),
-      sql`, `,
-    );
-    return [
-      sql`
-        INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
-        VALUES ${valueRows}
-        ON CONFLICT ("graph_id", "node_id")
-        DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
-      `,
-    ];
-  },
-
-  buildDelete(slot, params: DeleteEmbeddingParams): readonly SqlFragment[] {
-    const table = sql.identifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    return [
-      sql`
-        DELETE FROM ${table}
-        WHERE "graph_id" = ${params.graphId} AND "node_id" = ${params.nodeId}
-      `,
-    ];
-  },
-
-  buildDeleteBatch(
-    slot,
-    params: Omit<DeleteEmbeddingParams, "nodeId"> &
-      Readonly<{ nodeIds: readonly string[] }>,
-  ): readonly SqlFragment[] {
-    if (params.nodeIds.length === 0) return [];
-    const table = sql.identifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    return [
-      sql`DELETE FROM ${table} WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${sql.join(
-        params.nodeIds.map((nodeId) => sql`${nodeId}`),
-        sql`, `,
-      )})`,
-    ];
-  },
-
-  buildSearch(
-    slot,
-    params: VectorSearchParams,
-    candidates?: SqlFragment,
-  ): SqlFragment {
-    const table = sql.identifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    const embeddingColumn = sql`${table}."embedding"`;
-    const distance = distanceExpression(
-      embeddingColumn,
-      params.queryEmbedding,
-      params.metric,
-    );
-    const score = vectorScoreExpression(distance, params.metric);
-
-    // Same SQL for brute-force and ANN: with a matching HNSW/IVFFlat index the
-    // Postgres planner rewrites this `ORDER BY distance LIMIT k` into an index
-    // scan automatically, so the strategy never branches on `slot.indexType`.
-    const conditions: SqlFragment[] = [
-      sql`${table}."graph_id" = ${params.graphId}`,
-    ];
-    if (params.minScore !== undefined) {
-      conditions.push(
-        vectorMinScoreCondition(distance, params.metric, params.minScore),
+    buildUpsertBatch(
+      slot,
+      params: UpsertEmbeddingBatchParams,
+      timestamp,
+    ): readonly SqlFragment[] {
+      const table = sql.identifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
       );
-    }
-    // Candidate pushdown keeps the HNSW scan (verified plan: HNSW Index Scan
-    // -> Nested Loop probe of the nodes pkey -> Limit). Exact under
-    // `hnsw.iterative_scan` (pgvector >= 0.8, applied by the backend);
-    // bounded by `ef_search` on older pgvector — still strictly better than
-    // ranking tombstones into top-k and dropping them post-hoc.
-    //
-    // Plain `IN (subquery)`: with fresh statistics the planner hashes it
-    // (brute-force scans) or drives per-row probes of the nodes pkey
-    // under the ordered HNSW scan — the plan-verified shape the liveness
-    // pushdown was built on. Stale statistics degrade any membership
-    // form; the answer is `store.refreshStatistics()` after bulk loads,
-    // not a cleverer SQL shape.
-    if (candidates !== undefined) {
-      conditions.push(sql`${table}."node_id" IN (${candidates})`);
-    }
-    // Pagination is rank-relative: the scan fetches `limit + offset`
-    // ordered candidates and OFFSET discards the leading page.
-    const pageOffset = params.offset ?? 0;
-    const pageClause = vectorPageClause(params.limit, params.offset);
-    // IVFFlat's iterative scan only offers `relaxed_order` (no
-    // strict_order mode), so under the backend-applied
-    // `ivfflat.iterative_scan` the index may emit the candidate set
-    // slightly out of distance order. Re-sort the bounded set inside a
-    // MATERIALIZED wrapper — the fence stops the planner from collapsing
-    // the sort back into the index scan's claimed ordering — and page in
-    // the wrapper: an OFFSET inside the relaxed scan could discard the
-    // wrong rows. Score is monotone in distance, so ordering by score per
-    // the metric's direction restores exact ranking.
-    if (slot.indexType === "ivfflat") {
-      const direction =
-        params.metric === "cosine" ? sql.raw("DESC") : sql.raw("ASC");
-      const relaxedBody = sql`
+      const valueRows = sql.join(
+        params.rows.map(
+          (row) =>
+            sql`(${params.graphId}, ${row.nodeId}, ${vectorLiteral(row.embedding, "embedding")}, ${timestamp}, ${timestamp})`,
+        ),
+        sql`, `,
+      );
+      return [
+        sql`
+          INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+          VALUES ${valueRows}
+          ON CONFLICT ("graph_id", "node_id")
+          DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
+        `,
+      ];
+    },
+
+    buildDelete(slot, params: DeleteEmbeddingParams): readonly SqlFragment[] {
+      const table = sql.identifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      );
+      return [
+        sql`
+          DELETE FROM ${table}
+          WHERE "graph_id" = ${params.graphId} AND "node_id" = ${params.nodeId}
+        `,
+      ];
+    },
+
+    buildDeleteBatch(
+      slot,
+      params: Omit<DeleteEmbeddingParams, "nodeId"> &
+        Readonly<{ nodeIds: readonly string[] }>,
+    ): readonly SqlFragment[] {
+      if (params.nodeIds.length === 0) return [];
+      const table = sql.identifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      );
+      return [
+        sql`DELETE FROM ${table} WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${sql.join(
+          params.nodeIds.map((nodeId) => sql`${nodeId}`),
+          sql`, `,
+        )})`,
+      ];
+    },
+
+    buildSearch(
+      slot,
+      params: VectorSearchParams,
+      candidates?: SqlFragment,
+    ): SqlFragment {
+      const table = sql.identifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      );
+      const embeddingColumn = sql`${table}."embedding"`;
+      const distance = distanceExpression(
+        embeddingColumn,
+        params.queryEmbedding,
+        params.metric,
+      );
+      const score = vectorScoreExpression(distance, params.metric);
+
+      // Same SQL for brute-force and ANN: with a matching HNSW/IVFFlat index the
+      // Postgres planner rewrites this `ORDER BY distance LIMIT k` into an index
+      // scan automatically, so the strategy never branches on `slot.indexType`.
+      const conditions: SqlFragment[] = [
+        sql`${table}."graph_id" = ${params.graphId}`,
+      ];
+      if (params.minScore !== undefined) {
+        conditions.push(
+          vectorMinScoreCondition(distance, params.metric, params.minScore),
+        );
+      }
+      // Candidate pushdown keeps the HNSW scan (verified plan: HNSW Index Scan
+      // -> Nested Loop probe of the nodes pkey -> Limit). Exact under
+      // `hnsw.iterative_scan` (pgvector >= 0.8, applied by the backend);
+      // bounded by `ef_search` on older pgvector — still strictly better than
+      // ranking tombstones into top-k and dropping them post-hoc.
+      //
+      // Plain `IN (subquery)`: with fresh statistics the planner hashes it
+      // (brute-force scans) or drives per-row probes of the nodes pkey
+      // under the ordered HNSW scan — the plan-verified shape the liveness
+      // pushdown was built on. Stale statistics degrade any membership
+      // form; the answer is `store.refreshStatistics()` after bulk loads,
+      // not a cleverer SQL shape.
+      if (candidates !== undefined) {
+        conditions.push(sql`${table}."node_id" IN (${candidates})`);
+      }
+      // Pagination is rank-relative: the scan fetches `limit + offset`
+      // ordered candidates and OFFSET discards the leading page.
+      const pageOffset = params.offset ?? 0;
+      const pageClause = vectorPageClause(params.limit, params.offset);
+      // IVFFlat's iterative scan only offers `relaxed_order` (no
+      // strict_order mode), so under the backend-applied
+      // `ivfflat.iterative_scan` the index may emit the candidate set
+      // slightly out of distance order. Re-sort the bounded set inside a
+      // MATERIALIZED wrapper — the fence stops the planner from collapsing
+      // the sort back into the index scan's claimed ordering — and page in
+      // the wrapper: an OFFSET inside the relaxed scan could discard the
+      // wrong rows. Score is monotone in distance, so ordering by score per
+      // the metric's direction restores exact ranking.
+      if (slot.indexType === "ivfflat") {
+        const direction =
+          params.metric === "cosine" ? sql.raw("DESC") : sql.raw("ASC");
+        // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+        const relaxedBody = sql`
         SELECT ${table}."node_id" AS node_id, ${score} AS score
         FROM ${table}
         WHERE ${sql.join(conditions, sql` AND `)}
         ORDER BY ${distance} ASC
         LIMIT ${params.limit + pageOffset}
       `;
-      return sql`
+        // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+        return sql`
         WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
         SELECT node_id, score FROM tg_vec_relaxed
         ORDER BY score ${direction}, node_id ASC
         ${pageClause}
       `;
-    }
-    return sql`
+      }
+      // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+      return sql`
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
       ORDER BY ${distance} ASC
       ${pageClause}
     `;
-  },
+    },
 
-  distanceExpression(embeddingColumn, queryEmbedding, metric) {
-    return distanceExpression(embeddingColumn, queryEmbedding, metric);
-  },
+    distanceExpression(embeddingColumn, queryEmbedding, metric) {
+      return distanceExpression(embeddingColumn, queryEmbedding, metric);
+    },
 
-  buildCreateIndex(slot, options): SqlFragment | undefined {
-    if (!usesAnnIndex(slot)) return undefined;
-    return sql.raw(
-      pgvectorIndexDdl(
-        tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-        slot,
-        options?.concurrent === true,
-      ),
-    );
-  },
+    buildCreateIndex(slot, options): SqlFragment | undefined {
+      if (!usesAnnIndex(slot)) return undefined;
+      return sql.raw(
+        pgvectorIndexDdl(
+          strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+          slot,
+          options?.concurrent === true,
+          strategyIndexName(slot),
+        ),
+      );
+    },
 
-  buildDropIndex(slot): SqlFragment | undefined {
-    if (!usesAnnIndex(slot)) return undefined;
-    const indexName = pgvectorIndexName(slot);
-    return sql.raw(`DROP INDEX IF EXISTS ${quoteIdentifier(indexName)}`);
-  },
+    buildDropIndex(slot): SqlFragment | undefined {
+      if (!usesAnnIndex(slot)) return undefined;
+      const indexName = strategyIndexName(slot);
+      return sql.raw(`DROP INDEX IF EXISTS ${quoteIdentifier(indexName)}`);
+    },
 
-  buildDropStorage(slot): readonly string[] {
-    const table = quoteIdentifier(
-      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
-    );
-    // CASCADE drops the ANN index along with the table.
-    return [`DROP TABLE IF EXISTS ${table} CASCADE`];
-  },
-};
+    buildDropStorage(slot): readonly string[] {
+      const table = quoteIdentifier(
+        strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      );
+      // CASCADE drops the ANN index along with the table.
+      return [`DROP TABLE IF EXISTS ${table} CASCADE`];
+    },
+  };
+  pgvectorStrategies.add(strategy);
+  return strategy;
+}
+
+/** Default pgvector strategy, retaining its established physical names. */
+export const pgvectorStrategy: VectorStrategy =
+  createPgvectorStrategyWithPrefixes(TABLE_PREFIX, INDEX_PREFIX);
+
+/** @internal True for the bundled pgvector implementation and its namespaced instances. */
+export function isPgvectorStrategy(strategy: VectorStrategy): boolean {
+  return pgvectorStrategies.has(strategy);
+}
 
 /** Physical name of the ANN index pgvector builds for `slot`. */
 export function pgvectorIndexName(slot: VectorSlot): string {
@@ -458,8 +537,9 @@ function pgvectorIndexDdl(
   table: string,
   slot: VectorSlot,
   concurrent: boolean,
+  indexName: string,
 ): string {
-  const indexName = quoteIdentifier(pgvectorIndexName(slot));
+  const quotedIndexName = quoteIdentifier(indexName);
   const quotedTable = quoteIdentifier(table);
   const opClass = operatorClass(slot.metric);
   // Honor the field's declared tuning; fall back to pgvector defaults.
@@ -473,10 +553,10 @@ function pgvectorIndexDdl(
 
   switch (slot.indexType) {
     case "hnsw": {
-      return `${create} ${indexName} ON ${quotedTable} USING hnsw ("embedding" ${opClass}) WITH (m = ${m}, ef_construction = ${efConstruction});`;
+      return `${create} ${quotedIndexName} ON ${quotedTable} USING hnsw ("embedding" ${opClass}) WITH (m = ${m}, ef_construction = ${efConstruction});`;
     }
     case "ivfflat": {
-      return `${create} ${indexName} ON ${quotedTable} USING ivfflat ("embedding" ${opClass}) WITH (lists = ${lists});`;
+      return `${create} ${quotedIndexName} ON ${quotedTable} USING ivfflat ("embedding" ${opClass}) WITH (lists = ${lists});`;
     }
     case "none": {
       throw new Error(

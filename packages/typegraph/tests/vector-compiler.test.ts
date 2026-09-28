@@ -7,8 +7,14 @@ import {
   vectorSlotKey,
   type VectorSlotMap,
 } from "../src/query/compiler/schema";
-import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
-import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
+import {
+  createPgvectorStrategy,
+  pgvectorStrategy,
+} from "../src/query/dialect/vector/pgvector-strategy";
+import {
+  vectorPhysicalName,
+  type VectorStrategy,
+} from "../src/query/dialect/vector-strategy";
 import { jsonPointer } from "../src/query/json-pointer";
 import { fieldRef } from "../src/query/predicates";
 import { renderPostgres } from "../src/query/sql-fragment";
@@ -372,6 +378,73 @@ describe("vector predicate without an explicit metric uses the declared metric",
       ).sql;
     expect(ddlText(true)).toContain("CREATE INDEX CONCURRENTLY");
     expect(ddlText(false)).not.toContain("CONCURRENTLY");
+  });
+
+  it("namespaces every pgvector storage operation and retains singleton names", () => {
+    const strategy = createPgvectorStrategy("allocation-A");
+    const slot = {
+      graphId: "g1",
+      nodeKind: "Doc",
+      fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine" as const,
+      indexType: "hnsw" as const,
+    };
+    const table = strategy.tableName("g1", "Doc", "embedding");
+    const index = /CREATE INDEX IF NOT EXISTS "([^"]+)"/u.exec(
+      renderPostgres(requireDefined(strategy.buildCreateIndex?.(slot))).sql,
+    )?.[1];
+    expect(table).toContain("allocation_a");
+    expect(index).toContain("allocation_a");
+    expect(
+      createPgvectorStrategy("allocation-B").tableName(
+        "g1",
+        "Doc",
+        "embedding",
+      ),
+    ).not.toBe(table);
+    expect(pgvectorStrategy.tableName("g1", "Doc", "embedding")).toBe(
+      vectorPhysicalName("tg_vec", "g1", "Doc", "embedding"),
+    );
+
+    const ddl = strategy.ownedTables(slot)[0]?.createDdl.join("\n");
+    expect(ddl).toContain(`"${table}"`);
+    const upsert = renderPostgres(
+      requireDefined(
+        strategy.buildUpsert(
+          slot,
+          {
+            graphId: "g1",
+            nodeKind: "Doc",
+            nodeId: "n1",
+            fieldPath: "embedding",
+            dimensions: 3,
+            metric: "cosine",
+            indexType: "hnsw",
+            embedding: [1, 2, 3],
+          },
+          "2026-01-01T00:00:00.000Z",
+        )[0],
+      ),
+    ).sql;
+    expect(upsert).toContain(`"${table}"`);
+    const search = renderPostgres(
+      strategy.buildSearch(slot, {
+        graphId: "g1",
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        queryEmbedding: [1, 2, 3],
+        metric: "cosine",
+        dimensions: 3,
+        indexType: "hnsw",
+        limit: 3,
+      }),
+    ).sql;
+    expect(search).toContain(`"${table}"`);
+    expect(
+      renderPostgres(requireDefined(strategy.buildDropIndex?.(slot))).sql,
+    ).toContain(`"${index}"`);
+    expect(strategy.buildDropStorage(slot)[0]).toContain(`"${table}"`);
   });
 
   it("rejects an out-of-range cosine minScore even with no explicit metric (#3)", () => {

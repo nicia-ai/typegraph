@@ -170,6 +170,8 @@ describe("capability bundle totality (T9)", () => {
     // IVFFlat materialization drops an unrecorded leftover index before
     // building it: dropVectorIndex 0 -> 1, 229 -> 230. Managed PostgreSQL
     // copies add two owned DDL paths and one fulltext strategy probe: 230 -> 233.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(233);
+    // Vector lifecycle inventory adds one executeDdl, two upsertEmbedding,
+    // and five vectorStrategy access sites: 233 -> 241.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(241);
   });
 });

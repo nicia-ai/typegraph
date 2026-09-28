@@ -15,7 +15,10 @@ import {
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
-import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
+import {
+  createPgvectorStrategy,
+  pgvectorStrategy,
+} from "../src/query/dialect/vector/pgvector-strategy";
 import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
 import { sql } from "../src/query/sql-fragment";
 import { createStore, createStoreWithSchema } from "../src/store/store";
@@ -59,6 +62,40 @@ function insufficientResourcesError(message: string): Error & { code: string } {
 }
 
 describe("Postgres vector-index parallel worker cleanup", () => {
+  it("keeps the pgvector serial fallback for namespaced strategies", async () => {
+    const submitted: string[] = [];
+    let createAttempts = 0;
+    const resourceError = insufficientResourcesError(
+      "parallel HNSW index build exhausted memory",
+    );
+    const execute = vi.fn(
+      executionStub((text) => {
+        submitted.push(text);
+        if (text.includes("CREATE INDEX") && createAttempts === 0) {
+          createAttempts++;
+          throw resourceError;
+        }
+      }),
+    );
+
+    await runPostgresVectorIndexBuild(
+      createPgvectorStrategy("tenant-a"),
+      execute,
+      "tg_vec_tenant_a_table",
+      sql`CREATE INDEX tenant_a_index`,
+      sql`DROP INDEX tenant_a_index`,
+    );
+
+    expect(submitted).toEqual([
+      "ALTER TABLE tg_vec_tenant_a_table RESET (parallel_workers)",
+      "CREATE INDEX tenant_a_index",
+      "DROP INDEX tenant_a_index",
+      "ALTER TABLE tg_vec_tenant_a_table SET (parallel_workers = 0)",
+      "CREATE INDEX tenant_a_index",
+      "ALTER TABLE tg_vec_tenant_a_table RESET (parallel_workers)",
+    ]);
+  });
+
   it("preserves the build failure when RESET also fails and reports repair guidance", async () => {
     const buildError = new Error("serial index build failed");
     const resetError = new Error("parallel_workers reset failed");

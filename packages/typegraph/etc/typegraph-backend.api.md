@@ -4563,7 +4563,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "ddlExecution";
-        readonly ceiling: 15;
+        readonly ceiling: 16;
     };
     readonly executeRaw: {
         readonly kind: "deferred";
@@ -4707,7 +4707,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 10;
+        readonly ceiling: 12;
     };
     readonly upsertEmbeddingBatch: {
         readonly kind: "deferred";
@@ -4737,7 +4737,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 9;
+        readonly ceiling: 14;
     };
 };
 

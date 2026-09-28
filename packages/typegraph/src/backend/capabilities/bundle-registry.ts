@@ -1255,8 +1255,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "ddlExecution",
-    // The managed PostgreSQL copy provisions and removes its owned tables.
-    ceiling: 15,
+    // The managed PostgreSQL copy provisions its ledger and checks cleanup
+    // DDL support before performing allocation or destroy work.
+    ceiling: 16,
   },
   executeRaw: {
     kind: "deferred",
@@ -1405,7 +1406,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorOperations",
-    ceiling: 10,
+    // Managed vector copies verify the allocation backend's upsert port at
+    // allocation and reopen boundaries.
+    ceiling: 12,
   },
   upsertEmbeddingBatch: {
     kind: "deferred",
@@ -1435,7 +1438,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorOperations",
-    ceiling: 9,
+    // Managed copies require the bundled strategy on the source and verify
+    // the allocation-scoped strategy before cloning or reopening.
+    ceiling: 14,
   },
 } as const satisfies Record<string, UnbundledOptionalMember>;
 
