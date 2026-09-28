@@ -131,6 +131,7 @@ export function generateIndexDDL(index: RelationalIndexDeclaration, dialect: Sql
 export type GenerateIndexDdlOptions = Readonly<{
     nodesTableName?: string | undefined;
     edgesTableName?: string | undefined;
+    physicalName?: string | undefined;
     ifNotExists?: boolean | undefined;
     concurrent?: boolean | undefined;
 }>;

@@ -1532,14 +1532,15 @@ status relations. The manager refuses missing or mismatched bindings with a
 allocation tables are created, so custom callbacks may inspect those tables;
 on binding failure, the manager removes the new tables and ledger row.
 
-The table-backed strategy supports the bundled tsvector fulltext storage and
-rebuilds physical-name materialization markers for the copied relations.
-It refuses graphs with declared indexes or enabled vector fields because their
-current physical names are database-global or graph-scoped rather than
-allocation-scoped. The copy has a fixed schema: `evolve`, kind removal and
-deprecation, and graph-index materialization refuse before mutation. System
-index maintenance remains available. Use a host-level database fork when
-schema evolution or those physical storage features are needed. Source
+The table-backed strategy supports bundled tsvector fulltext and declared
+PostgreSQL B-tree, GIN, and trigram graph indexes. It builds each declared index
+on the copy's private tables under a stable allocation-scoped physical name,
+while keeping the graph's logical index names and schema hash unchanged.
+`materializeIndexes()` can retry or repair these indexes after reopen; closing
+or destroying a copy removes its indexes with its tables. The copy has a fixed
+schema: `evolve`, kind removal, and deprecation refuse before mutation. Vector
+fields and custom fulltext strategies still need a host-level database fork.
+System index maintenance remains available. Source
 table locks cover the entire TypeGraph relation set while the SQL clone runs,
 so a large clone briefly blocks writes to other graphs in the same database.
 
@@ -1614,12 +1615,21 @@ await worker.close();
 ```
 
 `TFork` must extend `ForkHandle` (`{ dispose?: () => Promise<void> }`).
-For a hosted PostgreSQL branch such as Neon, `connect` must bind every
-checkout and transaction to that branch, and durable reopen must attest its
-origin from the host's persisted allocation record. Doltgres exposes native
-branch and merge commands, but TypeGraph continues to use its own merge
-planner and apply path; native merge and Doltgres backend support require
-separate conformance testing.
+`forkedWorkingCopyStrategy` supplies ephemeral copies only. Its base-version
+comparison checks the graph's schema and revision or live-content anchor;
+the host fork must preserve the full physical database, including TypeGraph
+sidecars and extensions. A durable host strategy must persist its branch ID
+and attest the sealed origin when reopening it.
+
+For a hosted PostgreSQL branch such as [Neon](https://neon.com/docs/get-started-with-neon/workflow-primer),
+`connect` must use that branch's connection string and compute endpoint for
+every pooled checkout and transaction. Reusing the source pool can appear to
+pass a base-version check while writing to the source. Doltgres can pin a
+connection through a [database revision specifier](https://www.doltgres.com/docs/reference/version-control/branches/);
+avoid session-level branch switching on a pool whose checkouts may retain
+different branch state. Doltgres exposes native branch and merge commands,
+but TypeGraph continues to use its own merge planner and apply path; native
+merge and Doltgres backend support require separate conformance testing.
 `create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
 backend's `close` is composed with the fork's `dispose` through `deriveBackend`
 (never a spread), so `worker.close()` — the branch's public release call —

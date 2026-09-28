@@ -1,7 +1,7 @@
 /**
  * A table-backed working copy owns the relations allocated for one fixed graph
  * schema. Store evolution could introduce new physical vector tables or
- * database-global graph index names that its ledger cannot own or clean up.
+ * graph indexes outside the allocated name map that its ledger cannot own.
  * Register the exact backend handed to the copy Store after bootstrap; clones
  * of that Store retain the same backend object.
  */

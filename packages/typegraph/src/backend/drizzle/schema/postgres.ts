@@ -48,7 +48,10 @@ import {
   assertNoSystemIndexNameCollision,
   systemIndexName,
 } from "../../../indexes/system";
-import { type IndexDeclaration } from "../../../indexes/types";
+import {
+  type IndexDeclaration,
+  type RelationalIndexDeclaration,
+} from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
 import { defaultPostgresTableNames } from "./postgres-table-names";
 
@@ -88,6 +91,10 @@ export type CreatePostgresTablesOptions = Readonly<{
    * pick them up automatically.
    */
   indexes?: readonly IndexDeclaration[] | undefined;
+  /** Resolve graph index identifiers for an isolated physical namespace. */
+  physicalIndexName?:
+    | ((index: RelationalIndexDeclaration) => string)
+    | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
@@ -105,7 +112,24 @@ export function createPostgresTables(
 ) {
   const n: PostgresTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
-  assertNoSystemIndexNameCollision(indexes, n);
+  const physicalNames = new Set<string>();
+  const resolvedIndexes = indexes.map((index) => {
+    if (index.entity === "vector" || options.physicalIndexName === undefined)
+      return index;
+    const physicalName = options.physicalIndexName(index);
+    if (
+      physicalName.length === 0 ||
+      new TextEncoder().encode(physicalName).length > 63 ||
+      physicalNames.has(physicalName)
+    ) {
+      throw new Error(
+        `Invalid or duplicate physical PostgreSQL index name "${physicalName}".`,
+      );
+    }
+    physicalNames.add(physicalName);
+    return { ...index, name: physicalName };
+  });
+  assertNoSystemIndexNameCollision(resolvedIndexes, n);
 
   const nodes = pgTable(
     n.nodes,
@@ -126,7 +150,7 @@ export function createPostgresTables(
       // System indexes come from SYSTEM_INDEX_DECLARATIONS (single source
       // for both dialects + the runtime materializer).
       ...buildPostgresSystemIndexBuilders("nodes", n.nodes, t),
-      ...buildPostgresNodeIndexBuilders(t, indexes),
+      ...buildPostgresNodeIndexBuilders(t, resolvedIndexes),
     ],
   );
 
@@ -162,7 +186,7 @@ export function createPostgresTables(
         sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
       ),
       ...buildPostgresSystemIndexBuilders("edges", n.edges, t),
-      ...buildPostgresEdgeIndexBuilders(t, indexes),
+      ...buildPostgresEdgeIndexBuilders(t, resolvedIndexes),
     ],
   );
 

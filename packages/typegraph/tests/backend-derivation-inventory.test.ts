@@ -134,6 +134,12 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const provisioned = deriveBackend(backend, {",
+    reason:
+      "The allocator installs owned tables before Store bootstrap; this derived backend suppresses only repeat bootstrap while retaining the allocated connection and its backend proofs.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
     line: "const disposableBackend = wrapWithManagedClose(backend, () =>",
     reason:
       "An ephemeral working copy closes its derived connection and then discards only the tables owned by its allocation.",
