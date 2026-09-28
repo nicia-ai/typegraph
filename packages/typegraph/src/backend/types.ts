@@ -4559,17 +4559,14 @@ export type FindEdgesByKindParams = Readonly<{
   after?: string;
 }>;
 
-/** One durable edge identity tuple owned by a graph edge kind. */
-export type EdgeMatchIdentityOwnerKey = Readonly<{
-  kind: string;
-  name: string;
-  key: string;
-}>;
-
 /** Exact owner keys for a bounded durable edge identity lookup. */
 export type FindEdgesByMatchIdentityParams = Readonly<{
   graphId: string;
-  identities: readonly EdgeMatchIdentityOwnerKey[];
+  identities: readonly Readonly<{
+    kind: string;
+    name: string;
+    key: string;
+  }>[];
 }>;
 
 /**

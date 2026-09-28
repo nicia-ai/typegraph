@@ -3486,15 +3486,13 @@ function importEdgeInsertWork(
 // Property Validation
 // ============================================================
 
-export type ImportPropertyValidationResult =
-  | { success: true; data: Record<string, unknown> }
-  | { success: false; error: string };
-
 export function validateImportProperties(
   properties: Record<string, unknown>,
   schema: z.ZodObject<z.ZodRawShape>,
   unknownStrategy: UnknownPropertyStrategy,
-): ImportPropertyValidationResult {
+):
+  | { success: true; data: Record<string, unknown> }
+  | { success: false; error: string } {
   try {
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));
