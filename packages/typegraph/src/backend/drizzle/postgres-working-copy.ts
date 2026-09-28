@@ -70,7 +70,10 @@ export type PostgresAbandonedAllocation = Readonly<{
 /**
  * `control` and `connect` must address the same PostgreSQL database as the
  * source. `connect` receives the complete generated name map and must bind a
- * new backend to those names. It may use any Drizzle PostgreSQL driver.
+ * new backend to those names. Source and connected backends must expose every
+ * PostgreSQL table binding, including status relations, for attestation.
+ * `connect` runs after allocation tables exist and may use any Drizzle
+ * PostgreSQL driver.
  */
 export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
   control: GraphBackend;
@@ -153,23 +156,43 @@ function assertSourceBindings<G extends GraphDef>(
       );
     }
   }
+  const sourceNames = Object.fromEntries(
+    Object.keys(defaultPostgresTableNames).map((key) => [
+      key,
+      getTableName(sourceTables[key as keyof PostgresTableNames]),
+    ]),
+  ) as PostgresTableNames;
+  assertBackendBindings(storeBackend(source), sourceNames, "Source");
+}
+
+function assertBackendBindings(
+  backend: GraphBackend,
+  names: PostgresTableNames,
+  role: "Source" | "Working-copy",
+): void {
+  assertPostgresBackend(backend);
+  const bound = backend.tableNames;
+  if (bound === undefined)
+    throw new BranchError(`${role} backend has no table bindings.`);
+  const actualByKey = new Map(Object.entries(bound));
+  for (const [key, expected] of Object.entries(names)) {
+    const actual = actualByKey.get(key);
+    if (actual === undefined) {
+      throw new BranchError(`${role} backend is missing table binding ${key}.`);
+    }
+    if (actual !== expected) {
+      throw new BranchError(
+        `${role} backend table binding ${key} is incorrect.`,
+      );
+    }
+  }
 }
 
 function assertTargetBindings(
   backend: GraphBackend,
   names: PostgresTableNames,
 ): void {
-  assertPostgresBackend(backend);
-  const bound = backend.tableNames;
-  if (bound === undefined)
-    throw new BranchError("Working-copy backend has no table bindings.");
-  for (const [key, actual] of Object.entries(bound)) {
-    if (actual !== names[key as keyof PostgresTableNames]) {
-      throw new BranchError(
-        `Working-copy backend table binding ${key} is incorrect.`,
-      );
-    }
-  }
+  assertBackendBindings(backend, names, "Working-copy");
 }
 
 function fixedSchemaError(operation: string): BranchError {
@@ -508,6 +531,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         await rows(transaction, sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)));
       });
       provisioned = true;
+      // Refuse partial custom bindings before clone or Store writes can use
+      // shared default tables; the catch path removes this allocation.
       backend = await connect(names);
       assertTargetBindings(backend, names);
       await assertAllocationSession(backend, allocationId, ownershipToken);

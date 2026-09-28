@@ -28,6 +28,7 @@ import {
   destroyDurableBranch,
   reopenDurableBranch,
 } from "../../../src/graph-merge";
+import { BranchError } from "../../../src/graph-merge/errors";
 import { isOk, unwrap } from "../../../src/graph-merge/result";
 import { asBaseVersion, asBranchId } from "../../../src/graph-merge/types";
 import { defineNodeIndex } from "../../../src/indexes";
@@ -204,6 +205,134 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(abandoned[0]?.state).toBe("ephemeral");
         await copy.nodes.Person.create({ name: "Disposable" });
         await storeBackend(copy).close();
+        expect(await manager.listAbandoned()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it.each(["recordedClock", "contributionMaterializations"] as const)(
+      "refuses a target backend missing the %s binding before clone writes",
+      async (missing) => {
+        const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+        try {
+          const control = createPostgresBackend(drizzle(pool));
+          const [source] = await createStoreWithSchema(graph, control, {
+            revisionTracking: true,
+          });
+          const allocationId = `missing-target-binding-${missing}`;
+          let relationPresentAtConnect: boolean | undefined;
+          let allocatedNames: PostgresTableNames | undefined;
+          const manager = createPostgresWorkingCopyManager<typeof graph>({
+            control,
+            connect: async (names) => {
+              allocatedNames = names;
+              const present = await pool.query<{ present: string | null }>(
+                "SELECT to_regclass($1)::text AS present",
+                [`"${names.nodes}"`],
+              );
+              relationPresentAtConnect = present.rows[0]?.present !== null;
+              const backend = createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              });
+              const bound = backend.tableNames;
+              if (bound === undefined)
+                throw new Error("Bundled PostgreSQL backend has no bindings.");
+              const incomplete = Object.fromEntries(
+                Object.entries(bound).filter(([key]) => key !== missing),
+              ) as typeof bound;
+              return deriveBackend(backend, { tableNames: incomplete });
+            },
+          });
+          let created:
+            Awaited<ReturnType<typeof manager.durable.create>> | undefined;
+          let failure: unknown;
+          try {
+            created = await manager.durable.create(
+              source,
+              await computeBaseVersion(source),
+              asBranchId(`missing-target-${missing}`),
+              allocationId,
+            );
+          } catch (error) {
+            failure = error;
+          }
+          if (created !== undefined) {
+            await created.store.close();
+            await manager.abortAllocation(allocationId);
+          }
+          expect(failure).toBeInstanceOf(BranchError);
+          expect(relationPresentAtConnect).toBe(true);
+          if (allocatedNames === undefined)
+            throw new Error("Allocation did not call connect.");
+          const target = await pool.query<{ present: string | null }>(
+            "SELECT to_regclass($1)::text AS present",
+            [`"${allocatedNames.nodes}"`],
+          );
+          expect(target.rows[0]?.present).toBeNull();
+          expect(await manager.listAbandoned()).toEqual([]);
+          const ledger = await pool.query<{ count: string }>(
+            "SELECT count(*)::text AS count FROM typegraph_working_copy_allocations WHERE allocation_id = $1",
+            [allocationId],
+          );
+          expect(ledger.rows[0]?.count).toBe("0");
+        } finally {
+          await pool.end();
+        }
+      },
+      60_000,
+    );
+
+    it("refuses an incomplete source binding before connecting an allocation", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const bound = control.tableNames;
+        if (bound === undefined)
+          throw new Error("Bundled PostgreSQL backend has no bindings.");
+        const incomplete = Object.fromEntries(
+          Object.entries(bound).filter(
+            ([key]) => key !== "contributionMaterializations",
+          ),
+        ) as typeof bound;
+        const sourceBackend = deriveBackend(control, {
+          tableNames: incomplete,
+        });
+        const [source] = await createStoreWithSchema(graph, sourceBackend, {
+          revisionTracking: true,
+        });
+        const allocationId = "missing-source-binding";
+        let connected = false;
+        const manager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          connect: (names) => {
+            connected = true;
+            return Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+            );
+          },
+        });
+        let created:
+          Awaited<ReturnType<typeof manager.durable.create>> | undefined;
+        let failure: unknown;
+        try {
+          created = await manager.durable.create(
+            source,
+            await computeBaseVersion(source),
+            asBranchId("missing-source"),
+            allocationId,
+          );
+        } catch (error) {
+          failure = error;
+        }
+        if (created !== undefined) {
+          await created.store.close();
+          await manager.abortAllocation(allocationId);
+        }
+        expect(failure).toBeInstanceOf(BranchError);
+        expect(connected).toBe(false);
         expect(await manager.listAbandoned()).toEqual([]);
       } finally {
         await pool.end();

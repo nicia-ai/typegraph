@@ -4,6 +4,7 @@
  * this operation. No interchange representation is involved.
  */
 import { backendDerivationRoot } from "../backend/derive-backend";
+import { defaultPostgresTableNames } from "../backend/drizzle/schema/postgres-table-names";
 import type { GraphBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
@@ -205,8 +206,9 @@ async function vectorGraphRows(
 
 function assertDefaultNameMap(names: object | undefined): void {
   if (names === undefined) return;
+  const expectedByKey = new Map(Object.entries(defaultPostgresTableNames));
   for (const [key, actual] of Object.entries(names)) {
-    if (actual !== DEFAULT_NAMES[key]) {
+    if (actual !== expectedByKey.get(key)) {
       throw new BranchError(
         `Namespace fork cannot copy custom table mapping ${key}.`,
       );

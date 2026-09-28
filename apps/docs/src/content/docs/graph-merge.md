@@ -1504,6 +1504,13 @@ refused because its relation is outside the owned table inventory. Reopen
 options cannot replace the allocation's schema, recorded-read binding,
 history mode, or revision-tracking mode.
 
+The source backend and every backend returned by `connect` must expose the
+complete PostgreSQL `tableNames` inventory, including history, identity, and
+status relations. The manager refuses missing or mismatched bindings with a
+`BranchError` before cloning or opening a Store. `connect` runs after the
+allocation tables are created, so custom callbacks may inspect those tables;
+on binding failure, the manager removes the new tables and ledger row.
+
 The table-backed strategy supports the bundled tsvector fulltext storage and
 rebuilds physical-name materialization markers for the copied relations.
 It refuses graphs with declared indexes or enabled vector fields because their
