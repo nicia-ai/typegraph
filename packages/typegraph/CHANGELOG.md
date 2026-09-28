@@ -2,6 +2,19 @@
 
 ## 0.72.0
 
+### Highlights
+
+PostgreSQL graphs using bundled table, tsvector, and pgvector storage can now use table-backed working copies. Each allocation owns its tables, indexes, and vector sidecars under a recovery ledger; graph-scoped cloning, durable reopen, and cleanup keep copies isolated from the source. Copies use a fixed schema, so migrate the source before allocating one when schema changes are needed.
+
+On revision-tracked graphs, candidate merge planning stages the affected rows and their required identity, ontology, cardinality, and durable edge-identity dependencies instead of cloning the whole target. Candidate-scoped durable review is opt-in. Stores without a revision fence and custom backends missing the keyed reads needed for safe staging retain the complete-clone path.
+
+Bulk node creation now reports a generated ID collision as `ValidationError` with `ENTITY_ALREADY_EXISTS_CODE` across the bundled SQLite and PostgreSQL drivers, including atomic batches and the portable fallback.
+
+### Upgrade notes
+
+- If a custom PostgreSQL table contribution participates in table-backed working copies, declare its `workingCopyClonePolicy`. Use `graphRows` or `graphDocument` only for graph-scoped content; use `freshSeed` or `rebuildAfterClone` for installation or physical status. An absent or unsupported policy now refuses allocation.
+- If you handle generated ID collisions from `bulkCreate` or `bulkInsert`, branch on `ValidationError` with `ENTITY_ALREADY_EXISTS_CODE` rather than a driver error or `DatabaseOperationError`.
+
 ### Minor Changes
 
 - [#759](https://github.com/nicia-ai/typegraph/pull/759) [`d3e74f8`](https://github.com/nicia-ai/typegraph/commit/d3e74f8aff5948038351539c3479ed3b3339989f) Thanks [@pdlug](https://github.com/pdlug)! - Plan candidate write sets on revision-tracked graphs, including Operational Identity and ontology graphs, from bounded candidate dependencies instead of cloning the complete target. Unsupported custom backend reads and candidate owners excluded from the clone projection retain full clone staging. Add opt-in candidate-scoped durable review evidence while retaining the existing whole-graph review default.
