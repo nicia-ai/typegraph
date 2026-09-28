@@ -56,6 +56,9 @@ const primary = defineEdge("primary", { schema: z.object({}) });
 const limited = defineEdge("limited", { schema: z.object({}) });
 const paired = defineEdge("paired", { schema: z.object({}) });
 const activeLimited = defineEdge("activeLimited", { schema: z.object({}) });
+const identityOwned = defineEdge("identityOwned", {
+  schema: z.object({ code: z.string().default("shared") }),
+});
 const graph = defineGraph({
   id: "durable_merge_review",
   identity: { sameIdAcrossKinds: "fold" },
@@ -113,6 +116,18 @@ const boundedActiveCardinalityGraph = defineGraph({
       from: [Item],
       to: [Artifact],
       cardinality: "oneActive",
+    },
+  },
+});
+const boundedMatchIdentityGraph = defineGraph({
+  id: "bounded_match_identity_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {
+    identityOwned: {
+      type: identityOwned,
+      from: [Item],
+      to: [Artifact],
+      matchIdentity: { name: "code", fields: ["code"] },
     },
   },
 });
@@ -648,6 +663,95 @@ export function registerGraphMergeReviewIntegrationTests(
           expect(importError ?? "").toEqual(
             expect.stringContaining(occupied ? "oneActive" : ""),
           );
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it.each(["occupied", "deleted"] as const)(
+      "matches full-clone durable matchIdentity planning with a %s owner and schema defaults",
+      async (ownerState) => {
+        const target = await context.createHistoryStore(
+          boundedMatchIdentityGraph,
+        );
+        const source = await target.nodes.Item.create(
+          itemProps("match-source"),
+          { id: "match-source", validFrom },
+        );
+        const peer = await target.nodes.Artifact.create(
+          { content: "match-peer" },
+          { id: "match-peer", validFrom },
+        );
+        const owner = await target.edges.identityOwned.create(
+          source,
+          peer,
+          { code: "shared" },
+          { id: "durable-owner", validFrom },
+        );
+        if (ownerState === "deleted")
+          await target.edges.identityOwned.delete(
+            asEdgeId<typeof identityOwned>(owner.id),
+          );
+
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `match-identity-${ownerState}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [],
+          edges: [
+            {
+              kind: "identityOwned",
+              id: "candidate-owner",
+              from: { kind: "Item", id: source.id },
+              to: { kind: "Artifact", id: peer.id },
+              properties: {},
+              validFrom,
+            },
+          ],
+        };
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: [],
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "error",
+              onUnknownProperty: "allow",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          expect(imported.success).toBe(ownerState === "deleted");
           const bounded = await planCandidateWriteSet({
             target,
             writeSet,

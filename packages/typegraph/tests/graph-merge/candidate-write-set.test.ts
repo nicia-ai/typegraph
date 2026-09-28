@@ -100,7 +100,7 @@ const disjointGraph = defineGraph({
   ontology: [disjointWith(Person, Alias)],
 });
 const matched = defineEdge("matched", {
-  schema: z.object({ code: z.string() }),
+  schema: z.object({ code: z.string().default("shared") }),
 });
 const edgeIdentityGraph = defineGraph({
   id: "candidate-edge-match-identity",
@@ -1282,6 +1282,61 @@ describe("candidate write-set planning", () => {
       writeSet,
     });
     expect(isErr(bounded)).toBe(true);
+  });
+
+  it("normalizes match identity keys with the same schema defaults as import", async () => {
+    const [target] = await createStoreWithSchema(
+      edgeIdentityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.matched.create(
+      source,
+      peer,
+      { code: "shared" },
+      { id: "old-edge" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "edge-identity-default-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [
+        {
+          kind: "matched",
+          id: "new-edge",
+          from: { kind: "Person", id: source.id },
+          to: { kind: "Person", id: peer.id },
+          properties: {},
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    expect(
+      await fullCloneImportSucceeded(
+        target,
+        writeSet,
+        "full-match-identity-default",
+      ),
+    ).toBe(false);
+    expect(
+      isErr(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("uses full-clone fallback when a custom backend lacks owner reads", async () => {

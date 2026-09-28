@@ -1,5 +1,6 @@
 import type { EdgeRow } from "../backend/types";
 import type { GraphData } from "../interchange";
+import { validateImportProperties } from "../interchange/import";
 import { EDGE_CARDINALITY_SPECS } from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import {
@@ -84,14 +85,21 @@ export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
   try {
     for (const edge of writeSet.edges) {
       const registration = target.graph.edges[edge.kind];
+      if (registration === undefined) return undefined;
+      const validatedProperties = validateImportProperties(
+        edge.properties,
+        registration.type.schema,
+        "allow",
+      );
+      if (!validatedProperties.success) return undefined;
       const identity = resolveEdgeMatchIdentityStorage(
-        registration?.matchIdentity,
+        registration.matchIdentity,
         {
           fromKind: edge.from.kind,
           fromId: edge.from.id,
           toKind: edge.to.kind,
           toId: edge.to.id,
-          props: edge.properties,
+          props: validatedProperties.data,
         },
         { graphId: target.graphId, edgeKind: edge.kind },
       );
