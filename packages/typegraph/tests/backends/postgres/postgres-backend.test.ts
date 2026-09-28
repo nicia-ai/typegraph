@@ -32,6 +32,7 @@ import {
   NodeConstraintNotFoundError,
   StaleVersionError,
   subClassOf,
+  ValidationError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
@@ -60,6 +61,7 @@ import {
   createStore,
   createStoreWithSchema,
 } from "../../../src/store";
+import * as idUtilities from "../../../src/utils/id";
 import { requireDefined } from "../../../src/utils/presence";
 import { isSerializationFailure } from "../../../src/utils/sql-errors";
 import {
@@ -330,6 +332,28 @@ const testGraph = defineGraph({
     },
   },
   ontology: [subClassOf(Company, Organization)],
+});
+
+const SavepointPerson = defineNode("SavepointPerson", {
+  schema: z.object({ email: z.string() }),
+});
+
+const savepointCollisionGraph = defineGraph({
+  id: "savepoint_collision",
+  nodes: {
+    SavepointPerson: {
+      type: SavepointPerson,
+      unique: [
+        {
+          name: "savepoint_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
 });
 
 const testGraphWithoutCompany = defineGraph({
@@ -788,6 +812,53 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           excludeDeleted: false,
         }),
       ).toBe(0);
+    });
+
+    it("commits after a caught generated-ID collision is rolled back to a native savepoint", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db, {
+        capabilities: { atomicNodeInsertClaims: false },
+      });
+      const [store] = await createAdapterStoreWithSchema(
+        savepointCollisionGraph,
+        backend,
+      );
+      await store.nodes.SavepointPerson.create(
+        { email: "original@example.com" },
+        { id: "savepoint-collision" },
+      );
+
+      const generatedId = vi
+        .spyOn(idUtilities, "generateId")
+        .mockReturnValue("savepoint-collision");
+      try {
+        await store.transaction(async (tx) => {
+          if (tx.sqlAvailability !== "available")
+            throw new Error("PostgreSQL transaction did not expose native SQL");
+
+          await tx.sql.execute(sql.raw("SAVEPOINT collision_recovery"));
+          await expect(
+            tx.nodes.SavepointPerson.bulkCreate([
+              { props: { email: "colliding@example.com" } },
+            ]),
+          ).rejects.toBeInstanceOf(ValidationError);
+          await tx.sql.execute(
+            sql.raw("ROLLBACK TO SAVEPOINT collision_recovery"),
+          );
+          await tx.nodes.SavepointPerson.create(
+            { email: "survivor@example.com" },
+            { id: "savepoint-survivor" },
+          );
+        });
+      } finally {
+        generatedId.mockRestore();
+      }
+
+      expect(
+        await store.nodes.SavepointPerson.getById(
+          "savepoint-survivor" as never,
+        ),
+      ).toBeDefined();
     });
   });
 

@@ -25,6 +25,7 @@ import {
   defineNode,
   ENTITY_ALREADY_EXISTS_CODE,
   subClassOf,
+  UniquenessError,
   ValidationError,
 } from "../../../src";
 import {
@@ -134,22 +135,90 @@ export function registerClaimCompensationIntegrationTests(
           .spyOn(idUtilities, "generateId")
           .mockReturnValue("generated-collision");
         try {
-          const failure = await portableStore.nodes.CompEmployee[method]([
-            { props: { email: "new@compensation.example" } },
-          ]).catch((error: unknown) => error);
-          expect(failure).toBeInstanceOf(ValidationError);
-          if (!(failure instanceof ValidationError)) return;
-          expect(failure.details.issues).toContainEqual(
-            expect.objectContaining({
-              path: "id",
-              code: ENTITY_ALREADY_EXISTS_CODE,
-            }),
-          );
+          for (const candidateStore of [store, portableStore]) {
+            const failure = await candidateStore.nodes.CompEmployee[method]([
+              { props: { email: "new@compensation.example" } },
+            ]).catch((error: unknown) => error);
+            expect(failure).toBeInstanceOf(ValidationError);
+            if (!(failure instanceof ValidationError)) continue;
+            expect(failure.details.issues).toContainEqual(
+              expect.objectContaining({
+                path: "id",
+                code: ENTITY_ALREADY_EXISTS_CODE,
+              }),
+            );
+          }
         } finally {
           generatedId.mockRestore();
         }
       });
     }
+
+    it("reports the first batch member's unique conflict before a later ID collision", async () => {
+      const store = await context.createStore(compensationGraph);
+      await store.nodes.CompEmployee.create(
+        { email: "occupied@compensation.example" },
+        { id: "occupied-id" },
+      );
+      const generatedId = vi
+        .spyOn(idUtilities, "generateId")
+        .mockReturnValueOnce("fresh-but-conflicting")
+        .mockReturnValueOnce("occupied-id");
+      try {
+        await expect(
+          store.nodes.CompEmployee.bulkCreate([
+            { props: { email: "occupied@compensation.example" } },
+            { props: { email: "fresh@compensation.example" } },
+          ]),
+        ).rejects.toBeInstanceOf(UniquenessError);
+      } finally {
+        generatedId.mockRestore();
+      }
+    });
+
+    it("rejects a managed PostgreSQL transaction after a caught generated-ID collision", async () => {
+      const store = await context.createStore(compensationGraph);
+      await store.nodes.CompEmployee.create(
+        { email: "original@compensation.example" },
+        { id: "generated-collision" },
+      );
+      const portableStore = createStore(
+        compensationGraph,
+        backendFailingOneInsert(store.backend),
+      );
+      const generatedId = vi
+        .spyOn(idUtilities, "generateId")
+        .mockReturnValue("generated-collision");
+      try {
+        const outcome = await portableStore
+          .transaction(async (tx) => {
+            await tx.nodes.CompEmployee.create(
+              { email: "earlier@compensation.example" },
+              { id: "earlier-write" },
+            );
+            await expect(
+              tx.nodes.CompEmployee.bulkCreate([
+                { props: { email: "new@compensation.example" } },
+              ]),
+            ).rejects.toBeInstanceOf(ValidationError);
+          })
+          .then(
+            () => ({ kind: "committed" as const }),
+            (error: unknown) => ({ kind: "aborted" as const, error }),
+          );
+        const transactionAbortsOnConstraintError =
+          store.backend.dialect === "postgres";
+        expect(outcome.kind).toBe(
+          transactionAbortsOnConstraintError ? "aborted" : "committed",
+        );
+        expect(
+          (await store.nodes.CompEmployee.getById("earlier-write" as never)) ===
+            undefined,
+        ).toBe(transactionAbortsOnConstraintError);
+      } finally {
+        generatedId.mockRestore();
+      }
+    });
 
     it("frees the key for a sibling kind inside the same transaction", async () => {
       const store = await context.createStore(compensationGraph);

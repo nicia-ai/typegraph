@@ -38,7 +38,10 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import { isPostgresFailedTransactionError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { constraintFenceRefusal } from "../operations/write-transaction";
+import {
+  constraintFenceRefusal,
+  markWriteTransactionAborted,
+} from "../operations/write-transaction";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   type ClaimOwner,
@@ -831,6 +834,7 @@ async function claimGroupThenWrite<T>(
       // reservations, and its 25P02 must not replace the insert's diagnosis.
       if (!isPostgresFailedTransactionError(compensationError))
         throw compensationError;
+      markWriteTransactionAborted(ctx.backend, error);
     }
     throw error;
   }
@@ -1302,6 +1306,7 @@ async function claimUniqueKeysThen<T>(
     } catch (compensationError) {
       if (!isPostgresFailedTransactionError(compensationError))
         throw compensationError;
+      markWriteTransactionAborted(ctx.backend, error);
     }
     throw error;
   }

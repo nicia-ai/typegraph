@@ -445,7 +445,8 @@ describe("plain node batch store contract", () => {
       });
 
       expect(batch).toHaveBeenCalledOnce();
-      expect(batchNodeRead).toHaveBeenCalledOnce();
+      // One read checks the attempted IDs; the other checks the rival kind.
+      expect(batchNodeRead).toHaveBeenCalledTimes(2);
       expect(scalarNodeRead).not.toHaveBeenCalled();
       await expect(fixture.store.nodes.Person.count()).resolves.toBe(0);
       await expect(fixture.store.nodes.Rival.count()).resolves.toBe(1);
@@ -472,7 +473,7 @@ describe("plain node batch store contract", () => {
     }
   });
 
-  it("diagnoses a late disjoint refusal with one set-oriented node read", async () => {
+  it("diagnoses a late disjoint refusal with bounded set-oriented node reads", async () => {
     const fixture = await createDisjointFixture();
     try {
       await fixture.backend.insertNode({
@@ -495,7 +496,7 @@ describe("plain node batch store contract", () => {
         details: { nodeId: "late-disjoint-64" },
       });
 
-      expect(batchNodeRead).toHaveBeenCalledOnce();
+      expect(batchNodeRead).toHaveBeenCalledTimes(2);
       expect(scalarNodeRead).not.toHaveBeenCalled();
       await expect(fixture.store.nodes.Person.count()).resolves.toBe(0);
     } finally {
@@ -1656,11 +1657,11 @@ describe("constrained node batch store contract", () => {
       expect(batch).toHaveBeenCalledOnce();
       expect(batchClaimProbe).toHaveBeenCalledOnce();
       expect(scalarClaimProbe).not.toHaveBeenCalled();
-      // The transport-level sentinel rolls every chunk back first. The two
-      // failure-only reads then distinguish a current fence from the exact
-      // committed claim holder without letting client-side diagnosis authorize
-      // or partially commit the write.
-      expect(execute).toHaveBeenCalledTimes(2);
+      // The transport-level sentinel rolls every chunk back first. The three
+      // failure-only reads distinguish a current fence, occupied node IDs,
+      // and the exact committed claim holder without letting diagnosis
+      // authorize or partially commit the write.
+      expect(execute).toHaveBeenCalledTimes(3);
       await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(1);
       const claim = await fixture.backend.checkUnique({
         graphId: fallbackGraph.id,
