@@ -6,7 +6,10 @@ import { getTableName } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
 import { resolveGraphVectorSlots } from "../../core/embedding";
-import { computeBaseVersion } from "../../graph-merge/base-version";
+import {
+  compareBaseVersionAtTarget,
+  computeBaseVersion,
+} from "../../graph-merge/base-version";
 import type {
   DurableBranchOrigin,
   DurableWorkingCopyStrategy,
@@ -60,8 +63,8 @@ type AllocationRow = Readonly<{
 /** A non-secret locator; only the ledger can map it to physical tables. */
 export type PostgresWorkingCopyLocator = Readonly<{ allocationId: string }>;
 
-/** An unsealed allocation a caller can inspect and explicitly recover. */
-export type PostgresAbandonedAllocation = Readonly<{
+/** An unsealed allocation, which may still have an active owner. */
+export type PostgresUnsealedAllocation = Readonly<{
   allocationId: string;
   createdAt: string;
   state: "allocating" | "ephemeral";
@@ -96,11 +99,11 @@ export type PostgresWorkingCopyReopenOptions = Omit<
 export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
   ephemeral: WorkingCopyStrategy<G>;
   durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator>;
-  /** Bounded, ordered inventory of unsealed allocations. */
-  listAbandoned: (
+  /** Bounded, ordered inventory of unsealed allocations, including live ones. */
+  listUnsealedAllocations: (
     options?: Readonly<{ after?: string; limit?: number }>,
-  ) => Promise<readonly PostgresAbandonedAllocation[]>;
-  /** Recovery for an allocation whose create or seal outcome was lost. */
+  ) => Promise<readonly PostgresUnsealedAllocation[]>;
+  /** Explicit recovery after the caller confirms no active owner uses this allocation. */
   abortAllocation: (allocationId: string) => Promise<void>;
 }>;
 
@@ -302,6 +305,7 @@ async function cloneRelations(
   sourceTables: PostgresTables,
   targetTables: PostgresTables,
   graphId: string,
+  assertSourceVersion: (transaction: TransactionBackend) => Promise<void>,
 ): Promise<void> {
   const source = postgresContributions(sourceTables);
   const target = postgresContributions(targetTables);
@@ -309,6 +313,7 @@ async function cloneRelations(
   // A table lock on the pinned source transaction prevents writes between the
   // source token check and every INSERT ... SELECT. SHARE blocks ROW EXCLUSIVE.
   await rows(transaction, postgresTableLockSql(sourceNames, "share"));
+  await assertSourceVersion(transaction);
   const sourceMarker = getTableName(sourceTables.baseSchemaVersions);
   const marker = await rows<Readonly<{ version: number }>>(
     transaction,
@@ -547,6 +552,19 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           sourceTables,
           targetTables,
           source.graphId,
+          async (lockedTransaction) => {
+            const comparison = await compareBaseVersionAtTarget(
+              source,
+              lockedTransaction,
+              base,
+            );
+            if (!comparison.matches) {
+              throw new BranchError(
+                "Source advanced before its working-copy clone snapshot was taken.",
+                { details: comparison },
+              );
+            }
+          },
         );
       });
       const current = await computeBaseVersion(source);
@@ -673,10 +691,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   return {
     ephemeral,
     durable,
-    listAbandoned: async ({ after = "", limit = 100 } = {}) => {
+    listUnsealedAllocations: async ({ after = "", limit = 100 } = {}) => {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
         throw new BranchError(
-          "Abandoned-allocation inventory limit must be 1 to 1000.",
+          "Unsealed-allocation inventory limit must be 1 to 1000.",
         );
       }
       await ensureLedger();

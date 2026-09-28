@@ -1,6 +1,6 @@
 /** PostgreSQL table-backed working-copy allocation and recovery. */
 export type {
-  PostgresAbandonedAllocation,
+  PostgresUnsealedAllocation,
   PostgresWorkingCopyLocator,
   PostgresWorkingCopyManager,
   PostgresWorkingCopyOptions,

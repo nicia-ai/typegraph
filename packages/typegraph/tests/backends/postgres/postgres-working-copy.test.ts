@@ -163,13 +163,13 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(
           isOk(await reopenDurableBranch(graph, descriptor, manager.durable)),
         ).toBe(false);
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
     }, 60_000);
 
-    it("cleans failed allocation and discovers crashed ephemeral allocations", async () => {
+    it("cleans failed allocation and inventories a live ephemeral allocation", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
         const control = createPostgresBackend(drizzle(pool));
@@ -185,7 +185,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           allocationId: "failed-allocation",
         });
         expect(isOk(failed)).toBe(false);
-        expect(await failing.listAbandoned()).toEqual([]);
+        expect(await failing.listUnsealedAllocations()).toEqual([]);
 
         const manager = createPostgresWorkingCopyManager<typeof graph>({
           control,
@@ -200,12 +200,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
           source,
           await computeBaseVersion(source),
         );
-        const abandoned = await manager.listAbandoned();
-        expect(abandoned).toHaveLength(1);
-        expect(abandoned[0]?.state).toBe("ephemeral");
+        const unsealed = await manager.listUnsealedAllocations();
+        expect(unsealed).toHaveLength(1);
+        expect(unsealed[0]?.state).toBe("ephemeral");
         await copy.nodes.Person.create({ name: "Disposable" });
         await storeBackend(copy).close();
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -270,7 +270,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
             [`"${allocatedNames.nodes}"`],
           );
           expect(target.rows[0]?.present).toBeNull();
-          expect(await manager.listAbandoned()).toEqual([]);
+          expect(await manager.listUnsealedAllocations()).toEqual([]);
           const ledger = await pool.query<{ count: string }>(
             "SELECT count(*)::text AS count FROM typegraph_working_copy_allocations WHERE allocation_id = $1",
             [allocationId],
@@ -333,7 +333,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         }
         expect(failure).toBeInstanceOf(BranchError);
         expect(connected).toBe(false);
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -395,7 +395,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           allocationId: "stale-allocation",
         });
         expect(isOk(stale)).toBe(false);
-        expect(await staleManager.listAbandoned()).toEqual([]);
+        expect(await staleManager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -433,7 +433,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(
           manager.ephemeral.create(vectorDisabled, asBaseVersion("unused")),
         ).rejects.toThrow(/vector tables/);
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -475,7 +475,51 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(manager.ephemeral.create(source, base)).rejects.toThrow(
           /Source advanced/,
         );
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses an untracked source that changes and changes back around the clone", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        let restoreSource: (() => Promise<void>) | undefined;
+        const sourceBackend = deriveBackend(control, {
+          transaction: async <T>(
+            operation: (transaction: TransactionBackend) => Promise<T>,
+            options?: TransactionOptions,
+          ): Promise<T> => {
+            try {
+              return await control.transaction(operation, options);
+            } finally {
+              const restore = restoreSource;
+              restoreSource = undefined;
+              await restore?.();
+            }
+          },
+        });
+        const [source] = await createStoreWithSchema(graph, sourceBackend);
+        const base = await computeBaseVersion(source);
+        const manager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          connect: async (names) => {
+            const transient = await source.nodes.Person.create({
+              name: "Between stamp and clone",
+            });
+            restoreSource = () => source.nodes.Person.hardDelete(transient.id);
+            return createPostgresBackend(drizzle(pool), {
+              tables: createPostgresTables(names),
+            });
+          },
+        });
+
+        await expect(manager.ephemeral.create(source, base)).rejects.toThrow(
+          /Source advanced before its working-copy clone snapshot/,
+        );
+        expect(await computeBaseVersion(source)).toBe(base);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -504,7 +548,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(
           manager.ephemeral.create(source, asBaseVersion("unused")),
         ).rejects.toThrow(/index names/);
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -539,7 +583,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           `SELECT version FROM "${names.schemaVersions}" WHERE graph_id = $1`,
           [graph.id],
         );
-        const abandoned = await manager.listAbandoned();
+        const abandoned = await manager.listUnsealedAllocations();
         const extension = defineGraphExtension({
           nodes: {
             Document: {
@@ -575,7 +619,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           [graph.id],
         );
         expect(after.rows).toEqual(before.rows);
-        expect(await manager.listAbandoned()).toEqual(abandoned);
+        expect(await manager.listUnsealedAllocations()).toEqual(abandoned);
         const vectorMarkers = await pool.query<{ count: number }>(
           `SELECT count(*)::int AS count FROM "${names.contributionMaterializations}" WHERE graph_id = $1 AND owner = 'pgvector'`,
           [graph.id],
@@ -592,7 +636,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(unowned.rows[0]?.present).toBeNull();
         await storeBackend(copy).close();
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }
@@ -617,7 +661,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(
           manager.ephemeral.create(source, asBaseVersion("unused")),
         ).rejects.toThrow(/external recorded-read relation/);
-        expect(await manager.listAbandoned()).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
       } finally {
         await pool.end();
       }

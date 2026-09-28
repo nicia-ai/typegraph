@@ -54,18 +54,15 @@ import {
  * identical committed graph. T12 proves this with a fast-check shuffle property.
  */
 import {
+  compareBaseVersionAtTarget,
   computeBaseVersion,
-  computeContentComponent,
   computeSchemaComponent,
-  contentFingerprintOf,
-  contentOriginOf,
   engineAnchorOf,
   hasRevisionAnchor,
   isLegacyBaseVersion,
   LEGACY_BASE_VERSION_REFUSAL,
   readActiveSchemaVersion,
   revisionAnchorOf,
-  revisionOriginMatch,
   revisionOriginOf,
   schemaActiveVersionOf,
   schemaComponentOf,
@@ -2321,87 +2318,75 @@ async function assertTargetUnchanged<G extends GraphDef>(
           { cause },
         ),
     });
-    const originMatch = await revisionOriginMatch(
-      txBackend,
-      target.revisionSchema,
-      target.graphId,
-      expectedBaseVersion,
-    );
-    if (!originMatch.matches) {
+  }
+  const comparison = await compareBaseVersionAtTarget(
+    target,
+    txBackend,
+    expectedBaseVersion,
+  );
+  if (comparison.matches) return;
+  switch (comparison.kind) {
+    case "schema": {
+      throw new BaseVersionMismatchError(
+        "The merge target schema version changed before the commit transaction; the resolved plan was not applied.",
+        {
+          details: {
+            expectedActiveVersion: comparison.expectedActiveVersion,
+            liveActiveVersion: comparison.liveActiveVersion,
+          },
+        },
+      );
+    }
+    case "revision-origin": {
       throw new BaseVersionMismatchError(
         "The merge branch was forked from a different revision-tracked store; the resolved plan was not applied.",
         {
           details: {
-            expectedOrigin: originMatch.expectedOrigin,
-            liveOrigin: originMatch.liveOrigin,
+            expectedOrigin: comparison.expected,
+            liveOrigin: comparison.live,
           },
           suggestion:
             "Merge the branch back into its original base store, or fork a new branch from this target.",
         },
       );
     }
-    const liveRevision = await readRecordedClock(
-      txBackend,
-      target.revisionSchema,
-      target.graphId,
-    );
-    const expectedRevision = revisionAnchorOf(expectedBaseVersion);
-    if (liveRevision !== expectedRevision) {
+    case "revision": {
       throw new BaseVersionMismatchError(
         "The merge target was modified between the revision-anchor check and the commit transaction; the resolved plan was not applied.",
         {
-          details: { expectedRevision, liveRevision },
+          details: {
+            expectedRevision: comparison.expected,
+            liveRevision: comparison.live,
+          },
           suggestion:
             "Re-run the merge (and re-branch if the divergence is real), or route all graph writes through the revision-tracked Store.",
         },
       );
     }
-    return;
-  }
-  const liveActiveVersion = await readActiveSchemaVersion(
-    txBackend,
-    target.graphId,
-  );
-  const expectedActiveVersion = schemaActiveVersionOf(expectedBaseVersion);
-  if (liveActiveVersion !== expectedActiveVersion) {
-    throw new BaseVersionMismatchError(
-      "The merge target schema version changed before the commit transaction; the resolved plan was not applied.",
-      { details: { expectedActiveVersion, liveActiveVersion } },
-    );
-  }
-  const expectedOrigin = contentOriginOf(expectedBaseVersion);
-  if (expectedOrigin !== undefined) {
-    const liveOrigin = await readRevisionOrigin(
-      txBackend,
-      target.revisionSchema,
-      target.graphId,
-    );
-    if (liveOrigin !== expectedOrigin) {
+    case "content-origin": {
       throw new BaseVersionMismatchError(
         "The merge target's durable origin changed before the commit transaction; the resolved plan was not applied.",
-        { details: { expectedOrigin, liveOrigin } },
+        {
+          details: {
+            expectedOrigin: comparison.expected,
+            liveOrigin: comparison.live,
+          },
+        },
       );
     }
-  }
-  const liveContent = await computeContentComponent(
-    txBackend,
-    target.graphId,
-    target.graph,
-    await storeRuntime(target).identityAssertionsAtTarget(txBackend, "state"),
-  );
-  const expectedContent = contentFingerprintOf(expectedBaseVersion);
-  if (liveContent !== expectedContent) {
-    throw new BaseVersionMismatchError(
-      "The merge target was modified between the base@V check and the commit transaction; the resolved plan no longer describes the live target and was not applied.",
-      {
-        details: {
-          expectedContentFingerprint: expectedContent,
-          liveContentFingerprint: liveContent,
+    case "content": {
+      throw new BaseVersionMismatchError(
+        "The merge target was modified between the base@V check and the commit transaction; the resolved plan no longer describes the live target and was not applied.",
+        {
+          details: {
+            expectedContentFingerprint: comparison.expected,
+            liveContentFingerprint: comparison.live,
+          },
+          suggestion:
+            "Re-run the merge (and re-branch if the divergence is real), or serialize writers against merges on this target.",
         },
-        suggestion:
-          "Re-run the merge (and re-branch if the divergence is real), or serialize writers against merges on this target.",
-      },
-    );
+      );
+    }
   }
 }
 

@@ -4691,13 +4691,6 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 }>;
 
 // @public
-export type PostgresAbandonedAllocation = Readonly<{
-    allocationId: string;
-    createdAt: string;
-    state: "allocating" | "ephemeral";
-}>;
-
-// @public
 export type PostgresTableNames = Readonly<{
     nodes: string;
     edges: string;
@@ -4724,6 +4717,13 @@ export type PostgresTableNames = Readonly<{
 }>;
 
 // @public
+export type PostgresUnsealedAllocation = Readonly<{
+    allocationId: string;
+    createdAt: string;
+    state: "allocating" | "ephemeral";
+}>;
+
+// @public
 export type PostgresWorkingCopyLocator = Readonly<{
     allocationId: string;
 }>;
@@ -4732,10 +4732,10 @@ export type PostgresWorkingCopyLocator = Readonly<{
 export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
     ephemeral: WorkingCopyStrategy<G>;
     durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator>;
-    listAbandoned: (options?: Readonly<{
+    listUnsealedAllocations: (options?: Readonly<{
         after?: string;
         limit?: number;
-    }>) => Promise<readonly PostgresAbandonedAllocation[]>;
+    }>) => Promise<readonly PostgresUnsealedAllocation[]>;
     abortAllocation: (allocationId: string) => Promise<void>;
 }>;
 
