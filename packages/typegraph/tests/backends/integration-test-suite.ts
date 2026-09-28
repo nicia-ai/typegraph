@@ -66,6 +66,7 @@ import {
   registerGraphMergeCallbackIntegrationTests,
   registerGraphMergePlanIntegrationTests,
   registerGraphMergeReviewIntegrationTests,
+  registerGraphMergeReviewV2IntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
@@ -361,6 +362,7 @@ export function createIntegrationTestSuite<
     registerGraphMergeCallbackIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
     registerGraphMergeReviewIntegrationTests(context);
+    registerGraphMergeReviewV2IntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);

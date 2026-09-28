@@ -16,14 +16,19 @@ import {
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
+  ingestionBranch,
   type MergeOptions,
   planCandidateWriteSet,
   planCandidateWriteSetReview,
+  planMergeIncremental,
   revalidateCandidateWriteSetReview,
   StaleMergePlanError,
 } from "../../../src/graph-merge";
 import { captureMergePlanTargetFence } from "../../../src/graph-merge/merge";
+import { canonicalMergePlanJson } from "../../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
+import { asBranchId } from "../../../src/graph-merge/types";
+import { importGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -68,12 +73,22 @@ const boundedGraph = defineGraph({
   nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
   edges: {},
 });
+const boundedIdentityGraph = defineGraph({
+  id: "bounded_identity_candidate_review",
+  identity: { sameIdAcrossKinds: "fold" },
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {},
+});
 const policy = {
   id: "review-policy-v1",
   context: { minimumApprovals: 1 },
 } as const;
 const validFrom = "2026-01-01T00:00:00.000Z";
 type ReviewStore = Store<typeof graph>;
+
+function itemProps(id: string) {
+  return { label: id, status: "accepted" as const, group: id };
+}
 
 async function candidate(target: ReviewStore): Promise<CandidateWriteSet> {
   return {
@@ -107,6 +122,98 @@ export function registerGraphMergeReviewIntegrationTests(
     return { target, writeSet: await candidate(target), makeBackend, policy };
   }
   describe("durable merge review", () => {
+    it("matches full-clone planning for an identity class and unrelated ended assertion", async () => {
+      const target = await context.createHistoryStore(boundedIdentityGraph);
+      const first = await target.nodes.Item.create(itemProps("first"), {
+        id: "first",
+        validFrom,
+      });
+      const bridge = await target.nodes.Item.create(itemProps("bridge"), {
+        id: "bridge",
+        validFrom,
+      });
+      await target.nodes.Artifact.create(
+        { content: "second" },
+        { id: "second", validFrom },
+      );
+      const unrelatedA = await target.nodes.Item.create(
+        itemProps("unrelated-a"),
+        {
+          id: "unrelated-a",
+          validFrom,
+        },
+      );
+      const unrelatedB = await target.nodes.Item.create(
+        itemProps("unrelated-b"),
+        {
+          id: "unrelated-b",
+          validFrom,
+        },
+      );
+      await target.identity.assertSame(first, bridge);
+      const ended = await target.identity.assertSame(unrelatedA, unrelatedB);
+      await target.identity.retractAssertion(ended.assertion.id);
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "cross-backend-identity-candidate",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: "typegraph-identity-v1",
+          mode: "state",
+          assertions: [
+            {
+              id: "candidate-same",
+              relation: "same",
+              a: { kind: "Artifact", id: "second" },
+              b: { kind: "Item", id: "bridge" },
+              validFrom,
+            },
+          ],
+        },
+      };
+      const full = unwrap(
+        await ingestionBranch(target, makeBackend, {
+          id: asBranchId(writeSet.sourceId),
+        }),
+      );
+      try {
+        const imported = await importGraph(
+          full,
+          {
+            formatVersion: "2.0",
+            exportedAt: "1970-01-01T00:00:00.000Z",
+            source: { type: "external" },
+            nodes: writeSet.nodes,
+            edges: writeSet.edges,
+            identity: writeSet.identity,
+          },
+          {
+            onConflict: "update",
+            onUnknownProperty: "error",
+            validateReferences: true,
+            refreshStatistics: false,
+          },
+        );
+        expect(imported.success).toBe(true);
+        const expected = unwrap(
+          await planMergeIncremental({
+            forkPoint: target,
+            target,
+            branches: [full],
+          }),
+        );
+        const actual = unwrap(
+          await planCandidateWriteSet({ target, writeSet, makeBackend }),
+        );
+        expect(canonicalMergePlanJson(actual)).toBe(
+          canonicalMergePlanJson(expected),
+        );
+      } finally {
+        await full.close();
+      }
+    });
     it("keeps scoped review evidence stable across unrelated target growth", async () => {
       const target = await context.createHistoryStore(boundedGraph);
       const existing = await target.nodes.Item.create(

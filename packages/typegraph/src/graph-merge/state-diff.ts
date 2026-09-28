@@ -1,4 +1,5 @@
 import { requireDefined } from "../utils/presence";
+import type { CandidateIdentityScope } from "./candidate-identity-closure";
 /**
  * State-diff engine: compute the per-fork delta (new / modified / deleted nodes
  * and edges) of a working copy against the IMMUTABLE original base store.
@@ -934,9 +935,15 @@ export async function diffAgainstBase<G extends GraphDef>(
     captureForkState?: boolean;
     pruneTo?: LineageDelta | undefined;
     baseReader?: StateDiffBaseReader | undefined;
+    scopedIdentity?: CandidateIdentityScope | undefined;
   }> = {},
 ): Promise<StateDiff> {
-  const { captureForkState = true, pruneTo, baseReader } = options;
+  const {
+    captureForkState = true,
+    pruneTo,
+    baseReader,
+    scopedIdentity,
+  } = options;
   const prunedKeys = pruneTo?.kind === "keys" ? pruneTo : undefined;
   const graph = baseStore.graph;
   const nodeKinds = getNodeKinds(graph);
@@ -953,7 +960,9 @@ export async function diffAgainstBase<G extends GraphDef>(
   // state snapshot to preserve its identical-snapshot contract.
   const baseIdentityPromise =
     baseReader === undefined ?
-      storeRuntime(baseStore).readCurrentIdentityAssertions("state")
+      scopedIdentity === undefined ?
+        storeRuntime(baseStore).readCurrentIdentityAssertions("state")
+      : Promise.resolve(scopedIdentity.baseState)
     : baseReader.readIdentity("state");
   const [baseIdentity, forkIdentity] = await Promise.all([
     baseIdentityPromise,

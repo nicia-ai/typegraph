@@ -224,6 +224,10 @@ export async function planCandidateWriteSet<G extends GraphDef>(
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
   const bounded = canUseSparseCandidatePlanning(args.target);
+  const sparse =
+    bounded ?
+      sparseCandidateWorkingCopyStrategy<G>(writeSet, args.makeBackend)
+    : undefined;
   try {
     created = await ingestionBranchWithStrategy(
       args.target,
@@ -231,9 +235,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
       {
         id: asBranchId(writeSet.sourceId),
       },
-      bounded ?
-        sparseCandidateWorkingCopyStrategy(writeSet, args.makeBackend)
-      : undefined,
+      sparse?.strategy,
     );
   } catch (error) {
     return err(
@@ -277,10 +279,23 @@ export async function planCandidateWriteSet<G extends GraphDef>(
       branches: [candidate],
       ...(args.options === undefined ? {} : { options: args.options }),
     };
+    const identityScope = sparse?.identityScope();
+    if (
+      bounded &&
+      args.target.graph.identity !== undefined &&
+      identityScope === undefined
+    ) {
+      return err(
+        new CandidateWriteSetError(
+          "The bounded identity baseline was not captured.",
+        ),
+      );
+    }
     return bounded ?
         await planMergeIncrementalWithCandidateKeys(
           mergeArgs,
           boundedCandidateKeys(writeSet),
+          identityScope,
         )
       : await planMergeIncremental(mergeArgs);
   } catch (error) {

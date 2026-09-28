@@ -37,6 +37,7 @@ export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
 export { registerGraphMergeCallbackIntegrationTests } from "./graph-merge-callbacks";
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
+export { registerGraphMergeReviewV2IntegrationTests } from "./graph-merge-review-v2";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
