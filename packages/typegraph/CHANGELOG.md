@@ -1,5 +1,43 @@
 # @nicia-ai/typegraph
 
+## 0.72.0
+
+### Minor Changes
+
+- [#759](https://github.com/nicia-ai/typegraph/pull/759) [`d3e74f8`](https://github.com/nicia-ai/typegraph/commit/d3e74f8aff5948038351539c3479ed3b3339989f) Thanks [@pdlug](https://github.com/pdlug)! - Plan candidate write sets on revision-tracked graphs, including Operational Identity and ontology graphs, from bounded candidate dependencies instead of cloning the complete target. Unsupported custom backend reads and candidate owners excluded from the clone projection retain full clone staging. Add opt-in candidate-scoped durable review evidence while retaining the existing whole-graph review default.
+
+- [#757](https://github.com/nicia-ai/typegraph/pull/757) [`afe153b`](https://github.com/nicia-ai/typegraph/commit/afe153bd720c56ca17c67b527a4d981e8aefab66) Thanks [@pdlug](https://github.com/pdlug)! - Export `generatePostgresDropSQL()` for cleaning up isolated PostgreSQL table sets from the same contribution inventory used by installation DDL. Quote custom PostgreSQL table and index names consistently in generated DDL.
+
+- [#762](https://github.com/nicia-ai/typegraph/pull/762) [`d793eff`](https://github.com/nicia-ai/typegraph/commit/d793efff201b78f2aff8fcf0b6be45b6ad9592a8) Thanks [@pdlug](https://github.com/pdlug)! - Support graph-declared PostgreSQL indexes in table-backed working copies with stable allocation-scoped physical names. B-tree, GIN, and trigram indexes retain their logical declaration names and schema hashes while copy allocation, durable reopen, retry, and cleanup use isolated physical indexes.
+
+- [#761](https://github.com/nicia-ai/typegraph/pull/761) [`c6130a1`](https://github.com/nicia-ai/typegraph/commit/c6130a1dd05b3a0b19c13623b494069d1792527f) Thanks [@pdlug](https://github.com/pdlug)! - Add a PostgreSQL table-backed working-copy manager for graphs using bundled table and tsvector storage. It owns ephemeral and durable allocation, a persistent recovery ledger, origin-attested reopen and destroy, graph-scoped SQL cloning under source locks, and bounded inventory of unsealed allocations. Inventory rows may still be active, so callers confirm ownership before explicitly aborting one. Copies have a fixed schema and refuse evolution before mutation. Custom fulltext strategies remain available through host-level database forks.
+
+- [#769](https://github.com/nicia-ai/typegraph/pull/769) [`ac8c781`](https://github.com/nicia-ai/typegraph/commit/ac8c781d80deb3ff51f061d89d15360d8c5753c7) Thanks [@pdlug](https://github.com/pdlug)! - Bound candidate merge planning and opt-in candidate-scoped review for `oneActive` graphs on bundled backends. An active-only source read excludes ended edge history while preserving the claim rule that an open edge counts even when its `validFrom` is in the future. Custom backends without the optional read continue to use complete-clone candidate planning.
+
+- [#766](https://github.com/nicia-ai/typegraph/pull/766) [`c589e00`](https://github.com/nicia-ai/typegraph/commit/c589e00ad3b96960c89c58f8012decdedfdbb10a) Thanks [@pdlug](https://github.com/pdlug)! - Bound candidate merge planning on revision-tracked graphs with `one` or `unique` edge cardinality. The transient working copy now includes only cardinality peers for candidate sources or endpoint pairs, so staging preserves full-clone constraint decisions without reading unrelated edges. A `oneActive` graph uses complete-clone staging when its backend lacks the active-only keyed peer read.
+
+- [#756](https://github.com/nicia-ai/typegraph/pull/756) [`ae813a5`](https://github.com/nicia-ai/typegraph/commit/ae813a55056c5eec6c72c7add53b59a1833e160a) Thanks [@pdlug](https://github.com/pdlug)! - Read graph rows across declared kinds in keyset pages for merge planning and review, avoiding an empty query for each unused kind. Reuse one row read when the target is both sides of a diff, and skip statistics refresh for disposable ingestion clones. Custom backends continue using the existing per-kind read path.
+
+- [#768](https://github.com/nicia-ai/typegraph/pull/768) [`79bfa87`](https://github.com/nicia-ai/typegraph/commit/79bfa876765b84be6feb30e7f88237c7fbf3e0ca) Thanks [@pdlug](https://github.com/pdlug)! - Bound candidate merge planning on revision-tracked ontology graphs by reading live same-id peers across node kinds. This preserves full-clone disjointness and type-reconciliation decisions without scanning unrelated nodes, and extends opt-in candidate-scoped review evidence to ontology graphs.
+
+- [#764](https://github.com/nicia-ai/typegraph/pull/764) [`a3c2d9c`](https://github.com/nicia-ai/typegraph/commit/a3c2d9c718dc6f7ccb4dfcaac7136a036aabe83a) Thanks [@pdlug](https://github.com/pdlug)! - PostgreSQL table-backed working copies now isolate pgvector sidecars under each allocation's ledger-reserved physical prefix, preserve their embeddings through clone and reopen, and remove their owned tables during destroy. Allocation claims and initial table/vector provisioning commit atomically.
+
+- [#770](https://github.com/nicia-ai/typegraph/pull/770) [`7f69a44`](https://github.com/nicia-ai/typegraph/commit/7f69a4466ee36084f5866d0e3476794e687c1d4e) Thanks [@pdlug](https://github.com/pdlug)! - Add an optional backend read for exact durable edge match-identity owners, including tombstones. Candidate planning uses the bounded read to seed active owners into sparse working copies and falls back to full cloning for custom backends without the capability or when a durable owner is tombstoned.
+
+- [#764](https://github.com/nicia-ai/typegraph/pull/764) [`a3c2d9c`](https://github.com/nicia-ai/typegraph/commit/a3c2d9c718dc6f7ccb4dfcaac7136a036aabe83a) Thanks [@pdlug](https://github.com/pdlug)! - Add `createPgvectorStrategy(namespace)` for allocation-scoped pgvector table and index names while preserving the default strategy's existing names.
+
+### Patch Changes
+
+- [#774](https://github.com/nicia-ai/typegraph/pull/774) [`14dacc4`](https://github.com/nicia-ai/typegraph/commit/14dacc4a1b057671fab06e56380448692a330c36) Thanks [@pdlug](https://github.com/pdlug)! - Preserve the typed duplicate-ID error when PostgreSQL rejects claim cleanup after a failed bulk node insert.
+
+- [#760](https://github.com/nicia-ai/typegraph/pull/760) [`9198fa8`](https://github.com/nicia-ai/typegraph/commit/9198fa8b1c64e256d30665d913bc4ba82842f303) Thanks [@pdlug](https://github.com/pdlug)! - Compare cloned branch identity assertions with the base's current state so assertions ended before the fork do not appear as new branch retractions.
+
+- [#775](https://github.com/nicia-ai/typegraph/pull/775) [`6820b04`](https://github.com/nicia-ai/typegraph/commit/6820b04f2f63b10abd0d17daf414369cf4085c47) Thanks [@pdlug](https://github.com/pdlug)! - Require explicit PostgreSQL working-copy clone policies for table contributions so physical status rows cannot be copied by column-shape inference.
+
+- [#765](https://github.com/nicia-ai/typegraph/pull/765) [`d28c8cb`](https://github.com/nicia-ai/typegraph/commit/d28c8cba346b988c724e760a79f758d3c1b9a885) Thanks [@pdlug](https://github.com/pdlug)! - Refuse PostgreSQL working-copy allocation or durable reopen when the target connection changes the bundled fulltext strategy. This prevents copied fulltext projections from being exposed through a backend with different storage or disabled fulltext support.
+
+- [#763](https://github.com/nicia-ai/typegraph/pull/763) [`857f578`](https://github.com/nicia-ai/typegraph/commit/857f578b402d35c9ac3f929a18f7d78405c838ba) Thanks [@pdlug](https://github.com/pdlug)! - Add opt-in candidate-scoped V2 merge review evidence for identity-enabled graphs. Revalidation expands the retained endpoint and assertion-ID scope again and detects connected identity changes while leaving V1's global baseline as the default.
+
 ## 0.71.1
 
 ### Patch Changes
