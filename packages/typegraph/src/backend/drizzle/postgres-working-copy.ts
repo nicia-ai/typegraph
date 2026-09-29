@@ -932,6 +932,20 @@ async function discoverAllocationRelations(
   );
 }
 
+function quotedSchemaList(schemas: readonly string[]): string {
+  return schemas.map((name) => `"${name}"`).join(", ");
+}
+
+type AllocationRemovalPlan =
+  | Readonly<{ action: "drop"; owned: readonly string[] }>
+  | Readonly<{
+      action: "refuse";
+      message: string;
+      suggestion: string;
+      foundIn: readonly string[];
+      schemas: readonly string[];
+    }>;
+
 /**
  * The one decision on what removal may do with an allocation's discovered
  * relations: drop those in the schema the allocation lives in, and refuse
@@ -939,47 +953,57 @@ async function discoverAllocationRelations(
  * pointer to them, so a moved or renamed schema is recoverable; an allocation
  * whose relations are nowhere has nothing left to recover and its row is
  * removed.
+ *
+ * A refusal is worded by what the relations elsewhere are. Only when every one
+ * has a same-named relation in the recorded schema is it a stale copy (a backup
+ * or restore schema) that is safe to drop. When the recorded schema holds none,
+ * the allocation was moved or its schema renamed; when it holds only some, the
+ * allocation is split and the relations elsewhere may be the only copy, so no
+ * recovery step suggests dropping anything.
  */
-function partitionAllocationRelations(
-  discovered: readonly AllocationRelation[],
+function planAllocationRemoval(
+  allocationId: string,
   schema: string,
-): Readonly<{
-  owned: readonly string[];
-  elsewhere: readonly string[];
-}> {
+  discovered: readonly AllocationRelation[],
+): AllocationRemovalPlan {
   const owned = discovered
     .filter((relation) => relation.schema === schema)
     .map((relation) => relation.name);
-  const elsewhere = [
-    ...new Set(
-      discovered
-        .filter((relation) => relation.schema !== schema)
-        .map((relation) => relation.schema),
-    ),
+  const relationsElsewhere = discovered.filter(
+    (relation) => relation.schema !== schema,
+  );
+  if (relationsElsewhere.length === 0) return { action: "drop", owned };
+
+  const foundIn = [
+    ...new Set(relationsElsewhere.map((relation) => relation.schema)),
   ];
-  return { owned, elsewhere };
-}
-
-function quotedSchemaList(schemas: readonly string[]): string {
-  return schemas.map((name) => `"${name}"`).join(", ");
-}
-
-/**
- * The refusal wording for {@link partitionAllocationRelations}' `elsewhere`
- * case: an allocation that also keeps relations in its own schema was copied
- * (a backup or restore schema), while one that keeps none was moved or its
- * schema renamed.
- */
-function describeRelationsElsewhere(
-  allocationId: string,
-  schema: string,
-  owned: readonly string[],
-  elsewhere: readonly string[],
-): string {
-  const found = quotedSchemaList(elsewhere);
-  return owned.length > 0 ?
-      `Working-copy allocation ${allocationId} also has relations in ${found}, besides those in its schema "${schema}"; the allocation is kept for recovery.`
-    : `Working-copy allocation ${allocationId} has relations in ${found}, not in its schema "${schema}"; the allocation is kept for recovery.`;
+  const found = quotedSchemaList(foundIn);
+  const ownedNames = new Set(owned);
+  const refusal = { action: "refuse", foundIn } as const;
+  if (owned.length === 0) {
+    return {
+      ...refusal,
+      message: `Working-copy allocation ${allocationId} has relations in ${found}, not in its schema "${schema}"; the allocation is kept for recovery.`,
+      suggestion: `Move the tables back into "${schema}" or correct the ledger row's schema_name, then remove the allocation again.`,
+      schemas: foundIn,
+    };
+  }
+  const everyRelationIsCopied = relationsElsewhere.every((relation) =>
+    ownedNames.has(relation.name),
+  );
+  return everyRelationIsCopied ?
+      {
+        ...refusal,
+        message: `Working-copy allocation ${allocationId} also has relations in ${found}, besides those in its schema "${schema}"; the allocation is kept for recovery.`,
+        suggestion: `Drop the stale copies in ${found} (a backup or restore schema, for example) and remove the allocation again.`,
+        schemas: [schema, ...foundIn],
+      }
+    : {
+        ...refusal,
+        message: `Working-copy allocation ${allocationId} is split across schemas: ${found} holds relations its schema "${schema}" does not; the allocation is kept for recovery.`,
+        suggestion: `Move the relations in ${found} back into "${schema}" or correct the ledger row's schema_name, then remove the allocation again. Drop nothing until every relation is in one schema.`,
+        schemas: [schema, ...foundIn],
+      };
 }
 
 /** The one decision that a connection stores vectors under the allocation's strategy. */
@@ -1120,35 +1144,30 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           `Working-copy allocation ${allocationId} records no schema and this session has none to resolve it in.`,
         );
       }
-      const { owned, elsewhere } = partitionAllocationRelations(
-        await discoverAllocationRelations(transaction, physicalPrefix),
+      const plan = planAllocationRemoval(
+        allocationId,
         schema,
+        await discoverAllocationRelations(transaction, physicalPrefix),
       );
-      if (elsewhere.length > 0) {
-        throw new BranchError(
-          describeRelationsElsewhere(allocationId, schema, owned, elsewhere),
-          {
-            details: {
-              allocationId,
-              schema,
-              foundIn: elsewhere,
-              schemas: [...(owned.length > 0 ? [schema] : []), ...elsewhere],
-            },
-            suggestion:
-              owned.length > 0 ?
-                `Drop the stale copies in ${quotedSchemaList(elsewhere)} (a backup or restore schema, for example) and remove the allocation again.`
-              : `Move the tables back into "${schema}" or correct the ledger row's schema_name, then remove the allocation again.`,
+      if (plan.action === "refuse") {
+        throw new BranchError(plan.message, {
+          details: {
+            allocationId,
+            schema,
+            foundIn: plan.foundIn,
+            schemas: plan.schemas,
           },
-        );
+          suggestion: plan.suggestion,
+        });
       }
       // One statement, so the tables that reference each other go together. A
       // failure aborts the transaction and keeps the ledger row: the
       // allocation stays listed and recoverable.
-      if (owned.length > 0) {
+      if (plan.owned.length > 0) {
         await rows(
           transaction,
           sql.raw(
-            `DROP TABLE ${owned
+            `DROP TABLE ${plan.owned
               .map(
                 (name) =>
                   `${quoteDdlIdentifier(schema)}.${quoteDdlIdentifier(name)}`,

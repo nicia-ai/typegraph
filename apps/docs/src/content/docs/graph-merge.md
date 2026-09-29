@@ -1667,14 +1667,20 @@ tables that removal never finds.
   for `abortAllocation()` once the dependency is gone. If any such relation sits
   in a different schema, removal refuses with a `BranchError` that names the
   schemas found and keeps the row, because deleting the row would discard the
-  only pointer to them. That covers a renamed schema or moved tables (the message
-  says the relations are "not in its schema"; move the tables back or correct the
-  row's `schema_name` and remove again) and a stale copy of any allocation
-  relation left in another schema, such as a backup or restore schema (the
-  message says the allocation "also has relations" there; drop the copy and
-  remove again, since the copy blocks removal until it is gone). `details`
-  carries `allocationId`, `schema`, `foundIn`, and `schemas`, and `suggestion`
-  names the recovery step. If the
+  only pointer to them. Three cases are worded differently. When the recorded
+  schema holds none of them, the schema was renamed or the tables moved (the
+  message says the relations are "not in its schema"; move the tables back or
+  correct the row's `schema_name` and remove again). When every relation found
+  elsewhere has a same-named relation in the recorded schema, it is a stale copy
+  left in another schema, such as a backup or restore schema (the message says
+  the allocation "also has relations" there; drop the copy and remove again,
+  since the copy blocks removal until it is gone). When some relations moved and
+  others stayed, for example one table moved to a backup schema while the rest
+  remain, the allocation is split and the relations elsewhere may be the only
+  copy (the message says the allocation "is split across schemas"; the
+  suggestion drops nothing, so move the relations back or correct the row's
+  `schema_name`). `details` carries `allocationId`, `schema`, `foundIn`, and
+  `schemas`, and `suggestion` names the recovery step. If the
   allocation's relations exist nowhere (its tables were dropped entirely) there
   is nothing to recover, and removal deletes the ledger row, so a crashed owner's
   allocation cannot stay listed forever.

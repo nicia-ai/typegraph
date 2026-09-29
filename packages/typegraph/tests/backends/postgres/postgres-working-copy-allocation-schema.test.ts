@@ -783,6 +783,54 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
+    it("words a partial move as a split allocation and never suggests dropping the only copy of a moved table", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        await pool.query(`CREATE SCHEMA IF NOT EXISTS ${MOVED_SCHEMA}`);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const allocationId = await onlyUnsealedId(manager);
+        const recordedSchema = await currentSchema(pool);
+        // Only the nodes table leaves; the edges table stays where it was.
+        await pool.query(
+          `ALTER TABLE "${recordedSchema}"."${names.nodes}" SET SCHEMA ${MOVED_SCHEMA}`,
+        );
+
+        const failure = await rejectionOf(
+          manager.abortAllocation(allocationId),
+        );
+        expect(failure).toBeInstanceOf(BranchError);
+        const branchFailure = failure as BranchError;
+        expect(branchFailure.message).toContain("is split across schemas");
+        expect(branchFailure.message).toContain(`"${MOVED_SCHEMA}"`);
+        expect(branchFailure.message).not.toContain("also has relations");
+        expect(branchFailure.message).not.toContain("not in its schema");
+        expect(branchFailure.details).toMatchObject({
+          allocationId,
+          schema: recordedSchema,
+          foundIn: [MOVED_SCHEMA],
+          schemas: [recordedSchema, MOVED_SCHEMA],
+        });
+        expect(branchFailure.suggestion).not.toMatch(/drop the stale/i);
+        expect(branchFailure.suggestion).toContain("Drop nothing");
+        expect(branchFailure.suggestion).toContain(`"${MOVED_SCHEMA}"`);
+        expect(await ledgerRows(pool, names)).toHaveLength(1);
+
+        // The moved table is still the only copy; moving it back recovers.
+        await pool.query(
+          `ALTER TABLE ${MOVED_SCHEMA}."${names.nodes}" SET SCHEMA "${recordedSchema}"`,
+        );
+        await manager.abortAllocation(allocationId);
+        expect(await relationsOf(pool, names)).toEqual([]);
+        expect(await ledgerRows(pool, names)).toEqual([]);
+      } finally {
+        await pool.query(`DROP SCHEMA IF EXISTS ${MOVED_SCHEMA} CASCADE`);
+        await pool.end();
+      }
+    }, 60_000);
+
     it("removes the ledger row of an allocation whose tables were dropped entirely, so abort succeeds and it leaves the list", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
       try {
