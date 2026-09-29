@@ -19,6 +19,7 @@ import {
   type PostgresWorkingCopyManager,
 } from "../../../src/backend/postgres/working-copy";
 import {
+  branch,
   branchDurable,
   computeBaseVersion,
   reopenDurableBranch,
@@ -82,10 +83,13 @@ async function withHistorySource(
     await source.nodes.Person.create({ name: "Source" });
     const manager = createPostgresWorkingCopyManager<TestGraph>({
       control,
-      connect: (names) =>
+      connect: (names, allocation) =>
         Promise.resolve(
           createPostgresBackend(drizzle(pool), {
             tables: createPostgresTables(names),
+            ...(allocation === undefined ?
+              {}
+            : { vector: allocation.vectorStrategy }),
           }),
         ),
     });
@@ -209,6 +213,48 @@ describe.runIf(process.env["POSTGRES_URL"])(
               } finally {
                 await created.store.close();
                 await manager.abortAllocation(allocationId);
+              }
+            },
+          );
+        }, 60_000);
+
+        it("accepts and records writes from a history-enabled store over a makeBackend backend", async () => {
+          await withHistorySource(
+            revisionTracking,
+            async ({ graph, manager }) => {
+              const backend = await manager.makeBackend();
+              const [store] = await createStoreWithSchema(graph, backend, {
+                history: true,
+                revisionTracking,
+              });
+              try {
+                await store.nodes.Person.create({ name: "Source" });
+                await exerciseRecordedWrites(store);
+              } finally {
+                await store.close();
+              }
+            },
+          );
+        }, 60_000);
+
+        it("branches a history-enabled source over makeBackend into a writable copy", async () => {
+          await withHistorySource(
+            revisionTracking,
+            async ({ source, manager }) => {
+              const forked = unwrap(await branch(source, manager.makeBackend));
+              try {
+                const copy = forked.store;
+                const created = await copy.nodes.Person.create({
+                  name: "Copy",
+                });
+                await copy.nodes.Person.update(created.id, {
+                  name: "Copy updated",
+                });
+                await copy.nodes.Person.delete(created.id);
+                expect(await names(copy)).toEqual(["Source"]);
+                expect(await names(source)).toEqual(["Source"]);
+              } finally {
+                await forked.close();
               }
             },
           );
