@@ -6,6 +6,7 @@ import { getTableName } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
 import { resolveGraphVectorSlots } from "../../core/embedding";
+import { ConfigurationError } from "../../errors";
 import {
   compareBaseVersionAtTarget,
   computeBaseVersion,
@@ -79,6 +80,7 @@ const LEDGER = "typegraph_working_copy_allocations";
 const FORMAT_VERSION = 1;
 const STRATEGY_TYPE = "typegraph-postgres-tables";
 const DEFAULT_CLEANUP_LOCK_TIMEOUT_MS = 5000;
+const WORKING_COPY_ROLE_MISMATCH = "WORKING_COPY_ROLE_MISMATCH";
 
 type QuerySession = Pick<GraphBackend, "execute">;
 type AllocationState = "allocating" | "sealed" | "ephemeral";
@@ -104,6 +106,10 @@ type AllocationRow = Readonly<{
   vector_slots: readonly VectorSlotManifest[];
   created_at: string;
 }>;
+/** A ledger row read through `control`, carrying the role that read it. */
+type ObservedAllocationRow = AllocationRow & Readonly<{ control_role: string }>;
+/** What one session reports about itself; only the session can say. */
+type SessionFacts = Readonly<{ role: string; schema: string }>;
 
 /** A non-secret locator; only the ledger can map it to physical tables. */
 export type PostgresWorkingCopyLocator = Readonly<{ allocationId: string }>;
@@ -118,27 +124,30 @@ export type PostgresUnsealedAllocation = Readonly<{
 /**
  * `control` and `connect` must address the same PostgreSQL database as the
  * source. `control.transaction().execute` must support transactional DDL;
- * a separate root `executeDdl` port is not required. `connect` receives the complete generated name map and must bind a
- * new backend to those names. Source and connected backends must expose every
- * PostgreSQL table binding, including status relations, for attestation.
- * `connect` runs after allocation tables exist. For a cloned or durable copy of
- * a vector graph it also receives the allocation-scoped strategy, and for
- * `makeBackend` it always does (the graph is not known yet); pass it to
+ * a separate root `executeDdl` port is not required. `connect` receives the
+ * complete generated name map and must bind a new backend to those names.
+ * Source and connected backends must expose every PostgreSQL table binding,
+ * including status relations, for attestation. For a cloned or durable copy of
+ * a vector graph `connect` also receives the allocation-scoped strategy, and
+ * for `makeBackend` it always does (the graph is not known yet); pass it to
  * `createPostgresBackend({ vector: vectorStrategy })`. A `makeBackend`
  * connection must bind that strategy or disable vector support with
  * `vector: false`; any other strategy could create tables the allocation does
  * not own. `connect` may use any Drizzle PostgreSQL driver.
  *
- * Allocation, provisioning, and removal run through `control`, but a connected
- * Store issues its own boot-time DDL as the `connect` role (runtime
- * contribution markers, the revision journal, system and declared indexes,
- * vector tables an evolved graph introduces). That role needs `CREATE` on the
- * schema and ownership of the allocation's tables, or must share a role with
- * `control`. A `makeBackend` connection must also resolve the same creation
- * schema as `control`.
+ * `connect` runs after the allocation's tables exist, except for `makeBackend`,
+ * which connects first so it can refuse a bad connection before it writes
+ * anything.
  */
 export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
   control: GraphBackend;
+  /**
+   * Opens a backend over one allocation. Its session must run as the same
+   * PostgreSQL role as `control`: a connected Store creates objects that only
+   * their owner can drop, and `control` removes them. A different role is
+   * refused with a `ConfigurationError` whose `details.code` is
+   * `WORKING_COPY_ROLE_MISMATCH`, and the allocation is not left behind.
+   */
   connect: (
     names: PostgresTableNames,
     allocation?: Readonly<{ vectorStrategy: VectorStrategy }>,
@@ -711,10 +720,10 @@ async function cloneRelations(
 function readAllocation(
   control: GraphBackend,
   allocationId: string,
-): Promise<AllocationRow | undefined> {
-  return rows<AllocationRow>(
+): Promise<ObservedAllocationRow | undefined> {
+  return rows<ObservedAllocationRow>(
     control,
-    sql`SELECT allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+    sql`SELECT allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text, current_user::text AS control_role FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
   ).then((found) => found[0]);
 }
 
@@ -734,28 +743,70 @@ async function assertAllocationSession(
   }
 }
 
-async function currentSchemaOf(session: QuerySession): Promise<string> {
-  const observed = await rows<Readonly<{ schema: string | null }>>(
-    session,
-    sql`SELECT current_schema() AS schema`,
+/**
+ * The one decision that `control` and `connect` are the same database role. A
+ * connected Store creates objects (lazy vector tables, indexes, journals) that
+ * only their owner, or a member of the owning role, can drop; `control` removes
+ * every allocation, so a different role would leak them on close and abort.
+ */
+function assertSharedRole(controlRole: string, connectedRole: string): void {
+  if (controlRole === connectedRole) return;
+  throw new ConfigurationError(
+    `Working-copy connection runs as role "${connectedRole}" but the control backend runs as "${controlRole}"; both must be the same database role.`,
+    { code: WORKING_COPY_ROLE_MISMATCH, controlRole, connectedRole },
+    {
+      suggestion:
+        "Connect the working-copy backend with the control backend's database role.",
+    },
   );
-  return observed[0]?.schema ?? "";
+}
+
+async function observeSessionFacts(
+  session: QuerySession,
+): Promise<SessionFacts> {
+  const observed = await rows<
+    Readonly<{ role: string; schema: string | null }>
+  >(
+    session,
+    sql`SELECT current_user::text AS role, current_schema() AS schema`,
+  );
+  return { role: observed[0]?.role ?? "", schema: observed[0]?.schema ?? "" };
 }
 
 /**
- * Tables a connected Store creates lazily are issued unqualified, so they land
- * in the first creatable schema on the `connect` session's search_path, while
- * discovery and removal run unqualified through `control`. The two sessions
- * must therefore resolve the same creation schema, or those tables would
- * outlive the allocation with no ledger row naming them.
+ * A connection's role is observed by its own statement, ahead of the ledger
+ * token read: a role that differs from `control` usually lacks the privileges
+ * that read needs, and it must be refused with the typed role error rather
+ * than a permission failure. `controlRole` arrives folded into a ledger
+ * statement `control` already issued.
  */
-async function assertSharedCreationSchema(
+async function assertConnectionRole(
+  controlRole: string,
+  connected: QuerySession,
+): Promise<void> {
+  const connectedFacts = await observeSessionFacts(connected);
+  assertSharedRole(controlRole, connectedFacts.role);
+}
+
+/**
+ * Refuses a connection before it can create anything under a different role or
+ * schema than `control`. Tables a connected Store creates lazily are issued
+ * unqualified, so they land in the first creatable schema on the `connect`
+ * session's search_path, while discovery and removal run unqualified through
+ * `control`. The two sessions must therefore resolve the same creation schema,
+ * or those tables would outlive the allocation with no ledger row naming them.
+ */
+async function assertSharedSession(
   control: QuerySession,
   connected: QuerySession,
 ): Promise<void> {
-  const controlSchema = await currentSchemaOf(control);
-  const connectedSchema = await currentSchemaOf(connected);
-  if (controlSchema === "" || controlSchema !== connectedSchema) {
+  const controlFacts = await observeSessionFacts(control);
+  const connectedFacts = await observeSessionFacts(connected);
+  assertSharedRole(controlFacts.role, connectedFacts.role);
+  if (
+    controlFacts.schema === "" ||
+    controlFacts.schema !== connectedFacts.schema
+  ) {
     throw new BranchError(
       "Working-copy connection must create tables in the same schema as the control backend.",
     );
@@ -811,6 +862,15 @@ function assertMakeBackendVectorStrategy(
     throw new BranchError(
       "Working-copy connection must bind its allocation-scoped vector strategy or disable vector support; any other strategy could create tables the allocation does not own.",
     );
+  }
+}
+
+/** Close a connection whose setup failed; the caller's error wins. */
+async function closeQuietly(backend: GraphBackend | undefined): Promise<void> {
+  try {
+    await backend?.close();
+  } catch {
+    /* Preserve allocation error. */
   }
 }
 
@@ -965,11 +1025,12 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
    * The one owner of allocation provisioning: claim the ledger row, then
    * create the complete empty table set, vector sidecars, and base-schema
    * marker in the same transaction. Returns the private ownership token that
-   * every connection to the allocation must attest.
+   * every connection to the allocation must attest, and the role `control`
+   * provisioned it as.
    */
   async function provisionAllocation(
     provision: AllocationProvision,
-  ): Promise<string> {
+  ): Promise<Readonly<{ ownershipToken: string; controlRole: string }>> {
     const { allocationId, state, names, indexNames, vectorStrategy } =
       provision;
     const physicalPrefix = allocationPhysicalPrefix(names);
@@ -980,14 +1041,17 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       : vectorSlotManifest(provision.vectorSlots, vectorStrategy);
     await ensureLedger();
     const ownershipToken = globalThis.crypto.randomUUID();
-    await control.transaction(async (transaction) => {
+    const controlRole = await control.transaction(async (transaction) => {
       // The unique ledger prefix is the ownership claim for both bundled
       // tables and vector sidecars. Hold it through all provisioning DDL.
-      const claimed = await rows<Readonly<{ allocation_id: string }>>(
+      const claimed = await rows<
+        Readonly<{ allocation_id: string; role: string }>
+      >(
         transaction,
-        sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb) ON CONFLICT DO NOTHING RETURNING allocation_id`,
+        sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role`,
       );
-      if (claimed.length !== 1) {
+      const claim = claimed[0];
+      if (claimed.length !== 1 || claim === undefined) {
         throw new BranchError(
           "Working-copy allocation id or physical prefix is already owned.",
         );
@@ -1019,8 +1083,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         transaction,
         sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)),
       );
+      return claim.role;
     });
-    return ownershipToken;
+    return { ownershipToken, controlRole };
   }
 
   /** Release a provisioned allocation whose setup failed; the caller's error wins. */
@@ -1028,11 +1093,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     backend: GraphBackend | undefined,
     allocationId: string,
   ): Promise<void> {
-    try {
-      await backend?.close();
-    } catch {
-      /* Preserve allocation error. */
-    }
+    await closeQuietly(backend);
     try {
       await dropAllocation(allocationId);
     } catch {
@@ -1083,7 +1144,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       : createPgvectorStrategyForAllocation(physicalPrefix);
     const targetTables = createPostgresTables(names);
     const indexNames = await allocationIndexNames(source.graph, names);
-    const ownershipToken = await provisionAllocation({
+    const { ownershipToken, controlRole } = await provisionAllocation({
       allocationId,
       state,
       history: source.historyEnabled,
@@ -1103,6 +1164,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         : await connect(names, { vectorStrategy: targetVectorStrategy });
       backend = connectedBackend;
       assertTargetBindings(backend, names);
+      await assertConnectionRole(controlRole, backend);
       if (
         targetVectorStrategy !== undefined &&
         !bindsAllocationVectorStrategy(backend, targetVectorStrategy)
@@ -1264,6 +1326,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         : await connect(names, { vectorStrategy });
       try {
         assertTargetBindings(backend, names);
+        await assertConnectionRole(row.control_role, backend);
         if (
           vectorStrategy !== undefined &&
           !bindsAllocationVectorStrategy(backend, vectorStrategy)
@@ -1328,24 +1391,26 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     const vectorStrategy = createPgvectorStrategyForAllocation(
       allocationPhysicalPrefix(names),
     );
-    const ownershipToken = await provisionAllocation({
-      allocationId,
-      state: "ephemeral",
-      // Only a sealed allocation is ever reopened from these ledger columns.
-      history: false,
-      revisionTracking: false,
-      names,
-      indexNames: new Map(),
-      vectorSlots: [],
-      vectorStrategy: undefined,
-    });
-    let connected: GraphBackend | undefined;
+    // Connect first: every refusal below must precede the ledger claim and DDL.
+    const connected = await connect(names, { vectorStrategy });
+    let provisioned = false;
     try {
-      connected = await connect(names, { vectorStrategy });
       assertTargetBindings(connected, names);
       assertMakeBackendVectorStrategy(connected, vectorStrategy);
+      await assertSharedSession(control, connected);
+      const { ownershipToken } = await provisionAllocation({
+        allocationId,
+        state: "ephemeral",
+        // Only a sealed allocation is ever reopened from these ledger columns.
+        history: false,
+        revisionTracking: false,
+        names,
+        indexNames: new Map(),
+        vectorSlots: [],
+        vectorStrategy: undefined,
+      });
+      provisioned = true;
       await assertAllocationSession(connected, allocationId, ownershipToken);
-      await assertSharedCreationSchema(control, connected);
       // Schema-mutable on purpose: no fixed-schema guard or marker.
       const disposableBackend = wrapWithManagedClose(
         withoutBootstrapDdl(connected),
@@ -1358,7 +1423,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       );
       return disposableBackend;
     } catch (error) {
-      await discardAllocation(connected, allocationId);
+      if (provisioned) await discardAllocation(connected, allocationId);
+      else await closeQuietly(connected);
       throw error;
     }
   };

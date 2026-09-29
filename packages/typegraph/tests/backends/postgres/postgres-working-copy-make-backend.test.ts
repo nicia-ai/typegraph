@@ -20,18 +20,24 @@ import {
   createPostgresWorkingCopyManager,
   type PostgresWorkingCopyManager,
 } from "../../../src/backend/postgres/working-copy";
+import { ConfigurationError } from "../../../src/errors";
 import {
   branch,
+  branchDurable,
   branchForEvolution,
   type CandidateWriteSet,
   captureCandidateWriteSetTarget,
+  destroyDurableBranch,
   planCandidateWriteSet,
+  reopenDurableBranch,
 } from "../../../src/graph-merge";
+import { computeBaseVersion } from "../../../src/graph-merge/base-version";
 import { BranchError } from "../../../src/graph-merge/errors";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { defineNodeIndex } from "../../../src/indexes";
 import { allocationVectorTablePrefix } from "../../../src/query/dialect/vector/pgvector-strategy";
+import type { VectorStrategy } from "../../../src/query/dialect/vector-strategy";
 import { createStoreWithSchema } from "../../../src/store/store";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
@@ -39,6 +45,10 @@ const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const LEDGER = "typegraph_working_copy_allocations";
 const VALID_FROM = "2026-01-01T00:00:00.000Z";
+const ROLE_MISMATCH_CODE = "WORKING_COPY_ROLE_MISMATCH";
+// Roles are cluster-global; this name is reserved to this file.
+const OTHER_ROLE = "tg_make_backend_other_role";
+const OTHER_ROLE_PASSWORD = "other-role-password";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -136,6 +146,80 @@ function requireNames(
   const names = connectedNames[index];
   if (names === undefined) throw new Error("Allocation did not call connect.");
   return names;
+}
+
+async function dropOtherRole(pool: Pool): Promise<void> {
+  const existing = await pool.query(
+    "SELECT 1 FROM pg_roles WHERE rolname = $1",
+    [OTHER_ROLE],
+  );
+  if (existing.rowCount === 0) return;
+  await pool.query(`DROP OWNED BY ${OTHER_ROLE}`);
+  await pool.query(`DROP ROLE ${OTHER_ROLE}`);
+}
+
+/**
+ * Runs `run` with a pool that logs in as a second database role, then drops the
+ * role. The role holds no privileges beyond a login, as a least-privilege
+ * `connect` role would.
+ */
+async function withOtherRole<T>(
+  pool: Pool,
+  run: (otherPool: Pool) => Promise<T>,
+): Promise<T> {
+  await dropOtherRole(pool);
+  await pool.query(
+    `CREATE ROLE ${OTHER_ROLE} LOGIN PASSWORD '${OTHER_ROLE_PASSWORD}'`,
+  );
+  const otherUrl = new URL(TEST_DATABASE_URL);
+  otherUrl.username = OTHER_ROLE;
+  otherUrl.password = OTHER_ROLE_PASSWORD;
+  const otherPool = new Pool({ connectionString: otherUrl.toString(), max: 4 });
+  try {
+    return await run(otherPool);
+  } finally {
+    await otherPool.end();
+    await dropOtherRole(pool);
+  }
+}
+
+function connectOver(
+  pool: Pool,
+  connectedNames: PostgresTableNames[],
+  observeAtConnect?: (names: PostgresTableNames) => Promise<void>,
+) {
+  return async (
+    names: PostgresTableNames,
+    allocation?: Readonly<{ vectorStrategy: VectorStrategy }>,
+  ) => {
+    connectedNames.push(names);
+    await observeAtConnect?.(names);
+    return createPostgresBackend(drizzle(pool), {
+      tables: createPostgresTables(names),
+      ...(allocation === undefined ?
+        {}
+      : { vector: allocation.vectorStrategy }),
+    });
+  };
+}
+
+async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
+  try {
+    await pending;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the promise to reject.");
+}
+
+function expectRoleMismatch(error: unknown): void {
+  expect(error).toBeInstanceOf(ConfigurationError);
+  expect((error as ConfigurationError).details["code"]).toBe(
+    ROLE_MISMATCH_CODE,
+  );
+  expect((error as ConfigurationError).details["connectedRole"]).toBe(
+    OTHER_ROLE,
+  );
 }
 
 /**
@@ -727,6 +811,143 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(remaining.tables).toEqual([]);
       } finally {
+        await pool.end();
+      }
+    }, 60_000);
+    it("refuses a connection running as another role before it writes the ledger or any DDL", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        const connectedNames: PostgresTableNames[] = [];
+        const presentAtConnect: (string | undefined)[] = [];
+        // Ledger claims and DDL run only inside a `control` transaction.
+        let controlTransactions = 0;
+        let transactionsAtRefusal: number | undefined;
+        const source = createPostgresBackend(drizzle(pool));
+        const control = deriveBackend(source, {
+          transaction: (operation) => {
+            controlTransactions += 1;
+            return source.transaction(operation);
+          },
+        });
+        await withOtherRole(pool, async (otherPool) => {
+          const manager = createPostgresWorkingCopyManager<typeof personGraph>({
+            control,
+            connect: connectOver(otherPool, connectedNames, async (names) => {
+              const observed = await pool.query<{ present: string | null }>(
+                "SELECT to_regclass($1)::text AS present",
+                [`"${names.nodes}"`],
+              );
+              presentAtConnect.push(observed.rows[0]?.present ?? undefined);
+            }),
+          });
+
+          const failure = await rejectionOf(manager.makeBackend());
+
+          transactionsAtRefusal = controlTransactions;
+          expectRoleMismatch(failure);
+          expect(await manager.listUnsealedAllocations()).toEqual([]);
+        });
+        // `makeBackend` connects before provisioning, so the refusal precedes
+        // every allocation table and ledger write.
+        expect(presentAtConnect).toEqual([undefined]);
+        expect(transactionsAtRefusal).toBe(0);
+        expect(
+          await ownedRelations(pool, requireNames(connectedNames)),
+        ).toEqual({ tables: [], ledgerRows: 0 });
+      } finally {
+        await dropOtherRole(pool);
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses a differently-privileged clone connection with the role error and removes the allocation", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(personGraph, control, {
+          revisionTracking: true,
+        });
+        const connectedNames: PostgresTableNames[] = [];
+        // The role holds no ledger privilege: the role error must still win over
+        // the permission failure the ledger-token read would raise.
+        await withOtherRole(pool, async (otherPool) => {
+          const manager = createPostgresWorkingCopyManager<typeof personGraph>({
+            control,
+            connect: connectOver(otherPool, connectedNames),
+          });
+
+          const failure = await rejectionOf(
+            manager.durable.create(
+              source,
+              await computeBaseVersion(source),
+              asBranchId("role-mismatch-clone"),
+              "role-mismatch-clone-allocation",
+            ),
+          );
+
+          expectRoleMismatch(failure);
+          expect(await manager.listUnsealedAllocations()).toEqual([]);
+          expect(
+            await ownedRelations(pool, requireNames(connectedNames)),
+          ).toEqual({ tables: [], ledgerRows: 0 });
+        });
+      } finally {
+        await dropOtherRole(pool);
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses a reopen from another role and leaves the sealed allocation intact", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(personGraph, control, {
+          revisionTracking: true,
+        });
+        const sameRoleNames: PostgresTableNames[] = [];
+        const sameRole = createPostgresWorkingCopyManager<typeof personGraph>({
+          control,
+          connect: connectOver(pool, sameRoleNames),
+        });
+        const { branch: created, descriptor } = unwrap(
+          await branchDurable(source, sameRole.durable, {
+            id: asBranchId("role-mismatch-reopen"),
+            allocationId: "role-mismatch-reopen-allocation",
+          }),
+        );
+        await created.close();
+        try {
+          const otherNames: PostgresTableNames[] = [];
+          await withOtherRole(pool, async (otherPool) => {
+            const other = createPostgresWorkingCopyManager<typeof personGraph>({
+              control,
+              connect: connectOver(otherPool, otherNames),
+            });
+
+            const reopened = await reopenDurableBranch(
+              personGraph,
+              descriptor,
+              other.durable,
+            );
+
+            expect(isErr(reopened)).toBe(true);
+            expectRoleMismatch(
+              isErr(reopened) ? reopened.error.cause : undefined,
+            );
+          });
+          const intact = await ownedRelations(
+            pool,
+            requireNames(sameRoleNames),
+          );
+          expect(intact.ledgerRows).toBe(1);
+          expect(intact.tables).toEqual(
+            Object.values(requireNames(sameRoleNames)).toSorted(),
+          );
+        } finally {
+          unwrap(await destroyDurableBranch(descriptor, sameRole.durable));
+        }
+      } finally {
+        await dropOtherRole(pool);
         await pool.end();
       }
     }, 60_000);

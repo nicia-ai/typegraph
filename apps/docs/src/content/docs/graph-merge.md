@@ -1491,8 +1491,10 @@ in the source PostgreSQL database. It derives the table inventory and base
 schema marker from TypeGraph's PostgreSQL schema contributions, copies the
 source graph with fenced `INSERT ... SELECT` statements, and records ownership
 in `typegraph_working_copy_allocations`. The control backend, source backend,
-and backends returned by `connect` must all reach the same database. TypeGraph
-checks the allocation's private ownership token through each connection.
+and backends returned by `connect` must all reach the same database, and
+`control` and `connect` must run as the same role
+([One database role](#one-database-role)). TypeGraph checks the allocation's
+private ownership token through each connection.
 The control backend must execute DDL inside its PostgreSQL transactions;
 its root `executeDdl` port is not required.
 
@@ -1556,9 +1558,10 @@ history mode, or revision-tracking mode.
 The source backend and every backend returned by `connect` must expose the
 complete PostgreSQL `tableNames` inventory, including history, identity, and
 status relations. The manager refuses missing or mismatched bindings with a
-`BranchError` before cloning or opening a Store. `connect` runs after the
-allocation tables are created, so custom callbacks may inspect those tables;
-on binding failure, the manager removes the new tables and ledger row.
+`BranchError` before cloning or opening a Store. For `ephemeral` and `durable`,
+`connect` runs after the allocation tables are created, so custom callbacks may
+inspect those tables; on binding failure, the manager removes the new tables and
+ledger row. `makeBackend` connects earlier, before it provisions anything.
 
 The table-backed strategy supports bundled tsvector fulltext, declared
 PostgreSQL B-tree, GIN, and trigram graph indexes, and pgvector sidecars. It
@@ -1589,6 +1592,28 @@ inventory. A connection with fulltext disabled is refused for the same reason.
 System index maintenance remains available. Source table locks cover the
 entire TypeGraph relation set and vector sidecars while the SQL clone runs, so a
 large clone briefly blocks writes to other graphs in the same database.
+
+#### One database role
+
+The manager supports one deployment shape: the `control` backend and every
+session `connect` returns run as the **same PostgreSQL role**. TypeGraph reads
+`current_user` on both sessions and refuses a difference with a
+`ConfigurationError` whose `details.code` is `WORKING_COPY_ROLE_MISMATCH`, and
+the refused allocation is not left behind.
+
+The reason is ownership. A `control` session provisions and removes every
+allocation, but the Store that opens on a connected backend issues its own DDL:
+runtime-contribution markers, the revision journal and its triggers, system and
+declared indexes, and vector tables an evolved graph introduces. Only a table's
+owner can drop it, so a different `connect` role would leave the tables it
+creates behind on close and `abortAllocation`. The shared role therefore needs
+`CREATE` on the schema.
+
+`makeBackend` calls `connect` before it writes the ledger row or any DDL and
+refuses a mismatch there, so nothing is allocated. `ephemeral` and `durable`
+call `connect` after their allocation tables exist, so they refuse right after
+it, before cloning or opening a Store, and remove the new allocation; a durable
+reopen refuses the same way and leaves the sealed allocation untouched.
 
 #### `makeBackend` for branches, candidate planning, and evolution previews
 
@@ -1637,27 +1662,13 @@ Because the graph is unknown when the backend is allocated:
 - **Fulltext.** The same bundled `tsvectorStrategy` requirement applies as for
   the cloned copies.
 
-Allocation, provisioning, and removal run through the manager's `control`
-backend, but the Store that opens on the returned backend issues its own DDL as
-the `connect` role. Every boot-time ensure does: runtime-contribution markers,
-the revision journal and its triggers, system indexes, declared graph indexes,
-and vector tables an evolved graph introduces. PostgreSQL checks `CREATE` on
-the schema before it evaluates `IF NOT EXISTS`, and table ownership before an
-index statement that would be a no-op, so a role with only DML on the
-allocation's tables and `SELECT` on `typegraph_working_copy_allocations` is not
-enough: `branch`, `planCandidateWriteSet`, and `branchForEvolution` fail on
-their first Store open. Give the `connect` role `CREATE` on the schema and
-ownership of the allocation's tables (or the `TRIGGER` privilege where the
-revision journal is installed), or let it share a role with `control`. Tables
-the `connect` role creates are dropped through `control`, which must be a member
-of the role that owns them.
-
-`control` and `connect` must also resolve the same creation schema. A Store
-creates lazy tables, such as vector tables, unqualified, so they land in the
-first creatable schema on the `connect` session's `search_path`; `control`
-discovers and drops them through its own. `makeBackend` compares `current_schema()`
-on both sessions and refuses a mismatch with a `BranchError`, which matters when
-`connect` uses a role with its own `"$user"` schema.
+`control` and `connect` must run as the same role
+([One database role](#one-database-role)) and must also resolve the same creation
+schema. A Store creates lazy tables, such as vector tables, unqualified, so they
+land in the first creatable schema on the `connect` session's `search_path`;
+`control` discovers and drops them through its own. `makeBackend` compares
+`current_schema()` on both sessions and refuses a mismatch with a `BranchError`,
+which matters when `connect` uses a role with its own `"$user"` schema.
 
 ### Forked working copies
 
