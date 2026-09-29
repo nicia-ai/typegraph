@@ -1605,9 +1605,11 @@ The reason is ownership. A `control` session provisions and removes every
 allocation, but the Store that opens on a connected backend issues its own DDL:
 runtime-contribution markers, the revision journal and its triggers, system and
 declared indexes, and vector tables an evolved graph introduces. Only a table's
-owner can drop it, so a different `connect` role would leave the tables it
-creates behind on close and `abortAllocation`. The shared role therefore needs
-`CREATE` on the schema.
+owner (or a member of the owning role, or a superuser) can drop it, and the
+comparison is by role name, so a `connect` role that is merely a member of
+`control`'s role is refused rather than trusted. A different role would leave
+the tables it creates behind on close and `abortAllocation`. The shared role
+therefore needs `CREATE` on the schema.
 
 `makeBackend` calls `connect` before it writes the ledger row or any DDL and
 refuses a mismatch there, so nothing is allocated. `ephemeral` and `durable`
@@ -1668,7 +1670,7 @@ schema. A Store creates lazy tables, such as vector tables, unqualified, so they
 land in the first creatable schema on the `connect` session's `search_path`;
 `control` discovers and drops them through its own. `makeBackend` compares
 `current_schema()` on both sessions and refuses a mismatch with a `BranchError`,
-which matters when `connect` uses a role with its own `"$user"` schema.
+which matters when the two sessions have different `search_path` settings.
 
 ### Forked working copies
 
