@@ -950,8 +950,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   fenceSql: {
     kind: "reasoned",
     reason:
-      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.",
-    accesses: 2,
+      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The exceptions are the two session-isolation reads, which take the bare `isolationFactExpression` and are gated on `dialect`, not on a resolved fence plan, so there is no plan to read it through: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) reads `target.fenceSql` directly, and the graph storage inventory (`backend/graph-storage.ts`) folds the expression into its first count statement to report whether its counts shared one snapshot.",
+    accesses: 3,
   },
   commitSchemaVersionIfKindsEmpty: {
     kind: "reasoned",

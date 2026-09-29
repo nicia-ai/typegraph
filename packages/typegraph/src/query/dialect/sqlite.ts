@@ -128,6 +128,7 @@ export const sqliteDialect: DialectAdapter = {
     supportsFulltext: true,
     subgraphMembershipStrategy: "inline-cte",
     textIndexOrderIsBinary: true,
+    transactionReadsShareOneSnapshot: true,
   },
 
   binaryText(expression) {

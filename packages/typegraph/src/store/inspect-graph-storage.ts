@@ -48,7 +48,21 @@ function vectorRelationTargets<G extends GraphDef>(
  * on a store with live (non-history) revision tracking, which reseeds its clock
  * inside the clear transaction. Every other relation reads `0`.
  *
- * Read-only: one snapshot where the backend supports read-only transactions.
+ * Read-only, and reports whether its counts share one snapshot in
+ * `consistency`. It asks for one read-only `repeatable read` transaction and
+ * then observes the isolation level the counting session actually ran under,
+ * rather than trusting the request:
+ *
+ * - `"snapshot"`: every count came from one snapshot. SQLite transactions are
+ *   always one snapshot; on PostgreSQL the session was observed at
+ *   `repeatable read` or `serializable`.
+ * - `"per-statement"`: each relation was counted by its own statement, so a
+ *   write between two counts can leave `relations` and `totalRows` describing a
+ *   state that never existed. This is the result on a backend without
+ *   interactive transactions (Cloudflare D1, `neon-http`), or a
+ *   transaction whose session ran at `read committed` because a wrapper dropped
+ *   the isolation option. Read such counts as a lower-fidelity diagnostic:
+ *   quiesce writers first, or read twice and compare.
  *
  * ```typescript
  * await store.clear();

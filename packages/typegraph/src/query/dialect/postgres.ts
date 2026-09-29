@@ -174,6 +174,7 @@ export const postgresDialect: DialectAdapter = {
     supportsFulltext: true,
     subgraphMembershipStrategy: "materialized-ids",
     textIndexOrderIsBinary: false,
+    transactionReadsShareOneSnapshot: false,
   },
 
   binaryText(expression) {

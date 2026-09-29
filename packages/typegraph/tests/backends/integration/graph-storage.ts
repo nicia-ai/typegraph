@@ -316,6 +316,17 @@ export function registerGraphStorageIntegrationTests(
       }
     });
 
+    it("reports the counts of every relation as one snapshot", async () => {
+      const store = await populateNeighbor();
+
+      const inspection = await inspectGraphStorage(store);
+
+      // One statement per relation: a single count could not disagree with
+      // itself, so the label would prove nothing.
+      expect(inspection.relations.length).toBeGreaterThan(1);
+      expect(inspection.consistency).toBe("snapshot");
+    });
+
     for (const preserveContributionMaterializations of [true, false]) {
       it(`empties every relation on clear() (preserve contribution markers: ${String(preserveContributionMaterializations)}) and leaves another graph untouched`, async () => {
         const { store } = await populatePrimary();

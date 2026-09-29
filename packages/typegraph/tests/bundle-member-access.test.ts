@@ -43,8 +43,9 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // The managed PostgreSQL copy checks target names and guards five optional
 // schema-writing ports before handing its backend to a fixed-schema Store.
 // Candidate one-active and durable edge identity planning add four accesses.
-// The graph storage inventory resolves the graph-relation names once: 123 -> 124.
-const REASONED_FLOOR = 124;
+// The graph storage inventory resolves the graph-relation names once and reads
+// the session isolation expression once: 123 -> 125.
+const REASONED_FLOOR = 125;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -70,7 +71,7 @@ const REASONED_FLOOR = 124;
 const DEFERRED_LIVE_TOTAL = 238;
 const DEFERRED_DECLARED_TOTAL = 243;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 375;
+const TOTAL_ROW_COUNT = 376;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -217,7 +218,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 375)", () => {
+  it("the class partition covers every scanned row (total 376)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

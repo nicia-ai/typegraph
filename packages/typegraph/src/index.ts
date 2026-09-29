@@ -277,6 +277,7 @@ export {
 // ============================================================
 
 export {
+  type GraphStorageConsistency,
   type GraphStorageInspection,
   type GraphStorageRelation,
   listGraphIds,

@@ -4428,10 +4428,14 @@ export type GraphNodeReference<G extends GraphDef> = {
 }[NodeKinds<G>];
 
 // @public
+export type GraphStorageConsistency = "snapshot" | "per-statement";
+
+// @public
 export type GraphStorageInspection = Readonly<{
     graphId: string;
     relations: readonly GraphStorageRelation[];
     totalRows: number;
+    consistency: GraphStorageConsistency;
 }>;
 
 // @public

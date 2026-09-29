@@ -435,6 +435,37 @@ row after a clear, by design:
 
 Every other relation reads `0` after a clear, and other graphs in the same database are untouched.
 
+#### Consistency of the counts
+
+Each relation is counted by its own statement, so `relations` and `totalRows` describe one state of
+the graph only when every statement read the same snapshot. The result carries a `consistency`
+field that says whether they did:
+
+| `consistency` | Meaning |
+| --- | --- |
+| `"snapshot"` | Every count came from one snapshot: `relations` and `totalRows` describe a state the graph was in. |
+| `"per-statement"` | Each relation was counted independently. A write between two counts can leave the result describing a state that never existed together, for example rows in `nodes` beside an empty `schemaVersions`. |
+
+The read asks for a read-only `repeatable read` transaction, but it does not trust the request: a
+transaction wrapper can drop the isolation option, and a role or database can default the level.
+The effective level is read on the counting session itself, inside the first count statement, so
+the answer costs no extra round trip. What that gives on each backend:
+
+- **SQLite (better-sqlite3, libSQL, and other drivers with interactive transactions):**
+  always `"snapshot"`. A SQLite transaction reads one snapshot whatever level was requested.
+- **PostgreSQL (`pg`, `postgres-js`, PGlite):** `"snapshot"` when the session was observed at
+  `repeatable read` or `serializable`, which is what the request produces. `"per-statement"` when
+  it ran at `read committed`, which happens when a wrapper around `backend.transaction` does not
+  forward its options and the role or database defaults to `read committed`. A backend that
+  declares no session isolation read cannot be observed and reports `"per-statement"`.
+- **Backends without interactive transactions (Cloudflare D1, `neon-http`):** `"per-statement"`,
+  because there is no transaction to share a snapshot. The exception is a graph with at most one
+  provisioned relation, which is one statement and so trivially consistent.
+
+The read never refuses on a weaker level: it is a diagnostic. Treat `"per-statement"` counts as an
+approximation. To verify a clear with them, make sure nothing else writes the graph while you read,
+or read twice and compare.
+
 ## Shared Subgraph Helpers
 
 When multiple graphs share a common set of node and edge types, you can write reusable

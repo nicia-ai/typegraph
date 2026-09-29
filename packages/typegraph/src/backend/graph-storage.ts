@@ -17,6 +17,7 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { requireCatalog } from "./capabilities/catalog";
 import { resolveRecursiveTraversal } from "./capabilities/recursive-traversal";
+import { normalizeGraphCommandIsolation } from "./command-contract";
 import {
   GRAPH_ID_COLUMN,
   GRAPH_PRESENCE_ANCHOR_KEYS,
@@ -27,8 +28,11 @@ import {
 import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "./table-contribution";
 import {
   type GraphBackend,
+  type GraphCommandIsolation,
+  type OptionalTransactionExecution,
   runOptionallyInTransaction,
   type TransactionBackend,
+  type TransactionOptions,
 } from "./types";
 
 /** Page size when {@link ListGraphIdsOptions.limit} is omitted. */
@@ -38,6 +42,18 @@ const DEFAULT_LIST_GRAPH_IDS_LIMIT = 100;
 const MAX_LIST_GRAPH_IDS_LIMIT = 1000;
 
 const LIST_GRAPH_IDS_OPERATION = "listGraphIds";
+
+/**
+ * The transaction {@link countGraphStorage} asks for: one snapshot for every
+ * count, and no writes. A request only: the backend may not honor the
+ * isolation level, so the counts report what the session actually ran under.
+ */
+const STORAGE_COUNT_TRANSACTION = {
+  isolationLevel: "repeatable_read",
+  accessMode: "read_only",
+} as const satisfies TransactionOptions;
+
+const SESSION_ISOLATION_COLUMN = "transaction_isolation";
 
 /** Options for {@link listGraphIds}. */
 export type ListGraphIdsOptions = Readonly<{
@@ -62,11 +78,31 @@ export type GraphStorageRelation = Readonly<{
   rows: number;
 }>;
 
+/**
+ * How far the counts of one {@link GraphStorageInspection} agree with each
+ * other:
+ *
+ * - `snapshot`: every count read the same snapshot of the database, so the
+ *   relations and `totalRows` describe one state that existed. Reported only
+ *   when the counting session proved it: a SQLite transaction, or a PostgreSQL
+ *   transaction observed running at `repeatable read` or `serializable`.
+ * - `per-statement`: each relation was counted by its own statement and a
+ *   concurrent write may fall between two of them, so the counts can describe
+ *   a state that never existed together. It is what a backend with no
+ *   interactive transactions, or a transaction whose session runs at `read
+ *   committed` (a wrapper dropped the requested isolation level under a
+ *   `read committed` default), yields. Quiesce writers before reading such counts as one state, or read
+ *   them again and compare.
+ */
+export type GraphStorageConsistency = "snapshot" | "per-statement";
+
 /** Row counts for one graph across every relation that can hold its rows. */
 export type GraphStorageInspection = Readonly<{
   graphId: string;
   relations: readonly GraphStorageRelation[];
   totalRows: number;
+  /** Whether the counts share one snapshot; see {@link GraphStorageConsistency}. */
+  consistency: GraphStorageConsistency;
 }>;
 
 /** A relation to count: its identity and physical table, before counting. */
@@ -76,7 +112,7 @@ export type GraphStorageRelationTarget = Pick<
 >;
 
 type ReadTarget = GraphBackend | TransactionBackend;
-type CountRow = Readonly<{ cnt: unknown }>;
+type CountRow = Readonly<{ cnt: unknown; transaction_isolation?: unknown }>;
 type GraphIdRow = Readonly<{ graph_id: string }>;
 
 function assertPageLimit(limit: number): void {
@@ -415,9 +451,64 @@ export function inventoryRelationTargets(
 }
 
 /**
+ * The session fact that decides whether `target`'s reads share one snapshot,
+ * as an expression to fold into a count statement. Absent when no evidence is
+ * needed (no transaction to ask about, or a dialect whose transactions are
+ * snapshots by construction) or none can be produced (a backend that declares
+ * no session isolation read), where the counts are reported per statement.
+ */
+function sessionIsolationExpression(
+  target: ReadTarget,
+  dialect: DialectAdapter,
+  execution: OptionalTransactionExecution,
+): SqlFragment | undefined {
+  if (execution.mode !== "interactive-transaction") return undefined;
+  if (dialect.capabilities.transactionReadsShareOneSnapshot) return undefined;
+  return target.fenceSql?.isolationFactExpression?.();
+}
+
+/** What the counting session showed about the snapshot its reads shared. */
+type SnapshotEvidence = Readonly<{
+  execution: OptionalTransactionExecution;
+  dialect: DialectAdapter;
+  countStatements: number;
+  observedIsolation: GraphCommandIsolation | undefined;
+}>;
+
+/**
+ * THE decision behind {@link GraphStorageInspection.consistency}. Fewer than
+ * two count statements cannot disagree with each other; otherwise one snapshot
+ * needs an interactive transaction that either the dialect guarantees or the
+ * session was observed to run at a snapshot isolation level. A requested level
+ * is never evidence.
+ */
+function storageConsistency(
+  evidence: SnapshotEvidence,
+): GraphStorageConsistency {
+  if (evidence.countStatements < 2) return "snapshot";
+  if (evidence.execution.mode !== "interactive-transaction") {
+    return "per-statement";
+  }
+  if (evidence.dialect.capabilities.transactionReadsShareOneSnapshot) {
+    return "snapshot";
+  }
+  return (
+      evidence.observedIsolation === "repeatable_read" ||
+        evidence.observedIsolation === "serializable"
+    ) ?
+      "snapshot"
+    : "per-statement";
+}
+
+/**
  * Counts one graph's rows in each of `relations` inside one read-only
- * transaction where the backend has them, so the counts describe one snapshot.
- * A relation whose table does not exist counts as zero.
+ * transaction requested at `repeatable read`, where the backend has
+ * transactions. A relation whose table does not exist counts as zero.
+ *
+ * The result says whether the counts share one snapshot rather than promising
+ * it: the effective isolation level is read on the counting session, folded
+ * into the first count statement, because a backend or wrapper may not honor
+ * the request.
  */
 export async function countGraphStorage(
   backend: GraphBackend,
@@ -427,25 +518,49 @@ export async function countGraphStorage(
 ): Promise<GraphStorageInspection> {
   return runOptionallyInTransaction(
     backend,
-    async (target) => {
+    async (target, execution) => {
       const present = await existingTables(
         target,
         relations.map((relation) => relation.table),
         operation,
       );
+      const dialect = getDialect(target.dialect);
+      const isolationExpression = sessionIsolationExpression(
+        target,
+        dialect,
+        execution,
+      );
       const counted: GraphStorageRelation[] = [];
+      let countStatements = 0;
+      let observedIsolation: GraphCommandIsolation | undefined;
       for (const { relation, table } of relations) {
-        const rows =
-          present.has(table) ? await countRows(target, table, graphId) : 0;
-        counted.push({ relation, table, rows });
+        if (!present.has(table)) {
+          counted.push({ relation, table, rows: 0 });
+          continue;
+        }
+        const read = await countRows(
+          target,
+          table,
+          graphId,
+          countStatements === 0 ? isolationExpression : undefined,
+        );
+        countStatements += 1;
+        observedIsolation ??= read.isolation;
+        counted.push({ relation, table, rows: read.rows });
       }
       return {
         graphId,
         relations: counted,
         totalRows: counted.reduce((total, entry) => total + entry.rows, 0),
+        consistency: storageConsistency({
+          execution,
+          dialect,
+          countStatements,
+          observedIsolation,
+        }),
       };
     },
-    { transaction: { accessMode: "read_only" } },
+    { transaction: STORAGE_COUNT_TRANSACTION },
   );
 }
 
@@ -453,11 +568,24 @@ async function countRows(
   target: ReadTarget,
   table: string,
   graphId: string,
-): Promise<number> {
-  const rows = await target.execute<CountRow>(
+  isolationExpression: SqlFragment | undefined,
+): Promise<
+  Readonly<{ rows: number; isolation: GraphCommandIsolation | undefined }>
+> {
+  const isolationColumn =
+    isolationExpression === undefined ?
+      sql``
+    : sql`, ${isolationExpression} AS ${sql.identifier(SESSION_ISOLATION_COLUMN)}`;
+  const [row] = await target.execute<CountRow>(
     asCompiledRowsSql(
-      sql`SELECT COUNT(*) AS cnt FROM ${sql.identifier(table)} WHERE ${sql.identifier(GRAPH_ID_COLUMN)} = ${graphId}`,
+      sql`SELECT COUNT(*) AS cnt${isolationColumn} FROM ${sql.identifier(table)} WHERE ${sql.identifier(GRAPH_ID_COLUMN)} = ${graphId}`,
     ),
   );
-  return safeCount(rows[0]?.cnt, table);
+  return {
+    rows: safeCount(row?.cnt, table),
+    isolation:
+      isolationExpression === undefined ? undefined : (
+        normalizeGraphCommandIsolation(row?.[SESSION_ISOLATION_COLUMN])
+      ),
+  };
 }
