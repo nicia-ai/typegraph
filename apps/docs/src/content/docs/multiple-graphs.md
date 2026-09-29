@@ -456,11 +456,16 @@ the answer costs no extra round trip. What that gives on each backend:
 - **PostgreSQL (`pg`, `postgres-js`, PGlite):** `"snapshot"` when the session was observed at
   `repeatable read` or `serializable`, which is what the request produces. `"per-statement"` when
   it ran at `read committed`, which happens when a wrapper around `backend.transaction` does not
-  forward its options and the role or database defaults to `read committed`. A backend that
+  forward its options and the role or database defaults to `read committed`; the same wrapper under a
+  `repeatable read` default still reports `"snapshot"`, because the level is observed, not requested. A backend that
   declares no session isolation read cannot be observed and reports `"per-statement"`.
 - **Backends without interactive transactions (Cloudflare D1, `neon-http`):** `"per-statement"`,
   because there is no transaction to share a snapshot. The exception is a graph with at most one
   provisioned relation, which is one statement and so trivially consistent.
+
+The evidence proves the isolation of the session that ran the first count. A backend wrapper that
+violates the transaction contract by handing the root pool through as its transaction backend can
+run later counts on other sessions, which no observation on the first one can detect.
 
 The read never refuses on a weaker level: it is a diagnostic. Treat `"per-statement"` counts as an
 approximation. To verify a clear with them, make sure nothing else writes the graph while you read,

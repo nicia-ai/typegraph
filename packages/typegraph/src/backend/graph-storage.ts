@@ -82,17 +82,31 @@ export type GraphStorageRelation = Readonly<{
  * How far the counts of one {@link GraphStorageInspection} agree with each
  * other:
  *
- * - `snapshot`: every count read the same snapshot of the database, so the
- *   relations and `totalRows` describe one state that existed. Reported only
- *   when the counting session proved it: a SQLite transaction, or a PostgreSQL
- *   transaction observed running at `repeatable read` or `serializable`.
- * - `per-statement`: each relation was counted by its own statement and a
- *   concurrent write may fall between two of them, so the counts can describe
- *   a state that never existed together. It is what a backend with no
- *   interactive transactions, or a transaction whose session runs at `read
- *   committed` (a wrapper dropped the requested isolation level under a
- *   `read committed` default), yields. Quiesce writers before reading such counts as one state, or read
- *   them again and compare.
+ * The rules, in the order the decision applies them:
+ *
+ * - Fewer than two count statements: `snapshot`, since one statement cannot
+ *   disagree with itself.
+ * - No interactive transactions: `per-statement`.
+ * - A SQLite transaction: `snapshot`, whatever level was requested.
+ * - A PostgreSQL transaction whose session was observed at `repeatable read`
+ *   or `serializable`: `snapshot`.
+ * - A session observed at `read committed`, or a backend that declares no
+ *   session isolation read so nothing can be observed: `per-statement`. A
+ *   wrapper that drops the requested isolation option lands here only when the
+ *   session default is `read committed`; under a `repeatable read` default the
+ *   observed level still yields `snapshot`.
+ *
+ * `snapshot` means every count read the same snapshot, so the relations and
+ * `totalRows` describe one state that existed. `per-statement` means each
+ * relation was counted by its own statement and a concurrent write may fall
+ * between two of them, so the counts can describe a state that never existed
+ * together; quiesce writers before reading such counts as one state, or read
+ * them again and compare.
+ *
+ * Known limit: the evidence proves the isolation of the session that ran the
+ * first count. A backend wrapper that violates the transaction contract by
+ * handing the root pool through as its transaction backend can run later
+ * counts on other sessions.
  */
 export type GraphStorageConsistency = "snapshot" | "per-statement";
 

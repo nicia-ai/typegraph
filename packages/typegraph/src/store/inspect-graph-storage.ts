@@ -53,16 +53,23 @@ function vectorRelationTargets<G extends GraphDef>(
  * then observes the isolation level the counting session actually ran under,
  * rather than trusting the request:
  *
- * - `"snapshot"`: every count came from one snapshot. SQLite transactions are
- *   always one snapshot; on PostgreSQL the session was observed at
- *   `repeatable read` or `serializable`.
+ * - `"snapshot"`: every count came from one snapshot. That holds for a SQLite
+ *   transaction, for a PostgreSQL session observed at `repeatable read` or
+ *   `serializable`, and trivially when fewer than two count statements ran.
  * - `"per-statement"`: each relation was counted by its own statement, so a
  *   write between two counts can leave `relations` and `totalRows` describing a
  *   state that never existed. This is the result on a backend without
- *   interactive transactions (Cloudflare D1, `neon-http`), or a
- *   transaction whose session ran at `read committed` because a wrapper dropped
- *   the isolation option. Read such counts as a lower-fidelity diagnostic:
- *   quiesce writers first, or read twice and compare.
+ *   interactive transactions (Cloudflare D1, `neon-http`), on a session
+ *   observed at `read committed` (for example when a wrapper drops the isolation
+ *   option under a `read committed` default; under a `repeatable read` default
+ *   the observed level still yields `"snapshot"`), and on a backend that
+ *   declares no session isolation read. Read such counts as a lower-fidelity
+ *   diagnostic: quiesce writers first, or read twice and compare.
+ *
+ * The evidence proves the isolation of the session that ran the first count. A
+ * backend wrapper that violates the transaction contract by handing the root
+ * pool through as its transaction backend can run later counts on other
+ * sessions.
  *
  * ```typescript
  * await store.clear();
