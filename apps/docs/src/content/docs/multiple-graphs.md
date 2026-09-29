@@ -378,16 +378,20 @@ for (;;) {
 Ids come back in byte order (UTF-8 code point order) on every backend, so `Tenant-x` sorts before
 `tenant-a` on SQLite and PostgreSQL alike and a cursor resumes exactly where the last page ended,
 whatever the database collation. The reserved deployment marker id that TypeGraph uses for
-deployment-scoped contribution markers is never listed. A graph appears while it has nodes, edges, a
-committed schema version or graph-local contribution markers, so a graph that has been fully removed
-with `store.clear({ preserveContributionMaterializations: false })` stops being listed, even when a
+deployment-scoped contribution markers is never listed. A graph appears while it has nodes, edges or a
+committed schema version, which are exactly the relations a default `store.clear()` empties. A
+cleared graph therefore stops being listed even though `store.clear()` keeps its contribution
+markers unless you pass `preserveContributionMaterializations: false`, and even when a
 revision-tracked store reseeded its `recordedClock` row during the clear.
 
-A page is small, but the query behind it is not: every call reads the `graph_id` column of those
-relations and de-duplicates it before the cursor and prefix apply, so the cost grows with the rows
-in the database rather than with `limit`. Use it for operator tooling, not on a request path. Rows
-that exist only outside those relations, such as orphaned recorded history, do not make a graph
-appear; `inspectGraphStorage` counts every relation.
+Each page walks the distinct graph ids by index seek, one seek per graph per relation on the
+`graph_id`-leading primary keys, instead of reading every row. The cost grows with the number of
+graphs rather than the rows they hold, and does not depend on `limit`. It pays off when graphs hold
+more than a few dozen rows each; a database of very many tiny graphs is the one shape where a page is
+not cheap. PostgreSQL keeps these keys in the database collation, so the cursor and prefix apply to
+the walk in byte order rather than skipping ahead of it. Use it for operator tooling, not on a
+request path. Rows that exist only outside those relations, such as orphaned recorded history or
+contribution markers, do not make a graph appear; `inspectGraphStorage` counts every relation.
 
 The read runs in one read-only transaction where the backend supports it. It needs the backend's
 catalog probes to tell a table that was never provisioned from an empty one, and throws

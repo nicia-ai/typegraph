@@ -8,8 +8,14 @@
  */
 import { getTableColumns, getTableName, is, type Table } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { PgTable } from "drizzle-orm/pg-core";
-import { SQLiteTable } from "drizzle-orm/sqlite-core";
+import {
+  getTableConfig as getPgTableConfig,
+  PgTable,
+} from "drizzle-orm/pg-core";
+import {
+  getTableConfig as getSqliteTableConfig,
+  SQLiteTable,
+} from "drizzle-orm/sqlite-core";
 import { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -29,6 +35,7 @@ import {
 } from "../src/backend/drizzle/schema/sqlite";
 import {
   GRAPH_ID_COLUMN,
+  GRAPH_PRESENCE_ANCHOR_KEYS,
   GRAPH_RELATION_CLEAR_SEQUENCE,
   GRAPH_RELATION_KEYS,
   GRAPH_RELATIONS,
@@ -304,5 +311,52 @@ describe("graph relation working-copy clone policies", () => {
       expect(isGraphRelationKey(logicalName)).toBe(true);
       expect(workingCopyClonePolicy.graphIdColumn).toBe(GRAPH_ID_COLUMN);
     }
+  });
+});
+
+/** The columns of the table's primary key, in key order, whichever dialect. */
+function primaryKeyColumns(table: Table): readonly string[] {
+  const primaryKey =
+    is(table, PgTable) ?
+      getPgTableConfig(table).primaryKeys[0]
+    : getSqliteTableConfig(table as SQLiteTable).primaryKeys[0];
+  return requireDefined(primaryKey, "table declares a primary key").columns.map(
+    (column) => column.name,
+  );
+}
+
+describe("graph presence anchors", () => {
+  it("are exactly the relations whose rows mean a graph holds data", () => {
+    // Stated independently of the declaration. Contribution markers are
+    // bookkeeping the default clear keeps, so anchoring on them would list a
+    // cleared graph forever.
+    expect(GRAPH_PRESENCE_ANCHOR_KEYS).toEqual([
+      "nodes",
+      "edges",
+      "schemaVersions",
+    ]);
+  });
+
+  it("are emptied by a default Store.clear()", () => {
+    for (const key of GRAPH_PRESENCE_ANCHOR_KEYS) {
+      const { clear } = graphRelationDeclaration(key);
+      expect(clear.kind, `relation ${key}`).toBe("delete");
+      expect(
+        "preservable" in clear && clear.preservable,
+        `relation ${key} survives a default clear`,
+      ).toBe(false);
+    }
+  });
+
+  describe.each(BINDINGS)("%s", (_label, tables) => {
+    it("lead their primary key with graph_id, so graph ids can be walked by index seek", () => {
+      const bound = drizzleTables(tables);
+      for (const key of GRAPH_PRESENCE_ANCHOR_KEYS) {
+        const table = requireDefined(bound.get(key), `table for ${key}`);
+        expect(primaryKeyColumns(table)[0], `relation ${key}`).toBe(
+          GRAPH_ID_COLUMN,
+        );
+      }
+    });
   });
 });

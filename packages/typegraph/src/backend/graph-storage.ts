@@ -15,9 +15,13 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { requireCatalog } from "./capabilities/catalog";
 import {
+  type RecursiveTraversalVerdict,
+  resolveRecursiveTraversal,
+} from "./capabilities/recursive-traversal";
+import {
   GRAPH_ID_COLUMN,
+  GRAPH_PRESENCE_ANCHOR_KEYS,
   GRAPH_RELATIONS,
-  type GraphRelationKey,
   type GraphRelationNames,
   resolveGraphRelationNames,
 } from "./graph-relations";
@@ -35,21 +39,6 @@ const DEFAULT_LIST_GRAPH_IDS_LIMIT = 100;
 const MAX_LIST_GRAPH_IDS_LIMIT = 1000;
 
 const LIST_GRAPH_IDS_OPERATION = "listGraphIds";
-
-/**
- * The relations a graph id is listed from. Every graph that holds data has a
- * committed schema version, nodes or edges, so these anchor a graph's presence
- * without reading the recorded history and the revision journal, which are the
- * largest relations and only ever hold rows for a graph these already list.
- * `inspectGraphStorage` still counts every relation, so rows orphaned outside
- * these anchors are visible there.
- */
-const LISTING_RELATION_KEYS = [
-  "nodes",
-  "edges",
-  "schemaVersions",
-  "contributionMaterializations",
-] as const satisfies readonly GraphRelationKey[];
 
 /** Options for {@link listGraphIds}. */
 export type ListGraphIdsOptions = Readonly<{
@@ -138,8 +127,66 @@ function prefixPredicate(prefix: string): SqlFragment {
   return sql`substr(${sql.identifier(GRAPH_ID_COLUMN)}, 1, length(CAST(${prefix} AS TEXT))) = CAST(${prefix} AS TEXT)`;
 }
 
+/**
+ * The next graph id after `previous` (or the first, when omitted) across every
+ * anchor table: one index seek per table on the table's own `graph_id`-leading
+ * primary key, however many rows the table holds. It compares in the column's
+ * native order, the order those indexes are kept in.
+ */
+function nextGraphId(
+  tables: readonly string[],
+  previous?: SqlFragment,
+): SqlFragment {
+  const graphId = sql.identifier(GRAPH_ID_COLUMN);
+  const seeks = tables.map(
+    (table) =>
+      sql`SELECT min(${graphId}) AS next_graph_id FROM ${sql.identifier(table)}${
+        previous === undefined ? sql`` : sql` WHERE ${graphId} > ${previous}`
+      }`,
+  );
+  return sql`SELECT min(next_graph_id) FROM (${sql.join(seeks, sql` UNION ALL `)}) AS next_ids`;
+}
+
+/**
+ * The `graph_ids` relation: every distinct graph id in the anchor tables, in
+ * the columns' native order. Where the engine recurses it is a loose index
+ * scan, a recursive CTE that steps from one graph id to the next by index seek
+ * instead of reading every row, so its cost is the number of distinct graphs
+ * rather than the rows they hold. An engine that declares no recursive
+ * traversal still lists graphs, from a de-duplicating scan of the same columns,
+ * the way weighted shortest path falls back to a predecessor walk.
+ */
+function distinctGraphIds(
+  recursiveTraversal: RecursiveTraversalVerdict,
+  tables: readonly string[],
+): SqlFragment {
+  const graphId = sql.identifier(GRAPH_ID_COLUMN);
+  if (!recursiveTraversal.supported) {
+    const scans = tables.map(
+      (table) => sql`SELECT ${graphId} FROM ${sql.identifier(table)}`,
+    );
+    return sql`WITH graph_ids(${graphId}) AS (${sql.join(scans, sql` UNION `)})`;
+  }
+  return sql`
+    WITH RECURSIVE graph_ids(${graphId}) AS (
+      ${nextGraphId(tables)}
+      UNION ALL
+      SELECT (${nextGraphId(tables, sql`graph_ids.${graphId}`)})
+      FROM graph_ids
+      WHERE graph_ids.${graphId} IS NOT NULL
+    )
+  `;
+}
+
+/**
+ * The statement behind one {@link listGraphIds} page: the distinct graph ids,
+ * then the cursor, prefix and page size applied in byte order over them. The
+ * same statement runs on every dialect; the only dialect-specific piece is the
+ * byte-order collation, which the dialect adapter owns.
+ */
 function listGraphIdsQuery(
   dialect: GraphBackend["dialect"],
+  recursiveTraversal: RecursiveTraversalVerdict,
   tables: readonly string[],
   options: Readonly<{ prefix: string; after: string; limit: number }>,
 ): SqlFragment {
@@ -148,17 +195,16 @@ function listGraphIdsQuery(
   // otherwise order and page by the database collation, and two databases
   // would disagree about where a mixed-case id sorts.
   const byteOrdered = getDialect(dialect).binaryText(graphId);
-  const branches = tables.map(
-    (table) => sql`SELECT ${graphId} FROM ${sql.identifier(table)}`,
-  );
   const conditions = [
+    sql`${graphId} IS NOT NULL`,
     sql`${graphId} <> ${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}`,
     ...(options.after === "" ? [] : [sql`${byteOrdered} > ${options.after}`]),
     ...(options.prefix === "" ? [] : [prefixPredicate(options.prefix)]),
   ];
   return sql`
+    ${distinctGraphIds(recursiveTraversal, tables)}
     SELECT ${graphId}
-    FROM (${sql.join(branches, sql` UNION `)}) AS graph_ids
+    FROM graph_ids
     WHERE ${sql.join(conditions, sql` AND `)}
     ORDER BY ${byteOrdered}
     LIMIT ${options.limit}
@@ -167,8 +213,12 @@ function listGraphIdsQuery(
 
 /**
  * The graph ids that hold data, in byte order, one bounded page at a time. A
- * graph is listed while it has nodes, edges, a committed schema version, or
- * graph-local contribution markers.
+ * graph is listed while it has nodes, edges, or a committed schema version:
+ * exactly the relations a default `store.clear()` empties, so a cleared graph
+ * is no longer listed even though graph-local contribution markers survive the
+ * clear. Rows that exist only in other relations (a stray revision-journal
+ * row, contribution markers) do not list a graph; `inspectGraphStorage` counts
+ * every relation and shows them.
  *
  * The order is the same on every backend: byte order of the UTF-8 id (code
  * point order), so `B` sorts before `a` on SQLite and PostgreSQL alike, and a
@@ -180,10 +230,12 @@ function listGraphIdsQuery(
  * are not enumerable without one; a graph with vector rows has node rows too.
  * Use `inspectGraphStorage` to see everything one graph holds.
  *
- * Cost: a page is small, but the query behind it is not. Every call reads the
- * `graph_id` column of the listed relations and de-duplicates it before the
- * cursor and prefix apply, so the work grows with the rows in those relations,
- * not with the page size. It is an operator read, not a hot-path lookup.
+ * Cost: each page walks the distinct graph ids by index seek (one seek per
+ * graph per anchor table, on the `graph_id`-leading primary keys), so the work
+ * grows with the number of graphs, not the rows they hold, and is independent
+ * of the page size. A backend that declares no recursive traversal reads and
+ * de-duplicates every anchor row instead. It is an operator read, not a
+ * hot-path lookup.
  *
  * ```typescript
  * let after: string | undefined;
@@ -206,7 +258,7 @@ export async function listGraphIds(
   const limit = options.limit ?? DEFAULT_LIST_GRAPH_IDS_LIMIT;
   assertPageLimit(limit);
   const names = graphRelationNames(backend);
-  const relationTables = LISTING_RELATION_KEYS.map((key) => names[key]);
+  const relationTables = GRAPH_PRESENCE_ANCHOR_KEYS.map((key) => names[key]);
 
   return runOptionallyInTransaction(
     backend,
@@ -222,11 +274,16 @@ export async function listGraphIds(
       if (tables.length === 0) return [];
       const rows = await target.execute<GraphIdRow>(
         asCompiledRowsSql(
-          listGraphIdsQuery(target.dialect, tables, {
-            prefix: options.prefix ?? "",
-            after: options.after ?? "",
-            limit,
-          }),
+          listGraphIdsQuery(
+            target.dialect,
+            resolveRecursiveTraversal(target.capabilities),
+            tables,
+            {
+              prefix: options.prefix ?? "",
+              after: options.after ?? "",
+              limit,
+            },
+          ),
         ),
       );
       return rows.map((row) => row.graph_id);

@@ -11,7 +11,9 @@
  *
  *  - `clear`: how `Store.clear()` removes the relation and in what order;
  *  - `workingCopyClonePolicy`: what a PostgreSQL working copy does with it;
- *  - `role`: whether the rows are graph content or per-graph bookkeeping.
+ *  - `role`: whether the rows are graph content or per-graph bookkeeping;
+ *  - `presenceAnchor`: whether a row here is what makes a graph "hold data" for
+ *    the graph id listing.
  *
  * The relations are identified by their logical key (`nodes`, `edges`, ...),
  * the same key the Drizzle table factories and `SqlTableNames` use, so custom
@@ -117,6 +119,16 @@ type GraphRelationBehavior = Readonly<{
   clear: GraphRelationClearBehavior;
   role: GraphRelationRole;
   /**
+   * A row in this relation is what makes a graph count as holding data, so the
+   * graph id listing anchors on it. Every graph that holds data has a row in
+   * each anchor, and the default `Store.clear()` empties each anchor (it is a
+   * `delete` that is not `preservable`), so a cleared graph stops being listed.
+   * Anchors also lead their primary key with `graph_id`, which is what lets the
+   * listing step from one graph id to the next by index seek. A test holds all
+   * three properties.
+   */
+  presenceAnchor?: true;
+  /**
    * The stack that creates the relation. `"fulltext"` relations exist only on a
    * backend with the fulltext stack enabled; a consumer that reads every
    * relation unconditionally must select with {@link graphRelationsProvisionedBy}.
@@ -146,12 +158,14 @@ const BEHAVIOR = {
   nodes: {
     clear: { kind: "delete", order: 12, missingTable: "required" },
     role: "content",
+    presenceAnchor: true,
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   edges: {
     clear: { kind: "delete", order: 11, missingTable: "required" },
     role: "content",
+    presenceAnchor: true,
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
@@ -224,6 +238,7 @@ const BEHAVIOR = {
   schemaVersions: {
     clear: { kind: "delete", order: 18, missingTable: "required" },
     role: "bookkeeping",
+    presenceAnchor: true,
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
@@ -297,6 +312,16 @@ export function graphRelationsProvisionedBy(
     (relation) => relation.provisionedBy === "base" || stack.fulltext,
   );
 }
+
+/**
+ * The relations the graph id listing anchors on, in declaration order: the
+ * relations whose rows mean a graph holds data and that a default
+ * `Store.clear()` empties.
+ */
+export const GRAPH_PRESENCE_ANCHOR_KEYS: readonly GraphRelationKey[] =
+  GRAPH_RELATIONS.filter((relation) => relation.presenceAnchor === true).map(
+    (relation) => relation.key,
+  );
 
 /** A relation `Store.clear()` empties with a graph-scoped statement. */
 export type GraphRelationClearStep = Readonly<{

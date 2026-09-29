@@ -33,6 +33,7 @@ import {
   listGraphIds,
   searchable,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { GRAPH_RELATIONS } from "../../../src/backend/graph-relations";
 import { sql } from "../../../src/query/sql-fragment";
 import {
@@ -42,6 +43,7 @@ import {
 import type { LiveStoreOptions } from "../../../src/store/types";
 import { compareCodePoints } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
+import { refuseRecursiveTraversal } from "./capability-refusals";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -142,6 +144,38 @@ function populatedRelations(inspection: GraphStorageInspection): string[] {
     .filter((relation) => relation.rows > 0)
     .map((relation) => relation.relation)
     .toSorted(compareCodePoints);
+}
+
+/**
+ * Wraps `backend` so the text of every statement its transactions execute is
+ * recorded, to see which arm of the listing query ran.
+ */
+function recordingStatements(
+  backend: GraphBackend,
+  statements: string[],
+): GraphBackend {
+  return deriveBackend(backend, {
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run(
+            deriveBackend(target, {
+              async execute<T>(
+                query: Parameters<typeof target.execute>[0],
+              ): Promise<readonly T[]> {
+                const compiled = target.compileSql?.(query);
+                if (compiled) statements.push(compiled.sql);
+                return target.execute<T>(query);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
+function listingStatements(statements: readonly string[]): string[] {
+  return statements.filter((statement) => statement.includes("graph_ids"));
 }
 
 const MAX_PAGES = 500;
@@ -375,6 +409,28 @@ export function registerGraphStorageIntegrationTests(
       expect(await listGraphIds(backend)).not.toContain(NEIGHBOR_GRAPH_ID);
     });
 
+    it("stops listing a graph after a default clear() that keeps its contribution markers, and still lists an uncleared graph", async () => {
+      const cleared = await openStore(neighborGraph);
+      await cleared.nodes.Note.create({ body: "Cleared with defaults." });
+      const kept = await openStore(trackedGraph);
+      await kept.nodes.Note.create({ body: "Never cleared." });
+      const backend = context.getBackend();
+      expect(await listGraphIds(backend)).toEqual(
+        expect.arrayContaining([NEIGHBOR_GRAPH_ID, trackedGraph.id]),
+      );
+
+      await cleared.clear();
+
+      // The default clear keeps the graph's contribution markers, which is the
+      // whole reason they cannot anchor a graph's presence.
+      const remaining = rowsByRelation(await inspectGraphStorage(cleared));
+      expect(remaining.get("contributionMaterializations")).toBeGreaterThan(0);
+      expect(remaining.get("nodes")).toBe(0);
+      const listed = await listGraphIds(backend);
+      expect(listed).not.toContain(NEIGHBOR_GRAPH_ID);
+      expect(listed).toContain(trackedGraph.id);
+    });
+
     it("counts a lazily provisioned relation that does not exist as zero", async () => {
       const store = await openStore(neighborGraph);
       await store.nodes.Note.create({ body: "Marker table goes away." });
@@ -465,6 +521,36 @@ export function registerGraphStorageIntegrationTests(
         expect(paged.indexOf("tenant-Z")).toBeLessThan(
           paged.indexOf("tenant-a"),
         );
+      });
+
+      it("lists the same graphs from a de-duplicating scan when the engine declares no recursive traversal", async () => {
+        const backend = context.getBackend();
+        await seedMixedCaseGraphs();
+        const walked: string[] = [];
+        const scanned: string[] = [];
+
+        const withWalk = await pageAll(recordingStatements(backend, walked), 3);
+        const withScan = await pageAll(
+          recordingStatements(
+            refuseRecursiveTraversal(
+              backend,
+              "test engine has no recursive CTE",
+            ),
+            scanned,
+          ),
+          3,
+        );
+
+        expect(withScan).toEqual(withWalk);
+        expect(withScan).toEqual(expect.arrayContaining([...MIXED_CASE_IDS]));
+        expect(listingStatements(walked).length).toBeGreaterThan(0);
+        expect(listingStatements(scanned).length).toBeGreaterThan(0);
+        for (const statement of listingStatements(walked)) {
+          expect(statement).toContain("WITH RECURSIVE");
+        }
+        for (const statement of listingStatements(scanned)) {
+          expect(statement).not.toContain("RECURSIVE");
+        }
       });
 
       it("matches a prefix as case-sensitive literal text", async () => {
