@@ -114,6 +114,15 @@ export type DialectCapabilities = Readonly<{
    * {@link DialectSubgraphMembershipStrategy}.
    */
   subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+
+  /**
+   * Whether an index over a text column is kept in byte order, the order
+   * {@link DialectAdapter.binaryText} imposes. When true, a read may seed an
+   * index walk at a byte-order bound and stop it early. PostgreSQL keeps text
+   * indexes in the database collation, so a byte-order bound cannot be
+   * expressed as an index range there.
+   */
+  textIndexOrderIsBinary: boolean;
 }>;
 
 /**

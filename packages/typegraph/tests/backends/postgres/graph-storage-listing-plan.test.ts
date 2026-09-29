@@ -5,6 +5,12 @@
  * anchor relation is stepped by `graph_id > previous` through an index. The
  * planner may still prefer a sequential scan of a tiny table; this proves the
  * index is eligible, not that it is chosen for every data distribution.
+ *
+ * PostgreSQL orders those indexes by the database collation, not by the byte
+ * order a page is defined in, so a page's cursor and limit cannot narrow the
+ * walk the way they do on SQLite. This also pins that cost: a page visits every
+ * graph id, and the test is the place to change when an index in byte order
+ * makes that untrue.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -27,7 +33,10 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { GraphBackend } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
-import type { CapturedStatement } from "../../test-utils";
+import {
+  type CapturedStatement,
+  graphIdWalkVisitCount,
+} from "../../test-utils";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -126,6 +135,13 @@ describe("listGraphIds PostgreSQL query plan", () => {
         new RegExp(String.raw`Index (Only )?Scan using \S+ on ${table}\b`),
       );
     }
+    const counted = graphIdWalkVisitCount(statement);
+    const visited = await pool.query<{ visited: string }>(counted.sql, [
+      ...counted.params,
+    ]);
+    // Three graphs; a page of one after the first would visit two if the walk
+    // could be bounded by them.
+    expect(Number(visited.rows[0]?.visited)).toBe(3);
     // Plain EXPLAIN leaves the correlated step out; ANALYZE shows it.
     expect(
       plan.match(/Index Cond: \(graph_id > graph_ids_1\.graph_id\)/g) ?? [],

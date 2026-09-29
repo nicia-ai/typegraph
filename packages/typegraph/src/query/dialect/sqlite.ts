@@ -127,6 +127,7 @@ export const sqliteDialect: DialectAdapter = {
     vectorMetrics: ["cosine", "l2"] as const,
     supportsFulltext: true,
     subgraphMembershipStrategy: "inline-cte",
+    textIndexOrderIsBinary: true,
   },
 
   binaryText(expression) {

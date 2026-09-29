@@ -210,10 +210,10 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "backend/graph-storage.ts",
-    line: "WITH RECURSIVE graph_ids(${graphId}) AS (",
+    line: "WITH RECURSIVE graph_ids(${graphId}, ${step}) AS (",
     site: "H",
     reason:
-      "distinctGraphIds walks the distinct graph ids of the anchor tables by index seek, and selects a de-duplicating scan instead when the verdict says the engine cannot recurse.",
+      "distinctGraphIds walks the distinct graph ids of the anchor tables by index seek (bounded to the page where the dialect keeps text indexes in byte order), and selects a de-duplicating scan instead when the verdict says the engine cannot recurse.",
   },
 ];
 

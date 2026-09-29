@@ -384,13 +384,18 @@ cleared graph therefore stops being listed even though `store.clear()` keeps its
 markers unless you pass `preserveContributionMaterializations: false`, and even when a
 revision-tracked store reseeded its `recordedClock` row during the clear.
 
-Each page walks the distinct graph ids by index seek, one seek per graph per relation on the
-`graph_id`-leading primary keys, instead of reading every row. The cost grows with the number of
-graphs rather than the rows they hold, and does not depend on `limit`. It pays off when graphs hold
-more than a few dozen rows each; a database of very many tiny graphs is the one shape where a page is
-not cheap. PostgreSQL keeps these keys in the database collation, so the cursor and prefix apply to
-the walk in byte order rather than skipping ahead of it. Use it for operator tooling, not on a
-request path. Rows that exist only outside those relations, such as orphaned recorded history or
+Each page walks graph ids by index seek, one seek per graph per relation on the `graph_id`-leading
+primary keys, instead of reading every row, so the cost never depends on how many rows a graph holds.
+What it does depend on differs by backend. SQLite keeps those indexes in byte order, so the walk
+starts at the cursor or prefix and stops after the page: a page costs about `limit` seeks wherever it
+sits, however many graphs the database holds. PostgreSQL keeps them in the database collation, which
+is not the byte order pages are defined in, so the cursor, prefix and page size filter the walk
+instead of bounding it: a page costs one seek per graph in the database (roughly 15 to 20
+microseconds each on the cluster it was measured on). That beats reading every row once graphs hold
+more than about 150 rows per relation each, and is slower than reading them below that, the shape
+of a database with very many tiny graphs. A backend that declares no recursive traversal reads and
+de-duplicates every row of those relations for each page. Use the listing for operator tooling, not on
+a request path. Rows that exist only outside those relations, such as orphaned recorded history or
 contribution markers, do not make a graph appear; `inspectGraphStorage` counts every relation.
 
 The read runs in one read-only transaction where the backend supports it. It needs the backend's

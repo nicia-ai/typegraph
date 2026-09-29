@@ -580,6 +580,55 @@ export function registerGraphStorageIntegrationTests(
         expect(await listGraphIds(backend, { prefix: "absent-" })).toEqual([]);
       });
 
+      it("pages exactly the ids a cursor, prefix and page size select, wherever they fall among the ids", async () => {
+        const backend = context.getBackend();
+        const before = await pageAll(backend, 1000);
+        await seedMixedCaseGraphs();
+        const everyId = [...before, ...MIXED_CASE_IDS].toSorted(
+          compareCodePoints,
+        );
+        const prefixes = [
+          undefined,
+          "tenant-",
+          "tenant",
+          "Tenant",
+          "tenant-\u{1F600}",
+          "zzz",
+        ];
+        // Cursors below, at, between, inside and past the prefixes' ranges,
+        // including ids that are not graphs.
+        const cursors = [
+          undefined,
+          "a",
+          "tenant-",
+          "tenant-B",
+          "tenant-Z",
+          "tenant-a",
+          "tenant-b",
+          "tenant-\uFF21",
+          "tenant-\u{1F600}",
+          "zzz",
+        ];
+
+        for (const prefix of prefixes) {
+          for (const after of cursors) {
+            for (const limit of [1, 2, 1000]) {
+              const expected = everyId
+                .filter(
+                  (id) =>
+                    (prefix === undefined || id.startsWith(prefix)) &&
+                    (after === undefined || compareCodePoints(id, after) > 0),
+                )
+                .slice(0, limit);
+              expect(
+                await listGraphIds(backend, { prefix, after, limit }),
+                `prefix=${String(prefix)} after=${String(after)} limit=${limit}`,
+              ).toEqual(expected);
+            }
+          }
+        }
+      });
+
       it("never lists the reserved deployment marker id", async () => {
         const backend = context.getBackend();
         const markerTable = requireDefined(

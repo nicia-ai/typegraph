@@ -1943,6 +1943,7 @@ export type DialectCapabilities = Readonly<{
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+    textIndexOrderIsBinary: boolean;
 }>;
 
 // @public

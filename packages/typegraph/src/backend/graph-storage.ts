@@ -127,53 +127,112 @@ function prefixPredicate(prefix: string): SqlFragment {
   return sql`substr(${sql.identifier(GRAPH_ID_COLUMN)}, 1, length(CAST(${prefix} AS TEXT))) = CAST(${prefix} AS TEXT)`;
 }
 
+/** Everything that decides which graph ids one page lists. */
+type GraphIdPage = Readonly<{ prefix: string; after: string; limit: number }>;
+
 /**
- * The next graph id after `previous` (or the first, when omitted) across every
- * anchor table: one index seek per table on the table's own `graph_id`-leading
- * primary key, however many rows the table holds. It compares in the column's
- * native order, the order those indexes are kept in.
+ * How a walk is narrowed to one page. Both parts are only an optimization: the
+ * page filter is applied over the walk's output either way, so a walk that is
+ * not narrowed lists the same ids, only after visiting more of them.
  */
-function nextGraphId(
+type GraphIdWalkBounds = Readonly<{
+  /** Conditions on the first graph id visited. */
+  seed: readonly SqlFragment[];
+  /** Conditions under which the walk visits one more graph id. */
+  continueWhile: readonly SqlFragment[];
+}>;
+
+const WALK_STEP_COLUMN = "step";
+
+const UNBOUNDED_WALK: GraphIdWalkBounds = { seed: [], continueWhile: [] };
+
+/**
+ * Where a walk may start and stop for `page`. The walk visits ids in the order
+ * the anchor indexes keep them, so it can start at the page's lower bound and
+ * stop after the page (or the prefix) ends only where that order is the byte
+ * order the page is defined in. Elsewhere the ids the page wants are scattered
+ * through the walk, and the walk must visit all of them.
+ *
+ * The seed bound is inclusive so it is one range condition on the index however
+ * the cursor and the prefix compare: the larger of the two, chosen by the
+ * engine's own comparison. When it lands on the cursor itself, that id is the
+ * one visit the page filter drops, so the walk is allowed one more step.
+ */
+function walkBounds(
+  dialect: GraphBackend["dialect"],
+  page: GraphIdPage,
+): GraphIdWalkBounds {
+  if (!getDialect(dialect).capabilities.textIndexOrderIsBinary)
+    return UNBOUNDED_WALK;
+  const graphId = sql.identifier(GRAPH_ID_COLUMN);
+  const hasCursor = page.after !== "";
+  const hasPrefix = page.prefix !== "";
+  const lowerBound =
+    hasCursor && hasPrefix ? sql`max(${page.after}, ${page.prefix})`
+    : hasCursor ? sql`${page.after}`
+    : sql`${page.prefix}`;
+  const visits = page.limit + (hasCursor ? 1 : 0);
+  return {
+    seed: hasCursor || hasPrefix ? [sql`${graphId} >= ${lowerBound}`] : [],
+    continueWhile: [
+      sql`${sql.identifier(WALK_STEP_COLUMN)} < ${visits}`,
+      ...(hasPrefix ? [prefixPredicate(page.prefix)] : []),
+    ],
+  };
+}
+
+/**
+ * The next graph id across every anchor table that satisfies `conditions`: one
+ * index seek per table on the table's own `graph_id`-leading primary key,
+ * however many rows the table holds.
+ */
+function smallestGraphId(
   tables: readonly string[],
-  previous?: SqlFragment,
+  conditions: readonly SqlFragment[],
 ): SqlFragment {
   const graphId = sql.identifier(GRAPH_ID_COLUMN);
+  const where = [
+    sql`${graphId} <> ${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}`,
+    ...conditions,
+  ];
   const seeks = tables.map(
     (table) =>
-      sql`SELECT min(${graphId}) AS next_graph_id FROM ${sql.identifier(table)}${
-        previous === undefined ? sql`` : sql` WHERE ${graphId} > ${previous}`
-      }`,
+      sql`SELECT min(${graphId}) AS next_graph_id FROM ${sql.identifier(table)} WHERE ${sql.join(where, sql` AND `)}`,
   );
   return sql`SELECT min(next_graph_id) FROM (${sql.join(seeks, sql` UNION ALL `)}) AS next_ids`;
 }
 
 /**
  * The `graph_ids` relation: every distinct graph id in the anchor tables, in
- * the columns' native order. Where the engine recurses it is a loose index
- * scan, a recursive CTE that steps from one graph id to the next by index seek
- * instead of reading every row, so its cost is the number of distinct graphs
- * rather than the rows they hold. An engine that declares no recursive
- * traversal still lists graphs, from a de-duplicating scan of the same columns,
- * the way weighted shortest path falls back to a predecessor walk.
+ * the columns' native order, without the reserved deployment marker id. Where
+ * the engine recurses it is a loose index scan, a recursive CTE that steps from
+ * one graph id to the next by index seek instead of reading every row, so its
+ * cost is the number of graphs visited rather than the rows they hold. An
+ * engine that declares no recursive traversal still lists graphs, from a
+ * de-duplicating scan of the same columns, the way weighted shortest path falls
+ * back to a predecessor walk.
  */
 function distinctGraphIds(
   recursiveTraversal: RecursiveTraversalVerdict,
   tables: readonly string[],
+  bounds: GraphIdWalkBounds,
 ): SqlFragment {
   const graphId = sql.identifier(GRAPH_ID_COLUMN);
   if (!recursiveTraversal.supported) {
     const scans = tables.map(
-      (table) => sql`SELECT ${graphId} FROM ${sql.identifier(table)}`,
+      (table) =>
+        sql`SELECT ${graphId} FROM ${sql.identifier(table)} WHERE ${graphId} <> ${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}`,
     );
     return sql`WITH graph_ids(${graphId}) AS (${sql.join(scans, sql` UNION `)})`;
   }
+  const step = sql.identifier(WALK_STEP_COLUMN);
   return sql`
-    WITH RECURSIVE graph_ids(${graphId}) AS (
-      ${nextGraphId(tables)}
+    WITH RECURSIVE graph_ids(${graphId}, ${step}) AS (
+      SELECT (${smallestGraphId(tables, bounds.seed)}), 1
       UNION ALL
-      SELECT (${nextGraphId(tables, sql`graph_ids.${graphId}`)})
+      SELECT (${smallestGraphId(tables, [sql`${graphId} > graph_ids.${graphId}`])}), graph_ids.${step} + 1
       FROM graph_ids
-      WHERE graph_ids.${graphId} IS NOT NULL
+      WHERE ${sql.join([sql`graph_ids.${graphId} IS NOT NULL`, ...bounds.continueWhile], sql` AND `)}
     )
   `;
 }
@@ -181,14 +240,15 @@ function distinctGraphIds(
 /**
  * The statement behind one {@link listGraphIds} page: the distinct graph ids,
  * then the cursor, prefix and page size applied in byte order over them. The
- * same statement runs on every dialect; the only dialect-specific piece is the
- * byte-order collation, which the dialect adapter owns.
+ * same statement runs on every dialect; what differs is how far the walk may be
+ * narrowed (see {@link walkBounds}) and the byte-order collation, which the
+ * dialect adapter owns.
  */
 function listGraphIdsQuery(
   dialect: GraphBackend["dialect"],
   recursiveTraversal: RecursiveTraversalVerdict,
   tables: readonly string[],
-  options: Readonly<{ prefix: string; after: string; limit: number }>,
+  page: GraphIdPage,
 ): SqlFragment {
   const graphId = sql.identifier(GRAPH_ID_COLUMN);
   // The dialect's own owner of "compare text by bytes": PostgreSQL would
@@ -197,17 +257,16 @@ function listGraphIdsQuery(
   const byteOrdered = getDialect(dialect).binaryText(graphId);
   const conditions = [
     sql`${graphId} IS NOT NULL`,
-    sql`${graphId} <> ${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}`,
-    ...(options.after === "" ? [] : [sql`${byteOrdered} > ${options.after}`]),
-    ...(options.prefix === "" ? [] : [prefixPredicate(options.prefix)]),
+    ...(page.after === "" ? [] : [sql`${byteOrdered} > ${page.after}`]),
+    ...(page.prefix === "" ? [] : [prefixPredicate(page.prefix)]),
   ];
   return sql`
-    ${distinctGraphIds(recursiveTraversal, tables)}
+    ${distinctGraphIds(recursiveTraversal, tables, walkBounds(dialect, page))}
     SELECT ${graphId}
     FROM graph_ids
     WHERE ${sql.join(conditions, sql` AND `)}
     ORDER BY ${byteOrdered}
-    LIMIT ${options.limit}
+    LIMIT ${page.limit}
   `;
 }
 
@@ -230,10 +289,14 @@ function listGraphIdsQuery(
  * are not enumerable without one; a graph with vector rows has node rows too.
  * Use `inspectGraphStorage` to see everything one graph holds.
  *
- * Cost: each page walks the distinct graph ids by index seek (one seek per
- * graph per anchor table, on the `graph_id`-leading primary keys), so the work
- * grows with the number of graphs, not the rows they hold, and is independent
- * of the page size. A backend that declares no recursive traversal reads and
+ * Cost: a page walks graph ids by index seek (one seek per graph per anchor
+ * table, on the `graph_id`-leading primary keys), never by reading the rows
+ * those graphs hold. Where the engine keeps text indexes in byte order (SQLite)
+ * the walk starts at the cursor or prefix and stops after the page, so a page
+ * costs about `limit` seeks wherever it sits. Where it does not (PostgreSQL
+ * orders those indexes by the database collation, so byte-order bounds are not
+ * index ranges) the walk visits every graph, so a page costs one seek per graph
+ * in the database. A backend that declares no recursive traversal reads and
  * de-duplicates every anchor row instead. It is an operator read, not a
  * hot-path lookup.
  *
