@@ -6,9 +6,12 @@
  * TypeGraph owns descriptor validation, sealed-origin attestation, request
  * canonicalization, and evidence validation; the host owns the database
  * mechanics. A strategy that cannot combine the mutation and its evidence in a
- * single atomic unit returns `unsupported` BEFORE touching the host, and
- * TypeGraph refuses rather than emulating atomicity with callbacks or best
- * effort.
+ * single atomic unit returns `unsupported` before it applies any mutation or
+ * writes any evidence (it may read host state to decide), and TypeGraph refuses
+ * rather than emulating atomicity with best effort or with callbacks that run
+ * outside the evidence transaction. A callback the strategy itself runs INSIDE
+ * that transaction (the bundled PostgreSQL manager's `apply`) is the host's
+ * atomic mutation, not an emulation of it.
  *
  * WHAT IS OPAQUE. Both `metadata` and `mutation` are JSON-safe host values.
  * TypeGraph never interprets their application fields; it canonicalizes them to
@@ -168,7 +171,8 @@ export type DurableOperationCapability<
 > = Readonly<{
   /**
    * Atomically applies `request.mutation` and records evidence, or returns
-   * `unsupported` having executed no host SQL or mutation.
+   * `unsupported` having applied no host mutation and written no evidence. A
+   * strategy may read host state to decide that it is unsupported.
    *
    * The host MUST:
    *   1. attest `expectedOrigin` against the allocation `descriptor` names;
@@ -619,7 +623,7 @@ function unsupportedError(
     {
       details: { strategyType, member },
       suggestion:
-        "Use a strategy whose `operations` capability provides atomic mutation-plus-evidence and evidence access; TypeGraph never emulates the atomic guarantee.",
+        "Use a strategy whose `operations` capability provides atomic mutation-plus-evidence and evidence access; TypeGraph never emulates the atomic guarantee outside the evidence transaction.",
     },
   );
 }

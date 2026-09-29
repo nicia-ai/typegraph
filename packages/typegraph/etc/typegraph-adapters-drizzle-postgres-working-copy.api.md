@@ -4758,6 +4758,12 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+export type PostgresWorkingCopyOperations<G extends GraphDef> = Readonly<{
+    graph: G;
+    apply: (transaction: TransactionContext<G>, mutation: JsonValue) => Promise<void>;
+}>;
+
+// @public
 export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
     control: GraphBackend;
     connect: (names: PostgresTableNames, allocation?: Readonly<{
@@ -4767,6 +4773,7 @@ export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
     reopenOptions?: (graph: G) => PostgresWorkingCopyReopenOptions;
     refreshStatistics?: boolean;
     cleanupLockTimeoutMs?: number;
+    operations?: PostgresWorkingCopyOperations<G>;
 }>;
 
 // @public

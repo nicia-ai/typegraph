@@ -82,6 +82,7 @@ import {
 export {
   advanceRevisionClock,
   ensureRevisionOrigin,
+  ensureRevisionOriginRow,
   ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
   readRecordedClock,
@@ -158,28 +159,124 @@ export type RecordedFlushInstants = ReadonlyMap<string, string>;
 type RecordedFlushObserver = (instants: RecordedFlushInstants) => void;
 
 const RECORDED_FLUSH_OBSERVER = Symbol("typegraph.recordedFlushObserver");
+const TRANSACTION_PRE_COMMIT_HOOK = Symbol(
+  "typegraph.transactionPreCommitHook",
+);
 
-type RecordedFlushObserverOptions = InternalTransactionOptions &
+/**
+ * @internal Work that runs exactly once on the still-open transaction session
+ * after every write-side bookkeeping step — the recorded-time capture flush or
+ * the revision-clock advance — and before COMMIT, so it observes the state the
+ * commit will publish. A throw rolls the whole transaction back.
+ */
+export type TransactionPreCommitHook = (
+  target: TransactionBackend,
+) => Promise<void>;
+
+/**
+ * One transaction attempt's pre-commit hook and which layer answers for firing
+ * it. `pending` hooks are fired by the Store itself; the recorded-capture
+ * backend `claim`s the hook instead when it runs the transaction, because only
+ * it knows when its capture flush has finished. Every attempt fires its hook
+ * exactly once.
+ */
+interface PreCommitHookSlot {
+  readonly hook: TransactionPreCommitHook;
+  state: "pending" | "claimed" | "fired";
+}
+
+type RecordedFlushOptions = InternalTransactionOptions &
   Readonly<{
     [RECORDED_FLUSH_OBSERVER]?: RecordedFlushObserver;
+    [TRANSACTION_PRE_COMMIT_HOOK]?: PreCommitHookSlot;
   }>;
 
 function readRecordedFlushObserver(
   options: InternalTransactionOptions | undefined,
 ): RecordedFlushObserver | undefined {
-  return (options as RecordedFlushObserverOptions | undefined)?.[
+  return (options as RecordedFlushOptions | undefined)?.[
     RECORDED_FLUSH_OBSERVER
   ];
 }
 
-function stripRecordedFlushObserver(
+function readPreCommitHookSlot(
+  options: InternalTransactionOptions | undefined,
+): PreCommitHookSlot | undefined {
+  return (options as RecordedFlushOptions | undefined)?.[
+    TRANSACTION_PRE_COMMIT_HOOK
+  ];
+}
+
+async function firePreCommitHook(
+  slot: PreCommitHookSlot,
+  target: TransactionBackend,
+): Promise<void> {
+  if (slot.state === "fired") {
+    throw new CompilerInvariantError(
+      "A transaction pre-commit hook was fired twice.",
+    );
+  }
+  slot.state = "fired";
+  await slot.hook(target);
+}
+
+/**
+ * @internal Options for ONE transaction attempt: a retried transaction reuses
+ * its options, and each attempt must fire the hook again, so the Store renews
+ * the hook's fired/claimed state per attempt.
+ */
+export function beginPreCommitHookAttempt(
+  options: InternalTransactionOptions | undefined,
+): InternalTransactionOptions | undefined {
+  const slot = readPreCommitHookSlot(options);
+  if (slot === undefined) return options;
+  return {
+    ...options,
+    [TRANSACTION_PRE_COMMIT_HOOK]: { hook: slot.hook, state: "pending" },
+  } as RecordedFlushOptions;
+}
+
+/**
+ * @internal The recorded-capture backend's claim on the transaction's
+ * pre-commit hook: it returns the function that fires the hook once the capture
+ * flush has run, or `undefined` when there is no hook or another layer already
+ * answers for it. A claimed hook is not fired by {@link settleTransactionPreCommitHook}.
+ */
+export function claimTransactionPreCommitHook(
+  options: InternalTransactionOptions | undefined,
+): ((target: TransactionBackend) => Promise<void>) | undefined {
+  const slot = readPreCommitHookSlot(options);
+  if (slot?.state !== "pending") return undefined;
+  slot.state = "claimed";
+  return (target) => firePreCommitHook(slot, target);
+}
+
+/**
+ * @internal The Store's end-of-callback step for the transaction's pre-commit
+ * hook, on the still-open transaction session: fires the hook unless a lower
+ * layer claimed it. Whichever layer runs the transaction, the hook therefore
+ * runs exactly once BEFORE COMMIT, so a layer that never sees or never honors
+ * the hook option cannot let the transaction commit without it.
+ */
+export async function settleTransactionPreCommitHook(
+  options: InternalTransactionOptions | undefined,
+  target: TransactionBackend,
+): Promise<void> {
+  const slot = readPreCommitHookSlot(options);
+  if (slot?.state === "pending") await firePreCommitHook(slot, target);
+}
+
+function stripRecordedFlushOptions(
   options: InternalTransactionOptions | undefined,
 ): InternalTransactionOptions | undefined {
   if (options === undefined) return undefined;
-  // Omit only the observer symbol; every other (current or future)
+  // Omit only the flush symbols; every other (current or future)
   // TransactionOptions field passes through to the wrapped backend untouched.
-  const { [RECORDED_FLUSH_OBSERVER]: _observer, ...backendOptions } =
-    options as RecordedFlushObserverOptions;
+  const {
+    [RECORDED_FLUSH_OBSERVER]: _observer,
+    [TRANSACTION_PRE_COMMIT_HOOK]: _hook,
+    ...backendOptions
+  } = options as RecordedFlushOptions;
   return backendOptions;
 }
 
@@ -188,9 +285,26 @@ export function withRecordedFlushObserver(
   observer: RecordedFlushObserver,
 ): InternalTransactionOptions {
   return {
-    ...stripRecordedFlushObserver(options),
+    ...options,
     [RECORDED_FLUSH_OBSERVER]: observer,
-  } as RecordedFlushObserverOptions;
+  } as RecordedFlushOptions;
+}
+
+/**
+ * @internal Attaches a {@link TransactionPreCommitHook} to transaction options.
+ * It runs once per transaction attempt, after the capture flush for a
+ * recorded-capture Store and after the write-transaction session otherwise (see
+ * {@link claimTransactionPreCommitHook} and
+ * {@link settleTransactionPreCommitHook}).
+ */
+export function withTransactionPreCommitHook(
+  options: InternalTransactionOptions | undefined,
+  hook: TransactionPreCommitHook,
+): InternalTransactionOptions {
+  return {
+    ...options,
+    [TRANSACTION_PRE_COMMIT_HOOK]: { hook, state: "pending" },
+  } as RecordedFlushOptions;
 }
 
 type RecordedTransactionScope = Readonly<{
@@ -1045,7 +1159,8 @@ export function createRecordedBackend(
 
     async transaction(fn, options) {
       const observer = readRecordedFlushObserver(options);
-      const backendOptions = stripRecordedFlushObserver(options);
+      const firePreCommitHook = claimTransactionPreCommitHook(options);
+      const backendOptions = stripRecordedFlushOptions(options);
       assertRequestedRecordedIsolation(backend, backendOptions);
       return backend.transaction(async (target) => {
         await assertRecordedCaptureTransactionIsolation(target, backendOptions);
@@ -1059,6 +1174,7 @@ export function createRecordedBackend(
         const result = await fn(scope.backend);
         const instants = await scope.flush();
         observer?.(instants);
+        await firePreCommitHook?.(target);
         return result;
       }, backendOptions);
     },

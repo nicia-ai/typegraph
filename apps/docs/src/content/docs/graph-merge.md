@@ -1553,7 +1553,13 @@ custom status table names; pass `reopenOptions` to restore process-local hooks
 or query options on a later process. An external `recordedRead` binding is
 refused because its relation is outside the owned table inventory. Reopen
 options cannot replace the allocation's schema, recorded-read binding,
-history mode, or revision-tracking mode.
+history mode, or revision-tracking mode. Pass `operations` to let
+`durable.operations` commit host mutations atomically with immutable evidence;
+see [Atomic operations and immutable evidence](#atomic-operations-and-immutable-evidence).
+Each durable allocation also owns an evidence table (`<prefix>op_evidence`) in
+the allocation's schema, addressed through that schema rather than the
+connection's `search_path`; destroy refuses to drop it while undelivered
+evidence remains.
 
 The source backend and every backend returned by `connect` must expose the
 complete PostgreSQL `tableNames` inventory, including history, identity, and
@@ -2099,8 +2105,9 @@ const outcome = unwrap(
   await operateDurableBranch(descriptor, durableStrategy, request),
 );
 if (outcome.outcome === "unsupported") {
-  // The strategy executed no host SQL; TypeGraph refuses rather than emulating
-  // atomicity with callbacks or best effort.
+  // The strategy applied no mutation and wrote no evidence; TypeGraph refuses
+  // rather than emulating atomicity with best effort or callbacks that run
+  // outside the evidence transaction.
   throw new Error(`Missing capabilities: ${outcome.dimensions.join(", ")}`);
 }
 console.log(outcome.outcome); // "applied" | "replayed"
@@ -2164,7 +2171,9 @@ capability: a strategy with no `operations` returns the explicit `unsupported`
 outcome (`dimensions: ["atomicMutation"]`) having executed no host call. `get`,
 `scan`, `markDelivered`, and `hasUndelivered` instead refuse with a typed
 `DurableOperationUnsupportedError`. TypeGraph never emulates the atomic
-guarantee.
+guarantee: a callback that runs inside the strategy's own evidence transaction
+(as `apply` does in the bundled PostgreSQL manager below) is the host's atomic
+mutation, while best effort or a callback outside that transaction is refused.
 
 **Destroy fence.** A strategy with `operations` MUST refuse destruction while
 undelivered evidence remains, throwing `DurableEvidenceUndeliveredError`;
@@ -2175,6 +2184,141 @@ Concurrent `operate` and `destroy` are serialized by the host's own transaction:
 either the operation commits first (destroy then observes undelivered evidence
 and refuses) or destroy commits first (the operation fails against the removed
 allocation). No partial state is ever observable.
+
+##### Bundled PostgreSQL manager
+
+`createPostgresWorkingCopyManager` implements the capability when given an
+`operations` option. `apply` is how the host's opaque mutation reaches the
+graph; TypeGraph still never interprets `mutation`.
+
+```typescript
+const copies = createPostgresWorkingCopyManager<typeof graph>({
+  control,
+  connect,
+  operations: {
+    graph,
+    // Runs inside the transaction that commits the evidence row. A throw rolls
+    // back both the mutation and the evidence.
+    apply: async (transaction, mutation) => {
+      await applyHostMutation(transaction, mutation);
+    },
+  },
+});
+
+const outcome = unwrap(
+  await operateDurableBranch(descriptor, copies.durable, request),
+);
+```
+
+`operations.graph` is required because a capability member receives only the
+descriptor, so the manager must reopen the allocation from the graph the host
+names. Before any connection or transaction opens, every member checks that
+graph against the sealed allocation's attested origin: its graph id and its
+version-blind definition hash must equal the ones the branch was forked with, so
+a graph that reuses the id with a different definition is refused. `apply`
+receives the transaction-scoped context of the allocation's fixed-schema Store,
+the same context `store.transaction` provides, so the allocation's fixed schema
+applies. Without the option, `copies.durable.operations` is undefined and
+`operateDurableBranch()` returns `unsupported` (`atomicMutation`).
+
+Each durable allocation owns one evidence relation under its ledger-reserved
+physical prefix, created in the provisioning transaction and dropped by destroy.
+The ledger records whether an allocation has one (`operation_evidence`).
+`operate` takes the allocation lock on the allocation's own transaction session,
+attests the sealed origin, resolves idempotency, takes the graph write lock,
+computes the `before` coordinates, calls `apply`, computes the `after`
+coordinates once the transaction's revision bookkeeping has run, and inserts
+undelivered evidence, all in one transaction. The allocation lock is a
+transaction-scoped advisory lock keyed on the allocation id, in a namespace of
+its own so it can never collide with a graph's write lock. It serializes
+operations per allocation, so the evidence sequence that backs the opaque scan
+cursor is commit order, and each operation's `before` equals the previous
+operation's `after` whenever every writer to the allocation goes through
+`operate` or takes the graph write lock. Ordinary writes take that lock on an
+allocation that tracks history or revisions, so a direct write cannot commit
+between `before` and `apply`; on an allocation that tracks neither, a direct
+write is not fenced and the evidence's `before`/`after` pair may include it.
+
+The graph write lock is graph-wide. While `apply` runs, tracked writes to the
+source graph and to every sibling working copy of it wait on that lock, so keep
+`apply` short and do not wait on other graph writers inside it.
+
+Coordinates always carry `base`. They also carry `revision`, the engine
+revision, when the allocation resolves lineage, which is when it tracks history
+or revisions; both are read on the transaction's own session so they describe
+one state. An allocation that tracks neither reports no `revision`, and its
+`base` values are content fingerprints, which read the whole graph twice per
+operation.
+
+**Isolation is observed, not assumed.** `operate`, `markDelivered`, and destroy
+each request READ COMMITTED, and the statement that takes the allocation lock
+also reports the isolation level its session actually runs at. Any other level
+is refused before anything is read or written, with a `ConfigurationError` whose
+`details.code` is `WORKING_COPY_ISOLATION_UNSUPPORTED`, because the request is
+honored only where a backend supports it and a role or server default of
+REPEATABLE READ would otherwise give the fence and the idempotency lookup a
+snapshot older than the lock wait. A `control` or `connect` wrapper must
+therefore forward the transaction `isolationLevel` option. The refusal only
+fires when a wrapper drops the requested option and the session's default is
+not READ COMMITTED.
+
+The same check runs everywhere the manager drops an allocation, not only in
+destroy and `abortAllocation`: closing an ephemeral working-copy store, closing
+a `makeBackend` backend, and the cleanup after a failed allocation. The first
+two surface the refusal from `close()`. The cleanup swallows it so the
+allocation's original failure reaches the caller, which leaves the allocation
+behind. Every such orphan is discoverable with `listUnsealedAllocations` and is
+removed by `abortAllocation` once `control` forwards the option.
+
+**Destroy fence.** Destroy (and `abortAllocation`) takes the same allocation
+lock. `destroyDurableBranch()` refuses with `DurableEvidenceUndeliveredError`
+while undelivered evidence exists, even from a manager built without
+`operations`; delivering the evidence requires a manager built with
+`operations`. An in-flight `operate` and a destroy on one allocation serialize
+on the lock: whichever commits first decides the other's outcome. The destroy
+waits at most `cleanupLockTimeoutMs` (5000 ms by default); one that outwaits a
+long `apply` fails with the database's lock timeout having committed nothing,
+and can be retried after the operation settles. `get`, `scan`, and
+`hasUndelivered` take no allocation lock, so they never wait behind an `apply`.
+A destroy that commits after any member has attested the sealed row but before
+that member holds the allocation (before its connection is attested, before
+`operate` mints the revision origin, or before `get`, `scan`, or `hasUndelivered`
+reads the evidence relation) fails the member with one `BranchError`
+(`changed owner or was destroyed during the operation`), the same error
+`operate` and `markDelivered` raise against a removed allocation. It is never a
+raw missing-relation error or the "connection is not bound to the allocation
+database" refusal, which is reserved for a connection that reaches a different
+database than the one the ledger names.
+
+The fence follows the manager's [removal rule](#one-schema-per-allocation). It
+reads the evidence relation only in the allocation's own schema. Evidence
+relations that sit in another schema refuse removal before the fence runs and
+are kept. The fence runs only when the evidence relation is among the
+relations removal drops. An allocation whose evidence relation is gone has no
+evidence left to deliver and nothing to recover, so destroy removes its
+remaining relations and its ledger row, exactly as it does for an allocation
+whose relations exist nowhere.
+
+**Mixed-version deployments.** Only managers on this version take the allocation
+lock and honor the destroy fence. A manager from an earlier release that shares
+the ledger destroys an allocation without consulting its evidence, so
+undelivered evidence is lost with the allocation, and it does not drop the
+evidence relation, so a later `allocate` with the same id refuses because
+`<prefix>op_evidence` exists without a ledger row. Upgrade every process that
+shares a working-copy ledger before any of them creates or destroys a durable
+allocation. To recover an orphaned evidence relation, read its undelivered rows
+(`WHERE NOT delivered`) and deliver them, then drop the relation the refusal
+names and retry. TypeGraph never drops it for you, because it may hold the only
+copy of undelivered evidence.
+
+An allocation provisioned by an earlier release has no evidence relation, and
+its ledger row says so without any statement that changes the database.
+`operate` returns `unsupported` with `dimensions: ["evidenceStore"]`. The only
+statement it runs is one read-only ledger `SELECT` through `control`; it runs no
+DDL, takes no lock, calls no `connect`, and applies and writes nothing. The read
+members report no evidence: `get` and `markDelivered` return `undefined`, `scan`
+returns an empty page (echoing `after`), and `hasUndelivered` returns `false`.
+Re-fork the branch to gain evidence.
 
 ### Constraint-aware ingestion branches
 
