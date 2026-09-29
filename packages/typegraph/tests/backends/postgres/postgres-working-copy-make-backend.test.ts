@@ -671,52 +671,6 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 120_000);
 
-    it("refuses a connection whose creation schema differs from control's and leaves no allocation", async () => {
-      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
-      const otherSchema = "make_backend_other_schema";
-      try {
-        await pool.query(`CREATE SCHEMA IF NOT EXISTS ${otherSchema}`);
-        // Resolves the allocation's tables through `public` but creates new
-        // relations in its own schema, as a per-role "$user" schema does.
-        const connectedPool = new Pool({
-          connectionString: TEST_DATABASE_URL,
-          max: 4,
-          options: `-c search_path=${otherSchema},public`,
-        });
-        try {
-          const connectedNames: PostgresTableNames[] = [];
-          const manager = createPostgresWorkingCopyManager<typeof personGraph>({
-            control: createPostgresBackend(drizzle(pool)),
-            connect: (names, allocation) => {
-              connectedNames.push(names);
-              return Promise.resolve(
-                createPostgresBackend(drizzle(connectedPool), {
-                  tables: createPostgresTables(names),
-                  ...(allocation === undefined ?
-                    {}
-                  : { vector: allocation.vectorStrategy }),
-                }),
-              );
-            },
-          });
-
-          await expect(manager.makeBackend()).rejects.toBeInstanceOf(
-            BranchError,
-          );
-
-          expect(
-            await ownedRelations(pool, requireNames(connectedNames)),
-          ).toEqual({ tables: [], ledgerRows: 0 });
-          expect(await manager.listUnsealedAllocations()).toEqual([]);
-        } finally {
-          await connectedPool.end();
-        }
-      } finally {
-        await pool.query(`DROP SCHEMA IF EXISTS ${otherSchema} CASCADE`);
-        await pool.end();
-      }
-    }, 60_000);
-
     it("refuses a connection that does not bind the allocation vector strategy and leaves no allocation", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
       try {

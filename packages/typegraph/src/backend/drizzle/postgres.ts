@@ -161,6 +161,7 @@ import {
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type EngineRecordedTimeMembers,
+  type GraphBackend,
   type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -270,6 +271,11 @@ import {
   createPostgresOperationStrategy,
   tableExistsFromRow,
 } from "./operations/strategy";
+import {
+  allocationSchemaOfTables,
+  allocationSchemaPin,
+  markAllocationSchemaBackend,
+} from "./postgres-allocation-schema";
 import {
   advisoryLockSingleExpression,
   postgresDdlLockStatement,
@@ -687,6 +693,11 @@ function normalizePostgresColumnKind(
   return "other";
 }
 
+/** DDL PostgreSQL refuses inside a transaction block: `CREATE`/`DROP INDEX CONCURRENTLY`. */
+function isTransactionRefusedDdl(ddl: string): boolean {
+  return /\bCONCURRENTLY\b/iu.test(ddl);
+}
+
 /** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
 async function executeRawDdl(
   db: AnyPgDatabase,
@@ -1013,7 +1024,10 @@ export function createPostgresBackend(
     assertAdoptedDialect<AnyPgTransaction>(db, PgTransaction, "postgres");
     return createPostgresTransactionBackend(db, options);
   }
-  return createSqlBackend(buildPostgresEngineProfile(db, options));
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfile(db, options)),
+    options,
+  );
 }
 
 /**
@@ -1030,9 +1044,23 @@ export function createPostgresTransactionBackend(
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
   assertAdoptedDialect<AnyPgTransaction>(tx, PgTransaction, "postgres");
-  return createSqlBackend(
-    buildPostgresEngineProfileInternal(tx, options, true),
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
+    options,
   );
+}
+
+/** Records the allocation schema the backend's tables are bound to, so a working-copy manager can attest it. */
+function markAllocationBound<TBackend extends GraphBackend>(
+  backend: TBackend,
+  options: PostgresBackendOptions,
+): TBackend {
+  const schema =
+    options.tables === undefined ?
+      undefined
+    : allocationSchemaOfTables(options.tables);
+  if (schema !== undefined) markAllocationSchemaBackend(backend, schema);
+  return backend;
 }
 
 /**
@@ -1073,6 +1101,13 @@ function buildPostgresEngineProfileInternal(
     options.serializedResource,
   );
   const tables = options.tables ?? defaultTables;
+  // Set only for tables built from a working-copy allocation's names: every
+  // DDL this backend issues then runs where the allocation lives.
+  const allocationSchema = allocationSchemaOfTables(tables);
+  const allocationPin =
+    allocationSchema === undefined ?
+      undefined
+    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1159,6 +1194,23 @@ function buildPostgresEngineProfileInternal(
       ...driverBindParameterOverrides,
     }),
   );
+  if (
+    allocationSchema !== undefined &&
+    !declaredCapabilities.execution.interactiveTransactions
+  ) {
+    throw new ConfigurationError(
+      "A backend over a working-copy allocation needs interactive transactions: its DDL runs in a transaction that fixes the allocation schema, which a driver that cannot hold a session (drizzle-orm/neon-http) cannot provide.",
+      {
+        code: "ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS",
+        allocationSchema,
+        capability: "execution.interactiveTransactions",
+      },
+      {
+        suggestion:
+          "Connect the working copy with a node-postgres, postgres-js, or neon-serverless (WebSocket) driver.",
+      },
+    );
+  }
   // Derived last and not overridable: how far up the contribution health
   // ladder this backend goes is a structural fact about the wiring below
   // (durable markers, a catalog probe, a strategy that declares teardown
@@ -1305,9 +1357,42 @@ function buildPostgresEngineProfileInternal(
    */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
-    await withConcurrentCreateRetry(async () => {
+    await withConcurrentCreateRetry(() => runDdlStatement(statement));
+  }
+
+  /**
+   * Runs one DDL statement where this backend's relations live. Over an
+   * allocation the statement shares a transaction with the search-path pin, so
+   * an unqualified `CREATE ... IF NOT EXISTS` finds the allocation's relation
+   * or creates it there, whatever the pooled connection's own `search_path`.
+   * A statement PostgreSQL refuses inside a transaction (`CONCURRENTLY`) takes
+   * {@link executeUnpinnedDdl}: an index is created in its table's schema, so
+   * the table it names anchors it.
+   */
+  async function runDdlStatement(
+    statement: ReturnType<typeof sql.raw>,
+  ): Promise<void> {
+    if (allocationPin === undefined) {
       await db.execute(statement);
-    });
+      return;
+    }
+    const pinnedRun = async (session: Pick<AnyPgDatabase, "execute">) => {
+      await session.execute(allocationPin);
+      await session.execute(statement);
+    };
+    if (db instanceof PgTransaction) await pinnedRun(db);
+    else await db.transaction((transaction) => pinnedRun(transaction));
+  }
+
+  function executeUnpinnedDdl(ddl: string): Promise<void> {
+    return executeRawDdl(db, ddl, executionAdapter);
+  }
+
+  /** The `executeDdl` primitive: one statement, no concurrency handling. */
+  function executeSingleDdl(ddl: string): Promise<void> {
+    return allocationPin === undefined || isTransactionRefusedDdl(ddl) ?
+        executeUnpinnedDdl(ddl)
+      : runDdlStatement(sql.raw(ddl));
   }
 
   /**
@@ -1482,7 +1567,7 @@ function buildPostgresEngineProfileInternal(
       );
       return state?.ready === true;
     },
-    executeDdl: (ddl) => executeRawDdl(db, ddl, executionAdapter),
+    executeDdl: executeSingleDdl,
     contributionsForTableNames: (overrides) =>
       postgresContributions(
         buildPostgresTables(overrides),
@@ -1624,7 +1709,7 @@ function buildPostgresEngineProfileInternal(
   }
 
   const provisioning: EngineProvisioning = {
-    executeDdl: (ddl) => executeRawDdl(db, ddl, executionAdapter),
+    executeDdl: executeSingleDdl,
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
@@ -2044,6 +2129,8 @@ function buildPostgresEngineProfileInternal(
       const attempt = (): Promise<T> =>
         db.transaction(async (tx) => {
           await acquireSchemaWriteFence(tx, graphId);
+          // Schema writes run DDL: over an allocation, where it lives.
+          if (allocationPin !== undefined) await tx.execute(allocationPin);
           // The fence resolved above is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
           const { backend: txBackend, drainAndClose } =
@@ -2334,6 +2421,24 @@ function buildPostgresEngineProfileInternal(
                   externalTx,
                   adapterOptions,
                 );
+                if (allocationSchema !== undefined) {
+                  // The caller owns this session, so its search_path is not ours
+                  // to rewrite: refuse when unqualified DDL here would create
+                  // the allocation's relations somewhere else.
+                  const [session] = await settingAdapter.execute<{
+                    schema: string | null;
+                  }>(sql`SELECT current_schema() AS schema`);
+                  if (session?.schema !== allocationSchema) {
+                    throw new ConfigurationError(
+                      `Schema adoption over a working-copy allocation must run on a session whose current schema is "${allocationSchema}".`,
+                      {
+                        code: "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+                        allocationSchema,
+                        sessionSchema: session?.schema,
+                      },
+                    );
+                  }
+                }
                 const [setting] = await settingAdapter.execute<{
                   value: string;
                 }>(sql`SELECT current_setting('lock_timeout') AS value`);

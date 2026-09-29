@@ -60,10 +60,14 @@ import type { GraphBackend, TransactionBackend } from "../types";
 import { CURRENT_BASE_SCHEMA_VERSION } from "./base-schema";
 import {
   generatePostgresBaseSchemaMarkerSQL,
-  generatePostgresDropSQL,
   postgresContributions,
   quoteDdlIdentifier,
 } from "./ddl";
+import {
+  allocationSchemaOfBackend,
+  allocationSchemaPin,
+  bindNamesToAllocationSchema,
+} from "./postgres-allocation-schema";
 import {
   type PostgresCloneAction,
   resolvePostgresCloneActions,
@@ -81,6 +85,15 @@ const FORMAT_VERSION = 1;
 const STRATEGY_TYPE = "typegraph-postgres-tables";
 const DEFAULT_CLEANUP_LOCK_TIMEOUT_MS = 5000;
 const WORKING_COPY_ROLE_MISMATCH = "WORKING_COPY_ROLE_MISMATCH";
+/**
+ * Ledger columns added after the first release. `ensureLedger` adds a missing
+ * one to an existing ledger; a row written before `schema_name` existed
+ * carries no schema and is resolved through the session that removes it.
+ */
+const ADDITIVE_LEDGER_COLUMNS = [
+  { name: "vector_slots", definition: "jsonb NOT NULL DEFAULT '[]'::jsonb" },
+  { name: "schema_name", definition: "text" },
+] as const;
 
 type QuerySession = Pick<GraphBackend, "execute">;
 type AllocationState = "allocating" | "sealed" | "ephemeral";
@@ -104,6 +117,8 @@ type AllocationRow = Readonly<{
   history: boolean;
   revision_tracking: boolean;
   vector_slots: readonly VectorSlotManifest[];
+  /** The schema the allocation lives in; absent on a row written before it was recorded. */
+  schema_name: string | null;
   created_at: string;
 }>;
 /** A ledger row read through `control`, carrying the role that read it. */
@@ -125,15 +140,24 @@ export type PostgresUnsealedAllocation = Readonly<{
  * `control` and `connect` must address the same PostgreSQL database as the
  * source. `control.transaction().execute` must support transactional DDL;
  * a separate root `executeDdl` port is not required. `connect` receives the
- * complete generated name map and must bind a new backend to those names.
- * Source and connected backends must expose every PostgreSQL table binding,
- * including status relations, for attestation. For a cloned or durable copy of
- * a vector graph `connect` also receives the allocation-scoped strategy, and
- * for `makeBackend` it always does (the graph is not known yet); pass it to
- * `createPostgresBackend({ vector: vectorStrategy })`. A `makeBackend`
- * connection must bind that strategy or disable vector support with
- * `vector: false`; any other strategy could create tables the allocation does
- * not own. `connect` may use any Drizzle PostgreSQL driver.
+ * complete generated name map and must bind a new backend to those names: build
+ * its tables with `createPostgresTables(names)` from the object it is handed,
+ * not a copy, because that object carries the allocation's schema. For a
+ * cloned or durable copy of a vector graph `connect` also receives the
+ * allocation-scoped strategy, and for `makeBackend` it always does (the graph is
+ * not known yet); pass it to `createPostgresBackend({ vector: vectorStrategy })`.
+ * A `makeBackend` connection must bind that strategy or disable vector support
+ * with `vector: false`; any other strategy could create tables the allocation
+ * does not own. `connect` may use any Drizzle PostgreSQL driver that holds an
+ * interactive transaction.
+ *
+ * Every allocation lives in one schema, the `control` session's current schema
+ * when it is allocated, recorded in the ledger. Provisioning, the connected
+ * backend's DDL, the allocation's vector storage and removal all name that
+ * schema explicitly, so a pooled connection's own `search_path` never decides
+ * where an allocation's relations are created or dropped. The connection must
+ * still resolve the allocation's tables, so its `search_path` must include
+ * that schema.
  *
  * `connect` runs after the allocation's tables exist, except for `makeBackend`,
  * which connects first so it can refuse a bad connection before it writes
@@ -358,6 +382,36 @@ function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
   return manifest;
 }
 
+/** Refuses a manifest whose slots do not name this allocation's own vector tables. */
+function assertVectorManifestOwned(
+  slots: readonly VectorSlotManifest[],
+  strategy: VectorStrategy,
+): void {
+  for (const slot of slots) {
+    const slotDescriptor: VectorSlot = {
+      graphId: slot.graphId,
+      nodeKind: slot.nodeKind,
+      fieldPath: slot.fieldPath,
+      dimensions: slot.dimensions,
+      metric: slot.metric,
+      indexType: slot.indexType,
+      ...(slot.indexParams === undefined ?
+        {}
+      : { indexParams: slot.indexParams }),
+    };
+    if (
+      strategy.tableName(slot.graphId, slot.nodeKind, slot.fieldPath) !==
+        slot.tableName ||
+      ownedVectorTableNames(slotDescriptor, strategy).join("\0") !==
+        slot.ownedTableNames.join("\0")
+    ) {
+      throw new BranchError(
+        "Working-copy vector slot manifest does not match its allocation.",
+      );
+    }
+  }
+}
+
 function allocationNames(allocationId: string): Promise<PostgresTableNames> {
   return sha256Hex(allocationId, 12).then(
     (digest) =>
@@ -495,12 +549,32 @@ function assertBackendBindings(
   }
 }
 
+/**
+ * A connection must be built over the exact names it was handed, which is what
+ * carries the allocation schema into its DDL. A copy of the names carries
+ * nothing, and its lazy DDL would follow the pooled connection's `search_path`.
+ * A legacy allocation records no schema and has nothing to carry.
+ */
+function assertAllocationSchemaBound(
+  backend: GraphBackend,
+  schema: string | undefined,
+): void {
+  if (schema === undefined || allocationSchemaOfBackend(backend) === schema) {
+    return;
+  }
+  throw new BranchError(
+    `Working-copy connection is not bound to the allocation schema "${schema}"; build its tables with createPostgresTables from the names object connect receives, not a copy of it.`,
+  );
+}
+
 function assertTargetBindings(
   backend: GraphBackend,
   names: PostgresTableNames,
+  schema: string | undefined,
 ): void {
   assertBackendBindings(backend, names, "Working-copy");
   assertBundledFulltextStrategy(backend, "target");
+  assertAllocationSchemaBound(backend, schema);
 }
 
 function fixedSchemaError(operation: string): BranchError {
@@ -632,6 +706,7 @@ async function applyCloneAction(
   transaction: TransactionBackend,
   action: PostgresCloneAction,
   graphId: string,
+  targetSchema: string,
 ): Promise<void> {
   const { source, target, policy } = action;
   const names = await columns(transaction, source.tableName);
@@ -652,7 +727,7 @@ async function applyCloneAction(
     : sql`${sqlName(policy.documentColumn)}->>${policy.graphIdKey} = ${graphId}`;
   await rows(
     transaction,
-    sql`INSERT INTO ${sqlName(target.tableName)} (${selected}) SELECT ${selected} FROM ${sqlName(source.tableName)} WHERE ${selection}`,
+    sql`INSERT INTO ${sqlName(targetSchema)}.${sqlName(target.tableName)} (${selected}) SELECT ${selected} FROM ${sqlName(source.tableName)} WHERE ${selection}`,
   );
 }
 
@@ -660,6 +735,7 @@ async function cloneRelations(
   transaction: TransactionBackend,
   sourceTables: PostgresTables,
   targetTables: PostgresTables,
+  targetSchema: string,
   graphId: string,
   vectorSlots: readonly VectorSlot[],
   sourceVectorStrategy: VectorStrategy | undefined,
@@ -697,7 +773,7 @@ async function cloneRelations(
     throw new BranchError("Source base schema marker is not current.");
   }
   for (const action of actions) {
-    await applyCloneAction(transaction, action, graphId);
+    await applyCloneAction(transaction, action, graphId, targetSchema);
   }
   for (const slot of vectorSlots) {
     if (
@@ -712,7 +788,7 @@ async function cloneRelations(
       sourceVectorStrategy.ownedTables(slot),
       targetVectorStrategy.ownedTables(slot),
     )) {
-      await applyCloneAction(transaction, action, graphId);
+      await applyCloneAction(transaction, action, graphId, targetSchema);
     }
   }
 }
@@ -723,7 +799,7 @@ function readAllocation(
 ): Promise<ObservedAllocationRow | undefined> {
   return rows<ObservedAllocationRow>(
     control,
-    sql`SELECT allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text, current_user::text AS control_role FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+    sql`SELECT allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, vector_slots, schema_name, created_at::text, current_user::text AS control_role FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
   ).then((found) => found[0]);
 }
 
@@ -789,51 +865,49 @@ async function assertConnectionRole(
 }
 
 /**
- * Refuses a connection before it can create anything under a different role or
- * schema than `control`. Tables a connected Store creates lazily are issued
- * unqualified, so they land in the first creatable schema on the `connect`
- * session's search_path, while discovery and removal run unqualified through
- * `control`. The two sessions must therefore resolve the same creation schema,
- * or those tables would outlive the allocation with no ledger row naming them.
+ * The schema a new allocation is created in, chosen once from `control`'s own
+ * session. From here on it is explicit: provisioning fixes its DDL to it, the
+ * connected backend's DDL and the allocation's vector storage are bound to it,
+ * the ledger records it, and removal resolves relations through it. No later
+ * step consults a session's `search_path` to find or create an allocation
+ * relation.
  */
-async function assertSharedSession(
+async function observeAllocationSession(
   control: QuerySession,
-  connected: QuerySession,
-): Promise<void> {
-  const controlFacts = await observeSessionFacts(control);
-  const connectedFacts = await observeSessionFacts(connected);
-  assertSharedRole(controlFacts.role, connectedFacts.role);
-  if (
-    controlFacts.schema === "" ||
-    controlFacts.schema !== connectedFacts.schema
-  ) {
+): Promise<SessionFacts> {
+  const facts = await observeSessionFacts(control);
+  if (facts.schema === "") {
     throw new BranchError(
-      "Working-copy connection must create tables in the same schema as the control backend.",
+      "The control backend has no schema to create a working copy in: its search_path names no existing schema.",
     );
   }
+  return facts;
 }
 
 /**
- * Vector tables a schema-mutable allocation created after its manifest was
- * written. The ledger cannot list them and the materialization markers cannot
+ * Every table an allocation owns in `schema`: its bundled tables and the vector
+ * tables a schema-mutable allocation created after its manifest was written.
+ * The ledger cannot list the latter and the materialization markers cannot
  * either: a marker is written after its table's DDL as a separate statement, so
  * a crash between the two leaves a table no marker names. Discover them by the
- * allocation's reserved physical prefix instead.
+ * allocation's reserved prefixes instead, in the recorded schema and through
+ * the catalog, so no session's `search_path` decides what is found.
  *
- * `starts_with` compares literally, so the `_` in the prefix is not a wildcard.
+ * `starts_with` compares literally, so the `_` in a prefix is not a wildcard.
  * `allocationVectorTablePrefix` documents why one allocation's header cannot
  * match another's tables. The residual is a table created outside any
  * allocation whose name begins with this allocation's full 24-digit hash, which
  * requires a graph id equal to a ledger-reserved `tgw_` prefix; that namespace
  * is reserved to this ledger.
  */
-async function discoverAllocationVectorTables(
+async function discoverAllocationRelations(
   session: QuerySession,
+  schema: string,
   physicalPrefix: string,
 ): Promise<readonly string[]> {
   const found = await rows<Readonly<{ name: string }>>(
     session,
-    sql`SELECT c.relname::text AS name FROM pg_catalog.pg_class c WHERE c.relkind IN ('r', 'p') AND pg_catalog.pg_table_is_visible(c.oid) AND starts_with(c.relname::text, ${allocationVectorTablePrefix(physicalPrefix)}) ORDER BY c.relname`,
+    sql`SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p') AND (starts_with(c.relname::text, ${physicalPrefix}) OR starts_with(c.relname::text, ${allocationVectorTablePrefix(physicalPrefix)})) ORDER BY c.relname`,
   );
   return found.map((table) => table.name);
 }
@@ -903,20 +977,23 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       history boolean NOT NULL,
       revision_tracking boolean NOT NULL,
       vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb,
+      schema_name text,
       created_at timestamptz NOT NULL DEFAULT now()
     )`),
       );
-      const column = await rows<Readonly<{ present: boolean }>>(
+      const present = await rows<Readonly<{ name: string }>>(
         transaction,
-        sql`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${LEDGER}) AND attname = 'vector_slots' AND attnum > 0 AND NOT attisdropped) AS present`,
+        sql`SELECT attname::text AS name FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${LEDGER}) AND attname = ANY(${ADDITIVE_LEDGER_COLUMNS.map((column) => column.name)}::text[]) AND attnum > 0 AND NOT attisdropped`,
       );
-      if (column[0]?.present !== true) {
+      const presentNames = new Set(present.map((column) => column.name));
+      for (const column of ADDITIVE_LEDGER_COLUMNS) {
+        if (presentNames.has(column.name)) continue;
         // Concurrent migrations may pass the catalog probe together. The
         // guarded ALTER lets the later holder observe the first holder's DDL.
         await rows(
           transaction,
           sql.raw(
-            `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS vector_slots jsonb NOT NULL DEFAULT '[]'::jsonb`,
+            `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS ${quoteDdlIdentifier(column.name)} ${column.definition}`,
           ),
         );
       }
@@ -933,9 +1010,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         transaction,
         sql`SELECT set_config('lock_timeout', ${`${cleanupLockTimeoutMs}ms`}, true)`,
       );
-      const found = await rows<AllocationRow>(
+      const found = await rows<
+        AllocationRow & Readonly<{ session_schema: string | null }>
+      >(
         transaction,
-        sql`SELECT allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, vector_slots, created_at::text FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId} FOR UPDATE`,
+        sql`SELECT allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, vector_slots, schema_name, created_at::text, current_schema() AS session_schema FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId} FOR UPDATE`,
       );
       const row = found[0];
       if (row === undefined)
@@ -959,50 +1038,39 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       }
       const names = await allocationNames(allocationId);
       const physicalPrefix = assertAllocationPrefix(row, names);
-      const vectorSlots = parseVectorManifest(row.vector_slots);
-      const vectorStrategy =
-        createPgvectorStrategyForAllocation(physicalPrefix);
-      const manifestTableNames = vectorSlots.flatMap((slot) => {
-        const slotDescriptor: VectorSlot = {
-          graphId: slot.graphId,
-          nodeKind: slot.nodeKind,
-          fieldPath: slot.fieldPath,
-          dimensions: slot.dimensions,
-          metric: slot.metric,
-          indexType: slot.indexType,
-          ...(slot.indexParams === undefined ?
-            {}
-          : { indexParams: slot.indexParams }),
-        };
-        if (
-          vectorStrategy.tableName(
-            slot.graphId,
-            slot.nodeKind,
-            slot.fieldPath,
-          ) !== slot.tableName ||
-          ownedVectorTableNames(slotDescriptor, vectorStrategy).join("\0") !==
-            slot.ownedTableNames.join("\0")
-        ) {
-          throw new BranchError(
-            "Working-copy vector slot manifest does not match its allocation.",
-          );
-        }
-        return slot.ownedTableNames.toReversed();
-      });
-      const vectorTableNames = new Set([
-        ...manifestTableNames,
-        ...(await discoverAllocationVectorTables(transaction, physicalPrefix)),
-      ]);
-      for (const tableName of vectorTableNames) {
-        await rows(
-          transaction,
-          sql.raw(`DROP TABLE IF EXISTS ${quoteDdlIdentifier(tableName)}`),
+      assertVectorManifestOwned(
+        parseVectorManifest(row.vector_slots),
+        createPgvectorStrategyForAllocation(physicalPrefix),
+      );
+      // A row written before its schema was recorded is resolved through this
+      // session, as removal always resolved it.
+      const schema = row.schema_name ?? row.session_schema;
+      if (schema === null) {
+        throw new BranchError(
+          `Working-copy allocation ${allocationId} records no schema and this session has none to resolve it in.`,
         );
       }
-      await rows(
+      const owned = await discoverAllocationRelations(
         transaction,
-        sql.raw(generatePostgresDropSQL(createPostgresTables(names))),
+        schema,
+        physicalPrefix,
       );
+      // One statement, so the tables that reference each other go together. A
+      // failure aborts the transaction and keeps the ledger row: the
+      // allocation stays listed and recoverable.
+      if (owned.length > 0) {
+        await rows(
+          transaction,
+          sql.raw(
+            `DROP TABLE ${owned
+              .map(
+                (name) =>
+                  `${quoteDdlIdentifier(schema)}.${quoteDdlIdentifier(name)}`,
+              )
+              .join(", ")}`,
+          ),
+        );
+      }
       await rows(
         transaction,
         sql`DELETE FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
@@ -1012,6 +1080,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
 
   type AllocationProvision = Readonly<{
     allocationId: string;
+    /** The schema `observeAllocationSession` chose; provisioning fixes its DDL to it. */
+    schema: string;
     state: "allocating" | "ephemeral";
     history: boolean;
     revisionTracking: boolean;
@@ -1024,14 +1094,16 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   /**
    * The one owner of allocation provisioning: claim the ledger row, then
    * create the complete empty table set, vector sidecars, and base-schema
-   * marker in the same transaction. Returns the private ownership token that
-   * every connection to the allocation must attest, and the role `control`
-   * provisioned it as.
+   * marker in the same transaction. The transaction fixes its search path to
+   * the allocation schema first, so its unqualified DDL lands there whichever
+   * pooled connection runs it, and the claim records the schema the statement
+   * itself observed. Returns the private ownership token that every connection
+   * to the allocation must attest, and the role `control` provisioned it as.
    */
   async function provisionAllocation(
     provision: AllocationProvision,
   ): Promise<Readonly<{ ownershipToken: string; controlRole: string }>> {
-    const { allocationId, state, names, indexNames, vectorStrategy } =
+    const { allocationId, schema, state, names, indexNames, vectorStrategy } =
       provision;
     const physicalPrefix = allocationPhysicalPrefix(names);
     const targetTables = createPostgresTables(names);
@@ -1042,13 +1114,18 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     await ensureLedger();
     const ownershipToken = globalThis.crypto.randomUUID();
     const controlRole = await control.transaction(async (transaction) => {
+      await rows(transaction, allocationSchemaPin(schema));
       // The unique ledger prefix is the ownership claim for both bundled
       // tables and vector sidecars. Hold it through all provisioning DDL.
       const claimed = await rows<
-        Readonly<{ allocation_id: string; role: string }>
+        Readonly<{
+          allocation_id: string;
+          role: string;
+          schema_name: string | null;
+        }>
       >(
         transaction,
-        sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role`,
+        sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots, schema_name) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb, current_schema()) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role, schema_name`,
       );
       const claim = claimed[0];
       if (claimed.length !== 1 || claim === undefined) {
@@ -1056,9 +1133,14 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Working-copy allocation id or physical prefix is already owned.",
         );
       }
+      if (claim.schema_name !== schema) {
+        throw new BranchError(
+          `Working-copy allocation could not be fixed to schema "${schema}"; the provisioning session resolved "${claim.schema_name ?? ""}".`,
+        );
+      }
       const existing = await rows<Readonly<{ name: string }>>(
         transaction,
-        sql`SELECT name FROM unnest(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values(), ...vectorManifest.flatMap((slot) => slot.ownedTableNames)])]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
+        sql`SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${schema} AND c.relname = ANY(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values(), ...vectorManifest.flatMap((slot) => slot.ownedTableNames)])]}::text[])`,
       );
       if (existing.length > 0) {
         throw new BranchError(
@@ -1138,14 +1220,17 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     const sourceVectorStrategy = sourceBackend.vectorStrategy;
     const names = await allocationNames(allocationId);
     const physicalPrefix = allocationPhysicalPrefix(names);
+    const { schema } = await observeAllocationSession(control);
+    bindNamesToAllocationSchema(names, schema);
     const targetVectorStrategy =
       vectorSlots.length === 0 ?
         undefined
-      : createPgvectorStrategyForAllocation(physicalPrefix);
+      : createPgvectorStrategyForAllocation(physicalPrefix, schema);
     const targetTables = createPostgresTables(names);
     const indexNames = await allocationIndexNames(source.graph, names);
     const { ownershipToken, controlRole } = await provisionAllocation({
       allocationId,
+      schema,
       state,
       history: source.historyEnabled,
       revisionTracking: source.revisionTrackingEnabled,
@@ -1163,7 +1248,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           await connect(names)
         : await connect(names, { vectorStrategy: targetVectorStrategy });
       backend = connectedBackend;
-      assertTargetBindings(backend, names);
+      assertTargetBindings(backend, names, schema);
       await assertConnectionRole(controlRole, backend);
       if (
         targetVectorStrategy !== undefined &&
@@ -1184,6 +1269,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           transaction,
           sourceTables,
           targetTables,
+          schema,
           source.graphId,
           vectorSlots,
           sourceVectorStrategy,
@@ -1316,16 +1402,20 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       const indexNames = await allocationIndexNames(graph, names);
       const vectorSlots = parseVectorManifest(row.vector_slots);
       assertVectorManifestMatches(graph, physicalPrefix, vectorSlots);
+      // A row written before its schema was recorded reopens unbound, as it
+      // always has.
+      const schema = row.schema_name ?? undefined;
+      if (schema !== undefined) bindNamesToAllocationSchema(names, schema);
       const vectorStrategy =
         vectorSlots.length === 0 ?
           undefined
-        : createPgvectorStrategyForAllocation(physicalPrefix);
+        : createPgvectorStrategyForAllocation(physicalPrefix, schema);
       const backend =
         vectorStrategy === undefined ?
           await connect(names)
         : await connect(names, { vectorStrategy });
       try {
-        assertTargetBindings(backend, names);
+        assertTargetBindings(backend, names, schema);
         await assertConnectionRole(row.control_role, backend);
         if (
           vectorStrategy !== undefined &&
@@ -1385,21 +1475,26 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   const makeBackend: MakeBackend = async () => {
     const allocationId = globalThis.crypto.randomUUID();
     const names = await allocationNames(allocationId);
+    const physicalPrefix = allocationPhysicalPrefix(names);
+    const controlFacts = await observeAllocationSession(control);
+    bindNamesToAllocationSchema(names, controlFacts.schema);
     // The graph, and so its vector slots, is unknown until a Store opens. Vector
-    // tables are created later under this allocation's strategy; the manifest
-    // stays empty and `dropAllocation` discovers them by prefix.
+    // tables are created later under this allocation's strategy, in its schema;
+    // the manifest stays empty and `dropAllocation` discovers them by prefix.
     const vectorStrategy = createPgvectorStrategyForAllocation(
-      allocationPhysicalPrefix(names),
+      physicalPrefix,
+      controlFacts.schema,
     );
     // Connect first: every refusal below must precede the ledger claim and DDL.
     const connected = await connect(names, { vectorStrategy });
     let provisioned = false;
     try {
-      assertTargetBindings(connected, names);
+      assertTargetBindings(connected, names, controlFacts.schema);
       assertMakeBackendVectorStrategy(connected, vectorStrategy);
-      await assertSharedSession(control, connected);
+      await assertConnectionRole(controlFacts.role, connected);
       const { ownershipToken } = await provisionAllocation({
         allocationId,
+        schema: controlFacts.schema,
         state: "ephemeral",
         // Only a sealed allocation is ever reopened from these ledger columns.
         history: false,

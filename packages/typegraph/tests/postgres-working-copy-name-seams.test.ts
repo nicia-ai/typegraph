@@ -17,11 +17,76 @@ import {
   allocationVectorTablePrefix,
   createPgvectorStrategyForAllocation,
 } from "../src/query/dialect/vector/pgvector-strategy";
+import { renderPostgres } from "../src/query/sql-fragment";
 import { createTestBackend } from "./test-utils";
 
 const PREFIX_A = `tgw_${"a".repeat(24)}_`;
 const PREFIX_B = `tgw_${"b".repeat(24)}_`;
 const POSTGRES_IDENTIFIER_LIMIT = 63;
+
+function expectDefined(member: string): never {
+  throw new Error(`The pgvector strategy has no ${member}.`);
+}
+
+describe("allocation-schema vector DDL", () => {
+  const slot = {
+    graphId: "g",
+    nodeKind: "K",
+    fieldPath: "f",
+    dimensions: 3,
+    metric: "cosine",
+    indexType: "hnsw",
+  } as const;
+  // A quote in the schema name proves it is escaped, not interpolated.
+  const SCHEMA = 'alloc"schema';
+  const QUALIFIER = '"alloc""schema".';
+
+  it("qualifies every relation it creates or drops with the schema", () => {
+    const strategy = createPgvectorStrategyForAllocation(PREFIX_A, SCHEMA);
+    const table = strategy.tableName(
+      slot.graphId,
+      slot.nodeKind,
+      slot.fieldPath,
+    );
+    const contribution =
+      strategy.ownedTables(slot).at(0) ?? expectDefined("owned table");
+    expect(contribution.createDdl.join("\n")).toContain(
+      `CREATE TABLE IF NOT EXISTS ${QUALIFIER}"${table}"`,
+    );
+    const createIndex = renderPostgres(
+      strategy.buildCreateIndex?.(slot, { concurrent: true }) ??
+        expectDefined("buildCreateIndex"),
+    ).sql;
+    // An index is created in its table's schema; only the table names it.
+    expect(createIndex).toMatch(
+      /CREATE INDEX CONCURRENTLY IF NOT EXISTS "tg_vecidx_/u,
+    );
+    expect(createIndex).toContain(` ON ${QUALIFIER}"${table}" USING hnsw`);
+    expect(
+      renderPostgres(
+        strategy.buildDropIndex?.(slot) ?? expectDefined("buildDropIndex"),
+      ).sql,
+    ).toMatch(/^DROP INDEX IF EXISTS "alloc""schema"\."tg_vecidx_/u);
+    expect(strategy.buildDropStorage(slot)).toEqual([
+      `DROP TABLE IF EXISTS ${QUALIFIER}"${table}" CASCADE`,
+    ]);
+  });
+
+  it("names relations through the session when no schema is bound", () => {
+    const strategy = createPgvectorStrategyForAllocation(PREFIX_A);
+    const table = strategy.tableName(
+      slot.graphId,
+      slot.nodeKind,
+      slot.fieldPath,
+    );
+    expect(strategy.ownedTables(slot).at(0)?.createDdl.join("\n")).toContain(
+      `CREATE TABLE IF NOT EXISTS "${table}"`,
+    );
+    expect(strategy.buildDropStorage(slot)).toEqual([
+      `DROP TABLE IF EXISTS "${table}" CASCADE`,
+    ]);
+  });
+});
 
 describe("allocation vector table prefix", () => {
   const slot = { dimensions: 3, metric: "cosine", indexType: "hnsw" } as const;

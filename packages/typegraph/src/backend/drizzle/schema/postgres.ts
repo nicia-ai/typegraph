@@ -53,6 +53,7 @@ import {
   type RelationalIndexDeclaration,
 } from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
+import { carryAllocationSchemaToTables } from "../postgres-allocation-schema";
 import { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
@@ -690,7 +691,7 @@ export function createPostgresTables(
     ],
   );
 
-  return {
+  const created = {
     nodes,
     edges,
     recordedNodes,
@@ -715,6 +716,8 @@ export function createPostgresTables(
     fulltext,
     fulltextTableName: n.fulltext,
   } as const;
+  carryAllocationSchemaToTables(names, created);
+  return created;
 }
 
 /**
