@@ -835,10 +835,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     state: "allocating" | "ephemeral",
   ): Promise<
     Readonly<{
-      store: Store<G>;
-      // The unwrapped owned backend beneath `store`. A caller that builds a
-      // further store must start here: `storeBackend(store)` is already
-      // decorated by that store's recorded-capture wrapper.
+      // The fixed-schema owned backend, before any store decorates it with
+      // recorded capture. Each strategy builds its own store from this.
       backend: GraphBackend;
       descriptor: PostgresWorkingCopyLocator;
     }>
@@ -1010,15 +1008,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         }
       }
       if (options.refreshStatistics === true) await store.refreshStatistics();
-      const fixedBackend = fixedSchemaBackend(ownedBackend, indexNames);
-      const [fixedStore] = await createStoreWithSchema(
-        source.graph,
-        fixedBackend,
-        inheritedOptions,
-      );
       return {
-        store: fixedStore,
-        backend: fixedBackend,
+        backend: fixedSchemaBackend(ownedBackend, indexNames),
         descriptor: { allocationId },
       };
     } catch (error) {
@@ -1040,8 +1031,32 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     type: STRATEGY_TYPE,
     version: FORMAT_VERSION,
     create: async (source, base, _branchId, allocationId) => {
-      const created = await allocate(source, base, allocationId, "allocating");
-      return { ...created, access: { kind: "engine-fenced" } };
+      const { backend, descriptor } = await allocate(
+        source,
+        base,
+        allocationId,
+        "allocating",
+      );
+      try {
+        const [store] = await createStoreWithSchema(
+          source.graph,
+          backend,
+          cloneOptions(source),
+        );
+        return { store, descriptor, access: { kind: "engine-fenced" } };
+      } catch (error) {
+        try {
+          await backend.close();
+        } catch {
+          /* Preserve store-creation error. */
+        }
+        try {
+          await dropAllocation(allocationId);
+        } catch {
+          /* Orphan remains discoverable. */
+        }
+        throw error;
+      }
     },
     seal: async (descriptor, origin) => {
       if (descriptor.allocationId !== origin.allocationId) {

@@ -189,6 +189,31 @@ describe.runIf(process.env["POSTGRES_URL"])(
           );
         }, 60_000);
 
+        it("returns exactly the store, descriptor and access from durable create", async () => {
+          await withHistorySource(
+            revisionTracking,
+            async ({ source, manager }) => {
+              const allocationId = `history-shape-${revisionTracking}`;
+              const created = await manager.durable.create(
+                source,
+                await computeBaseVersion(source),
+                asBranchId(`history-shape-${revisionTracking}`),
+                allocationId,
+              );
+              try {
+                expect(Object.keys(created).toSorted()).toEqual([
+                  "access",
+                  "descriptor",
+                  "store",
+                ]);
+              } finally {
+                await created.store.close();
+                await manager.abortAllocation(allocationId);
+              }
+            },
+          );
+        }, 60_000);
+
         it("still refuses user raw SQL writes on an ephemeral copy", async () => {
           await withHistorySource(
             revisionTracking,
