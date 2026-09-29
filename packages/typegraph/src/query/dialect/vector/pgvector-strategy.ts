@@ -207,6 +207,30 @@ export function createPgvectorStrategy(namespace: string): VectorStrategy {
   );
 }
 
+function assertAllocationPhysicalPrefix(physicalPrefix: string): void {
+  if (!/^tgw_[0-9a-f]{24}_$/u.test(physicalPrefix)) {
+    throw new Error("Invalid PostgreSQL working-copy physical prefix.");
+  }
+}
+
+/**
+ * The literal leading text of every vector table
+ * {@link createPgvectorStrategyForAllocation} names for one allocation.
+ *
+ * Two facts make it a sound ownership boundary for discovering tables created
+ * after the allocation's manifest was written:
+ * - Prefix-free: a valid physical prefix is exactly `tgw_` + 24 hex digits +
+ *   `_`, a fixed length, so this header is a fixed length too and one
+ *   allocation's header can never be a leading substring of another's.
+ * - Never truncated: `vectorPhysicalName` shortens only the readable part and
+ *   always keeps the 8-character hash, which leaves 54 characters of the
+ *   63-character identifier for the readable part; the header is 36.
+ */
+export function allocationVectorTablePrefix(physicalPrefix: string): string {
+  assertAllocationPhysicalPrefix(physicalPrefix);
+  return `${TABLE_PREFIX}_${physicalPrefix}`;
+}
+
 /**
  * Bind vector storage to a working copy's ledger-reserved physical prefix.
  * The prefix is included verbatim, so two distinct reserved prefixes cannot
@@ -215,9 +239,7 @@ export function createPgvectorStrategy(namespace: string): VectorStrategy {
 export function createPgvectorStrategyForAllocation(
   physicalPrefix: string,
 ): VectorStrategy {
-  if (!/^tgw_[0-9a-f]{24}_$/u.test(physicalPrefix)) {
-    throw new Error("Invalid PostgreSQL working-copy physical prefix.");
-  }
+  assertAllocationPhysicalPrefix(physicalPrefix);
   const namespace = physicalPrefix.slice(0, -1);
   return createPgvectorStrategyWithPrefixes(
     `${TABLE_PREFIX}_${namespace}`,

@@ -63,7 +63,11 @@ const SEAM_CONSTRUCTORS = [
   "wrapWithManagedClose",
 ] as const;
 
-const SEAM_QUERIES = ["backendDerivationRoot", "isBackendDerivedFrom"] as const;
+const SEAM_QUERIES = [
+  "backendDerivationChain",
+  "backendDerivationRoot",
+  "isBackendDerivedFrom",
+] as const;
 
 type SeamConstructor = (typeof SEAM_CONSTRUCTORS)[number];
 
@@ -134,9 +138,15 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/postgres-working-copy.ts",
-    line: "const provisioned = deriveBackend(backend, {",
+    line: "return deriveBackend(backend, { bootstrapTables: () => Promise.resolve() });",
     reason:
       "The allocator installs owned tables before Store bootstrap; this derived backend suppresses only repeat bootstrap while retaining the allocated connection and its backend proofs.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const disposableBackend = wrapWithManagedClose(",
+    reason:
+      "A makeBackend allocation closes its derived connection and then discards the empty, schema-mutable table set it owns, including vector tables created after allocation.",
   },
   {
     file: "backend/drizzle/postgres-working-copy.ts",

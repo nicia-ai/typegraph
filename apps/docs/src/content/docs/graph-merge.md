@@ -254,7 +254,9 @@ planner refuses the artifact; replan outside the transaction.
 Branches forked from the original baseline can merge existing kinds. To
 include a newly added kind, call
 `branchForEvolution(target, evolutionPlan, makeBackend)` before the caller
-transaction, then add data on that isolated branch. The planner accepts
+transaction (on PostgreSQL, pass the working-copy manager's `makeBackend`; see
+[PostgreSQL table-backed working copies](#postgresql-table-backed-working-copies)),
+then add data on that isolated branch. The planner accepts
 branches from either one matching baseline; a mixed set of old-schema and
 resulting-schema forks is refused.
 Pass `{ revisionJournal: false }` as the fourth `branchForEvolution()` argument
@@ -1577,8 +1579,9 @@ match the persisted allocation manifest. Older ledger rows that stored only
 whose source sidecar is absent is refused because its contents cannot be
 snapshotted exactly.
 
-The copy has a fixed schema: `evolve`, kind removal, and deprecation refuse
-before mutation. Custom fulltext strategies still need a host-level database
+The `ephemeral` and `durable` copies have a fixed schema: `evolve`, kind
+removal, and deprecation refuse before mutation. Use `makeBackend`, below, when
+the working copy's schema must change. Custom fulltext strategies still need a host-level database
 fork. The source and every copy connection, including durable reopen, must use
 the bundled `tsvectorStrategy`: a custom strategy may own additional physical
 tables whose rows cannot be copied safely from the generic contribution
@@ -1586,6 +1589,75 @@ inventory. A connection with fulltext disabled is refused for the same reason.
 System index maintenance remains available. Source table locks cover the
 entire TypeGraph relation set and vector sidecars while the SQL clone runs, so a
 large clone briefly blocks writes to other graphs in the same database.
+
+#### `makeBackend` for branches, candidate planning, and evolution previews
+
+`copies.makeBackend` is a `MakeBackend`, so PostgreSQL callers no longer
+hand-roll table prefixes, DDL, and cleanup. It fits every API that takes one:
+`branch`, `ingestionBranch`, `planCandidateWriteSet`,
+`planCandidateWriteSetReview` (including sparse staging), `branchForEvolution`,
+and `planCandidateWriteSetForEvolution`.
+
+```typescript
+import { branch, branchForEvolution } from "@nicia-ai/typegraph/graph-merge";
+
+const fork = unwrap(await branch(sourceStore, copies.makeBackend));
+const preview = unwrap(
+  await branchForEvolution(sourceStore, evolutionPlan, copies.makeBackend),
+);
+```
+
+Each call allocates a fresh allocation in the same ledger, in the `ephemeral`
+state, and returns an **empty, schema-mutable** backend: the caller (or the
+branch API) seeds it and may commit new kinds and fields, which the fixed-schema
+`ephemeral` and `durable` copies refuse. Closing the backend drops the
+allocation. While it is live it appears in `listUnsealedAllocations()`, and if
+its owner crashes without closing it, `abortAllocation(id)` removes everything
+it owns.
+
+Because the graph is unknown when the backend is allocated:
+
+- **Vector tables.** A graph that declares embeddings creates its per-field
+  pgvector tables after allocation, so the ledger manifest cannot list them.
+  Dropping an allocation therefore also removes every table whose name starts
+  with the allocation's reserved vector prefix. That prefix is fixed-length and
+  never truncated, so it cannot match another allocation's tables. `connect`
+  always receives the allocation vector strategy for `makeBackend`; bind it with
+  `createPostgresBackend({ vector: allocation.vectorStrategy })`. A connection
+  that binds any other vector strategy is refused with a `BranchError`, because
+  it could create tables the allocation does not own. Pass `vector: false` to
+  opt out of vector support.
+- **Graph indexes.** PostgreSQL index names are database-global, so a declared
+  index cannot reuse its logical name on a private table. `makeBackend` scopes
+  each declaration to the allocation (`<prefix>gix_<hash>`) the first time the
+  Store's `materializeIndexes()` sees it, leaving logical names and schema
+  hashes unchanged and never touching the source's or another allocation's
+  indexes. A backend you derive from the returned one with `deriveBackend`
+  inherits the scoping; one you build by copying its members does not.
+- **Fulltext.** The same bundled `tsvectorStrategy` requirement applies as for
+  the cloned copies.
+
+Allocation, provisioning, and removal run through the manager's `control`
+backend, but the Store that opens on the returned backend issues its own DDL as
+the `connect` role. Every boot-time ensure does: runtime-contribution markers,
+the revision journal and its triggers, system indexes, declared graph indexes,
+and vector tables an evolved graph introduces. PostgreSQL checks `CREATE` on
+the schema before it evaluates `IF NOT EXISTS`, and table ownership before an
+index statement that would be a no-op, so a role with only DML on the
+allocation's tables and `SELECT` on `typegraph_working_copy_allocations` is not
+enough: `branch`, `planCandidateWriteSet`, and `branchForEvolution` fail on
+their first Store open. Give the `connect` role `CREATE` on the schema and
+ownership of the allocation's tables (or the `TRIGGER` privilege where the
+revision journal is installed), or let it share a role with `control`. Tables
+the `connect` role creates are dropped through `control`, which must be a member
+of the role that owns them.
+
+`control` and `connect` must also resolve the same creation schema. A Store
+creates lazy tables, such as vector tables, unqualified, so they land in the
+first creatable schema on the `connect` session's `search_path`; `control`
+discovers and drops them through its own. `makeBackend` compares `current_schema()`
+on both sessions and refuses a mismatch with a `BranchError`, which matters when
+`connect` uses a role with its own `"$user"` schema.
 
 ### Forked working copies
 

@@ -51,7 +51,10 @@ import { type GraphDef, isKnownKind } from "../core/define-graph";
 import type { IndexEntity } from "../core/types";
 import { ConfigurationError, KindNotFoundError } from "../errors";
 import { generateIndexDDL } from "../indexes/ddl";
-import { relationalIndexPhysicalName } from "../indexes/physical-name";
+import {
+  prepareRelationalIndexNames,
+  relationalIndexPhysicalName,
+} from "../indexes/physical-name";
 import {
   generateSystemIndexDDL,
   resolveSystemIndexNames,
@@ -251,6 +254,8 @@ export async function materializeIndexes(
   if (candidates.length === 0) {
     return { results: [] };
   }
+
+  await prepareRelationalIndexNames(backend, candidates);
 
   await ensureFocusedStatusTable(
     backend,
