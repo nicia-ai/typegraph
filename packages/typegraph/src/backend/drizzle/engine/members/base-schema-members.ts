@@ -224,7 +224,9 @@ export function createBaseSchemaMembers(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
+      await baseSchemaLifecycle.adoptBeforeBootstrap(
+        startingBaseSchemaVersion,
+      );
       const statements = generateDdl();
       for (const statement of statements) {
         await ensureTable(statement);

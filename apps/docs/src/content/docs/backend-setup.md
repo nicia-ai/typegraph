@@ -1139,10 +1139,12 @@ repeated values, so it stays small (about 7 MB beside a 97 MB `nodes` heap of on
 adds 1 to 2% to writes on the relation it lands on (single creates and 1,000-row bulk writes alike).
 
 The privileged open builds the three indexes with a plain `CREATE INDEX`, which blocks writes to the
-table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). Build them
-first with `CONCURRENTLY` to avoid that; the adoption step is `IF NOT EXISTS` and then finds them in
-place. Run each statement outside a transaction, and never run the same concurrent build from two
-sessions at once. Use the adapter's table names throughout:
+table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). This
+happens inline at boot even when `systemIndexes: "skip"` is set: that option only defers system index
+materialization, not base-schema adoption. For a large deployment, build the indexes first with
+`CONCURRENTLY`; the adoption step is `IF NOT EXISTS` and then finds them in place. Run each statement
+outside a transaction, and never run the same concurrent build from two sessions at once. Use the
+adapter's table names throughout:
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx"
@@ -1154,6 +1156,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_schema_versions_graph_id_byte
 ```
 
 `CREATE INDEX CONCURRENTLY` can leave an invalid index behind if it is interrupted; drop it and rerun.
+`listGraphIds` checks only that each index exists and is valid, not its definition, so an index you
+create by hand under one of these names with a different definition is trusted and makes the walk slow
+rather than wrong. Create them exactly as shown.
+
+Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
+database stamped 5, so roll forward rather than back once any process has adopted it.
 Externally managed DDL applies the same statements, then advances the marker to 5 with the
 monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
 correct pages, by reading and de-duplicating the anchor relations instead of walking them.

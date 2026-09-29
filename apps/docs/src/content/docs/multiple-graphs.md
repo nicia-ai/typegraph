@@ -395,7 +395,7 @@ for what it costs and how to build it ahead of an upgrade. On a 20,000-graph, 50
 PostgreSQL 18 database a page takes about 3 ms, where the same read took about 400 ms before the
 index; at 200 graphs of 5,000 rows it is about 3 ms either way. A database without the index (its
 base schema not adopted yet, or DDL managed by hand) lists the same ids by reading and de-duplicating
-every row of those relations for each page, tens of milliseconds at these sizes. A backend that
+every row of those relations for each page, measured at 47 to 105 ms a page at these sizes. A backend that
 declares no recursive traversal does the same. Use the listing for operator tooling, not on a request
 path. Rows that exist only outside those relations, such as orphaned recorded history or contribution
 markers, do not make a graph appear; `inspectGraphStorage` counts every relation.

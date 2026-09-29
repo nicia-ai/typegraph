@@ -95,7 +95,8 @@ export type CreatePostgresTablesOptions = Readonly<{
   indexes?: readonly IndexDeclaration[] | undefined;
   /** Resolve graph index identifiers for an isolated physical namespace. */
   physicalIndexName?:
-    ((index: RelationalIndexDeclaration) => string) | undefined;
+    | ((index: RelationalIndexDeclaration) => string)
+    | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
@@ -280,12 +281,7 @@ export function createPostgresTables(
       kind: text("kind").notNull(),
       id: text("id").notNull(),
     },
-    (t) => [
-      index(`${n.revisionChanges}_graph_revision_idx`).on(
-        t.graphId,
-        t.revision,
-      ),
-    ],
+    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY

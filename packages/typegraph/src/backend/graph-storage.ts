@@ -288,6 +288,13 @@ function listGraphIdsQuery(
  * assumed: a database whose base schema is not current yet, a schema managed by
  * hand, or an index an operator dropped, is still listed correctly, by the
  * de-duplicating scan, instead of by a walk whose every step would scan a table.
+ *
+ * The probe reads the index's name and validity only, through the shared
+ * `indexStates` catalog member, not its definition. The names are reserved
+ * system index names, so a same-named index that is not `graph_id COLLATE "C"`
+ * (one created by hand under a reserved name) would be trusted and make the
+ * walk slow, never wrong: results stay in byte order because the walk's
+ * ordering and bounds are computed by the query, not read from the index.
  */
 async function byteOrderedWalkAvailable(
   target: ReadTarget,

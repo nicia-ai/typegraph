@@ -120,9 +120,10 @@ type GraphRelationBehavior = Readonly<{
   role: GraphRelationRole;
   /**
    * A row in this relation is what makes a graph count as holding data, so the
-   * graph id listing anchors on it. Every graph that holds data has a row in
-   * each anchor, and the default `Store.clear()` empties each anchor (it is a
-   * `delete` that is not `preservable`), so a cleared graph stops being listed.
+   * graph id listing anchors on it. Every graph that holds data has a row in at
+   * least one anchor (a graph with only nodes has no `schema_versions` row),
+   * and the default `Store.clear()` empties each anchor (it is a `delete` that
+   * is not `preservable`), so a cleared graph stops being listed.
    * Anchors also lead their primary key with `graph_id`, which is what lets the
    * listing step from one graph id to the next by index seek. A test holds all
    * three properties.
