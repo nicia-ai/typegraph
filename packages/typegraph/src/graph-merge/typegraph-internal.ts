@@ -13,6 +13,10 @@ export {
   wrapWithManagedClose,
 } from "../backend/derive-backend";
 export {
+  GRAPH_RELATIONS,
+  resolveGraphRelationNames,
+} from "../backend/graph-relations";
+export {
   sharesSerializedTransactionResource,
   snapshotExportContention,
 } from "../backend/transaction-resource";

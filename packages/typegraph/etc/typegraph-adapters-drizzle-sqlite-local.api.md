@@ -5405,6 +5405,10 @@ type SqlTableNames = Readonly<{
     uniques: string;
     edgeClaims?: string | undefined;
     fences?: string | undefined;
+    indexMaterializations?: string | undefined;
+    contributionMaterializations?: string | undefined;
+    kindRemovals?: string | undefined;
+    reconciliationMarkers?: string | undefined;
 }>;
 
 // @public (undocumented)

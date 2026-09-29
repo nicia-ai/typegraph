@@ -155,8 +155,10 @@ import {
   createStoreWithSchema,
   defineInternalGraph,
   defineNode,
+  GRAPH_RELATIONS,
   requireFenceLockTables,
   requireWriteFence,
+  resolveGraphRelationNames,
   resolveWriteFencePlan,
   serializeSchema,
   sha256Hex,
@@ -796,10 +798,10 @@ type SidecarProbeRow = Readonly<{ present: number }>;
  * which needs the kinds of a graph whose schema — by construction, in the case
  * that matters — was never registered.
  *
- * The reachable set is exactly the tables the backend names through its
- * `tableNames` port. The schema-version table and the materialization-marker
- * tables are NOT addressable through it, so they are not probed; the active
- * schema row is covered by `getActiveSchema` in {@link inspectSidecarGraphId}.
+ * The probed set is every graph-scoped content relation of the shared
+ * inventory, named through the backend's `tableNames` port. The bookkeeping
+ * relations are not probed; the active schema row is covered by
+ * `getActiveSchema` in {@link inspectSidecarGraphId}.
  */
 async function hasRowsUnderGraphId(
   port: SidecarInspectionPort,
@@ -824,29 +826,29 @@ async function hasRowsUnderGraphId(
 }
 
 /**
- * The per-graph row tables beyond nodes and edges, deduplicated because a
+ * The per-graph content tables beyond nodes and edges, deduplicated because a
  * backend may map two logical relations onto one physical name.
  *
- * This list is the probe's completeness claim: it is every member of the
- * backend's resolved table names that carries a `graph_id` column.
+ * This list is the probe's completeness claim: every graph-scoped relation the
+ * shared inventory declares as graph `content`. The bookkeeping relations —
+ * schema versions and the index, contribution, removal and reconciliation
+ * status rows — are not occupancy evidence: the active schema row is covered by
+ * `getActiveSchema` in {@link inspectSidecarGraphId}, and a sidecar's own
+ * status rows must not read as an application's.
  */
 function secondaryRowTableNames(
   tables: ReturnType<typeof createSqlSchema>["tables"],
 ): readonly string[] {
+  const names = resolveGraphRelationNames(tables);
   return [
-    ...new Set([
-      tables.recordedNodes,
-      tables.recordedEdges,
-      tables.recordedClock,
-      tables.revisionOrigins,
-      tables.identityAssertions,
-      tables.recordedIdentityAssertions,
-      tables.identityClosure,
-      tables.identitySeparation,
-      tables.fulltext,
-      tables.uniques,
-      tables.edgeClaims,
-    ]),
+    ...new Set(
+      GRAPH_RELATIONS.filter(
+        (relation) =>
+          relation.role === "content" &&
+          relation.key !== "nodes" &&
+          relation.key !== "edges",
+      ).map((relation) => names[relation.key]),
+    ),
   ];
 }
 

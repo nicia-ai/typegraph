@@ -5,6 +5,10 @@
  */
 import { backendDerivationRoot } from "../backend/derive-backend";
 import { defaultPostgresTableNames } from "../backend/drizzle/schema/postgres-table-names";
+import {
+  graphRelationsProvisionedBy,
+  resolveGraphRelationNames,
+} from "../backend/graph-relations";
 import type { GraphBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
@@ -47,37 +51,34 @@ import {
 } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 
-const REVISION_CHANGES_TABLE = "typegraph_revision_changes";
+/**
+ * The graph-scoped relation names a fork copies, from the one inventory, under
+ * the bundled names. `assertDefaultTables` refuses any backend whose names
+ * differ, so these are exactly the names both sides resolve.
+ */
+const FORK_RELATION_NAMES = resolveGraphRelationNames(
+  defaultPostgresTableNames,
+);
+const REVISION_CHANGES_TABLE = FORK_RELATION_NAMES.revisionChanges;
+const INDEX_MATERIALIZATIONS_TABLE = FORK_RELATION_NAMES.indexMaterializations;
+const CONTRIBUTION_MATERIALIZATIONS_TABLE =
+  FORK_RELATION_NAMES.contributionMaterializations;
+const FULLTEXT_TABLE = FORK_RELATION_NAMES.fulltext;
 
-const DEFAULT_NAMES: Readonly<Record<string, string>> = {
-  nodes: "typegraph_nodes",
-  edges: "typegraph_edges",
-  recordedNodes: "typegraph_recorded_nodes",
-  recordedEdges: "typegraph_recorded_edges",
-  recordedClock: "typegraph_recorded_clock",
-  revisionOrigins: "typegraph_revision_origins",
-  revisionChanges: REVISION_CHANGES_TABLE,
-  identityAssertions: "typegraph_identity_assertions",
-  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
-  identityClosure: "typegraph_identity_closure",
-  identitySeparation: "typegraph_identity_separation",
-  uniques: "typegraph_node_uniques",
-  edgeClaims: "typegraph_edge_claims",
-  fences: "typegraph_fences",
-  schemaVersions: "typegraph_schema_versions",
-  fulltext: "typegraph_node_fulltext",
-};
+function hasFulltextStorage(backend: GraphBackend): boolean {
+  return backend.fulltextStrategy !== undefined;
+}
 
-/** The bundled graph-scoped relations, in copy order. Fence rows are shared. */
-const GRAPH_RELATIONS = [
-  ...Object.entries(DEFAULT_NAMES)
-    .filter(([key]) => key !== "fences")
-    .map(([, table]) => table),
-  "typegraph_index_materializations",
-  "typegraph_contribution_materializations",
-  "typegraph_kind_removals",
-  "typegraph_reconciliation_markers",
-] as const;
+/**
+ * The relations a fork copies from and to `backend`, in copy order: every
+ * graph-scoped relation the backend provisions. A backend with the fulltext
+ * stack disabled has no fulltext table to read, copy or digest.
+ */
+function forkRelationTables(backend: GraphBackend): readonly string[] {
+  return graphRelationsProvisionedBy({
+    fulltext: hasFulltextStorage(backend),
+  }).map((relation) => FORK_RELATION_NAMES[relation.key]);
+}
 const FORK_LEDGER = "typegraph_namespace_fork_operations";
 
 type QuerySession = Pick<GraphBackend, "execute" | "getActiveSchema">;
@@ -175,6 +176,26 @@ function assertMatchingVectorStorage(
   }
 }
 
+/**
+ * Fulltext content lives in one database-shared table that exists only where
+ * the fulltext stack is enabled. A fork copies whichever relations the source
+ * provisions, so the target must provision the same set: a target without the
+ * table would fail on the first read of it, and a source without it has no
+ * content for a target's index to hold.
+ */
+function assertMatchingFulltextStorage(
+  sourceBackend: GraphBackend,
+  targetBackend: GraphBackend,
+): void {
+  const source = hasFulltextStorage(sourceBackend);
+  const target = hasFulltextStorage(targetBackend);
+  if (source !== target) {
+    throw new BranchError(
+      `Namespace fork needs the same fulltext storage on source and target; the source has fulltext ${source ? "enabled" : "disabled"} and the target has it ${target ? "enabled" : "disabled"}.`,
+    );
+  }
+}
+
 async function presentRelations(
   session: QuerySession,
   tables: readonly string[],
@@ -253,9 +274,10 @@ async function digestRows(rows: readonly JsonRow[]): Promise<string> {
 async function digestGraph(
   session: QuerySession,
   graph: GraphDef,
+  relationTables: readonly string[],
 ): Promise<string> {
   const digests: [string, string][] = [];
-  for (const table of GRAPH_RELATIONS) {
+  for (const table of relationTables) {
     const rows = await graphRows(session, table, graph.id);
     digests.push([table, await digestRows(forkedRows(graph, table, rows))]);
   }
@@ -323,7 +345,7 @@ function forkedRows(
   table: string,
   rows: readonly JsonRow[],
 ): readonly JsonRow[] {
-  if (table !== "typegraph_index_materializations") return rows;
+  if (table !== INDEX_MATERIALIZATIONS_TABLE) return rows;
   const declarations = declarationsByStatusKey(graph);
   return rows.filter((row) => {
     const statusKey = row["index_name"];
@@ -338,7 +360,7 @@ function materializedIndexes(
   rows: readonly JsonRow[],
 ): readonly MaterializedIndex[] {
   const declarations = declarationsByStatusKey(graph);
-  return forkedRows(graph, "typegraph_index_materializations", rows)
+  return forkedRows(graph, INDEX_MATERIALIZATIONS_TABLE, rows)
     .filter((row) => row["materialized_at"] !== null)
     .map((row) => {
       const statusKey = row["index_name"];
@@ -384,9 +406,7 @@ function isForkableContribution(
   const logicalName = row["logical_name"];
   const tableName = row["table_name"];
   if (row["owner"] === "tsvector") {
-    return (
-      logicalName === "fulltext" && tableName === "typegraph_node_fulltext"
-    );
+    return logicalName === "fulltext" && tableName === FULLTEXT_TABLE;
   }
   return (
     row["owner"] === "pgvector" &&
@@ -423,12 +443,13 @@ async function assertSupportedContributions(
 async function assertEmpty(
   session: QuerySession,
   graph: GraphDef,
+  relationTables: readonly string[],
 ): Promise<void> {
   const presentVectorTables = await presentRelations(
     session,
     vectorRelations(graph),
   );
-  for (const table of [...GRAPH_RELATIONS, ...presentVectorTables]) {
+  for (const table of [...relationTables, ...presentVectorTables]) {
     const rows = await queryRows<ExistsRow>(
       session,
       sql`SELECT EXISTS(SELECT 1 FROM ${sql.identifier(table)} WHERE graph_id = ${graph.id}) AS present`,
@@ -524,6 +545,7 @@ function namespaceForkResult<G extends GraphDef>(
   targetBackend: GraphBackend,
   proof: NamespaceForkProof,
 ): NamespaceFork<G> {
+  const relationTables = forkRelationTables(targetBackend);
   return {
     store,
     proof,
@@ -534,7 +556,7 @@ function namespaceForkResult<G extends GraphDef>(
           sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
         );
         if (ledger[0] === undefined) {
-          await assertEmpty(targetTx, store.graph);
+          await assertEmpty(targetTx, store.graph, relationTables);
           return;
         }
         const ledgerProof = proofFromLedger(ledger[0], proof.operationKey);
@@ -542,7 +564,8 @@ function namespaceForkResult<G extends GraphDef>(
           ledger[0].graph_id !== proof.graphId ||
           ledgerProof.sourceBase !== proof.sourceBase ||
           ledger[0].content_digest !== proof.contentDigest ||
-          (await digestGraph(targetTx, store.graph)) !== proof.contentDigest
+          (await digestGraph(targetTx, store.graph, relationTables)) !==
+            proof.contentDigest
         ) {
           throw new BranchError(
             "Namespace fork abort found a changed target namespace.",
@@ -557,8 +580,8 @@ function namespaceForkResult<G extends GraphDef>(
             sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${proof.graphId}`,
           );
         }
-        const journal = "typegraph_revision_changes";
-        for (const table of GRAPH_RELATIONS) {
+        const journal = REVISION_CHANGES_TABLE;
+        for (const table of relationTables) {
           if (table === journal) continue;
           await queryRows(
             targetTx,
@@ -621,6 +644,7 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
   assertDefaultTables(sourceBackend);
   assertDefaultTables(targetBackend);
   assertMatchingVectorStorage(source.graph, sourceBackend, targetBackend);
+  assertMatchingFulltextStorage(sourceBackend, targetBackend);
   const executeDdl = targetBackend.executeDdl;
   if (executeDdl === undefined)
     throw new BranchError(
@@ -643,7 +667,7 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
 
   const recorded = await graphRows(
     sourceBackend,
-    "typegraph_index_materializations",
+    INDEX_MATERIALIZATIONS_TABLE,
     source.graphId,
   );
   for (const { declaration } of materializedIndexes(source.graph, recorded)) {
@@ -710,7 +734,9 @@ export async function forkGraphNamespace<G extends GraphDef>(
   assertDefaultTables(sourceBackend);
   assertDefaultTables(targetBackend);
   assertMatchingVectorStorage(source.graph, sourceBackend, targetBackend);
+  assertMatchingFulltextStorage(sourceBackend, targetBackend);
   assertDefaultNameMap(source.revisionSchema.tables);
+  const relationTables = forkRelationTables(sourceBackend);
   const targetStore = createStore(
     source.graph,
     targetBackend,
@@ -760,7 +786,10 @@ export async function forkGraphNamespace<G extends GraphDef>(
           proof.sourceBase,
           "Namespace fork retry found an invalid source base token on target.",
         );
-        if ((await digestGraph(targetTx, source.graph)) !== proof.contentDigest)
+        if (
+          (await digestGraph(targetTx, source.graph, relationTables)) !==
+          proof.contentDigest
+        )
           throw new BranchError(
             "Namespace fork retry found a changed target namespace.",
           );
@@ -797,18 +826,18 @@ export async function forkGraphNamespace<G extends GraphDef>(
       );
       await assertIndependentDatabase(sourceTx, targetBackend, source.graphId);
       return targetBackend.transaction(async (targetTx) => {
-        await assertEmpty(targetTx, source.graph);
+        await assertEmpty(targetTx, source.graph, relationTables);
         const sourceDigests: [string, string][] = [];
-        for (const table of GRAPH_RELATIONS) {
+        for (const table of relationTables) {
           if (table === REVISION_CHANGES_TABLE) continue;
           const rows = forkedRows(
             source.graph,
             table,
             await graphRows(sourceTx, table, source.graphId),
           );
-          if (table === "typegraph_contribution_materializations")
+          if (table === CONTRIBUTION_MATERIALIZATIONS_TABLE)
             await assertSupportedContributions(targetTx, source.graph, rows);
-          if (table === "typegraph_index_materializations")
+          if (table === INDEX_MATERIALIZATIONS_TABLE)
             await assertPhysicalIndexes(targetTx, source.graph, rows);
           sourceDigests.push([table, await digestRows(rows)]);
           await insertRows(targetTx, table, rows);
@@ -826,7 +855,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
           source.graphId,
         );
         sourceDigests.splice(
-          GRAPH_RELATIONS.indexOf(REVISION_CHANGES_TABLE),
+          relationTables.indexOf(REVISION_CHANGES_TABLE),
           0,
           [REVISION_CHANGES_TABLE, await digestRows(sourceJournalRows)],
         );
@@ -843,7 +872,11 @@ export async function forkGraphNamespace<G extends GraphDef>(
           JSON.stringify(sourceDigests),
           32,
         );
-        const targetDigest = await digestGraph(targetTx, source.graph);
+        const targetDigest = await digestGraph(
+          targetTx,
+          source.graph,
+          relationTables,
+        );
         if (targetDigest !== snapshotDigest)
           throw new BranchError(
             "Namespace fork target validation disagrees with the source snapshot.",

@@ -2322,6 +2322,8 @@ store.clear(options?: { preserveContributionMaterializations?: boolean }): Promi
 ```
 
 Wrapped in a transaction when the backend supports it. Does not affect other graphs sharing the same backend.
+To verify what remains afterward without reading TypeGraph's physical tables, use
+[`inspectGraphStorage(store)`](/multiple-graphs#inspectgraphstoragestore).
 
 ```typescript
 // Wipe all data and start fresh

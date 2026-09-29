@@ -38,6 +38,7 @@ export { registerGraphMergeCallbackIntegrationTests } from "./graph-merge-callba
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerGraphMergeReviewV2IntegrationTests } from "./graph-merge-review-v2";
+export { registerGraphStorageIntegrationTests } from "./graph-storage";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";

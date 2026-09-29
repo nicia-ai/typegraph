@@ -3762,6 +3762,10 @@ export type ResolvedSqlTableNames = Readonly<{
     uniques: string;
     edgeClaims: string;
     fences: string;
+    indexMaterializations?: string;
+    contributionMaterializations?: string;
+    kindRemovals?: string;
+    reconciliationMarkers?: string;
 }>;
 
 // @public
@@ -4022,6 +4026,10 @@ export type SqlTableNames = Readonly<{
     uniques: string;
     edgeClaims?: string | undefined;
     fences?: string | undefined;
+    indexMaterializations?: string | undefined;
+    contributionMaterializations?: string | undefined;
+    kindRemovals?: string | undefined;
+    reconciliationMarkers?: string | undefined;
 }>;
 
 // @public
@@ -4341,7 +4349,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.";
-        readonly accesses: 27;
+        readonly accesses: 28;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
@@ -4632,7 +4640,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "fulltextOperations";
-        readonly ceiling: 3;
+        readonly ceiling: 4;
     };
     readonly getIndexMaterialization: {
         readonly kind: "deferred";
@@ -4776,7 +4784,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 14;
+        readonly ceiling: 15;
     };
 };
 

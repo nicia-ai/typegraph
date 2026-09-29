@@ -347,6 +347,83 @@ if (orgSchemaResult.status === "migrated") {
 }
 ```
 
+## Inspecting What a Database Holds
+
+Graphs sharing a backend are separated by `graph_id` inside TypeGraph's tables. Two reads answer the
+questions an operator asks about that layout without depending on it: which graphs live in this
+database, and how many rows one graph holds.
+
+### `listGraphIds(backend, options?)`
+
+Lists the graph ids that hold data, one bounded page at a time:
+
+```typescript
+import { listGraphIds } from "@nicia-ai/typegraph";
+
+let after: string | undefined;
+for (;;) {
+  const page = await listGraphIds(backend, { prefix: "tenant-", after, limit: 100 });
+  if (page.length === 0) break;
+  for (const graphId of page) console.log(graphId);
+  after = page.at(-1);
+}
+```
+
+| Option   | Meaning                                                                             |
+| -------- | ----------------------------------------------------------------------------------- |
+| `prefix` | Only ids starting with this exact, case-sensitive text. `%` and `_` are not wildcards. |
+| `after`  | Exclusive cursor: only ids ordered after this one. Pass the last id of the previous page. |
+| `limit`  | Page size from 1 to 1000. Defaults to 100. Anything else throws `ConfigurationError`. |
+
+Ids come back in byte order (UTF-8 code point order) on every backend, so `Tenant-x` sorts before
+`tenant-a` on SQLite and PostgreSQL alike and a cursor resumes exactly where the last page ended,
+whatever the database collation. The reserved deployment marker id that TypeGraph uses for
+deployment-scoped contribution markers is never listed. A graph appears while it has nodes, edges, a
+committed schema version or graph-local contribution markers, so a graph that has been fully removed
+with `store.clear({ preserveContributionMaterializations: false })` stops being listed, even when a
+revision-tracked store reseeded its `recordedClock` row during the clear.
+
+A page is small, but the query behind it is not: every call reads the `graph_id` column of those
+relations and de-duplicates it before the cursor and prefix apply, so the cost grows with the rows
+in the database rather than with `limit`. Use it for operator tooling, not on a request path. Rows
+that exist only outside those relations, such as orphaned recorded history, do not make a graph
+appear; `inspectGraphStorage` counts every relation.
+
+The read runs in one read-only transaction where the backend supports it. It needs the backend's
+catalog probes to tell a table that was never provisioned from an empty one, and throws
+`ConfigurationError` on a custom backend that has none.
+
+### `inspectGraphStorage(store)`
+
+Counts one graph's rows in every relation that can hold them:
+
+```typescript
+import { inspectGraphStorage } from "@nicia-ai/typegraph";
+
+await store.clear();
+const { graphId, relations, totalRows } = await inspectGraphStorage(store);
+
+const leftovers = relations.filter((relation) => relation.rows > 0);
+// [{ relation: "contributionMaterializations", table: "typegraph_contribution_materializations", rows: 2 }]
+```
+
+`relations` lists every graph-scoped relation under its logical key (`nodes`, `edges`, `uniques`,
+`edgeClaims`, `identityAssertions`, `recordedNodes`, `fulltext`, `schemaVersions`, and so on) with
+the physical `table` it resolved to on this backend, so custom table names are reported as
+configured. The graph's per-field vector tables come from its vector slots and the active vector
+strategy and are reported as `vector:<Kind>.<field>`. A relation whose table the database never
+provisioned counts as `0` rather than failing.
+
+Use it to verify that `store.clear()` left nothing behind. Two relations can legitimately hold a
+row after a clear, by design:
+
+- `contributionMaterializations` is preserved unless you pass
+  `preserveContributionMaterializations: false`.
+- `recordedClock` is reseeded inside the clear transaction on a store with live revision tracking
+  (without history).
+
+Every other relation reads `0` after a clear, and other graphs in the same database are untouched.
+
 ## Shared Subgraph Helpers
 
 When multiple graphs share a common set of node and edge types, you can write reusable

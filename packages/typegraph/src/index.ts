@@ -273,6 +273,18 @@ export {
 } from "./query/dialect/vector-strategy";
 
 // ============================================================
+// Graph Storage Inventory (which graphs a database holds, and what each holds)
+// ============================================================
+
+export {
+  type GraphStorageInspection,
+  type GraphStorageRelation,
+  listGraphIds,
+  type ListGraphIdsOptions,
+} from "./backend/graph-storage";
+export { inspectGraphStorage } from "./store/inspect-graph-storage";
+
+// ============================================================
 // Vector Storage Migration (one-time shared-table → per-field cutover)
 // ============================================================
 

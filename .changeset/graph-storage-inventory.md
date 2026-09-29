@@ -1,0 +1,9 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+Add `listGraphIds(backend, { prefix, after, limit })` and `inspectGraphStorage(store)` so operators can list the graphs in a database and count one graph's rows per relation, including per-field vector tables, without depending on TypeGraph's physical table layout. Both behave identically on SQLite and PostgreSQL: ids page in byte order regardless of database collation, prefixes match as case-sensitive literal text, and relations that were never provisioned count as empty.
+
+The set of graph-scoped relations now has one owner. `store.clear()`, namespace forks, PostgreSQL working-copy clone policies, the provenance sidecar occupancy probe and the new reads all consume the same declaration, and a ratchet test fails when a bundled table gains a `graph_id` column without being classified. `SqlTableNames` now also carries the `indexMaterializations`, `contributionMaterializations`, `kindRemovals` and `reconciliationMarkers` names (optional, defaulting to the bundled names), and the SQLite backend reports them in `backend.tableNames` as PostgreSQL already did.
+
+Inconsistencies the shared declaration exposed are fixed. `store.clear()` now removes the graph's revision-origin row whichever store clears it; before, a store that did not mint origin-namespaced tokens left a row that a revision-tracking store had minted, so the graph still read as occupied. `forkGraphNamespace` and `prepareNamespaceForkTarget` no longer fail with a raw missing-relation error on a PostgreSQL backend created with `fulltext: false`, and refuse a source and target whose fulltext storage differs with a `BranchError`. The provenance sidecar occupancy probe now counts revision-journal rows as occupancy, so a graph id whose only rows are journal entries is no longer treated as free.

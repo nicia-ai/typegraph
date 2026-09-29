@@ -4428,6 +4428,20 @@ export type GraphNodeReference<G extends GraphDef> = {
 }[NodeKinds<G>];
 
 // @public
+export type GraphStorageInspection = Readonly<{
+    graphId: string;
+    relations: readonly GraphStorageRelation[];
+    totalRows: number;
+}>;
+
+// @public
+export type GraphStorageRelation = Readonly<{
+    relation: string;
+    table: string;
+    rows: number;
+}>;
+
+// @public
 export type GraphTemplate<G extends GraphDef> = Readonly<{
     id: string;
     reconciled: ReconciledSchema<G>;
@@ -5106,6 +5120,9 @@ type InsertUniqueParams = Readonly<{
 }>;
 
 // @public
+export function inspectGraphStorage<G extends GraphDef>(store: Store<G>): Promise<GraphStorageInspection>;
+
+// @public
 export function instantiateGraph<G extends GraphDef>(backend: GraphBackend, params: Readonly<{
     template: GraphTemplate<G>;
     graphId: string;
@@ -5587,6 +5604,16 @@ type LineageMembers = Readonly<{
 
 // @public
 type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
+
+// @public
+export function listGraphIds(backend: GraphBackend, options?: ListGraphIdsOptions): Promise<readonly string[]>;
+
+// @public
+export type ListGraphIdsOptions = Readonly<{
+    prefix?: string | undefined;
+    after?: string | undefined;
+    limit?: number | undefined;
+}>;
 
 // @public (undocumented)
 function literal<T extends DatabaseLiteral>(value: T): DatabaseExpression<LiteralResult<T>, never>;
@@ -7604,6 +7631,10 @@ export type ResolvedSqlTableNames = Readonly<{
     uniques: string;
     edgeClaims: string;
     fences: string;
+    indexMaterializations?: string;
+    contributionMaterializations?: string;
+    kindRemovals?: string;
+    reconciliationMarkers?: string;
 }>;
 
 // @public (undocumented)
@@ -8287,6 +8318,10 @@ export type SqlTableNames = Readonly<{
     uniques: string;
     edgeClaims?: string | undefined;
     fences?: string | undefined;
+    indexMaterializations?: string | undefined;
+    contributionMaterializations?: string | undefined;
+    kindRemovals?: string | undefined;
+    reconciliationMarkers?: string | undefined;
 }>;
 
 // @public
