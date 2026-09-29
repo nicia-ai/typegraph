@@ -140,7 +140,7 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/postgres-working-copy.ts",
-    line: "const disposableBackend = wrapWithManagedClose(backend, () =>",
+    line: "const disposableBackend = wrapWithManagedClose(created.backend, () =>",
     reason:
       "An ephemeral working copy closes its derived connection and then discards only the tables owned by its allocation.",
   },

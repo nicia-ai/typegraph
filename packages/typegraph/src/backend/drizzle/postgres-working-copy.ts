@@ -834,7 +834,12 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     allocationId: string,
     state: "allocating" | "ephemeral",
   ): Promise<
-    Readonly<{ store: Store<G>; descriptor: PostgresWorkingCopyLocator }>
+    Readonly<{
+      // The fixed-schema owned backend, before any store decorates it with
+      // recorded capture. Each strategy builds its own store from this.
+      backend: GraphBackend;
+      descriptor: PostgresWorkingCopyLocator;
+    }>
   > {
     const sourceBackend = storeBackend(source);
     assertPostgresBackend(sourceBackend);
@@ -1003,12 +1008,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         }
       }
       if (options.refreshStatistics === true) await store.refreshStatistics();
-      const [fixedStore] = await createStoreWithSchema(
-        source.graph,
-        fixedSchemaBackend(ownedBackend, indexNames),
-        inheritedOptions,
-      );
-      return { store: fixedStore, descriptor: { allocationId } };
+      return {
+        backend: fixedSchemaBackend(ownedBackend, indexNames),
+        descriptor: { allocationId },
+      };
     } catch (error) {
       try {
         await backend?.close();
@@ -1028,8 +1031,32 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     type: STRATEGY_TYPE,
     version: FORMAT_VERSION,
     create: async (source, base, _branchId, allocationId) => {
-      const created = await allocate(source, base, allocationId, "allocating");
-      return { ...created, access: { kind: "engine-fenced" } };
+      const { backend, descriptor } = await allocate(
+        source,
+        base,
+        allocationId,
+        "allocating",
+      );
+      try {
+        const [store] = await createStoreWithSchema(
+          source.graph,
+          backend,
+          cloneOptions(source),
+        );
+        return { store, descriptor, access: { kind: "engine-fenced" } };
+      } catch (error) {
+        try {
+          await backend.close();
+        } catch {
+          /* Preserve store-creation error. */
+        }
+        try {
+          await dropAllocation(allocationId);
+        } catch {
+          /* Orphan remains discoverable. */
+        }
+        throw error;
+      }
     },
     seal: async (descriptor, origin) => {
       if (descriptor.allocationId !== origin.allocationId) {
@@ -1116,8 +1143,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     create: async (source, base) => {
       const allocationId = globalThis.crypto.randomUUID();
       const created = await allocate(source, base, allocationId, "ephemeral");
-      const backend = storeBackend(created.store);
-      const disposableBackend = wrapWithManagedClose(backend, () =>
+      const disposableBackend = wrapWithManagedClose(created.backend, () =>
         dropAllocation(allocationId),
       );
       bindRelationalIndexNames(
