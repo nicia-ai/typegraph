@@ -834,7 +834,14 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     allocationId: string,
     state: "allocating" | "ephemeral",
   ): Promise<
-    Readonly<{ store: Store<G>; descriptor: PostgresWorkingCopyLocator }>
+    Readonly<{
+      store: Store<G>;
+      // The unwrapped owned backend beneath `store`. A caller that builds a
+      // further store must start here: `storeBackend(store)` is already
+      // decorated by that store's recorded-capture wrapper.
+      backend: GraphBackend;
+      descriptor: PostgresWorkingCopyLocator;
+    }>
   > {
     const sourceBackend = storeBackend(source);
     assertPostgresBackend(sourceBackend);
@@ -1003,12 +1010,17 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         }
       }
       if (options.refreshStatistics === true) await store.refreshStatistics();
+      const fixedBackend = fixedSchemaBackend(ownedBackend, indexNames);
       const [fixedStore] = await createStoreWithSchema(
         source.graph,
-        fixedSchemaBackend(ownedBackend, indexNames),
+        fixedBackend,
         inheritedOptions,
       );
-      return { store: fixedStore, descriptor: { allocationId } };
+      return {
+        store: fixedStore,
+        backend: fixedBackend,
+        descriptor: { allocationId },
+      };
     } catch (error) {
       try {
         await backend?.close();
@@ -1116,8 +1128,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     create: async (source, base) => {
       const allocationId = globalThis.crypto.randomUUID();
       const created = await allocate(source, base, allocationId, "ephemeral");
-      const backend = storeBackend(created.store);
-      const disposableBackend = wrapWithManagedClose(backend, () =>
+      const disposableBackend = wrapWithManagedClose(created.backend, () =>
         dropAllocation(allocationId),
       );
       bindRelationalIndexNames(
