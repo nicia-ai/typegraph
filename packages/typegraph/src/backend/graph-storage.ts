@@ -10,14 +10,13 @@
  * counted as zero rather than reported as an error.
  */
 import { ConfigurationError } from "../errors";
+import { graphIdOrderIndexName } from "../indexes/system";
 import { getDialect } from "../query/dialect";
+import { type DialectAdapter } from "../query/dialect/types";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { requireCatalog } from "./capabilities/catalog";
-import {
-  type RecursiveTraversalVerdict,
-  resolveRecursiveTraversal,
-} from "./capabilities/recursive-traversal";
+import { resolveRecursiveTraversal } from "./capabilities/recursive-traversal";
 import {
   GRAPH_ID_COLUMN,
   GRAPH_PRESENCE_ANCHOR_KEYS,
@@ -131,9 +130,16 @@ function prefixPredicate(prefix: string): SqlFragment {
 type GraphIdPage = Readonly<{ prefix: string; after: string; limit: number }>;
 
 /**
- * How a walk is narrowed to one page. Both parts are only an optimization: the
- * page filter is applied over the walk's output either way, so a walk that is
- * not narrowed lists the same ids, only after visiting more of them.
+ * How the distinct graph ids are read. A `walk` steps from one graph id to the
+ * next by index seek, so its cost is the number of graph ids it visits and the
+ * page bounds below narrow it to the page. A `scan` reads and de-duplicates
+ * every anchor row, whatever the page.
+ */
+type GraphIdRead = "walk" | "scan";
+
+/**
+ * Where a walk starts and how long it runs. Both only narrow the walk: the page
+ * filter is applied over its output either way.
  */
 type GraphIdWalkBounds = Readonly<{
   /** Conditions on the first graph id visited. */
@@ -144,36 +150,38 @@ type GraphIdWalkBounds = Readonly<{
 
 const WALK_STEP_COLUMN = "step";
 
-const UNBOUNDED_WALK: GraphIdWalkBounds = { seed: [], continueWhile: [] };
-
 /**
- * Where a walk may start and stop for `page`. The walk visits ids in the order
- * the anchor indexes keep them, so it can start at the page's lower bound and
- * stop after the page (or the prefix) ends only where that order is the byte
- * order the page is defined in. Elsewhere the ids the page wants are scattered
- * through the walk, and the walk must visit all of them.
+ * Where a walk may start and stop for `page`. The walk visits ids in byte order
+ * (see {@link byteOrderedWalkAvailable}, which is what allows a walk at all), so
+ * it can start at the page's lower bound and stop after the page, or the
+ * prefix, ends.
  *
  * The seed bound is inclusive so it is one range condition on the index however
  * the cursor and the prefix compare: the larger of the two, chosen by the
- * engine's own comparison. When it lands on the cursor itself, that id is the
- * one visit the page filter drops, so the walk is allowed one more step.
+ * dialect's own byte-order comparison. When it lands on the cursor itself, that
+ * id is the one visit the page filter drops, so the walk is allowed one more
+ * step.
  */
 function walkBounds(
-  dialect: GraphBackend["dialect"],
+  dialect: DialectAdapter,
   page: GraphIdPage,
 ): GraphIdWalkBounds {
-  if (!getDialect(dialect).capabilities.textIndexOrderIsBinary)
-    return UNBOUNDED_WALK;
   const graphId = sql.identifier(GRAPH_ID_COLUMN);
   const hasCursor = page.after !== "";
   const hasPrefix = page.prefix !== "";
+  const cursor = sql`CAST(${page.after} AS TEXT)`;
+  const prefix = sql`CAST(${page.prefix} AS TEXT)`;
   const lowerBound =
-    hasCursor && hasPrefix ? sql`max(${page.after}, ${page.prefix})`
-    : hasCursor ? sql`${page.after}`
-    : sql`${page.prefix}`;
+    hasCursor && hasPrefix ?
+      sql`CASE WHEN ${dialect.binaryText(cursor)} > ${prefix} THEN ${cursor} ELSE ${prefix} END`
+    : hasCursor ? cursor
+    : prefix;
   const visits = page.limit + (hasCursor ? 1 : 0);
   return {
-    seed: hasCursor || hasPrefix ? [sql`${graphId} >= ${lowerBound}`] : [],
+    seed:
+      hasCursor || hasPrefix ?
+        [sql`${dialect.binaryText(graphId)} >= ${lowerBound}`]
+      : [],
     continueWhile: [
       sql`${sql.identifier(WALK_STEP_COLUMN)} < ${visits}`,
       ...(hasPrefix ? [prefixPredicate(page.prefix)] : []),
@@ -183,10 +191,11 @@ function walkBounds(
 
 /**
  * The next graph id across every anchor table that satisfies `conditions`: one
- * index seek per table on the table's own `graph_id`-leading primary key,
- * however many rows the table holds.
+ * index seek per table, in byte order, on the table's `graph_id` index however
+ * many rows the table holds.
  */
 function smallestGraphId(
+  dialect: DialectAdapter,
   tables: readonly string[],
   conditions: readonly SqlFragment[],
 ): SqlFragment {
@@ -197,40 +206,41 @@ function smallestGraphId(
   ];
   const seeks = tables.map(
     (table) =>
-      sql`SELECT min(${graphId}) AS next_graph_id FROM ${sql.identifier(table)} WHERE ${sql.join(where, sql` AND `)}`,
+      sql`SELECT min(${dialect.binaryText(graphId)}) AS next_graph_id FROM ${sql.identifier(table)} WHERE ${sql.join(where, sql` AND `)}`,
   );
   return sql`SELECT min(next_graph_id) FROM (${sql.join(seeks, sql` UNION ALL `)}) AS next_ids`;
 }
 
 /**
- * The `graph_ids` relation: every distinct graph id in the anchor tables, in
- * the columns' native order, without the reserved deployment marker id. Where
- * the engine recurses it is a loose index scan, a recursive CTE that steps from
- * one graph id to the next by index seek instead of reading every row, so its
- * cost is the number of graphs visited rather than the rows they hold. An
- * engine that declares no recursive traversal still lists graphs, from a
- * de-duplicating scan of the same columns, the way weighted shortest path falls
- * back to a predecessor walk.
+ * The `graph_ids` relation: every distinct graph id in the anchor tables,
+ * without the reserved deployment marker id. As a `walk` it is a loose index
+ * scan, a recursive CTE that steps from one graph id to the next by index seek
+ * instead of reading every row, so its cost is the number of graphs visited
+ * rather than the rows they hold. As a `scan` it is a de-duplicating read of
+ * the same columns, the way weighted shortest path falls back to a predecessor
+ * walk where the engine declines recursion.
  */
 function distinctGraphIds(
-  recursiveTraversal: RecursiveTraversalVerdict,
+  dialect: DialectAdapter,
+  read: GraphIdRead,
   tables: readonly string[],
-  bounds: GraphIdWalkBounds,
+  page: GraphIdPage,
 ): SqlFragment {
   const graphId = sql.identifier(GRAPH_ID_COLUMN);
-  if (!recursiveTraversal.supported) {
+  if (read === "scan") {
     const scans = tables.map(
       (table) =>
         sql`SELECT ${graphId} FROM ${sql.identifier(table)} WHERE ${graphId} <> ${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}`,
     );
     return sql`WITH graph_ids(${graphId}) AS (${sql.join(scans, sql` UNION `)})`;
   }
+  const bounds = walkBounds(dialect, page);
   const step = sql.identifier(WALK_STEP_COLUMN);
   return sql`
     WITH RECURSIVE graph_ids(${graphId}, ${step}) AS (
-      SELECT (${smallestGraphId(tables, bounds.seed)}), 1
+      SELECT (${smallestGraphId(dialect, tables, bounds.seed)}), 1
       UNION ALL
-      SELECT (${smallestGraphId(tables, [sql`${graphId} > graph_ids.${graphId}`])}), graph_ids.${step} + 1
+      SELECT (${smallestGraphId(dialect, tables, [sql`${dialect.binaryText(graphId)} > graph_ids.${graphId}`])}), graph_ids.${step} + 1
       FROM graph_ids
       WHERE ${sql.join([sql`graph_ids.${graphId} IS NOT NULL`, ...bounds.continueWhile], sql` AND `)}
     )
@@ -240,13 +250,12 @@ function distinctGraphIds(
 /**
  * The statement behind one {@link listGraphIds} page: the distinct graph ids,
  * then the cursor, prefix and page size applied in byte order over them. The
- * same statement runs on every dialect; what differs is how far the walk may be
- * narrowed (see {@link walkBounds}) and the byte-order collation, which the
- * dialect adapter owns.
+ * same statement shape runs on every dialect; the byte-order collation is the
+ * dialect adapter's.
  */
 function listGraphIdsQuery(
-  dialect: GraphBackend["dialect"],
-  recursiveTraversal: RecursiveTraversalVerdict,
+  dialect: DialectAdapter,
+  read: GraphIdRead,
   tables: readonly string[],
   page: GraphIdPage,
 ): SqlFragment {
@@ -254,20 +263,43 @@ function listGraphIdsQuery(
   // The dialect's own owner of "compare text by bytes": PostgreSQL would
   // otherwise order and page by the database collation, and two databases
   // would disagree about where a mixed-case id sorts.
-  const byteOrdered = getDialect(dialect).binaryText(graphId);
+  const byteOrdered = dialect.binaryText(graphId);
   const conditions = [
     sql`${graphId} IS NOT NULL`,
     ...(page.after === "" ? [] : [sql`${byteOrdered} > ${page.after}`]),
     ...(page.prefix === "" ? [] : [prefixPredicate(page.prefix)]),
   ];
   return sql`
-    ${distinctGraphIds(recursiveTraversal, tables, walkBounds(dialect, page))}
+    ${distinctGraphIds(dialect, read, tables, page)}
     SELECT ${graphId}
     FROM graph_ids
     WHERE ${sql.join(conditions, sql` AND `)}
     ORDER BY ${byteOrdered}
     LIMIT ${page.limit}
   `;
+}
+
+/**
+ * Whether `tables` can be walked in byte order by index seek. SQLite keeps every
+ * text index in byte order, so its `graph_id`-leading primary keys serve the
+ * walk. PostgreSQL orders text indexes by the database collation, so the walk
+ * needs the byte-ordered `graph_id` index the base schema adopts on each anchor
+ * table (`graphIdOrderIndexName`). That is read from the catalog rather than
+ * assumed: a database whose base schema is not current yet, a schema managed by
+ * hand, or an index an operator dropped, is still listed correctly, by the
+ * de-duplicating scan, instead of by a walk whose every step would scan a table.
+ */
+async function byteOrderedWalkAvailable(
+  target: ReadTarget,
+  dialect: DialectAdapter,
+  tables: readonly string[],
+): Promise<boolean> {
+  if (dialect.capabilities.textIndexOrderIsBinary) return true;
+  const states = await requireCatalog(
+    target,
+    LIST_GRAPH_IDS_OPERATION,
+  ).indexStates(tables.map((table) => graphIdOrderIndexName(table)));
+  return states.every((state) => state.exists && !state.invalid);
 }
 
 /**
@@ -289,16 +321,17 @@ function listGraphIdsQuery(
  * are not enumerable without one; a graph with vector rows has node rows too.
  * Use `inspectGraphStorage` to see everything one graph holds.
  *
- * Cost: a page walks graph ids by index seek (one seek per graph per anchor
- * table, on the `graph_id`-leading primary keys), never by reading the rows
- * those graphs hold. Where the engine keeps text indexes in byte order (SQLite)
- * the walk starts at the cursor or prefix and stops after the page, so a page
- * costs about `limit` seeks wherever it sits. Where it does not (PostgreSQL
- * orders those indexes by the database collation, so byte-order bounds are not
- * index ranges) the walk visits every graph, so a page costs one seek per graph
- * in the database. A backend that declares no recursive traversal reads and
- * de-duplicates every anchor row instead. It is an operator read, not a
- * hot-path lookup.
+ * Cost: a page walks graph ids by index seek in byte order (one seek per graph
+ * per anchor table), never by reading the rows those graphs hold. The walk
+ * starts at the cursor or prefix and stops after the page, so a page costs about
+ * `limit` seeks wherever it sits and however many graphs the database holds.
+ * SQLite serves the seeks from the `graph_id`-leading primary keys. PostgreSQL
+ * orders those by the database collation, so it serves them from the
+ * byte-ordered `graph_id` index the base schema adds to each anchor table
+ * (`COLLATE "C"`, adopted at base-schema version 5). Where that index is absent,
+ * or the backend declares no recursive traversal, the page reads and
+ * de-duplicates every anchor row instead: the same ids, at a cost that grows
+ * with the rows the graphs hold. It is an operator read, not a hot-path lookup.
  *
  * ```typescript
  * let after: string | undefined;
@@ -335,18 +368,17 @@ export async function listGraphIds(
         present.has(table),
       );
       if (tables.length === 0) return [];
+      const dialect = getDialect(target.dialect);
+      const walkable =
+        resolveRecursiveTraversal(target.capabilities).supported &&
+        (await byteOrderedWalkAvailable(target, dialect, tables));
       const rows = await target.execute<GraphIdRow>(
         asCompiledRowsSql(
-          listGraphIdsQuery(
-            target.dialect,
-            resolveRecursiveTraversal(target.capabilities),
-            tables,
-            {
-              prefix: options.prefix ?? "",
-              after: options.after ?? "",
-              limit,
-            },
-          ),
+          listGraphIdsQuery(dialect, walkable ? "walk" : "scan", tables, {
+            prefix: options.prefix ?? "",
+            after: options.after ?? "",
+            limit,
+          }),
         ),
       );
       return rows.map((row) => row.graph_id);

@@ -116,11 +116,12 @@ export type DialectCapabilities = Readonly<{
   subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
 
   /**
-   * Whether an index over a text column is kept in byte order, the order
-   * {@link DialectAdapter.binaryText} imposes. When true, a read may seed an
-   * index walk at a byte-order bound and stop it early. PostgreSQL keeps text
-   * indexes in the database collation, so a byte-order bound cannot be
-   * expressed as an index range there.
+   * Whether every index over a text column is kept in byte order, the order
+   * {@link DialectAdapter.binaryText} imposes, so a byte-order bound is an
+   * index range on any text index. SQLite is. PostgreSQL keeps text indexes in
+   * the database collation, so a byte-order bound is an index range only on an
+   * index declared `COLLATE "C"`; a read that wants one must check the catalog
+   * for it (see the graph id listing).
    */
   textIndexOrderIsBinary: boolean;
 }>;

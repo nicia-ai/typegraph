@@ -762,6 +762,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     sinceIndexDdl: readonly string[];
     revisionChangesTableDdl?: string;
     revisionChangesIndexDdl?: readonly string[];
+    graphIdOrderIndexDdl?: readonly string[];
 }>;
 
 // @public (undocumented)

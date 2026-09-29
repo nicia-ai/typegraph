@@ -19,7 +19,10 @@ import {
 import { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { postgresContributions } from "../src/backend/drizzle/ddl";
+import {
+  postgresContributions,
+  sqliteContributions,
+} from "../src/backend/drizzle/ddl";
 import { buildClearGraph } from "../src/backend/drizzle/operations/clear";
 import type { Tables } from "../src/backend/drizzle/operations/shared";
 import {
@@ -46,6 +49,7 @@ import {
   resolveGraphRelationNames,
 } from "../src/backend/graph-relations";
 import { createPostgresBackend } from "../src/backend/postgres";
+import { graphIdOrderIndexTables } from "../src/indexes/system";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   fts5Strategy,
@@ -346,6 +350,58 @@ describe("graph presence anchors", () => {
         `relation ${key} survives a default clear`,
       ).toBe(false);
     }
+  });
+
+  it("carry the byte-ordered graph_id index the listing seeks on PostgreSQL, and nowhere else", () => {
+    // The listing walks anchors in byte order; PostgreSQL orders ordinary text
+    // indexes by the database collation, so an anchor without this index would
+    // make every page scan a table. Stated literally rather than derived from
+    // the index declaration under test.
+    const expected = new Map([
+      [
+        "nodes",
+        'CREATE INDEX IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx" ON "typegraph_nodes" ("graph_id" COLLATE "C");',
+      ],
+      [
+        "edges",
+        'CREATE INDEX IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx" ON "typegraph_edges" ("graph_id" COLLATE "C");',
+      ],
+      [
+        "schemaVersions",
+        'CREATE INDEX IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx" ON "typegraph_schema_versions" ("graph_id" COLLATE "C");',
+      ],
+    ]);
+    expect([...expected.keys()].toSorted()).toEqual(
+      [...GRAPH_PRESENCE_ANCHOR_KEYS].toSorted(),
+    );
+    const carriers = new Map(
+      postgresContributions(postgresTables).flatMap((contribution) => {
+        const statement = contribution.createDdl.find((ddl) =>
+          ddl.includes("graph_id_bytes_idx"),
+        );
+        return statement === undefined ?
+            []
+          : [[contribution.logicalName, statement] as const];
+      }),
+    );
+    expect(carriers).toEqual(expected);
+    const sqliteCarriers = sqliteContributions(sqliteTables).filter(
+      (contribution) =>
+        contribution.createDdl.some((ddl) =>
+          ddl.includes("graph_id_bytes_idx"),
+        ),
+    );
+    expect(sqliteCarriers).toEqual([]);
+  });
+
+  it("are the tables the adoption step and the name reservation cover, under custom names too", () => {
+    const overrides = customNames();
+    expect(graphIdOrderIndexTables(overrides)).toEqual(
+      GRAPH_PRESENCE_ANCHOR_KEYS.map((relation) => ({
+        relation,
+        table: `custom_${relation}`,
+      })),
+    );
   });
 
   describe.each(BINDINGS)("%s", (_label, tables) => {

@@ -95,6 +95,15 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   revisionChangesTableDdl?: string;
   /** Index DDL for the revision-change journal, installed during version-4 adoption. */
   revisionChangesIndexDdl?: readonly string[];
+  /**
+   * Version-5 adoption: the byte-ordered `graph_id` index on each relation the
+   * graph id listing seeks. Omit on an engine whose text indexes are already
+   * kept in byte order (SQLite): there is nothing to add, and the step only
+   * advances the marker. An engine that needs the index but omits it still
+   * lists graph ids correctly, because the listing checks the catalog for the
+   * index and reads every anchor row without it.
+   */
+  graphIdOrderIndexDdl?: readonly string[];
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -109,9 +118,10 @@ export type BaseSchemaMembers = Readonly<{
  * unchanged: version 1 (the graph-templates table plus edge-match-identity
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
  * rows table), version 3 (the recorded-relations' and recorded
- * identity-assertions relation's `since_idx` indexes), and version 4 (the
- * revision-changes relation) all follow the same
- * prepare/adopt-before/adopt-after bootstrap sequencing.
+ * identity-assertions relation's `since_idx` indexes), version 4 (the
+ * revision-changes relation), and version 5 (the byte-ordered `graph_id`
+ * indexes) all follow the same prepare/adopt-before/adopt-after bootstrap
+ * sequencing.
  */
 export function createBaseSchemaMembers(
   deps: CreateBaseSchemaMembersDeps,
@@ -129,6 +139,7 @@ export function createBaseSchemaMembers(
     sinceIndexDdl,
     revisionChangesTableDdl,
     revisionChangesIndexDdl,
+    graphIdOrderIndexDdl = [],
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -194,6 +205,15 @@ export function createBaseSchemaMembers(
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
+      {
+        version: 5,
+        async adopt(): Promise<void> {
+          for (const ddl of graphIdOrderIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
     ],
   });
 
@@ -204,9 +224,7 @@ export function createBaseSchemaMembers(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateDdl();
       for (const statement of statements) {
         await ensureTable(statement);

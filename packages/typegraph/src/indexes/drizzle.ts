@@ -1,4 +1,4 @@
-import { type SQLWrapper } from "drizzle-orm";
+import { sql as drizzleSql, type SQLWrapper } from "drizzle-orm";
 import {
   index as pgIndex,
   type IndexBuilder as PgIndexBuilder,
@@ -21,6 +21,7 @@ import {
   type IndexCompilationContext,
 } from "./compiler";
 import {
+  graphIdOrderIndexName,
   SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
   systemIndexName,
@@ -478,6 +479,21 @@ export function buildSqliteSystemIndexBuilders(
     physicalTableName,
     columns,
     (name) => sqliteIndex(name),
+  );
+}
+
+/**
+ * The byte-ordered `graph_id` index (see `graphIdOrderIndexName`) as a Drizzle
+ * builder, so the schema factory, drizzle-kit and the generated DDL all carry
+ * the index the graph id listing seeks. PostgreSQL only: SQLite's text indexes
+ * are already in byte order.
+ */
+export function buildPostgresGraphIdOrderIndex(
+  physicalTableName: string,
+  graphIdColumn: PgColumn,
+): PgIndexBuilder {
+  return pgIndex(graphIdOrderIndexName(physicalTableName)).on(
+    drizzleSql`${graphIdColumn} COLLATE "C"`,
   );
 }
 

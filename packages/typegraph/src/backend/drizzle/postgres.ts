@@ -64,7 +64,11 @@ import {
   SchemaFenceTimeoutError,
   StaleVersionError,
 } from "../../errors";
-import { sinceIndexAdoptionDdl } from "../../indexes/system";
+import {
+  generateGraphIdOrderIndexDDL,
+  graphIdOrderIndexTables,
+  sinceIndexAdoptionDdl,
+} from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -497,14 +501,19 @@ END; $tg$`;
     EXECUTE $definition$ ${functionDdl} $definition$;
   END IF;
 END; $install$`;
-  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
-    const triggerName = revisionChangeTriggerName(entity, table);
-    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
-    const trigger = triggerName.replaceAll("'", "''");
-    const journal = names.revisionChanges.replaceAll("'", "''");
-    const clock = names.recordedClock.replaceAll("'", "''");
-    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
-  });
+  const triggerDdl = postgresRevisionChangeTargets(names).map(
+    ({ entity, table }) => {
+      const triggerName = revisionChangeTriggerName(entity, table);
+      const relation = postgresIdentifierRegclassName(table).replaceAll(
+        "'",
+        "''",
+      );
+      const trigger = triggerName.replaceAll("'", "''");
+      const journal = names.revisionChanges.replaceAll("'", "''");
+      const clock = names.recordedClock.replaceAll("'", "''");
+      return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    },
+  );
   return [installFunctionDdl, ...triggerDdl];
 }
 
@@ -1265,13 +1274,17 @@ function buildPostgresEngineProfileInternal(
   );
   const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
   const bareClient =
-    typeof rawClient === "object" &&
-    rawClient !== null &&
-    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+    (
+      typeof rawClient === "object" &&
+      rawClient !== null &&
+      isBarePgClient(rawClient as Readonly<Record<string, unknown>>)
+    ) ?
       rawClient
     : undefined;
   const queueOwner =
-    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
+    transactionScoped ?
+      (getPinnedPostgresTransactionClient(db) ?? db)
+    : bareClient;
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
@@ -1306,7 +1319,9 @@ function buildPostgresEngineProfileInternal(
     baseSchemaVersions: getTableName(tables.baseSchemaVersions),
     graphTemplates: getTableName(tables.graphTemplates),
     indexMaterializations: getTableName(tables.indexMaterializations),
-    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
     kindRemovals: getTableName(tables.kindRemovals),
     reconciliationMarkers: getTableName(tables.reconciliationMarkers),
   } satisfies PostgresTableNames;
@@ -1599,8 +1614,9 @@ function buildPostgresEngineProfileInternal(
     revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
     async revisionChangesJournalReady(): Promise<boolean> {
       const expectedTriggers = portableSql.join(
-        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
-          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        postgresRevisionChangeTargets(tableNames).map(
+          ({ entity, table }) =>
+            portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
         ),
         portableSql`, `,
       );
@@ -1921,6 +1937,9 @@ function buildPostgresEngineProfileInternal(
     ],
     revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
     revisionChangesIndexDdl: generatePgCreateIndexSQL(tables.revisionChanges),
+    graphIdOrderIndexDdl: graphIdOrderIndexTables(tableNames).map(({ table }) =>
+      generateGraphIdOrderIndexDDL(table),
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /

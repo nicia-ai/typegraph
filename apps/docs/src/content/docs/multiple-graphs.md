@@ -384,19 +384,21 @@ cleared graph therefore stops being listed even though `store.clear()` keeps its
 markers unless you pass `preserveContributionMaterializations: false`, and even when a
 revision-tracked store reseeded its `recordedClock` row during the clear.
 
-Each page walks graph ids by index seek, one seek per graph per relation on the `graph_id`-leading
-primary keys, instead of reading every row, so the cost never depends on how many rows a graph holds.
-What it does depend on differs by backend. SQLite keeps those indexes in byte order, so the walk
-starts at the cursor or prefix and stops after the page: a page costs about `limit` seeks wherever it
-sits, however many graphs the database holds. PostgreSQL keeps them in the database collation, which
-is not the byte order pages are defined in, so the cursor, prefix and page size filter the walk
-instead of bounding it: a page costs one seek per graph in the database (roughly 15 to 20
-microseconds each on the cluster it was measured on). That beats reading every row once graphs hold
-more than about 150 rows per relation each, and is slower than reading them below that, the shape
-of a database with very many tiny graphs. A backend that declares no recursive traversal reads and
-de-duplicates every row of those relations for each page. Use the listing for operator tooling, not on
-a request path. Rows that exist only outside those relations, such as orphaned recorded history or
-contribution markers, do not make a graph appear; `inspectGraphStorage` counts every relation.
+Each page walks graph ids by index seek, one seek per graph per relation, instead of reading every
+row. The walk starts at the cursor or prefix and stops after the page, so a page costs about `limit`
+seeks wherever it sits, however many graphs the database holds and however many rows they contain.
+SQLite serves the seeks from the `graph_id`-leading primary keys, which are already in byte order.
+PostgreSQL orders ordinary text indexes by the database collation, so it serves them from a
+byte-ordered (`COLLATE "C"`) `graph_id` index that base-schema version 5 adds to `nodes`, `edges` and
+`schema_versions`; see [Base-schema version 5](/backend-setup#base-schema-version-5-byte-ordered-graph_id-indexes-postgresql)
+for what it costs and how to build it ahead of an upgrade. On a 20,000-graph, 50-rows-per-graph
+PostgreSQL 18 database a page takes about 3 ms, where the same read took about 400 ms before the
+index; at 200 graphs of 5,000 rows it is about 3 ms either way. A database without the index (its
+base schema not adopted yet, or DDL managed by hand) lists the same ids by reading and de-duplicating
+every row of those relations for each page, tens of milliseconds at these sizes. A backend that
+declares no recursive traversal does the same. Use the listing for operator tooling, not on a request
+path. Rows that exist only outside those relations, such as orphaned recorded history or contribution
+markers, do not make a graph appear; `inspectGraphStorage` counts every relation.
 
 The read runs in one read-only transaction where the backend supports it. It needs the backend's
 catalog probes to tell a table that was never provisioned from an empty one, and throws

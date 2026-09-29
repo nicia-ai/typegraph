@@ -41,6 +41,7 @@ import {
 
 import {
   buildPostgresEdgeIndexBuilders,
+  buildPostgresGraphIdOrderIndex,
   buildPostgresNodeIndexBuilders,
   buildPostgresSystemIndexBuilders,
 } from "../../../indexes/drizzle";
@@ -94,8 +95,7 @@ export type CreatePostgresTablesOptions = Readonly<{
   indexes?: readonly IndexDeclaration[] | undefined;
   /** Resolve graph index identifiers for an isolated physical namespace. */
   physicalIndexName?:
-    | ((index: RelationalIndexDeclaration) => string)
-    | undefined;
+    ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
@@ -151,6 +151,7 @@ export function createPostgresTables(
       // System indexes come from SYSTEM_INDEX_DECLARATIONS (single source
       // for both dialects + the runtime materializer).
       ...buildPostgresSystemIndexBuilders("nodes", n.nodes, t),
+      buildPostgresGraphIdOrderIndex(n.nodes, t.graphId),
       ...buildPostgresNodeIndexBuilders(t, resolvedIndexes),
     ],
   );
@@ -187,6 +188,7 @@ export function createPostgresTables(
         sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
       ),
       ...buildPostgresSystemIndexBuilders("edges", n.edges, t),
+      buildPostgresGraphIdOrderIndex(n.edges, t.graphId),
       ...buildPostgresEdgeIndexBuilders(t, resolvedIndexes),
     ],
   );
@@ -278,7 +280,12 @@ export function createPostgresTables(
       kind: text("kind").notNull(),
       id: text("id").notNull(),
     },
-    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
@@ -521,6 +528,7 @@ export function createPostgresTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.version] }),
       index(`${n.schemaVersions}_active_idx`).on(t.graphId, t.isActive),
+      buildPostgresGraphIdOrderIndex(n.schemaVersions, t.graphId),
       // Partial unique index enforcing the "at most one active version
       // per graph" invariant at the storage layer. Defense in depth
       // against buggy backend implementations or out-of-band writes.

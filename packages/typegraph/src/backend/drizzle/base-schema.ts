@@ -50,6 +50,18 @@ export const BASE_SCHEMA_RELEASES = [
         "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
     },
   },
+  {
+    version: 5,
+    // SQLite's shape is unchanged: its text indexes are already in byte order,
+    // so its digest is the previous release's.
+    id: "graph-id-byte-order-index",
+    orderedShapeDigests: {
+      postgres:
+        "9d254c4c28fdf3e084910fe50dcdba17bd7a7e705046b07f0377de4ff5aa2264",
+      sqlite:
+        "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {
