@@ -5,6 +5,7 @@
  * over connections whose `search_path` leads with a different schema, and
  * remove allocations from sessions that do not search the recorded one.
  */
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Client, type ClientConfig, Pool } from "pg";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -259,6 +260,19 @@ async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
     return error;
   }
   throw new Error("Expected the promise to reject.");
+}
+
+/** The `details.code` of every `ConfigurationError` along an error's cause chain. */
+function configurationCodesOf(error: unknown): readonly unknown[] {
+  const codes: unknown[] = [];
+  for (
+    let link: unknown = error;
+    link instanceof Error;
+    link = (link as { cause?: unknown }).cause
+  ) {
+    if (link instanceof ConfigurationError) codes.push(link.details["code"]);
+  }
+  return codes;
 }
 
 /** Sanity check that the skew is real, so the assertions below are not vacuous. */
@@ -631,6 +645,47 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
+    it("keeps the ledger row when the recorded schema no longer holds the allocation's tables", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        await pool.query(`CREATE SCHEMA IF NOT EXISTS ${MOVED_SCHEMA}`);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const allocationId = await onlyUnsealedId(manager);
+        // The tables move away; the ledger row still records the old schema.
+        for (const relation of await relationsOf(pool, names)) {
+          if (relation.kind !== TABLE_KIND) continue;
+          await pool.query(
+            `ALTER TABLE "${relation.schema}"."${relation.name}" SET SCHEMA ${MOVED_SCHEMA}`,
+          );
+        }
+
+        const failure = await rejectionOf(
+          manager.abortAllocation(allocationId),
+        );
+        expect(failure).toBeInstanceOf(BranchError);
+        expect(await ledgerRows(pool, names)).toHaveLength(1);
+        expect(await onlyUnsealedId(manager)).toBe(allocationId);
+        expect(schemasOf(await relationsOf(pool, names))).toEqual([
+          MOVED_SCHEMA,
+        ]);
+
+        // Pointing the row at where the tables now live makes it removable.
+        await pool.query(
+          `UPDATE ${LEDGER} SET schema_name = $1 WHERE physical_prefix = $2`,
+          [MOVED_SCHEMA, physicalPrefixOf(names)],
+        );
+        await manager.abortAllocation(allocationId);
+        expect(await relationsOf(pool, names)).toEqual([]);
+        expect(await ledgerRows(pool, names)).toEqual([]);
+      } finally {
+        await pool.query(`DROP SCHEMA IF EXISTS ${MOVED_SCHEMA} CASCADE`);
+        await pool.end();
+      }
+    }, 60_000);
+
     it("keeps the ledger row and the allocation discoverable when a relation cannot be dropped", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
       try {
@@ -806,6 +861,63 @@ describe.runIf(process.env["POSTGRES_URL"])(
           adopt(transaction, personGraph.id, { waitBudgetMs: 1000 }),
         );
         await backend.close();
+      } finally {
+        await skewed.end();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("checks a caller-owned transaction's schema for lazy DDL instead of rewriting its search_path", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const skewed = skewedPool();
+      try {
+        await prepareDatabase(pool);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        const owner = await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const searchPathOf = async (
+          transaction: AnyPgTransaction,
+        ): Promise<string> => {
+          const shown = await transaction.execute(sql`SHOW search_path`);
+          return String(
+            (shown as { rows: { search_path: string }[] }).rows[0]
+              ?.search_path,
+          );
+        };
+
+        let skewedPathBefore = "";
+        let skewedPathAfter = "";
+        let refusal: unknown;
+        await drizzle(skewed).transaction(async (transaction) => {
+          skewedPathBefore = await searchPathOf(transaction);
+          const callerBackend = createPostgresBackend(transaction, {
+            tables: createPostgresTables(names),
+          });
+          refusal = await rejectionOf(
+            createStoreWithSchema(personGraph, callerBackend),
+          );
+          skewedPathAfter = await searchPathOf(transaction);
+        });
+        expect(configurationCodesOf(refusal)).toContain(
+          "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+        );
+        expect(skewedPathAfter).toBe(skewedPathBefore);
+
+        // A session already in the allocation schema runs the same DDL and
+        // keeps the search_path it brought.
+        let matchingPathBefore = "";
+        let matchingPathAfter = "";
+        await drizzle(pool).transaction(async (transaction) => {
+          matchingPathBefore = await searchPathOf(transaction);
+          const callerBackend = createPostgresBackend(transaction, {
+            tables: createPostgresTables(names),
+          });
+          await createStoreWithSchema(personGraph, callerBackend);
+          matchingPathAfter = await searchPathOf(transaction);
+        });
+        expect(matchingPathAfter).toBe(matchingPathBefore);
+        await owner.close();
       } finally {
         await skewed.end();
         await pool.end();

@@ -1639,20 +1639,25 @@ tables that removal never finds.
   is already the allocation's. Extensions are database-global, not allocation
   relations, and are unchanged.
 - **Refusals.** A connection whose backend was built over a *copy* of `names`
-  (which carries no schema) is refused with a `BranchError`, as is a `connect`
-  driver that cannot hold an interactive transaction (`drizzle-orm/neon-http`),
-  because it cannot run its DDL under a fixed schema. Adopting a caller's own
-  transaction for a schema write is refused with a `ConfigurationError`
-  (`ALLOCATION_SCHEMA_SESSION_MISMATCH`) unless that session's current schema is
-  the allocation's: the caller owns that session's search path, so it is checked
-  rather than rewritten.
+  (which carries no schema) is refused with a `BranchError`. A `connect` driver
+  that cannot hold an interactive transaction (`drizzle-orm/neon-http`) is
+  refused with a `ConfigurationError`
+  (`ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS`), because it cannot run
+  its DDL under a fixed schema. A backend built over a caller's own transaction
+  runs its lazy DDL and schema writes, and adopts that transaction for a schema
+  write, only when that session's current schema is the allocation's; otherwise
+  it is refused with a `ConfigurationError`
+  (`ALLOCATION_SCHEMA_SESSION_MISMATCH`). The caller owns that session's search
+  path, so it is checked rather than rewritten.
 - **Removal** (`close`, `abort`, `destroy`) discovers the allocation's tables
   through the catalog by the recorded schema and the reserved prefixes, drops
   them schema-qualified in one statement, and deletes the ledger row in the same
   transaction. If a drop fails (a view that depends on an allocation table, for
   example) the transaction rolls back, the row stays, and the allocation remains
   in `listUnsealedAllocations()` for `abortAllocation()` once the dependency is
-  gone.
+  gone. Removal also refuses, keeping the row, when the recorded schema no longer
+  holds the allocation's nodes table (the schema was renamed or the tables were
+  moved), because deleting the row would discard the only pointer to them.
 - **Ledger rows from before the schema was recorded** (written by 0.72.0) carry
   no schema. They resolve through the session that removes them, as removal
   always did, and reopen without binding. `control` adds the column to an

@@ -712,6 +712,30 @@ async function executeRawDdl(
 }
 
 /**
+ * The one decision that a caller-owned session may run an allocation's DDL:
+ * its current schema is the allocation's. The caller owns that session's
+ * search path, so it is checked, never rewritten.
+ */
+async function assertCallerSessionInAllocationSchema(
+  adapter: PostgresExecutionAdapter,
+  allocationSchema: string,
+  operation: string,
+): Promise<void> {
+  const [session] = await adapter.execute<{ schema: string | null }>(
+    sql`SELECT current_schema() AS schema`,
+  );
+  if (session?.schema === allocationSchema) return;
+  throw new ConfigurationError(
+    `${operation} over a working-copy allocation must run on a session whose current schema is "${allocationSchema}".`,
+    {
+      code: "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+      allocationSchema,
+      sessionSchema: session?.schema,
+    },
+  );
+}
+
+/**
  * Builds this dialect's `catalog` probes bound to one execution session —
  * the profile's own connection for the root backend, or a transaction's
  * pinned client for a transaction-scoped backend, via `db` and
@@ -1367,21 +1391,51 @@ function buildPostgresEngineProfileInternal(
    * or creates it there, whatever the pooled connection's own `search_path`.
    * A statement PostgreSQL refuses inside a transaction (`CONCURRENTLY`) takes
    * {@link executeUnpinnedDdl}: an index is created in its table's schema, so
-   * the table it names anchors it.
+   * the table it names anchors it. A backend over a caller's own transaction
+   * does not rewrite that session's search path: it checks the session's
+   * schema instead.
    */
   async function runDdlStatement(
     statement: ReturnType<typeof sql.raw>,
   ): Promise<void> {
-    if (allocationPin === undefined) {
+    if (allocationPin === undefined || allocationSchema === undefined) {
       await db.execute(statement);
       return;
     }
-    const pinnedRun = async (session: Pick<AnyPgDatabase, "execute">) => {
-      await session.execute(allocationPin);
-      await session.execute(statement);
-    };
-    if (db instanceof PgTransaction) await pinnedRun(db);
-    else await db.transaction((transaction) => pinnedRun(transaction));
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        executionAdapter,
+        allocationSchema,
+        "Lazy DDL",
+      );
+      await db.execute(statement);
+      return;
+    }
+    await db.transaction(async (transaction) => {
+      await transaction.execute(allocationPin);
+      await transaction.execute(statement);
+    });
+  }
+
+  /**
+   * Fixes the session a schema write's DDL runs on to the allocation schema. A
+   * transaction this backend opened is pinned; when the backend was built over
+   * a caller's transaction, `tx` is a savepoint whose `set_config` would
+   * outlive it, so the caller's schema is checked instead.
+   */
+  async function bindSchemaWriteSessionToAllocation(
+    tx: AnyPgTransaction,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) return;
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        createPostgresExecutionAdapter(tx, adapterOptions),
+        allocationSchema,
+        "Schema write",
+      );
+      return;
+    }
+    await tx.execute(allocationPin);
   }
 
   function executeUnpinnedDdl(ddl: string): Promise<void> {
@@ -2130,7 +2184,7 @@ function buildPostgresEngineProfileInternal(
         db.transaction(async (tx) => {
           await acquireSchemaWriteFence(tx, graphId);
           // Schema writes run DDL: over an allocation, where it lives.
-          if (allocationPin !== undefined) await tx.execute(allocationPin);
+          await bindSchemaWriteSessionToAllocation(tx);
           // The fence resolved above is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
           const { backend: txBackend, drainAndClose } =
@@ -2422,22 +2476,11 @@ function buildPostgresEngineProfileInternal(
                   adapterOptions,
                 );
                 if (allocationSchema !== undefined) {
-                  // The caller owns this session, so its search_path is not ours
-                  // to rewrite: refuse when unqualified DDL here would create
-                  // the allocation's relations somewhere else.
-                  const [session] = await settingAdapter.execute<{
-                    schema: string | null;
-                  }>(sql`SELECT current_schema() AS schema`);
-                  if (session?.schema !== allocationSchema) {
-                    throw new ConfigurationError(
-                      `Schema adoption over a working-copy allocation must run on a session whose current schema is "${allocationSchema}".`,
-                      {
-                        code: "ALLOCATION_SCHEMA_SESSION_MISMATCH",
-                        allocationSchema,
-                        sessionSchema: session?.schema,
-                      },
-                    );
-                  }
+                  await assertCallerSessionInAllocationSchema(
+                    settingAdapter,
+                    allocationSchema,
+                    "Schema adoption",
+                  );
                 }
                 const [setting] = await settingAdapter.execute<{
                   value: string;

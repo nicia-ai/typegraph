@@ -1055,6 +1055,16 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         schema,
         physicalPrefix,
       );
+      // Provisioning creates the bundled set in the transaction that claims the
+      // row, so a recorded schema that no longer holds the nodes table means
+      // the tables moved or the schema was renamed. Deleting the row would
+      // discard the only pointer to them.
+      if (row.schema_name !== null && !owned.includes(names.nodes)) {
+        throw new BranchError(
+          `Working-copy allocation ${allocationId} records schema "${row.schema_name}" but its tables are not there; the allocation is kept for recovery.`,
+          { details: { allocationId, schema: row.schema_name } },
+        );
+      }
       // One statement, so the tables that reference each other go together. A
       // failure aborts the transaction and keeps the ledger row: the
       // allocation stays listed and recoverable.
