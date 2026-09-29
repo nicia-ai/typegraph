@@ -1162,6 +1162,7 @@ rather than wrong. Create them exactly as shown.
 
 Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
 database stamped 5, so roll forward rather than back once any process has adopted it.
+
 Externally managed DDL applies the same statements, then advances the marker to 5 with the
 monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
 correct pages, by reading and de-duplicating the anchor relations instead of walking them.
