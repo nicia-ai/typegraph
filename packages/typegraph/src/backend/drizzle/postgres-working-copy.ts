@@ -960,6 +960,28 @@ function partitionAllocationRelations(
   return { owned, elsewhere };
 }
 
+function quotedSchemaList(schemas: readonly string[]): string {
+  return schemas.map((name) => `"${name}"`).join(", ");
+}
+
+/**
+ * The refusal wording for {@link partitionAllocationRelations}' `elsewhere`
+ * case: an allocation that also keeps relations in its own schema was copied
+ * (a backup or restore schema), while one that keeps none was moved or its
+ * schema renamed.
+ */
+function describeRelationsElsewhere(
+  allocationId: string,
+  schema: string,
+  owned: readonly string[],
+  elsewhere: readonly string[],
+): string {
+  const found = quotedSchemaList(elsewhere);
+  return owned.length > 0 ?
+      `Working-copy allocation ${allocationId} also has relations in ${found}, besides those in its schema "${schema}"; the allocation is kept for recovery.`
+    : `Working-copy allocation ${allocationId} has relations in ${found}, not in its schema "${schema}"; the allocation is kept for recovery.`;
+}
+
 /** The one decision that a connection stores vectors under the allocation's strategy. */
 function bindsAllocationVectorStrategy(
   backend: GraphBackend,
@@ -1104,8 +1126,19 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       );
       if (elsewhere.length > 0) {
         throw new BranchError(
-          `Working-copy allocation ${allocationId} has relations in ${elsewhere.map((name) => `"${name}"`).join(", ")}, not in its schema "${schema}"; the allocation is kept for recovery.`,
-          { details: { allocationId, schema, foundIn: elsewhere } },
+          describeRelationsElsewhere(allocationId, schema, owned, elsewhere),
+          {
+            details: {
+              allocationId,
+              schema,
+              foundIn: elsewhere,
+              schemas: [...(owned.length > 0 ? [schema] : []), ...elsewhere],
+            },
+            suggestion:
+              owned.length > 0 ?
+                `Drop the stale copies in ${quotedSchemaList(elsewhere)} (a backup or restore schema, for example) and remove the allocation again.`
+              : `Move the tables back into "${schema}" or correct the ledger row's schema_name, then remove the allocation again.`,
+          },
         );
       }
       // One statement, so the tables that reference each other go together. A

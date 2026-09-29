@@ -1643,8 +1643,10 @@ tables that removal never finds.
   allocation relation, but their DDL still runs through the same DDL runner
   wherever the write fence takes no lock: there, a backend built over a caller's
   own transaction is subject to the same session check as any other lazy DDL
-  (below). Under a lock fence the extension installs in its own transaction, as
-  before.
+  (below). Under a lock fence, a pooled backend installs the extension in its own
+  transaction, as before; a backend built over a caller's own transaction runs it
+  as a savepoint inside that transaction and makes no session check, because the
+  extension creates no allocation relation.
 - **Refusals.** A connection whose backend was built over a *copy* of `names`
   (which carries no schema) is refused with a `BranchError`. A `connect` driver
   that cannot hold an interactive transaction (`drizzle-orm/neon-http`) is
@@ -1663,10 +1665,16 @@ tables that removal never finds.
   (a view that depends on an allocation table, for example) the transaction rolls
   back, the row stays, and the allocation remains in `listUnsealedAllocations()`
   for `abortAllocation()` once the dependency is gone. If any such relation sits
-  in a different schema (the schema was renamed or the tables were moved),
-  removal refuses with a `BranchError` that names the schemas found and keeps the
-  row, because deleting the row would discard the only pointer to them; move the
-  tables back or correct the row's `schema_name` and remove again. If the
+  in a different schema, removal refuses with a `BranchError` that names the
+  schemas found and keeps the row, because deleting the row would discard the
+  only pointer to them. That covers a renamed schema or moved tables (the message
+  says the relations are "not in its schema"; move the tables back or correct the
+  row's `schema_name` and remove again) and a stale copy of any allocation
+  relation left in another schema, such as a backup or restore schema (the
+  message says the allocation "also has relations" there; drop the copy and
+  remove again, since the copy blocks removal until it is gone). `details`
+  carries `allocationId`, `schema`, `foundIn`, and `schemas`, and `suggestion`
+  names the recovery step. If the
   allocation's relations exist nowhere (its tables were dropped entirely) there
   is nothing to recover, and removal deletes the ledger row, so a crashed owner's
   allocation cannot stay listed forever.

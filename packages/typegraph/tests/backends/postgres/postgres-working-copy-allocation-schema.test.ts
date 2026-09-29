@@ -708,6 +708,14 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(failure).toBeInstanceOf(BranchError);
         expect((failure as BranchError).message).toContain(`"${MOVED_SCHEMA}"`);
+        expect((failure as BranchError).message).toContain("not in its schema");
+        expect((failure as BranchError).message).not.toContain("also has");
+        expect((failure as BranchError).details).toMatchObject({
+          allocationId,
+          foundIn: [MOVED_SCHEMA],
+          schemas: [MOVED_SCHEMA],
+        });
+        expect((failure as BranchError).suggestion).toContain("schema_name");
         expect(await ledgerRows(pool, names)).toHaveLength(1);
         expect(await onlyUnsealedId(manager)).toBe(allocationId);
         expect(schemasOf(await relationsOf(pool, names))).toEqual([
@@ -719,6 +727,53 @@ describe.runIf(process.env["POSTGRES_URL"])(
           `UPDATE ${LEDGER} SET schema_name = $1 WHERE physical_prefix = $2`,
           [MOVED_SCHEMA, physicalPrefixOf(names)],
         );
+        await manager.abortAllocation(allocationId);
+        expect(await relationsOf(pool, names)).toEqual([]);
+        expect(await ledgerRows(pool, names)).toEqual([]);
+      } finally {
+        await pool.query(`DROP SCHEMA IF EXISTS ${MOVED_SCHEMA} CASCADE`);
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses removal while a stale copy of an allocation table sits in another schema, words it as an extra location, and removes once the copy is dropped", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        await pool.query(`CREATE SCHEMA IF NOT EXISTS ${MOVED_SCHEMA}`);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const allocationId = await onlyUnsealedId(manager);
+        const recordedSchema = await currentSchema(pool);
+        // A backup or restore schema holds a copy while the original stays.
+        await pool.query(
+          `CREATE TABLE ${MOVED_SCHEMA}."${names.nodes}" (LIKE "${recordedSchema}"."${names.nodes}")`,
+        );
+
+        const failure = await rejectionOf(
+          manager.abortAllocation(allocationId),
+        );
+        expect(failure).toBeInstanceOf(BranchError);
+        const branchFailure = failure as BranchError;
+        expect(branchFailure.message).toContain(
+          `also has relations in "${MOVED_SCHEMA}"`,
+        );
+        expect(branchFailure.message).toContain(`"${recordedSchema}"`);
+        expect(branchFailure.message).not.toContain("not in its schema");
+        expect(branchFailure.details).toMatchObject({
+          allocationId,
+          schema: recordedSchema,
+          foundIn: [MOVED_SCHEMA],
+          schemas: [recordedSchema, MOVED_SCHEMA],
+        });
+        expect(branchFailure.suggestion).toContain(`"${MOVED_SCHEMA}"`);
+        expect(await ledgerRows(pool, names)).toHaveLength(1);
+        expect(schemasOf(await relationsOf(pool, names))).toEqual(
+          [recordedSchema, MOVED_SCHEMA].toSorted(),
+        );
+
+        await pool.query(`DROP TABLE ${MOVED_SCHEMA}."${names.nodes}"`);
         await manager.abortAllocation(allocationId);
         expect(await relationsOf(pool, names)).toEqual([]);
         expect(await ledgerRows(pool, names)).toEqual([]);
@@ -1219,6 +1274,66 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(after.filter((oid) => before.includes(oid))).toEqual([]);
         await backend.close();
       } finally {
+        await skewed.end();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("drops and recreates only the allocation's own index when a same-named index sits earlier on the connection's search_path", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const skewed = skewedPool();
+      let decoyTable = "";
+      try {
+        await prepareDatabase(pool);
+        await expectSkewed(skewed);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, skewed, connectedNames);
+        const backend = await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const allocationSchema = await currentSchema(pool);
+        const indexOids = async (
+          schema: string,
+          indexName: string,
+        ): Promise<readonly string[]> => {
+          const found = await pool.query<{ oid: string }>(
+            "SELECT c.oid::text AS oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'i' AND n.nspname = $1 AND c.relname = $2",
+            [schema, indexName],
+          );
+          return found.rows.map((row) => row.oid);
+        };
+        const allocationIndex = await pool.query<{ index_name: string }>(
+          "SELECT i.relname AS index_name FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid WHERE x.indrelid = to_regclass($1) AND NOT x.indisprimary AND NOT x.indisunique ORDER BY 1 LIMIT 1",
+          [`"${allocationSchema}"."${names.nodes}"`],
+        );
+        const indexName = allocationIndex.rows[0]?.index_name ?? "";
+        expect(indexName).not.toBe("");
+        decoyTable = `decoy_${digestOf(names)}`;
+        await pool.query(
+          `CREATE TABLE ${SKEW_SCHEMA}."${decoyTable}" (id int)`,
+        );
+        await pool.query(
+          `CREATE INDEX "${indexName}" ON ${SKEW_SCHEMA}."${decoyTable}" (id)`,
+        );
+        const decoyBefore = await indexOids(SKEW_SCHEMA, indexName);
+        const ownBefore = await indexOids(allocationSchema, indexName);
+        expect(decoyBefore).toHaveLength(1);
+        expect(ownBefore).toHaveLength(1);
+
+        const trustedImport = backend.trustedImport;
+        if (trustedImport === undefined) throw new Error("No trusted import.");
+        await trustedImport(() => Promise.resolve());
+
+        expect(await indexOids(SKEW_SCHEMA, indexName)).toEqual(decoyBefore);
+        const ownAfter = await indexOids(allocationSchema, indexName);
+        expect(ownAfter).toHaveLength(1);
+        expect(ownAfter).not.toEqual(ownBefore);
+        await backend.close();
+      } finally {
+        if (decoyTable !== "") {
+          await pool.query(
+            `DROP TABLE IF EXISTS ${SKEW_SCHEMA}."${decoyTable}"`,
+          );
+        }
         await skewed.end();
         await pool.end();
       }

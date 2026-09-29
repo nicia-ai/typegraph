@@ -1429,7 +1429,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       "typegraph_nodes",
       "typegraph_edges",
     ],
-    "sql": "SELECT index_class.relname AS index_name,
+    "sql": "SELECT namespace.nspname AS index_schema,
+            index_class.relname AS index_name,
             pg_get_indexdef(index_class.oid) AS index_definition
        FROM pg_class AS table_class
        JOIN pg_namespace AS namespace
@@ -1448,55 +1449,55 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_cardinality_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_cardinality_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_deleted_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_deleted_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_from_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_from_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_kind_created_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_kind_created_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_kind_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_kind_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_match_identity_uq"",
+    "sql": "DROP INDEX "public"."typegraph_edges_match_identity_uq"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_to_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_to_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_valid_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_valid_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_deleted_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_deleted_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_id_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_id_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_kind_created_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_kind_created_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_kind_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_kind_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_valid_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_valid_idx"",
   },
   {
     "params": [
