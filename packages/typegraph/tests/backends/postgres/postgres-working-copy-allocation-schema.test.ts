@@ -52,7 +52,7 @@ import {
   createPgvectorStrategyForAllocation,
 } from "../../../src/query/dialect/vector/pgvector-strategy";
 import { renderPostgres } from "../../../src/query/sql-fragment";
-import { createStoreWithSchema } from "../../../src/store/store";
+import { createStore, createStoreWithSchema } from "../../../src/store/store";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -120,6 +120,34 @@ async function relationsOf(
     [digestOf(names)],
   );
   return found.rows;
+}
+
+/** Drops every table of an allocation, wherever it is, leaving nothing behind. */
+async function dropAllocationTables(
+  pool: Pool,
+  names: PostgresTableNames,
+): Promise<void> {
+  for (const relation of await relationsOf(pool, names)) {
+    if (relation.kind !== TABLE_KIND) continue;
+    await pool.query(
+      `DROP TABLE IF EXISTS "${relation.schema}"."${relation.name}" CASCADE`,
+    );
+  }
+  expect(await relationsOf(pool, names)).toEqual([]);
+}
+
+/** Moves every table of an allocation into `schema`. */
+async function moveAllocationTables(
+  pool: Pool,
+  names: PostgresTableNames,
+  schema: string,
+): Promise<void> {
+  for (const relation of await relationsOf(pool, names)) {
+    if (relation.kind !== TABLE_KIND) continue;
+    await pool.query(
+      `ALTER TABLE "${relation.schema}"."${relation.name}" SET SCHEMA ${schema}`,
+    );
+  }
 }
 
 function schemasOf(relations: readonly Relation[]): readonly string[] {
@@ -273,6 +301,19 @@ function configurationCodesOf(error: unknown): readonly unknown[] {
     if (link instanceof ConfigurationError) codes.push(link.details["code"]);
   }
   return codes;
+}
+
+/** The message of every error along an error's cause chain. */
+function messagesOf(error: unknown): readonly string[] {
+  const messages: string[] = [];
+  for (
+    let link: unknown = error;
+    link instanceof Error;
+    link = (link as { cause?: unknown }).cause
+  ) {
+    messages.push(link.message);
+  }
+  return messages;
 }
 
 /** Sanity check that the skew is real, so the assertions below are not vacuous. */
@@ -645,7 +686,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
-    it("keeps the ledger row when the recorded schema no longer holds the allocation's tables", async () => {
+    it("keeps the ledger row and names the schema when the allocation's tables moved out of the recorded one", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
       try {
         await pool.query(`CREATE SCHEMA IF NOT EXISTS ${MOVED_SCHEMA}`);
@@ -666,6 +707,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           manager.abortAllocation(allocationId),
         );
         expect(failure).toBeInstanceOf(BranchError);
+        expect((failure as BranchError).message).toContain(`"${MOVED_SCHEMA}"`);
         expect(await ledgerRows(pool, names)).toHaveLength(1);
         expect(await onlyUnsealedId(manager)).toBe(allocationId);
         expect(schemasOf(await relationsOf(pool, names))).toEqual([
@@ -682,6 +724,97 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(await ledgerRows(pool, names)).toEqual([]);
       } finally {
         await pool.query(`DROP SCHEMA IF EXISTS ${MOVED_SCHEMA} CASCADE`);
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("removes the ledger row of an allocation whose tables were dropped entirely, so abort succeeds and it leaves the list", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const allocationId = await onlyUnsealedId(manager);
+        await dropAllocationTables(pool, names);
+        expect(await ledgerRows(pool, names)).toHaveLength(1);
+
+        await manager.abortAllocation(allocationId);
+
+        expect(await ledgerRows(pool, names)).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("removes the ledger row when close() finds the allocation's tables dropped entirely", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        const backend = await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        await dropAllocationTables(pool, names);
+
+        await backend.close();
+
+        expect(await ledgerRows(pool, names)).toEqual([]);
+        expect(await manager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("keeps a legacy ledger row that records no schema and names where its tables moved", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        await pool.query(`CREATE SCHEMA IF NOT EXISTS ${MOVED_SCHEMA}`);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const allocationId = await onlyUnsealedId(manager);
+        await pool.query(
+          `UPDATE ${LEDGER} SET schema_name = NULL WHERE physical_prefix = $1`,
+          [physicalPrefixOf(names)],
+        );
+        await moveAllocationTables(pool, names, MOVED_SCHEMA);
+
+        const failure = await rejectionOf(
+          manager.abortAllocation(allocationId),
+        );
+
+        expect(failure).toBeInstanceOf(BranchError);
+        expect((failure as BranchError).message).toContain(`"${MOVED_SCHEMA}"`);
+        expect(await ledgerRows(pool, names)).toHaveLength(1);
+        expect(schemasOf(await relationsOf(pool, names))).toEqual([
+          MOVED_SCHEMA,
+        ]);
+      } finally {
+        await pool.query(`DROP SCHEMA IF EXISTS ${MOVED_SCHEMA} CASCADE`);
+        await abortLeftoverAllocations();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("removes a legacy ledger row that records no schema when its tables were dropped entirely", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      try {
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+        await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        await pool.query(
+          `UPDATE ${LEDGER} SET schema_name = NULL WHERE physical_prefix = $1`,
+          [physicalPrefixOf(names)],
+        );
+        await dropAllocationTables(pool, names);
+
+        await manager.abortAllocation(await onlyUnsealedId(manager));
+
+        expect(await ledgerRows(pool, names)).toEqual([]);
+      } finally {
         await pool.end();
       }
     }, 60_000);
@@ -881,8 +1014,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         ): Promise<string> => {
           const shown = await transaction.execute(sql`SHOW search_path`);
           return String(
-            (shown as { rows: { search_path: string }[] }).rows[0]
-              ?.search_path,
+            (shown as { rows: { search_path: string }[] }).rows[0]?.search_path,
           );
         };
 
@@ -918,6 +1050,174 @@ describe.runIf(process.env["POSTGRES_URL"])(
         });
         expect(matchingPathAfter).toBe(matchingPathBefore);
         await owner.close();
+      } finally {
+        await skewed.end();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses lazy DDL on a caller-owned transaction whose session is not in the allocation schema, before any schema write", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const skewed = skewedPool();
+      try {
+        await prepareDatabase(pool);
+        await expectSkewed(skewed);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<typeof articleGraph>(
+          pool,
+          pool,
+          connectedNames,
+        );
+        const owner = await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        // The schema is committed on the allocation and the caller's store is
+        // built with createStore, so no schema write precedes the rebuild's
+        // lazy contribution DDL: that DDL must be the statement refused.
+        await createStoreWithSchema(articleGraph, owner);
+        const before = await relationsOf(pool, names);
+
+        let refusal: unknown;
+        await drizzle(skewed).transaction(async (transaction) => {
+          const callerBackend = createPostgresBackend(transaction, {
+            tables: createPostgresTables(names),
+          });
+          const callerStore = createStore(articleGraph, callerBackend);
+          refusal = await rejectionOf(
+            callerStore.rebuildContribution("fulltext"),
+          );
+        });
+
+        expect(configurationCodesOf(refusal)).toContain(
+          "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+        );
+        expect(messagesOf(refusal).join(" ")).toContain("Lazy DDL");
+        const skewedRelations = await pool.query(
+          "SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1",
+          [SKEW_SCHEMA],
+        );
+        expect(skewedRelations.rows).toEqual([]);
+        expect(await relationsOf(pool, names)).toEqual(before);
+        await owner.close();
+      } finally {
+        await skewed.end();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("allocates, reopens and destroys a history-enabled durable copy through a connection that leads with another schema", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const skewed = skewedPool();
+      try {
+        await prepareDatabase(pool);
+        await expectSkewed(skewed);
+        const [source] = await createStoreWithSchema(
+          personGraph,
+          createPostgresBackend(drizzle(pool)),
+          { history: true },
+        );
+        await source.nodes.Person.create({ name: "source" });
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<typeof personGraph>(
+          pool,
+          skewed,
+          connectedNames,
+        );
+
+        const { branch: created, descriptor } = unwrap(
+          await branchDurable(source, manager.durable, {
+            id: asBranchId("allocation-schema-history"),
+            allocationId: "allocation-schema-history-allocation",
+          }),
+        );
+        const names = requireNames(connectedNames);
+        expect(schemasOf(await relationsOf(pool, names))).toEqual([
+          await currentSchema(pool),
+        ]);
+        await created.close();
+
+        const reopened = unwrap(
+          await reopenDurableBranch(personGraph, descriptor, manager.durable),
+        );
+        await reopened.close();
+
+        unwrap(await destroyDurableBranch(descriptor, manager.durable));
+        expect(await relationsOf(pool, names)).toEqual([]);
+        expect(await ledgerRows(pool, names)).toEqual([]);
+      } finally {
+        await skewed.end();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("answers catalog probes from the allocation's schema, not from a relation the session's search_path reaches first", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const skewed = skewedPool();
+      let decoy = "";
+      try {
+        await prepareDatabase(pool);
+        await expectSkewed(skewed);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, skewed, connectedNames);
+        const backend = await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        decoy = `shadow_${digestOf(names)}`;
+        await pool.query(
+          `CREATE TABLE ${SKEW_SCHEMA}."${decoy}" (id int PRIMARY KEY, label text)`,
+        );
+        const catalog = backend.catalog;
+        if (catalog?.tablesExist === undefined) throw new Error("No catalog.");
+
+        // The decoy exists only in the skew schema, which the connection
+        // searches first; the allocation's schema does not hold it.
+        expect(await catalog.tablesExist([decoy, names.nodes])).toEqual([
+          { name: decoy, exists: false },
+          { name: names.nodes, exists: true },
+        ]);
+        expect(await catalog.indexStates([`${decoy}_pkey`])).toEqual([
+          { name: `${decoy}_pkey`, exists: false, invalid: false },
+        ]);
+        expect(await catalog.columnTypes(decoy)).toEqual([]);
+        const nodeColumns = await catalog.columnTypes(names.nodes);
+        expect(nodeColumns.length).toBeGreaterThan(0);
+        await backend.close();
+      } finally {
+        if (decoy !== "") {
+          await pool.query(`DROP TABLE IF EXISTS ${SKEW_SCHEMA}."${decoy}"`);
+        }
+        await skewed.end();
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("finds the allocation's secondary indexes for a trusted import through a connection that leads with another schema", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+      const skewed = skewedPool();
+      try {
+        await prepareDatabase(pool);
+        await expectSkewed(skewed);
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = managerOver<GraphDef>(pool, skewed, connectedNames);
+        const backend = await manager.makeBackend();
+        const names = requireNames(connectedNames);
+        const nodeIndexOids = async (): Promise<readonly string[]> => {
+          const found = await pool.query<{ oid: string }>(
+            "SELECT i.indexrelid::text AS oid FROM pg_catalog.pg_index i WHERE i.indrelid = to_regclass($1) AND NOT i.indisprimary AND NOT i.indisunique ORDER BY 1",
+            [`"${await currentSchema(pool)}"."${names.nodes}"`],
+          );
+          return found.rows.map((row) => row.oid);
+        };
+        const before = await nodeIndexOids();
+        expect(before.length).toBeGreaterThan(0);
+
+        const trustedImport = backend.trustedImport;
+        if (trustedImport === undefined) throw new Error("No trusted import.");
+        await trustedImport(() => Promise.resolve());
+
+        // Suspending and restoring an index recreates it, so its oid changes.
+        const after = await nodeIndexOids();
+        expect(after).toHaveLength(before.length);
+        expect(after.filter((oid) => before.includes(oid))).toEqual([]);
+        await backend.close();
       } finally {
         await skewed.end();
         await pool.end();

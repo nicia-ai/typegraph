@@ -157,7 +157,19 @@ export type PostgresUnsealedAllocation = Readonly<{
  * schema explicitly, so a pooled connection's own `search_path` never decides
  * where an allocation's relations are created or dropped. The connection must
  * still resolve the allocation's tables, so its `search_path` must include
- * that schema.
+ * that schema. A backend `connect` builds over a caller's own transaction never
+ * has that transaction's `search_path` rewritten: its lazy DDL (extension DDL
+ * on the non-lock fence path included), schema writes, and schema adoption run
+ * only when the session's current schema is the allocation's, and are refused
+ * with a `ConfigurationError` (`ALLOCATION_SCHEMA_SESSION_MISMATCH`) otherwise.
+ *
+ * Removal (`close`, `abort`, `destroy`, `abortAllocation`) drops the relations
+ * it finds in the allocation's schema and deletes the ledger row. It refuses,
+ * keeping the row, with a `BranchError` naming the schemas when relations
+ * carrying the allocation's reserved prefixes exist in any other schema (the
+ * schema was renamed or the tables were moved), because deleting the row would
+ * discard the only pointer to them. An allocation whose relations exist
+ * nowhere has nothing left to recover, so its row is removed.
  *
  * `connect` runs after the allocation's tables exist, except for `makeBackend`,
  * which connects first so it can refuse a bad connection before it writes
@@ -207,7 +219,14 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
   listUnsealedAllocations: (
     options?: Readonly<{ after?: string; limit?: number }>,
   ) => Promise<readonly PostgresUnsealedAllocation[]>;
-  /** Explicit recovery after the caller confirms no active owner uses this allocation. */
+  /**
+   * Explicit recovery after the caller confirms no active owner uses this
+   * allocation. Removes its relations from the allocation's schema and its
+   * ledger row, including an allocation whose tables were dropped entirely.
+   * Refuses with a `BranchError`, keeping the row, only while relations
+   * carrying the allocation's reserved prefixes exist in another schema; the
+   * error names the schemas found.
+   */
   abortAllocation: (allocationId: string) => Promise<void>;
 }>;
 
@@ -884,14 +903,17 @@ async function observeAllocationSession(
   return facts;
 }
 
+type AllocationRelation = Readonly<{ schema: string; name: string }>;
+
 /**
- * Every table an allocation owns in `schema`: its bundled tables and the vector
- * tables a schema-mutable allocation created after its manifest was written.
- * The ledger cannot list the latter and the materialization markers cannot
- * either: a marker is written after its table's DDL as a separate statement, so
- * a crash between the two leaves a table no marker names. Discover them by the
- * allocation's reserved prefixes instead, in the recorded schema and through
- * the catalog, so no session's `search_path` decides what is found.
+ * Every table an allocation owns, in any schema: its bundled tables and the
+ * vector tables a schema-mutable allocation created after its manifest was
+ * written. The ledger cannot list the latter and the materialization markers
+ * cannot either: a marker is written after its table's DDL as a separate
+ * statement, so a crash between the two leaves a table no marker names.
+ * Discover them by the allocation's reserved prefixes instead, through the
+ * catalog, so no session's `search_path` decides what is found and a table
+ * that left the recorded schema is still seen.
  *
  * `starts_with` compares literally, so the `_` in a prefix is not a wildcard.
  * `allocationVectorTablePrefix` documents why one allocation's header cannot
@@ -902,14 +924,40 @@ async function observeAllocationSession(
  */
 async function discoverAllocationRelations(
   session: QuerySession,
-  schema: string,
   physicalPrefix: string,
-): Promise<readonly string[]> {
-  const found = await rows<Readonly<{ name: string }>>(
+): Promise<readonly AllocationRelation[]> {
+  return rows<AllocationRelation>(
     session,
-    sql`SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p') AND (starts_with(c.relname::text, ${physicalPrefix}) OR starts_with(c.relname::text, ${allocationVectorTablePrefix(physicalPrefix)})) ORDER BY c.relname`,
+    sql`SELECT n.nspname::text AS schema, c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND (starts_with(c.relname::text, ${physicalPrefix}) OR starts_with(c.relname::text, ${allocationVectorTablePrefix(physicalPrefix)})) ORDER BY n.nspname, c.relname`,
   );
-  return found.map((table) => table.name);
+}
+
+/**
+ * The one decision on what removal may do with an allocation's discovered
+ * relations: drop those in the schema the allocation lives in, and refuse
+ * while any sit elsewhere. Deleting the ledger row would discard the only
+ * pointer to them, so a moved or renamed schema is recoverable; an allocation
+ * whose relations are nowhere has nothing left to recover and its row is
+ * removed.
+ */
+function partitionAllocationRelations(
+  discovered: readonly AllocationRelation[],
+  schema: string,
+): Readonly<{
+  owned: readonly string[];
+  elsewhere: readonly string[];
+}> {
+  const owned = discovered
+    .filter((relation) => relation.schema === schema)
+    .map((relation) => relation.name);
+  const elsewhere = [
+    ...new Set(
+      discovered
+        .filter((relation) => relation.schema !== schema)
+        .map((relation) => relation.schema),
+    ),
+  ];
+  return { owned, elsewhere };
 }
 
 /** The one decision that a connection stores vectors under the allocation's strategy. */
@@ -1050,19 +1098,14 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           `Working-copy allocation ${allocationId} records no schema and this session has none to resolve it in.`,
         );
       }
-      const owned = await discoverAllocationRelations(
-        transaction,
+      const { owned, elsewhere } = partitionAllocationRelations(
+        await discoverAllocationRelations(transaction, physicalPrefix),
         schema,
-        physicalPrefix,
       );
-      // Provisioning creates the bundled set in the transaction that claims the
-      // row, so a recorded schema that no longer holds the nodes table means
-      // the tables moved or the schema was renamed. Deleting the row would
-      // discard the only pointer to them.
-      if (row.schema_name !== null && !owned.includes(names.nodes)) {
+      if (elsewhere.length > 0) {
         throw new BranchError(
-          `Working-copy allocation ${allocationId} records schema "${row.schema_name}" but its tables are not there; the allocation is kept for recovery.`,
-          { details: { allocationId, schema: row.schema_name } },
+          `Working-copy allocation ${allocationId} has relations in ${elsewhere.map((name) => `"${name}"`).join(", ")}, not in its schema "${schema}"; the allocation is kept for recovery.`,
+          { details: { allocationId, schema, foundIn: elsewhere } },
         );
       }
       // One statement, so the tables that reference each other go together. A

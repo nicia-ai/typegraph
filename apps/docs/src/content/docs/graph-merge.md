@@ -1636,8 +1636,15 @@ tables that removal never finds.
   search path, and the allocation's pgvector strategy names its tables and
   indexes through the schema. `CREATE INDEX CONCURRENTLY` cannot run in a
   transaction; it creates the index in the schema of the table it names, which
-  is already the allocation's. Extensions are database-global, not allocation
-  relations, and are unchanged.
+  is already the allocation's. The backend's catalog probes (table, index, and
+  column lookups, including the recorded-time compatibility check a
+  `history: true` Store runs) read the allocation's schema, not the session's
+  current one. Extensions are database-global and create no
+  allocation relation, but their DDL still runs through the same DDL runner
+  wherever the write fence takes no lock: there, a backend built over a caller's
+  own transaction is subject to the same session check as any other lazy DDL
+  (below). Under a lock fence the extension installs in its own transaction, as
+  before.
 - **Refusals.** A connection whose backend was built over a *copy* of `names`
   (which carries no schema) is refused with a `BranchError`. A `connect` driver
   that cannot hold an interactive transaction (`drizzle-orm/neon-http`) is
@@ -1649,18 +1656,24 @@ tables that removal never finds.
   it is refused with a `ConfigurationError`
   (`ALLOCATION_SCHEMA_SESSION_MISMATCH`). The caller owns that session's search
   path, so it is checked rather than rewritten.
-- **Removal** (`close`, `abort`, `destroy`) discovers the allocation's tables
-  through the catalog by the recorded schema and the reserved prefixes, drops
-  them schema-qualified in one statement, and deletes the ledger row in the same
-  transaction. If a drop fails (a view that depends on an allocation table, for
-  example) the transaction rolls back, the row stays, and the allocation remains
-  in `listUnsealedAllocations()` for `abortAllocation()` once the dependency is
-  gone. Removal also refuses, keeping the row, when the recorded schema no longer
-  holds the allocation's nodes table (the schema was renamed or the tables were
-  moved), because deleting the row would discard the only pointer to them.
+- **Removal** (`close`, `abort`, `destroy`, `abortAllocation`) searches the
+  catalog across every schema for relations named with the allocation's reserved
+  prefixes. It drops those in the recorded schema, schema-qualified in one
+  statement, and deletes the ledger row in the same transaction. If a drop fails
+  (a view that depends on an allocation table, for example) the transaction rolls
+  back, the row stays, and the allocation remains in `listUnsealedAllocations()`
+  for `abortAllocation()` once the dependency is gone. If any such relation sits
+  in a different schema (the schema was renamed or the tables were moved),
+  removal refuses with a `BranchError` that names the schemas found and keeps the
+  row, because deleting the row would discard the only pointer to them; move the
+  tables back or correct the row's `schema_name` and remove again. If the
+  allocation's relations exist nowhere (its tables were dropped entirely) there
+  is nothing to recover, and removal deletes the ledger row, so a crashed owner's
+  allocation cannot stay listed forever.
 - **Ledger rows from before the schema was recorded** (written by 0.72.0) carry
-  no schema. They resolve through the session that removes them, as removal
-  always did, and reopen without binding. `control` adds the column to an
+  no schema. They resolve through the session that removes them and reopen
+  without binding, and follow the same removal rule: relations found in a schema
+  other than the removing session's refuse removal and name that schema. `control` adds the column to an
   existing ledger the first time it runs.
 
 The connection must still be able to *resolve* the allocation's tables, so its

@@ -73,3 +73,32 @@ export function allocationSchemaOfBackend(
 export function allocationSchemaPin(schema: string): SqlFragment {
   return sql`SELECT set_config('search_path', quote_ident(${schema}) || ', ' || current_setting('search_path'), true)`;
 }
+
+/**
+ * The one owner of "the schema this backend's relations live in", for a
+ * catalog read that compares a schema name: the allocation's when the backend
+ * is bound to one, else the session's current schema. Bound, a pooled
+ * connection's `search_path` cannot make a catalog read look in the wrong
+ * place.
+ */
+export function backendRelationSchema(
+  allocationSchema: string | undefined,
+): SqlFragment {
+  return allocationSchema === undefined ?
+      sql`current_schema()`
+    : sql`${allocationSchema}`;
+}
+
+/**
+ * The same decision for a `pg_class` row aliased `c`, read where a bare name
+ * resolves through the session's `search_path`. Bound, the row must live in the
+ * allocation's schema, whatever the path leads with; unbound, it is whatever
+ * the session can see.
+ */
+export function relationInBackendSchema(
+  allocationSchema: string | undefined,
+): SqlFragment {
+  return allocationSchema === undefined ?
+      sql`pg_catalog.pg_table_is_visible(c.oid)`
+    : sql`c.relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ${allocationSchema})`;
+}

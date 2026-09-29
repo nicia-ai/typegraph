@@ -274,7 +274,9 @@ import {
 import {
   allocationSchemaOfTables,
   allocationSchemaPin,
+  backendRelationSchema,
   markAllocationSchemaBackend,
+  relationInBackendSchema,
 } from "./postgres-allocation-schema";
 import {
   advisoryLockSingleExpression,
@@ -754,13 +756,15 @@ function createPostgresCatalogProbes(
   executionAdapter: PostgresExecutionAdapter,
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
   transactionScoped: boolean,
+  allocationSchema: string | undefined,
 ): BackendCatalogProbes {
   async function indexStates(
     names: readonly string[],
   ): Promise<readonly IndexState[]> {
     if (names.length === 0) return [];
     // Scoped to `search_path`, matching the unqualified CREATE/DROP INDEX
-    // DDL a caller issues against these names.
+    // DDL a caller issues against these names, unless the backend is bound to
+    // an allocation: then to the allocation's schema.
     const rows = await executionAdapter.execute<{
       name: string;
       valid: boolean;
@@ -770,7 +774,7 @@ function createPostgresCatalogProbes(
           FROM pg_class c
           JOIN pg_index i ON i.indexrelid = c.oid
           WHERE c.relname IN (${sqlValueList(names)})
-            AND pg_catalog.pg_table_is_visible(c.oid)
+            AND ${relationInBackendSchema(allocationSchema)}
         `,
     );
     const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
@@ -797,7 +801,7 @@ function createPostgresCatalogProbes(
           FROM pg_class c
           WHERE c.relname IN (${sqlValueList(names)})
             AND c.relkind IN ('r', 'p')
-            AND pg_catalog.pg_table_is_visible(c.oid)
+            AND ${relationInBackendSchema(allocationSchema)}
         `,
       );
       const existing = new Set(rows.map((row) => row.name));
@@ -833,7 +837,7 @@ function createPostgresCatalogProbes(
         portableSql`
           SELECT column_name AS name, data_type AS type
           FROM information_schema.columns
-          WHERE table_schema = current_schema()
+          WHERE table_schema = ${backendRelationSchema(allocationSchema)}
             AND table_name = ${table}
         `,
       );
@@ -1772,6 +1776,7 @@ function buildPostgresEngineProfileInternal(
       executionAdapter,
       operationStrategy,
       transactionScoped,
+      allocationSchema,
     ),
   };
 
@@ -2202,6 +2207,7 @@ function buildPostgresEngineProfileInternal(
               contributionMaterializationsTable:
                 tables.contributionMaterializations,
               fenceTarget,
+              allocationSchema,
               lineage: provisioning.lineage,
               recordedTime: provisioning.recordedTime,
               isFirstParty,
@@ -2255,6 +2261,7 @@ function buildPostgresEngineProfileInternal(
           contributionMaterializationsTable:
             tables.contributionMaterializations,
           fenceTarget,
+          allocationSchema,
           lineage: provisioning.lineage,
           recordedTime: provisioning.recordedTime,
           isFirstParty: txIsFirstParty,
@@ -2681,6 +2688,7 @@ function buildPostgresEngineProfileInternal(
               const indexDefinitions = await suspendPostgresSecondaryIndexes(
                 trustedTx,
                 tableNames,
+                allocationSchema,
               );
               const result = await fn(
                 createPostgresTrustedImportSession(trustedTx, tableNames),
@@ -3093,6 +3101,8 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * builds its own probes bound to the transaction's own session.
    */
   catalog?: BackendCatalogProbes | undefined;
+  /** The allocation schema the backend's tables are bound to, if any; its catalog probes read there. */
+  allocationSchema?: string | undefined;
   /**
    * The root backend's own `lineage` bag, threaded through so a
    * transaction-scoped call exposes the SAME object — see
@@ -3141,6 +3151,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
    * caller's, not one TypeGraph has audited.
    */
   isFirstParty: boolean;
+  /** The allocation schema the backend's tables are bound to. See {@link CreatePostgresOperationBackendOptions}. */
+  allocationSchema?: string | undefined;
   /** The root backend's own `lineage` bag. See {@link CreatePostgresOperationBackendOptions}. */
   lineage?: LineageMembers | undefined;
   /** The root backend's own `recordedTime` bag. See {@link CreatePostgresOperationBackendOptions}. */
@@ -3166,6 +3178,7 @@ function createPostgresOperationBackend(
     fenceTarget,
     transactionScoped,
     catalog,
+    allocationSchema,
     lineage,
     recordedTime,
   } = options;
@@ -3919,6 +3932,7 @@ function createPostgresOperationBackend(
         executionAdapter,
         operationStrategy,
         transactionScoped,
+        allocationSchema,
       ),
     ...(lineage === undefined ? {} : { lineage }),
     ...(recordedTime === undefined ? {} : { recordedTime }),
@@ -4056,6 +4070,7 @@ function createTransactionBackend(
     schemaVersionsTable: options.schemaVersionsTable,
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
+    allocationSchema: options.allocationSchema,
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
