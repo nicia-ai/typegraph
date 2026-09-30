@@ -1461,16 +1461,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
         return { store, descriptor, access: { kind: "engine-fenced" } };
       } catch (error) {
-        try {
-          await backend.close();
-        } catch {
-          /* Preserve store-creation error. */
-        }
-        try {
-          await dropAllocation(allocationId);
-        } catch {
-          /* Orphan remains discoverable. */
-        }
+        await discardAllocation(backend, allocationId);
         throw error;
       }
     },
