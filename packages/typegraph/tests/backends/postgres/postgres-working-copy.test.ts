@@ -14,6 +14,7 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../../../src/backend/derive-backend";
+import { CURRENT_BASE_SCHEMA_VERSION } from "../../../src/backend/drizzle/base-schema";
 import { generateVectorlessPostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import {
@@ -38,6 +39,7 @@ import { BranchError } from "../../../src/graph-merge/errors";
 import { isOk, unwrap } from "../../../src/graph-merge/result";
 import { asBaseVersion, asBranchId } from "../../../src/graph-merge/types";
 import { defineNodeIndex } from "../../../src/indexes";
+import { graphIdOrderIndexName } from "../../../src/indexes/system";
 import {
   createSqlSchema,
   recordedRelation,
@@ -139,7 +141,20 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const marker = await pool.query<{ version: number }>(
           `SELECT version FROM "${names.baseSchemaVersions}"`,
         );
-        expect(marker.rows).toEqual([{ version: 4 }]);
+        expect(marker.rows).toEqual([{ version: CURRENT_BASE_SCHEMA_VERSION }]);
+        // The copy lists graph ids too, so it carries the byte-ordered index on
+        // each anchor relation under its own allocated table names.
+        const byteOrderIndexes = await pool.query<{ indexname: string }>(
+          "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND left(indexname, length($1)) = $1 AND indexname LIKE '%graph_id_bytes_idx' ORDER BY indexname",
+          [prefix],
+        );
+        expect(byteOrderIndexes.rows.map((row) => row.indexname)).toEqual(
+          [
+            graphIdOrderIndexName(names.edges),
+            graphIdOrderIndexName(names.nodes),
+            graphIdOrderIndexName(names.schemaVersions),
+          ].toSorted(),
+        );
         const fulltext = await pool.query<{ graph_id: string }>(
           `SELECT graph_id FROM "${names.fulltext}"`,
         );

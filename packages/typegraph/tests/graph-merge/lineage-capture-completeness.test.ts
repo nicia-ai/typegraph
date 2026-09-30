@@ -105,7 +105,8 @@ describe("Store.clear() rotates the origin a pre-clear branch anchored on", () =
         branchOrder: [BRANCH],
       });
 
-      // Mutation-proof: commenting out `clear()`'s `resetRevisionOrigin`
+      // Mutation-proof: removing the origin-row delete from both the
+      // `revisionOrigins` clear step and `clear()`'s `resetRevisionOrigin`
       // call makes this assertion fail — the merge silently succeeds
       // against a base whose entire content was replaced by the clear.
       expect(isErr(result)).toBe(true);

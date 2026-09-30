@@ -71,6 +71,14 @@ export type SqlTableNames = Readonly<{
    * not any target ever declares `writeFence.mechanism: "row"`.
    */
   fences?: string | undefined;
+  /** Per-deployment index materialization status (default: "typegraph_index_materializations") */
+  indexMaterializations?: string | undefined;
+  /** Strategy-owned table contribution markers (default: "typegraph_contribution_materializations") */
+  contributionMaterializations?: string | undefined;
+  /** Pending extension-kind removal cleanup (default: "typegraph_kind_removals") */
+  kindRemovals?: string | undefined;
+  /** Removal reconciliation high-water marks (default: "typegraph_reconciliation_markers") */
+  reconciliationMarkers?: string | undefined;
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{
@@ -101,6 +109,14 @@ export type ResolvedSqlTableNames = Readonly<{
   edgeClaims: string;
   /** Write-fence rows table name */
   fences: string;
+  /** Index materialization status table name */
+  indexMaterializations?: string;
+  /** Contribution marker table name */
+  contributionMaterializations?: string;
+  /** Kind removal cleanup table name */
+  kindRemovals?: string;
+  /** Removal reconciliation marker table name */
+  reconciliationMarkers?: string;
 }>;
 
 type SqlSchemaFields = Readonly<{
@@ -213,11 +229,22 @@ const DEFAULT_TABLE_NAMES = {
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   fences: "typegraph_fences",
+  indexMaterializations: "typegraph_index_materializations",
+  contributionMaterializations: "typegraph_contribution_materializations",
+  kindRemovals: "typegraph_kind_removals",
+  reconciliationMarkers: "typegraph_reconciliation_markers",
 } satisfies ResolvedSqlTableNames;
 
 function resolveTableNames(
   names: Partial<SqlTableNames>,
-): ResolvedSqlTableNames & Readonly<{ revisionChanges: string }> {
+): ResolvedSqlTableNames &
+  Readonly<{
+    revisionChanges: string;
+    indexMaterializations: string;
+    contributionMaterializations: string;
+    kindRemovals: string;
+    reconciliationMarkers: string;
+  }> {
   return {
     nodes: names.nodes ?? DEFAULT_TABLE_NAMES.nodes,
     edges: names.edges ?? DEFAULT_TABLE_NAMES.edges,
@@ -241,6 +268,14 @@ function resolveTableNames(
     edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
     fences: names.fences ?? DEFAULT_TABLE_NAMES.fences,
     schemaVersions: names.schemaVersions ?? DEFAULT_TABLE_NAMES.schemaVersions,
+    indexMaterializations:
+      names.indexMaterializations ?? DEFAULT_TABLE_NAMES.indexMaterializations,
+    contributionMaterializations:
+      names.contributionMaterializations ??
+      DEFAULT_TABLE_NAMES.contributionMaterializations,
+    kindRemovals: names.kindRemovals ?? DEFAULT_TABLE_NAMES.kindRemovals,
+    reconciliationMarkers:
+      names.reconciliationMarkers ?? DEFAULT_TABLE_NAMES.reconciliationMarkers,
   };
 }
 
@@ -363,6 +398,13 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.uniques, "uniques");
   validateTableName(tables.edgeClaims, "edgeClaims");
   validateTableName(tables.fences, "fences");
+  validateTableName(tables.indexMaterializations, "indexMaterializations");
+  validateTableName(
+    tables.contributionMaterializations,
+    "contributionMaterializations",
+  );
+  validateTableName(tables.kindRemovals, "kindRemovals");
+  validateTableName(tables.reconciliationMarkers, "reconciliationMarkers");
 
   return freezeSqlSchema({
     tables: Object.freeze(tables),

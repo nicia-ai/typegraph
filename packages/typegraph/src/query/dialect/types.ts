@@ -114,6 +114,27 @@ export type DialectCapabilities = Readonly<{
    * {@link DialectSubgraphMembershipStrategy}.
    */
   subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+
+  /**
+   * Whether every index over a text column is kept in byte order, the order
+   * {@link DialectAdapter.binaryText} imposes, so a byte-order bound is an
+   * index range on any text index. SQLite is. PostgreSQL keeps text indexes in
+   * the database collation, so a byte-order bound is an index range only on an
+   * index declared `COLLATE "C"`; a read that wants one must check the catalog
+   * for it (see the graph id listing).
+   */
+  textIndexOrderIsBinary: boolean;
+
+  /**
+   * Whether every read inside one interactive transaction sees one snapshot
+   * whatever isolation level was requested, so a multi-statement read needs no
+   * evidence beyond running inside the transaction. SQLite does: its readers
+   * see the database as of the transaction's first read. PostgreSQL does not:
+   * the default `read committed` takes a fresh snapshot per statement, so the
+   * effective isolation level has to be observed on the session that runs the
+   * reads (see the graph storage inventory).
+   */
+  transactionReadsShareOneSnapshot: boolean;
 }>;
 
 /**

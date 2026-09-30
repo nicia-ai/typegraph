@@ -25,6 +25,11 @@ import {
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  graphRelationDeclaration,
+  type GraphRelationKey,
+  isGraphRelationKey,
+} from "../graph-relations";
+import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,
   type TableContribution,
@@ -648,42 +653,39 @@ function isPgTable(
   return is(value, PgTable);
 }
 
-/** The clone decision is owned beside the PostgreSQL base-table DDL inventory. */
-const POSTGRES_BASE_CLONE_POLICIES = {
-  nodes: { kind: "graphRows", graphIdColumn: "graph_id" },
-  edges: { kind: "graphRows", graphIdColumn: "graph_id" },
-  recordedNodes: { kind: "graphRows", graphIdColumn: "graph_id" },
-  recordedEdges: { kind: "graphRows", graphIdColumn: "graph_id" },
-  recordedClock: { kind: "graphRows", graphIdColumn: "graph_id" },
-  revisionOrigins: { kind: "graphRows", graphIdColumn: "graph_id" },
-  revisionChanges: { kind: "graphRows", graphIdColumn: "graph_id" },
-  identityAssertions: { kind: "graphRows", graphIdColumn: "graph_id" },
-  recordedIdentityAssertions: { kind: "graphRows", graphIdColumn: "graph_id" },
-  identityClosure: { kind: "graphRows", graphIdColumn: "graph_id" },
-  identitySeparation: { kind: "graphRows", graphIdColumn: "graph_id" },
-  uniques: { kind: "graphRows", graphIdColumn: "graph_id" },
-  edgeClaims: { kind: "graphRows", graphIdColumn: "graph_id" },
+/**
+ * The clone decision for the deployment-shared relations that carry no
+ * `graph_id`. Every graph-scoped relation's decision is declared once, with
+ * the rest of what a graph-scoped relation means, in `../graph-relations`.
+ */
+const POSTGRES_DEPLOYMENT_CLONE_POLICIES = {
   fences: { kind: "freshSeed" },
   baseSchemaVersions: { kind: "freshSeed" },
-  schemaVersions: { kind: "graphRows", graphIdColumn: "graph_id" },
   graphTemplates: {
     kind: "graphDocument",
     documentColumn: "schema_doc",
     graphIdKey: "graphId",
   },
-  indexMaterializations: { kind: "rebuildAfterClone" },
-  contributionMaterializations: { kind: "rebuildAfterClone" },
-  kindRemovals: { kind: "graphRows", graphIdColumn: "graph_id" },
-  reconciliationMarkers: { kind: "graphRows", graphIdColumn: "graph_id" },
 } as const satisfies Record<
-  Exclude<keyof PostgresTables, "fulltext" | "fulltextTableName">,
+  Exclude<keyof PostgresTables, GraphRelationKey | "fulltextTableName">,
   NonNullable<TableContribution["workingCopyClonePolicy"]>
 >;
 
-function isPostgresBaseContributionName(
+function isPostgresDeploymentContributionName(
   name: string,
-): name is keyof typeof POSTGRES_BASE_CLONE_POLICIES {
-  return Object.hasOwn(POSTGRES_BASE_CLONE_POLICIES, name);
+): name is keyof typeof POSTGRES_DEPLOYMENT_CLONE_POLICIES {
+  return Object.hasOwn(POSTGRES_DEPLOYMENT_CLONE_POLICIES, name);
+}
+
+function postgresBaseClonePolicy(
+  name: string,
+): NonNullable<TableContribution["workingCopyClonePolicy"]> | undefined {
+  if (isGraphRelationKey(name)) {
+    return graphRelationDeclaration(name).workingCopyClonePolicy;
+  }
+  return isPostgresDeploymentContributionName(name) ?
+      POSTGRES_DEPLOYMENT_CLONE_POLICIES[name]
+    : undefined;
 }
 
 /**
@@ -712,7 +714,8 @@ export function postgresContributions(
     // can't reproduce its generated tsvector column); the strategy
     // declaration below is the authoritative fulltext contribution.
     if (table === tables.fulltext) continue;
-    if (!isPostgresBaseContributionName(key)) {
+    const workingCopyClonePolicy = postgresBaseClonePolicy(key);
+    if (workingCopyClonePolicy === undefined) {
       throw new Error(
         `PostgreSQL table ${key} lacks a working-copy clone policy.`,
       );
@@ -729,7 +732,7 @@ export function postgresContributions(
         ...generatePgCreateIndexSQL(table),
       ],
       runtimeEnsure: false,
-      workingCopyClonePolicy: POSTGRES_BASE_CLONE_POLICIES[key],
+      workingCopyClonePolicy,
     });
   }
   // `false` (`fulltext: false`) contributes no fulltext table at all.

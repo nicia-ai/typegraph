@@ -64,7 +64,11 @@ import {
   SchemaFenceTimeoutError,
   StaleVersionError,
 } from "../../errors";
-import { sinceIndexAdoptionDdl } from "../../indexes/system";
+import {
+  generateGraphIdOrderIndexDDL,
+  graphIdOrderIndexTables,
+  sinceIndexAdoptionDdl,
+} from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -1921,6 +1925,9 @@ function buildPostgresEngineProfileInternal(
     ],
     revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
     revisionChangesIndexDdl: generatePgCreateIndexSQL(tables.revisionChanges),
+    graphIdOrderIndexDdl: graphIdOrderIndexTables(tableNames).map(({ table }) =>
+      generateGraphIdOrderIndexDDL(table),
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /

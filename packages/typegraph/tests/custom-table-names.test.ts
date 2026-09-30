@@ -8,10 +8,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createSqliteTables } from "../src/backend/drizzle/schema/sqlite";
+import { GRAPH_RELATION_KEYS } from "../src/backend/graph-relations";
+import { listGraphIds } from "../src/backend/graph-storage";
 import type { GraphBackend } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { createStore } from "../src/store";
+import { inspectGraphStorage } from "../src/store/inspect-graph-storage";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -63,6 +66,10 @@ describe("custom table names", () => {
     identityClosure: "app_identity_closure",
     identitySeparation: "app_identity_separation",
     fences: "app_fences",
+    indexMaterializations: "app_index_materializations",
+    contributionMaterializations: "app_contribution_materializations",
+    kindRemovals: "app_kind_removals",
+    reconciliationMarkers: "app_reconciliation_markers",
   } as const;
 
   let backend: GraphBackend;
@@ -85,6 +92,10 @@ describe("custom table names", () => {
       identityClosure: CUSTOM_NAMES.identityClosure,
       identitySeparation: CUSTOM_NAMES.identitySeparation,
       fences: CUSTOM_NAMES.fences,
+      indexMaterializations: CUSTOM_NAMES.indexMaterializations,
+      contributionMaterializations: CUSTOM_NAMES.contributionMaterializations,
+      kindRemovals: CUSTOM_NAMES.kindRemovals,
+      reconciliationMarkers: CUSTOM_NAMES.reconciliationMarkers,
     });
     backend = createTestBackend(tables);
   });
@@ -184,6 +195,51 @@ describe("custom table names", () => {
     expect(rows[0]?.id).toBe(person.id);
   });
 
+  it("reports the storage inventory under the custom table names", async () => {
+    const store = createStore(graph, backend, { history: true });
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    await store.edges.knows.create(alice, bob, { since: "2024" });
+
+    const inspection = await inspectGraphStorage(store);
+    const tableByRelation = new Map(
+      inspection.relations.map((relation) => [
+        relation.relation,
+        relation.table,
+      ]),
+    );
+    const rowsByRelation = new Map(
+      inspection.relations.map((relation) => [
+        relation.relation,
+        relation.rows,
+      ]),
+    );
+
+    for (const relation of GRAPH_RELATION_KEYS) {
+      expect(tableByRelation.get(relation), `relation ${relation}`).toBe(
+        CUSTOM_NAMES[relation],
+      );
+    }
+    for (const relation of [
+      "nodes",
+      "edges",
+      "recordedNodes",
+      "recordedEdges",
+    ]) {
+      expect(
+        rowsByRelation.get(relation),
+        `relation ${relation}`,
+      ).toBeGreaterThan(0);
+    }
+    expect(await listGraphIds(backend)).toEqual([graph.id]);
+
+    await store.clear({ preserveContributionMaterializations: false });
+
+    const cleared = await inspectGraphStorage(store);
+    expect(cleared.totalRows).toBe(0);
+    expect(await listGraphIds(backend)).toEqual([]);
+  });
+
   it("explicit schema option takes precedence over backend.tableNames", () => {
     const explicitSchema = createSqlSchema({
       nodes: "override_nodes",
@@ -220,6 +276,10 @@ describe("custom table names", () => {
       identityClosure: "typegraph_identity_closure",
       identitySeparation: "typegraph_identity_separation",
       fences: "typegraph_fences",
+      indexMaterializations: "typegraph_index_materializations",
+      contributionMaterializations: "typegraph_contribution_materializations",
+      kindRemovals: "typegraph_kind_removals",
+      reconciliationMarkers: "typegraph_reconciliation_markers",
     });
   });
 });

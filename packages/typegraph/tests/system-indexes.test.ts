@@ -29,7 +29,11 @@ import {
 import { createSqliteTables, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
-import { systemIndexName } from "../src/indexes/system";
+import {
+  generateGraphIdOrderIndexDDL,
+  graphIdOrderIndexName,
+  systemIndexName,
+} from "../src/indexes/system";
 import { renderSqlInline, sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
@@ -75,8 +79,20 @@ function extractIndexes(statements: readonly string[]): ExtractedIndex[] {
   return extracted;
 }
 
+/**
+ * The one deliberate asymmetry in the index set: PostgreSQL keeps text indexes
+ * in the database collation, so the graph id listing's byte-order seeks need
+ * `COLLATE "C"` indexes there. SQLite's text indexes are already in byte order.
+ * Stated literally rather than derived from the declaration under test.
+ */
+const POSTGRES_ONLY_BYTE_ORDER_INDEXES = [
+  'typegraph_edges.typegraph_edges_graph_id_bytes_idx("graph_id" COLLATE "C")',
+  'typegraph_nodes.typegraph_nodes_graph_id_bytes_idx("graph_id" COLLATE "C")',
+  'typegraph_schema_versions.typegraph_schema_versions_graph_id_bytes_idx("graph_id" COLLATE "C")',
+] as const;
+
 describe("system-index dialect parity", () => {
-  it("emits the same index set (names, columns, uniqueness) on both dialects", () => {
+  it("emits the same index set (names, columns, uniqueness) on both dialects, bar PostgreSQL's byte-ordered graph_id indexes", () => {
     const sqliteIndexes = extractIndexes(
       generateSqliteDDL(createSqliteTables()),
     );
@@ -96,7 +112,16 @@ describe("system-index dialect parity", () => {
 
     const sqliteSet = normalize(sqliteIndexes);
     const postgresSet = normalize(postgresIndexes);
-    expect(sqliteSet).toEqual(postgresSet);
+    const postgresOnly = postgresSet.filter((entry) =>
+      entry.includes("_graph_id_bytes_idx"),
+    );
+    expect(postgresOnly).toEqual([...POSTGRES_ONLY_BYTE_ORDER_INDEXES]);
+    expect(
+      sqliteSet.some((entry) => entry.includes("_graph_id_bytes_idx")),
+    ).toBe(false);
+    expect(
+      postgresSet.filter((entry) => !postgresOnly.includes(entry)),
+    ).toEqual(sqliteSet);
     expect(sqliteSet.length).toBeGreaterThan(0);
   });
 
@@ -153,6 +178,40 @@ describe("system-index identifier bounds", () => {
     expect(script).toContain(`"${systemIndexName(longNodes, "kind_idx")}"`);
     expect(script).toContain(
       `"${systemIndexName(longNodes, "kind_created_idx")}"`,
+    );
+  });
+});
+
+describe("byte-ordered graph_id index", () => {
+  it("adopts byte-for-byte the DDL the PostgreSQL schema factory declares", () => {
+    const tables = {
+      nodes: "n_custom",
+      edges: "e_custom",
+      schemaVersions: "sv_custom",
+    };
+    const generated = generatePostgresDDL(createPostgresTables(tables));
+    for (const table of Object.values(tables)) {
+      expect(generated).toContain(generateGraphIdOrderIndexDDL(table));
+    }
+  });
+
+  it("stays within the identifier bound and distinct for a long custom table name", () => {
+    const longTable = `t${"x".repeat(57)}`;
+    const name = graphIdOrderIndexName(longTable);
+    expect(name.length).toBeLessThanOrEqual(63);
+    expect(name).not.toBe(graphIdOrderIndexName(`${longTable}y`));
+  });
+
+  it("is reserved: a graph-declared index cannot take its name", () => {
+    const colliding = defineNodeIndex(Person, {
+      fields: ["name"],
+      name: "typegraph_nodes_graph_id_bytes_idx",
+    });
+    expect(() => createPostgresTables({}, { indexes: [colliding] })).toThrow(
+      /collides with a TypeGraph system index/,
+    );
+    expect(() => createSqliteTables({}, { indexes: [colliding] })).toThrow(
+      /collides with a TypeGraph system index/,
     );
   });
 });

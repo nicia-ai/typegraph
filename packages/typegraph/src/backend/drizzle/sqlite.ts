@@ -1381,6 +1381,12 @@ export function buildSqliteEngineProfile(
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
     fences: getTableName(tables.fences),
+    indexMaterializations: getTableName(tables.indexMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
+    kindRemovals: getTableName(tables.kindRemovals),
+    reconciliationMarkers: getTableName(tables.reconciliationMarkers),
   } satisfies ResolvedSqlTableNames;
   // refreshStatistics() scopes ANALYZE to these — matching the Postgres
   // backend, which never touches unrelated tables sharing the database.
@@ -1760,6 +1766,9 @@ export function buildSqliteEngineProfile(
     revisionChangesIndexDdl: generateSqliteCreateIndexSQL(
       tables.revisionChanges,
     ),
+    // SQLite keeps text indexes in byte order, so the graph id listing seeks
+    // the graph_id-leading primary keys and version 5 adopts no index.
+    graphIdOrderIndexDdl: [],
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`

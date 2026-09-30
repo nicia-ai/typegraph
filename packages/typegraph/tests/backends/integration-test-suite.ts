@@ -67,6 +67,7 @@ import {
   registerGraphMergePlanIntegrationTests,
   registerGraphMergeReviewIntegrationTests,
   registerGraphMergeReviewV2IntegrationTests,
+  registerGraphStorageIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
@@ -356,6 +357,7 @@ export function createIntegrationTestSuite<
     registerStoreViewIntegrationTests(context);
     registerStoreAnalysisIntegrationTests(context);
     registerClearIntegrationTests(context);
+    registerGraphStorageIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);

@@ -347,6 +347,131 @@ if (orgSchemaResult.status === "migrated") {
 }
 ```
 
+## Inspecting What a Database Holds
+
+Graphs sharing a backend are separated by `graph_id` inside TypeGraph's tables. Two reads answer the
+questions an operator asks about that layout without depending on it: which graphs live in this
+database, and how many rows one graph holds.
+
+### `listGraphIds(backend, options?)`
+
+Lists the graph ids that hold data, one bounded page at a time:
+
+```typescript
+import { listGraphIds } from "@nicia-ai/typegraph";
+
+let after: string | undefined;
+for (;;) {
+  const page = await listGraphIds(backend, { prefix: "tenant-", after, limit: 100 });
+  if (page.length === 0) break;
+  for (const graphId of page) console.log(graphId);
+  after = page.at(-1);
+}
+```
+
+| Option   | Meaning                                                                             |
+| -------- | ----------------------------------------------------------------------------------- |
+| `prefix` | Only ids starting with this exact, case-sensitive text. `%` and `_` are not wildcards. |
+| `after`  | Exclusive cursor: only ids ordered after this one. Pass the last id of the previous page. |
+| `limit`  | Page size from 1 to 1000. Defaults to 100. Anything else throws `ConfigurationError`. |
+
+Ids come back in byte order (UTF-8 code point order) on every backend, so `Tenant-x` sorts before
+`tenant-a` on SQLite and PostgreSQL alike and a cursor resumes exactly where the last page ended,
+whatever the database collation. The reserved deployment marker id that TypeGraph uses for
+deployment-scoped contribution markers is never listed. A graph appears while it has nodes, edges or a
+committed schema version, which are exactly the relations a default `store.clear()` empties. A
+cleared graph therefore stops being listed even though `store.clear()` keeps its contribution
+markers unless you pass `preserveContributionMaterializations: false`, and even when a
+revision-tracked store reseeded its `recordedClock` row during the clear.
+
+Each page walks graph ids by index seek, one seek per graph per relation, instead of reading every
+row. The walk starts at the cursor or prefix and stops after the page, so a page costs about `limit`
+seeks wherever it sits, however many graphs the database holds and however many rows they contain.
+SQLite serves the seeks from the `graph_id`-leading primary keys, which are already in byte order.
+PostgreSQL orders ordinary text indexes by the database collation, so it serves them from a
+byte-ordered (`COLLATE "C"`) `graph_id` index that base-schema version 5 adds to `nodes`, `edges` and
+`schema_versions`; see [Base-schema version 5](/backend-setup#base-schema-version-5-byte-ordered-graph_id-indexes-postgresql)
+for what it costs and how to build it ahead of an upgrade. On a 20,000-graph, 50-rows-per-graph
+PostgreSQL 18 database a page takes about 3 ms, where the same read took about 400 ms before the
+index; at 200 graphs of 5,000 rows it is about 3 ms either way. A database without the index (its
+base schema not adopted yet, or DDL managed by hand) lists the same ids by reading and de-duplicating
+every row of those relations for each page, measured at 47 to 105 ms a page at these sizes. A backend that
+declares no recursive traversal does the same. Use the listing for operator tooling, not on a request
+path. Rows that exist only outside those relations, such as orphaned recorded history or contribution
+markers, do not make a graph appear; `inspectGraphStorage` counts every relation.
+
+The read runs in one read-only transaction where the backend supports it. It needs the backend's
+catalog probes to tell a table that was never provisioned from an empty one, and throws
+`ConfigurationError` on a custom backend that has none.
+
+### `inspectGraphStorage(store)`
+
+Counts one graph's rows in every relation that can hold them:
+
+```typescript
+import { inspectGraphStorage } from "@nicia-ai/typegraph";
+
+await store.clear();
+const { graphId, relations, totalRows } = await inspectGraphStorage(store);
+
+const leftovers = relations.filter((relation) => relation.rows > 0);
+// [{ relation: "contributionMaterializations", table: "typegraph_contribution_materializations", rows: 2 }]
+```
+
+`relations` lists every graph-scoped relation under its logical key (`nodes`, `edges`, `uniques`,
+`edgeClaims`, `identityAssertions`, `recordedNodes`, `fulltext`, `schemaVersions`, and so on) with
+the physical `table` it resolved to on this backend, so custom table names are reported as
+configured. The graph's per-field vector tables come from its vector slots and the active vector
+strategy and are reported as `vector:<Kind>.<field>`. A relation whose table the database never
+provisioned counts as `0` rather than failing.
+
+Use it to verify that `store.clear()` left nothing behind. Two relations can legitimately hold a
+row after a clear, by design:
+
+- `contributionMaterializations` is preserved unless you pass
+  `preserveContributionMaterializations: false`.
+- `recordedClock` is reseeded inside the clear transaction on a store with live revision tracking
+  (without history).
+
+Every other relation reads `0` after a clear, and other graphs in the same database are untouched.
+
+#### Consistency of the counts
+
+Each relation is counted by its own statement, so `relations` and `totalRows` describe one state of
+the graph only when every statement read the same snapshot. The result carries a `consistency`
+field that says whether they did:
+
+| `consistency` | Meaning |
+| --- | --- |
+| `"snapshot"` | Every count came from one snapshot: `relations` and `totalRows` describe a state the graph was in. |
+| `"per-statement"` | Each relation was counted independently. A write between two counts can leave the result describing a state that never existed together, for example rows in `nodes` beside an empty `schemaVersions`. |
+
+The read asks for a read-only `repeatable read` transaction, but it does not trust the request: a
+transaction wrapper can drop the isolation option, and a role or database can default the level.
+The effective level is read on the counting session itself, inside the first count statement, so
+the answer costs no extra round trip. What that gives on each backend:
+
+- **SQLite (better-sqlite3, libSQL, and other drivers with interactive transactions):**
+  always `"snapshot"`. A SQLite transaction reads one snapshot whatever level was requested.
+- **PostgreSQL (`pg`, `postgres-js`, PGlite):** `"snapshot"` when the session was observed at
+  `repeatable read` or `serializable`, which is what the request produces. `"per-statement"` when
+  it ran at `read committed`, which happens when a wrapper around `backend.transaction` does not
+  forward its options and the role or database defaults to `read committed`; the same wrapper
+  under a `repeatable read` default still reports `"snapshot"`, because the level is observed, not
+  requested. A backend that declares no session isolation read cannot be observed and reports
+  `"per-statement"`.
+- **Backends without interactive transactions (Cloudflare D1, `neon-http`):** `"per-statement"`,
+  because there is no transaction to share a snapshot. The exception is a graph with at most one
+  provisioned relation, which is one statement and so trivially consistent.
+
+The evidence proves the isolation of the session that ran the first count. A backend wrapper that
+violates the transaction contract by handing the root pool through as its transaction backend can
+run later counts on other sessions, which no observation on the first one can detect.
+
+The read never refuses on a weaker level: it is a diagnostic. Treat `"per-statement"` counts as an
+approximation. To verify a clear with them, make sure nothing else writes the graph while you read,
+or read twice and compare.
+
 ## Shared Subgraph Helpers
 
 When multiple graphs share a common set of node and edge types, you can write reusable

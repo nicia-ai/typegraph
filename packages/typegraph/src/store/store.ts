@@ -5134,12 +5134,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (mintsAnchorOrigin) {
         // Rotate the durable per-graph revision-origin nonce in the SAME
         // transaction as `clearGraph` for revision-tracked tokens and
-        // origin-namespaced content fingerprints. `clearGraph` deletes the
-        // recorded-clock row but not the origin row; without this, a graph
-        // repopulated after clear() could restore the old token and pass the
-        // base-version precondition again. See `resetRevisionOrigin`'s own
-        // doc for why this must be the origin row, not the revision, that
-        // fences the epoch.
+        // origin-namespaced content fingerprints. The bundled `clearGraph`
+        // already deletes the origin row with the rest of the graph's
+        // relations; this delete owns the guarantee for a backend whose own
+        // `clearGraph` does not, since without it a graph repopulated after
+        // clear() could restore the old token and pass the base-version
+        // precondition again. See `resetRevisionOrigin`'s own doc for why
+        // this must be the origin row, not the revision, that fences the
+        // epoch.
         await resetRevisionOrigin(target, this.#sqlSchema(), this.graphId);
       }
       // Live (non-capturing) revision tracking immediately reseeds the

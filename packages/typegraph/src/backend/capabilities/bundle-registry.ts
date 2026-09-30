@@ -940,18 +940,18 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
-    // 27, including the namespace fork's and managed PostgreSQL copy's backend table-name probes. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+    // 28, including the namespace fork's and managed PostgreSQL copy's backend table-name probes and the graph storage inventory's one resolution of the graph-relation names. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy and managed PostgreSQL copy read the
     // connected backend's names to fence physical target bindings.
-    accesses: 27,
+    accesses: 28,
   },
   fenceSql: {
     kind: "reasoned",
     reason:
-      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.",
-    accesses: 2,
+      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The exceptions are the two session-isolation reads, which take the bare `isolationFactExpression` and are gated on `dialect`, not on a resolved fence plan, so there is no plan to read it through: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) reads `target.fenceSql` directly, and the graph storage inventory (`backend/graph-storage.ts`) folds the expression into its first count statement to report whether its counts shared one snapshot.",
+    accesses: 3,
   },
   commitSchemaVersionIfKindsEmpty: {
     kind: "reasoned",
@@ -1273,8 +1273,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "fulltextOperations",
-    // The managed PostgreSQL copy refuses unsupported custom strategies.
-    ceiling: 3,
+    // The managed PostgreSQL copy refuses unsupported custom strategies, and
+    // the namespace fork reads it once to know whether the fulltext relation
+    // is provisioned.
+    ceiling: 4,
   },
   getIndexMaterialization: {
     kind: "deferred",
@@ -1421,8 +1423,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     workstream: "WS5b",
     bundle: "vectorOperations",
     // Managed copies require the bundled strategy on the source and verify
-    // the allocation-scoped strategy before cloning or reopening.
-    ceiling: 14,
+    // the allocation-scoped strategy before cloning or reopening. The graph
+    // storage inventory reads it once to name a graph's vector tables.
+    ceiling: 15,
   },
 } as const satisfies Record<string, UnbundledOptionalMember>;
 

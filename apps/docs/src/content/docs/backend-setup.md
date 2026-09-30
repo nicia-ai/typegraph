@@ -1129,6 +1129,44 @@ including tombstones. Export the affected edges, hard-delete them, publish the
 new schema, and import them again so every row receives a key under the new
 declaration.
 
+### Base-schema version 5: byte-ordered `graph_id` indexes (PostgreSQL)
+
+Version 5 adds one index to each relation `listGraphIds` seeks (`nodes`, `edges` and
+`schema_versions`), ordering `graph_id` by bytes instead of by the database collation so that a page's
+cursor, prefix and limit bound the walk. SQLite already keeps text indexes in byte order, so its step
+only advances the marker. The index is a single-column `graph_id` index: PostgreSQL deduplicates the
+repeated values, so it stays small (about 7 MB beside a 97 MB `nodes` heap of one million rows) and
+adds 1 to 2% to writes on the relation it lands on (single creates and 1,000-row bulk writes alike).
+
+The privileged open builds the three indexes with a plain `CREATE INDEX`, which blocks writes to the
+table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). This
+happens inline at boot even when `systemIndexes: "skip"` is set: that option only defers system index
+materialization, not base-schema adoption. For a large deployment, build the indexes first with
+`CONCURRENTLY`; the adoption step is `IF NOT EXISTS` and then finds them in place. Run each statement
+outside a transaction, and never run the same concurrent build from two sessions at once. Use the
+adapter's table names throughout:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx"
+  ON "typegraph_nodes" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx"
+  ON "typegraph_edges" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx"
+  ON "typegraph_schema_versions" ("graph_id" COLLATE "C");
+```
+
+`CREATE INDEX CONCURRENTLY` can leave an invalid index behind if it is interrupted; drop it and rerun.
+`listGraphIds` checks only that each index exists and is valid, not its definition, so an index you
+create by hand under one of these names with a different definition is trusted and makes the walk slow
+rather than wrong. Create them exactly as shown.
+
+Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
+database stamped 5, so roll forward rather than back once any process has adopted it.
+
+Externally managed DDL applies the same statements, then advances the marker to 5 with the
+monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
+correct pages, by reading and de-duplicating the anchor relations instead of walking them.
+
 ## Drizzle-Free Entrypoints
 
 TypeGraph keeps its public core and backend contracts independent of Drizzle:

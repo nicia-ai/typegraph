@@ -41,6 +41,7 @@ import {
 
 import {
   buildPostgresEdgeIndexBuilders,
+  buildPostgresGraphIdOrderIndex,
   buildPostgresNodeIndexBuilders,
   buildPostgresSystemIndexBuilders,
 } from "../../../indexes/drizzle";
@@ -151,6 +152,7 @@ export function createPostgresTables(
       // System indexes come from SYSTEM_INDEX_DECLARATIONS (single source
       // for both dialects + the runtime materializer).
       ...buildPostgresSystemIndexBuilders("nodes", n.nodes, t),
+      buildPostgresGraphIdOrderIndex(n.nodes, t.graphId),
       ...buildPostgresNodeIndexBuilders(t, resolvedIndexes),
     ],
   );
@@ -187,6 +189,7 @@ export function createPostgresTables(
         sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
       ),
       ...buildPostgresSystemIndexBuilders("edges", n.edges, t),
+      buildPostgresGraphIdOrderIndex(n.edges, t.graphId),
       ...buildPostgresEdgeIndexBuilders(t, resolvedIndexes),
     ],
   );
@@ -521,6 +524,7 @@ export function createPostgresTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.version] }),
       index(`${n.schemaVersions}_active_idx`).on(t.graphId, t.isActive),
+      buildPostgresGraphIdOrderIndex(n.schemaVersions, t.graphId),
       // Partial unique index enforcing the "at most one active version
       // per graph" invariant at the storage layer. Defense in depth
       // against buggy backend implementations or out-of-band writes.

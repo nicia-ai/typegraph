@@ -314,9 +314,11 @@ describe("store.clear() rotates the durable revision origin", () => {
     await store.clear();
 
     const originAfterClear = await store.revisionOriginNow();
-    // Mutation-proof: commenting out `clear()`'s `resetRevisionOrigin` call
-    // (`store.ts`) makes this equality hold instead — a pre-clear branch's
-    // revision anchor would silently match
+    // Mutation-proof: the origin row is deleted both by the `revisionOrigins`
+    // step of the graph-relation clear sequence and by `clear()`'s own
+    // `resetRevisionOrigin` call (`store.ts`, the guarantee for a backend whose
+    // `clearGraph` skips the inventory). Removing BOTH makes this equality hold
+    // instead — a pre-clear branch's revision anchor would silently match
     // again once the graph is repopulated to the same revision count.
     expect(originAfterClear).not.toBe(originBeforeClear);
   });

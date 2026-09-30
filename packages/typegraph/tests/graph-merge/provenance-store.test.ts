@@ -74,6 +74,7 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../../src/backend/derive-backend";
+import { resolveGraphRelationNames } from "../../src/backend/graph-relations";
 import type { NodeRow } from "../../src/backend/types";
 import { asEdgeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
@@ -193,6 +194,11 @@ const ASSERTION_INSTANT = "2024-01-01T00:00:00.000Z";
  */
 function identityAssertionsTable(backend: GraphBackend): string {
   return createSqlSchema(backend.tableNames).tables.identityAssertions;
+}
+
+/** The physical revision-journal table, resolved through the shared inventory. */
+function revisionChangesTable(backend: GraphBackend): string {
+  return resolveGraphRelationNames(backend.tableNames).revisionChanges;
 }
 
 /** Reads the durable ownership marker row straight from the backend. */
@@ -1149,6 +1155,38 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
         ),
       ),
     ).resolves.toHaveLength(1);
+  });
+
+  it("refuses an unregistered id whose only rows are REVISION JOURNAL entries", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const sidecarId = provenanceGraphId(careGraph.id);
+    // The revision journal carries a `graph_id` like every other per-graph
+    // relation, and an id whose only durable rows are journal entries is an id
+    // an application has written under: hard-deleting its nodes leaves the
+    // journal behind. The probe once enumerated its own list of relations and
+    // left this one out, reading the id as FREE.
+    await requireDefined(backend.executeStatement)(
+      asCompiledStatementSql(
+        sql`
+          INSERT INTO ${sql.identifier(revisionChangesTable(backend))}
+                        (entry_id, graph_id, revision, complete, entity, kind, id)
+                      VALUES (${"journal-application"}, ${sidecarId}, ${1}, TRUE, ${"node"}, ${"Patient"}, ${"pat-left"})
+        `,
+      ),
+    );
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "application-graph",
+      },
+    });
+    await expect(backend.getActiveSchema(sidecarId)).resolves.toBeUndefined();
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
   });
 
   it("refuses an EMPTY application graph carrying neither sidecar schema", async () => {

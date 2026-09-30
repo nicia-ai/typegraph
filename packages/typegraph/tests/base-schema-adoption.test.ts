@@ -1012,6 +1012,110 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
+  describe("version 5: byte-ordered graph_id indexes", () => {
+    const byteOrderIndexNames = [
+      "typegraph_nodes_graph_id_bytes_idx",
+      "typegraph_edges_graph_id_bytes_idx",
+      "typegraph_schema_versions_graph_id_bytes_idx",
+    ] as const;
+
+    async function presentByteOrderIndexes(
+      client: PGlite,
+    ): Promise<readonly string[]> {
+      const rows = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${byteOrderIndexNames.map((name) => `'${name}'`).join(", ")}) ORDER BY indexname`,
+      );
+      return rows.rows.map((row) => row.indexname);
+    }
+
+    async function downgradeToVersion4(client: PGlite): Promise<void> {
+      await client.exec(
+        [
+          ...byteOrderIndexNames.map((name) => `DROP INDEX "${name}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 4 WHERE installation = 1',
+        ].join(";\n"),
+      );
+    }
+
+    it("catches an installed version-4 PGlite database up to version 5 through adoptBaseSchema() directly, gaining the indexes", async () => {
+      // The offline path never calls `generateDdl()`, so only the version-5
+      // step body can create the indexes here: gutting it fails this case.
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+        await downgradeToVersion4(client);
+        expect(await presentByteOrderIndexes(client)).toEqual([]);
+
+        await requireDefined(backend.adoptBaseSchema)();
+
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("catches an installed version-4 PGlite database up to version 5 when a store reopens it", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        await downgradeToVersion4(client);
+
+        await createStoreWithSchema(graph, backend);
+
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("advances an installed version-4 SQLite database to version 5 without adding an index", async () => {
+      // SQLite keeps text indexes in byte order already, so the step only
+      // moves the marker.
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        client.exec(
+          "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
+        );
+
+        await requireDefined(backend.adoptBaseSchema)();
+
+        expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+          CURRENT_BASE_SCHEMA_VERSION,
+        );
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%graph_id_bytes_idx'",
+            )
+            .all(),
+        ).toEqual([]);
+      } finally {
+        await backend.close();
+      }
+    });
+  });
+
   it("accepts pre-provisioned SQLite identity columns without a pair CHECK", async () => {
     const tableNames = {
       baseSchemaVersions: "tg_base_schema_versions",

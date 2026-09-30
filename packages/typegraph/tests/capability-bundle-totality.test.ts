@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("41 reasoned entries sum to 123 accesses; 50 deferred entries sum to 241", () => {
+  it("41 reasoned entries sum to 125 accesses; 50 deferred entries sum to 243", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -164,8 +164,10 @@ describe("capability bundle totality (T9)", () => {
     // Readiness-first journal installation adds one guarded access. The
     // managed PostgreSQL copy adds six probes for table bindings and schema
     // provisioning. Candidate one-active and durable edge identity planning
-    // add four accesses.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(123);
+    // add four accesses. The graph storage inventory resolves the
+    // graph-relation names through one tableNames access and reads the session
+    // isolation expression through one fenceSql access: 123 -> 125.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(125);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
@@ -175,7 +177,8 @@ describe("capability bundle totality (T9)", () => {
     // building it: dropVectorIndex 0 -> 1, 229 -> 230. Managed PostgreSQL
     // copies add two owned DDL paths and one fulltext strategy probe: 230 -> 233.
     // Vector lifecycle inventory adds one executeDdl, two upsertEmbedding,
-    // and five vectorStrategy access sites: 233 -> 241.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(241);
+    // and five vectorStrategy access sites: 233 -> 241. The graph storage
+    // inventory and the namespace fork add one guarded strategy read each: 241 -> 243.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(243);
   });
 });
