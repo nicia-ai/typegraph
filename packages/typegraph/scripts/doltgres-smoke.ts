@@ -4,6 +4,18 @@
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 //
+// RE-MEASURED 2026-09-30 on TypeGraph main b85a3379 against a doltgresql main build at
+// 4f1448bd (no release since 1.3.3). Deltas since 2026-09-16:
+//   - #3388 (`ASC NULLS LAST`) is FIXED on main (33519eb); the ordered-query step passes.
+//   - NEW gap (doltgresql#3466, also covers regproc not resolving user-defined functions): main's revision-change journal (#738) calls
+//     `to_regprocedure`, which Doltgres lacks, so `revisionTracking: true` is refused at
+//     bootstrap. Triggers, PL/pgSQL functions and pg_trigger all work; only that function.
+//   - NEW server option `behavior.permit_unsupported_locking_statements` (#3405) accepts
+//     and IGNORES `FOR UPDATE`/`FOR SHARE`. It makes the bundled and advisory postures
+//     CONSTRUCT, but the clause excludes nothing, so they are not fenced. The row-locking
+//     probe pins both server modes. Do not read "constructs and walks" as "fenced".
+//   - #2600 is still open; maintainers said row-level locking is being prioritized.
+//
 // Measured 2026-09-16 against BOTH the 1.3.3 release and a build of doltgresql main at
 // 734e58b. For the first time the two builds DIVERGE through this battery, and the
 // divergence is the story: everything the latest release fixed is released, but the one
@@ -243,6 +255,13 @@ const POSTURES: readonly Posture[] = [
     capabilities: { writeFence: { mechanism: "caller-serialized" } },
   },
 ];
+
+/** The bundled default and the advisory mechanism both emit `FOR UPDATE` / `FOR SHARE`. */
+function usesRowLocks(posture: Posture): boolean {
+  return (
+    posture.label.startsWith("omitted") || posture.label.startsWith("advisory")
+  );
+}
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -561,6 +580,93 @@ async function probeMatchIdentityCheck(): Promise<void> {
   }
 }
 
+/** True once `probeRowLocking` saw row-locking clauses accepted but not enforced. */
+let rowLocksInert = false;
+
+/**
+ * A PIN on the row-locking clauses (`FOR UPDATE` / `FOR SHARE`), which the server can
+ * answer two ways, both expected:
+ *
+ *   - default config: refused with "locking clauses are not yet supported" (#2600);
+ *   - `behavior.permit_unsupported_locking_statements: true` (doltgresql#3405, after
+ *     1.3.3): ACCEPTED AND IGNORED. The second locker returns immediately, so there is
+ *     still no exclusion. A declaration that leans on the clause is not fenced by it.
+ *
+ * It turns red only if the clause is accepted AND the second locker blocks, which is
+ * #2600's row-lock half actually landing.
+ */
+async function probeRowLocking(): Promise<void> {
+  const name = "write fence: row-locking clauses still missing";
+  const first = new Client(DOLTGRES_CONNECTION);
+  const second = new Client(DOLTGRES_CONNECTION);
+  const lock = `SELECT "id" FROM "probe_rows" WHERE "id" = 'a' FOR UPDATE`;
+  try {
+    await first.connect();
+    await second.connect();
+    for (const statement of PROBE_SETUP) await first.query(statement);
+    await first.query(`BEGIN`);
+    try {
+      await first.query(lock);
+    } catch (error) {
+      const detail = describeError(error);
+      results.push(
+        detail.includes("locking clauses are not yet supported") ?
+          {
+            step: name,
+            outcome: "pass",
+            detail: "unsupported as pinned (doltgresql#2600): refused",
+          }
+        : {
+            step: name,
+            outcome: "fail",
+            detail: `refused for a DIFFERENT reason than doltgresql#2600: ${detail}`,
+          },
+      );
+      return;
+    }
+    await second.query(`BEGIN`);
+    const secondCompleted = await Promise.race([
+      second.query(lock).then(() => true),
+      new Promise<boolean>((resolve) =>
+        setTimeout(() => {
+          resolve(false);
+        }, 1500),
+      ),
+    ]);
+    await Promise.allSettled([
+      first.query(`ROLLBACK`),
+      second.query(`ROLLBACK`),
+    ]);
+    if (!secondCompleted) {
+      results.push({
+        step: name,
+        outcome: "fail",
+        detail:
+          "NOW SUPPORTED — doltgresql#2600 row locks exclude; re-run the declaration matrix",
+      });
+      return;
+    }
+    rowLocksInert = true;
+    results.push({
+      step: name,
+      outcome: "pass",
+      detail:
+        "accepted but INERT as pinned (permit_unsupported_locking_statements, doltgresql#3405): " +
+        "a second FOR UPDATE on the same row did not block — no exclusion, no freshness",
+    });
+  } catch (error) {
+    results.push({ step: name, outcome: "fail", detail: describeError(error) });
+  } finally {
+    for (const client of [first, second]) {
+      try {
+        await client.end();
+      } catch {
+        // Intentionally ignored: a failed connection is already closed.
+      }
+    }
+  }
+}
+
 /**
  * A PIN on Doltgres's conflict semantics for one fence row. Two clients each open a
  * transaction and run the `row` mechanism's acquisition (`INSERT ... ON CONFLICT (key) DO
@@ -720,15 +826,16 @@ async function runDeviationBattery(): Promise<void> {
       `SELECT pg_advisory_xact_lock(hashtext('typegraph:identity'), hashtext('g1'))`,
     ],
   );
-  await probe(
-    "write fence: row-locking clauses still missing",
-    unsupported("locking clauses are not yet supported", "doltgresql#2600"),
-    [...PROBE_SETUP, `SELECT "id" FROM "probe_rows" FOR SHARE`],
-  );
+  await probeRowLocking();
   await probe(
     "write fence: LOCK TABLE still missing",
     unsupported('at or near "lock": syntax error', "doltgresql#2600"),
     [...PROBE_SETUP, `BEGIN`, `LOCK TABLE "probe_rows" IN SHARE MODE`],
+  );
+  await probe(
+    "revision journal: to_regprocedure missing",
+    unsupported("'to_regprocedure' not found", "doltgresql#3466"),
+    [`SELECT to_regprocedure('pg_catalog.now()')`],
   );
   await probeFenceRowRace();
 
@@ -849,7 +956,11 @@ async function runDeclarationMatrix(pool: Pool): Promise<void> {
       results.push({
         step: name,
         outcome: "pass",
-        detail: `constructs and walks (schema ${validation.status}; ${String(rows.length)} rows)`,
+        detail:
+          `constructs and walks (schema ${validation.status}; ${String(rows.length)} rows)` +
+          (rowLocksInert && usesRowLocks(posture) ?
+            " — UNSOUND here: its row-locking clauses are accepted but inert"
+          : ""),
       });
     } catch (error) {
       const detail = describeError(error);
@@ -916,12 +1027,23 @@ async function runPostureGates(
     return `schema ${validation.status}`;
   });
 
-  await step("revisionTracking constructs under row", async () => {
-    const [, validation] = await createAdapterStoreWithSchema(graph, backend, {
-      revisionTracking: true,
-    });
-    return `schema ${validation.status}`;
-  });
+  await stepAllowingPinnedGap(
+    "revisionTracking constructs under row",
+    async () => {
+      const [, validation] = await createAdapterStoreWithSchema(
+        graph,
+        backend,
+        { revisionTracking: true },
+      );
+      return `schema ${validation.status}`;
+    },
+    (detail) =>
+      detail.includes("'to_regprocedure' not found") ?
+        "blocked (doltgresql#3466): the revision-change journal's install guard and " +
+        "readiness check call `to_regprocedure`, which Doltgres lacks. PL/pgSQL trigger " +
+        "functions, CREATE TRIGGER and pg_trigger (tgfoid/tgargs/tgtype) all work."
+      : undefined,
+  );
 
   await step("identity graph refused (table-lock drain)", async () => {
     try {
