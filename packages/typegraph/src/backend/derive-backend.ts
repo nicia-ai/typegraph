@@ -47,32 +47,38 @@ function recordBackendDerivation(derived: object, source: object): void {
   BACKEND_DERIVATION_SOURCES.set(derived, source);
 }
 
+/**
+ * The backend and each source it was derived from through this seam, nearest
+ * first. Identity a resource earned on any link is inherited by the links
+ * derived from it, so consumers resolve such identity along this chain.
+ */
+export function backendDerivationChain(
+  backend: object,
+): readonly [object, ...object[]] {
+  const chain: [object, ...object[]] = [backend];
+  const visited = new Set<object>(chain);
+  let source = BACKEND_DERIVATION_SOURCES.get(backend);
+  while (source !== undefined && !visited.has(source)) {
+    chain.push(source);
+    visited.add(source);
+    source = BACKEND_DERIVATION_SOURCES.get(source);
+  }
+  return chain;
+}
+
 /** Returns whether `candidate` was built from `source` through this seam. */
 export function isBackendDerivedFrom(
   candidate: object,
   source: object,
 ): boolean {
-  const visited = new Set<object>();
-  let current: object | undefined = candidate;
-  while (current !== undefined && !visited.has(current)) {
-    if (current === source) return candidate !== source;
-    visited.add(current);
-    current = BACKEND_DERIVATION_SOURCES.get(current);
-  }
-  return false;
+  return (
+    candidate !== source && backendDerivationChain(candidate).includes(source)
+  );
 }
 
 /** Returns the original backend at the root of a `deriveBackend` chain. */
 export function backendDerivationRoot(backend: object): object {
-  const visited = new Set<object>();
-  let current = backend;
-  while (!visited.has(current)) {
-    visited.add(current);
-    const source = BACKEND_DERIVATION_SOURCES.get(current);
-    if (source === undefined) return current;
-    current = source;
-  }
-  return current;
+  return backendDerivationChain(backend).at(-1) ?? backend;
 }
 
 /**

@@ -26,6 +26,7 @@ type SqliteIndexDefinition = Readonly<{
 }>;
 
 type PostgresIndexDefinition = Readonly<{
+  index_schema: string;
   index_name: string;
   index_definition: string;
 }>;
@@ -182,14 +183,27 @@ export async function suspendSqliteSecondaryIndexes(
   return definitions;
 }
 
+/**
+ * The index is dropped by the schema the catalog read found it in, never by
+ * whatever the session's `search_path` reaches first, so a same-named index in
+ * an earlier schema is not the one dropped.
+ */
+function qualifiedIndexName(definition: PostgresIndexDefinition): string {
+  return `${quoteSqlIdentifier(definition.index_schema)}.${quoteSqlIdentifier(definition.index_name)}`;
+}
+
 export async function suspendPostgresSecondaryIndexes(
   backend: TransactionBackend,
   tableNames: TrustedImportTableNames,
+  allocationSchema: string | undefined,
 ): Promise<readonly PostgresIndexDefinition[]> {
   const executeRaw = requireRawExecution(backend);
   const executeStatement = requireStatementExecution(backend);
+  const schemaPredicate =
+    allocationSchema === undefined ? "current_schema()" : "$3";
   const definitions = await executeRaw<PostgresIndexDefinition>(
-    `SELECT index_class.relname AS index_name,
+    `SELECT namespace.nspname AS index_schema,
+            index_class.relname AS index_name,
             pg_get_indexdef(index_class.oid) AS index_definition
        FROM pg_class AS table_class
        JOIN pg_namespace AS namespace
@@ -200,17 +214,19 @@ export async function suspendPostgresSecondaryIndexes(
          ON index_class.oid = index_metadata.indexrelid
        LEFT JOIN pg_constraint AS table_constraint
          ON table_constraint.conindid = index_class.oid
-      WHERE namespace.nspname = current_schema()
+      WHERE namespace.nspname = ${schemaPredicate}
         AND table_class.relname IN ($1, $2)
         AND table_constraint.oid IS NULL
         AND NOT index_metadata.indisprimary
       ORDER BY index_class.relname`,
-    [tableNames.nodes, tableNames.edges],
+    allocationSchema === undefined ?
+      [tableNames.nodes, tableNames.edges]
+    : [tableNames.nodes, tableNames.edges, allocationSchema],
   );
   for (const definition of definitions) {
     await executeStatement(
       asCompiledStatementSql(
-        sql.raw(`DROP INDEX ${quoteSqlIdentifier(definition.index_name)}`),
+        sql.raw(`DROP INDEX ${qualifiedIndexName(definition)}`),
       ),
     );
   }

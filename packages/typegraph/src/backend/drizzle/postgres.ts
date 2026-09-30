@@ -161,6 +161,7 @@ import {
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type EngineRecordedTimeMembers,
+  type GraphBackend,
   type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -270,6 +271,13 @@ import {
   createPostgresOperationStrategy,
   tableExistsFromRow,
 } from "./operations/strategy";
+import {
+  allocationSchemaOfTables,
+  allocationSchemaPin,
+  backendRelationSchema,
+  markAllocationSchemaBackend,
+  relationInBackendSchema,
+} from "./postgres-allocation-schema";
 import {
   advisoryLockSingleExpression,
   postgresDdlLockStatement,
@@ -687,6 +695,11 @@ function normalizePostgresColumnKind(
   return "other";
 }
 
+/** DDL PostgreSQL refuses inside a transaction block: `CREATE`/`DROP INDEX CONCURRENTLY`. */
+function isTransactionRefusedDdl(ddl: string): boolean {
+  return /\bCONCURRENTLY\b/iu.test(ddl);
+}
+
 /** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
 async function executeRawDdl(
   db: AnyPgDatabase,
@@ -698,6 +711,30 @@ async function executeRawDdl(
     return;
   }
   await db.execute(sql.raw(ddl));
+}
+
+/**
+ * The one decision that a caller-owned session may run an allocation's DDL:
+ * its current schema is the allocation's. The caller owns that session's
+ * search path, so it is checked, never rewritten.
+ */
+async function assertCallerSessionInAllocationSchema(
+  adapter: PostgresExecutionAdapter,
+  allocationSchema: string,
+  operation: string,
+): Promise<void> {
+  const [session] = await adapter.execute<{ schema: string | null }>(
+    sql`SELECT current_schema() AS schema`,
+  );
+  if (session?.schema === allocationSchema) return;
+  throw new ConfigurationError(
+    `${operation} over a working-copy allocation must run on a session whose current schema is "${allocationSchema}".`,
+    {
+      code: "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+      allocationSchema,
+      sessionSchema: session?.schema,
+    },
+  );
 }
 
 /**
@@ -719,13 +756,15 @@ function createPostgresCatalogProbes(
   executionAdapter: PostgresExecutionAdapter,
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
   transactionScoped: boolean,
+  allocationSchema: string | undefined,
 ): BackendCatalogProbes {
   async function indexStates(
     names: readonly string[],
   ): Promise<readonly IndexState[]> {
     if (names.length === 0) return [];
     // Scoped to `search_path`, matching the unqualified CREATE/DROP INDEX
-    // DDL a caller issues against these names.
+    // DDL a caller issues against these names, unless the backend is bound to
+    // an allocation: then to the allocation's schema.
     const rows = await executionAdapter.execute<{
       name: string;
       valid: boolean;
@@ -735,7 +774,7 @@ function createPostgresCatalogProbes(
           FROM pg_class c
           JOIN pg_index i ON i.indexrelid = c.oid
           WHERE c.relname IN (${sqlValueList(names)})
-            AND pg_catalog.pg_table_is_visible(c.oid)
+            AND ${relationInBackendSchema(allocationSchema)}
         `,
     );
     const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
@@ -762,7 +801,7 @@ function createPostgresCatalogProbes(
           FROM pg_class c
           WHERE c.relname IN (${sqlValueList(names)})
             AND c.relkind IN ('r', 'p')
-            AND pg_catalog.pg_table_is_visible(c.oid)
+            AND ${relationInBackendSchema(allocationSchema)}
         `,
       );
       const existing = new Set(rows.map((row) => row.name));
@@ -798,7 +837,7 @@ function createPostgresCatalogProbes(
         portableSql`
           SELECT column_name AS name, data_type AS type
           FROM information_schema.columns
-          WHERE table_schema = current_schema()
+          WHERE table_schema = ${backendRelationSchema(allocationSchema)}
             AND table_name = ${table}
         `,
       );
@@ -1013,7 +1052,10 @@ export function createPostgresBackend(
     assertAdoptedDialect<AnyPgTransaction>(db, PgTransaction, "postgres");
     return createPostgresTransactionBackend(db, options);
   }
-  return createSqlBackend(buildPostgresEngineProfile(db, options));
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfile(db, options)),
+    options,
+  );
 }
 
 /**
@@ -1030,9 +1072,23 @@ export function createPostgresTransactionBackend(
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
   assertAdoptedDialect<AnyPgTransaction>(tx, PgTransaction, "postgres");
-  return createSqlBackend(
-    buildPostgresEngineProfileInternal(tx, options, true),
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
+    options,
   );
+}
+
+/** Records the allocation schema the backend's tables are bound to, so a working-copy manager can attest it. */
+function markAllocationBound<TBackend extends GraphBackend>(
+  backend: TBackend,
+  options: PostgresBackendOptions,
+): TBackend {
+  const schema =
+    options.tables === undefined ?
+      undefined
+    : allocationSchemaOfTables(options.tables);
+  if (schema !== undefined) markAllocationSchemaBackend(backend, schema);
+  return backend;
 }
 
 /**
@@ -1073,6 +1129,13 @@ function buildPostgresEngineProfileInternal(
     options.serializedResource,
   );
   const tables = options.tables ?? defaultTables;
+  // Set only for tables built from a working-copy allocation's names: every
+  // DDL this backend issues then runs where the allocation lives.
+  const allocationSchema = allocationSchemaOfTables(tables);
+  const allocationPin =
+    allocationSchema === undefined ?
+      undefined
+    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1159,6 +1222,23 @@ function buildPostgresEngineProfileInternal(
       ...driverBindParameterOverrides,
     }),
   );
+  if (
+    allocationSchema !== undefined &&
+    !declaredCapabilities.execution.interactiveTransactions
+  ) {
+    throw new ConfigurationError(
+      "A backend over a working-copy allocation needs interactive transactions: its DDL runs in a transaction that fixes the allocation schema, which a driver that cannot hold a session (drizzle-orm/neon-http) cannot provide.",
+      {
+        code: "ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS",
+        allocationSchema,
+        capability: "execution.interactiveTransactions",
+      },
+      {
+        suggestion:
+          "Connect the working copy with a node-postgres, postgres-js, or neon-serverless (WebSocket) driver.",
+      },
+    );
+  }
   // Derived last and not overridable: how far up the contribution health
   // ladder this backend goes is a structural fact about the wiring below
   // (durable markers, a catalog probe, a strategy that declares teardown
@@ -1305,9 +1385,72 @@ function buildPostgresEngineProfileInternal(
    */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
-    await withConcurrentCreateRetry(async () => {
+    await withConcurrentCreateRetry(() => runDdlStatement(statement));
+  }
+
+  /**
+   * Runs one DDL statement where this backend's relations live. Over an
+   * allocation the statement shares a transaction with the search-path pin, so
+   * an unqualified `CREATE ... IF NOT EXISTS` finds the allocation's relation
+   * or creates it there, whatever the pooled connection's own `search_path`.
+   * A statement PostgreSQL refuses inside a transaction (`CONCURRENTLY`) takes
+   * {@link executeUnpinnedDdl}: an index is created in its table's schema, so
+   * the table it names anchors it. A backend over a caller's own transaction
+   * does not rewrite that session's search path: it checks the session's
+   * schema instead.
+   */
+  async function runDdlStatement(
+    statement: ReturnType<typeof sql.raw>,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) {
       await db.execute(statement);
+      return;
+    }
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        executionAdapter,
+        allocationSchema,
+        "Lazy DDL",
+      );
+      await db.execute(statement);
+      return;
+    }
+    await db.transaction(async (transaction) => {
+      await transaction.execute(allocationPin);
+      await transaction.execute(statement);
     });
+  }
+
+  /**
+   * Fixes the session a schema write's DDL runs on to the allocation schema. A
+   * transaction this backend opened is pinned; when the backend was built over
+   * a caller's transaction, `tx` is a savepoint whose `set_config` would
+   * outlive it, so the caller's schema is checked instead.
+   */
+  async function bindSchemaWriteSessionToAllocation(
+    tx: AnyPgTransaction,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) return;
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        createPostgresExecutionAdapter(tx, adapterOptions),
+        allocationSchema,
+        "Schema write",
+      );
+      return;
+    }
+    await tx.execute(allocationPin);
+  }
+
+  function executeUnpinnedDdl(ddl: string): Promise<void> {
+    return executeRawDdl(db, ddl, executionAdapter);
+  }
+
+  /** The `executeDdl` primitive: one statement, no concurrency handling. */
+  function executeSingleDdl(ddl: string): Promise<void> {
+    return allocationPin === undefined || isTransactionRefusedDdl(ddl) ?
+        executeUnpinnedDdl(ddl)
+      : runDdlStatement(sql.raw(ddl));
   }
 
   /**
@@ -1482,7 +1625,7 @@ function buildPostgresEngineProfileInternal(
       );
       return state?.ready === true;
     },
-    executeDdl: (ddl) => executeRawDdl(db, ddl, executionAdapter),
+    executeDdl: executeSingleDdl,
     contributionsForTableNames: (overrides) =>
       postgresContributions(
         buildPostgresTables(overrides),
@@ -1624,7 +1767,7 @@ function buildPostgresEngineProfileInternal(
   }
 
   const provisioning: EngineProvisioning = {
-    executeDdl: (ddl) => executeRawDdl(db, ddl, executionAdapter),
+    executeDdl: executeSingleDdl,
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
@@ -1633,6 +1776,7 @@ function buildPostgresEngineProfileInternal(
       executionAdapter,
       operationStrategy,
       transactionScoped,
+      allocationSchema,
     ),
   };
 
@@ -2044,6 +2188,8 @@ function buildPostgresEngineProfileInternal(
       const attempt = (): Promise<T> =>
         db.transaction(async (tx) => {
           await acquireSchemaWriteFence(tx, graphId);
+          // Schema writes run DDL: over an allocation, where it lives.
+          await bindSchemaWriteSessionToAllocation(tx);
           // The fence resolved above is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
           const { backend: txBackend, drainAndClose } =
@@ -2061,6 +2207,7 @@ function buildPostgresEngineProfileInternal(
               contributionMaterializationsTable:
                 tables.contributionMaterializations,
               fenceTarget,
+              allocationSchema,
               lineage: provisioning.lineage,
               recordedTime: provisioning.recordedTime,
               isFirstParty,
@@ -2114,6 +2261,7 @@ function buildPostgresEngineProfileInternal(
           contributionMaterializationsTable:
             tables.contributionMaterializations,
           fenceTarget,
+          allocationSchema,
           lineage: provisioning.lineage,
           recordedTime: provisioning.recordedTime,
           isFirstParty: txIsFirstParty,
@@ -2334,6 +2482,13 @@ function buildPostgresEngineProfileInternal(
                   externalTx,
                   adapterOptions,
                 );
+                if (allocationSchema !== undefined) {
+                  await assertCallerSessionInAllocationSchema(
+                    settingAdapter,
+                    allocationSchema,
+                    "Schema adoption",
+                  );
+                }
                 const [setting] = await settingAdapter.execute<{
                   value: string;
                 }>(sql`SELECT current_setting('lock_timeout') AS value`);
@@ -2533,6 +2688,7 @@ function buildPostgresEngineProfileInternal(
               const indexDefinitions = await suspendPostgresSecondaryIndexes(
                 trustedTx,
                 tableNames,
+                allocationSchema,
               );
               const result = await fn(
                 createPostgresTrustedImportSession(trustedTx, tableNames),
@@ -2945,6 +3101,8 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * builds its own probes bound to the transaction's own session.
    */
   catalog?: BackendCatalogProbes | undefined;
+  /** The allocation schema the backend's tables are bound to, if any; its catalog probes read there. */
+  allocationSchema?: string | undefined;
   /**
    * The root backend's own `lineage` bag, threaded through so a
    * transaction-scoped call exposes the SAME object — see
@@ -2993,6 +3151,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
    * caller's, not one TypeGraph has audited.
    */
   isFirstParty: boolean;
+  /** The allocation schema the backend's tables are bound to. See {@link CreatePostgresOperationBackendOptions}. */
+  allocationSchema?: string | undefined;
   /** The root backend's own `lineage` bag. See {@link CreatePostgresOperationBackendOptions}. */
   lineage?: LineageMembers | undefined;
   /** The root backend's own `recordedTime` bag. See {@link CreatePostgresOperationBackendOptions}. */
@@ -3018,6 +3178,7 @@ function createPostgresOperationBackend(
     fenceTarget,
     transactionScoped,
     catalog,
+    allocationSchema,
     lineage,
     recordedTime,
   } = options;
@@ -3771,6 +3932,7 @@ function createPostgresOperationBackend(
         executionAdapter,
         operationStrategy,
         transactionScoped,
+        allocationSchema,
       ),
     ...(lineage === undefined ? {} : { lineage }),
     ...(recordedTime === undefined ? {} : { recordedTime }),
@@ -3908,6 +4070,7 @@ function createTransactionBackend(
     schemaVersionsTable: options.schemaVersionsTable,
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
+    allocationSchema: options.allocationSchema,
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });

@@ -3922,6 +3922,9 @@ type LockSchemaVersionForWriteParams = Readonly<{
 }>;
 
 // @public
+export type MakeBackend = () => Promise<GraphBackend>;
+
+// @public
 type ManagedEdgeCreatePlan = Readonly<{
     entity: "edge";
     params: InsertEdgeParams;
@@ -4745,6 +4748,7 @@ export type PostgresWorkingCopyLocator = Readonly<{
 // @public (undocumented)
 export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
     ephemeral: WorkingCopyStrategy<G>;
+    makeBackend: MakeBackend;
     durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator>;
     listUnsealedAllocations: (options?: Readonly<{
         after?: string;

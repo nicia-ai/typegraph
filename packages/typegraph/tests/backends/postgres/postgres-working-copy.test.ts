@@ -895,10 +895,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
                   const queryText = query.chunks
                     .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
                     .join("");
-                  if (
-                    !injected &&
-                    queryText.includes("SELECT name FROM unnest")
-                  ) {
+                  if (!injected && queryText.includes("c.relname = ANY(")) {
                     injected = true;
                     await pool.query(
                       `CREATE TABLE "${vectorTable}" (sentinel integer)`,

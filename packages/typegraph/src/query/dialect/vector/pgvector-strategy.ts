@@ -207,28 +207,65 @@ export function createPgvectorStrategy(namespace: string): VectorStrategy {
   );
 }
 
+function assertAllocationPhysicalPrefix(physicalPrefix: string): void {
+  if (!/^tgw_[0-9a-f]{24}_$/u.test(physicalPrefix)) {
+    throw new Error("Invalid PostgreSQL working-copy physical prefix.");
+  }
+}
+
+/**
+ * The literal leading text of every vector table
+ * {@link createPgvectorStrategyForAllocation} names for one allocation.
+ *
+ * Two facts make it a sound ownership boundary for discovering tables created
+ * after the allocation's manifest was written:
+ * - Prefix-free: a valid physical prefix is exactly `tgw_` + 24 hex digits +
+ *   `_`, a fixed length, so this header is a fixed length too and one
+ *   allocation's header can never be a leading substring of another's.
+ * - Never truncated: `vectorPhysicalName` shortens only the readable part and
+ *   always keeps the 8-character hash, which leaves 54 characters of the
+ *   63-character identifier for the readable part; the header is 36.
+ */
+export function allocationVectorTablePrefix(physicalPrefix: string): string {
+  assertAllocationPhysicalPrefix(physicalPrefix);
+  return `${TABLE_PREFIX}_${physicalPrefix}`;
+}
+
 /**
  * Bind vector storage to a working copy's ledger-reserved physical prefix.
  * The prefix is included verbatim, so two distinct reserved prefixes cannot
  * alias through the generic strategy's short namespace hash.
+ *
+ * With `schema`, every relation the strategy creates or drops is named through
+ * that schema, so it lands there whatever `search_path` the executing session
+ * carries. Without it the names resolve through the session, as the bundled
+ * strategy always has.
  */
 export function createPgvectorStrategyForAllocation(
   physicalPrefix: string,
+  schema?: string,
 ): VectorStrategy {
-  if (!/^tgw_[0-9a-f]{24}_$/u.test(physicalPrefix)) {
-    throw new Error("Invalid PostgreSQL working-copy physical prefix.");
-  }
+  assertAllocationPhysicalPrefix(physicalPrefix);
   const namespace = physicalPrefix.slice(0, -1);
   return createPgvectorStrategyWithPrefixes(
     `${TABLE_PREFIX}_${namespace}`,
     `${INDEX_PREFIX}_${namespace}`,
+    schema,
   );
 }
 
 function createPgvectorStrategyWithPrefixes(
   tablePrefix: string,
   indexPrefix: string,
+  schema?: string,
 ): VectorStrategy {
+  /** A relation reference for DDL: schema-qualified when the strategy is bound to one. */
+  function relationReference(name: string): string {
+    return schema === undefined ?
+        quoteIdentifier(name)
+      : `${quoteIdentifier(schema)}.${quoteIdentifier(name)}`;
+  }
+
   function strategyTableName(
     graphId: string,
     nodeKind: string,
@@ -258,7 +295,7 @@ function createPgvectorStrategyWithPrefixes(
         slot.nodeKind,
         slot.fieldPath,
       );
-      const name = quoteIdentifier(table);
+      const name = relationReference(table);
 
       // No standalone graph_id index: the PRIMARY KEY (graph_id, node_id) already
       // covers `WHERE graph_id = ?` via its leading column, so a separate index
@@ -492,22 +529,25 @@ function createPgvectorStrategyWithPrefixes(
       if (!usesAnnIndex(slot)) return undefined;
       return sql.raw(
         pgvectorIndexDdl(
-          strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+          relationReference(
+            strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+          ),
           slot,
           options?.concurrent === true,
-          strategyIndexName(slot),
+          quoteIdentifier(strategyIndexName(slot)),
         ),
       );
     },
 
     buildDropIndex(slot): SqlFragment | undefined {
       if (!usesAnnIndex(slot)) return undefined;
-      const indexName = strategyIndexName(slot);
-      return sql.raw(`DROP INDEX IF EXISTS ${quoteIdentifier(indexName)}`);
+      return sql.raw(
+        `DROP INDEX IF EXISTS ${relationReference(strategyIndexName(slot))}`,
+      );
     },
 
     buildDropStorage(slot): readonly string[] {
-      const table = quoteIdentifier(
+      const table = relationReference(
         strategyTableName(slot.graphId, slot.nodeKind, slot.fieldPath),
       );
       // CASCADE drops the ANN index along with the table.
@@ -537,14 +577,13 @@ export function pgvectorIndexName(slot: VectorSlot): string {
   );
 }
 
+/** `table` and `quotedIndexName` are already quoted; an index lives in its table's schema. */
 function pgvectorIndexDdl(
-  table: string,
+  quotedTable: string,
   slot: VectorSlot,
   concurrent: boolean,
-  indexName: string,
+  quotedIndexName: string,
 ): string {
-  const quotedIndexName = quoteIdentifier(indexName);
-  const quotedTable = quoteIdentifier(table);
   const opClass = operatorClass(slot.metric);
   // Honor the field's declared tuning; fall back to pgvector defaults.
   const m = slot.indexParams?.m ?? DEFAULT_HNSW_M;

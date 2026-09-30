@@ -254,7 +254,9 @@ planner refuses the artifact; replan outside the transaction.
 Branches forked from the original baseline can merge existing kinds. To
 include a newly added kind, call
 `branchForEvolution(target, evolutionPlan, makeBackend)` before the caller
-transaction, then add data on that isolated branch. The planner accepts
+transaction (on PostgreSQL, pass the working-copy manager's `makeBackend`; see
+[PostgreSQL table-backed working copies](#postgresql-table-backed-working-copies)),
+then add data on that isolated branch. The planner accepts
 branches from either one matching baseline; a mixed set of old-schema and
 resulting-schema forks is refused.
 Pass `{ revisionJournal: false }` as the fourth `branchForEvolution()` argument
@@ -1489,8 +1491,10 @@ in the source PostgreSQL database. It derives the table inventory and base
 schema marker from TypeGraph's PostgreSQL schema contributions, copies the
 source graph with fenced `INSERT ... SELECT` statements, and records ownership
 in `typegraph_working_copy_allocations`. The control backend, source backend,
-and backends returned by `connect` must all reach the same database. TypeGraph
-checks the allocation's private ownership token through each connection.
+and backends returned by `connect` must all reach the same database, and
+`control` and `connect` must run as the same role
+([One database role](#one-database-role)). TypeGraph checks the allocation's
+private ownership token through each connection.
 The control backend must execute DDL inside its PostgreSQL transactions;
 its root `executeDdl` port is not required.
 
@@ -1554,9 +1558,10 @@ history mode, or revision-tracking mode.
 The source backend and every backend returned by `connect` must expose the
 complete PostgreSQL `tableNames` inventory, including history, identity, and
 status relations. The manager refuses missing or mismatched bindings with a
-`BranchError` before cloning or opening a Store. `connect` runs after the
-allocation tables are created, so custom callbacks may inspect those tables;
-on binding failure, the manager removes the new tables and ledger row.
+`BranchError` before cloning or opening a Store. For `ephemeral` and `durable`,
+`connect` runs after the allocation tables are created, so custom callbacks may
+inspect those tables; on binding failure, the manager removes the new tables and
+ledger row. `makeBackend` connects earlier, before it provisions anything.
 
 The table-backed strategy supports bundled tsvector fulltext, declared
 PostgreSQL B-tree, GIN, and trigram graph indexes, and pgvector sidecars. It
@@ -1577,8 +1582,9 @@ match the persisted allocation manifest. Older ledger rows that stored only
 whose source sidecar is absent is refused because its contents cannot be
 snapshotted exactly.
 
-The copy has a fixed schema: `evolve`, kind removal, and deprecation refuse
-before mutation. Custom fulltext strategies still need a host-level database
+The `ephemeral` and `durable` copies have a fixed schema: `evolve`, kind
+removal, and deprecation refuse before mutation. Use `makeBackend`, below, when
+the working copy's schema must change. Custom fulltext strategies still need a host-level database
 fork. The source and every copy connection, including durable reopen, must use
 the bundled `tsvectorStrategy`: a custom strategy may own additional physical
 tables whose rows cannot be copied safely from the generic contribution
@@ -1586,6 +1592,161 @@ inventory. A connection with fulltext disabled is refused for the same reason.
 System index maintenance remains available. Source table locks cover the
 entire TypeGraph relation set and vector sidecars while the SQL clone runs, so a
 large clone briefly blocks writes to other graphs in the same database.
+
+#### One database role
+
+The manager supports one deployment shape: the `control` backend and every
+session `connect` returns run as the **same PostgreSQL role**. TypeGraph reads
+`current_user` on both sessions and refuses a difference with a
+`ConfigurationError` whose `details.code` is `WORKING_COPY_ROLE_MISMATCH`, and
+the refused allocation is not left behind.
+
+The reason is ownership. A `control` session provisions and removes every
+allocation, but the Store that opens on a connected backend issues its own DDL:
+runtime-contribution markers, the revision journal and its triggers, system and
+declared indexes, and vector tables an evolved graph introduces. Only a table's
+owner (or a member of the owning role, or a superuser) can drop it, and the
+comparison is by role name, so a `connect` role that is merely a member of
+`control`'s role is refused rather than trusted. A different role would leave
+the tables it creates behind on close and `abortAllocation`. The shared role
+therefore needs `CREATE` on the schema.
+
+`makeBackend` calls `connect` before it writes the ledger row or any DDL and
+refuses a mismatch there, so nothing is allocated. `ephemeral` and `durable`
+call `connect` after their allocation tables exist, so they refuse right after
+it, before cloning or opening a Store, and remove the new allocation; a durable
+reopen refuses the same way and leaves the sealed allocation untouched.
+
+#### One schema per allocation
+
+Every allocation lives in one schema: the `control` session's current schema when
+the allocation is made, recorded in the ledger's `schema_name` column. No
+`search_path` decides where an allocation's relations are created or dropped, so
+a `connect` pool whose connections lead with different schemas cannot strand
+tables that removal never finds.
+
+- **Provisioning** fixes its transaction's search path to that schema before it
+  claims the ledger row, so the tables it creates land there whichever pooled
+  connection runs it, and the claim records the schema the statement itself
+  observed.
+- **The connected backend** receives table names that carry the schema. A
+  backend built with `createPostgresTables(names)` over that object runs the DDL
+  it issues lazily (bundled tables a Store ensures on first use, fulltext and
+  contribution storage, schema-write transactions) with the schema leading its
+  search path, and the allocation's pgvector strategy names its tables and
+  indexes through the schema. `CREATE INDEX CONCURRENTLY` cannot run in a
+  transaction; it creates the index in the schema of the table it names, which
+  is already the allocation's. The backend's catalog probes (table, index, and
+  column lookups, including the recorded-time compatibility check a
+  `history: true` Store runs) read the allocation's schema, not the session's
+  current one. Extensions are database-global and create no
+  allocation relation, but their DDL still runs through the same DDL runner
+  wherever the write fence takes no lock: there, a backend built over a caller's
+  own transaction is subject to the same session check as any other lazy DDL
+  (below). Under a lock fence, a pooled backend installs the extension in its own
+  transaction, as before; a backend built over a caller's own transaction runs it
+  as a savepoint inside that transaction and makes no session check, because the
+  extension creates no allocation relation.
+- **Refusals.** A connection whose backend was built over a *copy* of `names`
+  (which carries no schema) is refused with a `BranchError`. A `connect` driver
+  that cannot hold an interactive transaction (`drizzle-orm/neon-http`) is
+  refused with a `ConfigurationError`
+  (`ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS`), because it cannot run
+  its DDL under a fixed schema. A backend built over a caller's own transaction
+  runs its lazy DDL and schema writes, and adopts that transaction for a schema
+  write, only when that session's current schema is the allocation's; otherwise
+  it is refused with a `ConfigurationError`
+  (`ALLOCATION_SCHEMA_SESSION_MISMATCH`). The caller owns that session's search
+  path, so it is checked rather than rewritten.
+- **Removal** (`close`, `abort`, `destroy`, `abortAllocation`) searches the
+  catalog across every schema for relations named with the allocation's reserved
+  prefixes. It drops those in the recorded schema, schema-qualified in one
+  statement, and deletes the ledger row in the same transaction. If a drop fails
+  (a view that depends on an allocation table, for example) the transaction rolls
+  back, the row stays, and the allocation remains in `listUnsealedAllocations()`
+  for `abortAllocation()` once the dependency is gone. If any such relation sits
+  in a different schema, removal refuses with a `BranchError` that names the
+  schemas found and keeps the row, because deleting the row would discard the
+  only pointer to them. Three cases are worded differently. When the recorded
+  schema holds none of them, the schema was renamed or the tables moved (the
+  message says the relations are "not in its schema"; move the tables back or
+  correct the row's `schema_name` and remove again). When every relation found
+  elsewhere has a same-named relation in the recorded schema, it is a stale copy
+  left in another schema, such as a backup or restore schema (the message says
+  the allocation "also has relations" there; drop the copy and remove again,
+  since the copy blocks removal until it is gone). When some relations moved and
+  others stayed, for example one table moved to a backup schema while the rest
+  remain, the allocation is split and the relations elsewhere may be the only
+  copy (the message says the allocation "is split across schemas"; the
+  suggestion drops nothing, so move the relations back or correct the row's
+  `schema_name`). `details` carries `allocationId`, `schema`, `foundIn`, and
+  `schemas`, and `suggestion` names the recovery step. If the
+  allocation's relations exist nowhere (its tables were dropped entirely) there
+  is nothing to recover, and removal deletes the ledger row, so a crashed owner's
+  allocation cannot stay listed forever.
+- **Ledger rows from before the schema was recorded** (written by 0.72.0) carry
+  no schema. They resolve through the session that removes them and reopen
+  without binding, and follow the same removal rule: relations found in a schema
+  other than the removing session's refuse removal and name that schema. `control` adds the column to an
+  existing ledger the first time it runs.
+
+The connection must still be able to *resolve* the allocation's tables, so its
+`search_path` must include the schema, typically `public`. A per-role `"$user"`
+schema ahead of it is fine. The ledger itself lives where `control`'s session
+creates it, so run `control` with one consistent `search_path`.
+
+#### `makeBackend` for branches, candidate planning, and evolution previews
+
+`copies.makeBackend` is a `MakeBackend`, so PostgreSQL callers no longer
+hand-roll table prefixes, DDL, and cleanup. It fits every API that takes one:
+`branch`, `ingestionBranch`, `planCandidateWriteSet`,
+`planCandidateWriteSetReview` (including sparse staging), `branchForEvolution`,
+and `planCandidateWriteSetForEvolution`.
+
+```typescript
+import { branch, branchForEvolution } from "@nicia-ai/typegraph/graph-merge";
+
+const fork = unwrap(await branch(sourceStore, copies.makeBackend));
+const preview = unwrap(
+  await branchForEvolution(sourceStore, evolutionPlan, copies.makeBackend),
+);
+```
+
+Each call allocates a fresh allocation in the same ledger, in the `ephemeral`
+state, and returns an **empty, schema-mutable** backend: the caller (or the
+branch API) seeds it and may commit new kinds and fields, which the fixed-schema
+`ephemeral` and `durable` copies refuse. Closing the backend drops the
+allocation. While it is live it appears in `listUnsealedAllocations()`, and if
+its owner crashes without closing it, `abortAllocation(id)` removes everything
+it owns.
+
+Because the graph is unknown when the backend is allocated:
+
+- **Vector tables.** A graph that declares embeddings creates its per-field
+  pgvector tables after allocation, so the ledger manifest cannot list them.
+  Dropping an allocation therefore also removes every table in its schema whose
+  name starts with the allocation's reserved vector prefix. That prefix is
+  fixed-length and never truncated, so it cannot match another allocation's
+  tables. `connect` always receives the allocation vector strategy for
+  `makeBackend`; bind it with
+  `createPostgresBackend({ vector: allocation.vectorStrategy })`. A connection
+  that binds any other vector strategy is refused with a `BranchError`, because
+  it could create tables the allocation does not own. Pass `vector: false` to
+  opt out of vector support.
+- **Graph indexes.** PostgreSQL index names are database-global, so a declared
+  index cannot reuse its logical name on a private table. `makeBackend` scopes
+  each declaration to the allocation (`<prefix>gix_<hash>`) the first time the
+  Store's `materializeIndexes()` sees it, leaving logical names and schema
+  hashes unchanged and never touching the source's or another allocation's
+  indexes. A backend you derive from the returned one with `deriveBackend`
+  inherits the scoping; one you build by copying its members does not.
+- **Fulltext.** The same bundled `tsvectorStrategy` requirement applies as for
+  the cloned copies.
+
+`control` and `connect` must run as the same role
+([One database role](#one-database-role)). Both must also use the allocation's
+schema ([One schema per allocation](#one-schema-per-allocation)); a pooled
+connection's own `search_path` does not decide where anything is created.
 
 ### Forked working copies
 
