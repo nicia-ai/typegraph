@@ -455,6 +455,20 @@ export async function ensureRevisionOrigin(
   graphId: string,
 ): Promise<string> {
   await ensureRevisionOriginsRelation(target, verdict);
+  return ensureRevisionOriginRow(target, schema, graphId);
+}
+
+/**
+ * The row-only half of {@link ensureRevisionOrigin}: reads or mints the origin
+ * row without touching relation DDL, so it is safe on an open transaction whose
+ * origins relation already exists (every bundled backend installs it with the
+ * base schema). The unique graph-id row still makes concurrent minters converge.
+ */
+export async function ensureRevisionOriginRow(
+  target: Pick<GraphBackend, "dialect" | "execute" | "executeStatement">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
   const existing = await readRevisionOrigin(target, schema, graphId);
   if (existing !== undefined) return existing;
 

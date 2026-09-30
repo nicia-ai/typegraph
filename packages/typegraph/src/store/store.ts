@@ -369,6 +369,7 @@ import {
   assertCurrentRecordedSchema,
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
+  beginPreCommitHookAttempt,
   createMutationWitness,
   createRecordedBackend,
   createRecordedTransactionScope,
@@ -383,6 +384,7 @@ import {
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
   resolveLineage,
+  settleTransactionPreCommitHook,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
@@ -4047,12 +4049,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const runBulkHooks = this.#createBufferedBulkHookRunner(pending);
       const receiptRecorder = createReceiptRecorder?.();
       let recordedByGraph: RecordedFlushInstants | undefined;
-      const transactionOptions =
+      const transactionOptions = beginPreCommitHookAttempt(
         receiptRecorder !== undefined && this.#captureEnabled ?
           withRecordedFlushObserver(backendOptions, (instants) => {
             recordedByGraph = instants;
           })
-        : backendOptions;
+        : backendOptions,
+      );
       try {
         const run = async (
           txBackend: TransactionBackend,
@@ -4129,6 +4132,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             },
             invokeWithSchemaFenceLease,
           );
+          // Fires the pre-commit hook here, once the write session has advanced
+          // the revision clock, unless the recorded-capture backend claimed it
+          // to fire after its own flush.
+          await settleTransactionPreCommitHook(transactionOptions, txBackend);
           // The engine-native counterpart to capture's flush observer: read
           // inside the transaction (before its outer COMMIT), on the SAME
           // committing session `txBackend` is, so `recordedTime.revisionNow`

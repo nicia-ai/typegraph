@@ -8,4 +8,5 @@ export type {
   PostgresWorkingCopyReopenOptions,
 } from "../drizzle/postgres-working-copy";
 export { createPostgresWorkingCopyManager } from "../drizzle/postgres-working-copy";
+export type { PostgresWorkingCopyOperations } from "../drizzle/postgres-working-copy-operations";
 export type { PostgresTableNames } from "../drizzle/schema/postgres";

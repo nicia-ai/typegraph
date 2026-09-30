@@ -12,6 +12,7 @@ import {
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import { operationEvidenceTableName } from "../../../src/backend/drizzle/postgres-working-copy-operations";
 import {
   createPostgresTables,
   type PostgresTableNames,
@@ -894,8 +895,14 @@ describe.runIf(process.env["POSTGRES_URL"])(
             requireNames(sameRoleNames),
           );
           expect(intact.ledgerRows).toBe(1);
+          // A durable allocation also owns its operation evidence relation.
           expect(intact.tables).toEqual(
-            Object.values(requireNames(sameRoleNames)).toSorted(),
+            [
+              ...Object.values(requireNames(sameRoleNames)),
+              operationEvidenceTableName(
+                physicalPrefixOf(requireNames(sameRoleNames)),
+              ),
+            ].toSorted(),
           );
         } finally {
           unwrap(await destroyDurableBranch(descriptor, sameRole.durable));

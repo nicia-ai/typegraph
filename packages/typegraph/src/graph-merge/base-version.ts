@@ -45,7 +45,6 @@
  * the real store surface.
  */
 
-import type { SqlSchema } from "../query/compiler/schema";
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import {
@@ -65,11 +64,12 @@ import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import {
   encodeRecordedLineageRevision,
   ensureRevisionOrigin,
+  ensureRevisionOriginRow,
+  mintsOriginNamespacedAnchor,
   readRecordedClock,
   readRevisionOrigin,
   recordedRelationsLineage,
   recordedRevisionOriginsVerdict,
-  resolveLineage,
   storeBackend,
   storeCaptureEnabled,
   storeRuntime,
@@ -289,46 +289,183 @@ export async function computeContentComponent<G extends GraphDef>(
 export async function computeBaseVersion<G extends GraphDef>(
   store: Store<G>,
 ): Promise<BaseVersion> {
+  return computeBaseVersionOn(store, storeBackend(store), {
+    mintOrigin: () => mintRevisionOrigin(store),
+    readRevision: () => store.revisionNow(),
+  });
+}
+
+/**
+ * Reads or creates the graph's revision origin on the root backend, relation
+ * DDL included. A tracking store mints through its own base backend, because
+ * its `storeBackend` is the recorded-capture wrapper that refuses raw writes.
+ */
+function mintRevisionOrigin<G extends GraphDef>(
+  store: Store<G>,
+): Promise<string> {
+  if (store.revisionTrackingEnabled) return store.revisionOriginNow();
+  const backend = storeBackend(store);
+  return ensureRevisionOrigin(
+    backend,
+    recordedRevisionOriginsVerdict(backend),
+    store.revisionSchema,
+    store.graphId,
+  );
+}
+
+/**
+ * {@link computeBaseVersion} read through ONE pinned transaction session, so a
+ * caller inside a write transaction observes that transaction's own pending
+ * state (an uncommitted mutation, a capture flush that already ran on this
+ * session) rather than the last committed state a root-backend read sees.
+ *
+ * The decision logic is {@link computeBaseVersionOn}'s, shared with
+ * {@link computeBaseVersion}; the only divergence is where the revision origin
+ * and clock are read. The origins RELATION is DDL and is never projected onto
+ * an open transaction, so this path mints the ROW only and requires the
+ * relation to already exist (every bundled backend installs it with the base
+ * schema).
+ */
+export async function computeBaseVersionAtTarget<G extends GraphDef>(
+  store: Store<G>,
+  target: TransactionBackend,
+): Promise<BaseVersion> {
+  return computeBaseVersionOn(store, target, targetAnchorReads(store, target));
+}
+
+/** How one base-version computation reads the graph's revision anchor. */
+type RevisionAnchorReads = Readonly<{
+  /** Reads the graph's revision origin, creating it when absent. */
+  mintOrigin: () => Promise<string>;
+  readRevision: () => Promise<string | undefined>;
+}>;
+
+/** The anchor reads a pinned transaction session can also make without minting. */
+type TargetAnchorReads = RevisionAnchorReads &
+  Readonly<{
+    /** Reads the graph's revision origin; never creates it. */
+    readOrigin: () => Promise<string | undefined>;
+  }>;
+
+/**
+ * THE one owner of how a pinned transaction session reads the revision anchor,
+ * for both the token a caller mints ({@link computeBaseVersionAtTarget}) and the
+ * token it checks ({@link compareBaseVersionAtTarget}).
+ */
+function targetAnchorReads<G extends GraphDef>(
+  store: Store<G>,
+  target: TransactionBackend,
+): TargetAnchorReads {
+  return {
+    mintOrigin: () =>
+      ensureRevisionOriginRow(target, store.revisionSchema, store.graphId),
+    readOrigin: () =>
+      readRevisionOrigin(target, store.revisionSchema, store.graphId),
+    readRevision: () =>
+      readRecordedClock(target, store.revisionSchema, store.graphId),
+  };
+}
+
+/**
+ * THE one owner of the schema half of a live base version: the active schema
+ * version and the version-blind hash of the store's graph at that version, read
+ * through `target`.
+ */
+async function readLiveSchemaHalf<G extends GraphDef>(
+  store: Store<G>,
+  target: Pick<GraphBackend, "getActiveSchema">,
+): Promise<Readonly<{ activeVersion: number; schemaComponent: string }>> {
+  const activeVersion = await readActiveSchemaVersion(target, store.graphId);
+  const schemaComponent = await computeSchemaHash(
+    serializeSchema(store.graph, activeVersion),
+  );
+  return { activeVersion, schemaComponent };
+}
+
+/**
+ * THE one owner of the content half of a live base version: the live-content
+ * fingerprint, current identity assertions included, read through `target`.
+ */
+async function readLiveContentComponent<G extends GraphDef>(
+  store: Store<G>,
+  target: GraphBackend | TransactionBackend,
+): Promise<string> {
+  return computeContentComponent(
+    target,
+    store.graphId,
+    store.graph,
+    await storeRuntime(store).identityAssertionsAtTarget(target, "state"),
+  );
+}
+
+/**
+ * THE one owner of base-version mode dispatch: revision-anchored when the store
+ * tracks revisions, otherwise the live-content fingerprint (origin-namespaced
+ * when lineage mints one). Reads are sequential because a pinned transaction
+ * session must not overlap queries. `reads` names how the revision origin and
+ * clock are read, the only members a caller varies.
+ */
+async function computeBaseVersionOn<G extends GraphDef>(
+  store: Store<G>,
+  target: GraphBackend | TransactionBackend,
+  reads: RevisionAnchorReads,
+): Promise<BaseVersion> {
+  // The document hash is deliberately version-blind, and the revision
+  // clock does not advance on schema commits — so a schema ROUND-TRIP
+  // (migrate away and back) would otherwise restore the exact token while
+  // its preflights mutated identity rows. The active schema version is
+  // monotonic, so baking it into the schema half fences the round-trip.
+  // The content branch below carries this version too, because an
+  // otherwise identical schema round-trip still changes the committed cut.
+  const { activeVersion, schemaComponent } = await readLiveSchemaHalf(
+    store,
+    target,
+  );
   if (store.revisionTrackingEnabled) {
-    const [schemaComponent, origin, revision, activeVersion] =
-      await Promise.all([
-        computeSchemaComponent(store),
-        store.revisionOriginNow(),
-        store.revisionNow(),
-        readActiveSchemaVersion(storeBackend(store), store.graphId),
-      ]);
-    // The document hash is deliberately version-blind, and the revision
-    // clock does not advance on schema commits — so a schema ROUND-TRIP
-    // (migrate away and back) would otherwise restore the exact token while
-    // its preflights mutated identity rows. The active schema version is
-    // monotonic, so baking it into the schema half fences the round-trip.
-    // The content branch below carries this version too, because an
-    // otherwise identical schema round-trip still changes the committed cut.
-    return asBaseVersion(
-      `${versionedSchemaComponent(schemaComponent, activeVersion)}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
+    const origin = await reads.mintOrigin();
+    const revision = await reads.readRevision();
+    return revisionBaseVersion(
+      schemaComponent,
+      activeVersion,
+      origin,
+      revision,
     );
   }
   // Without TypeGraph revision tracking, the complete graph fingerprint is
   // the commit-spanning fence, including current identity assertions.
-  const [schemaComponent, activeVersion, contentComponent] = await Promise.all([
-    computeSchemaComponent(store),
-    readActiveSchemaVersion(storeBackend(store), store.graphId),
-    computeStoreContentComponent(store),
-  ]);
-  const backend = storeBackend(store);
-  const originsVerdict =
-    resolveLineage(store) === undefined ? undefined : (
-      recordedRevisionOriginsVerdict(backend)
-    );
-  const origin =
-    originsVerdict?.supported ?
-      await ensureRevisionOrigin(
-        backend,
-        originsVerdict,
-        store.revisionSchema,
-        store.graphId,
-      )
-    : undefined;
+  const contentComponent = await readLiveContentComponent(store, target);
+  const originsSupported = recordedRevisionOriginsVerdict(
+    storeBackend(store),
+  ).supported;
+  return contentBaseVersion(
+    schemaComponent,
+    activeVersion,
+    contentComponent,
+    mintsOriginNamespacedAnchor(store, originsSupported) ?
+      await reads.mintOrigin()
+    : undefined,
+  );
+}
+
+/** Assembles the O(1) revision-anchored token; the one owner of that spelling. */
+function revisionBaseVersion(
+  schemaComponent: string,
+  activeVersion: number,
+  origin: string,
+  revision: string | undefined,
+): BaseVersion {
+  return asBaseVersion(
+    `${versionedSchemaComponent(schemaComponent, activeVersion)}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
+  );
+}
+
+/** Assembles the content-fingerprint token, origin-namespaced when lineage minted one. */
+function contentBaseVersion(
+  schemaComponent: string,
+  activeVersion: number,
+  contentComponent: string,
+  origin: string | undefined,
+): BaseVersion {
   const contentAnchor =
     origin === undefined ? contentComponent : (
       `${CONTENT_ORIGIN_PREFIX}${origin}:${contentComponent}`
@@ -367,11 +504,11 @@ export async function compareBaseVersionAtTarget<G extends GraphDef>(
   target: TransactionBackend,
   expected: BaseVersion,
 ): Promise<BaseVersionTargetComparison> {
-  const activeVersion = await readActiveSchemaVersion(target, store.graphId);
-  const schemaHash = await computeSchemaHash(
-    serializeSchema(store.graph, activeVersion),
+  const { activeVersion, schemaComponent } = await readLiveSchemaHalf(
+    store,
+    target,
   );
-  const liveSchema = versionedSchemaComponent(schemaHash, activeVersion);
+  const liveSchema = versionedSchemaComponent(schemaComponent, activeVersion);
   const expectedSchema = schemaComponentOf(expected);
   if (liveSchema !== expectedSchema) {
     return {
@@ -384,13 +521,9 @@ export async function compareBaseVersionAtTarget<G extends GraphDef>(
     };
   }
 
+  const reads = targetAnchorReads(store, target);
   if (hasRevisionAnchor(expected)) {
-    const originMatch = await revisionOriginMatch(
-      target,
-      store.revisionSchema,
-      store.graphId,
-      expected,
-    );
+    const originMatch = await revisionOriginMatch(reads.readOrigin, expected);
     if (!originMatch.matches) {
       return {
         matches: false,
@@ -400,11 +533,7 @@ export async function compareBaseVersionAtTarget<G extends GraphDef>(
       };
     }
     const expectedRevision = revisionAnchorOf(expected);
-    const liveRevision = await readRecordedClock(
-      target,
-      store.revisionSchema,
-      store.graphId,
-    );
+    const liveRevision = await reads.readRevision();
     return liveRevision === expectedRevision ?
         { matches: true }
       : {
@@ -417,11 +546,7 @@ export async function compareBaseVersionAtTarget<G extends GraphDef>(
 
   const expectedOrigin = contentOriginOf(expected);
   if (expectedOrigin !== undefined) {
-    const liveOrigin = await readRevisionOrigin(
-      target,
-      store.revisionSchema,
-      store.graphId,
-    );
+    const liveOrigin = await reads.readOrigin();
     if (liveOrigin !== expectedOrigin) {
       return {
         matches: false,
@@ -431,12 +556,7 @@ export async function compareBaseVersionAtTarget<G extends GraphDef>(
       };
     }
   }
-  const liveContent = await computeContentComponent(
-    target,
-    store.graphId,
-    store.graph,
-    await storeRuntime(store).identityAssertionsAtTarget(target, "state"),
-  );
+  const liveContent = await readLiveContentComponent(store, target);
   const expectedContent = contentFingerprintOf(expected);
   return liveContent === expectedContent ?
       { matches: true }
@@ -464,28 +584,6 @@ function contentFingerprintOf(version: BaseVersion): string {
   if (!component.startsWith(CONTENT_ORIGIN_PREFIX)) return component;
   const separator = component.indexOf(":", CONTENT_ORIGIN_PREFIX.length);
   return separator === -1 ? component : component.slice(separator + 1);
-}
-
-/**
- * The content component of a live {@link Store}: reads the store's current
- * identity assertions, then fingerprints its live rows alongside them.
- *
- * Exists so {@link computeBaseVersion} can run the schema half and the content
- * half CONCURRENTLY. The identity read must precede the fingerprint (it is an
- * input to it), but that ordering is internal to this half and must not serialize
- * the independent schema hash behind it.
- */
-async function computeStoreContentComponent<G extends GraphDef>(
-  store: Store<G>,
-): Promise<string> {
-  const identityAssertions =
-    await storeRuntime(store).readCurrentIdentityAssertions("state");
-  return computeContentComponent(
-    storeBackend(store),
-    store.graphId,
-    store.graph,
-    identityAssertions,
-  );
 }
 
 /**
@@ -581,17 +679,14 @@ export function revisionOriginOf(version: BaseVersion): string | undefined {
 
 /**
  * The origin-match decision for TypeGraph revision anchors: compare the
- * token's origin with the live row {@link readRevisionOrigin} reads from the
- * supplied session. Both the merge commit and lineage pruning use this
- * comparison. Returns the two
- * values actually compared alongside the verdict, so a caller that refuses
- * on a mismatch embeds both in its own error `details` without a second
- * read.
+ * token's origin with the live origin `readOrigin` reads from the caller's own
+ * session. Both the merge commit and lineage pruning use this comparison.
+ * Returns the two values actually compared alongside the verdict, so a caller
+ * that refuses on a mismatch embeds both in its own error `details` without a
+ * second read.
  */
 async function revisionOriginMatch(
-  backend: Pick<GraphBackend, "execute">,
-  schema: SqlSchema,
-  graphId: string,
+  readOrigin: () => Promise<string | undefined>,
   expectedVersion: BaseVersion,
 ): Promise<
   Readonly<{
@@ -601,7 +696,7 @@ async function revisionOriginMatch(
   }>
 > {
   const expectedOrigin = revisionOriginOf(expectedVersion);
-  const liveOrigin = await readRevisionOrigin(backend, schema, graphId);
+  const liveOrigin = await readOrigin();
   return { expectedOrigin, liveOrigin, matches: liveOrigin === expectedOrigin };
 }
 
@@ -736,9 +831,12 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
     // relations the engine never populates.
     if (!storeCaptureEnabled(baseStore)) return undefined;
     const originMatch = await revisionOriginMatch(
-      storeBackend(baseStore),
-      baseStore.revisionSchema,
-      baseStore.graphId,
+      () =>
+        readRevisionOrigin(
+          storeBackend(baseStore),
+          baseStore.revisionSchema,
+          baseStore.graphId,
+        ),
       base,
     );
     if (!originMatch.matches || originMatch.liveOrigin === undefined) {

@@ -130,7 +130,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           [prefix],
         );
         expect(inventory.rows.map((row) => row.tablename).toSorted()).toEqual(
-          Object.values(names).toSorted(),
+          [...Object.values(names), `${prefix}op_evidence`].toSorted(),
         );
         const targetNodes = await pool.query<{ graph_id: string }>(
           `SELECT graph_id FROM "${names.nodes}"`,

@@ -317,7 +317,9 @@ export type DurableWorkingCopyStrategy<
    *
    * A strategy that cannot provide the atomic guarantee MUST omit this
    * capability (or return `unsupported` from `operate`) rather than emulating
-   * atomicity with callbacks or best effort. See `durable-operation.ts`.
+   * atomicity with best effort or with callbacks that run outside the evidence
+   * transaction. A callback the strategy runs inside that transaction is the
+   * host's atomic mutation, not an emulation. See `durable-operation.ts`.
    */
   operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
 }>;
@@ -1003,8 +1005,12 @@ function schemaAnchorsEqual(
  * is deliberately NOT a comparison against the working copy's live schema row
  * (a branch may evolve its committed schema after forking and must still
  * reopen). Throws a {@link BranchError}; the caller closes the store.
+ *
+ * Exported for a strategy that attaches a caller's graph to an allocation
+ * without going through reopen (the PostgreSQL manager's operation members), so
+ * this decision keeps one owner.
  */
-async function assertGraphMatchesAttestedOrigin<G extends GraphDef>(
+export async function assertGraphMatchesAttestedOrigin<G extends GraphDef>(
   graph: G,
   origin: DurableBranchOrigin,
 ): Promise<void> {
