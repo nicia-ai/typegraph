@@ -1,5 +1,20 @@
 # @nicia-ai/typegraph
 
+## 0.73.1
+
+### Highlights
+
+`updateWhere()` and `compareAndSet()` now preserve stored values for defaulted properties omitted from a patch, matching `update()`. Previously, changing one property could silently reset unrelated properties to their schema defaults on every matched row. Defaults are also no longer evaluated for omitted compare-and-set expectations.
+
+### Upgrade notes
+
+- After upgrading, remove workarounds that restate every defaulted property in `updateWhere()` or `compareAndSet()` patches. Omitted properties retain their stored values; to reset a property, supply the desired value explicitly.
+- Check rows previously changed by `updateWhere()` or `compareAndSet()` on node kinds with defaulted properties, and restore any unintended resets from application history or backups. Upgrading prevents future resets but does not recover overwritten values.
+
+### Patch Changes
+
+- [#783](https://github.com/nicia-ai/typegraph/pull/783) [`d5560e5`](https://github.com/nicia-ai/typegraph/commit/d5560e5dd220e6682799e94e55c26927d7638310) Thanks [@pdlug](https://github.com/pdlug)! - Preserve omitted defaulted properties in `updateWhere()` and `compareAndSet()` patches. Validate only supplied patch and expected-state fields so defaults cannot silently overwrite stored values or run for omitted expectations.
+
 ## 0.73.0
 
 ### Highlights
