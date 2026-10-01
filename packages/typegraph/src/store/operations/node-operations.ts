@@ -3200,8 +3200,13 @@ function validateNodePropertySubset(
 ) {
   // Reconstruct from `.shape` so object-level refinements stay on the complete
   // after-image. Zod 4 throws if `schema.partial()` is called on a refined object.
+  // Pick before parsing: Zod 4 applies defaults even inside optional fields,
+  // so a partial schema alone would inject values for omitted properties.
+  const suppliedProperties = Object.fromEntries(
+    Object.keys(properties).map((property) => [property, true as const]),
+  );
   return validateNodeProps(
-    z.object(schema.shape).partial(),
+    z.object(schema.shape).pick(suppliedProperties).partial(),
     properties,
     context,
   );
