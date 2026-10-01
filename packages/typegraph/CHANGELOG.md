@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.73.1
+
+### Patch Changes
+
+- [#783](https://github.com/nicia-ai/typegraph/pull/783) [`d5560e5`](https://github.com/nicia-ai/typegraph/commit/d5560e5dd220e6682799e94e55c26927d7638310) Thanks [@pdlug](https://github.com/pdlug)! - Preserve omitted defaulted properties in `updateWhere()` and `compareAndSet()` patches. Validate only supplied patch and expected-state fields so defaults cannot silently overwrite stored values or run for omitted expectations.
+
 ## 0.73.0
 
 ### Highlights
