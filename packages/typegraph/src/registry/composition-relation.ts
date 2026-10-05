@@ -71,11 +71,13 @@ export function isCompositionPartSide(
  * refused while the part is live). Default `"optional"`, so a declaration
  * that states no existence keeps its semantics.
  */
-export type CompositionExistence =
-  (typeof COMPOSITION_EXISTENCE_VALUES)[number];
+export type CompositionExistence = "optional" | "required";
 
 /** Every value `existence` may state, in declaration order. */
-export const COMPOSITION_EXISTENCE_VALUES = ["optional", "required"] as const;
+export const COMPOSITION_EXISTENCE_VALUES = [
+  "optional",
+  "required",
+] as const satisfies readonly CompositionExistence[];
 
 /**
  * THE check that a stated `existence` is one this library knows. One

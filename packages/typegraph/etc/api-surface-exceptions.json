@@ -1241,6 +1241,14 @@
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "ManagedEdgeCreatePlan",
     "member": "cardinalityClaim",
     "kind": "member-removed",
@@ -1961,6 +1969,14 @@
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
     "declaration": "ManagedEdgeCreatePlan",
     "member": "cardinalityClaim",
     "kind": "member-removed",
@@ -2593,6 +2609,14 @@
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "ManagedEdgeCreatePlan",
     "member": "cardinalityClaim",
     "kind": "member-removed",
@@ -3225,6 +3249,14 @@
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
     "declaration": "ManagedEdgeCreatePlan",
     "member": "cardinalityClaim",
     "kind": "member-removed",
@@ -3853,6 +3885,14 @@
     "member": "isCompositionWhole",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -4785,6 +4825,14 @@
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "ManagedEdgeCreatePlan",
     "member": "cardinalityClaim",
     "kind": "member-removed",
@@ -5437,6 +5485,14 @@
     "member": "isCompositionWhole",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -6117,6 +6173,14 @@
     "member": "isCompositionWhole",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "KindRegistry",
+    "member": "edgeKindFacts",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the `edgeKindFacts` reader, the resolved endpoint facts of an edge registration that a traversal's `to()` / `toDynamic()` target is now checked against. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {

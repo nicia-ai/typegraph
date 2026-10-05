@@ -577,7 +577,7 @@ function bareTypeTokens(member: unknown): readonly string[] | undefined {
   if (typeof token === "string") return [token];
   const isTokenArray =
     Array.isArray(token) && token.every((entry) => typeof entry === "string");
-  return isTokenArray ? (token) : undefined;
+  return isTokenArray ? token : undefined;
 }
 
 /**

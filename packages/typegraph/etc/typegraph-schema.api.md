@@ -663,6 +663,18 @@ type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 type EdgeIndexDirection = "out" | "in" | "none";
 
 // @public
+type EdgeKindFacts = Readonly<{
+    from: readonly string[];
+    to: readonly string[];
+    pairs: readonly Readonly<{
+        from: string;
+        to: string;
+    }>[];
+    cardinality: Cardinality;
+    targetCardinality: TargetCardinality;
+}>;
+
+// @public
 type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
     name: string;
     fields: readonly (keyof z.infer<E["schema"]> & string)[];
@@ -1799,7 +1811,7 @@ type KindEntity = "node" | "edge";
 
 // @public
 class KindRegistry {
-    constructor(nodeKinds: ReadonlyMap<string, NodeType>, edgeKinds: ReadonlyMap<string, AnyEdgeType>, closures: RegistryClosures, identity?: GraphIdentityConfig, composition?: CompositionRelation);
+    constructor(nodeKinds: ReadonlyMap<string, NodeType>, edgeKinds: ReadonlyMap<string, AnyEdgeType>, closures: RegistryClosures, identity?: GraphIdentityConfig, composition?: CompositionRelation, edgeFacts?: ReadonlyMap<string, EdgeKindFacts>);
     areDisjoint(a: string, b: string): boolean;
     areEquivalent(a: string, b: string): boolean;
     // (undocumented)
@@ -1825,6 +1837,7 @@ class KindRegistry {
     readonly edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
     // (undocumented)
     readonly edgeInverses: ReadonlyMap<string, string>;
+    edgeKindFacts(edgeKind: string): EdgeKindFacts | undefined;
     // (undocumented)
     readonly edgeKinds: ReadonlyMap<string, AnyEdgeType>;
     // (undocumented)
@@ -1836,6 +1849,7 @@ class KindRegistry {
     getAncestors(kind: string): ReadonlySet<string>;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
+    // (undocumented)
     getEdgeType(name: string): AnyEdgeType | undefined;
     getEquivalents(kind: string): readonly string[];
     getImpliedEdges(edgeKind: string): readonly string[];

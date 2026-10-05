@@ -4441,8 +4441,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly setActiveVersionWithPreflight: {
         readonly kind: "reasoned";
-        readonly reason: "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent.";
-        readonly accesses: 1;
+        readonly reason: "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent, and a fixed-schema working copy refuses it when present.";
+        readonly accesses: 2;
     };
     readonly lockSchemaVersionForWrite: {
         readonly kind: "reasoned";
