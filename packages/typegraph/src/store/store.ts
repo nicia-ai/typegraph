@@ -293,6 +293,7 @@ import {
   type ConstraintFenceViolation,
   verifyConstraintFences as verifyConstraintFencesImpl,
 } from "./claims/verify";
+import { resolveClearGraphCommand } from "./clear-graph-command";
 import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
@@ -5487,6 +5488,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * No hooks or per-row logic. Wrapped in a transaction when the backend
    * supports it.
    *
+   * Preserving the markers needs the backend's optional
+   * `clearGraphPreservingContributionMaterializations` member, which every
+   * bundled backend provides. On a custom backend without it, an omitted
+   * option clears through `clearGraph` and so follows whatever that backend's
+   * `clearGraph` does with the markers, while a stated
+   * `preserveContributionMaterializations: true` is refused with
+   * `UnsupportedBackendCapabilityError` before anything is deleted.
+   *
    * The store is usable after clearing — new data can be created immediately.
    */
   async clear(
@@ -5517,6 +5526,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const doClear = async (
       target: GraphBackend | TransactionBackend,
     ): Promise<void> => {
+      // Resolved before the first lock so a refusal has touched nothing.
+      const clearGraphData = resolveClearGraphCommand(
+        target,
+        options.preserveContributionMaterializations,
+      );
       if (this.#revisionTrackingEnabled) {
         await lockRecordedGraphWrite(target, this.graphId);
       }
@@ -5527,16 +5541,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#revisionTrackingEnabled && !this.#captureEnabled ?
           await readRecordedClock(target, this.#sqlSchema(), this.graphId)
         : undefined;
-      const clearGraphPreservingContributions =
-        target.clearGraphPreservingContributionMaterializations;
-      if (
-        options.preserveContributionMaterializations === false ||
-        clearGraphPreservingContributions === undefined
-      ) {
-        await target.clearGraph(this.graphId);
-      } else {
-        await clearGraphPreservingContributions(this.graphId);
-      }
+      await clearGraphData(this.graphId);
       if (mintsAnchorOrigin) {
         // Rotate the durable per-graph revision-origin nonce in the SAME
         // transaction as `clearGraph` for revision-tracked tokens and

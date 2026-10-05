@@ -3524,7 +3524,8 @@ export type GraphBackend = Readonly<{
    * Clears graph data while retaining contribution markers for physical
    * storage that remains provisioned. Optional so custom backends can keep
    * their existing `clearGraph` behavior; `Store.clear()` uses this member
-   * when available.
+   * when available, and refuses a stated
+   * `preserveContributionMaterializations: true` when it is absent.
    */
   clearGraphPreservingContributionMaterializations?: (
     this: void,

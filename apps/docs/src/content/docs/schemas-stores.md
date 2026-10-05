@@ -2468,6 +2468,18 @@ store.clear(options?: { preserveContributionMaterializations?: boolean }): Promi
 ```
 
 Wrapped in a transaction when the backend supports it. Does not affect other graphs sharing the same backend.
+
+Every bundled backend can preserve the markers. A custom backend does so through its optional
+`clearGraphPreservingContributionMaterializations` member. When that member is missing:
+
+- `store.clear()` with the option omitted clears through the backend's `clearGraph`, so whether the
+  markers survive is that backend's own `clearGraph` behavior.
+- `store.clear({ preserveContributionMaterializations: true })` is refused with
+  `UnsupportedBackendCapabilityError` before anything is deleted. Stating `true` asks for a
+  guarantee, so call it this way when your code depends on the markers surviving.
+- `store.clear({ preserveContributionMaterializations: false })` clears through `clearGraph` as on
+  any backend.
+
 To verify what remains afterward without reading TypeGraph's physical tables, use
 [`inspectGraphStorage(store)`](/multiple-graphs#inspectgraphstoragestore).
 
