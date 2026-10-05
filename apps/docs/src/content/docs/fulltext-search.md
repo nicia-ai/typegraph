@@ -525,7 +525,8 @@ nodes outside their validity window never rank.
 
 Returned hits are `FulltextSearchHit<Node<K>>` with `node`, `score`
 (higher = more relevant), `rank` (1-based), and `snippet` (when
-requested).
+requested). Under an affecting `expansion: "subclasses"`, `Node<K>` is the
+widened form described above.
 
 ## Reciprocal Rank Fusion
 

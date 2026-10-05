@@ -545,7 +545,7 @@ function createStore<G extends GraphDef>(
 | `recordedRead` | `ExternalRecordedReadSource` | Bind an already-populated recorded relation for `store.asOfRecorded(T)` reads without enabling TypeGraph-managed capture. Must be created with `recordedRelation({ schema })` using a `createSqlSchema(...)` schema; the store validates those factory descriptors at runtime. Use `history: true` when TypeGraph should capture writes and advance `store.recordedNow()`. |
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
-| `queryDefaults.expansion` | `"exact" \| "subclasses"` | Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an alias states no `expansion` (default: `"subclasses"` — a supertype query is polymorphic by default; see [Ontology](/ontology#subsumption-type-inheritance)). `"narrower"` is not a store-wide default. `search()` and the collection APIs are unaffected and stay exact-kind. |
+| `queryDefaults.expansion` | `"exact" \| "subclasses"` | Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an alias states no `expansion` (default: `"subclasses"` — a supertype query is polymorphic by default; see [Ontology](/ontology#subsumption-type-inheritance)). `"narrower"` is not a store-wide default. `search()` takes its own `expansion` option (default `"exact"`) and the collection APIs stay exact-kind; neither follows this default. |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
 | `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` or endpoint get-or-create update whose validated props and requested window already equal the existing live row; bulk forms behave identically (default: `false`). Node `getOrCreateByConstraint` updates are not coalesced; use `upsertById` for replay projectors that must avoid unchanged node history churn. For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options), [`getOrCreateByEndpoints`](#getorcreatebyendpointsfrom-to-props-options), and [Materializing external event logs](/materializing-event-logs). |
 
@@ -3295,7 +3295,11 @@ store.search.rebuildFulltext(nodeKind?, options?): Promise<RebuildFulltextResult
 
 Runs a ranked fulltext query against nodes of the given kind. Requires
 at least one `searchable()` field on the node schema. `hit.node` is
-narrowed to the typed node for `nodeKind` — no cast required.
+narrowed to the typed node for `nodeKind` — no cast required — unless the
+call states `expansion: "subclasses"` on a kind the ontology can affect, in
+which case `hit.node` keeps the kind's properties but its `kind` and `NodeId`
+brand widen, exactly as a `from()` alias over that kind does. The same holds
+for `store.search.vector` and `store.search.hybrid`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -3305,6 +3309,7 @@ narrowed to the typed node for `nodeKind` — no cast required.
 | `language` | `string` | per-row | Language override (Postgres only; throws on FTS5). |
 | `minScore` | `number` | — | Drop hits below this backend-native score. |
 | `includeSnippets` | `boolean` | `false` | Return a `<mark>…</mark>` snippet per hit. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | `"subclasses"` also searches `subClassOf` descendant and `equivalentTo` kinds and widens the hit's `kind` and `NodeId` brand. |
 
 #### `store.search.hybrid(nodeKind, options)`
 
@@ -3328,6 +3333,7 @@ with Reciprocal Rank Fusion. Requires both `vectorSearch` and
 | `fulltext.includeSnippets` | `boolean` | `false` | Return snippets per fulltext sub-hit. |
 | `fusion.method` | `"rrf"` | `"rrf"` | Fusion method. |
 | `fusion.k` | `number` | `60` | RRF constant. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | Applies to both legs; `"subclasses"` widens the hit's `kind` and `NodeId` brand as for `fulltext`. |
 | `fusion.weights.vector` | `number` | `1` | Bias toward the vector retriever. |
 | `fusion.weights.fulltext` | `number` | `1` | Bias toward the fulltext retriever. |
 

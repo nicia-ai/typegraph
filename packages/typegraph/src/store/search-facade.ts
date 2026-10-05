@@ -43,18 +43,22 @@ import {
 import { type Node } from "./types";
 
 /**
- * The expansion axis a search call states. `undefined` — the option omitted
- * or passed as `undefined` — takes the search default, `"exact"`.
+ * The option shape of a call that takes the search default or states
+ * `"exact"`: the hit stays the searched kind's own type.
  */
-type SearchExpansion = DefaultAliasExpansionAxis | undefined;
+type ExactExpansion = Readonly<{
+  expansion?: "exact" | undefined;
+}>;
 
 /**
  * States the call's expansion axis as a type parameter, so the hit type can
  * follow it. Intersected with the option type rather than threaded through
  * it: the axis is a fact about one call, not about a reusable options value.
+ * The key is required, so a call that omits the option or passes `undefined`
+ * never lands here: it takes the exact overload.
  */
-type StatedExpansion<E extends SearchExpansion> = Readonly<{
-  expansion?: E;
+type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
+  expansion: E;
 }>;
 
 /**
@@ -62,7 +66,7 @@ type StatedExpansion<E extends SearchExpansion> = Readonly<{
  * the query builder's own alias typing so a search hit and a `from()` alias
  * over the same kind and axis cannot disagree:
  *
- * - `"exact"` (stated, or the default) — the kind's own type.
+ * - `"exact"` — the kind's own type.
  * - `"subclasses"` — {@link AliasNodeType}: the kind's properties, with the
  *   `kind` discriminant and `NodeId` brand widened only when the ontology
  *   can actually return another kind's row.
@@ -73,9 +77,9 @@ type SearchNodeType<
   G extends GraphDef,
   K extends NodeKinds<G>,
   N extends NodeType,
-  E extends SearchExpansion,
+  E extends DefaultAliasExpansionAxis,
 > =
-  [E] extends ["exact" | undefined] ? N
+  [E] extends ["exact"] ? N
   : [E] extends ["subclasses"] ? AliasNodeType<G, K>
   : PolymorphicNodeType<N>;
 
@@ -93,7 +97,7 @@ type SearchNodeType<
 type ResolveNode<
   G extends GraphDef,
   K extends string,
-  E extends SearchExpansion,
+  E extends DefaultAliasExpansionAxis,
 > =
   K extends NodeKinds<G> ?
     G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ?
@@ -184,17 +188,28 @@ export class StoreSearch<G extends GraphDef> {
    * configured with) and resolves the matching node IDs back to typed
    * `Node` objects.
    */
-  async fulltext<K extends string, E extends SearchExpansion = undefined>(
+  fulltext<
+    K extends string,
+    E extends DefaultAliasExpansionAxis = DefaultAliasExpansionAxis,
+  >(
     nodeKind: K,
     options: FulltextSearchOptions<ResolveNodeType<G, K>> & StatedExpansion<E>,
-  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K, E>>[]> {
+  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K, E>>[]>;
+  fulltext<K extends string>(
+    nodeKind: K,
+    options: FulltextSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
+  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K, "exact">>[]>;
+  async fulltext(
+    nodeKind: string,
+    // Contravariance: the overloads narrow the accessor callback to the
+    // kind, which is wider than the base instantiation the core helpers take.
+    options: unknown,
+  ): Promise<readonly FulltextSearchHit[]> {
     this.#assertKindRegistered(nodeKind);
-    return executeFulltextSearch<ResolveNode<G, K, E>>(
+    return executeFulltextSearch(
       this.#context,
       nodeKind,
-      // Contravariance: the narrowed accessor callback is intentionally
-      // wider than the base instantiation the core helpers take.
-      options as unknown as FulltextSearchOptions,
+      options as FulltextSearchOptions,
     );
   }
 
@@ -209,17 +224,28 @@ export class StoreSearch<G extends GraphDef> {
    * Pure vector — no fulltext leg, no fusion. For combined
    * vector+fulltext ranking, use `hybrid`.
    */
-  async vector<K extends string, E extends SearchExpansion = undefined>(
+  vector<
+    K extends string,
+    E extends DefaultAliasExpansionAxis = DefaultAliasExpansionAxis,
+  >(
     nodeKind: K,
     options: VectorSearchOptions<ResolveNodeType<G, K>> & StatedExpansion<E>,
-  ): Promise<readonly VectorSearchHit<ResolveNode<G, K, E>>[]> {
+  ): Promise<readonly VectorSearchHit<ResolveNode<G, K, E>>[]>;
+  vector<K extends string>(
+    nodeKind: K,
+    options: VectorSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
+  ): Promise<readonly VectorSearchHit<ResolveNode<G, K, "exact">>[]>;
+  async vector(
+    nodeKind: string,
+    // Contravariance: the overloads narrow the accessor callback to the
+    // kind, which is wider than the base instantiation the core helpers take.
+    options: unknown,
+  ): Promise<readonly VectorSearchHit[]> {
     this.#assertKindRegistered(nodeKind);
-    return executeVectorSearch<ResolveNode<G, K, E>>(
+    return executeVectorSearch(
       this.#context,
       nodeKind,
-      // Contravariance: the narrowed accessor callback is intentionally
-      // wider than the base instantiation the core helpers take.
-      options as unknown as VectorSearchOptions,
+      options as VectorSearchOptions,
     );
   }
 
@@ -232,17 +258,28 @@ export class StoreSearch<G extends GraphDef> {
    * over-fetch is 4× `limit` from each source — tune via `vector.k` /
    * `fulltext.k` for higher-recall corpora.
    */
-  async hybrid<K extends string, E extends SearchExpansion = undefined>(
+  hybrid<
+    K extends string,
+    E extends DefaultAliasExpansionAxis = DefaultAliasExpansionAxis,
+  >(
     nodeKind: K,
     options: HybridSearchOptions<ResolveNodeType<G, K>> & StatedExpansion<E>,
-  ): Promise<readonly HybridSearchHit<ResolveNode<G, K, E>>[]> {
+  ): Promise<readonly HybridSearchHit<ResolveNode<G, K, E>>[]>;
+  hybrid<K extends string>(
+    nodeKind: K,
+    options: HybridSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
+  ): Promise<readonly HybridSearchHit<ResolveNode<G, K, "exact">>[]>;
+  async hybrid(
+    nodeKind: string,
+    // Contravariance: the overloads narrow the accessor callback to the
+    // kind, which is wider than the base instantiation the core helpers take.
+    options: unknown,
+  ): Promise<readonly HybridSearchHit[]> {
     this.#assertKindRegistered(nodeKind);
-    return executeHybridSearch<ResolveNode<G, K, E>>(
+    return executeHybridSearch(
       this.#context,
       nodeKind,
-      // Contravariance: the narrowed accessor callback is intentionally
-      // wider than the base instantiation the core helpers take.
-      options as unknown as HybridSearchOptions,
+      options as HybridSearchOptions,
     );
   }
 

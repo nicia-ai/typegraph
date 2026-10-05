@@ -575,6 +575,24 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
       );
       expectTypeOf(forwarded.node.kind).toEqualTypeOf<string>();
 
+      // Spelling the kind generic by hand still accepts the axis: the hit is
+      // exact without it and widened with it, never an option the call refuses.
+      const spelledExact = first(
+        await store.search.fulltext<"MediaAliasTest">("MediaAliasTest", {
+          query: "x",
+          limit: 1,
+        }),
+      );
+      const spelledExpanded = first(
+        await store.search.fulltext<"MediaAliasTest">("MediaAliasTest", {
+          query: "x",
+          limit: 1,
+          expansion: "subclasses",
+        }),
+      );
+      expectTypeOf(spelledExact.node.kind).toEqualTypeOf<"MediaAliasTest">();
+      expectTypeOf(spelledExpanded.node.kind).toEqualTypeOf<string>();
+
       // A kind the ontology cannot affect stays exact under "subclasses",
       // exactly as its from() alias does; an unpinned axis still widens it.
       const plainStore = undefined as unknown as Store<typeof plainGraph>;
