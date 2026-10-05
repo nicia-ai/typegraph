@@ -52,7 +52,6 @@ export {
 } from "../errors";
 export {
   bulkIsSeparated,
-  IDENTITY_STORAGE_MISSING_CODE,
   separationClassPairKey,
   separationFactsEmpty,
 } from "../identity/separation";
@@ -64,11 +63,7 @@ export {
   loadSpanningDifferentAssertion,
 } from "../identity/service-read";
 export type { PlainNodeRef } from "../identity/sql-target";
-export type {
-  IdentityAssertionPolicyLabel,
-  IdentityDecisionPolicyRecord,
-  IdentityDecisionProvenance,
-} from "../identity/transition-log";
+export type { IdentityDecisionProvenance } from "../identity/transition-log";
 export type {
   IdentityAssertionWriteFacade,
   IdentityFacade,
@@ -80,10 +75,6 @@ export {
   importGraphStream,
   summarizeImportErrors,
 } from "../interchange/import";
-export {
-  RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE,
-  type ResolvedNodeClaimConflict,
-} from "../store/claims/resolved-node-claims";
 export { getEdgeRowsByIds } from "../store/edge-fetch";
 export { getNodeRowsByIds } from "../store/node-fetch";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows

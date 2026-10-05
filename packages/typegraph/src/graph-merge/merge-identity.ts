@@ -52,7 +52,6 @@ import {
 import {
   assertNoOpposingIdentityRelationsRaw,
   dedupeIdentityAssertionsRaw,
-  type IdentityAssertionConflictPolicy,
   identityDedupeKey,
   planIdentityThreeWay,
 } from "./identity-three-way";
@@ -80,11 +79,7 @@ import {
   type TransactionBackend,
   TypeGraphError,
 } from "./typegraph-internal";
-import type {
-  DroppedItem,
-  IdentityReconciliation,
-  IdentityUnresolvedConflict,
-} from "./types";
+import type { DroppedItem } from "./types";
 
 /**
  * The identity-relevant slice of a resolved merge plan: a STRUCTURAL subset of
@@ -164,10 +159,9 @@ export const NO_STORED_ASSERTIONS: ReadonlyMap<string, LedgerAssertion> =
   new Map();
 
 /**
- * Structural (not policy) validation: one assertion id was staged for
- * retraction under two different identity truths — a data-integrity fault no
- * `onAssertionConflict` policy can arbitrate, so it is checked once, up
- * front, independent of the three-way classification below.
+ * Structural validation: one assertion id was staged for retraction under two
+ * different identity truths — a data-integrity fault, checked independently of
+ * the three-way classification below.
  */
 function assertRetractedIdsHaveOneTruth(staging: StagingSet): void {
   const seenById = new Map<string, IdentityTransferAssertion>();
@@ -196,11 +190,10 @@ function assertRetractedIdsHaveOneTruth(staging: StagingSet): void {
  * @internal Exported for deterministic phase-level verification.
  *
  * Plans every identity change for one merge: three-way classifies the staged
- * assertions against the staged base slice ({@link planIdentityThreeWay}, which
- * absorbs what used to be three separate inline arbitrations here — the
+ * assertions against the staged base slice ({@link planIdentityThreeWay}: the
  * duplicate-assertion survivor rule, the opposing-relations refusal, and the
- * retract/reassert race refusal), then applies the duties that stay owned
- * here regardless of policy: the raw one-id-one-truth checks, the
+ * retract/reassert race refusal), then applies the duties owned here: the raw
+ * one-id-one-truth checks, the
  * committed-id set the classifier's survivor rule needs, the retraction
  * target-truth filter against the target's ACTUAL stored rows (independent of
  * — and stricter than — the staged base slice the classifier reasons about),
@@ -209,13 +202,10 @@ function assertRetractedIdsHaveOneTruth(staging: StagingSet): void {
 export function planIdentityChanges(
   staging: StagingSet,
   storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
-  onAssertionConflict: IdentityAssertionConflictPolicy = "refuse",
 ): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
   retractions: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
-  reconciliations: readonly IdentityReconciliation[];
-  unresolved: readonly IdentityUnresolvedConflict[];
 }> {
   // Staged ids the target ALREADY holds with the exact staged truth. The
   // classifier's survivor rule must prefer these: the applier is idempotent
@@ -234,11 +224,7 @@ export function planIdentityChanges(
       })
       .map((assertion) => assertion.id),
   );
-  const classified = planIdentityThreeWay(
-    staging,
-    onAssertionConflict,
-    committedIds,
-  );
+  const classified = planIdentityThreeWay(staging, committedIds);
 
   // One id, one truth — over the RAW staged assertions, never the classifier's
   // survivors: two branches staging one id for the same pair with different
@@ -247,13 +233,10 @@ export function planIdentityChanges(
   // collision — while the report would list the id as both applied and
   // dropped.
   //
-  // ORDER IS BEHAVIOR. A staging set that trips more than one check must
-  // report the same error it always has, so the two structural checks run
-  // where they always did relative to the classifier's own refusals:
-  // opposing-relations, then the retract/reassert race (both inside
-  // `planIdentityThreeWay`), then one-id-one-truth, then the retraction's
-  // two-truths check. The classifier throws nothing after those two arms, so
-  // running these afterwards over the raw slices is exactly that order.
+  // ORDER IS BEHAVIOR. A staging set that trips more than one check reports
+  // the first of: opposing-relations, then the retract/reassert race (both
+  // inside `planIdentityThreeWay`), then one-id-one-truth, then the
+  // retraction's two-truths check.
   assertOneIdOneTruth(
     staging.newIdentityAssertions.map((staged) => staged.assertion),
     NO_STORED_ASSERTIONS,
@@ -307,8 +290,6 @@ export function planIdentityChanges(
       compareCodePoints(left.id, right.id),
     ),
     dropped: [...classified.dropped, ...retractionDropped],
-    reconciliations: classified.reconciliations,
-    unresolved: classified.unresolved,
   };
 }
 

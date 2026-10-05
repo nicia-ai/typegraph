@@ -177,21 +177,12 @@ const InterchangeIdentityTransitionCauseSchema = z.enum([
   "reconcile",
 ]);
 
-const InterchangeIdentityDecisionPolicySchema = z
-  .object({
-    assertion: z
-      .array(
-        z.enum(["refuse", "assertWins", "retractWins", "flag", "callback"]),
-      )
-      .readonly()
-      .optional(),
-    edge: z.literal("flag").optional(),
-    uniqueness: z.literal("flag").optional(),
-  })
-  .strict();
-
-const InterchangeIdentityTransitionDecisionSchema = z.object({
-  policy: InterchangeIdentityDecisionPolicySchema.optional(),
+/**
+ * Strict: a decision names only the evidence this format defines, so an
+ * archive carrying any other decision field is rejected rather than restored
+ * with that field silently stripped.
+ */
+const InterchangeIdentityTransitionDecisionSchema = z.strictObject({
   branchId: z.string().optional(),
   branchAncestry: z.array(z.string()).optional(),
   mergePlanDigest: z.string().optional(),

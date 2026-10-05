@@ -154,8 +154,8 @@ export async function applyDurableMergePlan<
 /**
  * Whether `artifact` carries semantic work only the portable applier performs,
  * which a host-native row merge cannot prove it ran: identity ledger writes and
- * their reconciliation (the transition log, closure maintenance, and the
- * recorded decision), or composition work (a whole's cascade to its parts, the
+ * a separation veto (the transition log, closure maintenance, and the recorded
+ * decision), or composition work (a whole's cascade to its parts, the
  * single-whole claim, and the required-existence check on every part, edge, or
  * whole the plan writes). Such a plan never reaches `strategy.merge`.
  */
@@ -167,7 +167,6 @@ function planOwesPortableSemantics<G extends GraphDef>(
   if (
     writes.identityAssertions.length > 0 ||
     writes.identityRetractions.length > 0 ||
-    (review.identityReconciliations ?? []).length > 0 ||
     (review.identityConflicts ?? []).length > 0 ||
     review.compositionOrphans.length > 0
   ) {

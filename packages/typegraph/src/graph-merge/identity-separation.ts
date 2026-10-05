@@ -1,13 +1,12 @@
 /**
- * The identity SEPARATION VETO — the plan-time half of identity reconciliation.
+ * The identity SEPARATION VETO.
  *
  * A `store.identity.assertDifferent(a, b)` is an integrity fact, not a recall
- * heuristic, so the veto is ON for every identity-enabled merge regardless of
- * `identity.pairing`. Without it a candidate match between two entities the
- * ledger holds apart survives planning and dies in the commit on the
- * separation relation's ordered-pair CHECK — a constraint violation at the
- * wrong phase, naming table columns rather than the two entities and the
- * assertions that separated them.
+ * heuristic, so the veto is ON for every identity-enabled merge. Without it a
+ * candidate match between two entities the ledger holds apart survives planning
+ * and dies in the commit on the separation relation's ordered-pair CHECK — a
+ * constraint violation at the wrong phase, naming table columns rather than the
+ * two entities and the assertions that separated them.
  *
  * The facts are captured ONCE, before planning, from the merge target's own
  * identity context, and consumed by three application points that all read
@@ -22,7 +21,7 @@
  *      apart, so no single candidate edge is separated yet the cluster fuses
  *      all three.
  *
- * Points 2 and 3 run AFTER the guards on purpose. A forced base pairing whose
+ * Points 2 and 3 run AFTER the guards on purpose. A forced base match whose
  * component the base guard severs never fuses anything, so refusing it up
  * front would fail a merge that is harmless; only an edge (or a cluster) that
  * survives the guards can actually collapse two separated classes.
@@ -147,11 +146,11 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   // separates-nothing pays nothing here.
   //
   // Consequence, deliberately: a legacy store whose separation relation was
-  // never provisioned no longer refuses a stated `identity.pairing` when it
-  // holds no `different` assertion either. Refusing there was a false alarm —
-  // there is nothing for the veto to read, and the identity module already
-  // treats "no live `different` assertion" as proof that an empty relation is
-  // correct. A store that does hold one still reaches the refusal below.
+  // never provisioned is not refused when it holds no `different` assertion
+  // either. Refusing there would be a false alarm — there is nothing for the
+  // veto to read, and the identity module already treats "no live `different`
+  // assertion" as proof that an empty relation is correct. A store that does
+  // hold one still reaches the refusal below.
   if (
     await separationFactsEmpty(
       ctx.backend,

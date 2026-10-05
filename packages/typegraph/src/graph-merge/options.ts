@@ -16,7 +16,6 @@ import { z } from "zod";
 
 import { createDataKeyedBag } from "../utils/object";
 import { InvalidMergeOptionsError } from "./errors";
-import type { IdentityAssertionConflictPolicy } from "./identity-three-way";
 import type { GraphDef } from "./typegraph-internal";
 import type {
   BranchId,
@@ -24,7 +23,6 @@ import type {
   ComparisonCeilingPolicy,
   DeleteModifyPolicy,
   Embedder,
-  IdentityReconciliationOptions,
   MergeOptions,
   PropertyConflictPolicy,
   ReconcileTypesMode,
@@ -45,13 +43,6 @@ export const MERGE_OPTION_DEFAULTS = {
   onComparisonCeiling: "error",
   provenance: true,
   persistProvenance: false,
-  identity: {
-    pairing: "off",
-    onAssertionConflict: "refuse",
-    onProvenanceConflict: "keepBoth",
-    onEdgeConflict: "repoint",
-    onUniquenessConflict: "refuse",
-  },
 } as const satisfies Readonly<{
   reconcileTypes: ReconcileTypesMode;
   onPropertyConflict: "flag";
@@ -60,13 +51,6 @@ export const MERGE_OPTION_DEFAULTS = {
   onComparisonCeiling: ComparisonCeilingPolicy;
   provenance: boolean;
   persistProvenance: boolean;
-  identity: Readonly<{
-    pairing: "off";
-    onAssertionConflict: "refuse";
-    onProvenanceConflict: "keepBoth";
-    onEdgeConflict: "repoint";
-    onUniquenessConflict: "refuse";
-  }>;
 }>;
 
 /**
@@ -81,41 +65,6 @@ const propertyConflictPolicySchema = z.enum([
   "lastWriteWins",
   "provenanceWeighted",
 ]);
-
-/**
- * zod schema for the STRING arm of `identity.onAssertionConflict` (the
- * function arm is not validatable by zod, exactly the `onPropertyConflict`
- * precedent above).
- */
-const identityAssertionConflictPolicySchema = z.enum([
-  "refuse",
-  "assertWins",
-  "retractWins",
-  "flag",
-]);
-
-/**
- * zod schema for `identity`'s scalar surface, EXCLUDING `onAssertionConflict`
- * (validated separately, like `onPropertyConflict`, since it admits a
- * function arm). `.strict()` so a mistyped sub-option is refused rather than
- * silently ignored.
- */
-const identityOptionsScalarSchema = z
-  .object({
-    pairing: z
-      .enum(["off", "candidate", "definitional"])
-      .default(MERGE_OPTION_DEFAULTS.identity.pairing),
-    onProvenanceConflict: z
-      .enum(["keepBoth", "refuse"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onProvenanceConflict),
-    onEdgeConflict: z
-      .enum(["repoint", "flag"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onEdgeConflict),
-    onUniquenessConflict: z
-      .enum(["refuse", "flag"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onUniquenessConflict),
-  })
-  .strict();
 
 /** zod schema for a single resolve config's scalar surface (the threshold). */
 const resolveConfigScalarSchema = z.object({
@@ -165,6 +114,47 @@ const mergeOptionsScalarSchema = z.object({
 });
 
 /**
+ * Every key {@link MergeOptions} declares. The `satisfies` record is total over
+ * the type, so adding an option without listing it here fails to compile.
+ */
+const MERGE_OPTION_KEYS: ReadonlySet<string> = new Set(
+  Object.keys({
+    resolve: true,
+    reconcileTypes: true,
+    onPropertyConflict: true,
+    onBasePropertyConflict: true,
+    onDeleteModifyConflict: true,
+    onComparisonCeiling: true,
+    canonical: true,
+    provenance: true,
+    persistProvenance: true,
+    embedder: true,
+    target: true,
+    maxComparisonsPerKind: true,
+    candidateDiagnostics: true,
+    clusterMaxDiameter: true,
+    branchOrder: true,
+    provenanceWeights: true,
+  } satisfies Readonly<Record<keyof MergeOptions, true>>),
+);
+
+/**
+ * Refuses an option the merge does not declare. Normalization reads each known
+ * field by name, so an undeclared key would otherwise be dropped silently and
+ * the merge would run as though the caller had never stated it.
+ */
+function assertOnlyDeclaredOptions(options: object): void {
+  const unknownOption = Object.keys(options).find(
+    (key) => !MERGE_OPTION_KEYS.has(key),
+  );
+  if (unknownOption === undefined) return;
+  throw new InvalidMergeOptionsError(
+    `Unknown merge option "${unknownOption}".`,
+    { details: { option: unknownOption } },
+  );
+}
+
+/**
  * Fully-normalized merge options: every default resolved, the (validated)
  * pass-through fields attached. Downstream phases consume this, never the raw
  * {@link MergeOptions}.
@@ -191,8 +181,6 @@ export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   candidateDiagnostics?: CandidateDiagnosticsOptions;
   branchOrder?: readonly BranchId[];
   provenanceWeights?: ReadonlyMap<BranchId, number>;
-  /** Presence-preserving: absent unless the caller stated `identity`. */
-  identity?: IdentityReconciliationOptions;
 }>;
 
 /**
@@ -213,51 +201,6 @@ function validatePropertyConflictPolicy<G extends GraphDef>(
     );
   }
   return policy;
-}
-
-/**
- * Validates the STRING arm of `identity.onAssertionConflict` (the function
- * arm is not validatable by zod).
- */
-function validateIdentityAssertionConflictPolicy(
-  policy: IdentityAssertionConflictPolicy,
-): IdentityAssertionConflictPolicy {
-  if (
-    typeof policy === "string" &&
-    !identityAssertionConflictPolicySchema.safeParse(policy).success
-  ) {
-    throw new InvalidMergeOptionsError(
-      `Invalid identity.onAssertionConflict "${policy}": expected "refuse", "assertWins", "retractWins", "flag", or a function.`,
-      { details: { option: "identity.onAssertionConflict", policy } },
-    );
-  }
-  return policy;
-}
-
-/**
- * Validates and fully resolves `identity`, PRESENCE-PRESERVING: `undefined`
- * in, `undefined` out — the compatibility hinge that keeps a review artifact
- * captured before this option existed revalidating `compatible`
- * (`reviewOptionEvidence` encodes only what `normalizeMergeOptions` emits).
- * `{}` in still resolves every default and comes back fully populated: the
- * caller STATED they want identity reconciliation, even with every field at
- * its default.
- */
-function validateIdentityOptions(
-  identity: IdentityReconciliationOptions | undefined,
-): IdentityReconciliationOptions | undefined {
-  if (identity === undefined) return undefined;
-  const { onAssertionConflict, ...scalarInput } = identity;
-  const scalar = identityOptionsScalarSchema.parse(scalarInput);
-  return {
-    pairing: scalar.pairing,
-    onAssertionConflict: validateIdentityAssertionConflictPolicy(
-      onAssertionConflict ?? MERGE_OPTION_DEFAULTS.identity.onAssertionConflict,
-    ),
-    onProvenanceConflict: scalar.onProvenanceConflict,
-    onEdgeConflict: scalar.onEdgeConflict,
-    onUniquenessConflict: scalar.onUniquenessConflict,
-  };
 }
 
 /**
@@ -339,12 +282,14 @@ function validateProvenanceWeights(
  * caller-boundary concern, surfaced as a thrown error per project conventions;
  * `merge()` converts it back to a typed `MergeError` at its own boundary.
  *
- * @throws if a threshold is outside `[0, 1]`, `maxComparisonsPerKind` is
- *   negative/non-integer, or `clusterMaxDiameter` is non-positive.
+ * @throws if an option is not one {@link MergeOptions} declares, a threshold is
+ *   outside `[0, 1]`, `maxComparisonsPerKind` is negative/non-integer, or
+ *   `clusterMaxDiameter` is non-positive.
  */
 export function normalizeMergeOptions<G extends GraphDef>(
   options: MergeOptions<G> = {},
 ): NormalizedMergeOptions<G> {
+  assertOnlyDeclaredOptions(options);
   const scalar = mergeOptionsScalarSchema.parse({
     reconcileTypes: options.reconcileTypes,
     onDeleteModifyConflict: options.onDeleteModifyConflict,
@@ -378,8 +323,6 @@ export function normalizeMergeOptions<G extends GraphDef>(
     options.provenanceWeights === undefined ?
       undefined
     : validateProvenanceWeights(options.provenanceWeights);
-
-  const identity = validateIdentityOptions(options.identity);
 
   // "provenanceWeighted" without weights would silently degrade to a
   // stable-branch-order (lastWriteWins) resolution and quietly commit a
@@ -423,6 +366,5 @@ export function normalizeMergeOptions<G extends GraphDef>(
       {}
     : { branchOrder: options.branchOrder }),
     ...(provenanceWeights === undefined ? {} : { provenanceWeights }),
-    ...(identity === undefined ? {} : { identity }),
   };
 }

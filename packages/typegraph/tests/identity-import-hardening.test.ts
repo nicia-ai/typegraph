@@ -14,6 +14,7 @@ import {
 import { deriveBackend } from "../src/backend/derive-backend";
 import { IdentityContradictionError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
+import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import {
   exportGraph,
   exportGraphStream,
@@ -33,6 +34,7 @@ import {
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
 import { storeRuntime } from "../src/store/runtime-port";
+import { generateId } from "../src/utils/id";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
@@ -494,6 +496,127 @@ describe("archival identity import window bounds", () => {
     // starts from.
     const targetReplay = await target.identity.replay(alice);
     expect(targetReplay.truncatedBefore).toBeDefined();
+  });
+
+  describe("archived decision provenance", () => {
+    const DECISION = {
+      branchId: "branch-a",
+      branchAncestry: [graph.id, "branch-a"],
+      mergePlanDigest: "plan-digest",
+      reviewDigest: "review-digest",
+      sourceId: "source-id",
+    } as const;
+
+    /** An archive whose one governed transition carries {@link DECISION}. */
+    async function archiveWithGovernedTransition() {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      await source.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+      await source.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+      await applyIdentityChangesForContext(
+        storeRuntime(source).identityContext(),
+        [],
+        [
+          {
+            id: generateId(),
+            relation: "same",
+            a: { kind: "Person", id: "alice" },
+            b: { kind: "Person", id: "bob" },
+            validFrom: new Date().toISOString(),
+          },
+        ],
+        DECISION,
+      );
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const transitions = requireDefined(archive.identity?.transitions);
+      const governed = requireDefined(
+        transitions.find((transition) => transition.decision !== undefined),
+      );
+      return { archive, transitions, governed };
+    }
+
+    async function restoreTarget() {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      return target;
+    }
+
+    it("round-trips every decision field through an archival restore", async () => {
+      const { archive, governed } = await archiveWithGovernedTransition();
+      expect(governed.cause).toBe("reconcile");
+      expect(governed.decision).toEqual(DECISION);
+
+      const target = await restoreTarget();
+      const result = await importGraph(target, archive, { onConflict: "skip" });
+      expect(result.errors).toEqual([]);
+      expect(result.success).toBe(true);
+
+      const { transitions } = await target.identity.transitionsOf({
+        kind: "Person",
+        id: "alice",
+      });
+      const restored = requireDefined(
+        transitions.find(
+          (transition) => transition.transitionId === governed.transitionId,
+        ),
+      );
+      console.info("restored transition", restored);
+      expect(restored.cause).toBe("reconcile");
+      expect(restored.decision).toEqual(DECISION);
+      expect(restored.restored?.at).toEqual(expect.any(String));
+    });
+
+    it("rejects an archive whose decision carries evidence the format does not define, rather than stripping it", async () => {
+      const { archive, transitions, governed } =
+        await archiveWithGovernedTransition();
+      const tampered = {
+        ...archive,
+        identity: {
+          ...requireDefined(archive.identity),
+          transitions: transitions.map((transition) =>
+            transition === governed ?
+              {
+                ...transition,
+                decision: {
+                  ...transition.decision,
+                  policy: { assertion: ["flag"] },
+                },
+              }
+            : transition,
+          ),
+        },
+      } as GraphData;
+
+      const target = await restoreTarget();
+      let refusal: unknown;
+      try {
+        await importGraph(target, tampered, { onConflict: "skip" });
+      } catch (error) {
+        refusal = error;
+      }
+      console.info("archive refusal", refusal);
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as Error).message).toContain(
+        "Invalid identity interchange section",
+      );
+      expect((refusal as Error).message).toContain("policy");
+      // Refused before anything was written.
+      expect(await target.nodes.Person.count()).toBe(0);
+      const { transitions: written } = await target.identity.transitionsOf({
+        kind: "Person",
+        id: "alice",
+      });
+      expect(written).toEqual([]);
+    });
   });
 
   it("refuses a state-mode payload naming a transitions section (IDENTITY_STATE_IMPORT_TRANSITIONS)", async () => {

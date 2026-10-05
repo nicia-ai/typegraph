@@ -11,8 +11,6 @@ export {
   transitionPageCursor,
 } from "./replay";
 export {
-  type IdentityAssertionPolicyLabel,
-  type IdentityDecisionPolicyRecord,
   type IdentityDecisionProvenance,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,

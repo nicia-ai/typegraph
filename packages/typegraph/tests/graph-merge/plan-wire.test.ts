@@ -195,6 +195,73 @@ describe("merge plan wire format", () => {
     if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
   });
 
+  describe("refuses identity arbitration shapes the merge no longer produces", () => {
+    const SEPARATION_CONFLICT = {
+      kind: "separation",
+      a: { kind: "Patient", id: "a" },
+      b: { kind: "Patient", id: "b" },
+      assertionIds: ["assertion-1"],
+    };
+
+    async function artifactWithReview(
+      extraReview: Readonly<Record<string, unknown>>,
+    ): Promise<unknown> {
+      const artifact = await constructMergePlanArtifact(planInput());
+      return { ...artifact, review: { ...artifact.review, ...extraReview } };
+    }
+
+    function expectMalformed(artifact: unknown): void {
+      const parsed = parseMergePlanArtifact(artifact);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
+    }
+
+    it("accepts a separation conflict, the one identity conflict arm a merge still writes", async () => {
+      const parsed = parseMergePlanArtifact(
+        await artifactWithReview({ identityConflicts: [SEPARATION_CONFLICT] }),
+      );
+      expect(parsed.success).toBe(true);
+    });
+
+    it.each(["assertion", "edge", "uniqueness"])(
+      "rejects an identity conflict of removed kind %s",
+      async (kind) => {
+        expectMalformed(
+          await artifactWithReview({
+            identityConflicts: [{ ...SEPARATION_CONFLICT, kind }],
+          }),
+        );
+      },
+    );
+
+    it("rejects review.identityReconciliations", async () => {
+      expectMalformed(
+        await artifactWithReview({ identityReconciliations: [] }),
+      );
+    });
+
+    it("rejects an identity match source on a resolution", async () => {
+      const input = resolutionPlanInput();
+      const artifact = await constructMergePlanArtifact(input);
+      const [resolution] = artifact.review.resolutions;
+      const [edge] = requireDefined(resolution).decisiveEdges;
+      expectMalformed({
+        ...artifact,
+        review: {
+          ...artifact.review,
+          resolutions: [
+            {
+              ...requireDefined(resolution),
+              decisiveEdges: [
+                { ...requireDefined(edge), sources: [{ kind: "identity" }] },
+              ],
+            },
+          ],
+        },
+      });
+    });
+  });
+
   it("rejects non-finite evidence numbers", async () => {
     const artifact = await constructMergePlanArtifact(planInput());
     const malformed = {
