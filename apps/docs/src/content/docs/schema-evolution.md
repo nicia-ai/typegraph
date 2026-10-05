@@ -219,7 +219,9 @@ a `differentFrom` relation exactly like the always-safe row.
   and requires an explicit `migrateSchema()`, like `inverseOf` and `implies`.
 - A relation whose `from` or `to` names a kind **this same commit removes**
   is itself safe with no check, and rows of the removed kind never hold the
-  commit back — the removal reclaims them.
+  commit back. They stay in storage until `materializeRemovals()` (or
+  `removeKinds(..., { eager: {} })`) reclaims them, and
+  `store.verifyConstraintFences()` can report their edges until then.
 - **An edge kind that stops admitting an endpoint pair** between kinds that
   survive the commit is checked against its live edges, whatever caused the
   loss: a removed `subClassOf` or `equivalentTo`, a narrowed `from` / `to`

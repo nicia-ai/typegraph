@@ -561,15 +561,23 @@ export function closesTupleByOmission(
   return schema.prefixItems !== undefined && schema.items === undefined;
 }
 
-/** A union member that is exactly one bare type token: `{ type: "string" }`. */
-function bareTypeToken(member: unknown): string | undefined {
+/**
+ * The type tokens a union member is exactly made of: `{ type: "string" }` or,
+ * once an inner union has been folded, `{ type: ["string", "null"] }`. A
+ * member carrying any other keyword is not a bare union of primitives.
+ */
+function bareTypeTokens(member: unknown): readonly string[] | undefined {
   if (member === null || typeof member !== "object") return undefined;
   const entries: readonly (readonly [string, unknown])[] =
     Object.entries(member);
   const [only, ...others] = entries;
   if (only === undefined || others.length > 0) return undefined;
   const [key, token] = only;
-  return key === "type" && typeof token === "string" ? token : undefined;
+  if (key !== "type") return undefined;
+  if (typeof token === "string") return [token];
+  const isTokenArray =
+    Array.isArray(token) && token.every((entry) => typeof entry === "string");
+  return isTokenArray ? (token) : undefined;
 }
 
 /**
@@ -584,15 +592,22 @@ function bareTypeToken(member: unknown): string | undefined {
  *  - **A union of bare primitives.** `anyOf: [{ type: "string" }, { type:
  *    "null" }]` and `type: ["string", "null"]` admit the same values; sibling
  *    keywords are ANDed with either form. Folded to the token array, in member
- *    order. A member carrying any other keyword keeps the union as written.
+ *    order; a member that is itself a folded union (`.nullable()` over a
+ *    primitive `z.union()`, or `.nullable().nullable()`) is flattened into it
+ *    and a repeated token collapses. A member carrying any other keyword keeps
+ *    the union as written.
  *  - **A tuple's arity.** `prefixItems` alone and `prefixItems` with the
  *    arity restated — `items: false` closing a tuple that has no rest element
  *    ({@link closesTupleByOmission}), `minItems`, and a closed tuple's
  *    `maxItems` — are the same tuple. Folded to an explicit `items: false`
  *    with each bound dropped when it only restates the prefix length. A
  *    `minItems` below the prefix length (an optional trailing member) is
- *    kept: it is information the shorter spelling never carried, so the two
- *    still differ and the change is surfaced rather than assumed away.
+ *    kept: the bare spelling is read as the required-arity tuple, because an
+ *    earlier projection wrote a required and an optional trailing member
+ *    identically and the document cannot say which was meant. A stored
+ *    optional-trailing tuple therefore still reads as changed, and the
+ *    reading is the same in the other direction (see
+ *    {@link closesTupleByOmission}).
  */
 function projectionSpellingNormalized(
   schema: Record<string, unknown>,
@@ -606,10 +621,10 @@ function projectionSpellingNormalized(
     Array.isArray(anyOf) &&
     anyOf.length > 1
   ) {
-    const tokens = anyOf.map((member) => bareTypeToken(member));
-    if (tokens.every((token) => token !== undefined)) {
+    const memberTokens = anyOf.map((member) => bareTypeTokens(member));
+    if (memberTokens.every((tokens) => tokens !== undefined)) {
       delete normalized["anyOf"];
-      normalized["type"] = tokens;
+      normalized["type"] = [...new Set(memberTokens.flat())];
     }
   }
 

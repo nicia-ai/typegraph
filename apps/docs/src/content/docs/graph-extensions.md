@@ -1130,7 +1130,9 @@ edge still relies on that admission, `removeKinds()` refuses with
 `MigrationError` (`reason: "ontology-tightening-violated"`) and lists the
 edges in `details.violations`; see
 [Ontology changes are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
-Edges touching rows of the removed kind itself never block the removal.
+Edges touching rows of the removed kind itself never block the removal; the
+rows are reclaimed by `materializeRemovals()` or an `eager` removal, not at
+commit.
 
 Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code

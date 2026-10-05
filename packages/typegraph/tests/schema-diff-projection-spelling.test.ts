@@ -187,6 +187,57 @@ describe("propertySchemasEqual over projection spellings", () => {
     ).toBe(true);
   });
 
+  it("flattens a union nested in a union and collapses a repeated token", () => {
+    // `z.union([z.string(), z.number()]).nullable()` under the earlier spelling.
+    expect(
+      equal(
+        {
+          anyOf: [
+            { anyOf: [{ type: "string" }, { type: "number" }] },
+            { type: "null" },
+          ],
+        },
+        { type: ["string", "number", "null"] },
+      ),
+    ).toBe(true);
+    // `z.string().nullable().nullable()` under the earlier spelling.
+    expect(
+      equal(
+        {
+          anyOf: [
+            { anyOf: [{ type: "string" }, { type: "null" }] },
+            { type: "null" },
+          ],
+        },
+        { type: ["string", "null"] },
+      ),
+    ).toBe(true);
+  });
+
+  it("still reports a nested union that admits a different set of types", () => {
+    const nested = {
+      anyOf: [
+        { anyOf: [{ type: "string" }, { type: "number" }] },
+        { type: "null" },
+      ],
+    };
+    expect(equal(nested, { type: ["string", "null"] })).toBe(false);
+    expect(
+      equal(nested, { type: ["string", "number", "null", "boolean"] }),
+    ).toBe(false);
+    expect(
+      equal(
+        {
+          anyOf: [
+            { anyOf: [{ type: "string", minLength: 2 }, { type: "number" }] },
+            { type: "null" },
+          ],
+        },
+        { type: ["string", "number", "null"] },
+      ),
+    ).toBe(false);
+  });
+
   it("keeps a union whose member carries any other keyword", () => {
     expect(
       equal(
