@@ -760,7 +760,9 @@ The `store.search` facade — `fulltext`, `vector`, `hybrid`, and
 `rebuildFulltext` — accepts any registered kind, compile-time or
 runtime, with no type cast. The hit's `node` type narrows to the
 concrete typed node only when the kind literal is statically known
-in `Store<G>`; extension kinds widen to the base `Node`. Misspelled
+in `Store<G>` (and the call does not state `expansion: "subclasses"` on a
+kind the ontology can affect, which widens `kind` and the `NodeId` brand);
+extension kinds widen to the base `Node`. Misspelled
 kind names throw `KindNotFoundError` at the call site instead of
 returning empty results.
 

@@ -585,6 +585,12 @@ const acrossKinds = await store.search.vector("Content", {
 });
 ```
 
+An expanded search types its hits like the `from()` alias it expands to:
+`acrossKinds[0].node` keeps `Content`'s properties, while its `kind` is
+`string` and its `NodeId` brand widens whenever the ontology can return
+another kind's row. See
+[Fulltext Search ▸ Options reference](/fulltext-search#options-reference).
+
 The `where` predicate is compiled by the same query compiler as
 `store.query()` — property predicates behave identically, use the same
 declared indexes, and apply the same current-read semantics (tombstoned

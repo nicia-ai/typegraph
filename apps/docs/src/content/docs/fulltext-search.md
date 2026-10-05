@@ -493,6 +493,31 @@ applies (search across multiple kinds must agree on one declared metric; see
 this asymmetry surprises you, that's the intended signal that it's worth
 double-checking whether your search call should opt in explicitly.
 
+A hit's type follows the stated axis. With `"exact"` (stated or omitted),
+`hit.node` is the searched kind exactly. With `expansion: "subclasses"` on a
+kind the ontology can affect — one another kind declares itself a subclass
+of, or one in an `equivalentTo` pair — `hit.node` keeps the searched kind's
+properties while its `kind` widens to `string` and its `NodeId` brand widens,
+exactly as a `from()` alias over that kind does: the row may be a subclass,
+so its id is not accepted by the searched kind's own `update()`. Narrow on
+`hit.node.kind` before treating the row as one concrete kind. A kind no
+subsumption relation names keeps its exact type, and an `expansion` value
+that is not a literal at the call site (a variable typed
+`"exact" | "subclasses"`) always types the hit in the widened form.
+
+```typescript
+const hits = await store.search.fulltext("Content", {
+  query: "climate",
+  limit: 10,
+  expansion: "subclasses",
+});
+
+for (const hit of hits) {
+  hit.node.title; // typed: every subclass satisfies Content's properties
+  hit.node.kind; // string — "Content", or any of its subclasses
+}
+```
+
 The same three options are available on `store.search.vector` and
 `store.search.hybrid` (where `where` and `expansion` apply to both
 halves). Search always follows current-read semantics: tombstoned nodes and
@@ -500,7 +525,8 @@ nodes outside their validity window never rank.
 
 Returned hits are `FulltextSearchHit<Node<K>>` with `node`, `score`
 (higher = more relevant), `rank` (1-based), and `snippet` (when
-requested).
+requested). Under an affecting `expansion: "subclasses"`, `Node<K>` is the
+widened form described above.
 
 ## Reciprocal Rank Fusion
 

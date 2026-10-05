@@ -14,6 +14,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  embedding,
   searchable,
   subClassOf,
 } from "../../../src";
@@ -87,17 +88,24 @@ const narrowerGraph = defineGraph({
   ],
 });
 
-// Fulltext fixture: a distinct graph so its `searchable()` field doesn't
-// have to be threaded through `subsumptionGraph`'s other, non-search cases.
+// Search fixture: a distinct graph so its `searchable()` and `embedding()`
+// fields don't have to be threaded through `subsumptionGraph`'s other,
+// non-search cases.
 const SearchMedia = defineNode("TsSearchMedia", {
-  schema: z.object({ title: searchable({ language: "english" }) }),
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    embedding: embedding(4).optional(),
+  }),
 });
 const SearchPodcast = defineNode("TsSearchPodcast", {
   schema: z.object({
     title: searchable({ language: "english" }),
+    embedding: embedding(4).optional(),
     rssUrl: z.string(),
   }),
 });
+const SEARCH_QUERY_EMBEDDING = [1, 0, 0, 0];
+const SEARCH_KINDS = ["TsSearchMedia", "TsSearchPodcast"];
 
 const searchGraph = defineGraph({
   id: "typed_subsumption_search_integration",
@@ -203,10 +211,96 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         limit: 10,
         expansion: "subclasses",
       });
-      expect(expanded.map((result) => result.node.kind).toSorted()).toEqual([
+      expect(expanded.map((result) => result.node.kind).toSorted()).toEqual(
+        SEARCH_KINDS,
+      );
+    });
+
+    it(`vector search stays exact-kind by default and returns the subclass row with expansion: "subclasses", on both engines`, async (ctx) => {
+      const store = await context.createStore(searchGraph);
+      if (store.backend.capabilities.vector?.supported !== true) {
+        ctx.skip();
+      }
+
+      await store.nodes.TsSearchMedia.create({
+        title: "vector media",
+        embedding: SEARCH_QUERY_EMBEDDING,
+      });
+      await store.nodes.TsSearchPodcast.create({
+        title: "vector podcast",
+        embedding: SEARCH_QUERY_EMBEDDING,
+        rssUrl: "https://x",
+      });
+
+      const exact = await store.search.vector("TsSearchMedia", {
+        fieldPath: "embedding",
+        queryEmbedding: SEARCH_QUERY_EMBEDDING,
+        limit: 10,
+      });
+      expect(exact.map((result) => result.node.kind)).toEqual([
         "TsSearchMedia",
-        "TsSearchPodcast",
       ]);
+
+      const expanded = await store.search.vector("TsSearchMedia", {
+        fieldPath: "embedding",
+        queryEmbedding: SEARCH_QUERY_EMBEDDING,
+        limit: 10,
+        expansion: "subclasses",
+      });
+      expect(expanded.map((result) => result.node.kind).toSorted()).toEqual(
+        SEARCH_KINDS,
+      );
+    });
+
+    it(`hybrid search stays exact-kind by default and returns the subclass row with expansion: "subclasses", on both engines`, async (ctx) => {
+      const store = await context.createStore(searchGraph);
+      if (
+        store.backend.capabilities.fulltext?.supported !== true ||
+        store.backend.capabilities.vector?.supported !== true
+      ) {
+        ctx.skip();
+      }
+
+      await store.nodes.TsSearchMedia.create({
+        title: "unique_ts_hybrid_marker media",
+        embedding: SEARCH_QUERY_EMBEDDING,
+      });
+      await store.nodes.TsSearchPodcast.create({
+        title: "unique_ts_hybrid_marker podcast",
+        embedding: SEARCH_QUERY_EMBEDDING,
+        rssUrl: "https://x",
+      });
+
+      const exact = await store.search.hybrid("TsSearchMedia", {
+        vector: {
+          fieldPath: "embedding",
+          queryEmbedding: SEARCH_QUERY_EMBEDDING,
+        },
+        fulltext: { query: "unique_ts_hybrid_marker" },
+        limit: 10,
+      });
+      expect(exact.map((result) => result.node.kind)).toEqual([
+        "TsSearchMedia",
+      ]);
+
+      const expanded = await store.search.hybrid("TsSearchMedia", {
+        vector: {
+          fieldPath: "embedding",
+          queryEmbedding: SEARCH_QUERY_EMBEDDING,
+        },
+        fulltext: { query: "unique_ts_hybrid_marker" },
+        limit: 10,
+        expansion: "subclasses",
+      });
+      expect(expanded.map((result) => result.node.kind).toSorted()).toEqual(
+        SEARCH_KINDS,
+      );
+      // Both legs found the subclass row, not only the fused union.
+      const podcast = expanded.find(
+        (result) => result.node.kind === "TsSearchPodcast",
+      );
+      expect(podcast?.vector?.node.kind).toBe("TsSearchPodcast");
+      expect(podcast?.fulltext?.node.kind).toBe("TsSearchPodcast");
     });
 
     // NOT mutation-checked: the outer `WHERE nodes.kind = <kind>` in
