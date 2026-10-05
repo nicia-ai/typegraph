@@ -809,6 +809,85 @@ export function registerCompositionExistenceIntegrationTests(
     // `hardDelete` above then rejects with `CompositionExistenceError`
     // instead of resolving.
 
+    it("case 13: an upsert never restores a required part without a live whole", async () => {
+      type ExistenceStore = Awaited<
+        ReturnType<typeof context.createStore<ReturnType<typeof buildGraph>>>
+      >;
+      const upserts: Readonly<
+        Record<string, (store: ExistenceStore, id: string) => Promise<unknown>>
+      > = {
+        upsertById: (store, id) => store.nodes.EeSegment.upsertById(id, {}),
+        bulkUpsertById: (store, id) =>
+          store.nodes.EeSegment.bulkUpsertById([{ id, props: {} }]),
+        bulkReplaceById: (store, id) =>
+          store.nodes.EeSegment.bulkReplaceById([{ id, props: {} }]),
+        "bulkUpsertById in a caught transaction": (store, id) =>
+          store.transaction(async (tx) => {
+            await tx.nodes.EeSegment.bulkUpsertById([{ id, props: {} }]);
+          }),
+      };
+      const retirements: Readonly<
+        Record<
+          string,
+          (
+            store: ExistenceStore,
+            ids: Readonly<{ segment: string; episode: string }>,
+          ) => Promise<void>
+        >
+      > = {
+        "the part was deleted": (store, ids) =>
+          store.nodes.EeSegment.delete(ids.segment),
+        "its whole was deleted": (store, ids) =>
+          store.nodes.EeEpisode.delete(ids.episode),
+      };
+
+      // MUTATION CHECK: drop the `assertRestoredRequiredPartsAttached` calls
+      // from `executeNodeUpdate` and `executeNodeUpsertUpdateBatch`
+      // (src/store/operations/node-operations.ts) — each upsert then restores
+      // the segment with its composition edge still deleted, and
+      // `verifyConstraintFences` reports it.
+      for (const [retirement, retire] of Object.entries(retirements)) {
+        for (const [name, upsert] of Object.entries(upserts)) {
+          const store = await context.createStore(buildGraph(nextGraphId()));
+          const episode = await store.nodes.EeEpisode.create({});
+          const segment = await store.nodes.EeSegment.create(
+            {},
+            { partOf: { whole: episode } },
+          );
+          await retire(store, { segment: segment.id, episode: episode.id });
+
+          const error = await upsert(store, segment.id).catch(
+            (error_: unknown) => error_,
+          );
+          const label = `${name} after ${retirement}`;
+          expect(error, label).toBeInstanceOf(CompositionExistenceError);
+          expect(
+            (error as CompositionExistenceError).details,
+            label,
+          ).toMatchObject({
+            situation: "create",
+            partKind: "EeSegment",
+            partId: segment.id,
+          });
+          expect(await store.nodes.EeSegment.getById(segment.id), label).toBe(
+            undefined,
+          );
+          expect(await store.verifyConstraintFences(), label).toEqual([]);
+        }
+      }
+
+      // An optional part is restored bare, as before.
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const collection = await store.nodes.EeCollection.create({});
+      const tag = await store.nodes.EeTag.create(
+        {},
+        { partOf: { whole: collection } },
+      );
+      await store.nodes.EeTag.delete(tag.id);
+      await store.nodes.EeTag.upsertById(tag.id, {});
+      expect(await store.nodes.EeTag.getById(tag.id)).toBeDefined();
+    });
+
     it("getOrCreateByConstraint: partOf applied on created, refused on found/updated naming the current whole", async () => {
       const store = await context.createStore(buildKeyedGraph(nextGraphId()));
       const episodeA = await store.nodes.EeEpisode.create({});

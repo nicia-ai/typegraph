@@ -1298,6 +1298,60 @@ export async function findLiveCompositionWhole(
 }
 
 /**
+ * THE refusal a node RESURRECTION owes that states no attachment: a tombstoned
+ * part of a required-existence kind may only come back holding a live whole.
+ *
+ * The restore-side twin of {@link resolveCompositionCreate}'s bare-create
+ * refusal, for the entries that revive a row without accepting a `partOf`
+ * (`upsertById`, `bulkUpsertById`, `bulkReplaceById`, and an update that
+ * clears a tombstone). Deleting a part removes its own composition edges, so
+ * the usual answer is that no attachment survives and the restore is refused;
+ * the read keeps the verdict honest for a tombstone whose edge does survive
+ * (rows written outside the store's write path), judged through the same
+ * readers the `compositionExistence` audit uses
+ * ({@link findLiveCompositionAttachment}, {@link readLiveCompositionWholes}).
+ *
+ * Called before the frame's first statement, for every candidate at once, so
+ * a caller that catches the refusal inside an enclosing `store.transaction`
+ * keeps nothing of the batch. A candidate whose row is live is not being
+ * restored and is skipped; a kind that requires no whole costs no read.
+ */
+export async function assertRestoredRequiredPartsAttached(
+  ctx: Readonly<{
+    graphId: string;
+    registry: KindRegistry;
+    lock: GraphWriteLock;
+  }>,
+  target: GraphReadBackend,
+  parts: readonly CompositionNodeRef[],
+): Promise<void> {
+  for (const part of parts) {
+    if (ctx.registry.compositionExistence(part.kind) !== "required") continue;
+    const row = await target.getNode(ctx.graphId, part.kind, part.id);
+    if (isEndpointRowLive(row)) continue;
+    const attachment = await findLiveCompositionAttachment(
+      ctx.registry,
+      target,
+      ctx.graphId,
+      part.kind,
+      part.id,
+    );
+    const liveWholes =
+      attachment === undefined ?
+        []
+      : await readLiveCompositionWholes(target, ctx.graphId, [
+          attachment.whole,
+        ]);
+    if (liveWholes.length > 0) continue;
+    throw new CompositionExistenceError({
+      partKind: part.kind,
+      partId: part.id,
+      situation: "create",
+    });
+  }
+}
+
+/**
  * Every concrete node kind the proposed/live registry declares a
  * required-existence composition part — expanded through
  * `expandSubClasses` so a SUBCLASS of a declared required part kind (which

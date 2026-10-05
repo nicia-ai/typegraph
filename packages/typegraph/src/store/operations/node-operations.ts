@@ -255,6 +255,7 @@ import {
 import {
   assertCompositionExistencePreserved,
   assertCompositionWholeEndpointLive,
+  assertRestoredRequiredPartsAttached,
   buildCompositionCreateEdgeInput,
   type CompositionAttachmentRequest,
   type CompositionCreateWork,
@@ -4503,7 +4504,14 @@ export async function executeNodeUpdate<G extends GraphDef>(
       : false,
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
+      if (options?.clearDeleted === true) {
+        await assertRestoredRequiredPartsAttached(
+          { graphId: ctx.graphId, registry: ctx.registry, lock },
+          target,
+          [{ kind: input.kind, id: input.id }],
+        );
+      }
       await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
       const node = await performNodeUpdateWithResurrectionRecovery(
@@ -4880,6 +4888,15 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
+      // A resurrection that states an attachment is decided below; one that
+      // states none may only restore a part that still holds a live whole.
+      if (options?.clearDeleted === true && compositionAttachment === undefined) {
+        await assertRestoredRequiredPartsAttached(
+          { graphId: ctx.graphId, registry: ctx.registry, lock },
+          target,
+          [{ kind: input.kind, id: input.id }],
+        );
+      }
       await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
       // Reads first, then writes — `prepareCompositionAttachmentDecision`
@@ -5086,7 +5103,14 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       ) && nodeRequiresIdentityLock(ctx),
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
+      await assertRestoredRequiredPartsAttached(
+        { graphId: ctx.graphId, registry: ctx.registry, lock },
+        target,
+        entries
+          .filter((entry) => entry.clearDeleted)
+          .map((entry) => ({ kind: entry.input.kind, id: entry.input.id })),
+      );
       const resolvedRows =
         (
           target.capabilities.execution.interactiveTransactions &&

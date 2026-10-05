@@ -587,7 +587,10 @@ Two refusals follow from that one declaration:
   (`COMPOSITION_WHOLE_REQUIRED`) before any row is written. Pass
   `partOf: { whole }` naming the whole; the node and its composition edge are written
   in the same transaction — a lost composition claim or a dead/missing whole
-  aborts the create too.
+  aborts the create too. Restoring a soft-deleted part is held to the same
+  rule: `upsertById`, `bulkUpsertById` and `bulkReplaceById` take no `partOf`,
+  so they refuse to restore one that holds no live whole. Restore it with
+  `getOrCreateByConstraint` and a `partOf`, or `create` with the same `id`.
 - **Detaching a live part is refused.** Ending, soft-deleting, or
   hard-deleting the composition edge of a LIVE required part throws the same
   error with `situation: "detach"` (`COMPOSITION_DETACH_REFUSED`). A part that
