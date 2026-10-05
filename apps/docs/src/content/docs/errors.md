@@ -351,7 +351,7 @@ cannot answer a request. Its code names the reason:
   hide the notes that name a class.
 
 A range with more boundaries than the requested `limit` is not an error —
-`replay` and `transitionsOf` page, returning a `nextFrom` cursor on the
+`replay` and `transitionsOf` page, returning a `nextCursor` on the
 result (see [Replay and identity history](/identity/#replay-and-identity-history)).
 
 ```typescript

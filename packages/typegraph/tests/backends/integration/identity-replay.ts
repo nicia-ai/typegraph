@@ -12,7 +12,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  type TransitionPageCursor,
+} from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -31,6 +36,20 @@ async function provisionIdentityReplayStore(context: IntegrationTestContext) {
     history: true,
   });
   return store;
+}
+
+async function provisionPagedLineage(context: IntegrationTestContext) {
+  const store = await provisionIdentityReplayStore(context);
+  const a = { kind: "Person" as const, id: "cursor-a" };
+  const b = { kind: "Person" as const, id: "cursor-b" };
+  await store.nodes.Person.create({}, { id: a.id });
+  await store.nodes.Person.create({}, { id: b.id });
+  const merge = await store.identity.assertSame(a, b);
+  await store.identity.retractAssertion(merge.assertion.id);
+  await store.identity.assertSame(a, b);
+  const firstPage = await store.identity.transitionsOf(a, { limit: 1 });
+  const cursor = requireDefined(firstPage.nextCursor);
+  return { store, a, firstPage, cursor };
 }
 
 export function registerIdentityReplayIntegrationTests(
@@ -123,7 +142,7 @@ export function registerIdentityReplayIntegrationTests(
     // out of the reader's SQL (which no longer takes revision bounds at all)
     // and into `replay.ts`, so the shared suite is where the two dialects are
     // pinned to the same answer rather than each certifying its own.
-    it("discovers lineage outside the requested window, and pages by boundary through nextFrom", async () => {
+    it("discovers lineage outside the requested window, and pages by boundary through nextCursor", async () => {
       const store = await provisionIdentityReplayStore(context);
       const a = { kind: "Person" as const, id: "page-a" };
       const b = { kind: "Person" as const, id: "page-b" };
@@ -148,7 +167,7 @@ export function registerIdentityReplayIntegrationTests(
       expect(windowed.transitions.length).toBeGreaterThan(0);
 
       const whole = await store.identity.transitionsOf(a);
-      expect(whole.nextFrom).toBeUndefined();
+      expect(whole.nextCursor).toBeUndefined();
       const boundaries = new Set(
         whole.transitions.map((transition) => transition.recorded),
       );
@@ -158,13 +177,13 @@ export function registerIdentityReplayIntegrationTests(
       // cursor that skipped a boundary, or a page that came back empty,
       // satisfies "differs" and fails here. This is also the one place a
       // dialect-decoded `recorded_at` (PostgreSQL hands back a timestamptz,
-      // SQLite a text column) round-trips back in through `fromRecorded`.
+      // SQLite a text column) round-trips back in through `cursor`.
       const paged: string[] = [];
-      let cursor: string | undefined;
+      let cursor: TransitionPageCursor | undefined;
       for (let page = 0; page <= boundaries.size; page += 1) {
         const result = await store.identity.transitionsOf(a, {
           limit: 1,
-          ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+          ...(cursor === undefined ? {} : { cursor }),
         });
         expect(
           new Set(result.transitions.map((transition) => transition.recorded))
@@ -173,13 +192,101 @@ export function registerIdentityReplayIntegrationTests(
         paged.push(
           ...result.transitions.map((transition) => transition.transitionId),
         );
-        cursor = result.nextFrom;
+        cursor = result.nextCursor;
         if (cursor === undefined) break;
       }
       expect(cursor).toBeUndefined();
       expect(paged).toEqual(
         whole.transitions.map((transition) => transition.transitionId),
       );
+    });
+
+    // The cursor and the recorded window are different inputs. The brand is
+    // type-level only, so these pin the RUNTIME separation: a cursor handed to
+    // a window bound, or a bare instant handed to `cursor`, is refused rather
+    // than silently read as the other.
+    describe("page cursor is distinct from the recorded window", () => {
+      const WINDOW_GIVEN_CURSOR =
+        /must be a recorded instant, not a page cursor/;
+      const CURSOR_GIVEN_NON_CURSOR = /cursor must be a page cursor/;
+
+      it("fromRecorded and toRecorded refuse a page cursor on both reads", async () => {
+        const { store, a, cursor } = await provisionPagedLineage(context);
+        for (const bound of ["fromRecorded", "toRecorded"] as const) {
+          const misuse = { [bound]: cursor };
+          await expect(store.identity.transitionsOf(a, misuse)).rejects.toThrow(
+            WINDOW_GIVEN_CURSOR,
+          );
+          await expect(store.identity.replay(a, misuse)).rejects.toThrow(
+            WINDOW_GIVEN_CURSOR,
+          );
+        }
+      });
+
+      it("cursor refuses a bare recorded instant and arbitrary text", async () => {
+        const { store, a, firstPage } = await provisionPagedLineage(context);
+        const instant = requireDefined(firstPage.transitions[0]).recorded;
+        for (const notACursor of [instant, "not-a-cursor"]) {
+          const misuse = { cursor: notACursor as TransitionPageCursor };
+          await expect(store.identity.transitionsOf(a, misuse)).rejects.toThrow(
+            CURSOR_GIVEN_NON_CURSOR,
+          );
+          await expect(store.identity.replay(a, misuse)).rejects.toThrow(
+            CURSOR_GIVEN_NON_CURSOR,
+          );
+        }
+      });
+
+      it("a cursor composes with the window by intersection", async () => {
+        const { store, a, firstPage, cursor } =
+          await provisionPagedLineage(context);
+        const whole = await store.identity.transitionsOf(a);
+        const firstBoundary = requireDefined(firstPage.transitions[0]).recorded;
+        const lastBoundary = requireDefined(whole.transitions.at(-1)).recorded;
+        const ids = (history: typeof whole) =>
+          history.transitions.map((transition) => transition.transitionId);
+        const afterFirstPage = whole.transitions.filter(
+          (transition) => transition.recorded !== firstBoundary,
+        );
+
+        // A window that already contains the cursor changes nothing.
+        const sameWindow = await store.identity.transitionsOf(a, {
+          cursor,
+          toRecorded: lastBoundary,
+        });
+        expect(ids(sameWindow)).toEqual(
+          afterFirstPage.map((transition) => transition.transitionId),
+        );
+
+        // A window that ends before the cursor leaves nothing to read, and
+        // says so without a continuation.
+        const endsBeforeCursor = await store.identity.transitionsOf(a, {
+          cursor,
+          toRecorded: firstBoundary,
+        });
+        expect(endsBeforeCursor.transitions).toEqual([]);
+        expect(endsBeforeCursor.nextCursor).toBeUndefined();
+
+        // A window that starts after the cursor wins: the page begins at the
+        // later of the two, on replay exactly as on transitionsOf.
+        const laterStart = requireDefined(whole.transitions.at(-1)).recorded;
+        const startsAfterCursor = await store.identity.transitionsOf(a, {
+          cursor,
+          fromRecorded: laterStart,
+        });
+        expect(
+          startsAfterCursor.transitions.every(
+            (transition) => transition.recorded === laterStart,
+          ),
+        ).toBe(true);
+        const replayed = await store.identity.replay(a, {
+          cursor,
+          fromRecorded: laterStart,
+        });
+        expect(
+          replayed.steps.map((step) => step.transition.transitionId),
+        ).toEqual(ids(startsAfterCursor));
+      });
     });
   });
 }

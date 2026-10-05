@@ -98,43 +98,83 @@ export type IdentityReplayStep<G extends GraphDef> = Readonly<{
   after: readonly IdentityNodeReference<G>[];
 }>;
 
-/**
- * The continuation cursor a paged transition read hands back: the recorded
- * instant of the first BOUNDARY the page did not include, or `undefined` when
- * the page reached the end of the lineage. Pass it back as `fromRecorded` to
- * read the next page — `fromRecorded` is inclusive, so the boundary this
- * names opens the next page exactly once.
- *
- * SCOPED TO THE TRANSITION LOG ONLY. When the cutoff boundary holds a
- * restored row (see {@link IdentityTransition.restored}), the revision this
- * names was minted by the SOURCE graph's clock, not this graph's — it is
- * `RecordedInstant`-shaped by construction (`requireTypeGraphRecordedRevision`
- * cannot tell the two apart), but it must never be passed to
- * `store.asOfRecorded`, which anchors a historical read on THIS graph's own
- * recorded axis. Use it only as `fromRecorded` on the next `transitionsOf` /
- * `replay` call.
- */
 declare const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
 
 /**
- * A page cursor for `transitionsOf` / `replay`. It is minted from a
- * recorded instant, including one a restored row's SOURCE graph allocated,
- * so it must not be passed to `store.asOfRecorded`. Pass it only as
- * `fromRecorded`.
+ * The continuation cursor a paged transition read hands back: it names the
+ * first BOUNDARY the page did not include, and is `undefined` when the page
+ * reached the end of the lineage. Pass it back as `options.cursor` to read the
+ * next page; the boundary it names opens that page exactly once.
+ *
+ * A cursor is NOT a recorded instant. It is minted from one, including one a
+ * restored row's SOURCE graph allocated (see {@link IdentityTransition.restored}),
+ * so it must never reach `store.asOfRecorded`, which anchors a historical read
+ * on THIS graph's own recorded axis. To keep the two apart at runtime as well
+ * as in the type system, its string form carries a prefix no recorded instant
+ * has: `fromRecorded` / `toRecorded` refuse it, and `cursor` refuses a bare
+ * recorded instant.
  */
 export type TransitionPageCursor = string & {
   readonly [TRANSITION_PAGE_CURSOR_BRAND]: "TransitionPageCursor";
 };
 
+const TRANSITION_PAGE_CURSOR_PREFIX = "tpc1:";
+
 export function transitionPageCursor(
   instant: RecordedInstant,
 ): TransitionPageCursor {
-  return instant as string as TransitionPageCursor;
+  return `${TRANSITION_PAGE_CURSOR_PREFIX}${instant}` as TransitionPageCursor;
+}
+
+function isTransitionPageCursorShaped(value: string): boolean {
+  return value.startsWith(TRANSITION_PAGE_CURSOR_PREFIX);
+}
+
+/** The revision a cursor names; refuses anything that was not minted as a cursor. */
+function requireCursorRevision(cursor: string): number {
+  if (!isTransitionPageCursorShaped(cursor))
+    throw new ValidationError(
+      "cursor must be a page cursor returned as nextCursor by a previous transitionsOf / replay page.",
+      {
+        issues: [
+          {
+            path: "cursor",
+            message:
+              "Not a transition page cursor. A recorded instant belongs in fromRecorded / toRecorded.",
+          },
+        ],
+      },
+    );
+  return requireTypeGraphRecordedRevision(
+    cursor.slice(TRANSITION_PAGE_CURSOR_PREFIX.length),
+    "cursor",
+  );
+}
+
+/** A window bound is a recorded instant; a page cursor handed to one is a misuse with a specific remedy. */
+function requireWindowRevision(
+  value: string,
+  surface: "fromRecorded" | "toRecorded",
+): number {
+  if (isTransitionPageCursorShaped(value))
+    throw new ValidationError(
+      `${surface} must be a recorded instant, not a page cursor.`,
+      {
+        issues: [
+          {
+            path: surface,
+            message:
+              "Got a transition page cursor. Pass nextCursor as options.cursor.",
+          },
+        ],
+      },
+    );
+  return requireTypeGraphRecordedRevision(value, surface);
 }
 
 type PagedTransitions = Readonly<{
   rows: readonly IdentityTransitionRow[];
-  nextFrom?: TransitionPageCursor | undefined;
+  nextCursor?: TransitionPageCursor | undefined;
 }>;
 
 export type IdentityReplay<G extends GraphDef> = Readonly<{
@@ -142,31 +182,41 @@ export type IdentityReplay<G extends GraphDef> = Readonly<{
   /** Set when the retention watermark cut history above the requested start. */
   truncatedBefore?: RecordedInstant | undefined;
   /**
-   * Set when `limit` capped this page; pass it as `fromRecorded` for the
-   * next one. Addresses the TRANSITION LOG only — like
+   * Set when `limit` capped this page; pass it as `cursor` for the next one.
+   * Addresses the TRANSITION LOG only — like
    * {@link IdentityTransition.restored}'s `at`, this can name a revision a
    * restored row's SOURCE graph allocated, not this graph. Never pass it to
-   * `store.asOfRecorded`; pass it only as `fromRecorded`.
+   * `store.asOfRecorded`; pass it only as `cursor`.
    */
-  nextFrom?: TransitionPageCursor | undefined;
+  nextCursor?: TransitionPageCursor | undefined;
 }>;
 
 /** One page of {@link identityTransitionsOf}'s answer. */
 export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
   transitions: readonly IdentityTransition<G>[];
   /**
-   * Set when `limit` capped this page; pass it as `fromRecorded` for the
-   * next one. Addresses the TRANSITION LOG only — like
+   * Set when `limit` capped this page; pass it as `cursor` for the next one.
+   * Addresses the TRANSITION LOG only — like
    * {@link IdentityTransition.restored}'s `at`, this can name a revision a
    * restored row's SOURCE graph allocated, not this graph. Never pass it to
-   * `store.asOfRecorded`; pass it only as `fromRecorded`.
+   * `store.asOfRecorded`; pass it only as `cursor`.
    */
-  nextFrom?: TransitionPageCursor | undefined;
+  nextCursor?: TransitionPageCursor | undefined;
 }>;
 
+/**
+ * `fromRecorded` / `toRecorded` bound the recorded window (inclusive).
+ * `cursor` continues a paged read from the `nextCursor` a previous page
+ * returned. The cursor is a position within the windowed lineage, so it
+ * composes with the window by intersection: the page starts at the later of
+ * `fromRecorded` and the cursor, and ends at `toRecorded`. A cursor combined
+ * with a different window than the one it came from is therefore well
+ * defined, never an error.
+ */
 export type IdentityReplayOptions = Readonly<{
   fromRecorded?: string | undefined;
   toRecorded?: string | undefined;
+  cursor?: TransitionPageCursor | undefined;
   limit?: number | undefined;
 }>;
 
@@ -413,7 +463,7 @@ export function identityReplayWalkIncompleteError(
 /**
  * A page size must be a whole number of at least one. The lower bound is not
  * decoration: {@link pageBoundaries} cuts the page at `boundaries[limit]`, so
- * `limit: 0` would hand back an empty page whose `nextFrom` names the very
+ * `limit: 0` would hand back an empty page whose `nextCursor` names the very
  * first boundary — re-issuing with that cursor returns the identical empty
  * page forever, and the documented `while (cursor !== undefined)` paging loop
  * never terminates. A fractional limit indexes past a boundary that is not
@@ -429,6 +479,14 @@ function resolveLimit(limit: number | undefined): number {
       resolved,
     );
   return resolved;
+}
+
+function laterRevision(
+  left: number | undefined,
+  right: number | undefined,
+): number | undefined {
+  if (left === undefined || right === undefined) return left ?? right;
+  return Math.max(left, right);
 }
 
 function distinctBoundaries(
@@ -458,9 +516,9 @@ function windowedRows(
  * boundaries, and every note sharing a boundary shares one replay step, so a
  * row-counted page could split a single step's rows across two pages.
  *
- * `nextFrom` names the first boundary this page did NOT include, so a caller
- * pages by re-issuing the identical call with `fromRecorded: nextFrom`
- * (`fromRecorded` is inclusive). One owner for both `transitionsOf` and
+ * `nextCursor` names the first boundary this page did NOT include, so a caller
+ * pages by re-issuing the identical call with `cursor: nextCursor` (the
+ * cursor's boundary is inclusive). One owner for both `transitionsOf` and
  * `replay`: they page identically, or a caller pairing an explanation from
  * one with a membership step from the other would see the two disagree about
  * where the page ended.
@@ -477,7 +535,7 @@ function pageBoundaries(
   );
   return {
     rows: rows.filter((row) => row.recorded_revision < cutoffRevision),
-    nextFrom: transitionPageCursor(
+    nextCursor: transitionPageCursor(
       createRecordedInstant(cutoffRow.recorded_revision, cutoffRow.recorded_at),
     ),
   };
@@ -508,7 +566,7 @@ type WalkedTransitions = Readonly<{
   fromRevision: number | undefined;
   toRevision: number | undefined;
   rows: readonly IdentityTransitionRow[];
-  nextFrom?: TransitionPageCursor | undefined;
+  nextCursor?: TransitionPageCursor | undefined;
 }>;
 
 /**
@@ -534,14 +592,19 @@ async function walkedTransitionsFor<G extends GraphDef>(
   const limit = resolveLimit(options?.limit);
   const seed = registeredPlainRef(ctx, ref);
   const walkSeed = await currentClassCanonicalSeed(ctx, seed);
-  const fromRevision =
+  const windowFromRevision =
     options?.fromRecorded === undefined ?
       undefined
-    : requireTypeGraphRecordedRevision(options.fromRecorded, "fromRecorded");
+    : requireWindowRevision(options.fromRecorded, "fromRecorded");
   const toRevision =
     options?.toRecorded === undefined ?
       undefined
-    : requireTypeGraphRecordedRevision(options.toRecorded, "toRecorded");
+    : requireWindowRevision(options.toRecorded, "toRecorded");
+  const cursorRevision =
+    options?.cursor === undefined ?
+      undefined
+    : requireCursorRevision(options.cursor);
+  const fromRevision = laterRevision(windowFromRevision, cursorRevision);
   const discovered = await walkClassLineage(ctx, walkSeed);
   const page = pageBoundaries(
     windowedRows(discovered, fromRevision, toRevision),
@@ -552,7 +615,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
     fromRevision,
     toRevision,
     rows: page.rows,
-    ...(page.nextFrom === undefined ? {} : { nextFrom: page.nextFrom }),
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
   };
 }
 
@@ -566,10 +629,10 @@ export async function identityTransitionsOf<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
-  const { rows, nextFrom } = await walkedTransitionsFor(ctx, ref, options);
+  const { rows, nextCursor } = await walkedTransitionsFor(ctx, ref, options);
   return {
     transitions: rows.map((row) => publicTransition<G>(row)),
-    ...(nextFrom === undefined ? {} : { nextFrom }),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
   };
 }
 
@@ -582,7 +645,7 @@ export async function identityTransitionsOf<G extends GraphDef>(
  * between two consecutive boundaries undetected. `store.identity.replay` is
  * a thin wrapper over this.
  *
- * Paged by boundary exactly as `transitionsOf` is: `nextFrom` names the first
+ * Paged by boundary exactly as `transitionsOf` is: `nextCursor` names the first
  * boundary this page stopped short of. Because the page is cut BEFORE
  * restored rows are excluded, `steps` can be shorter than `limit` boundaries
  * on a page whose lineage mixes restored and native rows — the page boundary
@@ -594,7 +657,7 @@ export async function identityReplay<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
-  const { seed, fromRevision, toRevision, rows, nextFrom } =
+  const { seed, fromRevision, toRevision, rows, nextCursor } =
     await walkedTransitionsFor(ctx, ref, options);
 
   const retention = await readTransitionRetentionDetails(
@@ -671,6 +734,6 @@ export async function identityReplay<G extends GraphDef>(
   return {
     steps,
     ...(truncatedBefore === undefined ? {} : { truncatedBefore }),
-    ...(nextFrom === undefined ? {} : { nextFrom }),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
   };
 }

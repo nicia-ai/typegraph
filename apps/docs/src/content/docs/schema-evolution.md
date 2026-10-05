@@ -30,14 +30,13 @@ These changes are backwards compatible and auto-migrate without intervention:
 - Adding new node types
 - Adding new edge types
 - Adding optional properties (with defaults)
-- Adding `broader`, `narrower`, `partOf`, `hasPart`, or `relatedTo` ontology
-  relations
+- Adding `broader`, `narrower`, or `relatedTo` ontology relations
 - Removing `disjointWith` ontology relations
 - Changing per-kind annotations (UI hints, audit policy, etc.)
 - Changing graph-scoped annotations (display metadata, capabilities, etc.)
 
-Adding `disjointWith`, `subClassOf`, or `equivalentTo` — and removing
-`subClassOf` or `equivalentTo` — auto-migrate too, but only after a
+Adding `disjointWith`, `subClassOf`, `equivalentTo`, `partOf`, or `hasPart` —
+and removing `subClassOf` or `equivalentTo` — auto-migrate too, but only after a
 data check. See
 [Ontology tightenings are checked against your data](#ontology-tightenings-are-checked-against-your-data)
 below.
@@ -176,7 +175,8 @@ publishing the new version:
 | `disjointWith`                                | Warning — checked against live nodes               | Safe                                                |
 | `subClassOf`, `equivalentTo`                  | Warning — checked against live nodes               | Warning — checked against live edges               |
 | `inverseOf`, `implies`                        | Breaking                                            | Breaking                                            |
-| `broader`, `narrower`, `partOf`, `hasPart`, `relatedTo` | Safe | Safe |
+| `partOf`, `hasPart`                           | Warning — checked against live parts (one whole per part, no cycles, and a required whole when `existence: "required"`) | Breaking |
+| `broader`, `narrower`, `relatedTo`            | Safe | Safe |
 | an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
 
 `sameAs` and `differentFrom` no longer have a public factory to author them
@@ -205,6 +205,17 @@ a `differentFrom` relation exactly like the always-safe row.
   edges — a read-semantics change, not a data-validity one — so it is
   `breaking` and requires an explicit `migrateSchema()`, the same treatment
   the Operational Identity `sameIdAcrossKinds` flip gets.
+- **Adding `partOf` or `hasPart`** is checked against the live parts of the
+  realizing edge kind: a part already holding more than one live whole, or a
+  cycle in the proposed composition relation, refuses the commit (families
+  `composition` and `edgeAcyclicity`). A pair declared `existence: "required"`
+  also refuses when a live part has no live whole (`compositionExistence`);
+  flipping an existing pair from optional to required is checked the same way,
+  and required to optional is safe.
+- **Removing `partOf` or `hasPart`** changes what `parts()` and `wholes()`
+  resolve to and stops parts from being deleted with their whole — a
+  read/write-semantics change, not a data-validity one — so it is `breaking`
+  and requires an explicit `migrateSchema()`, like `inverseOf` and `implies`.
 - A relation whose `from` or `to` names a kind **this same commit removes**
   is always safe with no check — `Store.removeKinds()` is unaffected.
 - **Declaring `acyclic: true`** on an edge kind that already carries live
@@ -769,11 +780,12 @@ console.log("Current version:", active?.version);
 | Add node type                  | Safe           | Yes            |
 | Add edge type                  | Safe           | Yes            |
 | Add optional property          | Safe           | Yes            |
-| Add `broader`/`narrower`/`partOf`/`hasPart`/`relatedTo` | Safe | Yes |
-| Add `disjointWith`, `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
+| Add `broader`/`narrower`/`relatedTo` | Safe | Yes |
+| Add `disjointWith`, `subClassOf`, `equivalentTo`, `partOf`, `hasPart` | Warning (data-checked) | Yes, if the check passes |
 | Remove `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
 | Remove `disjointWith`          | Safe           | Yes            |
 | Add/remove `inverseOf`, `implies` | Breaking    | No             |
+| Remove `partOf`, `hasPart`     | Breaking       | No             |
 | Change kind annotations           | Safe           | Yes            |
 | Add required property          | Breaking       | No             |
 | Remove property                | Breaking       | No             |

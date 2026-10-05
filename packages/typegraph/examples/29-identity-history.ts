@@ -10,7 +10,7 @@
  *
  * This example demonstrates:
  * - paginated `transitionsOf`, reading a lineage a page at a time via
- *   `nextFrom`
+ *   `nextCursor`
  * - paginated `replay`, pairing each transition with the class membership
  *   immediately before and after it
  * - retention: `pruneIdentityTransitions` deletes transitions before a
@@ -29,6 +29,7 @@ import {
   defineNode,
   type IdentityTransition,
   pruneIdentityTransitions,
+  type TransitionPageCursor,
 } from "@nicia-ai/typegraph";
 import { exportGraph, importGraph } from "@nicia-ai/typegraph/interchange";
 import { z } from "zod";
@@ -148,14 +149,14 @@ export async function main(): Promise<void> {
     console.log("\n=== 1. transitionsOf, paged with limit=2 ===\n");
 
     const allTransitions: IdentityTransition<typeof graph>[] = [];
-    let transitionsCursor: string | undefined;
+    let transitionsCursor: TransitionPageCursor | undefined;
     let pageCount = 0;
     do {
       const page = await store.identity.transitionsOf(crm, {
         limit: 2,
         ...(transitionsCursor === undefined ?
           {}
-        : { fromRecorded: transitionsCursor }),
+        : { cursor: transitionsCursor }),
       });
       pageCount += 1;
       console.log(
@@ -165,7 +166,7 @@ export async function main(): Promise<void> {
         console.log(`    ${transition.cause} @ ${transition.recorded}`);
       }
       allTransitions.push(...page.transitions);
-      transitionsCursor = page.nextFrom;
+      transitionsCursor = page.nextCursor;
     } while (transitionsCursor !== undefined);
 
     assertTrue(pageCount > 1, "the lineage needed more than one page");
@@ -188,12 +189,12 @@ export async function main(): Promise<void> {
     const allSteps: Awaited<
       ReturnType<typeof store.identity.replay>
     >["steps"][number][] = [];
-    let replayCursor: string | undefined;
+    let replayCursor: TransitionPageCursor | undefined;
     let replayPageCount = 0;
     do {
       const page = await store.identity.replay(crm, {
         limit: 2,
-        ...(replayCursor === undefined ? {} : { fromRecorded: replayCursor }),
+        ...(replayCursor === undefined ? {} : { cursor: replayCursor }),
       });
       replayPageCount += 1;
       console.log(`  page ${replayPageCount}: ${page.steps.length} step(s)`);
@@ -205,7 +206,7 @@ export async function main(): Promise<void> {
         console.log(`    ${step.transition.cause}: [${before}] -> [${after}]`);
       }
       allSteps.push(...page.steps);
-      replayCursor = page.nextFrom;
+      replayCursor = page.nextCursor;
     } while (replayCursor !== undefined);
 
     assertTrue(replayPageCount > 1, "replay also needed more than one page");

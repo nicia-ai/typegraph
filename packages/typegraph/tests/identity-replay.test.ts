@@ -14,7 +14,12 @@ import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createAdapterStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  createAdapterStoreWithSchema,
+  defineGraph,
+  defineNode,
+  type TransitionPageCursor,
+} from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   createRecordedInstant,
@@ -89,7 +94,7 @@ describe("identity replay", () => {
   // refusal — never a page. Mutation check: drop the
   // `!Number.isInteger(resolved) || resolved < 1` guard from `resolveLimit`
   // (replay.ts) and every case below fails — `limit: 0` resolves to an empty
-  // page whose `nextFrom` names the FIRST boundary, so the documented
+  // page whose `nextCursor` names the FIRST boundary, so the documented
   // `while (cursor !== undefined)` loop re-reads that same empty page
   // forever, and the fractional cases escape as a bare `TypeError` from
   // `requireDefined` instead of a `ValidationError`.
@@ -250,7 +255,7 @@ describe("identity replay", () => {
   // check: make `pageBoundaries` (replay.ts) throw when
   // `boundaries.length > limit` instead of cutting the page — every
   // `limit: 1` call below rejects and the whole test fails.
-  it("R7: limit caps a page and hands back nextFrom, and the pages reassemble the whole lineage", async () => {
+  it("R7: limit caps a page and hands back nextCursor, and the pages reassemble the whole lineage", async () => {
     const store = await buildAbcStore();
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
@@ -261,20 +266,20 @@ describe("identity replay", () => {
     await store.identity.assertSame(a, b);
 
     const ctx = storeRuntime(store).identityContext();
-    const { transitions: whole, nextFrom: wholeNextFrom } =
+    const { transitions: whole, nextCursor: wholeNextCursor } =
       await identityTransitionsOf(ctx, a);
-    expect(wholeNextFrom).toBeUndefined();
+    expect(wholeNextCursor).toBeUndefined();
     const wholeBoundaries = new Set(
       whole.map((transition) => transition.recorded),
     );
     expect(wholeBoundaries.size).toBeGreaterThan(2);
 
     const paged: string[] = [];
-    let cursor: string | undefined;
+    let cursor: TransitionPageCursor | undefined;
     for (let page = 0; page <= wholeBoundaries.size; page += 1) {
       const result = await identityTransitionsOf(ctx, a, {
         limit: 1,
-        ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+        ...(cursor === undefined ? {} : { cursor }),
       });
       // Exactly one boundary per page, and the boundary the cursor named.
       expect(
@@ -284,7 +289,7 @@ describe("identity replay", () => {
       paged.push(
         ...result.transitions.map((transition) => transition.transitionId),
       );
-      cursor = result.nextFrom;
+      cursor = result.nextCursor;
       if (cursor === undefined) break;
     }
     expect(cursor).toBeUndefined();
@@ -296,7 +301,7 @@ describe("identity replay", () => {
     const firstTransitionPage = await identityTransitionsOf(ctx, a, {
       limit: 1,
     });
-    expect(firstReplayPage.nextFrom).toBe(firstTransitionPage.nextFrom);
+    expect(firstReplayPage.nextCursor).toBe(firstTransitionPage.nextCursor);
     expect(
       firstReplayPage.steps.map((step) => step.transition.transitionId),
     ).toEqual(

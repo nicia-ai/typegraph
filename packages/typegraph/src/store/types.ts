@@ -729,7 +729,7 @@ export type BaseStoreOptions = Readonly<{
      * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when
      * an alias states no `expansion` (default: `"subclasses"`, roadmap Q3 —
      * a supertype query is polymorphic by default). Pass `"exact"` to
-     * restore the pre-Q3 exact-kind behavior for query aliases. `"narrower"` is
+     * restore the earlier exact-kind behavior for query aliases. `"narrower"` is
      * not a store-wide default (see {@link DefaultAliasExpansionAxis}).
      * This setting does NOT apply to `search()` or the collection APIs
      * (`find`, `count`, `updateWhere`, `compareAndSet`). `search()` has its

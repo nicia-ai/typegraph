@@ -1073,7 +1073,7 @@ export type IdentityReplayErrorDetails =
  * lies entirely below the retention watermark, or the lineage walk's own
  * internal read ceiling was reached before the seed set converged. A range
  * with more boundaries than the caller's `limit` is NOT a refusal — it pages,
- * through the `nextFrom` cursor on the result.
+ * through the `nextCursor` on the result.
  */
 export class IdentityReplayError extends TypeGraphError {
   declare readonly details: IdentityReplayErrorDetails;

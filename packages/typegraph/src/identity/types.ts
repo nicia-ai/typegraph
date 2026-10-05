@@ -199,9 +199,8 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * window end, kind drop, or reconciliation decision) that changed
      * `ref`'s identity class, ascending by recorded revision, in pages of at
      * most `options.limit` boundaries (default 200, maximum 2000). A capped
-     * page carries `nextFrom`, the recorded instant of the first boundary it
-     * stopped short of: pass it back as `options.fromRecorded` for the next
-     * page. Requires the store to be opened with `history: true`.
+     * page carries `nextCursor`, naming the first boundary it stopped
+     * short of: pass it back as `options.cursor` for the next page. Requires the store to be opened with `history: true`.
      *
      * On `tx.identity` specifically: reads the transition log itself, which
      * — unlike every other read on this facade — is NOT read-your-writes
@@ -224,7 +223,7 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * class membership immediately before and after it, reconstructed through
      * the same historical reader `asOf` / `asOfRecorded` reads use. Pages by
      * boundary exactly as {@link IdentityFacade.transitionsOf} does, through
-     * the same `nextFrom` cursor. Requires the store to be opened with
+     * the same `nextCursor` / `cursor` pair. Requires the store to be opened with
      * `history: true`.
      *
      * On `tx.identity`: carries the same pending-notes caveat as
