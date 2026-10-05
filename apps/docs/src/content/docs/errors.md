@@ -350,10 +350,12 @@ cannot answer a request. Its code names the reason:
   reads the whole log deliberately, so that a requested window can never
   hide the notes that name a class.
 - `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` — `pruneIdentityTransitions` was
-  given a `beforeRecorded` beyond the revision the graph's next commit will
-  take (`details.highestPrunableRevision`). A watermark there would sit above
-  history that does not exist yet and report it as pruned the moment it was
-  written, so the prune is refused and nothing is deleted. Pass an instant
+  given a `beforeRecorded` beyond every revision the graph holds: its next
+  commit's revision, or one past the highest retained transition when an
+  archival restore carried in higher revisions
+  (`details.highestPrunableRevision`). A prune there would claim history that
+  does not exist yet as already pruned, so it is refused and nothing is
+  deleted. Pass an instant
   the graph has reached, such as `store.recordedNow()`.
 
 A range with more boundaries than the requested `limit` is not an error —
@@ -1883,7 +1885,7 @@ try {
 | `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store whose backend owns recorded time (engine-native) |
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
 | `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
-| `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` | `IdentityReplayError` | constraint | A prune named a recorded instant beyond the revision the graph's next commit will take |
+| `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` | `IdentityReplayError` | constraint | A prune named a recorded instant beyond every revision the graph holds |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |

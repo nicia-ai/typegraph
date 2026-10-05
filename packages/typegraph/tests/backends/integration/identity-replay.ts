@@ -82,6 +82,10 @@ type DepartedLineageStore = Awaited<
   ReturnType<typeof provisionDepartedLineageStore>
 >;
 
+function personRef(id: string) {
+  return { kind: "Person" as const, id };
+}
+
 const DEPARTURES = [
   {
     name: "soft-deleted",
@@ -176,6 +180,85 @@ export function registerIdentityReplayIntegrationTests(
       expect(fresh.steps.map((step) => step.transition.cause)).toEqual([
         "assert",
       ]);
+    });
+
+    it("prunes restored transitions whose revisions sit above the destination clock, without raising the watermark past it", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_prune_restored_source"),
+      );
+      const ids = ["pr-a", "pr-b", "pr-c", "pr-d", "pr-e"];
+      for (const id of ids) await source.nodes.Person.create({}, { id });
+      for (const [left, right] of [
+        ["pr-a", "pr-b"],
+        ["pr-b", "pr-c"],
+        ["pr-c", "pr-d"],
+        ["pr-d", "pr-e"],
+      ] as const) {
+        await source.identity.assertSame(personRef(left), personRef(right));
+      }
+      const archive = await exportGraph(source, { identityMode: "archival" });
+
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_prune_restored_target"),
+      );
+      await target.nodes.Person.create({}, { id: "pr-native" });
+      const imported = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(imported.errors).toEqual([]);
+
+      const targetClock = requireDefined(await target.recordedNow());
+      const nextRevision = recordedInstantRevision(targetClock) + 1;
+      const restoredHistory = await target.identity.transitionsOf(
+        personRef("pr-a"),
+      );
+      const restoredRevisions = restoredHistory.transitions
+        .filter((transition) => transition.restored !== undefined)
+        .map((transition) => recordedInstantRevision(transition.recorded));
+      const highestRestored = Math.max(...restoredRevisions);
+      expect(highestRestored).toBeGreaterThanOrEqual(nextRevision);
+
+      const beyondEverything = createRecordedInstant(
+        highestRestored + 2,
+        recordedInstantWallTime(targetClock),
+      );
+      const refusal = await pruneIdentityTransitions(target, {
+        beforeRecorded: beyondEverything,
+      }).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(IdentityReplayError);
+      expect((refusal as IdentityReplayError).details).toMatchObject({
+        code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK",
+        highestPrunableRevision: highestRestored + 1,
+      });
+
+      const pruned = await pruneIdentityTransitions(target, {
+        beforeRecorded: createRecordedInstant(
+          highestRestored + 1,
+          recordedInstantWallTime(targetClock),
+        ),
+      });
+      expect(pruned.prunedBeforeRevision).toBe(nextRevision);
+      expect(pruned.pruned).toBeGreaterThanOrEqual(restoredRevisions.length);
+      const after = await target.identity.transitionsOf(personRef("pr-a"));
+      expect(after.transitions).toEqual([]);
+      expect(after.incompleteDiscovery).toBeUndefined();
+
+      // The watermark stays on the destination's own axis, so its next
+      // commit is not reported as pruned.
+      await target.nodes.Person.create({}, { id: "pr-later-a" });
+      await target.nodes.Person.create({}, { id: "pr-later-b" });
+      await target.identity.assertSame(
+        personRef("pr-later-a"),
+        personRef("pr-later-b"),
+      );
+      const latest = requireDefined(await target.recordedNow());
+      const fresh = await target.identity.replay(personRef("pr-later-a"), {
+        fromRecorded: latest,
+        toRecorded: latest,
+      });
+      expect(fresh.truncatedBefore).toBeUndefined();
     });
   });
 

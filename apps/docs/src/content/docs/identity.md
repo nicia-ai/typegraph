@@ -499,11 +499,19 @@ not advance the content revision**: it destroys retained explanation, never
 truth, so branch staleness tracks truth, not explanation.
 
 The watermark states that history below it is gone, so it can never sit above
-history the graph has yet to record. The highest instant a prune accepts is
-the revision the graph's next commit will take — `store.recordedNow()` plus
-one, which prunes everything recorded so far. A `beforeRecorded` beyond that
-is refused with `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` and changes nothing:
-installing it would report every later commit as already pruned.
+history the graph has yet to record. A prune accepts a `beforeRecorded` up to
+the revision the graph's next commit will take (`store.recordedNow()` plus
+one, which prunes everything this graph has recorded), or one past the highest
+retained transition when an archival restore brought in rows carrying higher
+revisions from another graph. A `beforeRecorded` beyond that is refused with
+`IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` and changes nothing.
+
+Restored rows keep the revision their source graph minted, so a prune removes
+them by that raw revision number alongside native rows. The returned
+`prunedBeforeRevision` and the watermark itself never rise above the
+revision the graph's next commit takes, even when the prune deleted restored
+rows with higher revisions: the watermark describes this graph's own history,
+and installing a higher one would report its later commits as already pruned.
 
 Once anything has been pruned, `replay` reports the gap honestly rather than
 silently answering from an incomplete log: a call whose range lies entirely

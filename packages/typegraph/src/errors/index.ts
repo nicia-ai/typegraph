@@ -1070,7 +1070,7 @@ export type IdentityReplayErrorDetails =
       /** The caller's own `beforeRecorded`. */
       requestedBefore: string;
       requestedRevision: number;
-      /** The revision the graph's next commit takes: the highest watermark a prune can install. */
+      /** The highest revision a prune can name: the next commit's revision, or one past the highest retained (possibly restored) transition. */
       highestPrunableRevision: number;
     }>;
 
