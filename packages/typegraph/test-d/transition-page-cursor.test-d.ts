@@ -1,5 +1,5 @@
 /**
- * `nextFrom` is a transition-log cursor, not a recorded-time anchor.
+ * `nextCursor` is a transition-log cursor, not a recorded-time anchor.
  * Passing it to `asOfRecorded` must fail to compile.
  */
 import { expectError, expectNotAssignable } from "tsd";
@@ -27,9 +27,12 @@ declare const recorded: RecordedInstant;
 expectNotAssignable<RecordedInstant>(cursor);
 expectError(store.asOfRecorded(cursor));
 
-store.identity.transitionsOf(
-  { kind: "Person", id: "ada" },
-  { fromRecorded: cursor },
+store.identity.transitionsOf({ kind: "Person", id: "ada" }, { cursor });
+expectError(
+  store.identity.transitionsOf(
+    { kind: "Person", id: "ada" },
+    { cursor: recorded },
+  ),
 );
 store.identity.transitionsOf(
   { kind: "Person", id: "ada" },

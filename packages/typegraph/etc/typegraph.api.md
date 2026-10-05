@@ -4983,7 +4983,7 @@ export type IdentityRelation = "same" | "different";
 export type IdentityReplay<G extends GraphDef> = Readonly<{
     steps: readonly IdentityReplayStep<G>[];
     truncatedBefore?: RecordedInstant | undefined;
-    nextFrom?: TransitionPageCursor | undefined;
+    nextCursor?: TransitionPageCursor | undefined;
 }>;
 
 // @public
@@ -5012,10 +5012,11 @@ export type IdentityReplayErrorDetails = Readonly<{
     ceiling: number;
 }>;
 
-// @public (undocumented)
+// @public
 export type IdentityReplayOptions = Readonly<{
     fromRecorded?: string | undefined;
     toRecorded?: string | undefined;
+    cursor?: TransitionPageCursor | undefined;
     limit?: number | undefined;
 }>;
 
@@ -5104,7 +5105,7 @@ export type IdentityTransitionCursor = Readonly<{
 // @public
 export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
     transitions: readonly IdentityTransition<G>[];
-    nextFrom?: TransitionPageCursor | undefined;
+    nextCursor?: TransitionPageCursor | undefined;
 }>;
 
 // @public
@@ -9745,7 +9746,7 @@ type TransactionRuntime = Readonly<{
     }>) => Promise<void>;
 }>;
 
-// @public
+// @public (undocumented)
 const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
 
 // @public

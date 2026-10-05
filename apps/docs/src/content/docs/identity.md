@@ -293,25 +293,25 @@ same-ID fold, a delete or restore, a validity-window end, a kind drop, a
 schema transition, or an identity change a graph merge applied. A page covers
 at most `limit` recorded boundaries (default 200), and one boundary can hold
 several transitions, so a page's `transitions` can be longer than `limit`;
-when the lineage has more boundaries, the page carries `nextFrom`, and passing
-it back as `fromRecorded` reads the next one. Reading the whole lineage is
+when the lineage has more boundaries, the page carries `nextCursor`, and
+passing it back as `cursor` reads the next one. Reading the whole lineage is
 therefore a loop, not a call:
 
 ```typescript
-let cursor: RecordedInstant | undefined;
+let cursor: TransitionPageCursor | undefined;
 do {
   const page = await store.identity.transitionsOf(alice, {
-    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+    ...(cursor === undefined ? {} : { cursor }),
   });
   for (const transition of page.transitions) {
     console.log(transition.cause, transition.recorded, transition.assertionIds);
   }
-  cursor = page.nextFrom;
+  cursor = page.nextCursor;
 } while (cursor !== undefined);
 ```
 
 A single call without the loop reads only the first page; a lineage short
-enough to fit in one page returns no `nextFrom`, which is what ends the loop.
+enough to fit in one page returns no `nextCursor`, which is what ends the loop.
 "Oldest first" is by this graph's recorded revision. A transition an
 archival restore brought in keeps the *source* graph's revision, so it can
 list before or after this graph's own rows regardless of when it happened;
@@ -366,21 +366,29 @@ transitions in it.
 `options.limit` (default 200, an integer from 1 to 2000 — anything else is a
 `ValidationError`) caps the number of BOUNDARIES one page returns. Both
 `replay` and `transitionsOf` page rather than refuse: a capped result carries
-`nextFrom`, the recorded instant of the first boundary it stopped short of,
-and passing that back as `fromRecorded` reads the next page. They page on
+`nextCursor`, naming the first boundary it stopped short of, and passing that
+back as `cursor` reads the next page. They page on
 identical boundaries, so a `replay` page and a `transitionsOf` page taken
 with the same options always stop at the same boundary — though `steps` can
-be shorter than `transitions` on that page (see below): `nextFrom` names
+be shorter than `transitions` on that page (see below): `nextCursor` names
 where the page stopped, not how many revisions it covered.
 
-`nextFrom` addresses the transition log only. When the boundary it names
+`nextCursor` addresses the transition log only. When the boundary it names
 holds a restored row (see [Archival transitions and the retention
 watermark](#archival-transitions-and-the-retention-watermark)), the revision
-it names was minted by the *source* graph's clock, not this graph's — pass it
-only as the next call's `fromRecorded`, and never to `store.asOfRecorded`,
-which anchors a historical read on this graph's own recorded axis.
+it names was minted by the *source* graph's clock, not this graph's. It is a
+`TransitionPageCursor`, not a recorded instant: pass it only as the next
+call's `cursor`. `store.asOfRecorded` does not accept it (a type error), and
+`fromRecorded` / `toRecorded` refuse one at runtime with a `ValidationError`
+rather than reading it as a window bound. A `cursor` that is not a page
+cursor is refused the same way.
 
-The same loop drives `replay`: pass `page.nextFrom` back as `fromRecorded`
+A cursor is a position within the windowed lineage, so it composes with
+`fromRecorded` / `toRecorded` by intersection: the page starts at the later of
+`fromRecorded` and the cursor and ends at `toRecorded`. Re-issuing a cursor
+with a different window is therefore well defined, not an error.
+
+The same loop drives `replay`: pass `page.nextCursor` back as `cursor`
 until it comes back `undefined`, choosing `limit` per page as the consumer
 needs (the loop above takes the default).
 

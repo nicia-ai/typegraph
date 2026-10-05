@@ -4164,13 +4164,14 @@ export type IdentityRelation = "same" | "different";
 type IdentityReplay<G extends GraphDef> = Readonly<{
     steps: readonly IdentityReplayStep<G>[];
     truncatedBefore?: RecordedInstant | undefined;
-    nextFrom?: TransitionPageCursor | undefined;
+    nextCursor?: TransitionPageCursor | undefined;
 }>;
 
-// @public (undocumented)
+// @public
 type IdentityReplayOptions = Readonly<{
     fromRecorded?: string | undefined;
     toRecorded?: string | undefined;
+    cursor?: TransitionPageCursor | undefined;
     limit?: number | undefined;
 }>;
 
@@ -4245,7 +4246,7 @@ type IdentityTransitionCursor = Readonly<{
 // @public
 type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
     transitions: readonly IdentityTransition<G>[];
-    nextFrom?: TransitionPageCursor | undefined;
+    nextCursor?: TransitionPageCursor | undefined;
 }>;
 
 // @public
@@ -8836,7 +8837,7 @@ type TransactionRuntime = Readonly<{
     }>) => Promise<void>;
 }>;
 
-// @public
+// @public (undocumented)
 const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
 
 // @public

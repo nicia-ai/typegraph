@@ -394,14 +394,23 @@ const parentSection = defineEdge("parentSection");
 partOf(Section, Section, { via: parentSection, partSide: "from" });
 ```
 
-**Changing this on a populated graph**: declaring or dropping a `partOf`/
-`hasPart` pair itself auto-migrates unconditionally either way — the schema
-change does not walk existing rows, so a graph that already holds parts with
-more than one live whole (written before the pair was declared, by trusted
-import, or by direct SQL) is not repaired by the declaration. Run
-`store.verifyConstraintFences()` (the `family: "composition"` entries) after
-adding a pair to a populated graph. Removing a pair only ever loosens a
-constraint, so it stays safe regardless.
+**Changing this on a populated graph**: the schema commit checks a newly
+declared pair against the rows that already exist. Adding a `partOf`/`hasPart`
+pair is a `warning`: inside the schema-commit transaction TypeGraph audits the
+composition claims (a part with more than one live whole is refused, because
+one whole per part is now enforced) and acyclicity over the proposed
+composition relation, and adds the required-whole audit when the pair declares
+`existence: "required"` (a live part with no live whole is refused). A graph
+that passes auto-migrates; one that does not is refused with a `MigrationError`
+(`reason: "ontology-tightening-violated"`) whose `details.violations` list the
+offending rows to resolve before retrying. Optional to `existence: "required"`
+on an already-declared pair is checked the same way, and `required` to optional
+is `safe`. Removing a pair is `breaking`: it changes what `parts()`/`wholes()`
+resolve to and stops parts from being deleted with their whole, so
+`ensureSchema()` refuses it and it needs an explicit `migrateSchema()`.
+`store.verifyConstraintFences()` (the `family: "composition"` entries) reports
+the same violations after the fact for rows written by trusted import or direct
+SQL.
 
 #### Attaching a part: `partOf: { whole, via?, props? }`
 

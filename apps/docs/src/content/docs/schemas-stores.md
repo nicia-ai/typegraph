@@ -573,7 +573,7 @@ const store = createStore(graph, backend, {
 });
 ```
 
-Restore the pre-Q3 exact-kind query behavior everywhere:
+Restore the earlier exact-kind query behavior (no subclass expansion) everywhere:
 
 ```typescript
 const store = createStore(graph, backend, {
