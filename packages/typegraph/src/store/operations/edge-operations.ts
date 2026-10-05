@@ -227,6 +227,7 @@ import {
 import {
   assertCompositionExistencePreserved,
   assertEndpointRowLive,
+  edgeWriteEndsOpenWindow,
 } from "./composition-create";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
@@ -2423,12 +2424,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     claims: reentryClaims,
   };
 
-  // The refusal fires only for the write that ENDS a currently
-  // OPEN window — `existing.valid_to === undefined` — not for one that
-  // merely restates or tightens an end the row already carries: the moment
-  // of detachment already passed the first time the window closed, so
-  // re-touching an already-ended edge is not what orphans a live part.
-  if (work.validTo !== undefined && existing.valid_to === undefined) {
+  if (edgeWriteEndsOpenWindow(existing, work.validTo)) {
     await assertCompositionExistencePreserved(
       {
         graphId: ctx.graphId,

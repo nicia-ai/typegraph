@@ -6,11 +6,11 @@
  * batch" can only be decided once the payload's whole edge set is known.
  * `pendingRequiredParts` (a frame-scoped accumulator, mirroring
  * `pendingMatchIdentityOwners`'s shape) tracks every required-existence part
- * this import CREATES; `assertImportedRequiredPartsAttached` resolves what
- * remains after both passes against the target (a part already attached
- * before this import is accepted) and records one per-row error — not a
- * thrown abort — for anything still unattached, removing that row's node in
- * the same transaction.
+ * this import CREATES; `assertImportedRequiredPartsAttached` judges each of
+ * them after both passes against the committed rows (a part attached in the
+ * same batch, or already attached on the target, is accepted) and records
+ * one per-row error — not a thrown abort — for anything left without a live
+ * whole, removing that row's node in the same transaction.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -281,10 +281,19 @@ describe("validating import: required composition existence", () => {
       // policy saw the still-live `ceiTaggedBy` edge and threw
       // `RestrictedDeleteError` PAST this function's per-row error channel,
       // aborting the whole import.
-      expect(result.errors).toHaveLength(1);
+      expect(result.errors).toHaveLength(2);
       expect(result.errors[0]?.entityType).toBe("node");
       expect(result.errors[0]?.id).toBe("seg-1");
       expect(result.errors[0]?.error).toMatch(/requires a whole/u);
+      // The edge the purge removed with the part is reported too, and comes
+      // off the created count: the result tracks what was committed.
+      expect(result.errors[1]).toMatchObject({
+        entityType: "edge",
+        kind: "ceiTaggedBy",
+        id: "e-tag-1",
+      });
+      expect(result.edges.created).toBe(0);
+      expect(result.nodes.created).toBe(1);
 
       // No orphan CeiSegment row survives for the refused part...
       expect(
@@ -310,6 +319,10 @@ describe("validating import: required composition existence", () => {
   // `result.errors[0].error` assertion above fails — and the segment row is
   // never purged at all (the restrict check runs before any deletion), so
   // the `CeiSegment.getById("seg-1")` assertion fails too.
+  //
+  // MUTATION CHECK: in `purgeUnattachedRequiredPart`, drop the
+  // `removedEdges` loop — `result.edges.created` then reads 1 for an edge
+  // that no longer exists, and the second error is never reported.
 
   it("a purged required part leaves no identity membership behind on an identity-enabled store", async () => {
     const { backend } = createLocalSqliteBackend();
@@ -361,6 +374,257 @@ describe("validating import: required composition existence", () => {
   // `runtime.detachDeletedImportedIdentityNode(frame.target, ...)` call from
   // `assertImportedRequiredPartsAttached` (src/interchange/import.ts). The
   // `validateIdentity()` assertion above then rejects instead of resolving.
+});
+
+const CeiRoot = defineNode("CeiRoot", { schema: z.object({}) });
+const CeiMid = defineNode("CeiMid", { schema: z.object({}) });
+const CeiLeaf = defineNode("CeiLeaf", { schema: z.object({}) });
+const ceiMidOf = defineEdge("ceiMidOf", { schema: z.object({}) });
+const ceiLeafOf = defineEdge("ceiLeafOf", { schema: z.object({}) });
+
+/** Two nested required pairs: CeiLeaf under CeiMid under CeiRoot. */
+function buildNestedGraph(population: "one" | "oneActive") {
+  return defineGraph({
+    id: `composition-existence-import-nested-${population}`,
+    nodes: {
+      CeiRoot: { type: CeiRoot },
+      CeiMid: { type: CeiMid },
+      CeiLeaf: { type: CeiLeaf },
+    },
+    edges: {
+      ceiMidOf: {
+        type: ceiMidOf,
+        from: [CeiMid],
+        to: [CeiRoot],
+        cardinality: population,
+      },
+      ceiLeafOf: {
+        type: ceiLeafOf,
+        from: [CeiLeaf],
+        to: [CeiMid],
+        cardinality: population,
+      },
+    },
+    ontology: [
+      partOf(CeiMid, CeiRoot, { via: ceiMidOf, existence: "required" }),
+      partOf(CeiLeaf, CeiMid, { via: ceiLeafOf, existence: "required" }),
+    ],
+  });
+}
+
+const ENDED_FROM = "2020-01-01T00:00:00.000Z";
+const ENDED_TO = "2021-01-01T00:00:00.000Z";
+
+describe("validating import: an accepted composition edge is not evidence of attachment", () => {
+  it("refuses a required part whose only composition edge is an ended oneActive window", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildNestedGraph("oneActive"),
+        backend,
+      );
+      const root = await store.nodes.CeiRoot.create({});
+
+      // MUTATION CHECK: in `assertImportedRequiredPartsAttached`
+      // (src/interchange/import.ts), skip a pending part as soon as any
+      // composition edge naming it was created this import (the old
+      // clear-on-create rule) — the ended edge then counts as an attachment
+      // and `mid-1` commits with no whole.
+      const result = await importGraph(
+        store,
+        payload({
+          nodes: [{ kind: "CeiMid", id: "mid-1", properties: {} }],
+          edges: [
+            {
+              kind: "ceiMidOf",
+              id: "e-mid-1",
+              from: { kind: "CeiMid", id: "mid-1" },
+              to: { kind: "CeiRoot", id: root.id },
+              properties: {},
+              validFrom: ENDED_FROM,
+              validTo: ENDED_TO,
+            },
+          ],
+        }),
+        { onConflict: "error" },
+      );
+
+      expect(result.errors.map((error) => [error.entityType, error.id])).toEqual(
+        [
+          ["node", "mid-1"],
+          ["edge", "e-mid-1"],
+        ],
+      );
+      expect(result.nodes.created).toBe(0);
+      expect(result.edges.created).toBe(0);
+      expect(await store.nodes.CeiMid.getById("mid-1" as never)).toBeUndefined();
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("refuses a required part attached to a whole that does not exist (validateReferences: false)", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildNestedGraph("one"),
+        backend,
+      );
+
+      // MUTATION CHECK: in `readCompositionPartStandings`
+      // (src/store/operations/composition-create.ts), report the attachment's
+      // whole without checking it is a live row — `mid-1` is then accepted
+      // hanging from a node that was never written.
+      const result = await importGraph(
+        store,
+        payload({
+          nodes: [{ kind: "CeiMid", id: "mid-1", properties: {} }],
+          edges: [
+            {
+              kind: "ceiMidOf",
+              id: "e-mid-1",
+              from: { kind: "CeiMid", id: "mid-1" },
+              to: { kind: "CeiRoot", id: "ghost" },
+              properties: {},
+            },
+          ],
+        }),
+        { onConflict: "error", validateReferences: false },
+      );
+
+      expect(result.errors.map((error) => [error.entityType, error.id])).toEqual(
+        [
+          ["node", "mid-1"],
+          ["edge", "e-mid-1"],
+        ],
+      );
+      expect(await store.nodes.CeiMid.getById("mid-1" as never)).toBeUndefined();
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("purges to a fixed point: a required part attached only to a purged part is refused too", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildNestedGraph("one"),
+        backend,
+      );
+
+      // `mid-1` has no whole, so it is purged; that removes the edge holding
+      // `leaf-1`, which the same pass may already have accepted.
+      //
+      // MUTATION CHECK: in `assertImportedRequiredPartsAttached`, stop after
+      // the first pass (`candidates = []` instead of re-queueing the parts a
+      // purged whole held) — `leaf-1` survives with no edge and no whole.
+      const result = await importGraph(
+        store,
+        payload({
+          nodes: [
+            { kind: "CeiLeaf", id: "leaf-1", properties: {} },
+            { kind: "CeiMid", id: "mid-1", properties: {} },
+          ],
+          edges: [
+            {
+              kind: "ceiLeafOf",
+              id: "e-leaf-1",
+              from: { kind: "CeiLeaf", id: "leaf-1" },
+              to: { kind: "CeiMid", id: "mid-1" },
+              properties: {},
+            },
+          ],
+        }),
+        { onConflict: "error" },
+      );
+
+      expect(await store.nodes.CeiMid.find({})).toEqual([]);
+      expect(await store.nodes.CeiLeaf.find({})).toEqual([]);
+      expect(await store.edges.ceiLeafOf.find({})).toEqual([]);
+      expect(result.nodes.created).toBe(0);
+      expect(result.edges.created).toBe(0);
+      expect(
+        result.errors
+          .map((error) => `${error.entityType}:${error.id}`)
+          .toSorted(),
+      ).toEqual(["edge:e-leaf-1", "node:leaf-1", "node:mid-1"]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("onConflict update refuses a validTo that would end a live required attachment", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildNestedGraph("oneActive"),
+        backend,
+      );
+      const root = await store.nodes.CeiRoot.create({});
+      const mid = await store.nodes.CeiMid.create(
+        {},
+        { partOf: { whole: root, validFrom: ENDED_FROM } },
+      );
+      const attachment = requireDefined(
+        (await store.edges.ceiMidOf.find({}))[0],
+        "the realizing edge",
+      );
+      const document = (batchSize: number) =>
+        importGraph(
+          store,
+          payload({
+            nodes: [],
+            edges: [
+              {
+                kind: "ceiMidOf",
+                id: attachment.id,
+                from: { kind: "CeiMid", id: mid.id },
+                to: { kind: "CeiRoot", id: root.id },
+                properties: {},
+                validFrom: ENDED_FROM,
+                validTo: ENDED_TO,
+              },
+              // A repeat of the same id takes the per-row path after the
+              // slice's flush, so both update paths are exercised.
+              ...(batchSize === 1 ?
+                []
+              : [
+                  {
+                    kind: "ceiMidOf",
+                    id: attachment.id,
+                    from: { kind: "CeiMid", id: mid.id },
+                    to: { kind: "CeiRoot", id: root.id },
+                    properties: {},
+                    validFrom: ENDED_FROM,
+                    validTo: ENDED_TO,
+                  },
+                ]),
+            ],
+          }),
+          { onConflict: "update", batchSize },
+        );
+
+      // MUTATION CHECK: drop the `assertCompositionExistencePreserved` call
+      // from `updateImportedEdge` (src/interchange/import.ts) — the window is
+      // then ended and `mid` is live with no whole.
+      for (const batchSize of [1, 100]) {
+        const result = await document(batchSize);
+        expect(result.edges.updated).toBe(0);
+        expect(result.errors).not.toHaveLength(0);
+        for (const error of result.errors) {
+          expect(error.error).toMatch(/^COMPOSITION_DETACH_REFUSED: /u);
+        }
+        const [edge] = await store.edges.ceiMidOf.find({});
+        expect(edge?.meta.validTo).toBeUndefined();
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      }
+    } finally {
+      await backend.close();
+    }
+  });
 });
 
 describe("streamed import: required composition existence", () => {

@@ -646,6 +646,26 @@ export async function assertCompositionExistencePreserved(
 }
 
 /**
+ * Whether a write stating `validTo` on an existing edge ENDS a currently OPEN
+ * window — `existing.valid_to === undefined` — rather than restating or
+ * tightening an end the row already carries. Only the former can detach a
+ * part: the moment of detachment already passed the first time the window
+ * closed, so re-touching an already-ended edge is not what orphans one.
+ *
+ * The gate in front of {@link assertCompositionExistencePreserved} for every
+ * write that can state a `validTo` on an existing edge — the store's edge
+ * update (`performEdgeUpdate`, `edge-operations.ts`) and interchange import's
+ * `onConflict: "update"` — one predicate, so neither can end a live required
+ * attachment the other refuses.
+ */
+export function edgeWriteEndsOpenWindow(
+  existing: Pick<EdgeRow, "valid_to">,
+  validTo: string | undefined,
+): boolean {
+  return validTo !== undefined && existing.valid_to === undefined;
+}
+
+/**
  * The composition edge that currently attaches this part, together with the
  * whole it attaches it to. `undefined` when `concreteKind` is not a
  * composition part at all, or the part currently has no live whole.
@@ -1433,7 +1453,7 @@ async function readPageAttachmentCandidateEdges(
   registry: KindRegistry,
   backend: GraphReadBackend,
   graphId: string,
-  parts: readonly NodeRow[],
+  parts: readonly CompositionNodeRef[],
 ): Promise<ReadonlyMap<string, readonly EdgeRow[]> | undefined> {
   const setRead = backend.findEdgesByHeterogeneousEndpointSet;
   if (setRead === undefined) return undefined;
@@ -1498,7 +1518,7 @@ export async function readCompositionAttachmentsForPage(
   registry: KindRegistry,
   backend: GraphReadBackend,
   graphId: string,
-  parts: readonly NodeRow[],
+  parts: readonly CompositionNodeRef[],
 ): Promise<
   ReadonlyMap<string, Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>>
 > {
@@ -1633,11 +1653,71 @@ export async function readLiveCompositionWholes(
 }
 
 /**
- * A part is unattached when it has no current composition edge OR the whole
- * that edge names is not a live row. The second arm is what makes the audit
- * report a part left hanging from a TOMBSTONED whole — a state the delete
- * cascade cannot produce but a direct backend write, a custom port, or a
- * belief-status close of a whole whose parts are optional can.
+ * One part and the LIVE whole it currently hangs from. `whole` is `undefined`
+ * when the part has no current composition edge OR the whole that edge names
+ * is not a live row. The second arm is what catches a part left hanging from
+ * a TOMBSTONED or absent whole — a state the delete cascade cannot produce
+ * but a direct backend write, a custom port, an import that skipped reference
+ * validation, or a belief-status close of a whole whose parts are optional
+ * can.
+ */
+export type CompositionPartStanding = Readonly<{
+  part: CompositionNodeRef;
+  whole: CompositionNodeRef | undefined;
+}>;
+
+/**
+ * THE page-scoped answer to "is each of these parts held up by a live whole",
+ * in input order: the current attachment
+ * ({@link readCompositionAttachmentsForPage}, so {@link edgeCurrentlyAttachesPart}
+ * decides which edge counts) composed with the whole's own liveness
+ * ({@link readLiveCompositionWholes}).
+ *
+ * One owner for the two consumers that must agree row for row: the
+ * `compositionExistence` audit ({@link readCompositionUnattachedParts}) and
+ * interchange import's end-of-import assertion, which refuses exactly the
+ * parts the audit would report.
+ */
+export async function readCompositionPartStandings(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  parts: readonly CompositionNodeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<readonly CompositionPartStanding[]> {
+  const attachments = await readCompositionAttachmentsForPage(
+    registry,
+    backend,
+    graphId,
+    parts,
+  );
+  const liveWholes = await readLiveCompositionWholes(
+    backend,
+    graphId,
+    [...attachments.values()].map((attachment) => attachment.whole),
+    batchPointRead,
+  );
+  const liveWholeKeys = new Set(
+    liveWholes.map((whole) => encodeTupleKey([whole.kind, whole.id])),
+  );
+  return parts.map((part) => {
+    const whole = attachments.get(encodeTupleKey([part.kind, part.id]))?.whole;
+    return {
+      part: { kind: part.kind, id: part.id },
+      whole:
+        (
+          whole !== undefined &&
+          liveWholeKeys.has(encodeTupleKey([whole.kind, whole.id]))
+        ) ?
+          whole
+        : undefined,
+    };
+  });
+}
+
+/**
+ * Every LIVE node of these part kinds that {@link readCompositionPartStandings}
+ * finds with no live whole, paged by id.
  */
 export async function readCompositionUnattachedParts(
   registry: KindRegistry,
@@ -1658,32 +1738,15 @@ export async function readCompositionUnattachedParts(
         limit: COMPOSITION_ATTACHMENT_PAGE_SIZE,
         ...(after === undefined ? {} : { after }),
       });
-      const attachments = await readCompositionAttachmentsForPage(
+      const standings = await readCompositionPartStandings(
         registry,
         backend,
         graphId,
         rows,
-      );
-      const liveWholes = await readLiveCompositionWholes(
-        backend,
-        graphId,
-        [...attachments.values()].map((attachment) => attachment.whole),
         batchPointRead,
       );
-      const liveWholeKeys = new Set(
-        liveWholes.map((whole) => encodeTupleKey([whole.kind, whole.id])),
-      );
-      for (const row of rows) {
-        const attachment = attachments.get(encodeTupleKey([row.kind, row.id]));
-        if (
-          attachment !== undefined &&
-          liveWholeKeys.has(
-            encodeTupleKey([attachment.whole.kind, attachment.whole.id]),
-          )
-        ) {
-          continue;
-        }
-        unattached.push({ kind: row.kind, id: row.id });
+      for (const standing of standings) {
+        if (standing.whole === undefined) unattached.push(standing.part);
       }
       if (rows.length < COMPOSITION_ATTACHMENT_PAGE_SIZE) break;
       after = requireDefined(

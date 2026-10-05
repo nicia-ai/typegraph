@@ -138,8 +138,11 @@ import {
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
 import {
+  assertCompositionExistencePreserved,
+  COMPOSITION_ATTACHMENT_PAGE_SIZE,
   declaresRequiredCompositionParts,
-  findLiveCompositionWhole,
+  edgeWriteEndsOpenWindow,
+  readCompositionPartStandings,
 } from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
@@ -324,13 +327,30 @@ export async function withImportStreamLease<G extends GraphDef, T>(
  * READS to answer; the executor owns decorating its own target with them.
  */
 /**
- * One required-existence part THIS import created, pending the composition edge
- * that attaches it.
+ * One required-existence part THIS import created, owing a live whole by the
+ * time the import commits.
  */
 type PendingRequiredPart = Readonly<{ kind: string; id: string }>;
 
-/** Pending required parts by `makeNodeKey`, cleared as their edges arrive. */
+/**
+ * Every required part this import created, by `makeNodeKey`. Nothing clears
+ * an entry while the payload is processed: whether a part ends up attached
+ * is one question, asked once, of the committed rows
+ * ({@link assertImportedRequiredPartsAttached}).
+ */
 type PendingRequiredParts = Map<string, PendingRequiredPart>;
+
+/**
+ * What an import must remember to undo a required part it has to refuse: the
+ * parts themselves, and the ids of the edges this import created, so the
+ * edges a purge removes with the part come off `result.edges.created` and no
+ * edge that predates the import is ever counted as one it wrote. Empty for a
+ * graph that declares no required part, which never purges.
+ */
+type RequiredPartLedger = Readonly<{
+  pendingParts: PendingRequiredParts;
+  createdEdgeIds: Set<string>;
+}>;
 
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
@@ -430,12 +450,15 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
   // Every required-existence part THIS import creates, keyed by
-  // `makeNodeKey`, removed as soon as the SAME batch's composition edge for
-  // it is accepted (`processEdgeSlice`'s `record`). Frame-scoped, like
+  // `makeNodeKey`, and every edge it creates. Frame-scoped, like
   // `pendingMatchIdentityOwners`: nodes are written before any edge is even
-  // seen (`processNodes` then `processEdges`), so "the edge in the same
-  // batch" can only be decided once the whole edge set is known.
+  // seen (`processNodes` then `processEdges`), so whether a part ended up
+  // attached can only be decided once the whole edge set is written.
   const pendingRequiredParts: PendingRequiredParts = new Map();
+  const requiredPartLedger: RequiredPartLedger = {
+    pendingParts: pendingRequiredParts,
+    createdEdgeIds: new Set(),
+  };
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
     session,
@@ -481,21 +504,19 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
-    pendingRequiredParts,
+    requiredPartLedger,
   );
-  // What remains in `pendingRequiredParts` after every edge in the
-  // payload is seen is either attached on the TARGET from before this
-  // import, or genuinely orphaned. Runs AFTER `foldImportedIdentityNodes`
-  // above (which needs the full node batch, before edges can clear any
-  // pending part) — a part purged here undoes that fold itself, through
-  // `runtime.detachDeletedImportedIdentityNode`, rather than
-  // never having been folded in the first place.
+  // Every required part this import created is judged once every edge in the
+  // payload is written. Runs AFTER `foldImportedIdentityNodes` above (which
+  // needs the full node batch) — a part purged here undoes that fold itself,
+  // through `runtime.detachDeletedImportedIdentityNode`, rather than never
+  // having been folded in the first place.
   await assertImportedRequiredPartsAttached(
     frame,
     inputs.graphId,
     inputs.registry,
     inputs.runtime,
-    pendingRequiredParts,
+    requiredPartLedger,
     result,
     importedNodeIds,
     errors,
@@ -1728,9 +1749,9 @@ async function processNodeSlice(
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
-    // A freshly created required-existence part owes a
-    // composition edge before this import commits — tracked here, cleared
-    // by `clearAttachedRequiredPart` the moment the edge for it lands.
+    // A freshly created required-existence part owes a live whole before
+    // this import commits — tracked here, judged by
+    // `assertImportedRequiredPartsAttached` once every edge is written.
     if (
       outcome.status === "created" &&
       registry.compositionExistence(node.kind) === "required"
@@ -2410,11 +2431,29 @@ function edgeIdentityConflict(
  * abort an import whose earlier rows are already written.
  */
 async function updateImportedEdge(
-  session: WriteSession,
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
   edge: InterchangeEdge,
+  existing: EdgeRow,
   props: Readonly<Record<string, unknown>>,
   windowFence: ValidityLowerBoundFence,
 ): Promise<string | undefined> {
+  // The same refusal a store edge update raises before it ends an open
+  // window: a document's `validTo` must not detach a live required part.
+  if (edgeWriteEndsOpenWindow(existing, edge.validTo)) {
+    try {
+      await assertCompositionExistencePreserved(
+        { graphId, registry, lock: frame.lock },
+        existing,
+        frame.target,
+      );
+    } catch (error) {
+      if (!(error instanceof CompositionExistenceError)) throw error;
+      return `${error.code}: ${error.message}`;
+    }
+  }
+  const { session } = frame;
   try {
     // Both halves of the predicate are stated as FENCES — required keys of the
     // method's fence record, applied into the statement's own `WHERE` by their
@@ -2765,7 +2804,7 @@ async function processEdges(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: PendingRequiredParts,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const batchSize = options.batchSize;
   // A slice flush makes its accepted keys visible to later database reads, but
@@ -2788,130 +2827,191 @@ async function processEdges(
       errors,
       importedNodeIds,
       pendingMatchIdentityOwners,
-      pendingRequiredParts,
+      requiredPartLedger,
     );
   }
 }
 
 /**
- * Removes `key` from `pendingRequiredParts` when the just-accepted
- * write attaches its part: a fresh composition edge create (`processEdgeSlice`)
- * naming a pending required part on either endpoint. The ONE place both
- * directions of "this write closed the gap" are decided, so the two callers
- * (single-item accept, batch accept — see the two `record` sites below)
- * cannot drift on which endpoint is the part.
- */
-function clearAttachedRequiredPart(
-  registry: KindRegistry,
-  edge: InterchangeEdge,
-  pendingRequiredParts: PendingRequiredParts,
-): void {
-  const partSide = registry.compositionPartSide(edge.kind);
-  if (partSide === undefined) return;
-  const part = partSide === "from" ? edge.from : edge.to;
-  pendingRequiredParts.delete(makeNodeKey(part.kind, part.id));
-}
-
-/**
- * What remains in `pendingRequiredParts` after every node AND
- * every edge in the payload has been processed: for each, whether the
- * target ALREADY carried a live whole for it before this import (via
- * {@link findLiveCompositionWhole} — the same predicate the write-path
- * detach refusal reads) decides accept vs. refuse.
+ * The end-of-import existence assertion: every required-existence part this
+ * import created must hang from a live whole once every node AND every edge
+ * of the payload is written. Parts that do not are refused per row and their
+ * node rows removed in the same transaction — no orphan survives.
  *
- * A refused part's node row is removed in the SAME transaction — `no orphan
- * node row survives` is the whole point of this assertion — through the
- * session's ordinary hard-delete step (the row was created THIS import, so
- * `session.purgeNode`'s uniqueness release and embedding cleanup are exactly
- * what an ordinary `hardDelete` would run). Its delete-behavior enforcement
- * is explicitly turned OFF (`enforceDeleteBehavior: false`): the part row
- * AND every edge touching it (e.g. an ordinary, non-composition edge this
- * same import also created) were all born this import, so there is no
- * pre-existing reference for `restrict` to protect — `hardDeleteNode`
- * (`src/backend/drizzle/operation-backend-core.ts`) unconditionally deletes
- * every edge connected to the node before deleting the node row itself,
- * `restrict` or not, so nothing is left dangling. Passing the default
- * policy here would let a part's ordinary edge (not the composition edge
- * that makes it a part) throw `RestrictedDeleteError` PAST this function —
- * an uncaught throw inside the same transaction as every other accepted
- * row, aborting the whole import instead of refusing this one row.
+ * Every pending part is judged, through the one owner the
+ * `compositionExistence` audit reads ({@link readCompositionPartStandings}):
+ * an accepted composition edge is not evidence on its own. An edge whose
+ * window does not attach its part (an ended `oneActive` window), or whose
+ * whole is absent or tombstoned (a ghost endpoint admitted under
+ * `validateReferences: false`), leaves the part exactly as unattached as no
+ * edge at all, and is refused the same way.
  *
- * This runs AFTER `foldImportedIdentityNodes` already folded
- * the batch's new node references into identity (the fold needs the
- * complete node batch, and `pendingRequiredParts` is not fully resolved
- * until every edge is processed too, so neither can move ahead of the
- * other) — a purged part's identity membership is undone here, through
- * `runtime.detachDeletedImportedIdentityNode`, the same
+ * The assertion runs to a FIXED POINT. Purging a part removes every edge
+ * touching it, including the composition edge that attached a required part
+ * BENEATH it which an earlier pass already accepted; those descendants are
+ * judged again, and again refused if nothing else holds them up.
+ *
+ * A refused part's row is removed through the session's ordinary hard-delete
+ * step (the row was created THIS import, so `session.purgeNode`'s uniqueness
+ * release and embedding cleanup are exactly what an ordinary `hardDelete`
+ * would run). Its delete-behavior enforcement is explicitly turned OFF
+ * (`enforceDeleteBehavior: false`): the part row was born this import, so
+ * there is no pre-existing reference for `restrict` to protect —
+ * `hardDeleteNode` (`src/backend/drizzle/operation-backend-core.ts`)
+ * unconditionally deletes every edge connected to the node before deleting
+ * the node row itself, so nothing is left dangling. Passing the default
+ * policy here would let a part's ordinary edge throw `RestrictedDeleteError`
+ * PAST this function, aborting the whole import instead of refusing this one
+ * row.
+ *
+ * The counts track what is committed: the purged node comes off
+ * `result.nodes.created`, and each edge this import created that the purge
+ * removed with it comes off `result.edges.created` and is reported as its own
+ * per-row error.
+ *
+ * This runs AFTER `foldImportedIdentityNodes` already folded the batch's new
+ * node references into identity — a purged part's identity membership is
+ * undone here, through `runtime.detachDeletedImportedIdentityNode`, the same
  * `identity.detachDeleted(..., "hard")` `executeNodeHardDelete`
  * (`src/store/operations/node-operations.ts`) issues for an ordinary hard
- * delete. That call, too, is inside the `try`: an identity-layer failure
- * on an already-purged row must not abort every other accepted row either.
- * One per-row `ImportError` is recorded for each refusal, or — on the
- * unexpected path — for whatever the purge/detach itself failed with; the
- * rest of the import's accepted rows are unaffected (the catch-per-row
- * contract holds).
+ * delete. That call, too, is inside the `try`: an identity-layer failure on
+ * an already-purged row must not abort every other accepted row either.
  */
 async function assertImportedRequiredPartsAttached<G extends GraphDef>(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   runtime: ReturnType<typeof storeRuntime<G>>,
-  pendingRequiredParts: ReadonlyMap<string, PendingRequiredPart>,
+  ledger: RequiredPartLedger,
   result: ImportResult,
   importedNodeIds: Set<string>,
   errors: ImportError[],
 ): Promise<void> {
-  for (const part of pendingRequiredParts.values()) {
-    const whole = await findLiveCompositionWhole(
-      registry,
-      frame.target,
-      graphId,
-      part.kind,
-      part.id,
-    );
-    if (whole !== undefined) continue;
-
-    const registration = frame.graph.nodes[part.kind];
-    if (registration === undefined) continue;
-    try {
-      await frame.session.purgeNode(
-        {
-          kind: part.kind,
-          id: part.id,
-          schema: registration.type.schema,
-          onDelete: registration.onDelete,
-        },
-        { enforceDeleteBehavior: false },
+  // Accepted parts by the whole that holds them, so a whole purged later
+  // re-queues exactly the parts its purge detached.
+  const acceptedByWhole = new Map<string, PendingRequiredPart[]>();
+  let candidates: readonly PendingRequiredPart[] = [
+    ...ledger.pendingParts.values(),
+  ];
+  while (candidates.length > 0) {
+    const purgedKeys: string[] = [];
+    for (
+      let index = 0;
+      index < candidates.length;
+      index += COMPOSITION_ATTACHMENT_PAGE_SIZE
+    ) {
+      const standings = await readCompositionPartStandings(
+        registry,
+        frame.target,
+        graphId,
+        candidates.slice(index, index + COMPOSITION_ATTACHMENT_PAGE_SIZE),
+        frame.batchPointRead,
       );
-      await runtime.detachDeletedImportedIdentityNode(frame.target, {
-        kind: part.kind,
-        id: part.id,
-      });
-    } catch (error: unknown) {
-      errors.push({
-        entityType: "node",
-        kind: part.kind,
-        id: part.id,
-        error:
-          error instanceof Error ?
-            error.message
-          : `Failed to purge unattached required-existence part: ${String(error)}`,
-      });
-      continue;
+      for (const { part, whole } of standings) {
+        if (whole !== undefined) {
+          const wholeKey = makeNodeKey(whole.kind, whole.id);
+          const held = acceptedByWhole.get(wholeKey) ?? [];
+          acceptedByWhole.set(wholeKey, held);
+          held.push(part);
+          continue;
+        }
+        const purged = await purgeUnattachedRequiredPart(
+          frame,
+          graphId,
+          runtime,
+          part,
+          ledger,
+          result,
+          importedNodeIds,
+          errors,
+        );
+        if (purged) purgedKeys.push(makeNodeKey(part.kind, part.id));
+      }
     }
-    result.nodes.created--;
-    importedNodeIds.delete(makeNodeKey(part.kind, part.id));
+    candidates = purgedKeys.flatMap((key) => {
+      const detached = acceptedByWhole.get(key) ?? [];
+      acceptedByWhole.delete(key);
+      return detached;
+    });
+  }
+}
+
+/**
+ * Removes one refused required part and settles the import's result for it.
+ * Returns whether the row was removed; a failed purge is reported as that
+ * row's own error and leaves the counts alone.
+ */
+async function purgeUnattachedRequiredPart<G extends GraphDef>(
+  frame: ImportWriteFrame,
+  graphId: string,
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  part: PendingRequiredPart,
+  ledger: RequiredPartLedger,
+  result: ImportResult,
+  importedNodeIds: Set<string>,
+  errors: ImportError[],
+): Promise<boolean> {
+  const registration = frame.graph.nodes[part.kind];
+  if (registration === undefined) return false;
+  // Read BEFORE the purge, which removes them with the node: the edges this
+  // import created that are about to go.
+  const removedEdges = (
+    await frame.target.findEdgesConnectedTo({
+      graphId,
+      nodeKind: part.kind,
+      nodeId: part.id,
+    })
+  ).filter((edge) => ledger.createdEdgeIds.has(edge.id));
+  try {
+    await frame.session.purgeNode(
+      {
+        kind: part.kind,
+        id: part.id,
+        schema: registration.type.schema,
+        onDelete: registration.onDelete,
+      },
+      { enforceDeleteBehavior: false },
+    );
+    await runtime.detachDeletedImportedIdentityNode(frame.target, {
+      kind: part.kind,
+      id: part.id,
+    });
+  } catch (error: unknown) {
     errors.push({
       entityType: "node",
       kind: part.kind,
       id: part.id,
-      error: new CompositionExistenceError({
-        partKind: part.kind,
-        partId: part.id,
-        situation: "create",
-      }).message,
+      error:
+        error instanceof Error ?
+          error.message
+        : `Failed to purge unattached required-existence part: ${String(error)}`,
+    });
+    return false;
+  }
+  result.nodes.created--;
+  importedNodeIds.delete(makeNodeKey(part.kind, part.id));
+  ledger.pendingParts.delete(makeNodeKey(part.kind, part.id));
+  errors.push({
+    entityType: "node",
+    kind: part.kind,
+    id: part.id,
+    error: new CompositionExistenceError({
+      partKind: part.kind,
+      partId: part.id,
+      situation: "create",
+    }).message,
+  });
+  for (const edge of removedEdges) {
+    result.edges.created--;
+    ledger.createdEdgeIds.delete(edge.id);
+    errors.push({
+      entityType: "edge",
+      kind: edge.kind,
+      id: edge.id,
+      error: `Edge "${edge.id}" was removed with its endpoint ${part.kind} "${part.id}", a required-existence part this import could not attach to a live whole.`,
     });
   }
+  return true;
 }
 
 function recordEdgeOutcome(
@@ -3173,15 +3273,14 @@ async function processEdgeSlice(
   errors: ImportError[],
   importedNodeIds: Set<string>,
   pendingMatchIdentityOwners: Set<string>,
-  pendingRequiredParts: PendingRequiredParts,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
+  // Only a graph that can purge a part ever reads the created-edge ids.
+  const tracksCreatedEdges = declaresRequiredCompositionParts(registry);
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
-    // A composition edge accepted this import closes the gap for
-    // whichever endpoint is its part, when that part is itself pending from
-    // `processNodes` (same batch) — see `clearAttachedRequiredPart`.
-    if (outcome.status === "created" && registry.isCompositionEdge(edge.kind)) {
-      clearAttachedRequiredPart(registry, edge, pendingRequiredParts);
+    if (tracksCreatedEdges && outcome.status === "created") {
+      requiredPartLedger.createdEdgeIds.add(edge.id);
     }
   };
 
@@ -3401,8 +3500,11 @@ async function processEdgeSlice(
             break;
           }
           const updateError = await updateImportedEdge(
-            frame.session,
+            frame,
+            graphId,
+            registry,
             edge,
+            existing,
             props,
             updateWindow.value,
           );
@@ -3875,8 +3977,11 @@ async function processEdge(
           return { status: "error", error: updateWindow.error };
         }
         const updateError = await updateImportedEdge(
-          frame.session,
+          frame,
+          graphId,
+          registry,
           edge,
+          existing,
           propsResult.data,
           updateWindow.value,
         );
