@@ -19,7 +19,9 @@ import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   type FieldRef,
   mergeEdgeKinds,
+  type NodePredicate,
   type OrderSpec,
+  type PredicateExpression,
   type QueryAst,
   type SelectiveField,
   type SortDirection,
@@ -36,7 +38,7 @@ import {
 import { type SqlDialect } from "../dialect/types";
 import {
   adjustOrderByForDirection,
-  buildCursorPredicate,
+  applyCursorFilters,
   buildPaginatedResult,
   buildPaginatedResultFromRows,
   buildSelectContext,
@@ -957,10 +959,25 @@ export class ExecutableQuery<
           projection: {
             fields: [
               ...ast.projection.fields,
-              ...(ast.orderBy ?? []).map((order, index) => ({
-                outputName: oneStatementBatchOrderColumn(index),
-                source: order.field,
-              })),
+              ...(ast.orderBy ?? []).map((order, index) => {
+                // An edge alias's columns live in its traversal's node CTE,
+                // as they do for an edge field a select() projects.
+                const edgeTraversal =
+                  order.field.__type === "field_ref" ?
+                    ast.traversals.find(
+                      (traversal) =>
+                        traversal.edgeAlias ===
+                        requireCursorField(order.field).alias,
+                    )
+                  : undefined;
+                return {
+                  outputName: oneStatementBatchOrderColumn(index),
+                  source: order.field,
+                  ...(edgeTraversal === undefined ?
+                    {}
+                  : { cteAlias: `cte_${edgeTraversal.nodeAlias}` }),
+                };
+              }),
             ],
           },
         };
@@ -1497,15 +1514,48 @@ export class ExecutableQuery<
   }
 
   /**
+   * Whether this query's keyset identifies, and is positioned against, the
+   * completed MATCH ROW rather than the start node alone: it has a traversal,
+   * and every traversal matches one edge per row.
+   *
+   * A recursive traversal has no single edge per row and its completed-match
+   * filter accepts database expressions only, so a query with one keeps the
+   * start-node keyset. That keyset does not distinguish the rows one start
+   * node fans out into; paging such a query is exact only while no start
+   * node's rows straddle a page boundary.
+   *
+   * The one decision both halves of the keyset read: the tiebreaker
+   * ({@link #paginationOrderBy}) and the cursor's placement
+   * ({@link #cursorFilters}).
+   */
+  #keysetIdentifiesMatchRows(): boolean {
+    return (
+      this.#state.traversals.length > 0 &&
+      this.#state.traversals.every(
+        (traversal) => traversal.variableLength === undefined,
+      )
+    );
+  }
+
+  /**
    * The ORDER BY used for keyset pagination: the caller's ORDER BY plus a final
-   * identity tiebreaker on the start alias. Without a unique final key, a
+   * tiebreaker that identifies the RESULT ROW. Without a unique final key, a
    * non-unique sort (e.g. `orderBy("p", "age")` with many equal ages) makes the
    * keyset predicate `age > lastAge` skip every not-yet-returned equal-age row,
-   * silently losing data across pages. For a multi-kind start, identity is
-   * `(kind, id)`; each missing component is appended after the caller's order.
-   * For a single-kind start, `id` alone remains sufficient. The emitted sort,
-   * cursor predicate, cursor encoding, and cursor validation all use this order,
-   * including the selective-field-optimized path.
+   * silently losing data across pages.
+   *
+   * A row is one start node together with one match per traversal, so its
+   * identity is the start node's plus, per traversal, the matched edge's id —
+   * an edge id is unique in the graph and determines the node it leads to, and
+   * two parallel edges between one pair of nodes are two rows. The start
+   * node's identity is `(kind, id)` when the start alias spans more than one
+   * kind and `id` alone otherwise. Each component the caller's order does not
+   * already name is appended after it, in traversal order. See
+   * {@link #keysetIdentifiesMatchRows} for the queries that keep the
+   * start-node identity alone.
+   *
+   * The emitted sort, cursor predicate, cursor encoding, and cursor validation
+   * all use this order, including the selective-field-optimized path.
    */
   #paginationOrderBy(): readonly (Omit<OrderSpec, "field"> & {
     field: FieldRef;
@@ -1514,39 +1564,57 @@ export class ExecutableQuery<
       ...order,
       field: requireCursorField(order.field),
     }));
-    const startAlias = this.#state.startAlias;
-    function hasSystemOrder(fieldName: "kind" | "id"): boolean {
-      return orderBy.some(
+    function missingIdentityKey(
+      alias: string,
+      fieldName: "kind" | "id",
+      nullable: boolean,
+    ): readonly (OrderSpec & { field: FieldRef })[] {
+      const named = orderBy.some(
         (spec) =>
-          spec.field.alias === startAlias &&
+          spec.field.alias === alias &&
           spec.field.path.length === 1 &&
           spec.field.path[0] === fieldName &&
           spec.field.jsonPointer === undefined,
       );
-    }
-    const missingKind =
-      this.#state.startKinds.length > 1 && !hasSystemOrder("kind");
-    const missingId = !hasSystemOrder("id");
-    if (!missingKind && !missingId) return orderBy;
-    function tiebreaker(fieldName: "kind" | "id"): OrderSpec & {
-      field: FieldRef;
-    } {
-      return {
-        field: {
-          __type: "field_ref",
-          alias: startAlias,
-          nullable: false,
-          path: [fieldName],
-          valueType: "string",
+      if (named) return [];
+      return [
+        {
+          field: {
+            __type: "field_ref",
+            alias,
+            nullable,
+            path: [fieldName],
+            valueType: "string",
+          },
+          direction: "asc",
         },
-        direction: "asc",
-      };
+      ];
     }
-    return [
-      ...orderBy,
-      ...(missingKind ? [tiebreaker("kind")] : []),
-      ...(missingId ? [tiebreaker("id")] : []),
+    function missingNodeIdentity(
+      alias: string,
+      kinds: readonly string[],
+      nullable: boolean,
+    ): readonly (OrderSpec & { field: FieldRef })[] {
+      return [
+        ...(kinds.length > 1 ?
+          missingIdentityKey(alias, "kind", nullable)
+        : []),
+        ...missingIdentityKey(alias, "id", nullable),
+      ];
+    }
+    const tiebreaker = [
+      ...missingNodeIdentity(
+        this.#state.startAlias,
+        this.#state.startKinds,
+        false,
+      ),
+      ...(this.#keysetIdentifiesMatchRows() ?
+        this.#state.traversals.flatMap((traversal) =>
+          missingIdentityKey(traversal.edgeAlias, "id", traversal.optional),
+        )
+      : []),
     ];
+    return tiebreaker.length === 0 ? orderBy : [...orderBy, ...tiebreaker];
   }
 
   /**
@@ -1711,23 +1779,11 @@ export class ExecutableQuery<
       validateCursorColumns(cursorData, paginationOrderBy);
     const direction = isBackward ? "backward" : "forward";
     const orderBy = adjustOrderByForDirection(paginationOrderBy, direction);
-    const predicates =
-      cursorData === undefined ?
-        this.#state.predicates
-      : [
-          ...this.#state.predicates,
-          buildCursorPredicate(
-            cursorData,
-            paginationOrderBy,
-            direction,
-            this.#state.startAlias,
-          ),
-        ];
     const pagedQuery = new ExecutableQuery(
       this.#config,
       {
         ...this.#state,
-        predicates,
+        ...this.#cursorFilters(cursorData, paginationOrderBy, direction),
         orderBy,
         limit: pageLimit + 1,
         offset: undefined,
@@ -1823,6 +1879,40 @@ export class ExecutableQuery<
   }
 
   /**
+   * This query's filters for one page: unchanged for the first page, with the
+   * cursor applied (`applyCursorFilters`) for every later one. Spread over
+   * the state by `page()` and over the AST by `#executeWithCursor`, so the
+   * two page builders place the cursor identically.
+   */
+  #cursorFilters(
+    cursorData: CursorData | undefined,
+    paginationOrderBy: readonly OrderSpec[],
+    direction: "forward" | "backward",
+  ): Readonly<{
+    predicates: readonly NodePredicate[];
+    resultPredicate?: PredicateExpression;
+  }> {
+    const { predicates, resultPredicate } =
+      cursorData === undefined ?
+        this.#state
+      : applyCursorFilters(
+          {
+            startAlias: this.#state.startAlias,
+            positionsCompletedMatch: this.#keysetIdentifiesMatchRows(),
+            predicates: this.#state.predicates,
+            resultPredicate: this.#state.resultPredicate,
+          },
+          cursorData,
+          paginationOrderBy,
+          direction,
+        );
+    return {
+      predicates,
+      ...(resultPredicate === undefined ? {} : { resultPredicate }),
+    };
+  }
+
+  /**
    * Executes a query with cursor conditions applied.
    */
   async #executeWithCursor(
@@ -1838,23 +1928,11 @@ export class ExecutableQuery<
       direction,
     );
 
-    // Build cursor predicates if we have cursor data
-    let predicates = [...this.#state.predicates];
-    if (cursorData) {
-      const cursorPredicate = buildCursorPredicate(
-        cursorData,
-        this.#paginationOrderBy(),
-        direction,
-        this.#state.startAlias,
-      );
-      predicates = [...predicates, cursorPredicate];
-    }
-
-    // Apply modified ORDER BY, predicates, and limit to AST (discard offset)
+    // Apply modified ORDER BY, cursor filters, and limit to AST (discard offset)
     const { offset: _discarded, ...astWithoutOffset } = ast;
     const modifiedAst = {
       ...astWithoutOffset,
-      predicates,
+      ...this.#cursorFilters(cursorData, this.#paginationOrderBy(), direction),
       orderBy,
       limit,
       ...(options?.selectiveFields !== undefined && {
