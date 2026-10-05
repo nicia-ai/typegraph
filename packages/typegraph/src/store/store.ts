@@ -1800,10 +1800,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * The resolved write set as the claim layer reads it: every upsert carrying
    * its kind's registered unique constraints, and the releases narrowed to the
-   * kinds whose declarations produce a key another node could take. One owner
-   * for the probe (`probeResolvedNodeUniqueness`) and the apply
-   * (`applyResolvedNodeUniqueness`), so the merge planner's plan-time finding
-   * and the commit's refusal read the same constraints over the same rows.
+   * kinds whose declarations produce a key another node could take.
    */
   #resolvedNodeClaimWrites(
     writes: Readonly<{
