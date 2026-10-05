@@ -245,19 +245,18 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
             // Keep descendants branchable with the same O(1) anchor contract,
             // but do not copy recorded-time history into the disposable fork.
             //
-            // Deliberately narrower than Store.workingCopyOptions (the full
-            // set a fork inherits, see forkStoreOptions): the clone's backend
-            // is a FRESH, empty database, not a physical copy of the base's,
-            // so a `schema` naming the base's tables would misdirect writes
-            // on an unrelated backend, and an external `recordedRead`
-            // binding would point at a relation the clone never populates.
-            // Hooks, `coalesceUnchangedUpserts`, `autoRefreshStatistics` and
-            // `queryDefaults` carry no such physical assumption, but the
-            // clone strategy is used for host-agnostic P0 branching where the
-            // caller's `makeBackend` factory — not the base's own
-            // configuration — owns the fresh store's behavior; only the
-            // branchability contract (`revisionTracking`) is load-bearing
-            // enough to thread through unconditionally.
+            // Narrower than Store.workingCopyOptions (the full set a fork
+            // inherits, see forkStoreOptions): the clone's backend is a
+            // FRESH, empty database, not a physical copy of the base's, so a
+            // `schema` naming the base's tables would misdirect writes on an
+            // unrelated backend, and an external `recordedRead` binding would
+            // point at a relation the clone never populates.
+            // `queryDefaults` decide which rows a query returns, so they are
+            // carried: the same query must answer alike on the base and on
+            // its working copy. Hooks, `coalesceUnchangedUpserts` and
+            // `autoRefreshStatistics` stay with the caller's `makeBackend`
+            // factory, which owns the fresh store's write-side behavior.
+            ...cloneQueryDefaults(baseStore),
             revisionTracking: baseStore.revisionTrackingEnabled,
             ...(options.revisionJournal === false ?
               { revisionJournal: false as const }
@@ -323,6 +322,14 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
       }
     },
   };
+}
+
+/** The base's query defaults, as the option a cloned store is opened with. */
+function cloneQueryDefaults<G extends GraphDef>(
+  baseStore: Store<G>,
+): Pick<StoreOptions, "queryDefaults"> {
+  const { queryDefaults } = baseStore.workingCopyOptions;
+  return queryDefaults === undefined ? {} : { queryDefaults };
 }
 
 /**
