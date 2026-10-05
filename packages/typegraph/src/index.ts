@@ -844,6 +844,7 @@ export type {
   CompiledSelectSql,
   CompiledStatementSql,
   CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,

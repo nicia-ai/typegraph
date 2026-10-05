@@ -1,6 +1,6 @@
 /**
  * The composition ATTACHMENT surface, on every backend: how a part names the
- * whole it belongs to (`partOf: { kind, id, via?, props? }`), how it MOVES
+ * whole it belongs to (`partOf: { whole, via?, props? }`), how it MOVES
  * between wholes (`nodes.<Kind>.reparent`), and what `getOrCreateByConstraint`
  * guarantees about a node it resolved rather than created.
  *
@@ -15,10 +15,14 @@
  *   CaClip    --(caClipOf,         partOf, part->whole, oneActive)-- CaShow
  *   CaTrack   --(caHasTrack,       hasPart, whole->part)-- CaAlbum
  *   CaFolder  --(caParentFolder,   partOf, part->whole, reflexive)-- CaFolder
+ *   CaRelic   --(caRelicOf,        partOf, part->whole, oneActive)-- CaVault
+ *
+ * CaVault's OWN schema declares properties named `via`, `props`, `validFrom`
+ * and `validTo` — the attachment's option names — so a whole passed as a
+ * node object proves only its `kind` and `id` are read.
  *
  * Each case states, in a comment, the mutation/revert that must make it
- * fail; the checks actually performed are recorded in the scratchpad
- * `lane-RVA-load-bearing.md` note.
+ * fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -61,6 +65,23 @@ const CaFolder = defineNode("CaFolder", { schema: z.object({}) });
 /** Declares no composition pair at all — `reparent`'s not-a-part refusal. */
 const CaReader = defineNode("CaReader", { schema: z.object({}) });
 
+/** A whole whose own property names collide with every attachment option. */
+const CaVault = defineNode("CaVault", {
+  schema: z.object({
+    via: z.string(),
+    props: z.object({ order: z.number() }),
+    validFrom: z.string(),
+    validTo: z.string(),
+  }),
+});
+const CaRelic = defineNode("CaRelic", { schema: z.object({}) });
+const CA_VAULT_PROPS = {
+  via: "caChapterOf",
+  props: { order: 7 },
+  validFrom: "1999-01-01T00:00:00.000Z",
+  validTo: "1999-06-01T00:00:00.000Z",
+} as const;
+
 const caChapterOf = defineEdge("caChapterOf", {
   schema: z.object({ order: z.number().int() }),
 });
@@ -73,6 +94,9 @@ const caPageOf = defineEdge("caPageOf", { schema: z.object({}) });
 const caClipOf = defineEdge("caClipOf", { schema: z.object({}) });
 const caHasTrack = defineEdge("caHasTrack", { schema: z.object({}) });
 const caParentFolder = defineEdge("caParentFolder", { schema: z.object({}) });
+const caRelicOf = defineEdge("caRelicOf", {
+  schema: z.object({ order: z.number().optional() }),
+});
 
 function buildGraph(id: string) {
   return defineGraph({
@@ -88,6 +112,8 @@ function buildGraph(id: string) {
       CaTrack: { type: CaTrack },
       CaFolder: { type: CaFolder },
       CaReader: { type: CaReader },
+      CaVault: { type: CaVault },
+      CaRelic: { type: CaRelic },
     },
     edges: {
       caChapterOf: {
@@ -132,6 +158,12 @@ function buildGraph(id: string) {
         to: [CaFolder],
         cardinality: "one",
       },
+      caRelicOf: {
+        type: caRelicOf,
+        from: [CaRelic],
+        to: [CaVault],
+        cardinality: "oneActive",
+      },
     },
     ontology: [
       partOf(CaChapter, CaBook, { via: caChapterOf }),
@@ -144,6 +176,7 @@ function buildGraph(id: string) {
         via: caParentFolder,
         partSide: "from",
       }),
+      partOf(CaRelic, CaVault, { via: caRelicOf }),
     ],
   });
 }
@@ -174,7 +207,7 @@ export function registerCompositionAttachmentIntegrationTests(
       await expect(
         store.nodes.CaChapter.create(
           { slug: "one" },
-          { partOf: { kind: "CaBook", id: book.id } },
+          { partOf: { whole: { kind: "CaBook", id: book.id } } },
         ),
       ).rejects.toThrow(
         expect.objectContaining({
@@ -195,7 +228,12 @@ export function registerCompositionAttachmentIntegrationTests(
       await expect(
         store.nodes.CaChapter.create(
           { slug: "one" },
-          { partOf: { kind: "CaBook", id: book.id, via: "caIncludedIn" } },
+          {
+            partOf: {
+              whole: { kind: "CaBook", id: book.id },
+              via: "caIncludedIn",
+            },
+          },
         ),
       ).rejects.toThrow(
         expect.objectContaining({
@@ -218,8 +256,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 3 },
           },
@@ -241,8 +278,7 @@ export function registerCompositionAttachmentIntegrationTests(
           { slug: "one" },
           {
             partOf: {
-              kind: "CaBook",
-              id: book.id,
+              whole: { kind: "CaBook", id: book.id },
               via: "caChapterOf",
               props: { order: "third" },
             },
@@ -257,7 +293,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const album = await store.nodes.CaAlbum.create({});
       const track = await store.nodes.CaTrack.create(
         {},
-        { partOf: { kind: "CaAlbum", id: album.id } },
+        { partOf: { whole: { kind: "CaAlbum", id: album.id } } },
       );
       const edges = await store.edges.caHasTrack.find({});
       expect(edges).toHaveLength(1);
@@ -276,8 +312,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -285,7 +320,7 @@ export function registerCompositionAttachmentIntegrationTests(
       );
       const page = await store.nodes.CaPage.create(
         {},
-        { partOf: { kind: "CaChapter", id: chapter.id } },
+        { partOf: { whole: { kind: "CaChapter", id: chapter.id } } },
       );
 
       // MUTATION CHECK: skip the retire (drop the `if (disposition ===
@@ -294,8 +329,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // — the attach then loses the composition claim and this rejects with
       // COMPOSITION_WHOLE_OCCUPIED instead of moving the chapter.
       await store.nodes.CaChapter.reparent(chapter.id, {
-        kind: "CaAnthology",
-        id: anthology.id,
+        whole: { kind: "CaAnthology", id: anthology.id },
         via: "caIncludedIn",
       });
 
@@ -321,7 +355,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const showB = await store.nodes.CaShow.create({});
       const clip = await store.nodes.CaClip.create(
         {},
-        { partOf: { kind: "CaShow", id: showA.id } },
+        { partOf: { whole: { kind: "CaShow", id: showA.id } } },
       );
 
       // MUTATION CHECK: remove the `reattachedPart` arm from
@@ -330,8 +364,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // then read as a detach of a live required part and this rejects with
       // CompositionExistenceError (`situation: "detach"`).
       await store.nodes.CaClip.reparent(clip.id, {
-        kind: "CaShow",
-        id: showB.id,
+        whole: { kind: "CaShow", id: showB.id },
       });
 
       const all = await store.edges.caClipOf.find(
@@ -355,7 +388,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const showB = await store.nodes.CaShow.create({});
       const clip = await store.nodes.CaClip.create(
         {},
-        { partOf: { kind: "CaShow", id: showA.id } },
+        { partOf: { whole: { kind: "CaShow", id: showA.id } } },
       );
 
       // This case asserts the invariant on every backend, but a two-read
@@ -366,8 +399,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // clock between the retire and the attach so a second read is
       // guaranteed to sample a later instant.
       await store.nodes.CaClip.reparent(clip.id, {
-        kind: "CaShow",
-        id: showB.id,
+        whole: { kind: "CaShow", id: showB.id },
       });
 
       const all = await store.edges.caClipOf.find(
@@ -403,8 +435,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -414,8 +445,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const before = requireDefined(beforeEdges[0]);
 
       await store.nodes.CaChapter.reparent(chapter.id, {
-        kind: "CaBook",
-        id: book.id,
+        whole: { kind: "CaBook", id: book.id },
         via: "caChapterOf",
       });
 
@@ -433,8 +463,8 @@ export function registerCompositionAttachmentIntegrationTests(
       const reader = await store.nodes.CaReader.create({});
       await expect(
         store.nodes.CaReader.reparent(reader.id, {
-          kind: "CaBook",
-          id: "whatever",
+          // @ts-expect-error CaReader is no declared part, so no whole kind is accepted
+          whole: { kind: "CaBook", id: "whatever" },
         }),
       ).rejects.toThrow(
         expect.objectContaining({
@@ -451,8 +481,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -460,17 +489,19 @@ export function registerCompositionAttachmentIntegrationTests(
       );
       const page = await store.nodes.CaPage.create(
         {},
-        { partOf: { kind: "CaChapter", id: chapter.id } },
+        { partOf: { whole: { kind: "CaChapter", id: chapter.id } } },
       );
 
       await expect(
-        store.nodes.CaPage.reparent(page.id, { kind: "CaBook", id: book.id }),
+        store.nodes.CaPage.reparent(page.id, {
+          // @ts-expect-error CaPage declares CaChapter as its only whole kind
+          whole: { kind: "CaBook", id: book.id },
+        }),
       ).rejects.toBeInstanceOf(ConfigurationError);
 
       await expect(
         store.nodes.CaChapter.reparent(asNodeId("no-such-chapter"), {
-          kind: "CaBook",
-          id: book.id,
+          whole: { kind: "CaBook", id: book.id },
           via: "caChapterOf",
         }),
       ).rejects.toBeInstanceOf(NodeNotFoundError);
@@ -481,11 +512,11 @@ export function registerCompositionAttachmentIntegrationTests(
       const root = await store.nodes.CaFolder.create({});
       const child = await store.nodes.CaFolder.create(
         {},
-        { partOf: { kind: "CaFolder", id: root.id } },
+        { partOf: { whole: { kind: "CaFolder", id: root.id } } },
       );
       const grandchild = await store.nodes.CaFolder.create(
         {},
-        { partOf: { kind: "CaFolder", id: child.id } },
+        { partOf: { whole: { kind: "CaFolder", id: child.id } } },
       );
 
       // MUTATION CHECK: pass `validateAcyclicity: false` in
@@ -494,8 +525,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // that no ordinary delete can unwind (`CompositionCycleError`).
       await expect(
         store.nodes.CaFolder.reparent(root.id, {
-          kind: "CaFolder",
-          id: grandchild.id,
+          whole: { kind: "CaFolder", id: grandchild.id },
         }),
       ).rejects.toBeInstanceOf(EdgeAcyclicityError);
 
@@ -519,8 +549,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -533,8 +562,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // `{}` and `total` 0, while the move itself still lands.
       const { receipt } = await store.transactionWithReceipt(async (tx) => {
         await tx.nodes.CaChapter.reparent(chapter.id, {
-          kind: "CaAnthology",
-          id: anthology.id,
+          whole: { kind: "CaAnthology", id: anthology.id },
           via: "caIncludedIn",
         });
       });
@@ -560,8 +588,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const store = await context.createStore(buildGraph(nextGraphId()));
       const book = await store.nodes.CaBook.create({});
       const attachment = {
-        kind: "CaBook" as const,
-        id: book.id,
+        whole: book,
         via: "caChapterOf",
         props: { order: 1 },
       };
@@ -596,8 +623,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -607,7 +633,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const error = await store.nodes.CaChapter.getOrCreateByConstraint(
         "ca_chapter_slug",
         { slug: "one" },
-        { partOf: { kind: "CaAnthology", id: anthology.id } },
+        { partOf: { whole: { kind: "CaAnthology", id: anthology.id } } },
       ).catch((error_: unknown) => error_);
 
       expect(error).toBeInstanceOf(CompositionExistenceError);
@@ -636,8 +662,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -654,8 +679,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caDraftChapterOf",
           },
         },
@@ -683,8 +707,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 7 },
           },
@@ -708,8 +731,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -728,7 +750,7 @@ export function registerCompositionAttachmentIntegrationTests(
         store.nodes.CaChapter.getOrCreateByConstraint(
           "ca_chapter_slug",
           { slug: "one" },
-          { partOf: { kind: "CaBook", id: book.id } },
+          { partOf: { whole: { kind: "CaBook", id: book.id } } },
         ),
       ).rejects.toThrow(
         expect.objectContaining({
@@ -746,8 +768,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "one" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -761,7 +782,12 @@ export function registerCompositionAttachmentIntegrationTests(
       const error = await store.nodes.CaChapter.getOrCreateByConstraint(
         "ca_chapter_slug",
         { slug: "one" },
-        { partOf: { kind: "CaReader", id: reader.id } },
+        {
+          partOf: {
+            // @ts-expect-error CaReader is not a whole kind declared for CaChapter
+            whole: { kind: "CaReader", id: reader.id },
+          },
+        },
       ).catch((error_: unknown) => error_);
 
       expect(error).toBeInstanceOf(ConfigurationError);
@@ -775,8 +801,7 @@ export function registerCompositionAttachmentIntegrationTests(
       const store = await context.createStore(buildGraph(nextGraphId()));
       const book = await store.nodes.CaBook.create({});
       const attachment = {
-        kind: "CaBook" as const,
-        id: book.id,
+        whole: book,
         via: "caChapterOf",
         props: { order: 1 },
       };
@@ -823,8 +848,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "a" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -843,8 +867,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "a" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 2 },
           },
@@ -879,8 +902,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "a" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -894,8 +916,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "a" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: "not-a-number" },
           },
@@ -912,8 +933,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "a" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -925,8 +945,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // (src/store/operations/composition-create.ts) — reparent's no-op arm
       // then resolves silently, leaving the edge at `order: 1`.
       const error = await store.nodes.CaChapter.reparent(chapter.id, {
-        kind: "CaBook",
-        id: book.id,
+        whole: { kind: "CaBook", id: book.id },
         via: "caChapterOf",
         props: { order: 2 },
       }).catch((error_: unknown) => error_);
@@ -956,8 +975,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { slug: "a" },
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -966,7 +984,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // "b" holds a DIFFERENT whole, through a different realizing edge.
       const elsewhere = await store.nodes.CaChapter.create(
         { slug: "b" },
-        { partOf: { kind: "CaAnthology", id: anthology.id } },
+        { partOf: { whole: { kind: "CaAnthology", id: anthology.id } } },
       );
 
       // Same props "a" already holds (order: 1): the batch's mismatch is
@@ -981,8 +999,7 @@ export function registerCompositionAttachmentIntegrationTests(
         [{ props: { slug: "a" } }, { props: { slug: "b" } }],
         {
           partOf: {
-            kind: "CaBook",
-            id: book.id,
+            whole: { kind: "CaBook", id: book.id },
             via: "caChapterOf",
             props: { order: 1 },
           },
@@ -1001,6 +1018,215 @@ export function registerCompositionAttachmentIntegrationTests(
       // Refused, not moved: "b" keeps the anthology and gains no book edge.
       expect(await store.edges.caIncludedIn.find({})).toHaveLength(1);
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
+    });
+
+    // ========================================================
+    // The attachment object itself: `whole`, and nothing unstated
+    // ========================================================
+
+    it("reads only kind and id from a whole passed as a node whose own properties are named like attachment options", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const vaultA = await store.nodes.CaVault.create(CA_VAULT_PROPS);
+      const vaultB = await store.nodes.CaVault.create(CA_VAULT_PROPS);
+
+      // MUTATION CHECK: read the options off the whole as well — in
+      // `readStatedAttachment` (src/store/operations/composition-create.ts)
+      // build `attachment` from `{ ...stated.whole, ...stated }`. The vault's
+      // own `via` ("caChapterOf") then names a realizing edge that is not
+      // declared for this pair and the create refuses with
+      // COMPOSITION_VIA_NOT_DECLARED.
+      const relic = await store.nodes.CaRelic.create(
+        {},
+        { partOf: { whole: vaultA } },
+      );
+
+      const createdEdges = await store.edges.caRelicOf.find({});
+      const created = requireDefined(createdEdges[0], "the realizing edge");
+      expect(created.toKind).toBe("CaVault");
+      expect(created.toId).toBe(vaultA.id);
+      expect(created.order).toBeUndefined();
+      expect(created.meta.validFrom).not.toBe(CA_VAULT_PROPS.validFrom);
+      expect(created.meta.validTo).toBeUndefined();
+
+      const moved = await store.nodes.CaRelic.reparent(relic.id, {
+        whole: vaultB,
+      });
+      expect(moved.moved).toBe(true);
+      expect(moved.edge.toId).toBe(vaultB.id);
+      expect(moved.edge.meta.validTo).toBeUndefined();
+
+      // The already-satisfied arm compares stated props against the stored
+      // ones; the vault's own `props` must not count as stated.
+      const again = await store.nodes.CaRelic.reparent(relic.id, {
+        whole: vaultB,
+      });
+      expect(again.moved).toBe(false);
+    });
+
+    it("reparent applies a stated validTo to the new attachment, not to the retired one", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const vaultA = await store.nodes.CaVault.create(CA_VAULT_PROPS);
+      const vaultB = await store.nodes.CaVault.create(CA_VAULT_PROPS);
+      const relic = await store.nodes.CaRelic.create(
+        {},
+        {
+          partOf: { whole: vaultA, validFrom: "2024-01-01T00:00:00.000Z" },
+        },
+      );
+      const at = "2024-06-01T00:00:00.000Z";
+      const validTo = "2999-01-01T00:00:00.000Z";
+
+      // MUTATION CHECK: make `attachmentWindow`
+      // (src/store/operations/node-operations.ts) return only
+      // `{ validFrom: moveAt }` for a move — the new edge is then open-ended.
+      const moved = await store.nodes.CaRelic.reparent(relic.id, {
+        whole: vaultB,
+        at,
+        validTo,
+      });
+
+      expect(moved.edge.toId).toBe(vaultB.id);
+      expect(moved.edge.meta.validFrom).toBe(at);
+      expect(moved.edge.meta.validTo).toBe(validTo);
+      const history = await store.edges.caRelicOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      const retired = requireDefined(
+        history.find((edge) => edge.toId === vaultA.id),
+        "the retired attachment",
+      );
+      expect(retired.meta.validTo).toBe(at);
+    });
+
+    it("refuses the flat { kind, id } attachment on every surface and writes nothing", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const other = await store.nodes.CaBook.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "held" },
+        { partOf: { whole: book, via: caChapterOf, props: { order: 1 } } },
+      );
+      const flat = { kind: "CaBook", id: other.id, via: "caChapterOf" };
+
+      // MUTATION CHECK: in `readStatedAttachment`
+      // (src/store/operations/composition-create.ts) fall back to the
+      // attachment object itself when `whole` is absent and stop refusing
+      // unknown keys — every call below then attaches or moves a chapter.
+      const attempts: readonly (readonly [string, () => Promise<unknown>])[] = [
+        [
+          "partOf",
+          () =>
+            store.nodes.CaChapter.create(
+              { slug: "create" },
+              // @ts-expect-error the flat form does not compile
+              { partOf: flat },
+            ),
+        ],
+        [
+          "partOf",
+          () =>
+            store.nodes.CaChapter.bulkCreate([
+              // @ts-expect-error the flat form does not compile
+              { props: { slug: "bulk" }, partOf: flat },
+            ]),
+        ],
+        [
+          "partOf",
+          () =>
+            store.nodes.CaChapter.getOrCreateByConstraint(
+              "ca_chapter_slug",
+              { slug: "get-or-create" },
+              // @ts-expect-error the flat form does not compile
+              { partOf: flat },
+            ),
+        ],
+        [
+          "partOf",
+          () =>
+            store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+              "ca_chapter_slug",
+              [{ props: { slug: "held" } }, { props: { slug: "bulk-get" } }],
+              // @ts-expect-error the flat form does not compile
+              { partOf: flat },
+            ),
+        ],
+        [
+          "options",
+          () =>
+            // @ts-expect-error the flat form does not compile
+            store.nodes.CaChapter.reparent(chapter.id, flat),
+        ],
+        [
+          "options",
+          () =>
+            store.nodes.CaChapter.bulkReparent([
+              // @ts-expect-error the flat form does not compile
+              { id: chapter.id, options: flat },
+            ]),
+        ],
+      ];
+
+      for (const [base, attempt] of attempts) {
+        const error = await attempt().catch((error_: unknown) => error_);
+        expect(error).toBeInstanceOf(ValidationError);
+        expect(
+          (error as ValidationError).details.issues.map((issue) => issue.path),
+        ).toEqual([`${base}.kind`, `${base}.id`, `${base}.whole`]);
+      }
+
+      const chapters = await store.nodes.CaChapter.find({});
+      expect(chapters.map((node) => node.slug)).toEqual(["held"]);
+      const edges = await store.edges.caChapterOf.find({});
+      expect(edges.map((edge) => edge.toId)).toEqual([book.id]);
+    });
+
+    it("refuses an unknown top-level attachment key instead of dropping it", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+
+      // MUTATION CHECK: drop the unknown-key issues from
+      // `readStatedAttachment` (src/store/operations/composition-create.ts) —
+      // the misspelled `prop` is then ignored, the chapter is created with
+      // the edge schema's own refusal (a missing `order`) instead of this
+      // one, and the issue path below no longer matches.
+      const error = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            whole: book,
+            via: caChapterOf,
+            // @ts-expect-error `prop` is not an attachment option
+            prop: { order: 1 },
+          },
+        },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).details.issues).toEqual([
+        expect.objectContaining({ path: "partOf.prop" }),
+      ]);
+      expect(await store.nodes.CaChapter.find({})).toHaveLength(0);
+    });
+
+    it("accepts any whole kind string on a dynamic collection and leaves the refusal to the runtime", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const reader = await store.nodes.CaReader.create({});
+      const chapters = requireDefined(
+        store.getNodeCollection("CaChapter"),
+        "the dynamic chapter collection",
+      );
+
+      await expect(
+        chapters.create(
+          { slug: "one" },
+          { partOf: { whole: { kind: "CaReader", id: reader.id } } },
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: matchingObject({ code: "COMPOSITION_WHOLE_NOT_DECLARED" }),
+        }),
+      );
     });
   });
 }

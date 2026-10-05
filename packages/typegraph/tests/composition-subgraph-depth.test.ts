@@ -107,8 +107,10 @@ describe("subgraph({ composition: true }) completeness", () => {
           {}
         : {
             partOf: {
-              kind: "SdFolder" as const,
-              id: requireDefined(ids[index - 1]),
+              whole: {
+                kind: "SdFolder" as const,
+                id: requireDefined(ids[index - 1]),
+              },
             },
           }),
       })),
@@ -152,7 +154,7 @@ describe("subgraph({ composition: true }) completeness", () => {
     const parent = await store.nodes.SdFolder.create({ depth: 0 });
     await store.nodes.SdFolder.create(
       { depth: 1 },
-      { partOf: { kind: "SdFolder", id: parent.id } },
+      { partOf: { whole: { kind: "SdFolder", id: parent.id } } },
     );
 
     // MUTATION CHECK: drop the `isStatementCutShortError` arm from

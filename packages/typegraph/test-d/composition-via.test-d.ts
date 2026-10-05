@@ -39,8 +39,7 @@ expectError(
     { title: "one" },
     {
       partOf: {
-        kind: "Show",
-        id: "show",
+        whole: { kind: "Show", id: "show" },
         via: episodeOf,
         props: { season: "nope" },
       },
@@ -51,7 +50,11 @@ expectError(
 store.nodes.Episode.create(
   { title: "one" },
   {
-    partOf: { kind: "Show", id: "show", via: episodeOf, props: { season: 1 } },
+    partOf: {
+      whole: { kind: "Show", id: "show" },
+      via: episodeOf,
+      props: { season: 1 },
+    },
   },
 );
 
@@ -59,8 +62,7 @@ store.nodes.Episode.create(
   { title: "one" },
   {
     partOf: {
-      kind: "Show",
-      id: "show",
+      whole: { kind: "Show", id: "show" },
       via: "episodeOf",
       props: { season: "unchecked" },
     },
@@ -69,8 +71,7 @@ store.nodes.Episode.create(
 
 expectError(
   store.nodes.Episode.reparent(episodeId as never, {
-    kind: "Show",
-    id: "show",
+    whole: { kind: "Show", id: "show" },
     via: episodeOf,
     props: { season: "nope" },
   }),

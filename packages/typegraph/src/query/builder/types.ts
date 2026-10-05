@@ -397,6 +397,99 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
   : false;
 
 /**
+ * The meta-edge names that make one kind assignable to another at runtime
+ * (`KindRegistry.isAssignableTo`): a declared composition pair then also
+ * admits every kind assignable to its part or whole endpoint.
+ */
+type SubsumptionMetaEdgeName = "subClassOf" | "equivalentTo" | "sameAs";
+
+type CompositionMetaEdgeName = "partOf" | "hasPart";
+
+/**
+ * True for an ontology-tuple element that stops {@link CompositionWholeKinds}
+ * from proving its restriction, so the whole kind falls back to any node kind
+ * of the graph:
+ *
+ * - its meta-edge name is the general `string` (an annotation erased it), so
+ *   it may be a composition pair this type cannot read;
+ * - it is, or may be, a subsumption relation. A declared pair then also
+ *   admits kinds reached through the subclass/equivalence closure, which no
+ *   single-element test computes — widening is the sound answer;
+ * - it is a composition pair whose endpoint lost its kind literal.
+ *
+ * Distributes over the element union.
+ */
+type CompositionWholeKindsUndecidable<Relation> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      string extends Name ? true
+      : [Extract<Name, SubsumptionMetaEdgeName>] extends [never] ?
+        [Extract<Name, CompositionMetaEdgeName>] extends [never] ? false
+        : true extends EndpointKindErased<From | To> ? true
+        : false
+      : true
+    : true
+  : never;
+
+type EndpointKinds<Endpoint> = Extract<Endpoint, { kind: string }>["kind"];
+
+/**
+ * The whole kinds one ontology-tuple element declares for part kind `K`:
+ * `partOf(Part, Whole)` reads part → whole, `hasPart(Whole, Part)` the
+ * mirror. An endpoint union contributes every kind it can hold.
+ *
+ * Distributes over the element union.
+ */
+type DeclaredCompositionWholeKinds<Relation, K extends string> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      | ([Extract<Name, "partOf">] extends [never] ? never
+        : [Extract<EndpointKinds<From>, K>] extends [never] ? never
+        : EndpointKinds<To>)
+      | ([Extract<Name, "hasPart">] extends [never] ? never
+        : [Extract<EndpointKinds<To>, K>] extends [never] ? never
+        : EndpointKinds<From>)
+    : never
+  : never;
+
+/**
+ * The whole kinds a part of kind `K` may be attached to in graph `G` — what
+ * `partOf.whole.kind` accepts on `store.nodes.<K>`.
+ *
+ * Exactly the kinds `G`'s ontology declares through `partOf`/`hasPart` when
+ * that is provable from the ontology tuple; `never` for a kind that is no
+ * declared part, so stating an attachment for it does not compile. Falls
+ * back to every node kind of `G` whenever the restriction cannot be proven
+ * sound: an ontology that lost its tuple shape ({@link OntologyTypeErased}),
+ * or any element {@link CompositionWholeKindsUndecidable} flags — notably
+ * any subclass or equivalence relation, since a declared pair then admits
+ * kinds only the registry's closure can enumerate.
+ *
+ * A composition pair added at runtime through `store.evolve()` is invisible
+ * here, as it is to every type computed from `G`; reach such a pair through
+ * `store.getNodeCollection(kind)`, whose whole kind is any string. The
+ * runtime refusal (`COMPOSITION_WHOLE_NOT_DECLARED`) is authoritative either
+ * way.
+ */
+export type CompositionWholeKinds<G extends GraphDef, K extends string> =
+  OntologyTypeErased<G> extends true ? keyof G["nodes"] & string
+  : true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ?
+    keyof G["nodes"] & string
+  : DeclaredCompositionWholeKinds<G["ontology"][number], K>;
+
+/**
  * The alias type a `from(kind, alias)` call with NO explicit
  * `expansion` resolves to, under the Q3 polymorphic-by-default
  * axis. `PolymorphicNodeType` only when `K` is actually

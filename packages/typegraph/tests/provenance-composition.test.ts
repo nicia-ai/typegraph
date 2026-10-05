@@ -215,15 +215,18 @@ async function seedComposedReport(store: HistoryStore<CompositionGraph>) {
   const report = await store.nodes.PcReport.create({}, { id: "report-1" });
   const section = await store.nodes.PcSection.create(
     {},
-    { id: "section-1", partOf: { kind: "PcReport", id: report.id } },
+    { id: "section-1", partOf: { whole: { kind: "PcReport", id: report.id } } },
   );
   const paragraph = await store.nodes.PcParagraph.create(
     {},
-    { id: "paragraph-1", partOf: { kind: "PcSection", id: section.id } },
+    {
+      id: "paragraph-1",
+      partOf: { whole: { kind: "PcSection", id: section.id } },
+    },
   );
   const annex = await store.nodes.PcAnnex.create(
     {},
-    { id: "annex-1", partOf: { kind: "PcReport", id: report.id } },
+    { id: "annex-1", partOf: { whole: { kind: "PcReport", id: report.id } } },
   );
 
   const reportJustification = await store.nodes.PcJustification.create(
@@ -267,7 +270,10 @@ async function seedExhibitUnderDossier(
   );
   const exhibit = await store.nodes.PcExhibit.create(
     {},
-    { id: "exhibit-1", partOf: { kind: "PcDossier", id: dossier.id } },
+    {
+      id: "exhibit-1",
+      partOf: { whole: { kind: "PcDossier", id: dossier.id } },
+    },
   );
   const attachments = await store.edges.pcExhibitOf.find({});
   const attachment = requireDefined(
@@ -470,7 +476,10 @@ describe("provenance composition existence", () => {
     const dossier = await store.nodes.PcDossier.create({}, { id: "dossier-1" });
     const exhibit = await store.nodes.PcExhibit.create(
       {},
-      { id: "exhibit-1", partOf: { kind: "PcDossier", id: dossier.id } },
+      {
+        id: "exhibit-1",
+        partOf: { whole: { kind: "PcDossier", id: dossier.id } },
+      },
     );
     const justification = await store.nodes.PcJustification.create(
       { label: "exhibits" },

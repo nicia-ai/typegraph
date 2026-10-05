@@ -612,7 +612,7 @@ describe("bulkCreate composition attach batching", () => {
       const parts = await store.nodes.Folder.bulkCreate(
         Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
           props: { name: `part-${index}` },
-          partOf: { kind: "Folder" as const, id: whole.id },
+          partOf: { whole: { kind: "Folder" as const, id: whole.id } },
         })),
       );
       expect(parts).toHaveLength(ATTACHING_BATCH_SIZE);
@@ -637,7 +637,7 @@ describe("bulkCreate composition attach batching", () => {
         await store.nodes.Folder.bulkCreate(
           Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
             props: { name: `part-${index}` },
-            partOf: { kind: "Folder" as const, id: whole.id },
+            partOf: { whole: { kind: "Folder" as const, id: whole.id } },
           })),
         );
         expect(probe).toHaveBeenCalledTimes(1);
@@ -658,7 +658,7 @@ describe("bulkCreate composition attach batching", () => {
       const parts = await store.nodes.Folder.bulkCreate(
         Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
           props: { name: `part-${index}` },
-          partOf: { kind: "Folder" as const, id: whole.id },
+          partOf: { whole: { kind: "Folder" as const, id: whole.id } },
         })),
       );
       const edges = await store.edges.folderOf.find({});
@@ -709,8 +709,14 @@ describe("bulkCreate composition attach on a backend without the batch point rea
       resetCounts(counts);
 
       const parts = await store.nodes.Folder.bulkCreate([
-        { props: { name: "one" }, partOf: { kind: "Folder", id: whole.id } },
-        { props: { name: "two" }, partOf: { kind: "Folder", id: whole.id } },
+        {
+          props: { name: "one" },
+          partOf: { whole: { kind: "Folder", id: whole.id } },
+        },
+        {
+          props: { name: "two" },
+          partOf: { whole: { kind: "Folder", id: whole.id } },
+        },
       ]);
 
       const edges = await store.edges.folderOf.find({});
@@ -734,10 +740,13 @@ describe("bulkCreate composition attach on a backend without the batch point rea
       const before = await store.nodes.Folder.count();
 
       const error = await store.nodes.Folder.bulkCreate([
-        { props: { name: "ok" }, partOf: { kind: "Folder", id: whole.id } },
+        {
+          props: { name: "ok" },
+          partOf: { whole: { kind: "Folder", id: whole.id } },
+        },
         {
           props: { name: "orphan" },
-          partOf: { kind: "Folder", id: "no-such-folder" },
+          partOf: { whole: { kind: "Folder", id: "no-such-folder" } },
         },
       ]).catch((error_: unknown) => error_);
 

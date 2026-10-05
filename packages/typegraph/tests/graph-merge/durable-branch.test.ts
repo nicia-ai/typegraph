@@ -715,7 +715,7 @@ describe("durable branch", () => {
         const album = await branchStore.nodes.Album.create({}, { id: "album" });
         await branchStore.nodes.Track.create(
           {},
-          { id: "track", partOf: { kind: "Album", id: album.id } },
+          { id: "track", partOf: { whole: { kind: "Album", id: album.id } } },
         );
       },
       async (baseStore) => {

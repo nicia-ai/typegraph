@@ -374,7 +374,7 @@ export function registerCompositionTighteningIntegrationTests(
       // the episode must exist first, and the segment must name it.
       await store.nodes.CtSegment.create(
         {},
-        { partOf: { kind: "CtEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "CtEpisode", id: episode.id } } },
       );
 
       // Loosening never needs a data probe — no `migrateSchema()` call,

@@ -49,6 +49,7 @@ import type { DefaultAliasExpansionAxis } from "../query/builder/alias-expansion
 import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import type {
   BatchableQuery,
+  CompositionWholeKinds,
   NodeAccessor,
   NodeCandidateQuery,
   OneStatementBatchReads,
@@ -214,49 +215,64 @@ export type CompositionAttachmentProps<Via> =
  * (`create`, `bulkCreate`, `getOrCreateByConstraint`,
  * `bulkGetOrCreateByConstraint`, and `reparent`).
  *
- * `kind`/`id` name the whole. `via` names the realizing edge, and is
- * required only when the part kind declares MORE THAN ONE composition pair
- * toward that whole kind: omitting it there is refused
- * (`COMPOSITION_VIA_AMBIGUOUS`) rather than resolved by sort order, and
- * naming an edge kind that realizes no declared pair between the two is
- * refused too (`COMPOSITION_VIA_NOT_DECLARED`). Pass the edge's TYPE when
- * you have it — a typo is then a compile error, and `props` is checked
- * against that edge's schema, the same check `store.edges.<via>.create`
- * applies. A kind string keeps `props` as `Record<string, unknown>` because
- * the schema is not in scope. {@link compositionViaKind} is the one owner
- * of the type-or-string distinction.
+ * `whole` names the whole: a node you already hold, or a `{ kind, id }`
+ * reference. Only its `kind` and `id` are ever read, so a whole node whose
+ * own schema has a property called `via` or `props` never leaks into the
+ * attachment. On a typed collection `whole.kind` is limited at compile time
+ * to the whole kinds the graph's ontology declares for this part kind (see
+ * {@link CompositionWholeKinds}); the runtime refusal
+ * (`COMPOSITION_WHOLE_NOT_DECLARED`) covers everything the type cannot see.
+ *
+ * `via` names the realizing edge, and is required only when the part kind
+ * declares MORE THAN ONE composition pair toward that whole kind: omitting
+ * it there is refused (`COMPOSITION_VIA_AMBIGUOUS`) rather than resolved by
+ * sort order, and naming an edge kind that realizes no declared pair between
+ * the two is refused too (`COMPOSITION_VIA_NOT_DECLARED`). Pass the edge's
+ * TYPE when you have it — a typo is then a compile error, and `props` is
+ * checked against that edge's schema, the same check
+ * `store.edges.<via>.create` applies. A kind string keeps `props` as
+ * `Record<string, unknown>` because the schema is not in scope.
+ * {@link compositionViaKind} is the one owner of the type-or-string
+ * distinction.
  *
  * `validFrom` / `validTo` are the realizing edge's validity window, not the
  * part node's. A node's own `validFrom` / `validTo` on `create` are never
  * copied onto the edge. Omit both to use the edge insert's own default.
+ *
+ * Any other top-level key is refused with `ValidationError`, so a
+ * misspelled option is never silently dropped.
  */
 export type CompositionAttachment<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
-> = CompositionNodeRef &
-  Readonly<{
-    via?: Via;
-    props?: CompositionAttachmentProps<Via>;
-    /** The realizing edge's lower bound. `null` requests no lower bound. */
-    validFrom?: string | null;
-    /** The realizing edge's upper bound. Independent of the part node's window. */
-    validTo?: string;
-  }>;
+  WholeKind extends string = string,
+> = Readonly<{
+  whole: Readonly<{ kind: WholeKind; id: string }>;
+  via?: Via;
+  props?: CompositionAttachmentProps<Via>;
+  /** The realizing edge's lower bound. `null` requests no lower bound. */
+  validFrom?: string | null;
+  /** The realizing edge's upper bound. Independent of the part node's window. */
+  validTo?: string;
+}>;
 
 /**
- * Options for {@link NodeCollection.reparent}. The attachment fields are
- * the destination; `at` is the single instant both halves of the move share.
+ * Options for {@link NodeCollection.reparent}: the destination attachment,
+ * and the one instant the move happens at.
+ *
+ * There is no `validFrom` here. A move has one instant — the incumbent's
+ * window ends where the new edge's begins — and `at` is its only spelling.
+ * `validTo` keeps its create-time meaning: the upper bound of the NEW
+ * attachment, for a membership that is already known to end.
  */
 export type NodeReparentOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
-> = CompositionAttachment<Via> &
+  WholeKind extends string = string,
+> = Omit<CompositionAttachment<Via, WholeKind>, "validFrom"> &
   Readonly<{
     /**
      * The instant a `oneActive` incumbent window ends and the new edge's
-     * `validFrom` begins, so the two halves abut. Omitted, a stated string
-     * `validFrom` is that instant; omitted with no `validFrom`, the clock is
-     * read once. A stated `at` that disagrees with `validFrom` is refused
-     * (`COMPOSITION_REPARENT_INSTANT_CONFLICT`) — a move has one instant.
-     * `validFrom: null` cannot abut and is refused on this surface.
+     * `validFrom` begins, so the two halves abut. Omitted, the clock is read
+     * once.
      */
     at?: string;
   }>;
@@ -294,6 +310,7 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
  */
 export type NodeCreateOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  WholeKind extends string = string,
 > = Readonly<{
   id?: string;
   /** Omit to use the creation default; null explicitly requests no lower bound. */
@@ -306,9 +323,10 @@ export type NodeCreateOptions<
    * convenience (the same one write); never required for one. Runtime-checked
    * against the graph's declared composition pairs — `ConfigurationError`
    * (`COMPOSITION_WHOLE_NOT_DECLARED`) when no pair exists from this kind to
-   * `partOf.kind`. See {@link CompositionAttachment} for `via` and `props`.
+   * `partOf.whole.kind`. See {@link CompositionAttachment} for `via` and
+   * `props`.
    */
-  partOf?: CompositionAttachment<Via>;
+  partOf?: CompositionAttachment<Via, WholeKind>;
 }>;
 
 /** One caller-identified member of the closed heterogeneous node upsert batch. */
@@ -961,6 +979,7 @@ export type NodeGetOrCreateByConstraintResult<N extends NodeType> = Readonly<{
  */
 export type NodeGetOrCreateByConstraintOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  WholeKind extends string = string,
 > = Readonly<{
   /** Existing record behavior. Default: "return" */
   ifExists?: IfExistsMode;
@@ -995,7 +1014,7 @@ export type NodeGetOrCreateByConstraintOptions<
    * batch. Use `reparent` to MOVE a part that already has a different whole
    * — this option never silently re-homes one.
    */
-  partOf?: CompositionAttachment<Via>;
+  partOf?: CompositionAttachment<Via, WholeKind>;
 }>;
 
 /**
@@ -1182,6 +1201,7 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
 export type NodeCollection<
   N extends NodeType,
   CN extends string = string,
+  WholeKind extends string = string,
 > = Readonly<{
   /**
    * Create a new node.
@@ -1197,7 +1217,7 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     props: z.input<N["schema"]>,
-    options?: NodeCreateOptions<Via>,
+    options?: NodeCreateOptions<Via, WholeKind>,
   ) => Promise<Node<N>>;
 
   /** Get a node by ID */
@@ -1274,7 +1294,7 @@ export type NodeCollection<
   /**
    * Moves this composition part to a new whole, atomically: the old
    * attachment is retired and the new one created in one transaction under
-   * one per-graph fence, so neither R4's one-whole-per-part claim nor
+   * one per-graph fence, so neither the one-whole-per-part claim nor
    * `existence: "required"` ever observes an intermediate state. Neither
    * half is expressible on its own — the create refuses while the old edge
    * holds the claim, and the delete refuses while a required part is live.
@@ -1297,13 +1317,12 @@ export type NodeCollection<
    * than silently keeping the stored value. The result's `edge` is the
    * holding edge either way; `moved` is false on that no-op.
    *
-   * `at` overrides the move instant (see {@link NodeReparentOptions}). Refuses
+   * `at` is the move instant (see {@link NodeReparentOptions}). Refuses
    * with `ConfigurationError` (`COMPOSITION_NOT_A_PART`) on a kind that
    * declares no `partOf`/`hasPart` pair at all,
    * (`COMPOSITION_WHOLE_NOT_DECLARED`) on an undeclared target pair,
    * (`COMPOSITION_VIA_AMBIGUOUS` / `COMPOSITION_VIA_NOT_DECLARED`) on an
-   * unresolvable `via`, (`COMPOSITION_REPARENT_INSTANT_CONFLICT`) when `at`
-   * and `validFrom` disagree, and with `NodeNotFoundError` when the part is
+   * unresolvable `via`, and with `NodeNotFoundError` when the part is
    * missing or already deleted.
    */
   reparent: <
@@ -1311,7 +1330,7 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     id: NodeId<N>,
-    options: NodeReparentOptions<Via>,
+    options: NodeReparentOptions<Via, WholeKind>,
   ) => Promise<NodeReparentResult<Via>>;
 
   /**
@@ -1325,7 +1344,7 @@ export type NodeCollection<
   >(
     items: readonly Readonly<{
       id: NodeId<N>;
-      options: NodeReparentOptions<Via>;
+      options: NodeReparentOptions<Via, WholeKind>;
     }>[],
   ) => Promise<readonly NodeReparentResult<Via>[]>;
 
@@ -1463,7 +1482,7 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
-      NodeCreateOptions<Via>)[],
+      NodeCreateOptions<Via, WholeKind>)[],
   ) => Promise<Node<N>[]>;
 
   /**
@@ -1634,7 +1653,7 @@ export type NodeCollection<
   >(
     constraintName: CN,
     props: z.input<N["schema"]>,
-    options?: NodeGetOrCreateByConstraintOptions<Via>,
+    options?: NodeGetOrCreateByConstraintOptions<Via, WholeKind>,
   ) => Promise<NodeGetOrCreateByConstraintResult<N>>;
 
   /**
@@ -1651,7 +1670,7 @@ export type NodeCollection<
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
     }>[],
-    options?: NodeGetOrCreateByConstraintOptions<Via>,
+    options?: NodeGetOrCreateByConstraintOptions<Via, WholeKind>,
   ) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
@@ -2248,7 +2267,8 @@ export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
 export type GraphNodeCollections<G extends GraphDef> = {
   [K in keyof G["nodes"] & string]-?: NodeCollection<
     G["nodes"][K]["type"],
-    ConstraintNames<G["nodes"][K]>
+    ConstraintNames<G["nodes"][K]>,
+    CompositionWholeKinds<G, K>
   >;
 };
 
@@ -2913,6 +2933,11 @@ export type BulkFindRuntimeEdgesFromResult<
  * This is intentional: unique constraints are graph-registration-level
  * details that differ between graphs sharing the same node types.
  *
+ * Composition whole kinds are erased the same way, and for the same reason:
+ * which wholes a kind may attach to is declared by each graph's ontology. A
+ * projected collection therefore accepts no `partOf` attachment and no
+ * `reparent`; type a helper that attaches parts against `Store<G>` itself.
+ *
  * @example
  * ```typescript
  * type CoreStore = StoreProjection<
@@ -2940,6 +2965,6 @@ export type StoreProjection<
   N extends keyof G["nodes"] & string = never,
   E extends keyof G["edges"] & string = never,
 > = Readonly<{
-  nodes: { [K in N]-?: NodeCollection<G["nodes"][K]["type"], never> };
+  nodes: { [K in N]-?: NodeCollection<G["nodes"][K]["type"], never, never> };
   edges: Pick<GraphEdgeCollections<G>, E>;
 }>;

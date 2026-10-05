@@ -183,7 +183,7 @@ describe("validating import: required composition existence", () => {
       const episode = await store.nodes.CeiEpisode.create({});
       await store.nodes.CeiSegment.create(
         {},
-        { partOf: { kind: "CeiEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "CeiEpisode", id: episode.id } } },
       );
       const [existingEdge] = await store.edges.ceiSegmentOf.find({});
 

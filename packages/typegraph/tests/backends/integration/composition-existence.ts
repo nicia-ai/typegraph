@@ -173,7 +173,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const segment = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       expect(segment.id).toBeDefined();
       const edges = await store.edges.eeSegmentOf.find({});
@@ -187,7 +187,7 @@ export function registerCompositionExistenceIntegrationTests(
       const album = await store.nodes.EeAlbum.create({});
       const track = await store.nodes.EeTrack.create(
         {},
-        { partOf: { kind: "EeAlbum", id: album.id } },
+        { partOf: { whole: { kind: "EeAlbum", id: album.id } } },
       );
       const edges = await store.edges.eeHasTrack.find({});
       expect(edges).toHaveLength(1);
@@ -212,7 +212,7 @@ export function registerCompositionExistenceIntegrationTests(
       const before = await store.nodes.EeSegment.count();
       const error = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: "does-not-exist" } },
+        { partOf: { whole: { kind: "EeEpisode", id: "does-not-exist" } } },
       ).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(EndpointNotFoundError);
       expect(await store.nodes.EeSegment.count()).toBe(before);
@@ -228,8 +228,11 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const before = await store.nodes.EeSegment.count();
       const error = await store.nodes.EeSegment.bulkCreate([
-        { props: {}, partOf: { kind: "EeEpisode", id: episode.id } },
-        { props: {}, partOf: { kind: "EeEpisode", id: "does-not-exist" } },
+        { props: {}, partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+        {
+          props: {},
+          partOf: { whole: { kind: "EeEpisode", id: "does-not-exist" } },
+        },
       ]).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(EndpointNotFoundError);
       expect(await store.nodes.EeSegment.count()).toBe(before);
@@ -246,7 +249,7 @@ export function registerCompositionExistenceIntegrationTests(
       const podcast = await store.nodes.EePodcast.create({});
       const error = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EePodcast", id: podcast.id } },
+        { partOf: { whole: { kind: "EePodcast", id: podcast.id } } },
       ).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(ConfigurationError);
       expect((error as ConfigurationError).details["code"]).toBe(
@@ -266,7 +269,7 @@ export function registerCompositionExistenceIntegrationTests(
       const collection = await store.nodes.EeCollection.create({});
       const tag = await store.nodes.EeTag.create(
         {},
-        { partOf: { kind: "EeCollection", id: collection.id } },
+        { partOf: { whole: { kind: "EeCollection", id: collection.id } } },
       );
       const edges = await store.edges.eeTagOf.find({});
       expect(edges).toHaveLength(1);
@@ -282,11 +285,14 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const collection = await store.nodes.EeCollection.create({});
       const [segmentA, segmentB] = await store.nodes.EeSegment.bulkCreate([
-        { props: {}, partOf: { kind: "EeEpisode", id: episode.id } },
-        { props: {}, partOf: { kind: "EeEpisode", id: episode.id } },
+        { props: {}, partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+        { props: {}, partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       ]);
       const [tag] = await store.nodes.EeTag.bulkCreate([
-        { props: {}, partOf: { kind: "EeCollection", id: collection.id } },
+        {
+          props: {},
+          partOf: { whole: { kind: "EeCollection", id: collection.id } },
+        },
       ]);
       const segmentEdges = await store.edges.eeSegmentOf.find({});
       expect(segmentEdges).toHaveLength(2);
@@ -306,7 +312,7 @@ export function registerCompositionExistenceIntegrationTests(
       const store = await context.createStore(buildGraph(nextGraphId()));
       const episode = await store.nodes.EeEpisode.create({});
       const error = await store.nodes.EeSegment.bulkCreate([
-        { props: {}, partOf: { kind: "EeEpisode", id: episode.id } },
+        { props: {}, partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
         { props: {} },
       ]).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(CompositionExistenceError);
@@ -320,13 +326,13 @@ export function registerCompositionExistenceIntegrationTests(
         {
           id: "ee-folder-ok",
           props: {},
-          partOf: { kind: "EeFolder", id: root.id },
+          partOf: { whole: { kind: "EeFolder", id: root.id } },
         },
         // Names ITSELF as its whole: the cycle this batch closes.
         {
           id: "ee-folder-loop",
           props: {},
-          partOf: { kind: "EeFolder", id: "ee-folder-loop" },
+          partOf: { whole: { kind: "EeFolder", id: "ee-folder-loop" } },
         },
       ]).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(EdgeAcyclicityError);
@@ -354,12 +360,12 @@ export function registerCompositionExistenceIntegrationTests(
         {
           id: "ee-cycle-a",
           props: {},
-          partOf: { kind: "EeFolder", id: "ee-cycle-b" },
+          partOf: { whole: { kind: "EeFolder", id: "ee-cycle-b" } },
         },
         {
           id: "ee-cycle-b",
           props: {},
-          partOf: { kind: "EeFolder", id: "ee-cycle-a" },
+          partOf: { whole: { kind: "EeFolder", id: "ee-cycle-a" } },
         },
       ]).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(EdgeAcyclicityError);
@@ -383,7 +389,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       const [edge] = await store.edges.eeSegmentOf.find({});
       const error = await store.edges.eeSegmentOf
@@ -408,7 +414,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       const [edge] = await store.edges.eeSegmentOf.find({});
       const error = await store.edges.eeSegmentOf
@@ -424,7 +430,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       const [edge] = await store.edges.eeSegmentOf.find({});
       const error = await store.edges.eeSegmentOf
@@ -445,7 +451,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const segment = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       const [edge] = await store.edges.eeSegmentOf.find({});
       // The ORDINARY node-delete path (`store.nodes.EeSegment.delete`)
@@ -480,7 +486,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const segment = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       await expect(
         store.nodes.EeEpisode.delete(episode.id),
@@ -501,10 +507,16 @@ export function registerCompositionExistenceIntegrationTests(
       const collection = await store.nodes.EeCollection.create({});
       const [segment, tag] = await Promise.all([
         store.nodes.EeSegment.bulkCreate([
-          { props: {}, partOf: { kind: "EeEpisode", id: episode.id } },
+          {
+            props: {},
+            partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+          },
         ]),
         store.nodes.EeTag.bulkCreate([
-          { props: {}, partOf: { kind: "EeCollection", id: collection.id } },
+          {
+            props: {},
+            partOf: { whole: { kind: "EeCollection", id: collection.id } },
+          },
         ]),
       ]);
       expect(segment).toHaveLength(1);
@@ -578,7 +590,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const segment = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       // Tombstoned through the RAW backend member, bypassing the cascade that
       // would otherwise take the part with it — the state a dirty database, a
@@ -614,7 +626,7 @@ export function registerCompositionExistenceIntegrationTests(
       const episode = await store.nodes.EeEpisode.create({});
       const segment = await store.nodes.EeSegment.create(
         {},
-        { partOf: { kind: "EeEpisode", id: episode.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
       );
       const other = await store.nodes.EeEpisode.create({});
       await store.backend.deleteNode({
@@ -627,8 +639,7 @@ export function registerCompositionExistenceIntegrationTests(
       // the move RETIRES that edge rather than treating the part as
       // unattached and adding a second live one.
       await store.nodes.EeSegment.reparent(segment.id, {
-        kind: "EeEpisode",
-        id: other.id,
+        whole: { kind: "EeEpisode", id: other.id },
       });
       const live = await store.edges.eeSegmentOf.find({});
       expect(live).toHaveLength(1);
@@ -665,8 +676,7 @@ export function registerCompositionExistenceIntegrationTests(
         {},
         {
           partOf: {
-            kind: "EeShow",
-            id: show.id,
+            whole: { kind: "EeShow", id: show.id },
             validTo: "2000-01-01T00:00:00.000Z",
           },
         },
@@ -719,7 +729,7 @@ export function registerCompositionExistenceIntegrationTests(
       const clip = await store.nodes.EeLiveClip.create(
         {},
         {
-          partOf: { kind: "EeShow", id: show.id },
+          partOf: { whole: { kind: "EeShow", id: show.id } },
           validTo: "2000-01-01T00:00:00.000Z",
         },
       );
@@ -749,7 +759,7 @@ export function registerCompositionExistenceIntegrationTests(
       // Born attaching, through the ordinary store path.
       const clip = await store.nodes.EeLiveClip.create(
         {},
-        { partOf: { kind: "EeShow", id: show.id } },
+        { partOf: { whole: { kind: "EeShow", id: show.id } } },
       );
       const [connectedEdge] = await store.backend.findEdgesConnectedTo({
         graphId: store.graphId,
@@ -807,7 +817,7 @@ export function registerCompositionExistenceIntegrationTests(
       const created = await store.nodes.EeKeyedSegment.getOrCreateByConstraint(
         "byKey",
         { key: "seg-1" },
-        { partOf: { kind: "EeEpisode", id: episodeA.id } },
+        { partOf: { whole: { kind: "EeEpisode", id: episodeA.id } } },
       );
       expect(created.action).toBe("created");
       const attachedEdges = await store.edges.eeKeyedSegmentOf.find({});
@@ -819,7 +829,7 @@ export function registerCompositionExistenceIntegrationTests(
         await store.nodes.EeKeyedSegment.getOrCreateByConstraint(
           "byKey",
           { key: "seg-1" },
-          { partOf: { kind: "EeEpisode", id: episodeB.id } },
+          { partOf: { whole: { kind: "EeEpisode", id: episodeB.id } } },
         ).catch((error_: unknown) => error_);
       expect(foundError).toBeInstanceOf(CompositionExistenceError);
       expect((foundError as CompositionExistenceError).details.situation).toBe(
@@ -835,7 +845,7 @@ export function registerCompositionExistenceIntegrationTests(
           { key: "seg-1" },
           {
             ifExists: "update",
-            partOf: { kind: "EeEpisode", id: episodeB.id },
+            partOf: { whole: { kind: "EeEpisode", id: episodeB.id } },
           },
         ).catch((error_: unknown) => error_);
       expect(updatedError).toBeInstanceOf(CompositionExistenceError);
@@ -845,7 +855,7 @@ export function registerCompositionExistenceIntegrationTests(
         await store.nodes.EeKeyedSegment.getOrCreateByConstraint(
           "byKey",
           { key: "seg-1" },
-          { partOf: { kind: "EeEpisode", id: episodeB.id } },
+          { partOf: { whole: { kind: "EeEpisode", id: episodeB.id } } },
         );
       expect(resurrected.action).toBe("resurrected");
       const edgesAfterResurrect = await store.edges.eeKeyedSegmentOf.find({});
@@ -874,7 +884,7 @@ export function registerCompositionExistenceIntegrationTests(
         await store.nodes.EeKeyedSegment.bulkGetOrCreateByConstraint(
           "byKey",
           [{ props: { key: "dup-1" } }, { props: { key: "dup-1" } }],
-          { partOf: { kind: "EeEpisode", id: episode.id } },
+          { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
         );
       expect(results[0]?.action).toBe("created");
       expect(results[1]?.action).toBe("found");

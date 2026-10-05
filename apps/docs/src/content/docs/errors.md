@@ -696,7 +696,7 @@ try {
     //   wholeId: "<anthology-id>", edgeKind: "includedIn",
     //   incumbentEdgeId: "<the chapterOf edge's id>" }
     console.log(error.suggestion);
-    // "Call `store.nodes.<PartKind>.reparent(partId, { kind, id, via? })` to
+    // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
     //  move the part — it retires the incumbent attachment and creates the
     //  new one in one transaction. ..."
   }
@@ -765,7 +765,7 @@ The error's `code` names the same four shapes, so a handler that routes on
 | `"existing"` | `COMPOSITION_WHOLE_CONFLICT` |
 | `"props"` | `COMPOSITION_PROPS_CONFLICT` |
 
-Pass `partOf: { kind, id, via? }` naming a live, declared whole to fix a
+Pass `partOf: { whole, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its
 edge — a retired part is not orphaned by losing it) to fix a detach refusal;
 call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
@@ -788,7 +788,7 @@ constraint matched):
 
 | `details.code` | when |
 | --- | --- |
-| `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.kind` |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.whole.kind` |
 | `COMPOSITION_VIA_NOT_DECLARED` | `via` names an edge kind that realizes no declared pair between the two kinds |
 | `COMPOSITION_VIA_AMBIGUOUS` | `via` was omitted while more than one pair is declared between the two kinds |
 | `COMPOSITION_NOT_A_PART` | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair at all |

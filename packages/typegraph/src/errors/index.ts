@@ -1216,7 +1216,7 @@ export class CompositionError extends TypeGraphError {
         details,
         category: "constraint",
         suggestion:
-          "Call `store.nodes.<PartKind>.reparent(partId, { kind, id, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
+          "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
         cause: options?.cause,
       },
     );
@@ -1295,7 +1295,7 @@ function describeCompositionExistenceRefusal(
       return {
         code: "COMPOSITION_WHOLE_REQUIRED",
         message: `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`,
-        suggestion: `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
+        suggestion: `Pass \`partOf: { whole }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
       };
     }
     case "detach": {
@@ -1304,7 +1304,7 @@ function describeCompositionExistenceRefusal(
         message: `Cannot detach ${partLabel} from its whole via "${details.edgeKind}"${
           details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
         }: this kind requires a whole (\`existence: "required"\`) and the part is still live.`,
-        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { kind, id, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
+        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { whole, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
       };
     }
     case "existing": {
@@ -1327,7 +1327,7 @@ function describeCompositionExistenceRefusal(
       return {
         code: "COMPOSITION_WHOLE_CONFLICT",
         message: `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`,
-        suggestion: `Call \`store.nodes.<Kind>.reparent(id, { kind, id, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
+        suggestion: `Call \`store.nodes.<Kind>.reparent(id, { whole, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
       };
     }
     case "props": {
