@@ -83,6 +83,12 @@ function declareTaxonomy(child: NodeType, parent: NodeType) {
   return subClassOf(child, parent);
 }
 
+function first<T>(items: readonly T[]): T {
+  const [item] = items;
+  if (item === undefined) throw new Error("expected a nonempty list");
+  return item;
+}
+
 describe("C.1 — subClassOf structural contract", () => {
   it("compiles when the child's schema extends the parent's", () => {
     const relation = subClassOf(Podcast, Media);
@@ -467,6 +473,130 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
       queryDefaults: { expansion: defaultAxis },
     };
     expect(storeOptions).toBeDefined();
+  });
+
+  it("types an expanded search hit like the alias it expands to, for every search form", () => {
+    // Type-checked only — never called, so nothing here runs at test time.
+    async function assertExpandedSearchTyping(): Promise<void> {
+      const store = undefined as unknown as Store<typeof affectedGraph>;
+      const vectorLeg = { fieldPath: "embedding", queryEmbedding: [0, 1] };
+      const fulltextLeg = { query: "x" };
+
+      // Exact, three spellings: omitted, stated, and an explicit undefined.
+      const exactFulltext = first(
+        await store.search.fulltext("MediaAliasTest", { query: "x", limit: 1 }),
+      ).node;
+      const exactVector = first(
+        await store.search.vector("MediaAliasTest", {
+          ...vectorLeg,
+          limit: 1,
+          expansion: "exact",
+        }),
+      ).node;
+      const exactHybrid = first(
+        await store.search.hybrid("MediaAliasTest", {
+          vector: vectorLeg,
+          fulltext: fulltextLeg,
+          limit: 1,
+          expansion: undefined,
+        }),
+      ).node;
+      expectTypeOf(exactFulltext.kind).toEqualTypeOf<"MediaAliasTest">();
+      expectTypeOf(exactVector.kind).toEqualTypeOf<"MediaAliasTest">();
+      expectTypeOf(exactHybrid.kind).toEqualTypeOf<"MediaAliasTest">();
+      void store.nodes.MediaAliasTest.update(exactFulltext.id, { title: "x" });
+
+      const aliasRow = first(
+        await store
+          .query()
+          .from("MediaAliasTest", "m")
+          .select((ctx) => ctx.m)
+          .execute(),
+      );
+      const fulltext = first(
+        await store.search.fulltext("MediaAliasTest", {
+          query: "x",
+          limit: 1,
+          expansion: "subclasses",
+          where: (media) => media.title.eq("x"),
+        }),
+      ).node;
+      const vector = first(
+        await store.search.vector("MediaAliasTest", {
+          ...vectorLeg,
+          limit: 1,
+          expansion: "subclasses",
+        }),
+      ).node;
+      const hybridHit = first(
+        await store.search.hybrid("MediaAliasTest", {
+          vector: vectorLeg,
+          fulltext: fulltextLeg,
+          limit: 1,
+          expansion: "subclasses",
+        }),
+      );
+      expectTypeOf(fulltext.kind).toEqualTypeOf<string>();
+      expectTypeOf(vector.kind).toEqualTypeOf<string>();
+      expectTypeOf(hybridHit.node.kind).toEqualTypeOf<string>();
+      expectTypeOf(hybridHit.vector?.node.kind).toEqualTypeOf<
+        string | undefined
+      >();
+      expectTypeOf(hybridHit.fulltext?.node.kind).toEqualTypeOf<
+        string | undefined
+      >();
+      expectTypeOf(aliasRow.id).toEqualTypeOf<typeof fulltext.id>();
+      expectTypeOf(aliasRow.id).toEqualTypeOf<typeof vector.id>();
+      expectTypeOf(aliasRow.id).toEqualTypeOf<typeof hybridHit.node.id>();
+      expectTypeOf(fulltext.title).toEqualTypeOf<string>();
+      // @ts-expect-error - the hit may be a PodcastAliasTest row; Media's update() requires an exact NodeId<MediaAliasTest>
+      void store.nodes.MediaAliasTest.update(fulltext.id, { title: "x" });
+
+      // A view's search facade is the store's own, so it types identically.
+      const viewHit = first(
+        await store
+          .view({ mode: "current" })
+          .search.fulltext("MediaAliasTest", {
+            query: "x",
+            limit: 1,
+            expansion: "subclasses",
+          }),
+      );
+      expectTypeOf(viewHit.node.kind).toEqualTypeOf<string>();
+
+      // An axis the call site does not pin types conservatively.
+      const forwardedAxis = "exact" as DefaultAliasExpansionAxis;
+      const forwarded = first(
+        await store.search.fulltext("MediaAliasTest", {
+          query: "x",
+          limit: 1,
+          expansion: forwardedAxis,
+        }),
+      );
+      expectTypeOf(forwarded.node.kind).toEqualTypeOf<string>();
+
+      // A kind the ontology cannot affect stays exact under "subclasses",
+      // exactly as its from() alias does; an unpinned axis still widens it.
+      const plainStore = undefined as unknown as Store<typeof plainGraph>;
+      const plain = first(
+        await plainStore.search.fulltext("MediaAliasTest", {
+          query: "x",
+          limit: 1,
+          expansion: "subclasses",
+        }),
+      );
+      expectTypeOf(plain.node.kind).toEqualTypeOf<"MediaAliasTest">();
+      const plainForwarded = first(
+        await plainStore.search.fulltext("MediaAliasTest", {
+          query: "x",
+          limit: 1,
+          expansion: forwardedAxis,
+        }),
+      );
+      expectTypeOf(plainForwarded.node.kind).toEqualTypeOf<string>();
+    }
+    void assertExpandedSearchTyping;
+    expect(affectedGraph.id).toBe("alias_typing_affected");
   });
 
   it("refuses an expansion axis outside the option's domain", () => {

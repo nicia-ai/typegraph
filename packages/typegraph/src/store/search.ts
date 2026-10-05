@@ -127,7 +127,9 @@ export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
    * descendants. Vector legs search each declaring kind's storage and merge
    * by score; kinds that don't declare the embedding field are skipped
    * (mirroring the query builder). `"subclasses"` requires a query-capable
-   * store. `"narrower"` is not an axis this facade offers.
+   * store. `"narrower"` is not an axis this facade offers. The facade types
+   * each hit by the axis stated here, as a `from()` alias over the kind
+   * would be.
    */
   expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
