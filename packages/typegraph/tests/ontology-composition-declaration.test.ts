@@ -628,6 +628,58 @@ describe("composition registration checks (buildKindRegistry)", () => {
     );
   });
 
+  it("ONTOLOGY_COMPOSITION_PART_SIDE_INVALID: a partSide outside its enum is refused by the factory and by the registry build, even where the edge admits both orientations", () => {
+    const Folder = defineNode("Folder", { schema: emptySchema });
+    const inFolder = defineEdge("inFolder", { schema: emptySchema });
+
+    // MUTATION CHECK: drop the `isCompositionPartSide` branch from
+    // `compositionRelationOptions` (src/ontology/core-meta-edges.ts) — both
+    // factories then return a relation carrying "sideways".
+    for (const factory of [
+      () =>
+        partOf(Folder, Folder, {
+          via: inFolder,
+          partSide: "sideways" as never,
+        }),
+      () =>
+        hasPart(Folder, Folder, {
+          via: inFolder,
+          partSide: "sideways" as never,
+        }),
+    ]) {
+      expectCompositionCode(factory, "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID");
+    }
+
+    // MUTATION CHECK: drop the `isCompositionPartSide` check from
+    // `inferCompositionPartSide` (src/registry/composition-relation.ts) — a
+    // reflexive pair admits both orientations, so the declared value is
+    // returned unchecked, the registry reads it as "to", and the schema is
+    // persisted with a value the stored-schema reader refuses.
+    const handBuilt = {
+      ...partOf(Folder, Folder, { via: inFolder, partSide: "from" }),
+      partSide: "sideways",
+    };
+    expectCompositionCode(
+      () =>
+        buildKindRegistry(
+          defineGraph({
+            id: "composition-part-side-invalid",
+            nodes: { Folder: { type: Folder } },
+            edges: {
+              inFolder: {
+                type: inFolder,
+                from: [Folder],
+                to: [Folder],
+                cardinality: "one",
+              },
+            },
+            ontology: [handBuilt as never],
+          }),
+        ),
+      "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID",
+    );
+  });
+
   it("ONTOLOGY_COMPOSITION_OPTION_UNKNOWN: partOf and hasPart refuse an option key they do not know", () => {
     // MUTATION CHECK: drop the unknown-key branch from
     // `compositionRelationOptions` — the misspelled `existance` is ignored

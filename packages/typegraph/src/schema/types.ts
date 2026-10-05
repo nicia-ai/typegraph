@@ -34,6 +34,7 @@ import {
 import { type JsonPointer } from "../query/json-pointer";
 import {
   COMPOSITION_EXISTENCE_VALUES,
+  COMPOSITION_PART_SIDE_VALUES,
   type CompositionExistence,
   type CompositionPartSide,
 } from "../registry/composition-relation";
@@ -338,7 +339,7 @@ const runtimeEdgeDocumentZod = z
   })
   .loose();
 
-const compositionPartSideZod = z.enum(["from", "to"]);
+const compositionPartSideZod = z.enum(COMPOSITION_PART_SIDE_VALUES);
 const compositionExistenceZod = z.enum(COMPOSITION_EXISTENCE_VALUES);
 
 const runtimeOntologyRelationZod = z

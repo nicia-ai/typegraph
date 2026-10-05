@@ -123,7 +123,7 @@ function buildGraph(id: string) {
       CaClip: { type: CaClip },
       CaAlbum: { type: CaAlbum },
       CaTrack: { type: CaTrack },
-      CaFolder: { type: CaFolder },
+      CaFolder: { type: CaFolder, onDelete: "cascade" },
       CaReader: { type: CaReader },
       CaVault: { type: CaVault },
       CaRelic: { type: CaRelic },
@@ -601,6 +601,57 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(await store.edges.caChapterOf.find({})).toHaveLength(0);
     });
 
+    it("bulkDelete naming a part before its own whole deletes each node once and reports each cascaded part once", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaFolder.create({});
+      const child = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: root.id } } },
+      );
+      const leaf = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: child.id } } },
+      );
+
+      // MUTATION CHECK: drop `withoutPlannedDeleteEffects` from
+      // `planCascadingNodeDelete` (src/store/operations/node-operations.ts) —
+      // the root's plan, read before any delete of the batch ran, still names
+      // the child and the leaf, so both are deleted a second time and
+      // `cascadedParts` reads [leaf, leaf, child].
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        await tx.nodes.CaFolder.bulkDelete([child.id, root.id]);
+      });
+
+      expect(receipt.cascadedParts).toEqual([
+        { kind: "CaFolder", id: leaf.id },
+      ]);
+      expect(await store.nodes.CaFolder.find({})).toEqual([]);
+      expect(await store.edges.caParentFolder.find({})).toEqual([]);
+    });
+
+    it("bulkDelete naming a whole before its own part reports the part as cascaded once", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaFolder.create({});
+      const child = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: root.id } } },
+      );
+      const leaf = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: child.id } } },
+      );
+
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        await tx.nodes.CaFolder.bulkDelete([root.id, child.id]);
+      });
+
+      expect(receipt.cascadedParts).toEqual([
+        { kind: "CaFolder", id: leaf.id },
+        { kind: "CaFolder", id: child.id },
+      ]);
+      expect(await store.nodes.CaFolder.find({})).toEqual([]);
+    });
+
     // ========================================================
     // `partOf` on get-or-create is a POSTCONDITION
     // ========================================================
@@ -1038,6 +1089,50 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(details.requestedWhole).toEqual({ kind: "CaBook", id: book.id });
       // Refused, not moved: "b" keeps the anthology and gains no book edge.
       expect(await store.edges.caIncludedIn.find({})).toHaveLength(1);
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
+    });
+
+    it("bulkGetOrCreateByConstraint creates nothing when a matched item's refusal is caught inside an enclosing transaction", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const held = await store.nodes.CaBook.create({});
+      const requested = await store.nodes.CaBook.create({});
+      await store.nodes.CaChapter.create(
+        { slug: "held" },
+        {
+          partOf: {
+            whole: { kind: "CaBook", id: held.id },
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      let caught: unknown;
+      // MUTATION CHECK: run the batch's creates before its matched items
+      // (swap steps 4 and 5 of `executeNodeBulkGetOrCreateByConstraint`,
+      // src/store/operations/node-operations.ts) — "fresh" is then created
+      // and attached before "held" refuses, and survives the caught refusal.
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
+            "ca_chapter_slug",
+            [{ props: { slug: "fresh" } }, { props: { slug: "held" } }],
+            {
+              partOf: {
+                whole: { kind: "CaBook", id: requested.id },
+                via: "caChapterOf",
+                props: { order: 1 },
+              },
+            },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(CompositionExistenceError);
+      const chapters = await store.nodes.CaChapter.find({});
+      expect(chapters.map((chapter) => chapter.slug)).toEqual(["held"]);
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
     });
 

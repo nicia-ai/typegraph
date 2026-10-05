@@ -675,7 +675,7 @@ async function planCascadingNodeDelete<G extends GraphDef>(
   effects: PlannedDeleteEffects,
   judgeRoot: boolean,
 ): Promise<CompositionCascadePlan> {
-  const plan: CompositionCascadePlan =
+  const plan: CompositionCascadePlan = withoutPlannedDeleteEffects(
     policy?.cascadeComposition === false ?
       { members: [], consumedEdgeIds: new Set() }
     : await planCompositionCascade(
@@ -683,7 +683,9 @@ async function planCascadingNodeDelete<G extends GraphDef>(
         root.kind,
         root.id,
         target,
-      );
+      ),
+    effects,
+  );
 
   const judge = async (
     node: Readonly<{ kind: string; id: string }>,
@@ -710,7 +712,36 @@ async function planCascadingNodeDelete<G extends GraphDef>(
   if (judgeRoot || plan.members.length > 0) {
     await judge(root, withCascadeConsumedEdges(policy, plan.consumedEdgeIds));
   }
+  for (const edgeId of plan.consumedEdgeIds) effects.removedEdgeIds.add(edgeId);
   return plan;
+}
+
+/**
+ * `plan` with what the frame's EARLIER deletes already take out of it.
+ *
+ * Every plan of a batch is read before any delete is applied, so a plan reads
+ * the graph as the frame started it: a whole named after one of its own
+ * parts (reflexive composition, `bulkDelete([child, root])`) still finds that
+ * part — and the part's descendants — live, though the earlier item's cascade
+ * deletes them first. Applying that plan unfiltered would delete them a
+ * second time through a pre-image that is no longer live and report them in
+ * `cascadedParts` twice. A member an earlier item already deletes, and an
+ * edge an earlier item already removes, belongs to that earlier item alone.
+ */
+function withoutPlannedDeleteEffects(
+  plan: CompositionCascadePlan,
+  effects: PlannedDeleteEffects,
+): CompositionCascadePlan {
+  return {
+    members: plan.members.filter(
+      (member) => !effects.deletedNodeKeys.has(refKey(member)),
+    ),
+    consumedEdgeIds: new Set(
+      [...plan.consumedEdgeIds].filter(
+        (edgeId) => !effects.removedEdgeIds.has(edgeId),
+      ),
+    ),
+  };
 }
 
 /** The policy every member of one cascade is deleted (and judged) under. */
@@ -6884,24 +6915,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
     const results: Result[] = Array.from({ length: items.length });
 
-    // Step 4: Execute creates
-    if (toCreate.length > 0) {
-      const createInputs = toCreate.map((entry) => entry.input);
-      const createdNodes = await executeNodeCreateBatch(
-        ctx,
-        createInputs,
-        backend,
-        { propsPreValidated: true },
-      );
-      for (const [batchIndex, entry] of toCreate.entries()) {
-        results[entry.index] = {
-          node: requireDefined(createdNodes[batchIndex]),
-          action: "created",
-        };
-      }
-    }
-
-    // Step 5: Handle existing nodes (fetch/update/resurrect)
+    // Step 4: Handle existing nodes (fetch/update/resurrect)
     for (const entry of toFetch) {
       const { index, concreteKind, validatedProps, nodeId } = entry;
 
@@ -6926,8 +6940,9 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       // the batch probe captured back in step 2 — the single-item path has
       // always derived it here (see `executeNodeGetOrCreateByConstraint`), and
       // one decision with two owners drifts. The uniques copy is also the
-      // staler of the two: step 4's creates run between the probe and this
-      // read, and a peer can soft-delete or resurrect the node in that window.
+      // staler of the two: the earlier items of this loop run between the probe
+      // and this read, and a peer can soft-delete or resurrect the node in
+      // that window.
       // Whether this write RESURRECTS has to come from the row it will target.
       const isSoftDeleted = existingRow.deleted_at !== undefined;
 
@@ -6981,6 +6996,29 @@ export async function executeNodeBulkGetOrCreateByConstraint<
           }
         }
         results[index] = { node: rowToNode(existingRow), action: "found" };
+      }
+    }
+
+    // Step 5: Execute creates
+    //
+    // After the matched items on purpose: every refusal a matched item can
+    // reach (a held whole that differs from the stated one, a stated window or
+    // props the held attachment contradicts) must precede the first row this
+    // call writes, or a caller catching it inside an enclosing
+    // `store.transaction(...)` keeps the created parts of a batch that threw.
+    if (toCreate.length > 0) {
+      const createInputs = toCreate.map((entry) => entry.input);
+      const createdNodes = await executeNodeCreateBatch(
+        ctx,
+        createInputs,
+        backend,
+        { propsPreValidated: true },
+      );
+      for (const [batchIndex, entry] of toCreate.entries()) {
+        results[entry.index] = {
+          node: requireDefined(createdNodes[batchIndex]),
+          action: "created",
+        };
       }
     }
 

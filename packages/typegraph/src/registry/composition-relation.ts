@@ -44,6 +44,25 @@ export function compositionViaKind(via: CompositionViaRef): string {
 /** Which endpoint of the realizing edge carries the PART. */
 export type CompositionPartSide = "from" | "to";
 
+/** Every value `partSide` may state, in declaration order. */
+export const COMPOSITION_PART_SIDE_VALUES = [
+  "from",
+  "to",
+] as const satisfies readonly CompositionPartSide[];
+
+/**
+ * THE check that a stated `partSide` is one this library knows, shared by the
+ * `partOf` / `hasPart` factories, the registry build, and the schema-document
+ * validators for the same reason {@link isCompositionExistence} is: a value
+ * one surface admits and another refuses is a schema that persists and cannot
+ * be read back.
+ */
+export function isCompositionPartSide(
+  value: unknown,
+): value is CompositionPartSide {
+  return (COMPOSITION_PART_SIDE_VALUES as readonly unknown[]).includes(value);
+}
+
 /**
  * Whether a composition part can exist with no whole.
  * `"required"` — the part cannot exist without a live whole, enforced at
@@ -195,6 +214,10 @@ export function inferCompositionPartSide(
 
   if (!forwardOk && !reverseOk) {
     return { code: "ONTOLOGY_COMPOSITION_VIA_ENDPOINTS" };
+  }
+
+  if (pair.declared !== undefined && !isCompositionPartSide(pair.declared)) {
+    return { code: "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID" };
   }
 
   if (forwardOk && reverseOk) {
@@ -388,7 +411,7 @@ function inferenceIssueMessage(
       );
     }
     case "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID": {
-      return `Composition relation ${relationLabel} declares a \`partSide\` that contradicts edge "${viaEdgeKind}"'s endpoints.`;
+      return `Composition relation ${relationLabel} declares a \`partSide\` that is not one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} or contradicts edge "${viaEdgeKind}"'s endpoints.`;
     }
   }
 }

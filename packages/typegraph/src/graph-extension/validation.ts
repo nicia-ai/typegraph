@@ -24,9 +24,10 @@ import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import {
   COMPOSITION_EXISTENCE_VALUES,
-  type CompositionPartSide,
+  COMPOSITION_PART_SIDE_VALUES,
   compositionRelationFields,
   isCompositionExistence,
+  isCompositionPartSide,
 } from "../registry/composition-relation";
 import {
   isUnstorablePropertyName,
@@ -210,7 +211,6 @@ const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "partSide",
   "existence",
 ]);
-const COMPOSITION_PART_SIDE_VALUES = ["from", "to"] as const;
 const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "name",
   "fields",
@@ -857,10 +857,7 @@ function validateOntologySection(
     }
 
     const partSide = entry["partSide"];
-    if (
-      partSide !== undefined &&
-      !(COMPOSITION_PART_SIDE_VALUES as readonly unknown[]).includes(partSide)
-    ) {
+    if (partSide !== undefined && !isCompositionPartSide(partSide)) {
       issues.push({
         path: `${path}/partSide`,
         message: `Ontology relation \`partSide\` must be one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} when present.`,
@@ -885,7 +882,7 @@ function validateOntologySection(
       to,
       ...compositionRelationFields({
         via,
-        partSide: partSide as CompositionPartSide | undefined,
+        partSide: partSide,
         existence,
       }),
     });

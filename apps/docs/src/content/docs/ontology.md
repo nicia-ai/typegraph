@@ -1117,8 +1117,10 @@ declaration order, from `defineGraph` and `store.evolve` alike.
 
 Both factories refuse an option key they do not know
 (`ONTOLOGY_COMPOSITION_OPTION_UNKNOWN`) and an `existence` outside
-`"optional" | "required"` (`ONTOLOGY_COMPOSITION_EXISTENCE_INVALID`), so a
-misspelled option cannot silently declare an optional part.
+`"optional" | "required"` (`ONTOLOGY_COMPOSITION_EXISTENCE_INVALID`), and a
+`partSide` outside `"from" | "to"` (`ONTOLOGY_COMPOSITION_PART_SIDE_INVALID`),
+so a misspelled option cannot silently declare an optional part or persist a
+schema that cannot be read back.
 
 ```typescript
 function hasPart<Whole extends NodeType, Part extends NodeType>(

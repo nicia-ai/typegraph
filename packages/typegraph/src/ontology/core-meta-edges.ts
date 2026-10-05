@@ -2,10 +2,12 @@ import { type AnyEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
   COMPOSITION_EXISTENCE_VALUES,
+  COMPOSITION_PART_SIDE_VALUES,
   type CompositionExistence,
   type CompositionPartSide,
   compositionRelationFields,
   isCompositionExistence,
+  isCompositionPartSide,
 } from "../registry/composition-relation";
 import {
   META_EDGE_BROADER,
@@ -325,8 +327,8 @@ const COMPOSITION_OPTION_KEYS: readonly string[] = [
  * factories so neither can accept what the other refuses. A key this library
  * does not know is refused rather than dropped — a misspelled `existence`
  * would otherwise silently declare an optional part — and so is an
- * `existence` outside its enum, which the registry would read as "not
- * required" and the schema serializer would persist as written.
+ * `existence` or `partSide` outside its enum, which the registry would read
+ * as "not required" / "to" and the schema serializer would persist as written.
  */
 function compositionRelationOptions(
   factory: typeof META_EDGE_PART_OF | typeof META_EDGE_HAS_PART,
@@ -357,6 +359,22 @@ function compositionRelationOptions(
       },
       {
         suggestion: `Pass one of: ${COMPOSITION_EXISTENCE_VALUES.join(", ")}.`,
+      },
+    );
+  }
+  if (
+    options.partSide !== undefined &&
+    !isCompositionPartSide(options.partSide)
+  ) {
+    throw new ConfigurationError(
+      `${factory}() was given \`partSide: ${JSON.stringify(options.partSide)}\`.`,
+      {
+        code: "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID",
+        factory,
+        partSide: options.partSide,
+      },
+      {
+        suggestion: `Pass one of: ${COMPOSITION_PART_SIDE_VALUES.join(", ")}.`,
       },
     );
   }
