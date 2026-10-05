@@ -178,6 +178,7 @@ publishing the new version:
 | `partOf`, `hasPart`                           | Warning — checked against live parts (one whole per part, no cycles, and a required whole when `existence: "required"`) | Breaking |
 | `broader`, `narrower`, `relatedTo`            | Safe | Safe |
 | an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
+| an edge's admitted endpoint pair              | Safe                                                | Warning — checked against live edges               |
 
 `sameAs` and `differentFrom` no longer have a public factory to author them
 with (see
@@ -217,7 +218,18 @@ a `differentFrom` relation exactly like the always-safe row.
   read/write-semantics change, not a data-validity one — so it is `breaking`
   and requires an explicit `migrateSchema()`, like `inverseOf` and `implies`.
 - A relation whose `from` or `to` names a kind **this same commit removes**
-  is always safe with no check — `Store.removeKinds()` is unaffected.
+  is itself safe with no check, and rows of the removed kind never hold the
+  commit back. They stay in storage until `materializeRemovals()` (or
+  `removeKinds(..., { eager: {} })`) reclaims them, and
+  `store.verifyConstraintFences()` can report their edges until then.
+- **An edge kind that stops admitting an endpoint pair** between kinds that
+  survive the commit is checked against its live edges, whatever caused the
+  loss: a removed `subClassOf` or `equivalentTo`, a narrowed `from` / `to`
+  declaration, or a kind removed from the middle of a subclass chain. With
+  `Dog ⊂ Mammal ⊂ Animal` and an edge declared `to: [Animal]`,
+  `Store.removeKinds(["Mammal"])` refuses while a live edge still points at a
+  `Dog`: nothing would admit that edge afterwards. Delete those edges, or
+  declare `subClassOf(Dog, Animal)` first, then retry.
 - **Declaring `acyclic: true`** on an edge kind that already carries live
   rows is checked against the whole relation: if any live edge's `to`
   endpoint already reaches its `from` endpoint, the commit refuses with the
@@ -796,8 +808,9 @@ console.log("Current version:", active?.version);
 | Change unique constraints      | Warning        | Yes            |
 | Change edge cardinality (source-side, `cardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
 | Change edge target cardinality (`targetCardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
-| Change edge endpoint kinds     | Warning        | Yes            |
-| Remove allowed source-dependent endpoint pairs | Breaking | No |
+| Widen edge endpoint kinds      | Warning        | Yes            |
+| Narrow edge endpoint kinds     | Warning (data-checked) | Yes, if the check passes |
+| Remove allowed source-dependent endpoint pairs | Breaking (data-checked by `migrateSchema()`) | No |
 
 ## Rollback
 

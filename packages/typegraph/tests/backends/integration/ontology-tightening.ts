@@ -193,6 +193,51 @@ async function cycleWrittenAfterDroppingAcyclic(
   if (withCycle) await relaxed.edges.dependsOn.create(b, a);
 }
 
+const Animal = defineNode("Animal", { schema: z.object({}) });
+const likes = defineEdge("likes", { schema: z.object({}) });
+
+/** `likes(Person → Animal)`, with the subclass chain added by {@link MID_CHAIN_EXTENSION}. */
+function midChainHostGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Person: { type: Person }, Animal: { type: Animal } },
+    edges: { likes: { type: likes, from: [Person], to: [Animal] } },
+  });
+}
+
+/** `Dog ⊂ Mammal ⊂ Animal`: removing `Mammal` cuts `Dog` off from `Animal`. */
+const MID_CHAIN_EXTENSION = defineGraphExtension({
+  nodes: { Mammal: { properties: {} }, Dog: { properties: {} } },
+  ontology: [
+    { metaEdge: "subClassOf", from: "Mammal", to: "Animal" },
+    { metaEdge: "subClassOf", from: "Dog", to: "Mammal" },
+  ],
+});
+
+/**
+ * `worksFor(Person → Organization | Company)`, or the same edge kind with
+ * `Company` dropped from its targets — as a plain list, or as a
+ * source-dependent map.
+ */
+function declaredEndpointGraph(
+  id: string,
+  endpoints: "wide" | "list" | "bySource",
+) {
+  const to =
+    endpoints === "wide" ? [Organization, Company]
+    : endpoints === "list" ? [Organization]
+    : { Person: [Organization] };
+  return defineGraph({
+    id,
+    nodes: {
+      Person: { type: Person },
+      Company: { type: Company },
+      Organization: { type: Organization },
+    },
+    edges: { worksFor: { type: worksFor, from: [Person], to } },
+  });
+}
+
 function probeGraph(id: string, withDisjoint: boolean) {
   return defineGraph({
     id,
@@ -737,13 +782,10 @@ export function registerOntologyTighteningIntegrationTests(
       ).not.toContain("Widget");
       expect(await activeVersion(context, id)).toBe(3);
     });
-    // NOTE: `Store.removeKinds()` attaches no ontology preflight at all (see
-    // `src/schema/manager.ts`'s enumeration table) — every relation it drops
-    // is classified `safe` for the mundane reason that classification never
-    // runs on this path, not because the removed-kind rule fired. This case
-    // is therefore a regression guard for "removeKinds is not refused", not
-    // for the removed-kind rule itself; the next case guards that rule on a
-    // path that actually classifies.
+    // A regression guard for "removeKinds is not refused over a relation
+    // naming the removed kind"; the next case guards the removed-kind rule
+    // through `migrateSchema`, and the mid-chain cases below guard what a
+    // removal still owes a SURVIVING kind.
 
     it("classifies a subClassOf removal alongside its own kind's removal as safe, through migrateSchema", async () => {
       const id = "ontology_tightening_removed_kind_rule";
@@ -793,8 +835,9 @@ export function registerOntologyTighteningIntegrationTests(
       // classifies as `warning` + `edgeEndpointAssignability` like any other
       // `subClassOf` removal, and the probe would find the edge above
       // sitting outside the shrunken `worksFor` allowance. With the rule,
-      // the relation is `safe` (it names a kind THIS commit removes) and no
-      // probe runs at all.
+      // the relation is `safe` (it names a kind THIS commit removes), and
+      // the only admitted pair lost names that removed kind, so no probe
+      // runs at all.
       const version = await migrateSchema(
         context.getBackend(),
         graphWith(false),
@@ -813,6 +856,202 @@ export function registerOntologyTighteningIntegrationTests(
     // above outside the shrunken allowance, `migrateSchema` throws
     // `MigrationError` `reason: "ontology-tightening-violated"` instead of
     // returning the new version, and this test fails.
+
+    it("refuses removeKinds of a mid-chain kind that strands a surviving subclass's live edge", async () => {
+      const id = "ontology_tightening_mid_chain_removal";
+      const store = await context.createStore(midChainHostGraph(id));
+      const evolved = await store.evolve(MID_CHAIN_EXTENSION);
+      const person = await evolved.nodes.Person.create({});
+      const dog = await evolved.getNodeCollectionOrThrow("Dog").create({});
+      const mammal = await evolved
+        .getNodeCollectionOrThrow("Mammal")
+        .create({});
+      const dogEdge = await store.backend.insertEdge({
+        graphId: id,
+        id: "likes-dog",
+        kind: "likes",
+        fromKind: "Person",
+        fromId: person.id,
+        toKind: "Dog",
+        toId: dog.id,
+        props: {},
+      });
+      await store.backend.insertEdge({
+        graphId: id,
+        id: "likes-mammal",
+        kind: "likes",
+        fromKind: "Person",
+        fromId: person.id,
+        toKind: "Mammal",
+        toId: mammal.id,
+        props: {},
+      });
+      expect(await evolved.verifyConstraintFences()).toEqual([]);
+
+      // Dropping Mammal drops both `subClassOf` relations, so `likes(Person →
+      // Animal)` stops admitting Dog while the Dog edge survives. Only that
+      // edge is reported: the Mammal edge belongs to the removed kind, whose
+      // rows the removal itself reclaims.
+      const error = await evolved
+        .removeKinds(["Mammal"])
+        .catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      expect(details.violations).toEqual([
+        {
+          family: "edgeEndpointAssignability",
+          edgeKind: "likes",
+          allowedPairs: [
+            ["Person", "Animal"],
+            ["Person", "Mammal"],
+          ],
+          edges: [
+            {
+              edgeKind: "likes",
+              edgeId: dogEdge.id,
+              fromKind: "Person",
+              fromId: person.id,
+              toKind: "Dog",
+              toId: dog.id,
+            },
+          ],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(2);
+      expect(await evolved.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("lets removeKinds drop a mid-chain kind when only its own rows relied on the chain", async () => {
+      const id = "ontology_tightening_mid_chain_removal_clean";
+      const store = await context.createStore(midChainHostGraph(id));
+      const evolved = await store.evolve(MID_CHAIN_EXTENSION);
+      const person = await evolved.nodes.Person.create({});
+      const mammal = await evolved
+        .getNodeCollectionOrThrow("Mammal")
+        .create({});
+      await store.backend.insertEdge({
+        graphId: id,
+        id: "likes-mammal",
+        kind: "likes",
+        fromKind: "Person",
+        fromId: person.id,
+        toKind: "Mammal",
+        toId: mammal.id,
+        props: {},
+      });
+
+      const afterRemoval = await evolved.removeKinds(["Mammal"], {
+        eager: {},
+      });
+
+      expect(await activeVersion(context, id)).toBe(3);
+      expect(await afterRemoval.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses narrowing an edge kind's declared endpoints out from under a live edge", async () => {
+      const id = "ontology_tightening_declared_endpoint_narrowing";
+      const store = await context.createStore(
+        declaredEndpointGraph(id, "wide"),
+      );
+      const person = await store.nodes.Person.create({});
+      const company = await store.nodes.Company.create({});
+      const edge = await store.edges.worksFor.create(person, company, {});
+
+      for (const narrowing of ["list", "bySource"] as const) {
+        // A narrowed source-dependent map is `breaking`, so it only ever
+        // commits through an explicit `migrateSchema()`; a narrowed list
+        // auto-migrates. Both owe the same probe.
+        const commit =
+          narrowing === "list" ?
+            createAdapterStoreWithSchema(
+              declaredEndpointGraph(id, narrowing),
+              context.getBackend(),
+            )
+          : migrateSchema(
+              context.getBackend(),
+              declaredEndpointGraph(id, narrowing),
+              1,
+            );
+        const error = await commit.catch((error_: unknown) => error_);
+
+        expect(error).toBeInstanceOf(MigrationError);
+        const details = (error as MigrationError).details;
+        if (details.reason !== "ontology-tightening-violated") {
+          throw new Error(
+            `expected ontology-tightening-violated, got ${details.reason}`,
+          );
+        }
+        expect(details.changes).toEqual([
+          matchingObject({
+            entity: "edgeRegistration",
+            name: "worksFor",
+            severity: "warning",
+          }),
+        ]);
+        expect(details.violations).toEqual([
+          {
+            family: "edgeEndpointAssignability",
+            edgeKind: "worksFor",
+            allowedPairs: [["Person", "Organization"]],
+            edges: [
+              {
+                edgeKind: "worksFor",
+                edgeId: edge.id,
+                fromKind: "Person",
+                fromId: person.id,
+                toKind: "Company",
+                toId: company.id,
+              },
+            ],
+          },
+        ]);
+        expect(await activeVersion(context, id)).toBe(1);
+      }
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("auto-migrates a narrowed endpoint declaration no live edge sits outside", async () => {
+      const id = "ontology_tightening_declared_endpoint_narrowing_clean";
+      const store = await context.createStore(
+        declaredEndpointGraph(id, "wide"),
+      );
+      const person = await store.nodes.Person.create({});
+      const organization = await store.nodes.Organization.create({});
+      await store.edges.worksFor.create(person, organization, {});
+
+      const [narrowed] = await createAdapterStoreWithSchema(
+        declaredEndpointGraph(id, "list"),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+      expect(await narrowed.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses rolling back to a version whose narrower endpoints a live edge sits outside", async () => {
+      const id = "ontology_tightening_declared_endpoint_rollback";
+      await context.createStore(declaredEndpointGraph(id, "list"));
+      const [widened] = await createAdapterStoreWithSchema(
+        declaredEndpointGraph(id, "wide"),
+        context.getBackend(),
+      );
+      const person = await widened.nodes.Person.create({});
+      const company = await widened.nodes.Company.create({});
+      await widened.edges.worksFor.create(person, company, {});
+
+      await expect(
+        rollbackSchema(context.getBackend(), id, 1),
+      ).rejects.toMatchObject({
+        details: matchingObject({ reason: "ontology-tightening-violated" }),
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
 
     it("refuses the same probe-1 tightening through migrateSchema directly", async () => {
       const id = "ontology_tightening_via_migrate_schema";
