@@ -23,9 +23,10 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import {
-  type CompositionExistence,
+  COMPOSITION_EXISTENCE_VALUES,
   type CompositionPartSide,
   compositionRelationFields,
+  isCompositionExistence,
 } from "../registry/composition-relation";
 import {
   isUnstorablePropertyName,
@@ -210,7 +211,6 @@ const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "existence",
 ]);
 const COMPOSITION_PART_SIDE_VALUES = ["from", "to"] as const;
-const COMPOSITION_EXISTENCE_VALUES = ["optional", "required"] as const;
 const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "name",
   "fields",
@@ -872,7 +872,7 @@ function validateOntologySection(
     const existence = entry["existence"];
     if (
       existence !== undefined &&
-      !(COMPOSITION_EXISTENCE_VALUES as readonly unknown[]).includes(existence)
+      !isCompositionExistence(existence)
     ) {
       issues.push({
         path: `${path}/existence`,
@@ -889,7 +889,7 @@ function validateOntologySection(
       ...compositionRelationFields({
         via,
         partSide: partSide as CompositionPartSide | undefined,
-        existence: existence as CompositionExistence | undefined,
+        existence,
       }),
     });
   }

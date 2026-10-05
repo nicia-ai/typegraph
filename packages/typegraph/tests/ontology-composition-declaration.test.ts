@@ -23,10 +23,13 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   hasPart,
+  type OntologyRelation,
   partOf,
   subClassOf,
 } from "../src";
@@ -38,7 +41,7 @@ import {
   partitionCompositionEdgeKindsByDirection,
 } from "../src/registry/composition-relation";
 import { type EdgeKindFacts } from "../src/registry/edge-kind-facts";
-import { matchingObject } from "./test-utils";
+import { createTestBackend, matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
 
@@ -109,6 +112,7 @@ describe("composition registration checks (buildKindRegistry)", () => {
   const Part = defineNode("Part", { schema: emptySchema });
   const Whole = defineNode("Whole", { schema: emptySchema });
   const Other = defineNode("Other", { schema: emptySchema });
+  const realizes = defineEdge("realizes", { schema: emptySchema });
 
   it("ONTOLOGY_COMPOSITION_VIA_UNKNOWN: via names an unregistered edge kind", () => {
     const ghost = defineEdge("ghost", { schema: emptySchema });
@@ -493,6 +497,155 @@ describe("composition registration checks (buildKindRegistry)", () => {
   // graph then builds cleanly and `registry.compositionExistence("SharedPart")`
   // answers whichever pair happens to be iterated last, silently — the
   // exact ambiguity `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` exists to refuse.
+
+  it("ONTOLOGY_COMPOSITION_EXISTENCE_MIXED: a mirrored partOf/hasPart pair disagreeing on existence, in either declaration order", () => {
+    const mirrored = (ontology: readonly OntologyRelation[]) =>
+      defineGraph({
+        id: "composition-existence-mirror",
+        nodes: { Part: { type: Part }, Whole: { type: Whole } },
+        edges: {
+          realizes: {
+            type: realizes,
+            from: [Part],
+            to: [Whole],
+            cardinality: "one",
+          },
+        },
+        ontology,
+      });
+    const optional = partOf(Part, Whole, { via: realizes });
+    const required = hasPart(Whole, Part, {
+      via: realizes,
+      existence: "required",
+    });
+
+    for (const ontology of [
+      [optional, required],
+      [required, optional],
+    ]) {
+      expectCompositionCode(
+        () => buildKindRegistry(mirrored(ontology)),
+        "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+      );
+    }
+
+    // A mirror that restates the same existence is one pair.
+    const agreeing = buildKindRegistry(
+      mirrored([
+        partOf(Part, Whole, { via: realizes, existence: "required" }),
+        required,
+      ]),
+    );
+    expect(agreeing.compositionExistence("Part")).toBe("required");
+    expect(agreeing.compositionRelation().pairs).toHaveLength(1);
+  });
+  // MUTATION CHECK: in `buildCompositionRelation`
+  // (src/registry/composition-relation.ts), drop the `existenceByPairKey`
+  // comparison ahead of the `seenPairKeys` fold. The first declaration then
+  // wins: `[optional, required]` builds an OPTIONAL part and
+  // `[required, optional]` a required one, and neither order refuses.
+
+  it("the same mirrored disagreement in a runtime extension document is refused by store.evolve", async () => {
+    const Base = defineNode("Base", { schema: emptySchema });
+    const [store] = await createStoreWithSchema(
+      defineGraph({
+        id: "composition-existence-mirror-extension",
+        nodes: { Base: { type: Base } },
+        edges: {},
+      }),
+      createTestBackend(),
+    );
+
+    // MUTATION CHECK: as above — `store.evolve` builds its registry through
+    // the same `buildCompositionRelation`, so the document is then accepted.
+    await expect(
+      store.evolve(
+        defineGraphExtension({
+          nodes: { A: { properties: {} }, B: { properties: {} } },
+          edges: {
+            e: { from: ["A"], to: ["B"], properties: {}, cardinality: "one" },
+          },
+          ontology: [
+            { metaEdge: "partOf", from: "A", to: "B", via: "e" },
+            {
+              metaEdge: "hasPart",
+              from: "B",
+              to: "A",
+              via: "e",
+              existence: "required",
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        details: matchingObject({
+          code: "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+        }),
+      }),
+    );
+  });
+
+  it("ONTOLOGY_COMPOSITION_EXISTENCE_INVALID: an existence outside its enum is refused by the factory and by the registry build", () => {
+    // MUTATION CHECK: drop the `isCompositionExistence` branch from
+    // `compositionRelationOptions` (src/ontology/core-meta-edges.ts) — both
+    // factories then return a relation carrying the misspelling.
+    for (const factory of [
+      () => partOf(Part, Whole, { via: realizes, existence: "require" as never }),
+      () => hasPart(Whole, Part, { via: realizes, existence: "require" as never }),
+    ]) {
+      expectCompositionCode(factory, "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID");
+    }
+
+    // A relation object built without the factory reaches the registry.
+    // MUTATION CHECK: drop the `isCompositionExistence` issue from
+    // `buildCompositionRelation` — the graph builds, reads "require" as not
+    // required, and serializes a schema document that no longer loads.
+    const handBuilt = {
+      ...partOf(Part, Whole, { via: realizes }),
+      existence: "require",
+    };
+    expectCompositionCode(
+      () =>
+        buildKindRegistry(
+          defineGraph({
+            id: "composition-existence-invalid",
+            nodes: { Part: { type: Part }, Whole: { type: Whole } },
+            edges: {
+              realizes: {
+                type: realizes,
+                from: [Part],
+                to: [Whole],
+                cardinality: "one",
+              },
+            },
+            ontology: [handBuilt as never],
+          }),
+        ),
+      "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID",
+    );
+  });
+
+  it("ONTOLOGY_COMPOSITION_OPTION_UNKNOWN: partOf and hasPart refuse an option key they do not know", () => {
+    // MUTATION CHECK: drop the unknown-key branch from
+    // `compositionRelationOptions` — the misspelled `existance` is ignored
+    // and the pair is declared optional.
+    const misspelled = { via: realizes, existance: "required" } as never;
+    for (const factory of [
+      () => partOf(Part, Whole, misspelled),
+      () => hasPart(Whole, Part, misspelled),
+    ]) {
+      expect(factory).toThrow(
+        expect.objectContaining({
+          code: "CONFIGURATION_ERROR",
+          details: matchingObject({
+            code: "ONTOLOGY_COMPOSITION_OPTION_UNKNOWN",
+            unknownKeys: ["existance"],
+          }),
+        }),
+      );
+    }
+  });
 
   it("existence on a non-composition meta-edge is refused (ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN)", () => {
     const issues = validateOntologyRelations([

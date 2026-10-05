@@ -1,8 +1,11 @@
 import { type AnyEdgeType, type NodeType } from "../core/types";
+import { ConfigurationError } from "../errors";
 import {
+  COMPOSITION_EXISTENCE_VALUES,
   type CompositionExistence,
   type CompositionPartSide,
   compositionRelationFields,
+  isCompositionExistence,
 } from "../registry/composition-relation";
 import {
   META_EDGE_BROADER,
@@ -311,6 +314,59 @@ export type CompositionOptions = Readonly<{
   existence?: CompositionExistence;
 }>;
 
+const COMPOSITION_OPTION_KEYS: readonly string[] = [
+  "via",
+  "partSide",
+  "existence",
+] satisfies readonly (keyof CompositionOptions)[];
+
+/**
+ * THE one read of a `partOf` / `hasPart` options object, shared by both
+ * factories so neither can accept what the other refuses. A key this library
+ * does not know is refused rather than dropped — a misspelled `existence`
+ * would otherwise silently declare an optional part — and so is an
+ * `existence` outside its enum, which the registry would read as "not
+ * required" and the schema serializer would persist as written.
+ */
+function compositionRelationOptions(
+  factory: typeof META_EDGE_PART_OF | typeof META_EDGE_HAS_PART,
+  options: CompositionOptions,
+): ReturnType<typeof compositionRelationFields> {
+  const unknownKeys = Object.keys(options).filter(
+    (key) => !COMPOSITION_OPTION_KEYS.includes(key),
+  );
+  if (unknownKeys.length > 0) {
+    throw new ConfigurationError(
+      `${factory}() was given unknown option${unknownKeys.length === 1 ? "" : "s"} ${unknownKeys.map((key) => `"${key}"`).join(", ")}.`,
+      { code: "ONTOLOGY_COMPOSITION_OPTION_UNKNOWN", factory, unknownKeys },
+      {
+        suggestion: `Accepted options: ${COMPOSITION_OPTION_KEYS.join(", ")}.`,
+      },
+    );
+  }
+  if (
+    options.existence !== undefined &&
+    !isCompositionExistence(options.existence)
+  ) {
+    throw new ConfigurationError(
+      `${factory}() was given \`existence: ${JSON.stringify(options.existence)}\`.`,
+      {
+        code: "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID",
+        factory,
+        existence: options.existence,
+      },
+      {
+        suggestion: `Pass one of: ${COMPOSITION_EXISTENCE_VALUES.join(", ")}.`,
+      },
+    );
+  }
+  return compositionRelationFields({
+    via: options.via.kind,
+    partSide: options.partSide,
+    existence: options.existence,
+  });
+}
+
 /**
  * Creates a partOf ontology relation.
  *
@@ -326,11 +382,7 @@ export function partOf<Part extends NodeType, Whole extends NodeType>(
     metaEdge: partOfMetaEdge,
     from: part,
     to: whole,
-    via: options.via.kind,
-    ...compositionRelationFields({
-      partSide: options.partSide,
-      existence: options.existence,
-    }),
+    ...compositionRelationOptions(META_EDGE_PART_OF, options),
   };
 }
 
@@ -355,11 +407,7 @@ export function hasPart<Whole extends NodeType, Part extends NodeType>(
     metaEdge: hasPartMetaEdge,
     from: whole,
     to: part,
-    via: options.via.kind,
-    ...compositionRelationFields({
-      partSide: options.partSide,
-      existence: options.existence,
-    }),
+    ...compositionRelationOptions(META_EDGE_HAS_PART, options),
   };
 }
 

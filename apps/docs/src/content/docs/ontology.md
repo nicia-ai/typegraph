@@ -1110,6 +1110,15 @@ function partOf<Part extends NodeType, Whole extends NodeType>(
 
 Declares a compositional relationship (whole to part) — the mirror of
 `partOf`. Declaring both directions for the same pair is redundant; pick one.
+When both are declared they are one pair and must state the same `existence`
+(an omitted one reads as `"optional"`); a disagreement raises
+`ConfigurationError` (`ONTOLOGY_COMPOSITION_EXISTENCE_MIXED`) in either
+declaration order, from `defineGraph` and `store.evolve` alike.
+
+Both factories refuse an option key they do not know
+(`ONTOLOGY_COMPOSITION_OPTION_UNKNOWN`) and an `existence` outside
+`"optional" | "required"` (`ONTOLOGY_COMPOSITION_EXISTENCE_INVALID`), so a
+misspelled option cannot silently declare an optional part.
 
 ```typescript
 function hasPart<Whole extends NodeType, Part extends NodeType>(
