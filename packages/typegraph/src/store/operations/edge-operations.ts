@@ -510,10 +510,16 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   if (options?.validateCardinality ?? true) {
     await checkEdgeCardinalityConstraints(
       constraintContext,
-      kind,
-      edgeCardinalityAxisReferences(declarations),
-      { fromKind, fromId: input.fromId, toKind, toId: input.toId },
-      validTo,
+      edgeInsertClaims(ctx.registry, declarations, {
+        graphId: ctx.graphId,
+        id,
+        kind,
+        fromKind,
+        fromId: input.fromId,
+        toKind,
+        toId: input.toId,
+        ...(validTo === undefined ? {} : { validTo }),
+      }),
     );
   }
 
@@ -1613,7 +1619,7 @@ async function diagnoseAtomicEdgeBatchEndpointRefusal<G extends GraphDef>(
 
 async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  inputs: readonly CreateEdgeInput[],
+  preparedCreates: readonly EdgeCreatePrepared[],
   backend: WriteTarget,
 ): Promise<void> {
   const constraintContext: ConstraintContext = {
@@ -1622,25 +1628,15 @@ async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
     backend,
   };
   for (const window of chunk(
-    inputs,
+    preparedCreates,
     ATOMIC_EDGE_SCALAR_DIAGNOSTIC_WINDOW_SIZE,
   )) {
     const errors = await Promise.all(
-      window.map(async (input) => {
+      window.map(async (prepared) => {
         try {
           await checkEdgeCardinalityConstraints(
             constraintContext,
-            input.kind,
-            edgeCardinalityAxisReferences(
-              edgeCardinalityDeclarations(ctx, input.kind),
-            ),
-            {
-              fromKind: input.fromKind,
-              fromId: input.fromId,
-              toKind: input.toKind,
-              toId: input.toId,
-            },
-            input.validTo,
+            edgeInsertWork(ctx, prepared).claims,
           );
           return;
         } catch (error) {
@@ -1712,7 +1708,11 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
         );
       }
       if (error instanceof AtomicEdgeBatchCardinalityRefusalError) {
-        await assertAtomicEdgeBatchCardinality(ctx, inputs, backend);
+        await assertAtomicEdgeBatchCardinality(
+          ctx,
+          preparation.preparedCreates,
+          backend,
+        );
         throw new DatabaseOperationError(
           "Atomic edge batch refused a cardinality claim, but no current " +
             "competing edge could be diagnosed.",
@@ -2258,60 +2258,14 @@ async function performEdgeUpdate<G extends GraphDef>(
       reentersLivePopulation ?
         edgeCardinalityAxisReferences(declarations)
       : activeOnlyAxisReferences(declarations);
-    await checkEdgeCardinalityConstraints(
-      {
-        graphId: ctx.graphId,
-        registry: ctx.registry,
-        backend: target,
-      },
-      input.identity.kind,
-      reentryAxisReferences,
-      {
-        fromKind: existing.from_kind,
-        fromId: existing.from_id,
-        toKind: existing.to_kind,
-        toId: existing.to_id,
-      },
-      effectiveValidTo,
-    );
-    // Acyclicity's population is soft-delete-only: a resurrection
-    // (`clearDeleted`) re-admits the edge and is checked; reopening an
-    // `oneActive` window alone (`reentersActivePopulation` with no
-    // `clearDeleted`) never removed the edge from the acyclicity
-    // population in the first place, so it is deliberately NOT checked
-    // here — checking it would over-fence a path that must stay free.
-    if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
-      await assertEdgeRelationsAcyclic(
-        acyclicityProbeContext(
-          ctx,
-          target,
-          requireDefined(
-            lock,
-            "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
-          ),
-          "edges.resurrect",
-        ),
-        [
-          {
-            edgeId: id,
-            edgeKind: input.identity.kind,
-            fromKind: existing.from_kind,
-            fromId: existing.from_id,
-            toKind: existing.to_kind,
-            toId: existing.to_id,
-          },
-        ],
-      );
-    }
     // Re-entry re-admits this edge to every population {@link
     // reentryAxisReferences} above decided it left, so it claims exactly
-    // those axes — BEFORE the update that re-admits it, because the probe
-    // above read a population no key fences. Both legs claim: a resurrect
-    // (`clearDeleted`) and a reopened `oneActive`-shaped window (#469) put
-    // the same row back into the same counted population, and a fence that
-    // covered only the first would leave the second unfenced. Decided here,
-    // ISSUED by the step that owns the row write, so the pair cannot be
-    // separated.
+    // those axes — and probes exactly those claims, BEFORE the update that
+    // re-admits it. Both legs claim: a resurrect (`clearDeleted`) and a
+    // reopened `oneActive`-shaped window (#469) put the same row back into
+    // the same counted population, and a fence that covered only the first
+    // would leave the second unfenced. Decided here, ISSUED by the step that
+    // owns the row write, so the pair cannot be separated.
     const reentrySubject: EdgeClaimSubject = {
       graphId: ctx.graphId,
       id,
@@ -2343,6 +2297,43 @@ async function performEdgeUpdate<G extends GraphDef>(
         reentryOrdinaryClaims
       : [...reentryOrdinaryClaims, compositionEntry],
     );
+    await checkEdgeCardinalityConstraints(
+      {
+        graphId: ctx.graphId,
+        registry: ctx.registry,
+        backend: target,
+      },
+      reentryClaims,
+    );
+    // Acyclicity's population is soft-delete-only: a resurrection
+    // (`clearDeleted`) re-admits the edge and is checked; reopening an
+    // `oneActive` window alone (`reentersActivePopulation` with no
+    // `clearDeleted`) never removed the edge from the acyclicity
+    // population in the first place, so it is deliberately NOT checked
+    // here — checking it would over-fence a path that must stay free.
+    if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
+      await assertEdgeRelationsAcyclic(
+        acyclicityProbeContext(
+          ctx,
+          target,
+          requireDefined(
+            lock,
+            "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
+          ),
+          "edges.resurrect",
+        ),
+        [
+          {
+            edgeId: id,
+            edgeKind: input.identity.kind,
+            fromKind: existing.from_kind,
+            fromId: existing.from_id,
+            toKind: existing.to_kind,
+            toId: existing.to_id,
+          },
+        ],
+      );
+    }
   }
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the

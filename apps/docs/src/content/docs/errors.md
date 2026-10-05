@@ -708,7 +708,13 @@ transaction, which is the only order in which both R4 and
 `details.incumbentEdgeId` names the edge that already holds the axis — the
 one fact the claim statement's own result reports. It never names the
 incumbent whole's kind or id: reading that would be a second query this
-refusal path does not make. Run `store.verifyConstraintFences()` (the
+refusal path does not make. The refusal is the same class with the same
+detail wherever it is decided: by the claim row, or by the pre-write probe a
+batch, a custom command port's fallback, or a backend without claim
+relations runs instead. That probe counts the part's attachments across
+every realizing edge kind, and reports composition ahead of the edge kind's
+own `CardinalityError`. `incumbentEdgeId` is absent only when the incumbent
+is an earlier row of the same batch, which has no stored edge to name. Run `store.verifyConstraintFences()` (the
 `family: "composition"` entries) to find every part already holding more
 than one whole.
 

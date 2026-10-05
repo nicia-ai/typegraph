@@ -241,6 +241,7 @@ export function registerEdgeAcyclicityIntegrationTests(
       >;
 
       const store = context.getStore();
+      const outcomes: Record<string, unknown> = {};
       for (const [variant, write] of Object.entries(batchWrites)) {
         const a = await store.nodes.Task.create({ name: `${variant}-a` });
         const b = await store.nodes.Task.create({ name: `${variant}-b` });
@@ -257,14 +258,21 @@ export function registerEdgeAcyclicityIntegrationTests(
           }).catch((error: unknown) => refusals.push(error));
         });
 
-        expect(refusals, variant).toEqual([
-          expect.objectContaining({ name: "EdgeAcyclicityError" }),
-        ]);
-        expect(
-          await store.edges.dependsOn.findFrom(c),
-          `${variant} left its refused edge stored`,
-        ).toEqual([]);
+        outcomes[variant] = {
+          refusals: refusals.map((error) =>
+            error instanceof Error ? error.name : error,
+          ),
+          storedFromClosingSource: await store.edges.dependsOn.findFrom(c),
+        };
       }
+      expect(outcomes).toEqual(
+        Object.fromEntries(
+          Object.keys(batchWrites).map((variant) => [
+            variant,
+            { refusals: ["EdgeAcyclicityError"], storedFromClosingSource: [] },
+          ]),
+        ),
+      );
       expect(await store.verifyConstraintFences()).toEqual([]);
     });
 

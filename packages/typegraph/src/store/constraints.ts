@@ -34,14 +34,24 @@
  * are what the write paths ask so they take that same per-graph lock whenever
  * one of these probes is in play, and only then.
  */
-import { type GraphEntityReadBackend, isLiveNodeRow } from "../backend/types";
+import {
+  type ClaimEdgeCardinalityParams,
+  type CompositionClaimScope,
+  type GraphEntityReadBackend,
+  isLiveNodeRow,
+} from "../backend/types";
 import { checkDisjointness } from "../constraints";
 import { type GraphDef } from "../core/define-graph";
 import { type UniqueConstraint } from "../core/types";
+import { type CardinalityError, type CompositionError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import { acyclicEdgeRelations } from "./acyclicity";
 import { type ConstraintFenceReason } from "./claims/backing";
 import {
+  claimRefusalFor,
+  claimsInProbeOrder,
+  compositionClaimEndpoints,
+  edgeCardinalityAxisName,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
@@ -49,6 +59,7 @@ import {
   edgeCardinalityViolation,
 } from "./claims/edge-claims";
 import { nodeClaimSites } from "./claims/sites";
+import { findLiveCompositionAttachment } from "./operations/composition-create";
 
 export { type ConstraintFenceReason } from "./claims/backing";
 
@@ -92,8 +103,8 @@ export type ConstraintContext = Readonly<{
  * unfenceable backend calls the constraint.
  *
  * The one owner of this classification: it folds through
- * {@link edgeCardinalityAxisReferences}, the same fold `checkEdgeCardinalityConstraints`
- * iterates, so a second inline `!== "many"` at a write path — blind to a
+ * {@link edgeCardinalityAxisReferences}, the same fold the claim set
+ * `checkEdgeCardinalityConstraints` probes is built from, so a second inline `!== "many"` at a write path — blind to a
  * target-only declaration — can never drift from it. {@link graphOwesClaims}
  * routes through this function too, and accepts only its
  * `"edgeComposition"` / `"edgeCardinality"` answers: acyclicity has no claim
@@ -300,70 +311,71 @@ export async function checkDisjointnessConstraint(
   }
 }
 
-/** The endpoint identity a cardinality probe reads and refuses against. */
-export type EdgeEndpointTuple = Readonly<{
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-}>;
-
 /**
- * Checks every cardinality axis an edge's declaration constrains, source and
- * target alike.
+ * The portable probe for every claim one edge write owes: the claim set
+ * itself, read against the live graph instead of the claim relation.
  *
- * Takes the AXIS LIST rather than the raw {@link EdgeCardinalityDeclarations},
- * so the caller decides which axes this write actually owes a probe for.
- * Every ordinary write (create, or an update re-entering the FULL live
- * population on a resurrection) owes the complete
- * {@link edgeCardinalityAxisReferences} fold, and every such caller passes
- * exactly that. The one caller that does not is a window reopen with no
- * delete transition: this row held its non-active-only axes continuously
- * (see {@link file://./operations/edge-operations.ts}'s reentry branch for
- * why probing them here would count the row against itself), so it passes a
- * narrower list. Per axis, reads {@link edgeCardinalitySpec} rather than
- * re-spelling each cardinality's rules: which endpoint the axis covers
- * (`keyShape`), whether an edge born already ended joins the population at
- * all (`claimsWhenBornEnded`) and whether the population is the live one or
- * the active one (`holderLiveness`) are the same three facts the claim's SQL
- * reads. A probe that spelled its own copy would be the drift that accepts a
- * write the fence then refuses (or the reverse).
+ * Takes the CLAIMS — `edgeInsertClaims` for a create, the re-entry set for a
+ * resurrect or window reopen — rather than a declaration, so a write probes
+ * exactly what it then claims, never a superset and never a subset. The claim
+ * owners already applied every exemption (an edge born ended joins no
+ * active-only population; a window reopen re-enters only the axes it left),
+ * so this function decides nothing about WHICH axes are owed. Per claim it
+ * reads {@link edgeCardinalitySpec} rather than re-spelling each
+ * cardinality's rules: which endpoint the axis covers (`keyShape`) and
+ * whether the population is the live one or the active one
+ * (`holderLiveness`) are the same facts the claim's SQL reads. A probe that
+ * spelled its own copy would be the drift that accepts a write the fence
+ * then refuses (or the reverse).
+ *
+ * Probe order is {@link claimsInProbeOrder}: composition first. "One whole
+ * per part" spans every realizing edge kind, so it is counted across all of
+ * the claim's holders and refused as `CompositionError` naming the incumbent
+ * edge — the refusal the claim row raises on a backend that takes the fused
+ * path, so the two sides of that seam cannot disagree about the error class.
+ * It is also the only fence that invariant has on a backend with no claim
+ * relation, where the per-graph lock serializes writers but no row collides.
  *
  * **These are limits on edge count, not on distinct neighbours**: nothing in
  * the count mentions the opposite endpoint on a `from`/`to` axis, so a second
  * distinct edge from the same source to a target-`one` target is refused
  * exactly as a second edge from a different source would be.
  *
+ * @throws CompositionError if the part already holds a whole
  * @throws CardinalityError if any constrained axis is violated
  */
 export async function checkEdgeCardinalityConstraints(
   ctx: ConstraintContext,
-  edgeKind: string,
-  axisReferences: readonly EdgeCardinalityAxisRef[],
-  endpoints: EdgeEndpointTuple,
-  validTo: string | undefined,
+  claims: readonly ClaimEdgeCardinalityParams[],
 ): Promise<void> {
-  for (const ref of axisReferences) {
-    const spec = edgeCardinalitySpec(ref);
+  const ordered = claimsInProbeOrder(claims);
+  const composition = ordered.find((claim) => claim.scope !== undefined);
+  for (const claim of ordered) {
+    if (claim.scope !== undefined) {
+      const refusal = await compositionAttachmentViolation(
+        ctx,
+        claim,
+        claim.scope,
+      );
+      if (refusal !== undefined) throw refusal;
+      continue;
+    }
+    // The composition count above already read this kind's own part-side
+    // population, so the ordinary axis that names the same population has
+    // nothing left to decide.
+    if (composition !== undefined && sameAxis(composition, claim)) continue;
 
-    // An edge born ended never joins an active-only population, so it has
-    // nothing to check and nothing to claim.
-    if (!spec.claimsWhenBornEnded && validTo !== undefined) continue;
-
+    const spec = edgeCardinalitySpec(claim);
     if (spec.keyShape === "fromAndTo") {
       const exists = await ctx.backend.edgeExistsBetween({
         graphId: ctx.graphId,
-        edgeKind,
-        fromKind: endpoints.fromKind,
-        fromId: endpoints.fromId,
-        toKind: endpoints.toKind,
-        toId: endpoints.toId,
+        edgeKind: claim.edgeKind,
+        fromKind: claim.fromKind,
+        fromId: claim.fromId,
+        toKind: claim.toKind,
+        toId: claim.toId,
       });
-      const error = edgeCardinalityViolation(
-        ref,
-        { edgeKind, ...endpoints },
-        exists ? 1 : 0,
-      );
+      const error = edgeCardinalityViolation(claim, claim, exists ? 1 : 0);
       if (error) throw error;
       continue;
     }
@@ -371,21 +383,66 @@ export async function checkEdgeCardinalityConstraints(
     const endpoint = spec.keyShape;
     const { endpointKind, endpointId } =
       endpoint === "from" ?
-        { endpointKind: endpoints.fromKind, endpointId: endpoints.fromId }
-      : { endpointKind: endpoints.toKind, endpointId: endpoints.toId };
+        { endpointKind: claim.fromKind, endpointId: claim.fromId }
+      : { endpointKind: claim.toKind, endpointId: claim.toId };
     const count = await ctx.backend.countEdgesAtEndpoint({
       graphId: ctx.graphId,
-      edgeKind,
+      edgeKind: claim.edgeKind,
       endpoint,
       endpointKind,
       endpointId,
       activeOnly: spec.holderLiveness === "liveAndActive",
     });
-    const error = edgeCardinalityViolation(
-      ref,
-      { edgeKind, ...endpoints },
-      count,
-    );
+    const error = edgeCardinalityViolation(claim, claim, count);
     if (error) throw error;
   }
+}
+
+function sameAxis(
+  left: EdgeCardinalityAxisRef,
+  right: EdgeCardinalityAxisRef,
+): boolean {
+  return edgeCardinalityAxisName(left) === edgeCardinalityAxisName(right);
+}
+
+/**
+ * The relation-wide half of the probe: whether the part a composition claim
+ * keys on already has an attachment through ANY realizing edge kind, in the
+ * population the claim's own axis counts. The portable rendering of the claim
+ * statement's competing-holder predicate — same holders, same part-side
+ * endpoint, same liveness.
+ *
+ * Counted through `countEdgesAtEndpoint`, one read per holder kind, so a
+ * batch's pending rows and a move's retiring row are seen through the same
+ * overlays that already adjust the ordinary axes. The incumbent edge is read
+ * only once a count has refused, to name it.
+ */
+async function compositionAttachmentViolation(
+  ctx: ConstraintContext,
+  claim: ClaimEdgeCardinalityParams,
+  scope: CompositionClaimScope,
+): Promise<CardinalityError | CompositionError | undefined> {
+  const { part } = compositionClaimEndpoints(claim);
+  const activeOnly =
+    edgeCardinalitySpec(claim).holderLiveness === "liveAndActive";
+  for (const holder of scope.holders) {
+    const count = await ctx.backend.countEdgesAtEndpoint({
+      graphId: ctx.graphId,
+      edgeKind: holder.edgeKind,
+      endpoint: holder.partSide,
+      endpointKind: part.kind,
+      endpointId: part.id,
+      activeOnly,
+    });
+    if (count <= 0) continue;
+    const incumbent = await findLiveCompositionAttachment(
+      ctx.registry,
+      ctx.backend,
+      ctx.graphId,
+      part.kind,
+      part.id,
+    );
+    return claimRefusalFor(claim, incumbent?.edge.id);
+  }
+  return undefined;
 }

@@ -808,20 +808,20 @@ describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-I
   });
 });
 
-describe("assertUnwrittenEdgeRelationsAcyclic: a batch probed before its insert", () => {
-  function probeContext(backend: GraphBackend) {
-    return {
-      graphId: graph.id,
-      graph,
-      registry,
-      schema: createSqlSchema(backend.tableNames),
-      dialect: getDialect(backend.dialect),
-      target: backend,
-      lock: uncapturedGraphWriteLock(),
-      operation: "test",
-    };
-  }
+function probeContext(backend: GraphBackend) {
+  return {
+    graphId: graph.id,
+    graph,
+    registry,
+    schema: createSqlSchema(backend.tableNames),
+    dialect: getDialect(backend.dialect),
+    target: backend,
+    lock: uncapturedGraphWriteLock(),
+    operation: "test",
+  };
+}
 
+describe("assertUnwrittenEdgeRelationsAcyclic: a batch probed before its insert", () => {
   it("refuses a three-edge cycle none of whose rows is written", async () => {
     const backend = createTestBackend();
     const nodes = await seedThreeNodes(backend);
