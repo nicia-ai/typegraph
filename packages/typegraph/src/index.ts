@@ -125,6 +125,7 @@ export {
   type IdentityClassPageOptions,
   type IdentityDecisionProvenance,
   type IdentityFacade,
+  type IdentityLineageIncompleteDiscovery,
   type IdentityNode,
   type IdentityNodeReference,
   type IdentityNodeRefInput,

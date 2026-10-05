@@ -416,6 +416,41 @@ async function changedEntityKeys(
 }
 
 /**
+ * Whether any identity assertion of `graphId` changed strictly after `since` —
+ * the same two-armed predicate {@link changedEntityKeys} applies to nodes and
+ * edges, asked of the recorded identity-assertions relation.
+ *
+ * A `"keys"` delta names nodes and edges only. {@link evidencedRevisionCount}
+ * still counts an identity assertion as completeness evidence, deliberately:
+ * the merge diff that prunes by this source reads identity through its own
+ * path and needs the node/edge delta to stay bounded across an identity write.
+ * A caller holding only the key delta has no such second path, so a span this
+ * answers `true` for changed something that delta cannot name. A token this
+ * module did not mint has no revision to compare, and is reported as changed.
+ */
+async function recordedIdentityChangedSince<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+  session: LineageSession,
+  since: EngineRevision,
+): Promise<boolean> {
+  const parsed = parseLineageRevision(since);
+  if (parsed === undefined) return true;
+  const rows = await session.execute<Readonly<{ changed: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT 1 AS changed
+      FROM ${store.revisionSchema.recordedIdentityAssertionsTable}
+      WHERE graph_id = ${store.graphId}
+        AND (
+          recorded_from > ${parsed.revision}
+          OR (recorded_to > ${parsed.revision} AND recorded_to <> ${RECORDED_MAX_REVISION})
+        )
+      LIMIT 1
+    `),
+  );
+  return rows.length > 0;
+}
+
+/**
  * Builds a `lineage` capability sourced from `store`'s own recorded
  * relations. Callers get this indirectly through {@link resolveLineage};
  * call it directly only to consult the recorded-relations source even when
@@ -676,25 +711,85 @@ export function mintsOriginNamespacedAnchor<G extends GraphDef>(
 }
 
 /**
+ * A selected lineage source, with the one thing its `"keys"` delta can leave
+ * out: `identityChangedSince` is present only on the source whose delta stays
+ * bounded across an identity write it does not name.
+ */
+type LineageSource = Readonly<{
+  lineage: LineageMembers;
+  identityChangedSince?: (
+    session: LineageSession,
+    since: EngineRevision,
+  ) => Promise<boolean>;
+}>;
+
+/**
  * THE one owner of lineage source selection: the backend's own `lineage`
  * when it declares one, else the store's recorded-relations lineage when
  * it captures history, else the trigger-backed revision journal for a
- * revision-tracked first-party SQL backend, else `undefined`. Every caller that wants a
- * `lineage` — graph-merge's pruned diff among
- * them — consults this function instead of re-deriving the choice.
+ * revision-tracked first-party SQL backend, else `undefined`. Both
+ * {@link resolveLineage} and {@link changesSinceIncludingIdentity} read the
+ * choice from here instead of re-deriving it.
  */
-export function resolveLineage<G extends GraphDef>(
+function resolveLineageSource<G extends GraphDef>(
   store: RecordedLineageStore<G>,
-): LineageMembers | undefined {
+): LineageSource | undefined {
   const backend = storeBackend(store);
-  if (backend.lineage !== undefined) return backend.lineage;
-  if (storeCaptureEnabled(store)) return recordedRelationsLineage(store);
+  if (backend.lineage !== undefined) return { lineage: backend.lineage };
+  if (storeCaptureEnabled(store)) {
+    return {
+      lineage: recordedRelationsLineage(store),
+      identityChangedSince: (session, since) =>
+        recordedIdentityChangedSince(store, session, since),
+    };
+  }
   if (
     store.revisionTrackingEnabled &&
     store.revisionJournalEnabled !== false &&
     isFirstPartyFactory(backend)
   ) {
-    return revisionJournalLineage(store);
+    return { lineage: revisionJournalLineage(store) };
   }
   return undefined;
+}
+
+/**
+ * The lineage a store's graph-merge pruning and base tokens read: the source
+ * {@link resolveLineageSource} selects, or `undefined` when there is none.
+ * Its `changesSince` is a NODE AND EDGE delta — graph-merge's pruned diff
+ * reads identity through its own path, and relies on this staying bounded
+ * across an identity write.
+ */
+export function resolveLineage<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+): LineageMembers | undefined {
+  return resolveLineageSource(store)?.lineage;
+}
+
+/**
+ * The delta `Store.changesSince` answers: the selected source's node and edge
+ * keys, or `unbounded` whenever an identity change the keys cannot name fell
+ * in the span. A caller of the public method has only the keys to go on, so an
+ * identity write must never read as "nothing changed".
+ *
+ * The identity probe runs after the key delta, so a write landing between the
+ * two can only turn a bounded answer into `unbounded`, never hide a change.
+ */
+export async function changesSinceIncludingIdentity<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+  session: LineageSession,
+  since: EngineRevision,
+): Promise<LineageDelta> {
+  const source = resolveLineageSource(store);
+  if (source === undefined) return UNBOUNDED_DELTA;
+  const delta = await source.lineage.changesSince(
+    session,
+    since,
+    store.graphId,
+  );
+  if (delta.kind === "unbounded") return delta;
+  if (source.identityChangedSince === undefined) return delta;
+  return (await source.identityChangedSince(session, since)) ?
+      UNBOUNDED_DELTA
+    : delta;
 }

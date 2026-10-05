@@ -24,6 +24,7 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { readNextRecordedRevision } from "../store/recorded-capture";
 import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { chunk } from "../utils/array";
@@ -736,6 +737,24 @@ export async function hasNativeIdentityTransitions(
   return rows.length > 0;
 }
 
+type RawRestoredTransitionCountRow = Readonly<{ restored: unknown }>;
+
+/** How many of `graphId`'s retained transition rows an archival restore inserted. */
+export async function countRestoredIdentityTransitions(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<number> {
+  const rows = await target.execute<RawRestoredTransitionCountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS restored
+      FROM ${schema.identityTransitionsTable}
+      WHERE graph_id = ${graphId} AND restored_at IS NOT NULL
+    `),
+  );
+  return Number(requireDefined(rows[0]).restored);
+}
+
 /** Reads a graph's transition-retention watermark; `0` when nothing has been pruned. */
 async function readTransitionRetention(
   target: IdentityTarget,
@@ -865,11 +884,34 @@ export async function writeIdentityTransitionRetentionWatermark(
   );
 }
 
+async function readHighestRetainedTransitionRevision(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<number | undefined> {
+  const rows = await target.execute<Readonly<{ highest: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT MAX(recorded_revision) AS highest
+      FROM ${schema.identityTransitionsTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+  const highest = rows[0]?.highest;
+  return highest === null || highest === undefined ?
+      undefined
+    : toRevisionNumber(highest);
+}
+
 /**
  * Prunes retained explanation: deletes every transition row strictly below
- * the resolved revision and advances the retention watermark monotonically.
- * A prune at an earlier revision than the current watermark is a successful
- * no-op, never a rollback.
+ * the requested revision and advances the retention watermark monotonically.
+ * A prune at an earlier revision than the current watermark never lowers it.
+ * A prune beyond every revision the graph holds — the next commit's revision,
+ * or one past the highest retained row when archival restore carried higher
+ * revisions in from another graph — is refused: it would claim history the
+ * graph has yet to record as already pruned. The watermark itself is clamped to
+ * the next commit's revision, because restored revisions are not on this
+ * graph's axis.
  *
  * Explicit operator action only — no automatic retention policy exists. Per
  * the ratified ruling, a prune does NOT advance the content revision (the
@@ -892,17 +934,50 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
       ctx.schema,
       ctx.graphId,
     );
-    const resolvedWatermark = Math.max(existingWatermark, targetRevision);
-    if (resolvedWatermark === existingWatermark) {
-      return { pruned: 0, prunedBeforeRevision: existingWatermark };
+    const nextRevision = await readNextRecordedRevision(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    const highestRetained = await readHighestRetainedTransitionRevision(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    const highestPrunableRevision = Math.max(
+      nextRevision,
+      highestRetained === undefined ? nextRevision : highestRetained + 1,
+    );
+    if (targetRevision > highestPrunableRevision) {
+      throw new IdentityReplayError(
+        `Cannot prune identity transitions before ${options.beforeRecorded}: the graph holds no transition at or above revision ${String(highestPrunableRevision)}, so a prune beyond it would claim history that does not exist yet as already pruned.`,
+        {
+          code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK",
+          requestedBefore: options.beforeRecorded,
+          requestedRevision: targetRevision,
+          highestPrunableRevision,
+        },
+        {
+          suggestion:
+            "Pass a recorded instant this graph has reached, such as store.recordedNow(), as beforeRecorded.",
+        },
+      );
     }
+    // Restored rows keep the revision their source graph minted, so they can
+    // sit above this graph's clock: the rows are deleted by the requested
+    // revision, while the watermark — a claim about this graph's own axis —
+    // never rises above the revision its next commit takes.
+    const resolvedWatermark = Math.max(
+      existingWatermark,
+      Math.min(targetRevision, nextRevision),
+    );
     const deleted = await rawTarget.execute<
       Readonly<{ transition_id: unknown }>
     >(
       asCompiledRowsSql(sql`
         DELETE FROM ${ctx.schema.identityTransitionsTable}
         WHERE graph_id = ${ctx.graphId}
-          AND recorded_revision < ${resolvedWatermark}
+          AND recorded_revision < ${targetRevision}
         RETURNING transition_id
       `),
     );

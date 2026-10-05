@@ -344,6 +344,35 @@ list before or after this graph's own rows regardless of when it happened;
 an audit timeline that mixes the two should order by `recorded` and
 `restored.at` rather than by list position.
 
+A lineage is discovered from the reference itself, not only from the class
+it belongs to now. A member that has left its class — deleted, retracted
+apart, or folded out — is a singleton in current state, and its departure is
+noted against the class that survives it, so `transitionsOf` and `replay`
+also follow the recorded evidence that once tied the reference to a class:
+every `same` assertion that ever named it and, on a folding graph, every node
+that ever shared its id. Asking for the history of a deleted node therefore
+returns the assertions, folds and the detach that explain it, and `replay`
+pairs them with the membership it had at each boundary.
+
+That evidence is this graph's own recorded history. An archival restore
+brings transitions in without the source graph's history behind them, so a
+restored transition that discovery reaches from neither side can be neither
+tied to the reference nor ruled out. When the graph holds such transitions,
+the result says so instead of returning a short page that looks complete:
+
+```typescript
+const { transitions, incompleteDiscovery } =
+  await store.identity.transitionsOf(ref);
+if (incompleteDiscovery !== undefined) {
+  // Restored transitions this lineage could not be checked against.
+  console.log(incompleteDiscovery.unattributedRestoredTransitions);
+}
+```
+
+`incompleteDiscovery` is absent whenever every restored transition in the
+graph belongs to the lineage that was read, and always absent on a graph that
+never restored an archive. `replay` carries the same member.
+
 A transition that an archival restore brought into this graph — rather than
 this graph's own history capture recording it — carries `restored`, whose
 `at` is the destination's wall clock at restore time. That is the marker
@@ -468,6 +497,21 @@ earlier point than the current watermark is a successful no-op, never a
 rollback. Per the same rule `rebuildIdentityClosure` follows, **a prune does
 not advance the content revision**: it destroys retained explanation, never
 truth, so branch staleness tracks truth, not explanation.
+
+The watermark states that history below it is gone, so it can never sit above
+history the graph has yet to record. A prune accepts a `beforeRecorded` up to
+the revision the graph's next commit will take (`store.recordedNow()` plus
+one, which prunes everything this graph has recorded), or one past the highest
+retained transition when an archival restore brought in rows carrying higher
+revisions from another graph. A `beforeRecorded` beyond that is refused with
+`IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` and changes nothing.
+
+Restored rows keep the revision their source graph minted, so a prune removes
+them by that raw revision number alongside native rows. The returned
+`prunedBeforeRevision` and the watermark itself never rise above the
+revision the graph's next commit takes, even when the prune deleted restored
+rows with higher revisions: the watermark describes this graph's own history,
+and installing a higher one would report its later commits as already pruned.
 
 Once anything has been pruned, `replay` reports the gap honestly rather than
 silently answering from an incomplete log: a call whose range lies entirely

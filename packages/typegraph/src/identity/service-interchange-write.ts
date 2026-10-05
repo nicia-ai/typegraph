@@ -1,5 +1,4 @@
 import { type GraphDef } from "../core/define-graph";
-import { recordedInstantRevision } from "../core/temporal";
 import {
   ConfigurationError,
   IdentityValidityWindowError,
@@ -8,7 +7,7 @@ import {
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import {
-  readRecordedClock,
+  readNextRecordedRevision,
   withRecordedIdentityDecision,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
@@ -570,15 +569,11 @@ export async function importIdentityTransitionsIntoTarget(
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const destinationClock = await readRecordedClock(
+    const destinationFloor = await readNextRecordedRevision(
       rawTarget,
       ctx.schema,
       ctx.graphId,
     );
-    const destinationFloor =
-      destinationClock === undefined ? 1 : (
-        recordedInstantRevision(destinationClock) + 1
-      );
     const restoredAt = nowIso();
     const hasOwnHistory = await hasNativeIdentityTransitions(
       rawTarget,

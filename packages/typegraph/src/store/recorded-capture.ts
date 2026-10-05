@@ -91,6 +91,7 @@ export {
   ensureRevisionOriginRow,
   ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
+  readNextRecordedRevision,
   readRecordedClock,
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
@@ -107,6 +108,7 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  changesSinceIncludingIdentity,
   encodeRecordedLineageRevision,
   mintsOriginNamespacedAnchor,
   recordedRelationsLineage,

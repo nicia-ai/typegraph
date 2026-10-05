@@ -20,6 +20,7 @@ import {
 import { IdentityReplayError, ValidationError } from "../errors";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
+import { readIdentityEvidenceNeighbours } from "./lineage-evidence";
 import { identityActiveKinds } from "./service-components";
 import {
   loadCurrentStructuralClasses,
@@ -31,6 +32,7 @@ import {
 import { type IdentityServiceContext } from "./service-types";
 import { type PlainNodeRef } from "./sql-target";
 import {
+  countRestoredIdentityTransitions,
   type IdentityDecisionProvenance,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,
@@ -178,6 +180,22 @@ type PagedTransitions = Readonly<{
   nextCursor?: TransitionPageCursor | undefined;
 }>;
 
+/**
+ * Set on a `transitionsOf` / `replay` result when lineage discovery could not
+ * vouch for the whole answer, so a short or empty page is never mistaken for
+ * "nothing happened".
+ *
+ * `unattributedRestoredTransitions` counts the transitions an archival restore
+ * brought into this graph that discovery could neither tie to the requested
+ * reference nor rule out. Discovery follows this graph's own recorded
+ * evidence, and a restore carries none for what happened on the source graph
+ * before the archive was taken, so a member that had already left its class
+ * there cannot be traced to the restored rows that explain it.
+ */
+export type IdentityLineageIncompleteDiscovery = Readonly<{
+  unattributedRestoredTransitions: number;
+}>;
+
 export type IdentityReplay<G extends GraphDef> = Readonly<{
   steps: readonly IdentityReplayStep<G>[];
   /** Set when the retention watermark cut history above the requested start. */
@@ -190,6 +208,8 @@ export type IdentityReplay<G extends GraphDef> = Readonly<{
    * `store.asOfRecorded`; pass it only as `cursor`.
    */
   nextCursor?: TransitionPageCursor | undefined;
+  /** Set when discovery could not vouch for the whole lineage; identical on every page. */
+  incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
 }>;
 
 /** One page of {@link identityTransitionsOf}'s answer. */
@@ -203,6 +223,8 @@ export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
    * `store.asOfRecorded`; pass it only as `cursor`.
    */
   nextCursor?: TransitionPageCursor | undefined;
+  /** Set when discovery could not vouch for the whole lineage; identical on every page. */
+  incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
 }>;
 
 /**
@@ -244,7 +266,8 @@ function publicTransition<G extends GraphDef>(
 
 /**
  * Resolves `ref`'s CURRENT class canonical (§3.2 step 2's "one closure
- * probe"), to seed the lineage WALK — never the historical reconstruction.
+ * probe"), one of the seeds of the lineage WALK (see
+ * {@link lineageWalkSeeds}) — never the historical reconstruction.
  * Every transition note names the class canonical — never an arbitrary
  * member — as its `class` / `priorClass` columns, so `walkClassLineage` must
  * be seeded from the canonical, not from `ref` itself: in a k-member class,
@@ -279,6 +302,94 @@ async function currentClassCanonicalSeed<G extends GraphDef>(
 }
 
 /**
+ * Every reference `ref` was ever tied to by recorded identity evidence — the
+ * fixed point of {@link readIdentityEvidenceNeighbours} from `ref` itself.
+ *
+ * This is what makes a DEPARTED member's lineage discoverable. Once a member
+ * leaves its class its current canonical is itself, and its own departure is
+ * noted against the surviving class's canonical (`diffClosureTransitions`'s
+ * "absent from the new state" branch), so {@link currentClassCanonicalSeed}
+ * alone seeds a walk that matches nothing. The evidence that once put the
+ * member in the class still names it, and every canonical its classes ever
+ * carried is reachable through that evidence, so seeding the walk with this
+ * set reaches the notes the current closure can no longer point at.
+ *
+ * Bounded by the same ceiling as the walk it seeds, for the same reason: the
+ * alternative to refusing is an unbounded read.
+ */
+async function everConnectedReferences<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  ref: PlainNodeRef,
+): Promise<readonly PlainNodeRef[]> {
+  const connected = new Map<string, PlainNodeRef>([[refKey(ref), ref]]);
+  let frontier: readonly PlainNodeRef[] = [ref];
+  while (frontier.length > 0) {
+    const neighbours = await readIdentityEvidenceNeighbours(
+      ctx.backend,
+      ctx.schema,
+      ctx.graphId,
+      frontier,
+      ctx.sameIdAcrossKinds,
+    );
+    const discovered = new Map<string, PlainNodeRef>();
+    for (const neighbour of neighbours) {
+      const key = refKey(neighbour);
+      if (!connected.has(key)) discovered.set(key, neighbour);
+    }
+    for (const [key, neighbour] of discovered) connected.set(key, neighbour);
+    if (connected.size > IDENTITY_REPLAY_WALK_ROW_CEILING) {
+      throw identityReplayWalkIncompleteError(IDENTITY_REPLAY_WALK_ROW_CEILING);
+    }
+    frontier = [...discovered.values()];
+  }
+  return [...connected.values()];
+}
+
+/**
+ * The references the lineage walk starts from: `ref`'s current class canonical
+ * (see {@link currentClassCanonicalSeed}) together with everything recorded
+ * evidence ever tied `ref` to (see {@link everConnectedReferences}). The ONE
+ * owner of "where does a lineage walk begin", so `transitionsOf` and `replay`
+ * cannot discover different lineages for the same reference.
+ */
+async function lineageWalkSeeds<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  ref: PlainNodeRef,
+): Promise<readonly PlainNodeRef[]> {
+  return [
+    await currentClassCanonicalSeed(ctx, ref),
+    ...(await everConnectedReferences(ctx, ref)),
+  ];
+}
+
+/**
+ * How many restored transitions the walk could neither attribute to the
+ * lineage nor rule out of it, or `undefined` when there are none.
+ *
+ * A restored row names class canonicals on the SOURCE graph's timeline. The
+ * evidence the walk is seeded from is this graph's own recorded relations,
+ * which hold nothing about what happened on the source before the restore, so
+ * a restored row the walk did not reach may still belong to this reference —
+ * a member that had already left its class when the archive was taken leaves
+ * no trace here to find it by. That cannot be told apart from a row that is
+ * simply about another class, so it is reported rather than silently omitted.
+ */
+async function unattributedRestoredTransitions<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  discovered: readonly IdentityTransitionRow[],
+): Promise<number | undefined> {
+  const restored = await countRestoredIdentityTransitions(
+    ctx.backend,
+    ctx.schema,
+    ctx.graphId,
+  );
+  const attributed = discovered.filter((row) =>
+    isRestoredTransitionRow(row),
+  ).length;
+  return restored > attributed ? restored - attributed : undefined;
+}
+
+/**
  * Page size for each ROUND-TRIP the seed-lineage walk issues while reading
  * one round to exhaustion (see {@link walkClassLineage}): generous enough
  * that a typical lineage's round completes in a single page, but never the
@@ -300,8 +411,8 @@ const IDENTITY_REPLAY_WALK_PAGE_SIZE = 100_000;
 const IDENTITY_REPLAY_WALK_ROW_CEILING = 2_000_000;
 
 /**
- * The fixed-point class-lineage walk (§3.2 step 2): starting from `ref`'s
- * CURRENT class canonical, repeatedly reads every transition touching the
+ * The fixed-point class-lineage walk: starting from
+ * {@link lineageWalkSeeds}, repeatedly reads every transition touching the
  * known set of class keys (forward AND reverse — a note's `class` or
  * `priorClass`), adding any newly discovered keys, until a round adds
  * nothing new.
@@ -331,9 +442,11 @@ const IDENTITY_REPLAY_WALK_ROW_CEILING = 2_000_000;
  */
 async function walkClassLineage<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-  seed: PlainNodeRef,
+  walkSeeds: readonly PlainNodeRef[],
 ): Promise<readonly IdentityTransitionRow[]> {
-  const seeds = new Map<string, PlainNodeRef>([[refKey(seed), seed]]);
+  const seeds = new Map<string, PlainNodeRef>(
+    walkSeeds.map((seed) => [refKey(seed), seed]),
+  );
   let totalRowsRead = 0;
   for (;;) {
     const scopeReferences = [...seeds.values()];
@@ -569,15 +682,17 @@ type WalkedTransitions = Readonly<{
   toRevision: number | undefined;
   rows: readonly IdentityTransitionRow[];
   nextCursor?: TransitionPageCursor | undefined;
+  incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
 }>;
 
 /**
  * The shared setup both `identityTransitionsOf` and `identityReplay` need
  * before they diverge: enforce `history: true`, resolve the requested limit
- * and revision bounds, seed and run the lineage walk (§3.2 step 2), narrow
- * the converged result to the requested window, and cut it into one page of
- * at most `limit` boundaries (§3.2 step 3). `seed` is the caller's ORIGINAL
- * reference (not the resolved class canonical), for `identityReplay`'s
+ * and revision bounds, seed and run the lineage walk, report what the walk
+ * could not vouch for, narrow the converged result to the requested window,
+ * and cut it into one page of at most `limit` boundaries. `seed` is the
+ * caller's ORIGINAL reference (not the resolved class canonical), for
+ * `identityReplay`'s
  * `reconstructAt` calls — see that function's docblock for why the two must
  * not be conflated.
  *
@@ -593,7 +708,6 @@ async function walkedTransitionsFor<G extends GraphDef>(
   requireIdentityTransitionLog(ctx);
   const limit = resolveLimit(options?.limit);
   const seed = registeredPlainRef(ctx, ref);
-  const walkSeed = await currentClassCanonicalSeed(ctx, seed);
   const windowFromRevision =
     options?.fromRecorded === undefined ?
       undefined
@@ -607,7 +721,11 @@ async function walkedTransitionsFor<G extends GraphDef>(
       undefined
     : requireCursorRevision(options.cursor);
   const fromRevision = laterRevision(windowFromRevision, cursorRevision);
-  const discovered = await walkClassLineage(ctx, walkSeed);
+  const discovered = await walkClassLineage(
+    ctx,
+    await lineageWalkSeeds(ctx, seed),
+  );
+  const unattributed = await unattributedRestoredTransitions(ctx, discovered);
   const page = pageBoundaries(
     windowedRows(discovered, fromRevision, toRevision),
     limit,
@@ -618,6 +736,11 @@ async function walkedTransitionsFor<G extends GraphDef>(
     toRevision,
     rows: page.rows,
     ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+    ...(unattributed === undefined ?
+      {}
+    : {
+        incompleteDiscovery: { unattributedRestoredTransitions: unattributed },
+      }),
   };
 }
 
@@ -631,10 +754,15 @@ export async function identityTransitionsOf<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
-  const { rows, nextCursor } = await walkedTransitionsFor(ctx, ref, options);
+  const { rows, nextCursor, incompleteDiscovery } = await walkedTransitionsFor(
+    ctx,
+    ref,
+    options,
+  );
   return {
     transitions: rows.map((row) => publicTransition<G>(row)),
     ...(nextCursor === undefined ? {} : { nextCursor }),
+    ...(incompleteDiscovery === undefined ? {} : { incompleteDiscovery }),
   };
 }
 
@@ -659,8 +787,14 @@ export async function identityReplay<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
-  const { seed, fromRevision, toRevision, rows, nextCursor } =
-    await walkedTransitionsFor(ctx, ref, options);
+  const {
+    seed,
+    fromRevision,
+    toRevision,
+    rows,
+    nextCursor,
+    incompleteDiscovery,
+  } = await walkedTransitionsFor(ctx, ref, options);
 
   const retention = await readTransitionRetentionDetails(
     ctx.backend,
@@ -737,5 +871,6 @@ export async function identityReplay<G extends GraphDef>(
     steps,
     ...(truncatedBefore === undefined ? {} : { truncatedBefore }),
     ...(nextCursor === undefined ? {} : { nextCursor }),
+    ...(incompleteDiscovery === undefined ? {} : { incompleteDiscovery }),
   };
 }

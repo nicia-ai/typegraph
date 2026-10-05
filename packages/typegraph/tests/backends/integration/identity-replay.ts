@@ -13,11 +13,20 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  IdentityReplayError,
+  pruneIdentityTransitions,
   type TransitionPageCursor,
 } from "../../../src";
+import {
+  createRecordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+} from "../../../src/core/temporal";
+import { exportGraph, importGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -38,6 +47,64 @@ async function provisionIdentityReplayStore(context: IntegrationTestContext) {
   return store;
 }
 
+const DepartedPerson = defineNode("Person", { schema: z.object({}) });
+const DepartedOrg = defineNode("Org", { schema: z.object({}) });
+
+function departedLineageGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Person: { type: DepartedPerson }, Org: { type: DepartedOrg } },
+    edges: {},
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+}
+
+const departedLineageSourceGraph = departedLineageGraph(
+  "identity_departed_lineage",
+);
+const departedLineageRestoreGraph = departedLineageGraph(
+  "identity_departed_lineage_restore",
+);
+
+async function provisionDepartedLineageStore(
+  context: IntegrationTestContext,
+  graph: ReturnType<typeof departedLineageGraph>,
+) {
+  const [store] = await createStoreWithSchema(
+    graph,
+    context.getStore().backend,
+    { history: true },
+  );
+  return store;
+}
+
+type DepartedLineageStore = Awaited<
+  ReturnType<typeof provisionDepartedLineageStore>
+>;
+
+function personRef(id: string) {
+  return { kind: "Person" as const, id };
+}
+
+const DEPARTURES = [
+  {
+    name: "soft-deleted",
+    depart: (store: DepartedLineageStore, id: string) =>
+      store.nodes.Person.delete(asNodeId(id)),
+  },
+  {
+    name: "hard-deleted",
+    depart: (store: DepartedLineageStore, id: string) =>
+      store.nodes.Person.hardDelete(asNodeId(id)),
+  },
+] as const;
+
+function memberKeys(
+  members: readonly Readonly<{ kind: string; id: string }>[],
+): readonly string[] {
+  return members.map((member) => `${member.kind}:${member.id}`).toSorted();
+}
+
 async function provisionPagedLineage(context: IntegrationTestContext) {
   const store = await provisionIdentityReplayStore(context);
   const a = { kind: "Person" as const, id: "cursor-a" };
@@ -55,6 +122,288 @@ async function provisionPagedLineage(context: IntegrationTestContext) {
 export function registerIdentityReplayIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("identity transition retention", () => {
+    it("refuses a prune watermark beyond the revision the next commit takes, and accepts exactly that revision", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = { kind: "Person" as const, id: "prune-a" };
+      const b = { kind: "Person" as const, id: "prune-b" };
+      const c = { kind: "Person" as const, id: "prune-c" };
+      const d = { kind: "Person" as const, id: "prune-d" };
+      for (const ref of [a, b, c, d]) {
+        await store.nodes.Person.create({}, { id: ref.id });
+      }
+      await store.identity.assertSame(a, b);
+      const clock = requireDefined(await store.recordedNow());
+      const clockRevision = recordedInstantRevision(clock);
+      const wallTime = recordedInstantWallTime(clock);
+      const beyondNextCommit = createRecordedInstant(
+        clockRevision + 2,
+        wallTime,
+      );
+
+      const refusal = await pruneIdentityTransitions(store, {
+        beforeRecorded: beyondNextCommit,
+      }).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(IdentityReplayError);
+      expect((refusal as IdentityReplayError).details).toEqual({
+        code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK",
+        requestedBefore: beyondNextCommit,
+        requestedRevision: clockRevision + 2,
+        highestPrunableRevision: clockRevision + 1,
+      });
+
+      // The refusal installed nothing and deleted nothing.
+      const untouched = await store.identity.replay(a);
+      expect(untouched.truncatedBefore).toBeUndefined();
+      expect(untouched.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+      ]);
+
+      // The next commit's own revision is the highest truthful watermark:
+      // everything recorded so far is below it, everything later is not.
+      const nextCommit = createRecordedInstant(clockRevision + 1, wallTime);
+      const pruned = await pruneIdentityTransitions(store, {
+        beforeRecorded: nextCommit,
+      });
+      expect(pruned).toEqual({
+        pruned: 1,
+        prunedBeforeRevision: clockRevision + 1,
+      });
+
+      await store.identity.assertSame(c, d);
+      const latest = requireDefined(await store.recordedNow());
+      const fresh = await store.identity.replay(c, {
+        fromRecorded: latest,
+        toRecorded: latest,
+      });
+      expect(fresh.truncatedBefore).toBeUndefined();
+      expect(fresh.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+      ]);
+    });
+
+    it("prunes restored transitions whose revisions sit above the destination clock, without raising the watermark past it", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_prune_restored_source"),
+      );
+      const ids = ["pr-a", "pr-b", "pr-c", "pr-d", "pr-e"];
+      for (const id of ids) await source.nodes.Person.create({}, { id });
+      for (const [left, right] of [
+        ["pr-a", "pr-b"],
+        ["pr-b", "pr-c"],
+        ["pr-c", "pr-d"],
+        ["pr-d", "pr-e"],
+      ] as const) {
+        await source.identity.assertSame(personRef(left), personRef(right));
+      }
+      const archive = await exportGraph(source, { identityMode: "archival" });
+
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_prune_restored_target"),
+      );
+      await target.nodes.Person.create({}, { id: "pr-native" });
+      const imported = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(imported.errors).toEqual([]);
+
+      const targetClock = requireDefined(await target.recordedNow());
+      const nextRevision = recordedInstantRevision(targetClock) + 1;
+      const restoredHistory = await target.identity.transitionsOf(
+        personRef("pr-a"),
+      );
+      const restoredRevisions = restoredHistory.transitions
+        .filter((transition) => transition.restored !== undefined)
+        .map((transition) => recordedInstantRevision(transition.recorded));
+      const highestRestored = Math.max(...restoredRevisions);
+      expect(highestRestored).toBeGreaterThanOrEqual(nextRevision);
+
+      const beyondEverything = createRecordedInstant(
+        highestRestored + 2,
+        recordedInstantWallTime(targetClock),
+      );
+      const refusal = await pruneIdentityTransitions(target, {
+        beforeRecorded: beyondEverything,
+      }).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(IdentityReplayError);
+      expect((refusal as IdentityReplayError).details).toMatchObject({
+        code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK",
+        highestPrunableRevision: highestRestored + 1,
+      });
+
+      const pruned = await pruneIdentityTransitions(target, {
+        beforeRecorded: createRecordedInstant(
+          highestRestored + 1,
+          recordedInstantWallTime(targetClock),
+        ),
+      });
+      expect(pruned.prunedBeforeRevision).toBe(nextRevision);
+      expect(pruned.pruned).toBeGreaterThanOrEqual(restoredRevisions.length);
+      const after = await target.identity.transitionsOf(personRef("pr-a"));
+      expect(after.transitions).toEqual([]);
+      expect(after.incompleteDiscovery).toBeUndefined();
+
+      // The watermark stays on the destination's own axis, so its next
+      // commit is not reported as pruned.
+      await target.nodes.Person.create({}, { id: "pr-later-a" });
+      await target.nodes.Person.create({}, { id: "pr-later-b" });
+      await target.identity.assertSame(
+        personRef("pr-later-a"),
+        personRef("pr-later-b"),
+      );
+      const latest = requireDefined(await target.recordedNow());
+      const fresh = await target.identity.replay(personRef("pr-later-a"), {
+        fromRecorded: latest,
+        toRecorded: latest,
+      });
+      expect(fresh.truncatedBefore).toBeUndefined();
+    });
+  });
+
+  describe("identity lineage of a departed member", () => {
+    it.each(DEPARTURES)(
+      "keeps the history of a $name non-canonical member discoverable from that member",
+      async ({ depart }) => {
+        const store = await provisionDepartedLineageStore(
+          context,
+          departedLineageSourceGraph,
+        );
+        const a = { kind: "Person" as const, id: "departed-a" };
+        const b = { kind: "Person" as const, id: "departed-b" };
+        const c = { kind: "Person" as const, id: "departed-c" };
+        for (const ref of [a, b, c]) {
+          await store.nodes.Person.create({}, { id: ref.id });
+        }
+        await store.identity.assertSame(a, b);
+        await store.identity.assertSame(b, c);
+        await depart(store, b.id);
+
+        // The departure is noted against the surviving canonical only, and
+        // `b` is a singleton in the current closure: nothing in current state
+        // leads from `b` to the class it left.
+        const history = await store.identity.transitionsOf(b);
+        expect(
+          history.transitions.map((transition) => transition.cause),
+        ).toEqual(["assert", "assert", "detach", "detach"]);
+        expect(history.incompleteDiscovery).toBeUndefined();
+        const survivorHistory = await store.identity.transitionsOf(a);
+        expect(
+          history.transitions.map((transition) => transition.transitionId),
+        ).toEqual(
+          survivorHistory.transitions.map(
+            (transition) => transition.transitionId,
+          ),
+        );
+
+        const replay = await store.identity.replay(b);
+        expect(
+          replay.steps.map((step) => [
+            step.transition.cause,
+            memberKeys(step.before),
+            memberKeys(step.after),
+          ]),
+        ).toEqual([
+          [
+            "assert",
+            ["Person:departed-b"],
+            ["Person:departed-a", "Person:departed-b"],
+          ],
+          [
+            "assert",
+            ["Person:departed-a", "Person:departed-b"],
+            ["Person:departed-a", "Person:departed-b", "Person:departed-c"],
+          ],
+          [
+            "detach",
+            ["Person:departed-a", "Person:departed-b", "Person:departed-c"],
+            [],
+          ],
+          [
+            "detach",
+            ["Person:departed-a", "Person:departed-b", "Person:departed-c"],
+            [],
+          ],
+        ]);
+        expect(replay.incompleteDiscovery).toBeUndefined();
+      },
+    );
+
+    it("keeps a departed same-id fold member's history discoverable when no assertion ever named it", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageSourceGraph,
+      );
+      const person = { kind: "Person" as const, id: "departed-fold" };
+      await store.nodes.Org.create({}, { id: person.id });
+      await store.nodes.Person.create({}, { id: person.id });
+      await store.nodes.Person.hardDelete(asNodeId(person.id));
+
+      const replay = await store.identity.replay(person);
+      expect(
+        replay.steps.map((step) => [
+          step.transition.cause,
+          memberKeys(step.before),
+          memberKeys(step.after),
+        ]),
+      ).toEqual([
+        ["fold", [], ["Org:departed-fold", "Person:departed-fold"]],
+        ["detach", ["Org:departed-fold", "Person:departed-fold"], []],
+      ]);
+    });
+
+    it("reports restored transitions it can neither attribute nor rule out, instead of a silent short page", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageSourceGraph,
+      );
+      const a = { kind: "Person" as const, id: "restored-a" };
+      const b = { kind: "Person" as const, id: "restored-b" };
+      await source.nodes.Person.create({}, { id: a.id });
+      await source.nodes.Person.create({}, { id: b.id });
+      await source.identity.assertSame(a, b);
+      await source.nodes.Person.hardDelete(asNodeId(b.id));
+      const sourceHistory = await source.identity.transitionsOf(b);
+      expect(
+        sourceHistory.transitions.map((transition) => transition.cause),
+      ).toEqual(["assert", "detach"]);
+      expect(sourceHistory.incompleteDiscovery).toBeUndefined();
+
+      const archive = await exportGraph(source, { identityMode: "archival" });
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageRestoreGraph,
+      );
+      const imported = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(imported.errors).toEqual([]);
+
+      // `b` was gone before the archive was taken, so the target holds no
+      // evidence tying it to the two restored rows that explain it.
+      const departed = await target.identity.transitionsOf(b);
+      expect(departed.transitions).toEqual([]);
+      expect(departed.incompleteDiscovery).toEqual({
+        unattributedRestoredTransitions: 2,
+      });
+      const departedReplay = await target.identity.replay(b);
+      expect(departedReplay.incompleteDiscovery).toEqual({
+        unattributedRestoredTransitions: 2,
+      });
+
+      // The surviving canonical is named by both rows, so nothing is left
+      // unattributed and no signal is raised.
+      const survivor = await target.identity.transitionsOf(a);
+      expect(
+        survivor.transitions.map((transition) => transition.transitionId),
+      ).toEqual(
+        sourceHistory.transitions.map((transition) => transition.transitionId),
+      );
+      expect(survivor.incompleteDiscovery).toBeUndefined();
+    });
+  });
+
   describe("identity replay equivalence", () => {
     it("replays merge / split / re-merge: four steps, causes assert/assert/retract/assert, after matching the live closure at EVERY revision", async () => {
       const store = await provisionIdentityReplayStore(context);
