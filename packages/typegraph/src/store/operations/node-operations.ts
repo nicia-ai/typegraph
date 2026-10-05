@@ -2830,19 +2830,10 @@ type CompositionEndpointEvidence =
  * refusal the composition edge can reach before its insert, with no
  * statement issued.
  *
- * A required-existence part must never be BORN unattached.
- * `resolveCompositionCreate` already refuses a bare create with no `partOf`
- * for that reason, but the node's own validity window (`temporal`, forwarded
- * verbatim onto the composition edge) can still make the edge it DOES
- * create non-attaching from the start — e.g. a `population: "oneActive"`
- * pair created with a `validTo` already in the past. Left unchecked, that
- * create would succeed and `store.verifyConstraintFences()` would
- * immediately report the row as a `compositionExistence` violation. Checked
- * here, against the edge input this call is ABOUT to issue, with
- * `edgeCurrentlyAttachesPart` — the same predicate
- * `assertCompositionExistencePreserved`/`findLiveCompositionWhole`/the
- * constraint-fence audit all read — rather than a second, drift-prone
- * spelling of "does this edge attach".
+ * An attachment whose window would leave the edge born NOT attaching its part
+ * never reaches here: `resolveCompositionCreate` /
+ * `resolveCompositionAttachmentRequest` refuse it read-free, before the
+ * frame's first statement.
  *
  * `endpoints` says what this call still owes on the endpoint rows, and
  * `validateAcyclicity` whether it owes the relation walk — see
@@ -2861,20 +2852,6 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
     validateAcyclicity: boolean;
   }>,
 ): Promise<EdgeCreatePrepared> {
-  if (
-    ctx.registry.compositionExistence(work.partKind) === "required" &&
-    !edgeCurrentlyAttachesPart(ctx.registry, work.partKind, {
-      kind: work.pair.viaEdgeKind,
-      deleted_at: undefined,
-      valid_to: temporal.validTo,
-    })
-  ) {
-    throw new CompositionExistenceError({
-      partKind: work.partKind,
-      partId,
-      situation: "create",
-    });
-  }
   if (options.endpoints.source === "primedWhole") {
     assertCompositionWholeEndpointLive(work, options.endpoints.wholeRow);
   }
@@ -3526,7 +3503,7 @@ function createInputWithPartOf(
  * edge) is accepted as a NO-OP (no write, no history), not refused: reparent
  * states a destination, and a caller converging on one should not have to
  * first ask where the part is. A stated `attachment.props` is still checked
- * on this no-op (`assertSatisfiedPartOfPropsHonored`) — schema-invalid
+ * on this no-op (`assertSatisfiedAttachmentHonored`) — schema-invalid
  * refuses as it would on a fresh attach, and valid-but-different from the
  * edge's live stored props refuses with `situation: "props"` rather than
  * being silently kept, since no write happens here to apply it.

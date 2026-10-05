@@ -61,7 +61,14 @@ import {
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
-import { nowIso, validateCanonicalIsoDate } from "../../utils/date";
+import {
+  assertOrderedValidityWindow,
+  nowIso,
+  statedBoundMatchesStored,
+  validateCanonicalIsoDate,
+  validateOptionalCanonicalIsoDate,
+  validateStatedValidityLowerBound,
+} from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -80,6 +87,13 @@ import {
 
 const ATTACHMENT_KEYS = ["whole", "via", "props", "validFrom", "validTo"];
 const REPARENT_OPTION_KEYS = ["whole", "via", "props", "at"];
+
+/** A stated window bound differs from the one an already-held attachment stores. */
+const COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE =
+  "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT";
+/** A stated `validTo` would write an edge that does not attach its part. */
+const COMPOSITION_ATTACHMENT_WINDOW_BOUNDED_CODE =
+  "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED";
 
 /**
  * Where an attachment was stated: the argument name its refusals are
@@ -134,7 +148,11 @@ function readWholeRef(whole: unknown): CompositionNodeRef | undefined {
  * - a top-level key the surface does not accept is refused rather than
  *   dropped — including the whole's `kind`/`id` stated beside `via` instead
  *   of under `whole`, and `validFrom` / `validTo` on `reparent`, whose one
- *   instant is `at` and which states no window.
+ *   instant is `at` and which states no window;
+ * - a stated window is validated here, once, as the edge insert would validate
+ *   it (canonical bounds, ordered pair), so a path that ends up writing no
+ *   edge — an already-satisfied attachment — refuses a malformed or inverted
+ *   window exactly as a create does.
  */
 function readStatedAttachment(
   value: unknown,
@@ -177,6 +195,19 @@ function readStatedAttachment(
   }
 
   const attachment = stated as Omit<CompositionAttachment, "whole">;
+  const validFrom = validateStatedValidityLowerBound(
+    attachment.validFrom,
+    `${surface.path}.validFrom`,
+  );
+  const validTo = validateOptionalCanonicalIsoDate(
+    attachment.validTo,
+    `${surface.path}.validTo`,
+  );
+  assertOrderedValidityWindow(
+    `the composition attachment of ${part.kind}${part.id === undefined ? "" : ` "${part.id}"`}`,
+    validFrom,
+    validTo,
+  );
   return {
     whole,
     ...(attachment.via === undefined ?
@@ -184,12 +215,8 @@ function readStatedAttachment(
     : { viaKind: compositionViaKind(attachment.via) }),
     ...(attachment.props === undefined ? {} : { props: attachment.props }),
     edgeWindow: {
-      ...(attachment.validFrom === undefined ?
-        {}
-      : { validFrom: attachment.validFrom }),
-      ...(attachment.validTo === undefined ?
-        {}
-      : { validTo: attachment.validTo }),
+      ...(validFrom === undefined ? {} : { validFrom }),
+      ...(validTo === undefined ? {} : { validTo }),
     },
   };
 }
@@ -391,13 +418,64 @@ function compositionCreateWork(
     return undefined;
   }
 
+  const pair = resolveCompositionAttachment(registry, partKind, attachment);
+  assertStatedWindowAttachesPart(registry, part, pair, attachment);
   return {
-    pair: resolveCompositionAttachment(registry, partKind, attachment),
+    pair,
     whole: attachment.whole,
     partKind,
     props: attachment.props ?? {},
     edgeWindow: attachment.edgeWindow,
   };
+}
+
+/**
+ * Refuses a stated attachment whose realizing edge would be written already
+ * NOT attaching its part: a `validTo` on a `population: "oneActive"` pair,
+ * where only an open-ended row is a membership.
+ *
+ * `partOf` asks for an attachment, and an edge
+ * {@link edgeCurrentlyAttachesPart} does not count is not one: no later call
+ * could find it as the incumbent, so a repeated get-or-create would insert it
+ * again and a different whole would be accepted beside it; a required part
+ * would be written with no whole at all. Judged against the edge this request
+ * WOULD write, through the same predicate every reader of an attachment uses,
+ * and read-free — so it precedes the first statement on every surface.
+ */
+function assertStatedWindowAttachesPart(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id?: string }>,
+  pair: CompositionPair,
+  attachment: StatedCompositionAttachment,
+): void {
+  const { validTo } = attachment.edgeWindow;
+  if (
+    edgeCurrentlyAttachesPart(registry, part.kind, {
+      kind: pair.viaEdgeKind,
+      deleted_at: undefined,
+      valid_to: validTo,
+    })
+  ) {
+    return;
+  }
+  throw new ValidationError(
+    `Invalid composition attachment for ${part.kind}: a bounded window does not attach a part under a "${pair.population}" composition pair.`,
+    {
+      entityType: "node",
+      kind: part.kind,
+      ...(part.id === undefined ? {} : { id: part.id }),
+      issues: [
+        {
+          path: `${PART_OF_SURFACE.path}.validTo`,
+          code: COMPOSITION_ATTACHMENT_WINDOW_BOUNDED_CODE,
+          message: `"${pair.viaEdgeKind}" counts as a membership only while its window is open, so an attachment stated with validTo "${validTo}" would not attach the part.`,
+        },
+      ],
+    },
+    {
+      suggestion: `Omit \`${PART_OF_SURFACE.path}.validTo\` to attach the part. To record a bounded membership as history, write the edge itself with \`store.edges.${pair.viaEdgeKind}.create(...)\`.`,
+    },
+  );
 }
 
 /**
@@ -460,10 +538,10 @@ export function compositionEdgeHasRequiredExistencePart(
  * everything `assertCompositionExistencePreserved`, `findLiveCompositionWhole`
  * (and, through it, the import assertion and `verifyConstraintFences`'s
  * `compositionExistence` audit) share, so none of them re-spell it apart and
- * drift. `attachCompositionCreateEdge` (`node-operations.ts`) also reuses it
- * ahead of the write, against the not-yet-persisted edge's own
- * `kind`/`validTo` — the CREATE-time mirror of the same question, refusing a
- * required part's composition edge that would be born already unattaching.
+ * drift. {@link assertStatedWindowAttachesPart} also reuses it ahead of the
+ * write, against the not-yet-persisted edge's own `kind`/`validTo` — the
+ * CREATE-time mirror of the same question, refusing a stated attachment whose
+ * composition edge would be born already unattaching.
  *
  * Reuses {@link compositionEdgeCounts} (`./composition-cascade.ts`), the one
  * owner of "does a composition edge row still count as a live membership
@@ -646,100 +724,178 @@ function selectLiveCompositionAttachment(
 }
 
 /**
- * Whether a stated `partOf.props` is already what the satisfied incumbent
- * edge holds — the decision itself, not a boolean a caller re-derives the
- * comparison from, so both consumers read the same verdict:
- * {@link assertSatisfiedPartOfPropsHonored} (which turns a disagreement into
- * the refusal) and the lock-free pre-check that decides whether an
- * already-satisfied get-or-create can stay read-only
+ * What a stated attachment asks of an incumbent that already IS the requested
+ * attachment (same whole, same realizing edge) — the decision itself, not a
+ * boolean a caller re-derives the comparison from, so both consumers read the
+ * same verdict: {@link assertSatisfiedAttachmentHonored} (which turns a
+ * disagreement into the refusal) and the lock-free pre-check that decides
+ * whether an already-satisfied get-or-create can stay read-only
  * ({@link incumbentSatisfiesRequestedAttachment}).
  */
-type SatisfiedPartOfPropsVerdict =
+type SatisfiedAttachmentVerdict =
   | Readonly<{ honored: true }>
   | Readonly<{
       honored: false;
+      dimension: "props";
       currentProps: Record<string, unknown>;
       requestedProps: Record<string, unknown>;
+    }>
+  | Readonly<{
+      honored: false;
+      dimension: "window";
+      bound: "validFrom" | "validTo";
+      stated: string | null;
+      stored: string | undefined;
     }>;
 
+/** The columns of an incumbent edge the satisfied verdict reads. */
+type SatisfiedAttachmentEdge = Pick<
+  EdgeRow,
+  "props" | "valid_from" | "valid_to"
+>;
+
 /**
- * THE one place stated `partOf.props` are compared against an attachment that
- * is ALREADY satisfied (same whole, same realizing edge).
+ * THE one place a stated attachment is compared against an incumbent that is
+ * ALREADY the requested attachment. The satisfied arm writes no edge, so every
+ * option the caller stated beyond the whole and the realizing edge is either
+ * verified equal to what the edge stores or reported as a disagreement —
+ * never dropped.
  *
- * `props` omitted: nothing stated, nothing to compare — honored. `props`
- * stated: run through {@link validateEdgeProps} against `pair.viaEdgeKind`'s
- * own schema — the same owner `validateAndPrepareEdgeCreate` calls for a
- * fresh attach, so an invalid value is refused here exactly as it would be on
- * create, never silently accepted because the caller happens not to write.
- * (That refusal is a property of the caller's own input, not of the row, which
- * is why the lock-free pre-check may reach it too.) A valid value that is
- * canonically (`canonicalEqual`, key order aside) identical to the edge's live
- * stored props is honored; a valid value that DIFFERS is not, and the
- * verdict carries both sides for the refusal to name.
+ * `props` omitted: nothing stated, nothing to compare. `props` stated: run
+ * through {@link validateEdgeProps} against `pair.viaEdgeKind`'s own schema —
+ * the same owner `validateAndPrepareEdgeCreate` calls for a fresh attach, so
+ * an invalid value is refused here exactly as it would be on create, never
+ * silently accepted because the caller happens not to write. (That refusal is
+ * a property of the caller's own input, not of the row, which is why the
+ * lock-free pre-check may reach it too.) A valid value canonically
+ * (`canonicalEqual`, key order aside) identical to the edge's live stored
+ * props is honored; a valid value that DIFFERS is not.
+ *
+ * A stated `validFrom` / `validTo` is compared bound by bound through
+ * {@link statedBoundMatchesStored} — the one stated-versus-stored comparison
+ * every window write uses. An omitted bound states nothing; `validFrom: null`
+ * states "no lower bound" and matches only a row that has none.
  */
-function judgeSatisfiedPartOfProps(
+function judgeSatisfiedAttachment(
   registry: KindRegistry,
   attachment: StatedCompositionAttachment,
   pair: CompositionPair,
-  currentEdge: Pick<EdgeRow, "props">,
-): SatisfiedPartOfPropsVerdict {
-  if (attachment.props === undefined) return { honored: true };
-  const edgeType = requireDefined(
-    registry.getEdgeType(pair.viaEdgeKind),
-    `getEdgeType(${pair.viaEdgeKind}) is undefined for a resolved composition pair's own realizing edge kind`,
-  );
-  const validatedProps = validateEdgeProps(edgeType.schema, attachment.props, {
-    kind: pair.viaEdgeKind,
-    operation: "create",
-  });
-  const storedProps = rowPropsToObject(currentEdge.props);
-  return canonicalEqual(validatedProps, storedProps) ?
-      { honored: true }
-    : {
+  currentEdge: SatisfiedAttachmentEdge,
+): SatisfiedAttachmentVerdict {
+  if (attachment.props !== undefined) {
+    const edgeType = requireDefined(
+      registry.getEdgeType(pair.viaEdgeKind),
+      `getEdgeType(${pair.viaEdgeKind}) is undefined for a resolved composition pair's own realizing edge kind`,
+    );
+    const validatedProps = validateEdgeProps(
+      edgeType.schema,
+      attachment.props,
+      { kind: pair.viaEdgeKind, operation: "create" },
+    );
+    const storedProps = rowPropsToObject(currentEdge.props);
+    if (!canonicalEqual(validatedProps, storedProps)) {
+      return {
         honored: false,
+        dimension: "props",
         currentProps: storedProps,
         requestedProps: validatedProps,
       };
+    }
+  }
+
+  const { validFrom, validTo } = attachment.edgeWindow;
+  if (
+    validFrom !== undefined &&
+    !statedBoundMatchesStored(validFrom, currentEdge.valid_from)
+  ) {
+    return {
+      honored: false,
+      dimension: "window",
+      bound: "validFrom",
+      stated: validFrom,
+      stored: currentEdge.valid_from,
+    };
+  }
+  if (
+    validTo !== undefined &&
+    !statedBoundMatchesStored(validTo, currentEdge.valid_to)
+  ) {
+    return {
+      honored: false,
+      dimension: "window",
+      bound: "validTo",
+      stated: validTo,
+      stored: currentEdge.valid_to,
+    };
+  }
+  return { honored: true };
 }
 
 /**
  * The refusal {@link decideCompositionIncumbent}'s satisfied arm owes — every
  * surface's no-write return (`reparent`'s no-op and the get-or-create
  * postcondition's idempotent hit both resolve there). That arm performs no
- * edge write, so without this call `props` would be neither applied nor
- * refused nor even validated — an accepted option silently dropped, the same
+ * edge write, so without this call a stated `props` or window would be
+ * neither applied nor refused — an accepted option silently dropped, the same
  * shape `situation: "existing"` refuses one dimension over (a differing
  * whole, or a differing realizing edge).
  *
- * A disagreeing value refuses with `CompositionExistenceError`
- * (`situation: "props"`) naming both: this call resolves an attachment, it
- * does not rewrite the realizing edge's properties
- * (`store.edges.<via>.update(...)` does that).
+ * Disagreeing `props` refuse with `CompositionExistenceError`
+ * (`situation: "props"`) naming both sides. A disagreeing window bound
+ * refuses with `ValidationError` under `partOf.<bound>`, the shape an
+ * in-place edge write gives a lower bound it cannot apply. Neither is
+ * rewritten here: this call resolves an attachment, and changing the
+ * realizing edge is `store.edges.<via>.update(...)`'s.
  */
-function assertSatisfiedPartOfPropsHonored(
+function assertSatisfiedAttachmentHonored(
   registry: KindRegistry,
   partKind: string,
   partId: string,
   attachment: StatedCompositionAttachment,
   pair: CompositionPair,
-  currentEdge: Pick<EdgeRow, "id" | "kind" | "props">,
+  currentEdge: Pick<EdgeRow, "id" | "kind"> & SatisfiedAttachmentEdge,
 ): void {
-  const verdict = judgeSatisfiedPartOfProps(
+  const verdict = judgeSatisfiedAttachment(
     registry,
     attachment,
     pair,
     currentEdge,
   );
   if (verdict.honored) return;
-  throw new CompositionExistenceError({
-    partKind,
-    partId,
-    situation: "props",
-    edgeKind: currentEdge.kind,
-    edgeId: currentEdge.id,
-    currentProps: verdict.currentProps,
-    requestedProps: verdict.requestedProps,
-  });
+  if (verdict.dimension === "props") {
+    throw new CompositionExistenceError({
+      partKind,
+      partId,
+      situation: "props",
+      edgeKind: currentEdge.kind,
+      edgeId: currentEdge.id,
+      currentProps: verdict.currentProps,
+      requestedProps: verdict.requestedProps,
+    });
+  }
+  const path = `${PART_OF_SURFACE.path}.${verdict.bound}`;
+  const storedDescription =
+    verdict.stored === undefined ?
+      "no such bound"
+    : `"${verdict.stored}"`;
+  throw new ValidationError(
+    `Unappliable ${path} for ${partKind} "${partId}": it already holds this whole via "${currentEdge.kind}" (edge ${currentEdge.id}) with a different window.`,
+    {
+      entityType: "node",
+      kind: partKind,
+      id: partId,
+      issues: [
+        {
+          path,
+          code: COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE,
+          message: `Stated ${verdict.stated === null ? "no lower bound" : `"${verdict.stated}"`}, but the realizing edge stores ${storedDescription}.`,
+        },
+      ],
+    },
+    {
+      suggestion: `Omit \`${path}\` or restate the stored bound; an already-satisfied attachment only asserts placement. Change the window on the realizing edge with \`store.edges.${currentEdge.kind}.update(${JSON.stringify(currentEdge.id)}, ...)\`.`,
+    },
+  );
 }
 
 /**
@@ -854,8 +1010,8 @@ function incumbentHoldsRequestedAttachment(
 /**
  * Whether this incumbent leaves the request with NOTHING to write: it is the
  * requested attachment ({@link incumbentHoldsRequestedAttachment}) AND the
- * realizing edge already carries the stated `props`
- * ({@link judgeSatisfiedPartOfProps}) — the two conjuncts
+ * realizing edge already carries the stated `props` and window
+ * ({@link judgeSatisfiedAttachment}) — the two conjuncts
  * {@link decideCompositionIncumbent}'s satisfied arm is built from, in one
  * predicate so the cheap skip and the authoritative verdict cannot disagree
  * about what "nothing to do" means.
@@ -877,13 +1033,13 @@ export function incumbentSatisfiesRequestedAttachment(
   registry: KindRegistry,
   request: CompositionAttachmentRequest,
   current: Readonly<{
-    edge: Pick<EdgeRow, "kind" | "props">;
+    edge: Pick<EdgeRow, "kind"> & SatisfiedAttachmentEdge;
     whole: CompositionNodeRef;
   }>,
 ): boolean {
   return (
     incumbentHoldsRequestedAttachment(request, current) &&
-    judgeSatisfiedPartOfProps(
+    judgeSatisfiedAttachment(
       registry,
       request.attachment,
       request.work.pair,
@@ -899,8 +1055,8 @@ export function incumbentSatisfiesRequestedAttachment(
  * - `"satisfied"` — the part already holds exactly this attachment. No write
  *   at all, which is what makes a repeated get-or-create (and a `reparent`
  *   to the whole the part already holds) idempotent rather than a refusal.
- *   A stated `props` is still honored here
- *   ({@link assertSatisfiedPartOfPropsHonored}): this arm writes no edge, so
+ *   A stated `props` or window is still honored here
+ *   ({@link assertSatisfiedAttachmentHonored}): this arm writes no edge, so
  *   a differing value is refused rather than silently dropped.
  * - `"attach"` — the part holds no live whole: write the attachment.
  * - `"replace"` — a DIFFERENT incumbent under `onIncumbent: "replace"`:
@@ -920,7 +1076,7 @@ function decideCompositionIncumbent(
   request: CompositionAttachmentRequest,
   current:
     | Readonly<{
-        edge: Pick<EdgeRow, "id" | "kind" | "props">;
+        edge: Pick<EdgeRow, "id" | "kind"> & SatisfiedAttachmentEdge;
         whole: CompositionNodeRef;
       }>
     | undefined,
@@ -930,7 +1086,7 @@ function decideCompositionIncumbent(
   const { attachment, work, onIncumbent } = request;
   const partKind = work.partKind;
   if (incumbentHoldsRequestedAttachment(request, current)) {
-    assertSatisfiedPartOfPropsHonored(
+    assertSatisfiedAttachmentHonored(
       registry,
       partKind,
       partId,

@@ -26,6 +26,7 @@ import {
   hasPart,
   partOf,
   subClassOf,
+  ValidationError,
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -666,10 +667,9 @@ export function registerCompositionExistenceIntegrationTests(
       const show = await store.nodes.EeShow.create({});
       // The attachment's `validTo` is the composition edge's own window
       // (`compositionEdgeWindow`): a `population: "oneActive"` edge born
-      // with its window already closed would never attach its part at all,
-      // which `resolveCompositionCreate`'s "a required part always has a
-      // live whole" rule must refuse just as it refuses a bare create with
-      // no `partOf` — admitting it would leave a state
+      // with a bounded window would never attach its part at all, which
+      // `resolveCompositionCreate` refuses for every part kind — for a
+      // required one, admitting it would leave a state
       // `store.verifyConstraintFences()` immediately reports as a
       // violation.
       const error = await store.nodes.EeLiveClip.create(
@@ -682,13 +682,13 @@ export function registerCompositionExistenceIntegrationTests(
         },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      expect((error as CompositionExistenceError).details.situation).toBe(
-        "create",
-      );
-      expect((error as CompositionExistenceError).details.partKind).toBe(
-        "EeLiveClip",
-      );
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).details.issues).toEqual([
+        expect.objectContaining({
+          path: "partOf.validTo",
+          code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+        }),
+      ]);
 
       // No node row, and no composition edge row, survive the refused
       // create — the whole write plan (node + composition edge) is one
@@ -713,9 +713,9 @@ export function registerCompositionExistenceIntegrationTests(
         ),
       ).toBe(false);
     });
-    // MUTATION CHECK: in `attachCompositionCreateEdge`
-    // (src/store/operations/node-operations.ts), delete the
-    // `edgeCurrentlyAttachesPart` guard this fix added (the create then
+    // MUTATION CHECK: in `compositionCreateWork`
+    // (src/store/operations/composition-create.ts), delete the
+    // `assertStatedWindowAttachesPart` call (the create then
     // succeeds unconditionally once the composition edge is built). The
     // `create` call above then resolves instead of rejecting, and the
     // subsequent `find({})`/`verifyConstraintFences` assertions fail.
@@ -750,8 +750,8 @@ export function registerCompositionExistenceIntegrationTests(
     // MUTATION CHECK: in `executeNodeCreateInternal`
     // (src/store/operations/node-operations.ts), spread the part node's
     // `input.validTo` into the window passed to `attachCompositionCreateEdge`.
-    // The edge is then born ended and the create is refused with
-    // `CompositionExistenceError`.
+    // The edge is then born ended and the assertion above reads its
+    // `validTo`.
 
     it("case 12b: an already-unattached `oneActive` composition edge (planted through the RAW backend, bypassing case 12's create-time guard) is unattached, and cleaning it up is not refused", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
