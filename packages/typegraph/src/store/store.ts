@@ -401,6 +401,7 @@ import {
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
   beginPreCommitHookAttempt,
+  changesSinceIncludingIdentity,
   createMutationWitness,
   createRecordedBackend,
   createRecordedTransactionScope,
@@ -3439,14 +3440,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Lists entity keys changed since a lineage revision. History-enabled
    * stores use recorded relations; bundled SQLite and PostgreSQL live stores
-   * with revision tracking use the entity-key journal. Unknown backends,
-   * identity-only changes, and revisions with incomplete journal evidence
-   * return `unbounded`.
+   * with revision tracking use the entity-key journal. Unknown backends, a
+   * span in which an identity assertion changed, and revisions with
+   * incomplete evidence return `unbounded`: the keys name nodes and edges
+   * only, so an identity write is never reported as an exact delta.
    */
   async changesSince(revision: EngineRevision): Promise<LineageDelta> {
-    const lineage = resolveLineage(this);
-    if (lineage === undefined) return { kind: "unbounded" };
-    return lineage.changesSince(this.#backend, revision, this.graphId);
+    return changesSinceIncludingIdentity(this, this.#backend, revision);
   }
 
   /**

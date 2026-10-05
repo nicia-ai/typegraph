@@ -108,6 +108,7 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  changesSinceIncludingIdentity,
   encodeRecordedLineageRevision,
   mintsOriginNamespacedAnchor,
   recordedRelationsLineage,

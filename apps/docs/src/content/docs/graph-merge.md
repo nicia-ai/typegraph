@@ -1490,6 +1490,12 @@ Node and edge inserts, updates, and deletes are recorded by database triggers.
 Identity-only revisions and revisions whose write provenance is incomplete
 produce `{ kind: "unbounded" }` rather than an incomplete key list. Custom
 backends must provide their own lineage capability to get bounded results.
+`store.changesSince(anchor)` holds to the same rule on a history-capturing
+store: the keys name nodes and edges only, so a span in which an identity
+assertion was created, retracted or ended answers `unbounded` rather than a
+key list that omits it. The lineage source `resolveLineage(store)` returns is
+unchanged — a merge reads identity through its own path, and its pruned diff
+keeps a bounded node and edge delta across an identity write.
 Each trigger is attached to a whole physical node, edge, or identity table; it
 records every write to that table and uses `graph_id` to identify the affected
 graph. On shared tables this captures writes from every graph, not only graphs
