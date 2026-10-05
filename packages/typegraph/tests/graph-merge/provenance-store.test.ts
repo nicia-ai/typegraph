@@ -1694,8 +1694,17 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
 
   // Each entry is one the stored `Provenance` row cannot account for. The first
   // two differ from the row's own entry in exactly one column and reuse its id,
-  // so a rule that matched on the id alone would excuse them.
-  it.each([
+  // so a rule that matched on the id alone would excuse them. The last names a
+  // `Provenance` row that IS stored, but under another graph id — what a copied
+  // sidecar or a colliding application row provides — so a rule that looked the
+  // row up without the graph id would excuse it.
+  it.each<
+    Readonly<{
+      evidence: string;
+      entryFor: (storedId: string) => JournalEntry;
+      storedUnderAnotherGraph?: true;
+    }>
+  >([
     {
       evidence: "a node of another kind under the stored row's id",
       entryFor: (storedId: string) => ({
@@ -1724,9 +1733,18 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
       evidence: "an identity assertion",
       entryFor: () => ({ entity: "identity", kind: "", id: "" }),
     },
+    {
+      evidence: "a Provenance row stored only under another graph id",
+      entryFor: () => ({
+        entity: "node",
+        kind: "Provenance",
+        id: "prov_stored-elsewhere",
+      }),
+      storedUnderAnotherGraph: true,
+    },
   ])(
     "refuses a journaled legacy sidecar whose journal also records $evidence",
-    async ({ entryFor }) => {
+    async ({ entryFor, storedUnderAnotherGraph }) => {
       const backend = await makeBackend();
       const sidecarId = provenanceGraphId(careGraph.id);
       await installRevisionChangesJournal(backend);
@@ -1740,9 +1758,16 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
         { id: legacyId },
       );
       const entry = entryFor(legacyId);
-      // What a hard delete leaves behind: the row is gone, the journal entry
-      // that recorded it is not. No stored row verifies it, so it is evidence
-      // of content this module never wrote.
+      if (storedUnderAnotherGraph === true) {
+        await backend.insertNode({
+          graphId: "another-graph",
+          kind: entry.kind,
+          id: entry.id,
+          props: { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+        });
+      }
+      // Plants one journal entry under the sidecar's graph id that no row
+      // stored under that graph id accounts for.
       await requireDefined(backend.executeStatement)(
         asCompiledStatementSql(
           sql`

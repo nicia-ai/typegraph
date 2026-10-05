@@ -160,6 +160,7 @@ import {
   requireWriteFence,
   resolveGraphRelationNames,
   resolveWriteFencePlan,
+  REVISION_JOURNAL_ENTITY,
   serializeSchema,
   sha256Hex,
   sql,
@@ -835,9 +836,6 @@ async function hasRowsUnderGraphId(
   return false;
 }
 
-/** The `entity` the revision journal records for a node-table write. */
-const JOURNALED_NODE_ENTITY = "node";
-
 /**
  * Narrows the revision journal to the entries a pre-marker sidecar's own rows
  * cannot account for.
@@ -860,7 +858,7 @@ function unaccountedJournalEntryFilter(
 ): ReturnType<typeof sql.empty> {
   const journal = sql.identifier(journalTable);
   const nodes = sql.identifier(nodesTable);
-  return sql` AND NOT (${journal}.entity = ${JOURNALED_NODE_ENTITY} AND ${journal}.kind = ${PROVENANCE_KIND} AND EXISTS (SELECT 1 FROM ${nodes} WHERE ${nodes}.graph_id = ${journal}.graph_id AND ${nodes}.kind = ${journal}.kind AND ${nodes}.id = ${journal}.id))`;
+  return sql` AND NOT (${journal}.entity = ${REVISION_JOURNAL_ENTITY.node} AND ${journal}.kind = ${PROVENANCE_KIND} AND EXISTS (SELECT 1 FROM ${nodes} WHERE ${nodes}.graph_id = ${journal}.graph_id AND ${nodes}.kind = ${journal}.kind AND ${nodes}.id = ${journal}.id))`;
 }
 
 /**

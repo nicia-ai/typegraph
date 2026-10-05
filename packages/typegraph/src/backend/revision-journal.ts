@@ -2,6 +2,20 @@ import { ConfigurationError } from "../errors";
 import type { GraphBackend } from "./types";
 
 /**
+ * The `entity` a revision-journal entry records for a write to each journaled
+ * relation. The trigger builders write these values and journal readers match
+ * on them.
+ */
+export const REVISION_JOURNAL_ENTITY = {
+  node: "node",
+  edge: "edge",
+  identity: "identity",
+} as const;
+
+export type RevisionJournalEntity =
+  (typeof REVISION_JOURNAL_ENTITY)[keyof typeof REVISION_JOURNAL_ENTITY];
+
+/**
  * Install the revision-change journal on a privileged backend during schema
  * bootstrap or adoption. This is the only runtime API that invokes its DDL.
  */
