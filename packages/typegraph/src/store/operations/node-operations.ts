@@ -271,7 +271,10 @@ import {
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
 } from "./composition-create";
-import { createRetiringEdgeValidationBackend } from "./edge-batch-validation";
+import {
+  createEdgeBatchValidationBackend,
+  createRetiringEdgeValidationBackend,
+} from "./edge-batch-validation";
 import {
   assertPreparedEdgeCreatesAcyclic,
   edgeCardinalityDeclarations,
@@ -2811,10 +2814,14 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
  *   `edge-operations.ts`). Every single-row create path.
  * - `"primedWhole"` — the WHOLE's row was already read by the caller (one
  *   `getNodes` per kind for a whole batch) and travels here to be judged by
- *   {@link assertCompositionWholeEndpointLive}; the PART's liveness is proven
- *   by the insert this same frame just issued for it, so its row is never
- *   re-read. The batch create attach loop
- *   ({@link attachBatchCompositionCreateEdges}).
+ *   {@link assertCompositionWholeEndpointLive}; the PART is a row this same
+ *   frame writes after the preparation, so there is nothing to read yet and
+ *   its insert is the liveness proof. Every node create
+ *   ({@link prepareCompositionEdgeForCreate},
+ *   {@link prepareBatchCompositionCreateEdges}).
+ * - `"wholeInFrame"` — the whole is ALSO a row this frame writes (another
+ *   item of the same batch, or the part itself), so neither endpoint has a row
+ *   to read: both are proven by the frame's own inserts.
  * - `"restoredByUpdate"` — the part row is a tombstone at read time and a
  *   later statement of this same frame restores it (the get-or-create
  *   resurrection leg); the whole was already refused-or-passed at decide time
@@ -2824,6 +2831,7 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
 type CompositionEndpointEvidence =
   | Readonly<{ source: "read" }>
   | Readonly<{ source: "primedWhole"; wholeRow: BackendNodeRow | undefined }>
+  | Readonly<{ source: "wholeInFrame" }>
   | Readonly<{ source: "restoredByUpdate" }>;
 
 /**
@@ -2839,7 +2847,7 @@ type CompositionEndpointEvidence =
  * `endpoints` says what this call still owes on the endpoint rows, and
  * `validateAcyclicity` whether it owes the relation walk — see
  * {@link CompositionEndpointEvidence} and
- * {@link attachBatchCompositionCreateEdges}.
+ * {@link prepareBatchCompositionCreateEdges}.
  */
 async function prepareCompositionCreateEdge<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2954,89 +2962,149 @@ function batchCompositionAttachments(
 }
 
 /**
- * After every node row in a batch exists (inserted or
- * resurrected), attaches each item's composition edge — one owner reached
- * from every prepared row, so a mixed batch of required/optional/no-`partOf`
- * items each takes exactly the edge it owes. Shared by both batch create
- * paths so neither re-spells the join, the attach loop, or the probe below.
+ * The READ half of one node create's composition edge, run BEFORE the node
+ * row is written: the whole's liveness, cardinality and acyclicity are all
+ * judged while the frame has issued no statement, so a caller that catches
+ * the refusal inside an enclosing `store.transaction(...)` — where there is
+ * no nested frame to roll back — is left with no part row. The one statement
+ * left after the node insert is {@link insertPreparedCompositionEdge}.
  *
- * Three reads a per-item attach would repeat are folded to one per batch:
+ * Only the PART endpoint goes unread: its row does not exist yet (or is the
+ * tombstone this create restores), and the frame's own write is its proof. A
+ * part named as its own whole has no whole row to read either; the
+ * acyclicity probe refuses that self-loop.
  *
- * - The WHOLE rows are read once per kind ({@link readBatchCompositionWholeRows})
+ * A lost claim at insert time is not a refusal this ordering leaves open:
+ * every create that owes a composition edge holds the constraint fence
+ * ({@link compositionEdgeConstraintFence}), so no other writer can change
+ * what these reads judged before the insert lands, and the claim rows stay
+ * the database backstop for the same verdict.
+ */
+async function prepareCompositionEdgeForCreate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  work: CompositionCreateWork | undefined,
+  part: Readonly<{ kind: string; id: string }>,
+): Promise<EdgeCreatePrepared | undefined> {
+  if (work === undefined) return undefined;
+  const wholeIsPart = refKey(work.whole) === refKey(part);
+  return prepareCompositionCreateEdge(
+    ctx,
+    target,
+    lock,
+    work,
+    part.id,
+    work.edgeWindow,
+    {
+      endpoints:
+        wholeIsPart ?
+          { source: "wholeInFrame" }
+        : {
+            source: "primedWhole",
+            wholeRow: await target.getNode(
+              ctx.graphId,
+              work.whole.kind,
+              work.whole.id,
+            ),
+          },
+      validateAcyclicity: true,
+    },
+  );
+}
+
+/**
+ * The READ half of a node batch's composition edges, run BEFORE the batch's
+ * node rows are written — one owner reached from every prepared row, so a
+ * mixed batch of required/optional/no-`partOf` items each prepares exactly the
+ * edge it owes, and every refusal an attachment can reach precedes the
+ * batch's first statement (see {@link prepareCompositionEdgeForCreate} for why
+ * that order is load-bearing, and why a lost claim cannot reopen it). Shared
+ * by both batch create paths so neither re-spells the join, the loop, or the
+ * probe below.
+ *
+ * - The WHOLE rows are read once per kind ({@link readCompositionWholeRows})
  *   and judged per item by {@link assertCompositionWholeEndpointLive} — the
  *   same owner the fenced attachment decision uses, so a dead or missing
  *   whole refuses with the identical `EndpointNotFoundError` on the identical
- *   endpoint side, in input order, as it did per item.
- * - The PART row is not read at all: this frame's own insert (or the
- *   resurrection update that preceded this call) is the proof it is live, and
- *   a read of it could only confirm a row nothing has had the chance to
- *   change.
- * - ACYCLICITY is probed ONCE, after every one of the batch's composition
- *   edges is inserted ({@link assertPreparedEdgeCreatesAcyclic}), instead of
- *   once per item before its own insert. The probe is order-insensitive with
- *   respect to the rows it is given (see `assertEdgeRelationsAcyclic`), so
- *   combining them answers the same question in one walk per relation — and
- *   the combined set is what makes an in-batch cycle among two items' own
- *   edges visible regardless of which of them is inserted first. The refusal
- *   still names a concrete offending edge: a self-loop is attributed to the
+ *   endpoint side, in input order. A whole that is itself an item of this
+ *   batch has no row yet and is not read: the batch's own insert (or
+ *   resurrection) is its proof, exactly as it is the part's.
+ * - CARDINALITY is judged per item against the in-batch accounting every edge
+ *   batch uses ({@link createEdgeBatchValidationBackend}), so a later item's
+ *   probe counts the earlier items' edges although none is inserted yet.
+ * - ACYCLICITY is probed ONCE for the whole batch
+ *   ({@link assertPreparedEdgeCreatesAcyclic}). A cycle can run through more
+ *   than one of the batch's own edges only when an item names another item
+ *   as its whole, or restores a tombstone that may still carry edges of its
+ *   own — a freshly inserted part has no other edge for a walk to arrive by.
+ *   Only then does the probe pay for hopping through the prepared rows. The
+ *   refusal names a concrete offending edge: a self-loop is attributed to the
  *   item that states it, and a cycle to the first of the batch's own edges
  *   that lies on it.
- *
- * Each item's prepare-then-insert stays interleaved: a later item's
- * CARDINALITY probe must see the rows the earlier items wrote, which for
- * composition edges is the `one`/`oneActive` whole-side count their inserts
- * already carry.
  *
  * `operation` is the batch shape that reached here, carried into the probe's
  * diagnostics (an `EdgeAcyclicityIndeterminateError` names the operation whose
  * statement the engine cut short). Supplied by the caller rather than spelled
  * here, because this one function serves both batch executors.
  */
-async function attachBatchCompositionCreateEdges<G extends GraphDef>(
+async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
   operation: string,
   preparedCreates: readonly NodeCreatePrepared[],
   compositionWorks: readonly (CompositionCreateWork | undefined)[],
-): Promise<void> {
+): Promise<readonly EdgeCreatePrepared[]> {
   const attachments = batchCompositionAttachments(
     preparedCreates,
     compositionWorks,
   );
-  if (attachments.length === 0) return;
+  if (attachments.length === 0) return [];
 
+  const batchRowKeys = new Set(
+    preparedCreates.map((prepared) => refKey(prepared)),
+  );
+  const wholeIsBatchRow = (work: CompositionCreateWork): boolean =>
+    batchRowKeys.has(refKey(work.whole));
   // One round trip per distinct whole kind, through the owner the
-  // `compositionExistence` audit reads as well — and read AFTER the batch's
-  // node rows land, which is what makes a whole created by the SAME batch
-  // visible to the item attaching to it. `refKey` below is the tuple key that
-  // read returns its rows under.
+  // `compositionExistence` audit reads as well. `refKey` below is the tuple
+  // key that read returns its rows under.
   const wholeRows = await readCompositionWholeRows(
     target,
     ctx.graphId,
-    attachments.map(({ work }) => work.whole),
+    attachments
+      .filter(({ work }) => !wholeIsBatchRow(work))
+      .map(({ work }) => work.whole),
     ctx.batchPointRead,
   );
+  const { backend: validationTarget, registerPendingEdgeForCardinality } =
+    createEdgeBatchValidationBackend(target);
   const preparedEdges: EdgeCreatePrepared[] = [];
   for (const { prepared, work } of attachments) {
     const preparedEdge = await prepareCompositionCreateEdge(
       ctx,
-      target,
+      validationTarget,
       lock,
       work,
       prepared.id,
       work.edgeWindow,
       {
-        endpoints: {
-          source: "primedWhole",
-          wholeRow: wholeRows.get(refKey(work.whole)),
-        },
+        endpoints:
+          wholeIsBatchRow(work) ?
+            { source: "wholeInFrame" }
+          : {
+              source: "primedWhole",
+              wholeRow: wholeRows.get(refKey(work.whole)),
+            },
         validateAcyclicity: false,
       },
     );
+    registerPendingEdgeForCardinality(
+      preparedEdge.insertParams,
+      preparedEdge.declarations,
+    );
     preparedEdges.push(preparedEdge);
-    await insertPreparedCompositionEdge(ctx, session, preparedEdge);
   }
   await assertPreparedEdgeCreatesAcyclic(
     ctx,
@@ -3044,7 +3112,27 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
     lock,
     operation,
     preparedEdges,
+    attachments.some(
+      ({ prepared, work }) =>
+        prepared.tombstone !== undefined || wholeIsBatchRow(work),
+    ),
   );
+  return preparedEdges;
+}
+
+/**
+ * The WRITE half of a node batch's composition edges, after every node row of
+ * the batch exists: one insert per prepared edge, each carrying the claims
+ * its preparation decided.
+ */
+async function insertPreparedCompositionEdges<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  preparedEdges: readonly EdgeCreatePrepared[],
+): Promise<void> {
+  for (const preparedEdge of preparedEdges) {
+    await insertPreparedCompositionEdge(ctx, session, preparedEdge);
+  }
 }
 
 /**
@@ -3825,18 +3913,25 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       projectionFusionEligible &&
       supportsNodeInsertProjections(target, projections);
 
-    // The realizing edge's window is the attachment's own
-    // (`compositionWork.edgeWindow`), never the part node's insert params.
-    const attachCompositionEdge = (): Promise<EdgeCreatePrepared | undefined> =>
-      attachCompositionCreateEdge(
+    // Every refusal the composition edge can reach, before this frame's
+    // first statement — see `prepareCompositionEdgeForCreate`. The realizing
+    // edge's window is the attachment's own (`compositionWork.edgeWindow`),
+    // never the part node's insert params.
+    const preparedCompositionEdge = await prepareCompositionEdgeForCreate(
+      ctx,
+      target,
+      lock,
+      compositionWork,
+      { kind: prepared.kind, id },
+    );
+    const attachCompositionEdge = async (): Promise<void> => {
+      if (preparedCompositionEdge === undefined) return;
+      await insertPreparedCompositionEdge(
         ctx,
         session,
-        target,
-        lock,
-        compositionWork,
-        id,
-        compositionWork?.edgeWindow ?? {},
+        preparedCompositionEdge,
       );
+    };
 
     const existing = prepared.tombstone;
     if (existing !== undefined) {
@@ -4170,6 +4265,16 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
+      // See `prepareBatchCompositionCreateEdges`'s docblock.
+      const preparedCompositionEdges = await prepareBatchCompositionCreateEdges(
+        ctx,
+        target,
+        lock,
+        "nodes.bulkInsert",
+        preparedCreates,
+        compositionWorks,
+      );
+
       const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
       //
@@ -4204,15 +4309,10 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
           "restore",
         );
       }
-      // See `attachBatchCompositionCreateEdges`'s docblock.
-      await attachBatchCompositionCreateEdges(
+      await insertPreparedCompositionEdges(
         ctx,
         session,
-        target,
-        lock,
-        "nodes.bulkInsert",
-        preparedCreates,
-        compositionWorks,
+        preparedCompositionEdges,
       );
     },
     { didWrite: writeResultAlwaysChanges },
@@ -4322,6 +4422,16 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         options,
       );
 
+      // See `prepareBatchCompositionCreateEdges`'s docblock.
+      const preparedCompositionEdges = await prepareBatchCompositionCreateEdges(
+        ctx,
+        target,
+        lock,
+        "nodes.bulkCreate",
+        preparedCreates,
+        compositionWorks,
+      );
+
       const partition = partitionCreates(preparedCreates);
       // One call for claims + row + sidecars, so the resurrections follow the
       // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
@@ -4360,15 +4470,10 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           "restore",
         );
       }
-      // See `attachBatchCompositionCreateEdges`'s docblock.
-      await attachBatchCompositionCreateEdges(
+      await insertPreparedCompositionEdges(
         ctx,
         session,
-        target,
-        lock,
-        "nodes.bulkCreate",
-        preparedCreates,
-        compositionWorks,
+        preparedCompositionEdges,
       );
 
       return rows.map((row) => rowToNode(row));

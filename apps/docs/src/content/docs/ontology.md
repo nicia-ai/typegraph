@@ -434,7 +434,10 @@ const chapter = await store.nodes.Chapter.create(
 
 The node and its realizing composition edge are written in **one**
 transaction: a lost composition claim, a dead or missing whole, a cardinality
-refusal, or an acyclicity refusal aborts the node create too.
+refusal, or an acyclicity refusal aborts the node create too. Those refusals
+are reached before the node row is written (for `bulkCreate`, before any row
+of the batch), so catching one inside an enclosing `store.transaction(...)`
+leaves nothing of the refused create behind.
 
 - **`whole`** names the whole: a node you already hold, or a
   `{ kind, id }` reference when you only have the id

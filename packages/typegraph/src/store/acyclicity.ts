@@ -470,6 +470,14 @@ function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
  * (batches, merge apply) therefore call the same function with the same
  * meaning.
  *
+ * `rows` says whether the walk may hop THROUGH the proposed rows themselves.
+ * `"proposed"` (the default) is every caller whose rows are already inserted,
+ * or that proposes rows no cycle could chain through. `"planned"` is a caller
+ * deciding BEFORE its inserts for rows that may chain through one another, so
+ * a cycle closed entirely by the batch's own rows is refused with nothing
+ * written — see `AcyclicityProbeSeed` (`src/store/recursive-cte.ts`) for what
+ * each form costs.
+ *
  * Short-circuits three ways before touching SQL: a proposed row whose kind is
  * in no acyclic relation is dropped; a self-loop
  * (`fromKind === toKind && fromId === toId`) is refused immediately, because
@@ -479,6 +487,7 @@ function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
 export async function assertEdgeRelationsAcyclic(
   ctx: AcyclicityProbeContext,
   proposed: readonly ProposedRelationEdge[],
+  rows: "proposed" | "planned" = "proposed",
 ): Promise<void> {
   const { groups, firstSelfLoop } = groupProposedByAcyclicRelation(
     ctx.graph,
@@ -504,7 +513,7 @@ export async function assertEdgeRelationsAcyclic(
 
   for (const { relation, edges } of probeable) {
     const violatingOriginKeys = await runAcyclicityProbe(ctx, relation, {
-      kind: "proposed",
+      kind: rows,
       edges,
     });
     if (violatingOriginKeys.length === 0) continue;

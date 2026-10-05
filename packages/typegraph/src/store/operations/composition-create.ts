@@ -1186,9 +1186,10 @@ function isEndpointRowLive(row: NodeRow | undefined): row is LiveNodeRow {
  * One owner for the two callers that check the whole ALONE — a part's own
  * liveness being established some other way:
  * {@link decideCompositionAttachmentUnderFence}, whose part row may still be
- * a tombstone the frame's later update restores, and the batch create's
- * attach loop (`attachBatchCompositionCreateEdges`, `node-operations.ts`),
- * whose part row was just written by this same frame's insert. Without one
+ * a tombstone the frame's later update restores, and a node create's
+ * preparation (`prepareCompositionEdgeForCreate` and its batch twin,
+ * `node-operations.ts`), whose part row this same frame is about to write.
+ * Without one
  * spelling, each would re-derive the side from `pair.partSide` itself, and
  * the two could report a dead whole on different endpoints.
  */
@@ -1552,7 +1553,7 @@ type CompositionWholeRowReader = Readonly<Pick<GraphBackend, "getNode">> &
  *
  * One owner, two consumers that would otherwise spell the same dedupe, the same
  * binding and the same fallback twice: the node-create batch's attach loop
- * (`attachBatchCompositionCreateEdges`, `node-operations.ts`), which judges each
+ * (`prepareBatchCompositionCreateEdges`, `node-operations.ts`), which judges each
  * row through {@link assertCompositionWholeEndpointLive} and carries it as the
  * preparation's `"primedWhole"` evidence, and {@link readLiveCompositionWholes}
  * below. The port is an optimization, never a requirement: the verdict a caller

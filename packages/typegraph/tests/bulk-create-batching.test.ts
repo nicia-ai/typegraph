@@ -624,7 +624,7 @@ describe("bulkCreate composition attach batching", () => {
       expect(counts["getNode"]).toBe(0);
     });
   });
-  // MUTATION CHECK: have `attachBatchCompositionCreateEdges`
+  // MUTATION CHECK: have `prepareBatchCompositionCreateEdges`
   // (src/store/operations/node-operations.ts) prepare each item with
   // `endpoints: { source: "read" }` instead of the primed whole. Both endpoint
   // rows are then read per item and `getNode` counts 16 instead of 0.
