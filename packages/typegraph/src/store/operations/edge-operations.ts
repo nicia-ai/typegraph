@@ -938,12 +938,18 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       constrainedAxisCount === 0 || usesGuardedCardinalityClaim;
     const durableIdentityArbitratedCreate =
       registration.matchIdentity !== undefined;
+    // A durable-identity create takes its cardinality claim after the
+    // converge command has written the row, so nothing downstream can refuse
+    // it before the write: the probe has to run here. (A converging one
+    // probes after its incumbent lookup below instead, because a found match
+    // is not a create.)
+    const probesCardinalityBeforeWrite =
+      durableIdentityArbitratedCreate ?
+        convergeOn === undefined
+      : !usesGuardedCardinalityClaim && !delaysCardinalityProbe;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
       validateEndpoints: convergeOn === undefined && !canFuseEndpointCheck,
-      validateCardinality:
-        !durableIdentityArbitratedCreate &&
-        !usesGuardedCardinalityClaim &&
-        !delaysCardinalityProbe,
+      validateCardinality: probesCardinalityBeforeWrite,
       // Always run here, unlike cardinality: this is the one call every
       // create path reaches before any insert branch (fused, durable, or
       // plain), and acyclicity has no database key that could enforce it
@@ -1039,8 +1045,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         if (result.outcome === "created") {
           // Durable identity and cardinality are separate authorities. The
           // converge command owns the former; retain the latter's claim row
-          // in the same transaction after the edge exists. If claiming
-          // refuses, the surrounding write frame rolls the command back.
+          // in the same transaction after the edge exists. The cardinality
+          // probe already ran before the command under this frame's graph
+          // fence, so a refusal here means a writer that bypassed the fence —
+          // the only case left to the surrounding frame's rollback.
           if (durableMatchIdentity !== undefined && work.claims.length > 0) {
             await claimEdgeCardinalities(
               target,
