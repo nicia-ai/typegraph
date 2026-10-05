@@ -716,7 +716,13 @@ transaction, which is the only order in which both R4 and
 `details.incumbentEdgeId` names the edge that already holds the axis — the
 one fact the claim statement's own result reports. It never names the
 incumbent whole's kind or id: reading that would be a second query this
-refusal path does not make. Run `store.verifyConstraintFences()` (the
+refusal path does not make. The refusal is the same class with the same
+detail wherever it is decided: by the claim row, or by the pre-write probe a
+batch, a custom command port's fallback, or a backend without claim
+relations runs instead. That probe counts the part's attachments across
+every realizing edge kind, and reports composition ahead of the edge kind's
+own `CardinalityError`. `incumbentEdgeId` is absent only when the incumbent
+is an earlier row of the same batch, which has no stored edge to name. Run `store.verifyConstraintFences()` (the
 `family: "composition"` entries) to find every part already holding more
 than one whole.
 
@@ -1219,6 +1225,16 @@ no `approximate` is not refused on the query builder either; `store.search.vecto
 and `store.search.hybrid` refuse every mismatched override on their own broader
 rule. See
 [Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
+
+#### Edge integrity option codes
+
+`defineGraph` refuses an edge registration whose integrity options are stated
+outside their domain. TypeScript rejects these at compile time; the runtime
+check is for untyped callers:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
 
 #### Durable edge match identity guard codes
 

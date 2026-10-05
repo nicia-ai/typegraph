@@ -17,6 +17,7 @@ import {
   normalizeTargetMap,
   validateTargetMapEntries,
 } from "./edge-endpoints";
+import { assertEdgeIntegrityOptions } from "./edge-integrity-options";
 import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   assertGraphAnnotations,
@@ -184,6 +185,8 @@ function normalizeEdgeEntry(
     // Unconstrained EdgeType — allow any→any
     return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
+
+  assertEdgeIntegrityOptions(name, entry);
 
   let normalizedRegistration: AnyEdgeRegistration = entry;
   if (!Array.isArray(entry.to)) {

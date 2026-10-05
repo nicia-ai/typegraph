@@ -18,7 +18,7 @@ import {
   searchable,
   subClassOf,
 } from "../../../src";
-import { ConfigurationError } from "../../../src/errors";
+import { ConfigurationError, EndpointError } from "../../../src/errors";
 import { type IntegrationTestContext } from "./test-context";
 
 const Media = defineNode("TsMedia", {
@@ -70,6 +70,12 @@ const conceptLinkNarrow = defineEdge("tsConceptLinkNarrow", {
   from: [RootConcept],
   to: [RootConcept],
 });
+// The same root-only admission as `tsConceptLinkNarrow`, declared where graphs
+// normally declare endpoints: on the graph's edge registration, with a bare
+// edge type that carries none of its own.
+const conceptLinkGraphNarrow = defineEdge("tsConceptLinkGraphNarrow", {
+  schema: z.object({}),
+});
 
 const narrowerGraph = defineGraph({
   id: "typed_narrower_integration",
@@ -81,6 +87,11 @@ const narrowerGraph = defineGraph({
   edges: {
     tsConceptLink: conceptLink,
     tsConceptLinkNarrow: conceptLinkNarrow,
+    tsConceptLinkGraphNarrow: {
+      type: conceptLinkGraphNarrow,
+      from: [RootConcept],
+      to: [RootConcept],
+    },
   },
   ontology: [
     broader(MidConcept, RootConcept),
@@ -424,6 +435,68 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       expect((caught as ConfigurationError).details["code"]).toBe(
         "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",
       );
+    });
+
+    it("refuses the same narrower expansion when the edge's endpoints are declared on the graph registration", async () => {
+      const store = await context.createStore(narrowerGraph);
+      const traversal = () =>
+        store
+          .query()
+          .from("TsRootConcept", "root")
+          .traverse("tsConceptLinkGraphNarrow", "e");
+      const attempts: Record<string, () => unknown> = {
+        to: () =>
+          traversal().to("TsRootConcept", "target", { expansion: "narrower" }),
+        toDynamic: () =>
+          traversal().toDynamic("TsRootConcept", "target", {
+            expansion: "narrower",
+          }),
+      };
+
+      const refusals = Object.fromEntries(
+        Object.entries(attempts).map(([name, attempt]) => {
+          try {
+            attempt();
+            return [name, "accepted"];
+          } catch (error) {
+            return [
+              name,
+              error instanceof ConfigurationError ?
+                error.details["code"]
+              : error,
+            ];
+          }
+        }),
+      );
+
+      expect(refusals).toEqual({
+        to: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",
+        toDynamic: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",
+      });
+    });
+
+    it("refuses a toDynamic target the graph registration does not admit, and accepts one it does", async () => {
+      const store = await context.createStore(narrowerGraph);
+      const traversal = () =>
+        store
+          .query()
+          .from("TsRootConcept", "root")
+          .traverse("tsConceptLinkGraphNarrow", "e");
+
+      expect(() =>
+        traversal().toDynamic("TsLeafConcept", "target", {
+          expansion: "exact",
+        }),
+      ).toThrow(EndpointError);
+
+      const root = await store.nodes.TsRootConcept.create({ name: "root" });
+      const other = await store.nodes.TsRootConcept.create({ name: "other" });
+      await store.edges.tsConceptLinkGraphNarrow.create(root, other, {});
+      const rows = await traversal()
+        .toDynamic("TsRootConcept", "target", { expansion: "exact" })
+        .select((ctx) => ({ id: ctx.target.id }))
+        .execute();
+      expect(rows).toEqual([{ id: other.id }]);
     });
   });
 }

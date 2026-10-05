@@ -325,6 +325,78 @@ export function registerCompositionFenceIntegrationTests(
     // passes (no cycle found) while the previous one still fails, proving the
     // flag — not just the union's existence — is load-bearing.
 
+    it("refuses a second whole with the same CompositionError, naming the incumbent edge, on every create shape", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const chapter = await store.nodes.CfChapter.create({});
+      const book = await store.nodes.CfBook.create({});
+      const anthology = await store.nodes.CfAnthology.create({});
+      const incumbent = await store.edges.cfChapterOf.create(chapter, book, {});
+      const second = { from: chapter, to: anthology, props: {} };
+
+      const shapes: Record<string, () => Promise<unknown>> = {
+        create: () => store.edges.cfIncludedIn.create(chapter, anthology, {}),
+        bulkCreate: () => store.edges.cfIncludedIn.bulkCreate([second]),
+        bulkInsert: () => store.edges.cfIncludedIn.bulkInsert([second]),
+        getOrCreateByEndpoints: () =>
+          store.edges.cfIncludedIn.getOrCreateByEndpoints(
+            chapter,
+            anthology,
+            {},
+          ),
+        bulkGetOrCreateByEndpoints: () =>
+          store.edges.cfIncludedIn.bulkGetOrCreateByEndpoints([second]),
+        "create caught inside a transaction": async () => {
+          const refusals: unknown[] = [];
+          await store.transaction(async (tx) => {
+            await tx.edges.cfIncludedIn
+              .create(chapter, anthology, {})
+              .catch((error: unknown) => refusals.push(error));
+          });
+          throw refusals[0];
+        },
+      };
+      const refusals: Record<string, unknown> = {};
+      for (const [shape, run] of Object.entries(shapes)) {
+        refusals[shape] = await run().then(
+          () => "accepted",
+          (error: unknown) =>
+            error instanceof CompositionError ? error.details : error,
+        );
+      }
+
+      const refusal = expect.objectContaining({
+        partId: chapter.id,
+        wholeId: anthology.id,
+        edgeKind: "cfIncludedIn",
+        incumbentEdgeId: incumbent.id,
+      }) as unknown;
+      expect(refusals).toEqual(
+        Object.fromEntries(
+          Object.keys(shapes).map((shape) => [shape, refusal]),
+        ),
+      );
+
+      expect(await store.edges.cfIncludedIn.find({})).toEqual([]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("reports the composition refusal ahead of the ordinary axes on a kind that declares both", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const part = await store.nodes.CfDualPart.create({});
+      const wholeA = await store.nodes.CfDualWhole.create({});
+      const wholeB = await store.nodes.CfDualWhole.create({});
+      const incumbent = await store.edges.cfDualOf.create(part, wholeA, {});
+
+      const error = await store.edges.cfDualOf
+        .create(part, wholeB, {})
+        .catch((error_: unknown) => error_);
+
+      expectWholeOccupied(error, part.id);
+      expect((error as CompositionError).details.incumbentEdgeId).toBe(
+        incumbent.id,
+      );
+    });
+
     it("`oneActive` reparents once the incumbent's window ends, with no delete required", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const part = await store.nodes.CfActivePart.create({});

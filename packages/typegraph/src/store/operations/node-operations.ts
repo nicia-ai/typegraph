@@ -3141,14 +3141,13 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
  *   batch uses ({@link createEdgeBatchValidationBackend}), so a later item's
  *   probe counts the earlier items' edges although none is inserted yet.
  * - ACYCLICITY is probed ONCE for the whole batch
- *   ({@link assertPreparedEdgeCreatesAcyclic}). A cycle can run through more
- *   than one of the batch's own edges only when an item names another item
- *   as its whole, or restores a tombstone that may still carry edges of its
- *   own — a freshly inserted part has no other edge for a walk to arrive by.
- *   Only then does the probe pay for hopping through the prepared rows. The
- *   refusal names a concrete offending edge: a self-loop is attributed to the
- *   item that states it, and a cycle to the first of the batch's own edges
- *   that lies on it.
+ *   ({@link assertPreparedEdgeCreatesAcyclic}), as an overlay of the prepared
+ *   edges on the stored relation, so a cycle that runs through more than one
+ *   of the batch's own edges (an item naming another item as its whole, or
+ *   restoring a tombstone that still carries edges of its own) is refused
+ *   too. The refusal names a concrete offending edge: a self-loop is
+ *   attributed to the item that states it, and a cycle to the first of the
+ *   batch's own edges that lies on it.
  *
  * `operation` is the batch shape that reached here, carried into the probe's
  * diagnostics (an `EdgeAcyclicityIndeterminateError` names the operation whose
@@ -3219,10 +3218,6 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
     lock,
     operation,
     preparedEdges,
-    attachments.some(
-      ({ prepared, work }) =>
-        prepared.tombstone !== undefined || wholeIsBatchRow(work),
-    ),
   );
   return preparedEdges;
 }

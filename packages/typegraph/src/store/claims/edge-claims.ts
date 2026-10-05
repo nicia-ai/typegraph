@@ -327,8 +327,7 @@ export function sortedByClaimTarget(
 /**
  * THE claims an edge write owes, in CLAIM order.
  *
- * Takes the AXIS LIST, the same one {@link checkEdgeCardinalityConstraints}
- * probes, rather than the raw {@link EdgeCardinalityDeclarations} — a caller
+ * Takes the AXIS LIST rather than the raw {@link EdgeCardinalityDeclarations} — a caller
  * that re-admits a row to only PART of its declaration (a window reopen with
  * no delete transition re-admits just the active-only axes; see
  * {@link file://../operations/edge-operations.ts}'s reentry branch) claims
@@ -460,15 +459,7 @@ function compositionClaimRefusal(
   params: ClaimEdgeCardinalityParams,
   incumbentEdgeId?: string,
 ): CompositionError {
-  const spec = edgeCardinalitySpec(params);
-  const part =
-    spec.keyShape === "from" ?
-      { kind: params.fromKind, id: params.fromId }
-    : { kind: params.toKind, id: params.toId };
-  const whole =
-    spec.keyShape === "from" ?
-      { kind: params.toKind, id: params.toId }
-    : { kind: params.fromKind, id: params.fromId };
+  const { part, whole } = compositionClaimEndpoints(params);
   return new CompositionError({
     partKind: part.kind,
     partId: part.id,
@@ -477,6 +468,46 @@ function compositionClaimRefusal(
     edgeKind: params.edgeKind,
     ...(incumbentEdgeId === undefined ? {} : { incumbentEdgeId }),
   });
+}
+
+/**
+ * Which endpoint of a composition claim's edge is the part and which the
+ * whole. A composition claim keys on its PART endpoint
+ * ({@link edgeCardinalityClaimTarget}), so the claim's own `keyShape` is the
+ * orientation: the refusal names both sides from it, and the portable probe
+ * (`checkEdgeCardinalityConstraints`, `../constraints.ts`) counts the part's
+ * attachments from it.
+ */
+export function compositionClaimEndpoints(
+  params: ClaimEdgeCardinalityParams,
+): Readonly<{
+  part: Readonly<{ kind: string; id: string }>;
+  whole: Readonly<{ kind: string; id: string }>;
+}> {
+  const from = { kind: params.fromKind, id: params.fromId };
+  const to = { kind: params.toKind, id: params.toId };
+  return edgeCardinalitySpec(params).keyShape === "from" ?
+      { part: from, whole: to }
+    : { part: to, whole: from };
+}
+
+/**
+ * Claims in PROBE order: the composition claim first, then source before
+ * target. The diagnostic counterpart of {@link sortedByClaimTarget}'s lock
+ * order — when a write violates several axes, the refusal a caller sees names
+ * the widest invariant first ("this part already has a whole") and then the
+ * source axis, whichever backend path decided it.
+ */
+export function claimsInProbeOrder(
+  claims: readonly ClaimEdgeCardinalityParams[],
+): readonly ClaimEdgeCardinalityParams[] {
+  const rank = (claim: ClaimEdgeCardinalityParams): number =>
+    claim.scope === undefined ?
+      claim.direction === "source" ?
+        1
+      : 2
+    : 0;
+  return claims.toSorted((left, right) => rank(left) - rank(right));
 }
 
 /**

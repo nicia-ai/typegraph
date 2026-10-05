@@ -30,9 +30,17 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
+import {
+  createQueryBuilder,
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  subClassOf,
+} from "../src";
 import { searchable } from "../src/core/searchable";
 import { ConfigurationError } from "../src/errors";
+import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createInitializedStore, createTestBackend } from "./test-utils";
@@ -403,4 +411,69 @@ describe("Q3 — store.subgraph() is unaffected by the query default", () => {
     expect(result.nodes.size).toBe(1);
     expect(requireDefined(result.root).kind).toBe("Media");
   });
+});
+
+function refusalCodeOf(construct: () => unknown): unknown {
+  try {
+    construct();
+    return "accepted";
+  } catch (error) {
+    return error instanceof ConfigurationError ? error.details["code"] : error;
+  }
+}
+
+describe("a store-wide default expansion is refused where it is stated", () => {
+  // "narrower" is a real axis an alias may state, but never a default: an
+  // alias declared with no options is typed as its declared kind.
+  it.each(["bogus", "subClasses", "narrower", 1])(
+    "createStore refuses queryDefaults.expansion: %s before any query runs",
+    (expansion) => {
+      const graph = buildGraph("default_expansion_refused_store");
+
+      expect(
+        refusalCodeOf(() =>
+          createStore(graph, createTestBackend(), {
+            queryDefaults: { expansion: expansion as never },
+          }),
+        ),
+      ).toBe("QUERY_ALIAS_EXPANSION_INVALID");
+    },
+  );
+
+  it.each(["bogus", "subClasses", "narrower", 1])(
+    "createQueryBuilder refuses defaultExpansion: %s before any alias is declared",
+    (defaultExpansion) => {
+      const graph = buildGraph("default_expansion_refused_builder");
+
+      expect(
+        refusalCodeOf(() =>
+          createQueryBuilder<typeof graph>(graph.id, buildKindRegistry(graph), {
+            defaultExpansion: defaultExpansion as never,
+          }),
+        ),
+      ).toBe("QUERY_ALIAS_EXPANSION_INVALID");
+    },
+  );
+
+  it.each([undefined, "exact", "subclasses"] as const)(
+    "accepts %s on both surfaces",
+    (expansion) => {
+      const graph = buildGraph("default_expansion_accepted");
+
+      expect(
+        refusalCodeOf(() =>
+          createStore(graph, createTestBackend(), {
+            queryDefaults: { expansion },
+          }),
+        ),
+      ).toBe("accepted");
+      expect(
+        refusalCodeOf(() =>
+          createQueryBuilder<typeof graph>(graph.id, buildKindRegistry(graph), {
+            defaultExpansion: expansion,
+          }),
+        ),
+      ).toBe("accepted");
+    },
+  );
 });

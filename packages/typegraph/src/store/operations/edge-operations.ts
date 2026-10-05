@@ -142,6 +142,7 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import {
   type AcyclicityProbeContext,
   assertEdgeRelationsAcyclic,
+  assertUnwrittenEdgeRelationsAcyclic,
   edgeKindIsInAcyclicRelation,
   type ProposedRelationEdge,
 } from "../acyclicity";
@@ -169,6 +170,7 @@ import {
   type UpsertDirtyCheck,
 } from "../collections/coalesce";
 import {
+  type EdgeCreateBatchOptions,
   type EdgeUpsertUpdateBatchEntry,
   type UpsertUpdateEdgeInput,
 } from "../collections/edge-collection";
@@ -424,8 +426,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     /**
      * Whether this call owes the acyclicity probe when the edge kind
      * declares `acyclic: true`. Defaults to `true`; callers that already
-     * covered it earlier in the same write frame (or that will re-probe the
-     * combined post-insert set, as batch create does) pass `false` so the
+     * covered it earlier in the same write frame (or that probe the whole
+     * prepared set once before inserting, as batch create does) pass `false` so the
      * relation is not walked twice for one write. `lock` is required
      * whenever the probe actually runs — see
      * `assertEdgeRelationsAcyclic`'s isolation-freshness guard.
@@ -510,10 +512,16 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   if (options?.validateCardinality ?? true) {
     await checkEdgeCardinalityConstraints(
       constraintContext,
-      kind,
-      edgeCardinalityAxisReferences(declarations),
-      { fromKind, fromId: input.fromId, toKind, toId: input.toId },
-      validTo,
+      edgeInsertClaims(ctx.registry, declarations, {
+        graphId: ctx.graphId,
+        id,
+        kind,
+        fromKind,
+        fromId: input.fromId,
+        toKind,
+        toId: input.toId,
+        ...(validTo === undefined ? {} : { validTo }),
+      }),
     );
   }
 
@@ -938,12 +946,18 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       constrainedAxisCount === 0 || usesGuardedCardinalityClaim;
     const durableIdentityArbitratedCreate =
       registration.matchIdentity !== undefined;
+    // A durable-identity create takes its cardinality claim after the
+    // converge command has written the row, so nothing downstream can refuse
+    // it before the write: the probe has to run here. (A converging one
+    // probes after its incumbent lookup below instead, because a found match
+    // is not a create.)
+    const probesCardinalityBeforeWrite =
+      durableIdentityArbitratedCreate ?
+        convergeOn === undefined
+      : !usesGuardedCardinalityClaim && !delaysCardinalityProbe;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
       validateEndpoints: convergeOn === undefined && !canFuseEndpointCheck,
-      validateCardinality:
-        !durableIdentityArbitratedCreate &&
-        !usesGuardedCardinalityClaim &&
-        !delaysCardinalityProbe,
+      validateCardinality: probesCardinalityBeforeWrite,
       // Always run here, unlike cardinality: this is the one call every
       // create path reaches before any insert branch (fused, durable, or
       // plain), and acyclicity has no database key that could enforce it
@@ -1039,8 +1053,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         if (result.outcome === "created") {
           // Durable identity and cardinality are separate authorities. The
           // converge command owns the former; retain the latter's claim row
-          // in the same transaction after the edge exists. If claiming
-          // refuses, the surrounding write frame rolls the command back.
+          // in the same transaction after the edge exists. The cardinality
+          // probe already ran before the command under this frame's graph
+          // fence, so a refusal here means a writer that bypassed the fence —
+          // the only case left to the surrounding frame's rollback.
           if (durableMatchIdentity !== undefined && work.claims.length > 0) {
             await claimEdgeCardinalities(
               target,
@@ -1376,13 +1392,10 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
       input,
       id,
       validationBackend,
-      // Acyclicity's recursive reachability probe cannot be overlaid the
-      // way the in-batch cardinality/endpoint cache above is: it is
-      // executed through `execute`, not intercepted per predicate. An
-      // acyclic kind's batch is checked once, combined, against every row
-      // this batch inserts, after the insert lands (see the batch create
-      // callers below) — probing here would also miss in-batch cycles
-      // entirely (each row's probe would see only committed state).
+      // A per-row probe here would see only stored state and miss a cycle
+      // two rows of this batch close through each other. The batch create
+      // callers below probe the whole prepared set once, as an overlay on
+      // the stored relation, before their insert.
       { validateAcyclicity: false },
     );
     preparedCreates.push(prepared);
@@ -1608,7 +1621,7 @@ async function diagnoseAtomicEdgeBatchEndpointRefusal<G extends GraphDef>(
 
 async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  inputs: readonly CreateEdgeInput[],
+  preparedCreates: readonly EdgeCreatePrepared[],
   backend: WriteTarget,
 ): Promise<void> {
   const constraintContext: ConstraintContext = {
@@ -1617,25 +1630,15 @@ async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
     backend,
   };
   for (const window of chunk(
-    inputs,
+    preparedCreates,
     ATOMIC_EDGE_SCALAR_DIAGNOSTIC_WINDOW_SIZE,
   )) {
     const errors = await Promise.all(
-      window.map(async (input) => {
+      window.map(async (prepared) => {
         try {
           await checkEdgeCardinalityConstraints(
             constraintContext,
-            input.kind,
-            edgeCardinalityAxisReferences(
-              edgeCardinalityDeclarations(ctx, input.kind),
-            ),
-            {
-              fromKind: input.fromKind,
-              fromId: input.fromId,
-              toKind: input.toKind,
-              toId: input.toId,
-            },
-            input.validTo,
+            edgeInsertWork(ctx, prepared).claims,
           );
           return;
         } catch (error) {
@@ -1707,7 +1710,11 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
         );
       }
       if (error instanceof AtomicEdgeBatchCardinalityRefusalError) {
-        await assertAtomicEdgeBatchCardinality(ctx, inputs, backend);
+        await assertAtomicEdgeBatchCardinality(
+          ctx,
+          preparation.preparedCreates,
+          backend,
+        );
         throw new DatabaseOperationError(
           "Atomic edge batch refused a cardinality claim, but no current " +
             "competing edge could be diagnosed.",
@@ -1825,6 +1832,15 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           durableWork.length !== batchInsertWork.length ||
           target.insertEdgesDurableBatchReturning === undefined
         ) {
+          // The row-by-row legs below probe each row against stored state
+          // only, so the batch is probed whole first: a refusal must precede
+          // the first row written, not follow it.
+          await assertBatchEdgesRelationsAcyclic(
+            ctx,
+            target,
+            lock,
+            batchInsertWork,
+          );
           for (const input of inputs) {
             await executeEdgeCreateInternal(
               ctx,
@@ -1838,26 +1854,26 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           }
           return;
         }
-        const rows = await withAlreadyExistsTranslation("edge", () =>
-          requireDefined(session.createEdgesDurable)(batchInsertWork),
-        );
-        assertDurableBatchRows(batchInsertWork, rows);
         await assertBatchEdgesRelationsAcyclic(
           ctx,
           target,
           lock,
           batchInsertWork,
         );
+        const rows = await withAlreadyExistsTranslation("edge", () =>
+          requireDefined(session.createEdgesDurable)(batchInsertWork),
+        );
+        assertDurableBatchRows(batchInsertWork, rows);
         return;
       }
-      await withAlreadyExistsTranslation("edge", () =>
-        session.createEdgesNoReturn(batchInsertWork),
-      );
       await assertBatchEdgesRelationsAcyclic(
         ctx,
         target,
         lock,
         batchInsertWork,
+      );
+      await withAlreadyExistsTranslation("edge", () =>
+        session.createEdgesNoReturn(batchInsertWork),
       );
     },
   );
@@ -1876,6 +1892,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
   backend: GraphBackend | TransactionBackend,
+  options?: EdgeCreateBatchOptions,
 ): Promise<readonly Edge[]> {
   if (inputs.length === 0) {
     return [];
@@ -1926,6 +1943,15 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           durableWork.length !== batchInsertWork.length ||
           target.insertEdgesDurableBatchReturning === undefined
         ) {
+          // See the non-returning fallback: probe the whole batch (and the
+          // updates paired with it) before its first row is written.
+          await assertBatchEdgesRelationsAcyclic(
+            ctx,
+            target,
+            lock,
+            batchInsertWork,
+            options?.pairedUpdates,
+          );
           const fallbackRows: Edge[] = [];
           for (const input of inputs) {
             const result = await executeEdgeCreateInternal(
@@ -1950,27 +1976,29 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           }
           return fallbackRows;
         }
-        const rows = await withAlreadyExistsTranslation("edge", () =>
-          requireDefined(session.createEdgesDurable)(batchInsertWork),
-        );
-        assertDurableBatchRows(batchInsertWork, rows);
         await assertBatchEdgesRelationsAcyclic(
           ctx,
           target,
           lock,
           batchInsertWork,
+          options?.pairedUpdates,
         );
+        const rows = await withAlreadyExistsTranslation("edge", () =>
+          requireDefined(session.createEdgesDurable)(batchInsertWork),
+        );
+        assertDurableBatchRows(batchInsertWork, rows);
         return rows.map((row) => rowToEdge(row));
       }
 
-      const rows = await withAlreadyExistsTranslation("edge", () =>
-        session.createEdges(batchInsertWork),
-      );
       await assertBatchEdgesRelationsAcyclic(
         ctx,
         target,
         lock,
         batchInsertWork,
+        options?.pairedUpdates,
+      );
+      const rows = await withAlreadyExistsTranslation("edge", () =>
+        session.createEdges(batchInsertWork),
       );
 
       return rows.map((row) => rowToEdge(row));
@@ -2000,7 +2028,7 @@ function batchFencesConstraintProbe<G extends GraphDef>(
 
 /**
  * One insert's row params as the acyclicity probe's proposed edge — the one
- * spelling shared by every post-insert probe, whether its rows arrive as a
+ * spelling shared by every batch probe, whether its rows arrive as a
  * batch's insert units ({@link proposedRelationEdgesFromInsertWork}) or as
  * prepared creates ({@link assertPreparedEdgeCreatesAcyclic}).
  */
@@ -2017,7 +2045,7 @@ function proposedRelationEdgeFromInsertParams(
   };
 }
 
-/** The proposed edges a batch create's post-insert acyclicity probe answers for. */
+/** The proposed edges a batch create's acyclicity probe answers for. */
 function proposedRelationEdgesFromInsertWork(
   batchInsertWork: readonly EdgeInsertWork[],
 ): readonly ProposedRelationEdge[] {
@@ -2034,14 +2062,13 @@ function proposedRelationEdgesFromInsertWork(
  * each item's composition edge with `validateAcyclicity: false` and reaches
  * this once for the whole batch, ahead of the batch's first statement.
  *
- * `rowsMayChain` is the caller's own knowledge of its rows: whether a cycle
- * could run through more than one of them. When it cannot, each row is judged
- * against the live relation alone — the index-seek form. When it can, the
- * walk hops through the prepared rows too, so a cycle closed entirely by the
- * batch's own rows is refused before anything is written.
- * `assertEdgeRelationsAcyclic` drops rows whose kind is in no acyclic relation
- * and issues no statement for an empty remainder, so a graph that declares no
- * acyclic relation pays nothing.
+ * Probes the prepared set as an overlay on the stored relation
+ * (`assertUnwrittenEdgeRelationsAcyclic`), so a cycle closed entirely by the
+ * batch's own rows is refused before anything is written. The probe drops
+ * rows whose kind is in no acyclic relation and issues no statement for an
+ * empty remainder, so a batch of composition edges is probed in exactly one
+ * walk per relation, and a graph that declares no acyclic relation pays
+ * nothing.
  */
 export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -2049,39 +2076,85 @@ export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   lock: GraphWriteLock,
   operation: string,
   prepared: readonly EdgeCreatePrepared[],
-  rowsMayChain: boolean,
 ): Promise<void> {
-  await assertEdgeRelationsAcyclic(
+  await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, operation),
     prepared.map((create) =>
       proposedRelationEdgeFromInsertParams(create.insertParams),
     ),
-    rowsMayChain ? "planned" : "proposed",
   );
 }
 
 /**
- * The batch acyclicity probe: run once against every row this batch just
- * inserted, treating them all as origins in one combined recursive walk.
+ * The edges a set of upsert updates re-admits to the live relation: the ones
+ * that resurrect a tombstoned row. A plain update never changes the relation's
+ * membership, so it proposes nothing.
+ */
+function proposedRelationEdgesFromResurrections(
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+): readonly ProposedRelationEdge[] {
+  return entries
+    .filter((entry) => entry.clearDeleted)
+    .map((entry) => {
+      const tombstone = requireDefined(
+        entry.existing,
+        "a resurrecting edge update reached the acyclicity probe without its stored row",
+      );
+      return {
+        edgeId: tombstone.id,
+        edgeKind: entry.input.identity.kind,
+        fromKind: tombstone.from_kind,
+        fromId: tombstone.from_id,
+        toKind: tombstone.to_kind,
+        toId: tombstone.to_id,
+      };
+    });
+}
+
+/**
+ * The batch acyclicity probe: one combined recursive walk over the stored
+ * relation overlaid with every row this batch is about to insert, and with
+ * the resurrections of `pairedUpdates` the caller writes right after it.
  *
- * Run AFTER the insert, never before: the in-batch overlay
- * (`createEdgeBatchValidationBackend`) that lets cardinality/endpoint checks
- * see earlier rows in the same batch intercepts `countEdgesFrom` /
- * `edgeExistsBetween`, not a recursive `execute` statement, so it cannot
- * account for an in-batch cycle. Inserting first and then checking the whole
- * committed set together is what makes an in-batch cycle (`a→b` and `b→a` in
- * one `bulkCreate`) visible at all, and a thrown `EdgeAcyclicityError` here
- * rolls the whole transaction back — no partial batch commits.
+ * Run BEFORE the insert, so a refusal precedes the batch's first write: a
+ * caller that catches the `EdgeAcyclicityError` inside an enclosing
+ * transaction and commits has written none of the refused rows. The overlay
+ * is what makes an in-batch cycle (`a→b` and `b→a` in one `bulkCreate`)
+ * visible without the rows being stored.
  */
 async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   target: WriteTarget,
   lock: GraphWriteLock,
   batchInsertWork: readonly EdgeInsertWork[],
+  pairedUpdates: readonly EdgeUpsertUpdateBatchEntry[] = [],
 ): Promise<void> {
-  await assertEdgeRelationsAcyclic(
+  await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
-    proposedRelationEdgesFromInsertWork(batchInsertWork),
+    [
+      ...proposedRelationEdgesFromInsertWork(batchInsertWork),
+      ...proposedRelationEdgesFromResurrections(pairedUpdates),
+    ],
+  );
+}
+
+/**
+ * The acyclicity probe for a set of resurrecting updates a caller writes one
+ * row at a time: the whole set as one overlay, run before the first of them
+ * is written. Each row's own probe (`performEdgeUpdate`) sees only stored
+ * state, so on its own a refusal at the Nth resurrection would follow N-1
+ * stored ones, and two resurrections closing a cycle through each other
+ * would pass both probes.
+ */
+async function assertResurrectionsAcyclic<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+): Promise<void> {
+  await assertUnwrittenEdgeRelationsAcyclic(
+    acyclicityProbeContext(ctx, target, lock, "edges.resurrect"),
+    proposedRelationEdgesFromResurrections(entries),
   );
 }
 
@@ -2260,60 +2333,14 @@ async function performEdgeUpdate<G extends GraphDef>(
       reentersLivePopulation ?
         edgeCardinalityAxisReferences(declarations)
       : activeOnlyAxisReferences(declarations);
-    await checkEdgeCardinalityConstraints(
-      {
-        graphId: ctx.graphId,
-        registry: ctx.registry,
-        backend: target,
-      },
-      input.identity.kind,
-      reentryAxisReferences,
-      {
-        fromKind: existing.from_kind,
-        fromId: existing.from_id,
-        toKind: existing.to_kind,
-        toId: existing.to_id,
-      },
-      effectiveValidTo,
-    );
-    // Acyclicity's population is soft-delete-only: a resurrection
-    // (`clearDeleted`) re-admits the edge and is checked; reopening an
-    // `oneActive` window alone (`reentersActivePopulation` with no
-    // `clearDeleted`) never removed the edge from the acyclicity
-    // population in the first place, so it is deliberately NOT checked
-    // here — checking it would over-fence a path that must stay free.
-    if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
-      await assertEdgeRelationsAcyclic(
-        acyclicityProbeContext(
-          ctx,
-          target,
-          requireDefined(
-            lock,
-            "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
-          ),
-          "edges.resurrect",
-        ),
-        [
-          {
-            edgeId: id,
-            edgeKind: input.identity.kind,
-            fromKind: existing.from_kind,
-            fromId: existing.from_id,
-            toKind: existing.to_kind,
-            toId: existing.to_id,
-          },
-        ],
-      );
-    }
     // Re-entry re-admits this edge to every population {@link
     // reentryAxisReferences} above decided it left, so it claims exactly
-    // those axes — BEFORE the update that re-admits it, because the probe
-    // above read a population no key fences. Both legs claim: a resurrect
-    // (`clearDeleted`) and a reopened `oneActive`-shaped window (#469) put
-    // the same row back into the same counted population, and a fence that
-    // covered only the first would leave the second unfenced. Decided here,
-    // ISSUED by the step that owns the row write, so the pair cannot be
-    // separated.
+    // those axes — and probes exactly those claims, BEFORE the update that
+    // re-admits it. Both legs claim: a resurrect (`clearDeleted`) and a
+    // reopened `oneActive`-shaped window (#469) put the same row back into
+    // the same counted population, and a fence that covered only the first
+    // would leave the second unfenced. Decided here, ISSUED by the step that
+    // owns the row write, so the pair cannot be separated.
     const reentrySubject: EdgeClaimSubject = {
       graphId: ctx.graphId,
       id,
@@ -2345,6 +2372,43 @@ async function performEdgeUpdate<G extends GraphDef>(
         reentryOrdinaryClaims
       : [...reentryOrdinaryClaims, compositionEntry],
     );
+    await checkEdgeCardinalityConstraints(
+      {
+        graphId: ctx.graphId,
+        registry: ctx.registry,
+        backend: target,
+      },
+      reentryClaims,
+    );
+    // Acyclicity's population is soft-delete-only: a resurrection
+    // (`clearDeleted`) re-admits the edge and is checked; reopening an
+    // `oneActive` window alone (`reentersActivePopulation` with no
+    // `clearDeleted`) never removed the edge from the acyclicity
+    // population in the first place, so it is deliberately NOT checked
+    // here — checking it would over-fence a path that must stay free.
+    if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
+      await assertEdgeRelationsAcyclic(
+        acyclicityProbeContext(
+          ctx,
+          target,
+          requireDefined(
+            lock,
+            "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
+          ),
+          "edges.resurrect",
+        ),
+        [
+          {
+            edgeId: id,
+            edgeKind: input.identity.kind,
+            fromKind: existing.from_kind,
+            fromId: existing.from_id,
+            toKind: existing.to_kind,
+            toId: existing.to_id,
+          },
+        ],
+      );
+    }
   }
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the
@@ -2991,6 +3055,7 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
             ...distinctIds,
           ])
         : undefined;
+      await assertResurrectionsAcyclic(ctx, target, lock, entries);
       const edges: Edge[] = [];
       for (const entry of entries) {
         edges.push(
@@ -4483,6 +4548,36 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     if (found !== undefined) return found;
   }
 
+  // The upsert-update a fetched match owes: the one spelling shared by the
+  // create batch's paired probe and the update legs below.
+  function updateEntryFor(entry: FetchEntry): EdgeUpsertUpdateBatchEntry {
+    return {
+      input: {
+        id: entry.row.id,
+        identity: {
+          kind,
+          fromKind: entry.fromKind,
+          fromId: entry.fromId,
+          toKind: entry.toKind,
+          toId: entry.toId,
+        },
+        props: entry.validatedProps,
+        ...(entry.validFrom !== undefined && {
+          validFrom: entry.validFrom,
+        }),
+        ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+        ...(entry.clearValidTo === true && {
+          clearValidTo: true as const,
+        }),
+        ...(entry.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: entry.onImmutableLowerBound,
+        }),
+      },
+      clearDeleted: entry.isDeleted,
+      existing: entry.row,
+    };
+  }
+
   // The partition that decides create-vs-fetch is re-derived from `target`
   // INSIDE the fenced transaction, so the batch's lookup and its writes commit
   // under one per-graph mutual exclusion — the bulk analogue of the single-item
@@ -4535,6 +4630,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             ctx,
             createInputs,
             rawTarget,
+            {
+              pairedUpdates: toFetch
+                .filter((entry) => entry.isDeleted)
+                .map((entry) => updateEntryFor(entry)),
+            },
           );
           for (const [batchIndex, entry] of toCreate.entries()) {
             results[entry.index] = {
@@ -4553,34 +4653,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         // outcome path below: the batch helper has no per-entry dirty-check
         // candidate, so routing that shape through it would turn a found
         // replay into an update.
-        const updateEntries = toFetch.map(
-          (entry) =>
-            ({
-              input: {
-                id: entry.row.id,
-                identity: {
-                  kind,
-                  fromKind: entry.fromKind,
-                  fromId: entry.fromId,
-                  toKind: entry.toKind,
-                  toId: entry.toId,
-                },
-                props: entry.validatedProps,
-                ...(entry.validFrom !== undefined && {
-                  validFrom: entry.validFrom,
-                }),
-                ...(entry.validTo !== undefined && { validTo: entry.validTo }),
-                ...(entry.clearValidTo === true && {
-                  clearValidTo: true as const,
-                }),
-                ...(entry.onImmutableLowerBound !== undefined && {
-                  onImmutableLowerBound: entry.onImmutableLowerBound,
-                }),
-              },
-              clearDeleted: entry.isDeleted,
-              existing: entry.row,
-            }) satisfies EdgeUpsertUpdateBatchEntry,
-        );
+        const updateEntries = toFetch.map((entry) => updateEntryFor(entry));
 
         const batchEntryIndexes =
           ifExists === "update" ?
@@ -4623,6 +4696,14 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             }
           }
         } else {
+          // These legs write one resurrection at a time, each probed against
+          // stored state only: probe them as one set before the first.
+          await assertResurrectionsAcyclic(
+            ctx,
+            target,
+            lock,
+            updateEntries.filter((entry) => entry.clearDeleted),
+          );
           for (const [entryIndex, entry] of toFetch.entries()) {
             const input = requireDefined(updateEntries[entryIndex]).input;
             if (entry.isDeleted) {

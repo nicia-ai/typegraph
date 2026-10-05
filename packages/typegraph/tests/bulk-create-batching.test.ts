@@ -632,7 +632,10 @@ describe("bulkCreate composition attach batching", () => {
   it("walks the acyclicity relation once for the whole batch", async () => {
     await withCountedCompositionStore(async (store) => {
       const whole = await store.nodes.Folder.create({ name: "whole" });
-      const probe = vi.spyOn(acyclicityModule, "assertEdgeRelationsAcyclic");
+      const probe = vi.spyOn(
+        acyclicityModule,
+        "assertUnwrittenEdgeRelationsAcyclic",
+      );
       try {
         await store.nodes.Folder.bulkCreate(
           Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({

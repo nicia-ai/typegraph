@@ -1,8 +1,27 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { expr } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { seedProductsForCursorPagination } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
+
+async function seedFanOut(context: IntegrationTestContext) {
+  const store = context.getStore();
+  const hub = await store.nodes.Person.create({ name: "hub" });
+  const names = ["n1", "n2", "n3", "n4", "n5"];
+  for (const name of names) {
+    const neighbor = await store.nodes.Person.create({ name });
+    await store.edges.knows.create(hub, neighbor);
+  }
+  const fanOut = () =>
+    store
+      .query()
+      .from("Person", "source")
+      .whereNode("source", (source) => source.id.eq(hub.id))
+      .traverse("knows", "edge")
+      .to("Person", "neighbor");
+  return { store, hub, names, fanOut };
+}
 
 export function registerPaginationIntegrationTests(
   context: IntegrationTestContext,
@@ -207,6 +226,162 @@ export function registerPaginationIntegrationTests(
       expect(second.data.map((product) => product.price)).toEqual([
         700, 600, 500,
       ]);
+    });
+  });
+
+  // One start node fanning out into several result rows: every row ties on a
+  // start-alias order key, so the keyset has to identify the ROW (the start
+  // node and the edge each traversal matched), and the cursor has to be
+  // positioned against the completed row, whose order keys may read any alias.
+  describe("Cursor pagination over traversal fan-out", () => {
+    type Page = Readonly<{
+      data: readonly string[];
+      nextCursor?: string | undefined;
+      prevCursor?: string | undefined;
+    }>;
+
+    async function walkForward(
+      paginate: (
+        options: Readonly<{ first: number; after?: string }>,
+      ) => Promise<Page>,
+    ): Promise<readonly string[]> {
+      const seen: string[] = [];
+      let after: string | undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const result = await paginate({
+          first: 2,
+          ...(after === undefined ? {} : { after }),
+        });
+        seen.push(...result.data);
+        if (result.nextCursor === undefined) return seen;
+        after = result.nextCursor;
+      }
+      throw new Error("pagination did not terminate");
+    }
+
+    async function walkBackward(
+      paginate: (
+        options: Readonly<{ last: number; before?: string }>,
+      ) => Promise<Page>,
+    ): Promise<readonly string[]> {
+      const seen: string[] = [];
+      let before: string | undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const result = await paginate({
+          last: 2,
+          ...(before === undefined ? {} : { before }),
+        });
+        seen.unshift(...result.data);
+        if (result.prevCursor === undefined) return seen;
+        before = result.prevCursor;
+      }
+      throw new Error("pagination did not terminate");
+    }
+
+    it("returns every row once when the order names only the start alias", async () => {
+      const { names, fanOut } = await seedFanOut(context);
+      const query = fanOut()
+        .orderBy("source", "name", "asc")
+        .select((ctx) => ctx.neighbor.name);
+
+      const forward = await walkForward((options) => query.paginate(options));
+      const backward = await walkBackward((options) => query.paginate(options));
+
+      expect(forward.toSorted()).toEqual(names);
+      expect(backward).toEqual(forward);
+    });
+
+    it("orders and pages by a traversal alias's own keys", async () => {
+      const { names, fanOut } = await seedFanOut(context);
+      const byNeighborName = fanOut()
+        .orderBy("neighbor", "name", "desc")
+        .select((ctx) => ctx.neighbor.name);
+      const byNeighborId = fanOut()
+        .orderBy("source", "name", "asc")
+        .orderBy("neighbor", "id", "asc")
+        .select((ctx) => ctx.neighbor.name);
+
+      expect(
+        await walkForward((options) => byNeighborName.paginate(options)),
+      ).toEqual(names.toReversed());
+      expect(
+        await walkBackward((options) => byNeighborName.paginate(options)),
+      ).toEqual(names.toReversed());
+      const byId = await walkForward((options) =>
+        byNeighborId.paginate(options),
+      );
+      expect(byId.toSorted()).toEqual(names);
+    });
+
+    it("keeps two parallel edges between one pair of nodes as two rows", async () => {
+      const store = context.getStore();
+      const hub = await store.nodes.Person.create({ name: "hub" });
+      const neighbor = await store.nodes.Person.create({ name: "twice" });
+      const other = await store.nodes.Person.create({ name: "once" });
+      await store.edges.knows.create(hub, neighbor);
+      await store.edges.knows.create(hub, neighbor);
+      await store.edges.knows.create(hub, other);
+      const query = store
+        .query()
+        .from("Person", "source")
+        .whereNode("source", (source) => source.id.eq(hub.id))
+        .traverse("knows", "edge")
+        .to("Person", "neighbor")
+        .orderBy("source", "name", "asc")
+        .select((ctx) => ctx.neighbor.name);
+
+      const forward = await walkForward((options) => query.paginate(options));
+
+      expect(forward.toSorted()).toEqual(["once", "twice", "twice"]);
+    });
+
+    it("pages an optional traversal's unmatched rows alongside its fan-out", async () => {
+      const { store, hub, names } = await seedFanOut(context);
+      const loner = await store.nodes.Person.create({ name: "loner" });
+      const query = store
+        .query()
+        .from("Person", "source")
+        .whereNode("source", (source) => source.id.in([hub.id, loner.id]))
+        .optionalTraverse("knows", "edge")
+        .to("Person", "neighbor")
+        .orderBy("source", "name", "asc")
+        .select((ctx) => `${ctx.source.name}>${ctx.neighbor?.name ?? "-"}`);
+
+      const forward = await walkForward((options) => query.paginate(options));
+      const backward = await walkBackward((options) => query.paginate(options));
+
+      expect(forward.toSorted()).toEqual(
+        [...names.map((name) => `hub>${name}`), "loner>-"].toSorted(),
+      );
+      expect(backward).toEqual(forward);
+    });
+
+    it("pages the same rows through page() inside batchOnce", async () => {
+      const { store, names, fanOut } = await seedFanOut(context);
+      const query = fanOut()
+        .orderBy("source", "name", "asc")
+        .select((ctx) => ctx.neighbor.name);
+
+      const viaBatch = await walkForward(async (options) => {
+        const [page] = await store.batchOnce(
+          () => [query.page(options)] as const,
+        );
+        return page;
+      });
+
+      expect(viaBatch.toSorted()).toEqual(names);
+    });
+
+    it("composes the cursor with a completed-match where()", async () => {
+      const { names, fanOut } = await seedFanOut(context);
+      const query = fanOut()
+        .where((fields) => expr.neq(fields.neighbor.name, expr.literal("n3")))
+        .orderBy("source", "name", "asc")
+        .select((ctx) => ctx.neighbor.name);
+
+      const forward = await walkForward((options) => query.paginate(options));
+
+      expect(forward.toSorted()).toEqual(names.filter((name) => name !== "n3"));
     });
   });
 }

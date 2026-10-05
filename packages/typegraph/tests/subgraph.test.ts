@@ -25,7 +25,7 @@ import {
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
-import { ValidationError } from "../src/errors";
+import { KindNotFoundError, ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
 import { type SubgraphResult } from "../src/store/subgraph";
 import { requireDefined } from "../src/utils/presence";
@@ -939,17 +939,21 @@ describe("store.subgraph()", () => {
   });
 
   describe("compile-time type safety", () => {
-    it("rejects invalid edge kinds at compile time", async () => {
-      // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
-      await store.subgraph(ids.runId, { edges: ["nonexistent_edge"] });
+    it("rejects invalid edge kinds at compile time and at runtime", async () => {
+      await expect(
+        // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
+        store.subgraph(ids.runId, { edges: ["nonexistent_edge"] }),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
     });
 
-    it("rejects invalid includeKinds at compile time", async () => {
-      await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        // @ts-expect-error - "NonExistent" is not a valid node kind
-        includeKinds: ["NonExistent"],
-      });
+    it("rejects invalid includeKinds at compile time and at runtime", async () => {
+      await expect(
+        store.subgraph(ids.runId, {
+          edges: ["has_task"],
+          // @ts-expect-error - "NonExistent" is not a valid node kind
+          includeKinds: ["NonExistent"],
+        }),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
     });
 
     it("accepts valid edge and node kinds", async () => {

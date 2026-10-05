@@ -9,6 +9,10 @@
  * document is merged into a host `GraphDef`.
  */
 import {
+  CARDINALITY_VALUES,
+  TARGET_CARDINALITY_VALUES,
+} from "../core/edge-integrity-options";
+import {
   assertJsonValue,
   cloneAndFreezeGraphAnnotations,
 } from "../core/json-value";
@@ -201,8 +205,6 @@ const EDGE_BODY_KEYS: ReadonlySet<string> = new Set([
   "targetCardinality",
   "acyclic",
 ]);
-const CARDINALITY_VALUES = ["many", "one", "unique", "oneActive"] as const;
-const TARGET_CARDINALITY_VALUES = ["many", "one", "oneActive"] as const;
 const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "metaEdge",
   "from",

@@ -5,7 +5,9 @@
  * THE acyclicity predicate: "does `from` lie in the reflexive-transitive
  * closure of `to`, over one acyclic relation's live edges". Every write path
  * that can put an edge into a declared-acyclic relation calls
- * {@link assertEdgeRelationsAcyclic} and no other function; the audit and the
+ * {@link assertEdgeRelationsAcyclic} (rows already visible to the frame, or
+ * one row) or {@link assertUnwrittenEdgeRelationsAcyclic} (a batch probed
+ * before its insert) and no other function; the audit and the
  * schema-tightening preflight call {@link readEdgeAcyclicityViolations},
  * which shares the same SQL builder (`buildEdgeAcyclicityProbe`,
  * `src/store/recursive-cte.ts`) so a live-graph audit and a write-path probe
@@ -376,19 +378,20 @@ export type AcyclicityAuditContext = Omit<
 >;
 
 /**
- * Runs one acyclicity probe statement and returns the `origin_key`s the
- * database reports as reaching their own `from` — empty when the seed's rows
- * are all fine. Shared by the write-path assertion and the audit reader, so
- * a cut-short statement is classified identically by both.
+ * Runs one acyclicity probe statement and returns its rows — one per origin
+ * the database reports as reaching its own `from` (empty when the seed's rows
+ * are all fine), or the `"unwritten"` form's reach pairs. Shared by the
+ * write-path assertions and the audit reader, so a cut-short statement is
+ * classified identically by all of them.
  *
  * @throws EdgeAcyclicityIndeterminateError when the engine cut the statement
  *   short.
  */
-async function runAcyclicityProbe(
+async function runAcyclicityProbe<Row extends Readonly<{ origin_key: string }>>(
   ctx: AcyclicityAuditContext,
   relation: AcyclicEdgeRelation,
   seed: AcyclicityProbeSeed,
-): Promise<readonly string[]> {
+): Promise<readonly Row[]> {
   const fragment = buildEdgeAcyclicityProbe({
     graphId: ctx.graphId,
     members: relation.members,
@@ -399,10 +402,7 @@ async function runAcyclicityProbe(
     operation: ctx.operation,
   });
   try {
-    const rows = await ctx.target.execute<Readonly<{ origin_key: string }>>(
-      asCompiledRowsSql(fragment),
-    );
-    return rows.map((row) => row.origin_key);
+    return await ctx.target.execute<Row>(asCompiledRowsSql(fragment));
   } catch (error) {
     if (!isStatementCutShortError(error)) throw error;
     throw new EdgeAcyclicityIndeterminateError(
@@ -414,6 +414,16 @@ async function runAcyclicityProbe(
       { cause: error },
     );
   }
+}
+
+/** The origins one probe reports, for the forms that return nothing else. */
+async function readViolatingOriginKeys(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  seed: AcyclicityProbeSeed,
+): Promise<readonly string[]> {
+  const rows = await runAcyclicityProbe(ctx, relation, seed);
+  return rows.map((row) => row.origin_key);
 }
 
 /**
@@ -454,29 +464,24 @@ function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
 }
 
 /**
- * THE acyclicity predicate. Every write path calls exactly this function and
- * no other. Refuses with {@link EdgeAcyclicityError} when any proposed edge
- * closes a cycle in its relation; with {@link EdgeAcyclicityIndeterminateError}
- * when the engine cut the search short; with `ConfigurationError`
+ * THE acyclicity predicate for edges a frame has ALREADY made visible to its
+ * own transaction, or for a single proposed edge. Refuses with
+ * {@link EdgeAcyclicityError} when any proposed edge closes a cycle in its
+ * relation; with {@link EdgeAcyclicityIndeterminateError} when the engine cut
+ * the search short; with `ConfigurationError`
  * (`RECURSIVE_TRAVERSAL_UNSUPPORTED`) when the backend declares no recursive
  * traversal; with `ConfigurationError`
  * (`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`) when the fenced session cannot
  * observe writes committed while it waited for the fence.
  *
- * Order-insensitive with respect to the proposed rows: the question is "does
- * `from` lie in the reflexive-transitive closure of `to`", and the proposed
- * edge itself, present or absent, is never on such a path unless a cycle
- * already exists. Probe-then-insert (single writes) and insert-then-probe
- * (batches, merge apply) therefore call the same function with the same
- * meaning.
- *
- * `rows` says whether the walk may hop THROUGH the proposed rows themselves.
- * `"proposed"` (the default) is every caller whose rows are already inserted,
- * or that proposes rows no cycle could chain through. `"planned"` is a caller
- * deciding BEFORE its inserts for rows that may chain through one another, so
- * a cycle closed entirely by the batch's own rows is refused with nothing
- * written — see `AcyclicityProbeSeed` (`src/store/recursive-cte.ts`) for what
- * each form costs.
+ * The question is "does `from` lie in the reflexive-transitive closure of
+ * `to`", and a single proposed edge, present or absent, is never on such a
+ * path unless a cycle already exists — so one row may be probed before its
+ * insert. MORE than one row is different: two rows of one set can close a
+ * cycle through each other, which this form sees only when both are already
+ * live. A caller holding several rows it has NOT written yet — every batch
+ * that must refuse before its first write — calls
+ * {@link assertUnwrittenEdgeRelationsAcyclic} instead.
  *
  * Short-circuits three ways before touching SQL: a proposed row whose kind is
  * in no acyclic relation is dropped; a self-loop
@@ -487,50 +492,157 @@ function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
 export async function assertEdgeRelationsAcyclic(
   ctx: AcyclicityProbeContext,
   proposed: readonly ProposedRelationEdge[],
-  rows: "proposed" | "planned" = "proposed",
 ): Promise<void> {
+  const probeable = selfLoopFreeAcyclicGroups(ctx, proposed);
+  if (probeable.length === 0) return;
+
+  assertFreshSnapshot(ctx);
+
+  for (const { relation, edges } of probeable) {
+    const violatingOriginKeys = await readViolatingOriginKeys(ctx, relation, {
+      kind: "proposed",
+      edges,
+    });
+    if (violatingOriginKeys.length === 0) continue;
+    throw cycleRefusal(
+      relation,
+      edges.find((edge) => violatingOriginKeys.includes(edge.edgeId)) ??
+        requireDefined(edges[0]),
+    );
+  }
+}
+
+/**
+ * The same predicate over a proposed-edge OVERLAY: the relation's live edges
+ * plus `proposed` itself, none of which needs to exist yet. This is what a
+ * batch calls BEFORE its insert, so a refusal precedes the first write and a
+ * caller that catches it inside an enclosing transaction commits no cycle.
+ *
+ * A cycle in the overlay alternates proposed edges with (possibly empty) live
+ * paths between them, so it is decided in two steps: one walk over the live
+ * relation answers "which proposed edges' `from` does each proposed edge's
+ * `to` reach" (the `"unwritten"` seed form — an index seek per hop, like the
+ * single-row probe), and {@link proposedEdgeOnOverlayCycle} then looks for a
+ * cycle among those reaches. A cycle closed entirely by rows of the one batch
+ * (`a→b` and `b→a` together) is seen because a row's `to` trivially reaches
+ * the next row's `from`.
+ *
+ * Order-insensitive: a proposed row that is already live only adds reaches,
+ * never removes one, so the probe means the same thing before and after the
+ * insert.
+ */
+export async function assertUnwrittenEdgeRelationsAcyclic(
+  ctx: AcyclicityProbeContext,
+  proposed: readonly ProposedRelationEdge[],
+): Promise<void> {
+  const probeable = selfLoopFreeAcyclicGroups(ctx, proposed);
+  if (probeable.length === 0) return;
+
+  assertFreshSnapshot(ctx);
+
+  for (const { relation, edges } of probeable) {
+    const reaches = await runAcyclicityProbe<ProposedEdgeReach>(ctx, relation, {
+      kind: "unwritten",
+      edges,
+    });
+    const violatingEdge = proposedEdgeOnOverlayCycle(edges, reaches);
+    if (violatingEdge === undefined) continue;
+    throw cycleRefusal(relation, violatingEdge);
+  }
+}
+
+/** One `"unwritten"` probe row: `origin_key`'s `to` reaches `reached_key`'s `from` over live edges. */
+type ProposedEdgeReach = Readonly<{ origin_key: string; reached_key: string }>;
+
+/**
+ * The first proposed edge, in the caller's order, that lies on a cycle of the
+ * "reaches" digraph (an arc `i → j` per {@link ProposedEdgeReach}), or
+ * `undefined` when that digraph is acyclic.
+ *
+ * Trims every edge no arc enters, repeatedly: whatever survives has an
+ * entering arc from another survivor, so survivors exist exactly when a cycle
+ * does. The common no-cycle batch therefore costs one linear pass; the
+ * per-edge search below runs only to name the edge a refusal reports.
+ */
+function proposedEdgeOnOverlayCycle(
+  edges: readonly ProposedRelationEdge[],
+  reaches: readonly ProposedEdgeReach[],
+): ProposedRelationEdge | undefined {
+  const successors = new Map<string, string[]>();
+  const enteringArcs = new Map(edges.map((edge) => [edge.edgeId, 0]));
+  for (const { origin_key: origin, reached_key: reached } of reaches) {
+    successors.set(origin, [...(successors.get(origin) ?? []), reached]);
+    enteringArcs.set(reached, (enteringArcs.get(reached) ?? 0) + 1);
+  }
+  const trimmable = [...enteringArcs]
+    .filter(([, count]) => count === 0)
+    .map(([edgeId]) => edgeId);
+  while (trimmable.length > 0) {
+    const edgeId = requireDefined(trimmable.pop());
+    enteringArcs.delete(edgeId);
+    for (const successor of successors.get(edgeId) ?? []) {
+      const remaining = requireDefined(enteringArcs.get(successor)) - 1;
+      enteringArcs.set(successor, remaining);
+      if (remaining === 0) trimmable.push(successor);
+    }
+  }
+  if (enteringArcs.size === 0) return undefined;
+  return edges.find(
+    (edge) =>
+      enteringArcs.has(edge.edgeId) && reachesItself(edge.edgeId, successors),
+  );
+}
+
+function reachesItself(
+  edgeId: string,
+  successors: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  const visited = new Set<string>();
+  const frontier = [...(successors.get(edgeId) ?? [])];
+  while (frontier.length > 0) {
+    const current = requireDefined(frontier.pop());
+    if (current === edgeId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    frontier.push(...(successors.get(current) ?? []));
+  }
+  return false;
+}
+
+/**
+ * The shared front half of both write-path assertions: refuses the caller's
+ * first self-loop, and returns the relation groups that still owe a probe.
+ */
+function selfLoopFreeAcyclicGroups(
+  ctx: AcyclicityProbeContext,
+  proposed: readonly ProposedRelationEdge[],
+): readonly ProposedAcyclicGroup[] {
   const { groups, firstSelfLoop } = groupProposedByAcyclicRelation(
     ctx.graph,
     ctx.registry,
     proposed,
   );
   if (firstSelfLoop !== undefined) {
-    throw new EdgeAcyclicityError({
-      relation: displayAcyclicRelationName(firstSelfLoop.relation.name),
-      edgeKind: firstSelfLoop.edge.edgeKind,
-      edgeId: firstSelfLoop.edge.edgeId,
-      fromKind: firstSelfLoop.edge.fromKind,
-      fromId: firstSelfLoop.edge.fromId,
-      toKind: firstSelfLoop.edge.toKind,
-      toId: firstSelfLoop.edge.toId,
-      selfLoop: true,
-    });
+    throw cycleRefusal(firstSelfLoop.relation, firstSelfLoop.edge, true);
   }
-  const probeable = groups.filter((group) => group.edges.length > 0);
-  if (probeable.length === 0) return;
+  return groups.filter((group) => group.edges.length > 0);
+}
 
-  assertFreshSnapshot(ctx);
-
-  for (const { relation, edges } of probeable) {
-    const violatingOriginKeys = await runAcyclicityProbe(ctx, relation, {
-      kind: rows,
-      edges,
-    });
-    if (violatingOriginKeys.length === 0) continue;
-    const violatingEdge =
-      edges.find((edge) => violatingOriginKeys.includes(edge.edgeId)) ??
-      requireDefined(edges[0]);
-    throw new EdgeAcyclicityError({
-      relation: displayAcyclicRelationName(relation.name),
-      edgeKind: violatingEdge.edgeKind,
-      edgeId: violatingEdge.edgeId,
-      fromKind: violatingEdge.fromKind,
-      fromId: violatingEdge.fromId,
-      toKind: violatingEdge.toKind,
-      toId: violatingEdge.toId,
-      selfLoop: false,
-    });
-  }
+function cycleRefusal(
+  relation: AcyclicEdgeRelation,
+  edge: ProposedRelationEdge,
+  selfLoop = false,
+): EdgeAcyclicityError {
+  return new EdgeAcyclicityError({
+    relation: displayAcyclicRelationName(relation.name),
+    edgeKind: edge.edgeKind,
+    edgeId: edge.edgeId,
+    fromKind: edge.fromKind,
+    fromId: edge.fromId,
+    toKind: edge.toKind,
+    toId: edge.toId,
+    selfLoop,
+  });
 }
 
 /**
@@ -551,7 +663,7 @@ export async function readEdgeAcyclicityViolations(
   for (const relation of [...relations].toSorted((left, right) =>
     compareStrings(left.name, right.name),
   )) {
-    const originKeys = await runAcyclicityProbe(ctx, relation, {
+    const originKeys = await readViolatingOriginKeys(ctx, relation, {
       kind: "relation",
     });
     if (originKeys.length === 0) continue;
@@ -580,14 +692,14 @@ export async function readEdgeAcyclicityViolations(
  * ({@link assertEdgeRelationsAcyclic}) re-verifies under the per-graph write
  * lock at commit/apply time regardless, and remains the sole authority.
  *
- * Shares `runAcyclicityProbe` (and so `buildEdgeAcyclicityProbe`) with the
+ * Shares `readViolatingOriginKeys` (and so `buildEdgeAcyclicityProbe`) with the
  * write path and the audit reader, so a write-path refusal, a live-graph
  * audit, and a plan-time preview can never disagree about what counts as a
  * cycle. This is the ONE caller that probes rows not yet written anywhere,
- * so it is the ONE caller that passes the `"planned"` seed form: the
- * write path's own probe passes `"proposed"` (rows already inserted, or a
- * single row) precisely because it never needs to hop through a row that
- * isn't live yet — see `AcyclicityProbeSeed`'s docblock in
+ * so it is the ONE caller that passes the `"planned"` seed form: the write
+ * path either probes rows already inserted or a single row (`"proposed"`),
+ * or composes a batch's unwritten rows in memory (`"unwritten"`), and so
+ * never needs the walk itself to hop through a row that isn't live yet — see `AcyclicityProbeSeed`'s docblock in
  * `src/store/recursive-cte.ts` for the full contract. A self-loop among
  * `proposed` is reported directly, mirroring
  * {@link assertEdgeRelationsAcyclic}'s immediate refusal, without a round
@@ -608,7 +720,7 @@ export async function readProposedEdgeAcyclicityViolations(
     const probedIds =
       edges.length === 0 ?
         []
-      : await runAcyclicityProbe(ctx, relation, {
+      : await readViolatingOriginKeys(ctx, relation, {
           kind: "planned",
           edges,
         });

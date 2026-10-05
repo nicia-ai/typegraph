@@ -32,6 +32,7 @@ import {
 } from "../query/ast";
 import {
   assertPermittedExpansionAxis,
+  DEFAULT_ALIAS_EXPANSION_AXES,
   type DefaultAliasExpansionAxis,
   expandKindsForAxis,
   SEARCH_EXPANSION_DEFAULT,
@@ -86,17 +87,6 @@ export type HybridSearchHit<N = Node> = Readonly<{
   /** Sub-result from the fulltext half, if it ranked this node. */
   fulltext?: FulltextSearchHit<N>;
 }>;
-
-/**
- * The axis values this facade accepts, as a runtime list the shared refusal
- * (`assertPermittedExpansionAxis`) checks against. `"narrower"` is a real
- * member of the shared vocabulary, so leaving it unchecked would silently
- * downgrade it to `"exact"` rather than say it is unsupported here.
- */
-const SEARCH_EXPANSION_AXES: readonly DefaultAliasExpansionAxis[] = [
-  "exact",
-  "subclasses",
-];
 
 /**
  * Scope options shared by every facade search leg.
@@ -332,7 +322,7 @@ function resolveSearchKinds(
   nodeKind: string,
   axis: DefaultAliasExpansionAxis = SEARCH_EXPANSION_DEFAULT,
 ): readonly string[] {
-  assertPermittedExpansionAxis(axis, SEARCH_EXPANSION_AXES, "search");
+  assertPermittedExpansionAxis(axis, DEFAULT_ALIAS_EXPANSION_AXES, "search");
   if (axis === "subclasses" && ctx.createQuery === undefined) {
     throw new ConfigurationError(
       'search with expansion: "subclasses" requires a query-capable store',

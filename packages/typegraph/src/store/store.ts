@@ -222,8 +222,8 @@ import {
   type QueryCoordinateState,
 } from "../query/builder";
 import {
-  DEFAULT_ALIAS_EXPANSION_AXIS,
   type DefaultAliasExpansionAxis,
+  resolveDefaultAliasExpansion,
 } from "../query/builder/alias-expansion";
 import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import {
@@ -429,6 +429,10 @@ import {
   createRecordedReadService,
   type RecordedReadService,
 } from "./recorded-read-service";
+import {
+  assertRegisteredEdgeKinds,
+  assertRegisteredNodeKinds,
+} from "./registered-kinds";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
   bindEvolvedTransactionStore,
@@ -1602,8 +1606,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
-    this.#defaultExpansion =
-      options?.queryDefaults?.expansion ?? DEFAULT_ALIAS_EXPANSION_AXIS;
+    this.#defaultExpansion = resolveDefaultAliasExpansion(
+      options?.queryDefaults?.expansion,
+      "queryDefaults",
+    );
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
@@ -3017,8 +3023,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend) =>
-        executeEdgeCreateBatch(ctx, inputs, backend),
+      executeCreateBatch: (inputs, backend, options) =>
+        executeEdgeCreateBatch(ctx, inputs, backend, options),
       executeCreateNoReturnBatch: (inputs, backend) =>
         executeEdgeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
@@ -3717,18 +3723,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     source: GraphNodeReference<G>,
     edgeKinds: readonly EdgeKinds<G>[],
   ): void {
-    if (!Object.hasOwn(this.#graph.nodes, source.kind)) {
-      throw new KindNotFoundError(source.kind, "node", {
-        graphId: this.graphId,
-      });
-    }
-    for (const edgeKind of edgeKinds) {
-      if (!Object.hasOwn(this.#graph.edges, edgeKind)) {
-        throw new KindNotFoundError(edgeKind, "edge", {
-          graphId: this.graphId,
-        });
-      }
-    }
+    assertRegisteredNodeKinds(this.#graph, [source.kind]);
+    assertRegisteredEdgeKinds(this.#graph, edgeKinds);
   }
 
   /**
@@ -3766,23 +3762,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     options?: EdgeBulkFindEndpointOptions,
   ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
     const operation = side === "from" ? "bulkFindEdgesFrom" : "bulkFindEdgesTo";
-    const sources: readonly GraphNodeReference<G>[] = params.sources.flatMap(
-      (group) => {
-        if (!Object.hasOwn(this.#graph.nodes, group.kind)) {
-          throw new KindNotFoundError(group.kind, "node", {
-            graphId: this.graphId,
-          });
-        }
-        return group.ids.map((id) => ({ kind: group.kind, id }));
-      },
+    assertRegisteredNodeKinds(
+      this.#graph,
+      params.sources.map((group) => group.kind),
     );
-    for (const edgeKind of params.edgeKinds) {
-      if (!Object.hasOwn(this.#graph.edges, edgeKind)) {
-        throw new KindNotFoundError(edgeKind, "edge", {
-          graphId: this.graphId,
-        });
-      }
-    }
+    assertRegisteredEdgeKinds(this.#graph, params.edgeKinds);
+    const sources: readonly GraphNodeReference<G>[] = params.sources.flatMap(
+      (group) => group.ids.map((id) => ({ kind: group.kind, id })),
+    );
 
     if (sources.length === 0 || params.edgeKinds.length === 0) {
       return sources.map((source) => ({ source, edges: [] }));

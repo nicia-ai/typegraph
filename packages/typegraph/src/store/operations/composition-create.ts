@@ -687,7 +687,7 @@ export function edgeWriteEndsOpenWindow(
  */
 export async function findLiveCompositionAttachment(
   registry: KindRegistry,
-  backend: GraphReadBackend,
+  backend: Pick<GraphReadBackend, "findEdgesConnectedTo">,
   graphId: string,
   concreteKind: string,
   concreteId: string,

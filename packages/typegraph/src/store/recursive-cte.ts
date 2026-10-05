@@ -609,14 +609,13 @@ function buildDirectedGroupsBranch(
  *   answer that about ITSELF by being hopped through as an intermediate
  *   step. **Contract:** a caller passing more than one `"proposed"` row
  *   thereby asserts those rows are already inserted in the probing
- *   transaction — every real write path satisfies this (bulkCreate and
- *   import probe AFTER their insert; single create and resurrection propose
- *   exactly one row). `ancestry` joins `typegraph_edges` DIRECTLY for this
- *   form, no compound `candidates` CTE in between: a compound CTE whose
- *   outer query is a join cannot be flattened by SQLite's query flattener
- *   (rule 17d), which forces `MATERIALIZE candidates` — the entire relation
- *   copied into an ephemeral table on EVERY probe, turning every acyclic
- *   insert into an O(|relation|) operation instead of an index seek.
+ *   transaction (import and resurrection satisfy this; single create
+ *   proposes exactly one row). `ancestry` joins `typegraph_edges` DIRECTLY
+ *   for this form, no compound `candidates` CTE in between: a compound CTE
+ *   whose outer query is a join cannot be flattened by SQLite's query
+ *   flattener (rule 17d), which forces `MATERIALIZE candidates` — the entire
+ *   relation copied into an ephemeral table on EVERY probe, turning every
+ *   acyclic insert into an O(|relation|) operation instead of an index seek.
  * - `"planned"` — edges NOT YET written anywhere that the walk must hop
  *   through to see a cycle closed entirely by rows sharing no live edge.
  *   Used by exactly one caller: the graph-merge plan-time preview
@@ -628,6 +627,15 @@ function buildDirectedGroupsBranch(
  *   {@link buildPlannedAcyclicityCandidates}'s docblock for why that pays
  *   SQLite's full-relation materialization, and why that cost is acceptable
  *   once per merge plan (never per write).
+ * - `"unwritten"` — a batch's rows, NOT YET written, probed before the
+ *   batch's first write (`assertUnwrittenEdgeRelationsAcyclic`,
+ *   `src/store/acyclicity.ts`). The walk is the `"proposed"` one — live edges
+ *   only, joined directly, so it stays an index seek — but the closing select
+ *   differs: it returns one `(origin_key, reached_key)` row for every seed
+ *   row whose `from` the origin's `to` reaches, not only the origin's own.
+ *   The caller composes those reaches with the batch's own edges in memory,
+ *   which is what finds a cycle two unwritten rows close through each other
+ *   without the `"planned"` form's whole-relation materialization.
  * - `"relation"` — every live edge of the relation (the audit and
  *   schema-tightening forms). `ancestry` joins `typegraph_edges` directly,
  *   same as `"proposed"`.
@@ -635,6 +643,7 @@ function buildDirectedGroupsBranch(
 export type AcyclicityProbeSeed =
   | Readonly<{ kind: "proposed"; edges: readonly ProposedRelationEdge[] }>
   | Readonly<{ kind: "planned"; edges: readonly ProposedRelationEdge[] }>
+  | Readonly<{ kind: "unwritten"; edges: readonly ProposedRelationEdge[] }>
   | Readonly<{ kind: "relation" }>;
 
 function kindKeys(members: readonly AcyclicRelationMember[]): {
@@ -734,9 +743,9 @@ function proposedSeedRow(
 
 /**
  * The `seed` CTE body, oriented endpoints throughout: a `VALUES` row list
- * for the two row-list forms (`"proposed"` and `"planned"` — identical
- * shape, since both name rows the caller supplies rather than reading the
- * table), or the relation's own live edges for the `"relation"` (audit)
+ * for the row-list forms (`"proposed"`, `"planned"` and `"unwritten"` —
+ * identical shape, since each names rows the caller supplies rather than
+ * reading the table), or the relation's own live edges for the `"relation"` (audit)
  * form.
  */
 function buildAcyclicitySeed(
@@ -1028,8 +1037,11 @@ export function buildEdgeAcyclicityProbe(
     options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
   const anchor = sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
 
-  const closingSelect = sql`SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
-  // A single-edge row-list seed (`"proposed"` OR `"planned"` — a single row
+  const closingSelect =
+    options.seed.kind === "unwritten" ?
+      sql`SELECT DISTINCT a.origin_key, s.origin_key AS reached_key FROM ancestry a JOIN seed s ON s.from_kind = a.node_kind AND s.from_id = a.node_id`
+    : sql`SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
+  // A single-edge row-list seed (any of the row-list forms — a single row
   // has only one possible `origin_key`) stops at the first witness: both
   // engines pipeline a recursive CTE, so a `LIMIT 1` short-circuits the walk
   // instead of running to fixpoint. Several origins must return every

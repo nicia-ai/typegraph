@@ -3663,15 +3663,7 @@ async function processEdgeSlice(
     const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
       checkEdgeCardinalityConstraints(
         { graphId, registry, backend: cardinalityValidationBackend },
-        edge.kind,
-        edgeCardinalityAxisReferences(declarations),
-        {
-          fromKind: edge.from.kind,
-          fromId: edge.from.id,
-          toKind: edge.to.kind,
-          toId: edge.to.id,
-        },
-        edge.validTo,
+        importEdgeInsertWork(registry, params, declarations).claims,
       ),
     );
     if (!cardinalityResult.ok) {
@@ -4013,15 +4005,7 @@ async function processEdge(
   const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
     checkEdgeCardinalityConstraints(
       { graphId, registry, backend: frame.target },
-      edge.kind,
-      edgeCardinalityAxisReferences(declarations),
-      {
-        fromKind: edge.from.kind,
-        fromId: edge.from.id,
-        toKind: edge.to.kind,
-        toId: edge.to.id,
-      },
-      edge.validTo,
+      importEdgeInsertWork(registry, params, declarations).claims,
     ),
   );
   if (!cardinalityResult.ok) {

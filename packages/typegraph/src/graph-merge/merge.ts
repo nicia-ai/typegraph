@@ -3865,7 +3865,7 @@ function acyclicityMergeConflict(
  * exists (planning does no write) and is inherently racy against a
  * concurrent writer of the same relation, which is fine — the actual commit
  * re-verifies under the per-graph write lock regardless (the existing
- * insert-then-probe write-path fence, unchanged by this check), and stays
+ * write-path fence, unchanged by this check), and stays
  * the sole authority. This function only turns an otherwise-silent future
  * refusal into an up-front, reviewable conflict.
  */
