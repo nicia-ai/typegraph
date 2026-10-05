@@ -58,6 +58,10 @@ export default defineConfig({
         __dirname,
         "src/backend/postgres/pglite.ts",
       ),
+      "@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy": resolve(
+        __dirname,
+        "src/backend/postgres/working-copy.ts",
+      ),
       "@nicia-ai/typegraph/adapters/drizzle/postgres": resolve(
         __dirname,
         "src/backend/postgres/index.ts",

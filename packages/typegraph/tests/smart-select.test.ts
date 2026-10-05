@@ -777,6 +777,7 @@ describe("selective projection over a declared prototype-named field", () => {
     const results = await store
       .query()
       .from("Shadow", "s")
+      // eslint-disable-next-line @typescript-eslint/unbound-method
       .select((ctx) => ({ name: ctx.s.name, shadowed: ctx.s.toString }))
       .execute();
 
@@ -803,6 +804,7 @@ describe("selective projection over a declared prototype-named field", () => {
       .from("Plain", "s")
       .traverse("shadowedBy", "e")
       .to("Plain", "t")
+      // eslint-disable-next-line @typescript-eslint/unbound-method
       .select((ctx) => ({ name: ctx.s.name, shadowed: ctx.e.valueOf }))
       .execute();
 
@@ -823,7 +825,7 @@ describe("selective projection over a declared prototype-named field", () => {
         // the tracker must not record it, and the result proxy answers with the
         // inherited function rather than throwing MissingSelectiveFieldError.
         const alias = ctx.s as unknown as Record<string, unknown>;
-        // eslint-disable-next-line @typescript-eslint/dot-notation
+        // eslint-disable-next-line @typescript-eslint/dot-notation, @typescript-eslint/unbound-method
         const inherited = alias["valueOf"];
         return { name: ctx.s.name, inherited: typeof inherited };
       })

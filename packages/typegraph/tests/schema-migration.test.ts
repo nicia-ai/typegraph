@@ -24,6 +24,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import type { MigrationHookContext } from "../src/schema";
 import {
+  computeSchemaDiff,
   computeSchemaHash,
   ensureSchema,
   getActiveSchema,
@@ -394,6 +395,32 @@ describe("Schema Changes Detection", () => {
     const diff = await getSchemaChanges(backend, graph);
 
     expect(diff).toBeUndefined();
+  });
+
+  it("reports JSON pointers and before/after values for changed patterns", () => {
+    const DateNode = defineNode("AcquisitionRun", {
+      schema: z.object({ startedAt: z.iso.datetime() }),
+    });
+    const graph = defineGraph({
+      id: "schema_pattern_diagnostic_test",
+      nodes: { AcquisitionRun: { type: DateNode } },
+      edges: {},
+    });
+    const before = serializeSchema(graph, 1);
+    const after = structuredClone(before);
+    const node = requireDefined(after.nodes["AcquisitionRun"]);
+    const properties = requireDefined(node.properties.properties);
+    const startedAt = requireDefined(properties["startedAt"]);
+    properties["startedAt"] = { ...startedAt, pattern: "^changed$" };
+
+    const diff = computeSchemaDiff(before, after);
+
+    expect(diff.hasBreakingChanges).toBe(true);
+    expect(diff.nodes[0]?.details).toContain(
+      "/nodes/AcquisitionRun/properties/properties/startedAt/pattern:",
+    );
+    expect(diff.nodes[0]?.details).toContain(JSON.stringify(startedAt.pattern));
+    expect(diff.nodes[0]?.details).toContain('"^changed$"');
   });
 
   it("getSchemaChanges surfaces annotations-only node changes as safe", async () => {

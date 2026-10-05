@@ -20,7 +20,10 @@ import {
   loadCurrentStructuralClassComponents,
   UnionFind,
 } from "../src/identity/service";
-import { buildDistinctComponents } from "../src/identity/service-components";
+import {
+  buildDistinctComponents,
+  closureMismatchError,
+} from "../src/identity/service-components";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
@@ -59,6 +62,24 @@ const graph = defineGraph({
   edges: { knows: { type: knows, from: [Person, Author], to: [Person] } },
   ontology: [disjointWith(Person, Company)],
   identity: { sameIdAcrossKinds: "fold" },
+});
+
+describe("identity closure mismatch diagnostics", () => {
+  it("keeps historical reconstruction errors scoped to their graph", () => {
+    const error = closureMismatchError(
+      "historical-graph",
+      { invariant: "same-class pair has no proof" },
+      "historical",
+    );
+
+    expect(error.message).toContain("Historical Identity");
+    expect(error.details).toMatchObject({
+      code: "IDENTITY_SCHEMA_CONTRADICTION",
+      graphId: "historical-graph",
+      invariant: "same-class pair has no proof",
+    });
+    expect(error.suggestion).not.toContain("rebuildIdentityClosure");
+  });
 });
 
 type Ref = Readonly<{ kind: string; id: string }>;

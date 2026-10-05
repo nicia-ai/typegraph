@@ -20,6 +20,7 @@ import {
 import { IdentityReplayError, ValidationError } from "../errors";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
+import { identityActiveKinds } from "./service-components";
 import {
   loadCurrentStructuralClasses,
   loadHistoricalClasses,
@@ -424,6 +425,7 @@ async function reconstructAt<G extends GraphDef>(
     [seed],
     coordinate,
     ctx.sameIdAcrossKinds,
+    identityActiveKinds(ctx.registry),
   );
   const found = requireDefined(classes.get(refKey(seed)));
   return found.visible.map((ref) => publicNodeRef<G>(ref));

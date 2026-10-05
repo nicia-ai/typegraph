@@ -16,6 +16,7 @@
  */
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
+  asNodeId,
   CardinalityError,
   createStoreWithSchema,
   defineEdge,
@@ -37,14 +38,17 @@ import {
   InvalidMergeOptionsError,
   MergeConstraintConflictError,
 } from "../../src/graph-merge/errors";
-import { mergeIncremental } from "../../src/graph-merge/merge";
+import {
+  mergeIncremental,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type {
   GraphBranch,
   MergeIncrementalArgs,
   MergeOptions,
 } from "../../src/graph-merge/types";
-import { asBranchId } from "../../src/graph-merge/types";
+import { asBaseVersion, asBranchId } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
 import { normalizeGraph } from "../property/graph-merge/normalize";
 import { createPgliteFixturePool } from "./pglite-fixture-pool";
@@ -285,6 +289,113 @@ describe.each(backendMatrix())(
         { id: "new-ana", name: "Ana Rivera", mrn: "MRN-1" },
       ]);
       expect(await target.recordedNow()).toBeDefined();
+    });
+
+    it("plans and merges from an attested recorded cut after the target advances", async () => {
+      cleanups = [];
+      const target = await historyStore();
+      await seedCarePath(target);
+      const recorded = await target.recordedNow();
+      if (recorded === undefined) throw new Error("Missing recorded fork cut");
+      const provider = await forkOf(target);
+      const forkPoint = { recorded, base: provider.base };
+
+      await provider.store.nodes.Patient.update(asNodeId("base-ana"), {
+        tag: "provider",
+      });
+      await provider.store.nodes.Encounter.create(
+        { reason: "provider visit" },
+        { id: "provider-visit" },
+      );
+      await target.nodes.Encounter.create(
+        { reason: "unrelated committed visit" },
+        { id: "committed-visit" },
+      );
+
+      const plan = await planMergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+      expect(isOk(plan)).toBe(true);
+      const merged = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+      expect(isOk(merged)).toBe(true);
+      expect(
+        (await target.nodes.Patient.getById(asNodeId("base-ana")))?.tag,
+      ).toBe("provider");
+      expect(
+        await target.nodes.Encounter.getById(asNodeId("provider-visit")),
+      ).toBeDefined();
+      expect(
+        await target.nodes.Encounter.getById(asNodeId("committed-visit")),
+      ).toBeDefined();
+
+      const wrongPoint = {
+        recorded,
+        base: asBaseVersion(`${forkPoint.base}-wrong`),
+      };
+      const refused = await planMergeIncremental<CareGraph>({
+        forkPoint: wrongPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+      expect(isErr(refused)).toBe(true);
+      if (isErr(refused)) {
+        expect(refused.error).toBeInstanceOf(BaseVersionMismatchError);
+      }
+    });
+
+    it("guards an inherited row unchanged since a recorded cut against a later edit", async () => {
+      cleanups = [];
+      const target = await historyStore();
+      await seedCarePath(target);
+      const recorded = await target.recordedNow();
+      if (recorded === undefined) throw new Error("Missing recorded fork cut");
+      const provider = await forkOf(target);
+      const forkPoint = { recorded, base: provider.base };
+      await provider.store.nodes.Patient.update(asNodeId("base-ana"), {
+        name: "Provider Edit",
+      });
+
+      const original = target.transaction.bind(target);
+      let injected = false;
+      (target as { transaction: unknown }).transaction = async (
+        fn: unknown,
+        opts: unknown,
+      ) => {
+        if (!injected) {
+          injected = true;
+          await target.nodes.Patient.update(asNodeId("base-ana"), {
+            name: "Concurrent Edit",
+          });
+        }
+        return (original as (f: unknown, o: unknown) => unknown)(fn, opts);
+      };
+
+      try {
+        const result = await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [provider],
+          options: options(),
+        });
+        expect(isErr(result)).toBe(true);
+        if (isErr(result)) {
+          expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+        }
+      } finally {
+        (target as { transaction: unknown }).transaction = original;
+      }
+      expect(
+        (await target.nodes.Patient.getById(asNodeId("base-ana")))?.name,
+      ).toBe("Concurrent Edit");
     });
 
     it("acquires the schema fence for a managed target without revision tracking", async () => {

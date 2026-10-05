@@ -41,6 +41,7 @@ import {
 
 import {
   buildPostgresEdgeIndexBuilders,
+  buildPostgresGraphIdOrderIndex,
   buildPostgresNodeIndexBuilders,
   buildPostgresSystemIndexBuilders,
 } from "../../../indexes/drizzle";
@@ -48,8 +49,13 @@ import {
   assertNoSystemIndexNameCollision,
   systemIndexName,
 } from "../../../indexes/system";
-import { type IndexDeclaration } from "../../../indexes/types";
+import {
+  type IndexDeclaration,
+  type RelationalIndexDeclaration,
+} from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
+import { carryAllocationSchemaToTables } from "../postgres-allocation-schema";
+import { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
  * Table name configuration.
@@ -61,6 +67,7 @@ export type PostgresTableNames = Readonly<{
   recordedEdges: string;
   recordedClock: string;
   revisionOrigins: string;
+  revisionChanges: string;
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
@@ -88,33 +95,16 @@ export type CreatePostgresTablesOptions = Readonly<{
    * pick them up automatically.
    */
   indexes?: readonly IndexDeclaration[] | undefined;
+  /** Resolve graph index identifiers for an isolated physical namespace. */
+  physicalIndexName?:
+    | ((index: RelationalIndexDeclaration) => string)
+    | undefined;
 }>;
 
-const DEFAULT_TABLE_NAMES: PostgresTableNames = {
-  nodes: "typegraph_nodes",
-  edges: "typegraph_edges",
-  recordedNodes: "typegraph_recorded_nodes",
-  recordedEdges: "typegraph_recorded_edges",
-  recordedClock: "typegraph_recorded_clock",
-  revisionOrigins: "typegraph_revision_origins",
-  identityAssertions: "typegraph_identity_assertions",
-  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
-  identityClosure: "typegraph_identity_closure",
-  identitySeparation: "typegraph_identity_separation",
-  identityTransitions: "typegraph_identity_transitions",
-  identityTransitionRetention: "typegraph_identity_transition_retention",
-  uniques: "typegraph_node_uniques",
-  edgeClaims: "typegraph_edge_claims",
-  baseSchemaVersions: "typegraph_base_schema_versions",
-  schemaVersions: "typegraph_schema_versions",
-  graphTemplates: "typegraph_graph_templates",
-  fulltext: "typegraph_node_fulltext",
-  indexMaterializations: "typegraph_index_materializations",
-  contributionMaterializations: "typegraph_contribution_materializations",
-  kindRemovals: "typegraph_kind_removals",
-  reconciliationMarkers: "typegraph_reconciliation_markers",
-  fences: "typegraph_fences",
-};
+const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
+
+/** The bundled physical names, shared with working-copy allocation. */
+export { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
  * Creates PostgreSQL table definitions with customizable table names.
@@ -126,7 +116,24 @@ export function createPostgresTables(
 ) {
   const n: PostgresTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
-  assertNoSystemIndexNameCollision(indexes, n);
+  const physicalNames = new Set<string>();
+  const resolvedIndexes = indexes.map((index) => {
+    if (index.entity === "vector" || options.physicalIndexName === undefined)
+      return index;
+    const physicalName = options.physicalIndexName(index);
+    if (
+      physicalName.length === 0 ||
+      new TextEncoder().encode(physicalName).length > 63 ||
+      physicalNames.has(physicalName)
+    ) {
+      throw new Error(
+        `Invalid or duplicate physical PostgreSQL index name "${physicalName}".`,
+      );
+    }
+    physicalNames.add(physicalName);
+    return { ...index, name: physicalName };
+  });
+  assertNoSystemIndexNameCollision(resolvedIndexes, n);
 
   const nodes = pgTable(
     n.nodes,
@@ -147,7 +154,8 @@ export function createPostgresTables(
       // System indexes come from SYSTEM_INDEX_DECLARATIONS (single source
       // for both dialects + the runtime materializer).
       ...buildPostgresSystemIndexBuilders("nodes", n.nodes, t),
-      ...buildPostgresNodeIndexBuilders(t, indexes),
+      buildPostgresGraphIdOrderIndex(n.nodes, t.graphId),
+      ...buildPostgresNodeIndexBuilders(t, resolvedIndexes),
     ],
   );
 
@@ -183,7 +191,8 @@ export function createPostgresTables(
         sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
       ),
       ...buildPostgresSystemIndexBuilders("edges", n.edges, t),
-      ...buildPostgresEdgeIndexBuilders(t, indexes),
+      buildPostgresGraphIdOrderIndex(n.edges, t.graphId),
+      ...buildPostgresEdgeIndexBuilders(t, resolvedIndexes),
     ],
   );
 
@@ -261,6 +270,20 @@ export function createPostgresTables(
       origin: text("origin").notNull(),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const revisionChanges = pgTable(
+    n.revisionChanges,
+    {
+      entryId: text("entry_id").primaryKey(),
+      graphId: text("graph_id").notNull(),
+      revision: bigint("revision", { mode: "number" }).notNull(),
+      complete: boolean("complete").notNull(),
+      entity: text("entity").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+    },
+    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
@@ -571,6 +594,7 @@ export function createPostgresTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.version] }),
       index(`${n.schemaVersions}_active_idx`).on(t.graphId, t.isActive),
+      buildPostgresGraphIdOrderIndex(n.schemaVersions, t.graphId),
       // Partial unique index enforcing the "at most one active version
       // per graph" invariant at the storage layer. Defense in depth
       // against buggy backend implementations or out-of-band writes.
@@ -741,13 +765,14 @@ export function createPostgresTables(
     ],
   );
 
-  return {
+  const created = {
     nodes,
     edges,
     recordedNodes,
     recordedEdges,
     recordedClock,
     revisionOrigins,
+    revisionChanges,
     identityAssertions,
     recordedIdentityAssertions,
     identityClosure,
@@ -767,6 +792,8 @@ export function createPostgresTables(
     fulltext,
     fulltextTableName: n.fulltext,
   } as const;
+  carryAllocationSchemaToTables(names, created);
+  return created;
 }
 
 /**

@@ -14,7 +14,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type EngineRevision,
+} from "../src";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
@@ -71,10 +77,19 @@ describe("lineage: recorded relations (PGlite)", () => {
 const NonCapturingPerson = defineNode("NonCapturingLineagePerson", {
   schema: z.object({ name: z.string() }),
 });
+const NonCapturingLink = defineEdge("NonCapturingLineageLink", {
+  schema: z.object({ label: z.string() }),
+});
 const nonCapturingGraph = defineGraph({
   id: "lineage_requires_history",
   nodes: { NonCapturingLineagePerson: { type: NonCapturingPerson } },
-  edges: {},
+  edges: {
+    NonCapturingLineageLink: {
+      type: NonCapturingLink,
+      from: [NonCapturingPerson],
+      to: [NonCapturingPerson],
+    },
+  },
 });
 
 describe("recordedRelationsLineage: history requirement", () => {
@@ -84,7 +99,36 @@ describe("recordedRelationsLineage: history requirement", () => {
       const [store] = await createStoreWithSchema(nonCapturingGraph, backend, {
         revisionTracking: true,
       });
-      await store.nodes.NonCapturingLineagePerson.create({ name: "Grace" });
+      const person = await store.nodes.NonCapturingLineagePerson.create({
+        name: "Grace",
+      });
+      const second = await store.nodes.NonCapturingLineagePerson.create({
+        name: "Katherine",
+      });
+      const link = await store.edges.NonCapturingLineageLink.create(
+        { kind: "NonCapturingLineagePerson", id: person.id },
+        { kind: "NonCapturingLineagePerson", id: second.id },
+        { label: "colleague" },
+      );
+
+      const anchor = await store.lineageRevisionNow();
+      expect(anchor).toBeDefined();
+      await store.nodes.NonCapturingLineagePerson.update(person.id, {
+        name: "Grace Hopper",
+      });
+      await store.edges.NonCapturingLineageLink.delete(link.id);
+      await store.nodes.NonCapturingLineagePerson.delete(person.id);
+      if (anchor === undefined)
+        throw new Error("Expected a lineage revision anchor.");
+      await expect(store.changesSince(anchor)).resolves.toMatchObject({
+        kind: "keys",
+        nodes: [{ kind: "NonCapturingLineagePerson", id: person.id }],
+        edges: [{ kind: "NonCapturingLineageLink", id: link.id }],
+      });
+
+      await expect(
+        store.changesSince("opaque-revision" as EngineRevision),
+      ).resolves.toEqual({ kind: "unbounded" });
 
       expect(() => recordedRelationsLineage(store)).toThrow(
         /requires a store constructed with `history: true`/,

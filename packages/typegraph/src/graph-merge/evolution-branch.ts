@@ -7,7 +7,10 @@ import { evolutionPlanningTarget } from "./evolution-target";
 import type { Result } from "./result";
 import { err } from "./result";
 import type { BranchOptions, GraphBranch } from "./types";
-import type { MakeBackend } from "./working-copy";
+import { cloneWorkingCopyStrategy, type MakeBackend } from "./working-copy";
+
+export type EvolutionBranchOptions = BranchOptions &
+  Readonly<{ revisionJournal?: false }>;
 
 /**
  * Forks an isolated branch from an evolution plan's resulting graph, before
@@ -18,11 +21,15 @@ export async function branchForEvolution<G extends GraphDef>(
   store: Store<G>,
   plan: EvolutionPlan,
   makeBackend: MakeBackend,
-  options?: BranchOptions,
+  options?: EvolutionBranchOptions,
 ): Promise<Result<GraphBranch<G>, BranchError | MergePlanCapabilityError>> {
   try {
     const candidate = evolutionPlanningTarget(store, plan);
-    const result = await branch(candidate, makeBackend, options);
+    const strategy =
+      options?.revisionJournal === false ?
+        cloneWorkingCopyStrategy<G>(makeBackend, { revisionJournal: false })
+      : undefined;
+    const result = await branch(candidate, makeBackend, options, strategy);
     return result;
   } catch (error) {
     if (error instanceof MergePlanCapabilityError) return err(error);

@@ -23,6 +23,7 @@ const ENTRY = {
   "backend/sqlite/libsql": "src/backend/sqlite/libsql.ts",
   "backend/drizzle/indexes": "src/backend/drizzle/indexes.ts",
   "backend/postgres/index": "src/backend/postgres/index.ts",
+  "backend/postgres/working-copy": "src/backend/postgres/working-copy.ts",
   "backend/postgres/pglite": "src/backend/postgres/pglite.ts",
   "backend/postgres/pglite-store": "src/backend/postgres/pglite-store.ts",
   "backend/drizzle/engine/index": "src/backend/drizzle/engine/index.ts",

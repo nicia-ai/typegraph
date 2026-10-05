@@ -25,6 +25,11 @@ import {
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  graphRelationDeclaration,
+  type GraphRelationKey,
+  isGraphRelationKey,
+} from "../graph-relations";
+import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,
   type TableContribution,
@@ -85,6 +90,16 @@ function generateBaseSchemaVersionMarkerSQL(
   return `INSERT INTO ${table} (${installation}, ${version}, ${updatedAt})
 VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION)}, CURRENT_TIMESTAMP)
 ON CONFLICT (${installation}) DO NOTHING;`;
+}
+
+/** Current marker statement shared by fresh installation and working copies. */
+export function generatePostgresBaseSchemaMarkerSQL(
+  tables: PostgresTables,
+): string {
+  return generateBaseSchemaVersionMarkerSQL(
+    getPgTableConfig(tables.baseSchemaVersions).name,
+    tables.baseSchemaVersions,
+  );
 }
 
 /** Identifier-preserving text accepted by PostgreSQL's `regclass` input. */
@@ -274,7 +289,7 @@ function renderTableChecks(
 ): readonly string[] {
   return checks.map(
     (check) =>
-      `CONSTRAINT "${check.name}" CHECK (${inlineSqlOrThrow(
+      `CONSTRAINT ${quoteDdlIdentifier(check.name)} CHECK (${inlineSqlOrThrow(
         check.value,
         `table "${tableName}" CHECK constraint "${check.name}"`,
       )})`,
@@ -286,7 +301,7 @@ function renderTableChecks(
  */
 function renderIndexColumn(col: unknown): string {
   if (col && typeof col === "object" && "name" in col) {
-    return `"${(col as { name: string }).name}"`;
+    return quoteDdlIdentifier((col as { name: string }).name);
   }
 
   const sql = tryInlineSql(col);
@@ -319,7 +334,7 @@ function flattenSqlChunk(chunk: unknown): string {
     // a column's `.getSQL()` wraps the column back inside a SQL object
     // that points to itself, which would recurse infinitely.
     if ("name" in chunk && typeof chunk.name === "string") {
-      return `"${(chunk as { name: string }).name}"`;
+      return quoteDdlIdentifier((chunk as { name: string }).name);
     }
 
     // Drizzle's StringChunk stores its literal as `.value`, usually as a
@@ -571,7 +586,10 @@ export function generatePgCreateTableSQL(
 
   // Generate column definitions
   for (const column of config.columns) {
-    const parts: string[] = [`"${column.name}"`, getPgColumnType(column)];
+    const parts: string[] = [
+      quoteDdlIdentifier(column.name),
+      getPgColumnType(column),
+    ];
 
     if (column.notNull) {
       parts.push("NOT NULL");
@@ -587,13 +605,15 @@ export function generatePgCreateTableSQL(
   // Add primary key constraint
   const pk = config.primaryKeys[0];
   if (pk) {
-    const pkColumns = pk.columns.map((c) => `"${c.name}"`).join(", ");
+    const pkColumns = pk.columns
+      .map((column) => quoteDdlIdentifier(column.name))
+      .join(", ");
     columnDefs.push(`PRIMARY KEY (${pkColumns})`);
   }
 
   columnDefs.push(...renderTableChecks(config.checks, config.name));
 
-  return `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`;
+  return `CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(config.name)} (\n  ${columnDefs.join(",\n  ")}\n);`;
 }
 
 /**
@@ -608,6 +628,11 @@ export function generatePgCreateIndexSQL(
 
   for (const index of config.indexes) {
     const indexConfig = index.config;
+    if (indexConfig.name === undefined) {
+      throw new Error(
+        `PostgreSQL index on ${quoteDdlIdentifier(config.name)} needs a name for generated DDL.`,
+      );
+    }
     const columns = indexConfig.columns
       .map((c) => renderIndexColumn(c))
       .join(", ");
@@ -622,7 +647,7 @@ export function generatePgCreateIndexSQL(
       : "";
 
     statements.push(
-      `CREATE ${unique}INDEX IF NOT EXISTS "${indexConfig.name}" ON "${config.name}"${method} (${columns})${where};`,
+      `CREATE ${unique}INDEX IF NOT EXISTS ${quoteDdlIdentifier(indexConfig.name)} ON ${quoteDdlIdentifier(config.name)}${method} (${columns})${where};`,
     );
   }
 
@@ -638,6 +663,41 @@ function isPgTable(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): value is PgTableWithColumns<any> {
   return is(value, PgTable);
+}
+
+/**
+ * The clone decision for the deployment-shared relations that carry no
+ * `graph_id`. Every graph-scoped relation's decision is declared once, with
+ * the rest of what a graph-scoped relation means, in `../graph-relations`.
+ */
+const POSTGRES_DEPLOYMENT_CLONE_POLICIES = {
+  fences: { kind: "freshSeed" },
+  baseSchemaVersions: { kind: "freshSeed" },
+  graphTemplates: {
+    kind: "graphDocument",
+    documentColumn: "schema_doc",
+    graphIdKey: "graphId",
+  },
+} as const satisfies Record<
+  Exclude<keyof PostgresTables, GraphRelationKey | "fulltextTableName">,
+  NonNullable<TableContribution["workingCopyClonePolicy"]>
+>;
+
+function isPostgresDeploymentContributionName(
+  name: string,
+): name is keyof typeof POSTGRES_DEPLOYMENT_CLONE_POLICIES {
+  return Object.hasOwn(POSTGRES_DEPLOYMENT_CLONE_POLICIES, name);
+}
+
+function postgresBaseClonePolicy(
+  name: string,
+): NonNullable<TableContribution["workingCopyClonePolicy"]> | undefined {
+  if (isGraphRelationKey(name)) {
+    return graphRelationDeclaration(name).workingCopyClonePolicy;
+  }
+  return isPostgresDeploymentContributionName(name) ?
+      POSTGRES_DEPLOYMENT_CLONE_POLICIES[name]
+    : undefined;
 }
 
 /**
@@ -666,6 +726,12 @@ export function postgresContributions(
     // can't reproduce its generated tsvector column); the strategy
     // declaration below is the authoritative fulltext contribution.
     if (table === tables.fulltext) continue;
+    const workingCopyClonePolicy = postgresBaseClonePolicy(key);
+    if (workingCopyClonePolicy === undefined) {
+      throw new Error(
+        `PostgreSQL table ${key} lacks a working-copy clone policy.`,
+      );
+    }
     // Stable factory key (`nodes`, `edges`, …) is the logicalName so
     // the #135 materialization identity survives custom table-name
     // overrides; the resolved SQL name is only the physical tableName.
@@ -678,6 +744,7 @@ export function postgresContributions(
         ...generatePgCreateIndexSQL(table),
       ],
       runtimeEnsure: false,
+      workingCopyClonePolicy,
     });
   }
   // `false` (`fulltext: false`) contributes no fulltext table at all.
@@ -710,6 +777,30 @@ export function generatePostgresDDL(
   );
 }
 
+/**
+ * Drops the same base and fulltext tables that {@link generatePostgresDDL}
+ * creates. PostgreSQL removes their indexes with the tables. The statement
+ * deliberately omits CASCADE so an application-owned dependent object cannot
+ * be removed silently. Runtime vector tables are graph-scoped contributions
+ * and are not part of a fresh-installation table set.
+ */
+export function generatePostgresDropSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
+): string {
+  const tableNames = [
+    ...new Set(
+      postgresContributions(tables, fulltextStrategy).map(
+        (contribution) => contribution.tableName,
+      ),
+    ),
+  ];
+  return `DROP TABLE IF EXISTS ${tableNames
+    .toReversed()
+    .map((tableName) => quoteDdlIdentifier(tableName))
+    .join(", ")};`;
+}
+
 /** Builds complete PostgreSQL installation SQL for a bundled factory profile. */
 function generatePostgresInstallationSQL(
   tables: PostgresTables = postgresTables,
@@ -722,10 +813,7 @@ function generatePostgresInstallationSQL(
       "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;"
     : undefined;
   const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
-  const markerSql = generateBaseSchemaVersionMarkerSQL(
-    getPgTableConfig(tables.baseSchemaVersions).name,
-    tables.baseSchemaVersions,
-  );
+  const markerSql = generatePostgresBaseSchemaMarkerSQL(tables);
   return [extensionSql, ddlSql, markerSql]
     .filter((statement) => statement !== undefined)
     .join("\n\n");

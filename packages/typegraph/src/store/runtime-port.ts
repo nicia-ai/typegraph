@@ -35,6 +35,7 @@ import {
 } from "../identity/transition-log";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
+import { type RecordedReadBinding } from "../query/compiler/schema";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
@@ -67,6 +68,8 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /** The Store's validated historical source, shared by all recorded reads. */
+  recordedReadBinding?: RecordedReadBinding | undefined;
   /** Constructs a plan-owned resulting-schema view for outside-transaction merge planning. */
   evolutionPlanningTarget?: (plan: EvolutionPlan) => Store<G>;
   /**
@@ -331,6 +334,40 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[]
   >;
+  /** Current-state or archival assertions incident to any supplied endpoint. */
+  identityAssertionsTouchingAtTarget?: (
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    mode?: "state" | "archival",
+    options?: Readonly<{ includeDeleted?: boolean }>,
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[]
+  >;
+  /** Interchange-visible assertion ID rows, with the requested archive state. */
+  interchangeIdentityAssertionsByIdsAtTarget?: (
+    target: GraphBackend | TransactionBackend,
+    ids: readonly string[],
+    mode: "state" | "archival",
+    options?: Readonly<{ includeDeleted?: boolean }>,
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[]
+  >;
   readIdentityAssertionPageAtTarget: (
     target: GraphBackend | TransactionBackend,
     mode: "state" | "archival",
@@ -498,6 +535,23 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     seeds: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
 }>;
+
+/** Optional scoped identity reads added after the original Store runtime port. */
+export function hasScopedIdentityReads<G extends GraphDef>(
+  runtime: StoreRuntime<G>,
+): runtime is StoreRuntime<G> &
+  Required<
+    Pick<
+      StoreRuntime<G>,
+      | "identityAssertionsTouchingAtTarget"
+      | "interchangeIdentityAssertionsByIdsAtTarget"
+    >
+  > {
+  return (
+    runtime.identityAssertionsTouchingAtTarget !== undefined &&
+    runtime.interchangeIdentityAssertionsByIdsAtTarget !== undefined
+  );
+}
 
 export function storeRuntime<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,

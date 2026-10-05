@@ -36,6 +36,7 @@ import { requireDefined } from "../utils/presence";
  *   identical to what a full enumeration would have produced.
  */
 import { lineageDeltaSinceAnchor } from "./base-version";
+import type { CandidateIdentityScope } from "./candidate-identity-closure";
 import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   ChangedEdge,
@@ -48,6 +49,7 @@ import type {
   WindowedEdge,
   WindowedNode,
 } from "./state-diff";
+import type { StateDiffBaseReader } from "./state-diff";
 import { diffAgainstBase } from "./state-diff";
 import type {
   EntityKey,
@@ -287,10 +289,10 @@ export async function branchPruneTo<G extends GraphDef>(
   baseStore: Store<G>,
   branch: GraphBranch<G>,
 ): Promise<LineageDelta | undefined> {
-  if (branch.forkRevision === undefined) return undefined;
+  const forkRevision = branch.forkRevision;
+  if (forkRevision === undefined) return undefined;
   const forkLineage = resolveLineage(branch.store);
   if (forkLineage === undefined) return undefined;
-  const forkRevision = branch.forkRevision;
   // The session is the fork's own root backend — the same object
   // `resolveLineage(branch.store)` just resolved `lineage` off of, and the
   // only session available this far outside any transaction.
@@ -311,6 +313,31 @@ export async function branchPruneTo<G extends GraphDef>(
     nodes: dedupeEntityKeys([...forkDelta.nodes, ...baseDelta.nodes]),
     edges: dedupeEntityKeys([...forkDelta.edges, ...baseDelta.edges]),
   };
+}
+
+/** A recorded ancestor is immutable, so only the branch can have changed since its cut. */
+async function branchPruneFromRecordedAncestor<G extends GraphDef>(
+  branch: GraphBranch<G>,
+): Promise<LineageDelta | undefined> {
+  const forkRevision = branch.forkRevision;
+  // The synthetic committed-target branch has no forkRevision. Its own base
+  // token names the recorded cut, so its target-side lineage is the delta.
+  if (forkRevision === undefined) {
+    const delta = await safeLineageDelta(() =>
+      lineageDeltaSinceAnchor(branch.store, branch.base),
+    );
+    return delta?.kind === "keys" ? delta : undefined;
+  }
+  const lineage = resolveLineage(branch.store);
+  if (lineage === undefined) return undefined;
+  const delta = await safeLineageDelta(() =>
+    lineage.changesSince(
+      storeBackend(branch.store),
+      forkRevision,
+      branch.store.graphId,
+    ),
+  );
+  return delta?.kind === "keys" ? delta : undefined;
 }
 
 /**
@@ -347,6 +374,9 @@ export async function stageBranches<G extends GraphDef>(
   baseStore: Store<G>,
   branches: readonly GraphBranch<G>[],
   captureTargetStateFor?: BranchId,
+  baseReader?: StateDiffBaseReader,
+  explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+  scopedIdentity?: CandidateIdentityScope,
 ): Promise<StagingSet> {
   const newNodes: (StagedNewNode & { kind: string; id: string })[] = [];
   const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] =
@@ -364,19 +394,27 @@ export async function stageBranches<G extends GraphDef>(
   const retractedIdentityAssertions: StagedRetraction[] = [];
 
   const baseIdentityAssertions =
-    await storeRuntime(baseStore).readCurrentIdentityAssertions("state");
+    baseReader === undefined ?
+      scopedIdentity === undefined ?
+        await storeRuntime(baseStore).readCurrentIdentityAssertions("state")
+      : scopedIdentity.baseState
+    : await baseReader.readIdentity("state");
 
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
   let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();
   for (const branch of branches) {
     const branchId = branch.id;
-    const pruneTo = await branchPruneTo(baseStore, branch);
-    const diff = await diffAgainstBase(
-      baseStore,
-      branch.store,
-      branchId === captureTargetStateFor,
+    const pruneTo =
+      explicitPruneTo?.get(branchId) ??
+      (baseReader === undefined ?
+        await branchPruneTo(baseStore, branch)
+      : await branchPruneFromRecordedAncestor(branch));
+    const diff = await diffAgainstBase(baseStore, branch.store, {
+      captureForkState: branchId === captureTargetStateFor,
       pruneTo,
-    );
+      baseReader,
+      scopedIdentity,
+    });
     if (branchId === captureTargetStateFor) {
       targetNodeVersions = diff.forkNodeVersions;
       targetEdgeSignatures = diff.forkEdgeSignatures;

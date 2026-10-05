@@ -11,10 +11,11 @@
  *
  * The descriptor has two halves:
  *
- *   - TypeGraph-owned fences: `kind`/`version`, the owning `graphId`, the
- *     branch id, the `base@V` token the working copy forked from, the at-fork
- *     schema anchor (explicitly absent for an unmanaged store), and the
- *     at-fork engine revision when the working copy resolved `lineage`.
+ *   - TypeGraph-owned fences: `kind`/`version`, the allocation id, the owning
+ *     `graphId`, the branch id, the `base@V` token the working copy forked from, the at-fork
+ *     schema anchor (explicitly absent for an unmanaged store), the at-fork
+ *     engine revision when the working copy resolved `lineage`, and the
+ *     source recorded-time cut when history was captured.
  *   - An opaque, strategy-defined `store` locator. TypeGraph never interprets
  *     it and never assumes a database URL, product, or dialect.
  *
@@ -23,10 +24,13 @@
  * the authority: at seal time it persists the {@link DurableBranchOrigin} that
  * TypeGraph captured at the fork, and at reopen it ATTESTS the complete origin
  * it holds. Reopen refuses unless every descriptor fence equals the attested
- * origin — a tampered `graphId`/`definitionHash`/`base`/`branchId`/
- * `forkRevision`/`schemaAnchor`, including DELETING `schemaAnchor` from the
+ * origin — a tampered `allocationId`/`graphId`/`definitionHash`/`base`/`branchId`/
+ * `forkRevision`/`schemaAnchor`/`recordedForkPoint`, including DELETING
+ * `schemaAnchor` from the
  * envelope, cannot relabel a fork, because the host's own record is the
- * reference. `destroy` is verified the same way before it deletes (see
+ * reference. Allocation identity is independent of a caller-supplied branch
+ * name, so even two allocations with the same branch id cannot be relabeled.
+ * `destroy` is verified the same way before it deletes (see
  * {@link DurableWorkingCopyStrategy.destroy}), so swapping one working copy's
  * locator for another's cannot destroy the wrong allocation.
  *
@@ -60,6 +64,7 @@
  * Backend-specific mechanics remain entirely within the strategy.
  */
 
+import { asRecordedInstant } from "../core/temporal";
 import { computeBaseVersion, schemaComponentOf } from "./base-version";
 import { readBranchForkState } from "./branch";
 import type { DurableOperationCapability } from "./durable-operation";
@@ -68,7 +73,6 @@ import {
   describeCause,
   DurableEvidenceUndeliveredError,
 } from "./errors";
-import type { MergePlanArtifactV2 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import { diffAgainstBase } from "./state-diff";
@@ -84,7 +88,7 @@ import type {
   BranchId,
   BranchOptions,
   GraphBranch,
-  MergedCounts,
+  RecordedForkPoint,
 } from "./types";
 import { asBranchId } from "./types";
 import { coalescedWorkingCopyClose } from "./working-copy";
@@ -125,48 +129,16 @@ export type DurableWorkingCopyAccess =
       release: () => Promise<void>;
     }>;
 
-/** Why an authoritative native merge attempt could not safely run. */
-export type NativeDurableMergeUnsupportedDimension =
-  | "branchOrigin"
-  | "graphScope"
-  | "nativeConflicts"
-  | "planSemantics"
-  | "targetFence";
-
-/**
- * Result of a host-native merge optimization attempt.
- *
- * `unsupported` proves that NO native merge SQL or host mutation ran; TypeGraph
- * then executes the complete portable plan application. `applied` proves the
- * strategy atomically validated every dimension named by
- * {@link DurableWorkingCopyStrategy.merge} and applied exactly the approved
- * plan. A refusal or uncertain/partial execution throws instead of returning
- * `unsupported`, because falling back after a possible native write would
- * double-apply the plan.
- */
-export type NativeDurableMergeResult =
-  | Readonly<{
-      outcome: "applied";
-      merged: MergedCounts;
-      warnings?: readonly string[] | undefined;
-    }>
-  | Readonly<{
-      outcome: "unsupported";
-      dimensions: readonly [
-        NativeDurableMergeUnsupportedDimension,
-        ...NativeDurableMergeUnsupportedDimension[],
-      ];
-    }>;
-
 /**
  * The complete immutable TypeGraph origin of one durable working copy — every
  * TypeGraph-owned fork fence, with NO dependence on the descriptor: the graph
- * id and version-blind graph-definition hash identifying the fork-time caller
+ * allocation id, graph id and version-blind graph-definition hash identifying the fork-time caller
  * definition, the branch id, the `base@V` token it forked from, the at-fork
  * schema anchor (`undefined` meaning the working copy committed no schema row —
  * an EXPLICIT absent, so a descriptor that simply omits the field still
  * disagrees with a host that persisted one), and the at-fork engine revision
- * (`undefined` when the working copy resolved no lineage).
+ * (`undefined` when the working copy resolved no lineage), plus the source
+ * recorded-time cut when history was captured.
  *
  * `graphId` and `definitionHash` are REQUIRED and carry the definition identity
  * even when `schemaAnchor` is absent: an unmanaged working copy still has to
@@ -175,12 +147,15 @@ export type NativeDurableMergeResult =
  * descriptor fence is compared against.
  */
 export type DurableBranchOrigin = Readonly<{
+  /** Unique identity of this physical allocation, independent of branch name. */
+  allocationId: string;
   graphId: string;
   definitionHash: string;
   branchId: BranchId;
   base: BaseVersion;
   schemaAnchor: Readonly<{ version: number; hash: string }> | undefined;
   forkRevision: EngineRevision | undefined;
+  recordedForkPoint?: RecordedForkPoint;
 }>;
 
 /**
@@ -202,9 +177,11 @@ export type DurableBranchOrigin = Readonly<{
 export type DurableBranchDescriptor<
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
+  /** Unique identity of the sealed physical allocation. */
+  allocationId: string;
   /** Stable strategy type tag; must equal the reopening strategy's `type`. */
   kind: string;
-  /** Strategy descriptor format version; must equal the strategy's `version`. */
+  /** Strategy locator format version; must be readable by the strategy. */
   version: number;
   /** The graph id the working copy belongs to. */
   graphId: string;
@@ -224,7 +201,17 @@ export type DurableBranchDescriptor<
   schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
   /** The at-fork engine revision, when the working copy resolves `lineage`. */
   forkRevision?: EngineRevision | undefined;
+  /** Source recorded-time cut, when the source captured history at fork time. */
+  recordedForkPoint?: RecordedForkPoint;
 }>;
+
+/** A branch handle bound to the sealed physical allocation it opened. */
+export type DurableGraphBranch<G extends GraphDef> = GraphBranch<G> &
+  Readonly<{ allocationId: string }>;
+
+/** Persist `allocationId` before calling when host-side recovery is required. */
+export type DurableBranchOptions = BranchOptions &
+  Readonly<{ allocationId?: string | undefined }>;
 
 /**
  * The host-owned half of a durable working copy: how a persistent working copy
@@ -232,9 +219,15 @@ export type DurableBranchDescriptor<
  *
  * The create -> seal/abort protocol has explicit ownership:
  *
- *   1. `create` allocates the persistent working copy and returns a mutable
- *      {@link Store} over it plus the opaque locator. Once `create` resolves,
- *      TypeGraph owns the allocation and the returned store.
+ *   1. `create` allocates the persistent working copy under `allocationId` and
+ *      returns a mutable {@link Store} over it plus the opaque locator. An
+ *      allocation id MUST NOT name a second physical copy. If a previous
+ *      attempt may have allocated the id, the host MUST refuse `create` and
+ *      require explicit recovery through host tooling; it MUST NOT return a
+ *      sealed allocation as a newly created one. If it supplies
+ *      `forkRevision`, that revision MUST be captured atomically with the
+ *      physical fork; otherwise TypeGraph uses a full diff at merge time.
+ *      Once `create` resolves, TypeGraph owns the allocation and the store.
  *   2. TypeGraph captures the fork state off the store and calls `seal` with
  *      the complete {@link DurableBranchOrigin}. The host MUST persist that
  *      origin durably before `seal` resolves — it is what later attestations
@@ -256,7 +249,9 @@ export type DurableBranchDescriptor<
  * locator. TypeGraph refuses when any descriptor fence disagrees with that
  * attested origin. A reopen failure (missing or deleted store, unreachable
  * host) throws; the strategy must not leave an opened backend behind when it
- * throws.
+ * throws. Every connection and transaction of the returned Store MUST stay
+ * bound to this allocation's native branch; a checkout on one pooled session
+ * is not evidence that later sessions read the same branch.
  *
  * `destroy` is the ONLY operation that may delete or archive the persistent
  * working copy. It receives the locator AND the caller's expected origin and
@@ -272,16 +267,21 @@ export type DurableWorkingCopyStrategy<
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
   type: string;
+  /** Version written by new descriptors. */
   version: number;
+  /** Older locator versions every strategy method can still read and manage. */
+  readableVersions?: readonly number[] | undefined;
   create: (
     baseStore: Store<G>,
     base: BaseVersion,
     branchId: BranchId,
+    allocationId: string,
   ) => Promise<
     Readonly<{
       store: Store<G>;
       descriptor: TStoreDescriptor;
       access: DurableWorkingCopyAccess;
+      forkRevision?: EngineRevision | undefined;
     }>
   >;
   seal: (
@@ -292,6 +292,7 @@ export type DurableWorkingCopyStrategy<
   reopen: (
     graph: G,
     descriptor: TStoreDescriptor,
+    descriptorVersion: number,
   ) => Promise<
     Readonly<{
       store: Store<G>;
@@ -302,48 +303,8 @@ export type DurableWorkingCopyStrategy<
   destroy: (
     descriptor: TStoreDescriptor,
     expectedOrigin: DurableBranchOrigin,
+    descriptorVersion: number,
   ) => Promise<void>;
-  /**
-   * Optional authoritative host-native merge optimization.
-   *
-   * Before returning `applied`, the strategy MUST, atomically with the native
-   * merge operation:
-   *
-   * 1. attest `expectedOrigin` against the same allocation `branch.store` is
-   *    connected to;
-   * 2. validate `plan.target` on the exact target branch/session the host will
-   *    merge into;
-   * 3. prove the host-native diff contains exactly `plan.writes`, including all
-   *    TypeGraph sidecars and no rows belonging to another graph or application;
-   * 4. prove the plan needs no canonicalization, repointing, identity, callback,
-   *    provenance, composition, or other semantic work the native merge would
-   *    bypass; and
-   * 5. report the actual applied counts.
-   *
-   * A whole-database merge primitive therefore qualifies only for an allocation
-   * whose complete physical diff is owned by this graph and is byte-for-byte
-   * equivalent to the approved TypeGraph plan. If any dimension cannot be
-   * proven, return `unsupported` BEFORE executing host SQL; TypeGraph will apply
-   * the plan through its portable transaction path.
-   *
-   * TypeGraph never offers this command a plan that requests callbacks or
-   * persisted provenance, writes or reconciles identity assertions (identity
-   * assertion or retraction writes, identity reconciliations or conflicts), or
-   * touches composition (a reported composition orphan, or a write to a
-   * composition whole, part, or edge kind, which owes cascade, single-whole, and
-   * required-existence enforcement): those plans always take the portable path.
-   */
-  merge?:
-    | ((
-        args: Readonly<{
-          target: Store<G>;
-          branch: GraphBranch<G>;
-          descriptor: TStoreDescriptor;
-          expectedOrigin: DurableBranchOrigin;
-          plan: MergePlanArtifactV2;
-        }>,
-      ) => Promise<NativeDurableMergeResult>)
-    | undefined;
   /**
    * Optional atomic operation + evidence capability.
    *
@@ -356,7 +317,9 @@ export type DurableWorkingCopyStrategy<
    *
    * A strategy that cannot provide the atomic guarantee MUST omit this
    * capability (or return `unsupported` from `operate`) rather than emulating
-   * atomicity with callbacks or best effort. See `durable-operation.ts`.
+   * atomicity with best effort or with callbacks that run outside the evidence
+   * transaction. A callback the strategy runs inside that transaction is the
+   * host's atomic mutation, not an emulation. See `durable-operation.ts`.
    */
   operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
 }>;
@@ -370,7 +333,7 @@ export type DurableBranch<
   G extends GraphDef,
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
-  branch: GraphBranch<G>;
+  branch: DurableGraphBranch<G>;
   descriptor: DurableBranchDescriptor<TStoreDescriptor>;
 }>;
 
@@ -400,13 +363,30 @@ export async function branchDurable<
 >(
   baseStore: Store<G>,
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
-  options?: BranchOptions,
+  options?: DurableBranchOptions,
 ): Promise<Result<DurableBranch<G, TStoreDescriptor>, BranchError>> {
+  if (options?.allocationId !== undefined && options.id === undefined) {
+    return err(
+      new BranchError(
+        "A caller-supplied durable allocation id requires a stable branch id for retries.",
+      ),
+    );
+  }
+  if (options?.allocationId === "") {
+    return err(new BranchError("Durable allocation id must not be empty."));
+  }
   let base: BaseVersion;
+  let recordedForkPoint: RecordedForkPoint | undefined;
   let id: BranchId;
+  let allocationId: string;
   try {
     base = await computeBaseVersion(baseStore);
+    if (baseStore.historyEnabled) {
+      const recorded = await baseStore.recordedNow();
+      if (recorded !== undefined) recordedForkPoint = { recorded, base };
+    }
     id = options?.id ?? asBranchId(generateId());
+    allocationId = options?.allocationId ?? generateId();
   } catch (error) {
     return err(
       new BranchError(
@@ -420,14 +400,20 @@ export async function branchDurable<
     store: Store<G>;
     descriptor: TStoreDescriptor;
     access: DurableWorkingCopyAccess;
+    forkRevision?: EngineRevision | undefined;
   }>;
   try {
-    created = await strategy.create(baseStore, base, id);
+    created = await strategy.create(baseStore, base, id, allocationId);
   } catch (error) {
     return err(
       new BranchError(
-        "Failed to create durable working-copy branch of base store",
-        { cause: error },
+        "Failed to create durable working-copy branch of base store. The host may have allocated it before reporting failure.",
+        {
+          cause: error,
+          details: { branchId: id, allocationId, strategyType: strategy.type },
+          suggestion:
+            "Use the strategy's operator tooling to inspect and recover this allocation id before retrying.",
+        },
       ),
     );
   }
@@ -438,19 +424,22 @@ export async function branchDurable<
   let definitionHash: string;
   try {
     await assertDurableWorkingCopyMatchesBase(baseStore, created.store, base);
-    forkState = await readBranchForkState(created.store);
+    const captured = await readBranchForkState(created.store, false);
+    forkState = { ...captured, forkRevision: created.forkRevision };
     definitionHash = await getGraphDefinitionHash(created.store.graph);
   } catch (error) {
     return err(await abandonAllocation(strategy, created, id, error));
   }
 
   const origin: DurableBranchOrigin = {
+    allocationId,
     graphId: created.store.graphId,
     definitionHash,
     branchId: id,
     base,
     schemaAnchor: forkState.schemaAnchor,
     forkRevision: forkState.forkRevision,
+    ...(recordedForkPoint === undefined ? {} : { recordedForkPoint }),
   };
   try {
     await strategy.seal(created.descriptor, origin);
@@ -458,7 +447,8 @@ export async function branchDurable<
     return err(await abandonAllocation(strategy, created, id, error));
   }
 
-  const branch: GraphBranch<G> = {
+  const branch: DurableGraphBranch<G> = {
+    allocationId: origin.allocationId,
     id,
     base,
     store: created.store,
@@ -469,8 +459,10 @@ export async function branchDurable<
     ...(forkState.forkRevision === undefined ?
       {}
     : { forkRevision: forkState.forkRevision }),
+    ...(recordedForkPoint === undefined ? {} : { recordedForkPoint }),
   };
   const descriptor: DurableBranchDescriptor<TStoreDescriptor> = {
+    allocationId: origin.allocationId,
     kind: strategy.type,
     version: strategy.version,
     graphId: created.store.graphId,
@@ -484,6 +476,7 @@ export async function branchDurable<
     ...(forkState.forkRevision === undefined ?
       {}
     : { forkRevision: forkState.forkRevision }),
+    ...(recordedForkPoint === undefined ? {} : { recordedForkPoint }),
   };
   return ok({ branch, descriptor });
 }
@@ -542,7 +535,9 @@ async function assertDurableWorkingCopyMatchesBase<G extends GraphDef>(
     );
   }
 
-  const diff = await diffAgainstBase(baseStore, workingCopy, false);
+  const diff = await diffAgainstBase(baseStore, workingCopy, {
+    captureForkState: false,
+  });
   const sourceVersionAfterDiff = await computeBaseVersion(baseStore);
   if (sourceVersionAfterDiff !== base) {
     throw new BranchError(
@@ -627,7 +622,7 @@ export async function reopenDurableBranch<
   graph: G,
   descriptor: DurableBranchDescriptor<TStoreDescriptor>,
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
-): Promise<Result<GraphBranch<G>, BranchError>> {
+): Promise<Result<DurableGraphBranch<G>, BranchError>> {
   const refusal = durableDescriptorRefusal(descriptor, strategy);
   if (refusal !== undefined) return err(refusal);
   if (descriptor.graphId !== graph.id) {
@@ -646,7 +641,11 @@ export async function reopenDurableBranch<
     access: DurableWorkingCopyAccess;
   }>;
   try {
-    reopened = await strategy.reopen(graph, descriptor.store);
+    reopened = await strategy.reopen(
+      graph,
+      descriptor.store,
+      descriptor.version,
+    );
   } catch (error) {
     return err(
       new BranchError(
@@ -729,6 +728,7 @@ export async function destroyDurableBranch<
     await strategy.destroy(
       descriptor.store,
       durableOriginOfDescriptor(descriptor),
+      descriptor.version,
     );
     return ok(undefined);
   } catch (error) {
@@ -805,11 +805,6 @@ async function abandonAllocation<
 }
 
 /**
- * The strategy fields descriptor validation reads; nothing host-specific.
- */
-type DescriptorOwner = Readonly<{ type: string; version: number }>;
-
-/**
  * Structural and format validation of a (possibly JSON-parsed, hence untyped)
  * descriptor against the strategy that must own it. Returns the typed refusal
  * or `undefined` when the envelope is well-formed.
@@ -821,7 +816,11 @@ type DescriptorOwner = Readonly<{ type: string; version: number }>;
  */
 export function durableDescriptorRefusal(
   descriptor: unknown,
-  strategy: DescriptorOwner,
+  strategy: Readonly<{
+    type: string;
+    version: number;
+    readableVersions?: readonly number[] | undefined;
+  }>,
 ): BranchError | undefined {
   if (
     typeof descriptor !== "object" ||
@@ -844,18 +843,26 @@ export function durableDescriptorRefusal(
       },
     );
   }
-  if (record["version"] !== strategy.version) {
+  if (
+    record["version"] !== strategy.version &&
+    !(
+      typeof record["version"] === "number" &&
+      strategy.readableVersions?.includes(record["version"])
+    )
+  ) {
     return new BranchError(
-      `Durable branch descriptor version ${String(record["version"])} is not supported by strategy "${strategy.type}" (expected ${strategy.version}).`,
+      `Durable branch descriptor version ${String(record["version"])} is not supported by strategy "${strategy.type}".`,
       {
         details: {
           descriptorVersion: record["version"],
           strategyVersion: strategy.version,
+          readableVersions: strategy.readableVersions ?? [],
         },
       },
     );
   }
   for (const key of [
+    "allocationId",
     "graphId",
     "definitionHash",
     "branchId",
@@ -899,6 +906,29 @@ export function durableDescriptorRefusal(
       { details: { strategyType: strategy.type } },
     );
   }
+  if (record["recordedForkPoint"] !== undefined) {
+    const point = record["recordedForkPoint"];
+    if (
+      typeof point !== "object" ||
+      point === null ||
+      typeof (point as Readonly<Record<string, unknown>>)["recorded"] !==
+        "string" ||
+      typeof (point as Readonly<Record<string, unknown>>)["base"] !== "string"
+    ) {
+      return new BranchError(
+        "Durable branch descriptor is malformed: recordedForkPoint must be { recorded: string, base: string }.",
+        { details: { strategyType: strategy.type } },
+      );
+    }
+    try {
+      asRecordedInstant((point as Readonly<{ recorded: string }>).recorded);
+    } catch (error) {
+      return new BranchError(
+        "Durable branch descriptor has an invalid recorded fork instant.",
+        { cause: error, details: { strategyType: strategy.type } },
+      );
+    }
+  }
   return undefined;
 }
 
@@ -907,12 +937,16 @@ export function durableOriginOfDescriptor<
   TStoreDescriptor extends DurableStoreDescriptor,
 >(descriptor: DurableBranchDescriptor<TStoreDescriptor>): DurableBranchOrigin {
   return {
+    allocationId: descriptor.allocationId,
     graphId: descriptor.graphId,
     definitionHash: descriptor.definitionHash,
     branchId: descriptor.branchId,
     base: descriptor.base,
     schemaAnchor: descriptor.schemaAnchor,
     forkRevision: descriptor.forkRevision,
+    ...(descriptor.recordedForkPoint === undefined ?
+      {}
+    : { recordedForkPoint: descriptor.recordedForkPoint }),
   };
 }
 
@@ -929,13 +963,26 @@ export function durableOriginsEqual(
   attested: DurableBranchOrigin,
 ): boolean {
   return (
+    descriptor.allocationId === attested.allocationId &&
     descriptor.graphId === attested.graphId &&
     descriptor.definitionHash === attested.definitionHash &&
     descriptor.branchId === attested.branchId &&
     descriptor.base === attested.base &&
     schemaAnchorsEqual(descriptor.schemaAnchor, attested.schemaAnchor) &&
-    descriptor.forkRevision === attested.forkRevision
+    descriptor.forkRevision === attested.forkRevision &&
+    recordedForkPointsEqual(
+      descriptor.recordedForkPoint,
+      attested.recordedForkPoint,
+    )
   );
+}
+
+function recordedForkPointsEqual(
+  left: DurableBranchOrigin["recordedForkPoint"],
+  right: DurableBranchOrigin["recordedForkPoint"],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.recorded === right.recorded && left.base === right.base;
 }
 
 function schemaAnchorsEqual(
@@ -958,8 +1005,12 @@ function schemaAnchorsEqual(
  * is deliberately NOT a comparison against the working copy's live schema row
  * (a branch may evolve its committed schema after forking and must still
  * reopen). Throws a {@link BranchError}; the caller closes the store.
+ *
+ * Exported for a strategy that attaches a caller's graph to an allocation
+ * without going through reopen (the PostgreSQL manager's operation members), so
+ * this decision keeps one owner.
  */
-async function assertGraphMatchesAttestedOrigin<G extends GraphDef>(
+export async function assertGraphMatchesAttestedOrigin<G extends GraphDef>(
   graph: G,
   origin: DurableBranchOrigin,
 ): Promise<void> {
@@ -998,8 +1049,9 @@ function rebuildBranch<G extends GraphDef>(
   store: Store<G>,
   access: DurableWorkingCopyAccess,
   descriptor: DurableBranchDescriptor<DurableStoreDescriptor>,
-): GraphBranch<G> {
+): DurableGraphBranch<G> {
   return {
+    allocationId: descriptor.allocationId,
     id: descriptor.branchId,
     base: descriptor.base,
     store,
@@ -1008,6 +1060,9 @@ function rebuildBranch<G extends GraphDef>(
     ...(descriptor.forkRevision === undefined ?
       {}
     : { forkRevision: descriptor.forkRevision }),
+    ...(descriptor.recordedForkPoint === undefined ?
+      {}
+    : { recordedForkPoint: descriptor.recordedForkPoint }),
   };
 }
 

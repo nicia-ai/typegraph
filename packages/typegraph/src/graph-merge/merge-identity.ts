@@ -70,6 +70,7 @@ import {
   compareCodePoints,
   type GraphBackend,
   type GraphDef,
+  hasScopedIdentityReads,
   IdentityContradictionError,
   type IdentityTransferAssertion,
   NodeNotFoundError,
@@ -826,11 +827,17 @@ async function relevantLedgerAssertions<G extends GraphDef>(
   memberKeys: ReadonlySet<MergeKey>,
   backend: GraphBackend | TransactionBackend,
 ): Promise<readonly LedgerAssertion[]> {
-  const current = await storeRuntime(target).identityAssertionsAtTarget(
-    backend,
-    "state",
-  );
-  return current.filter(
+  const runtime = storeRuntime(target);
+  if (hasScopedIdentityReads(runtime)) {
+    return runtime.identityAssertionsTouchingAtTarget(
+      backend,
+      [...memberKeys].map((key) => ({ kind: kindOf(key), id: idOf(key) })),
+      "state",
+    );
+  }
+  // Older custom Store runtimes lack the scoped read. Preserve their original
+  // full-ledger guard, using the same transaction target and endpoint filter.
+  return (await runtime.identityAssertionsAtTarget(backend, "state")).filter(
     (assertion) =>
       memberKeys.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
       memberKeys.has(mergeKey(assertion.b.kind, assertion.b.id)),

@@ -1,4 +1,5 @@
 // Types
+export type { EngineRevision, EntityKey, LineageDelta } from "../backend/types";
 export type {
   RuntimeEdgeKind,
   RuntimeEdgeTypeFor,

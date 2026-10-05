@@ -155,7 +155,10 @@ describe("per-revision evidence catches an interleaved non-capturing writer [PGl
     // row at all.
     expect(pruneTo).toBeUndefined();
 
-    const diff = await diffAgainstBase(baseStore, forkStore, false, pruneTo);
+    const diff = await diffAgainstBase(baseStore, forkStore, {
+      captureForkState: false,
+      pruneTo,
+    });
     const aliceModified = diff.nodes.modified.find(
       (node) => node.id === alice.id,
     );

@@ -609,17 +609,18 @@ export async function ensureSchemaInternal<G extends GraphDef>(
     // design (`RemoveCompileTimeKindError`) — they are removed by recompiling
     // and redeploying. `removeKinds` is for runtime extension kinds, which
     // cannot be the cause of this diff.
-    const removesKind = [...diff.nodes, ...diff.edges].some(
-      (change) => change.type === "removed",
-    );
+    const removedKinds = [...diff.nodes, ...diff.edges]
+      .filter((change) => change.type === "removed")
+      .map((change) => `"${change.kind}"`);
     throw new MigrationError(
       `Schema migration required: ${diff.summary}. ` +
         `${actions.length} migration action(s) needed. ` +
         `Use getSchemaChanges() to review, then migrateSchema() to apply.` +
-        (removesKind ?
-          ` This diff removes a kind: migrateSchema() refuses to drop one ` +
-          `that still holds rows, so export or delete those rows first and ` +
-          `retry.`
+        (actions.length > 0 ? `\n${actions.join("\n")}` : "") +
+        (removedKinds.length > 0 ?
+          `${actions.length > 0 ? "\n" : " "}This diff removes ${removedKinds.length === 1 ? "kind" : "kinds"} ` +
+          `${removedKinds.join(", ")}: migrateSchema() refuses to drop a kind ` +
+          `that still holds rows, so export or delete those rows first and retry.`
         : ""),
       {
         graphId: graph.id,

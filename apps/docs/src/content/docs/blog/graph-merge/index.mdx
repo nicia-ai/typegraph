@@ -1,0 +1,223 @@
+---
+title: "Merging Two Feeds That Disagree About the Same Patient"
+date: 2026-06-09
+excerpt: "Graph merge lets independent writers edit isolated branches of a store, then folds them back with deterministic entity resolution, repointed edges, flagged conflicts, and provenance."
+tags:
+  - announcements
+cover:
+  alt: "Two rows contrasting merge() outcomes for same-birthDate-block patient pairs from an EHR branch and a claims branch: Zoe Adams and Quinn Webb's connectors cross into a red X and stay separate at near-zero name similarity, while Mohammed Ali and Mohamed Ali's connectors converge into one canonical Mohamed Ali card at similarity above the 0.78 threshold"
+  image: "./cover.png"
+social:
+  alt: "Merging Two Feeds That Disagree About the Same Patient"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Point two ingestion agents at overlapping data (an EHR export and a claims
+feed, say) and tell them to "just write everything to the graph", and you end
+up with two patient nodes for one person, each holding half the care history
+and neither aware of the other. Most pipelines then add a nightly dedupe job
+and hope nothing reads the graph in between.
+
+I think append is the wrong default for graphs, which is why 0.31 ships
+`@nicia-ai/typegraph/graph-merge`. It's the feature I've been most eager to get
+into people's hands. You branch a store, let each writer work on its own copy,
+and then fold the branches back in: entities are resolved, edges are repointed
+onto the surviving nodes, disagreements are reported instead of silently
+overwritten, and the merge records who contributed what.
+
+## Branch, write, merge
+
+`branch()` records the base store's current state and hands back an
+isolated working copy. Writers use the ordinary store API against it.
+`merge()` diffs every branch against the base and runs one pipeline to fold
+them back in:
+
+```text
+stage (diff every branch)
+  → generate candidates (exact unique · blocking key · similarity)
+    → cluster (group nodes that are the same entity)
+      → canonicalize (pick a survivor, union properties, resolve conflicts)
+        → repoint + dedupe edges onto survivors
+          → reconcile delete/modify and types
+            → commit transactionally + build the report
+```
+
+The whole thing is deterministic: clusters resolve by stable keys and
+conflicts are decided by an explicit `branchOrder` rather than by which branch
+happened to arrive first, so merging the same branches in any order commits
+the same graph.
+
+## Two ways to be the same patient
+
+[Example 18](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/18-fhir-graph-merge.ts)
+runs this on a small FHIR-flavored care graph. An EHR branch and a claims
+branch each record the same two patients, and each gets both identities
+wrong in a different way:
+
+- **Anna Rivera** (EHR) and **Ana Rivera** (claims) share `MRN-001`, and
+  because `mrn` is declared `unique`, they're matched regardless of how the
+  name is spelled, without any similarity threshold.
+- **Mohammed Ali** (EHR, `MRN-204`) and **Mohamed Ali** (claims, `MRN-205`)
+  have _different_ MRNs, so nothing forces them together. They share a birth
+  date, which puts them in the same blocking bucket, and they collapse because
+  their fulltext name similarity clears the configured `0.78` threshold.
+
+Landing in the same bucket only means two records get compared. The test
+suite also covers the other side of the threshold with **Zoe Adams** and
+**Quinn Webb**, who share a birth date and land in the same bucket but score
+near zero on name similarity, so they stay two separate patients.
+
+```typescript
+const mergeOptions: MergeOptions<CareGraph> = {
+  resolve: {
+    Patient: {
+      block: (node) => node.birthDate,
+      similarity: { kind: "fulltext", fields: ["name"] },
+      threshold: 0.78,
+    },
+  },
+  onPropertyConflict: "flag",
+  branchOrder: [EHR_BRANCH, CLAIMS_BRANCH],
+  provenance: true,
+};
+
+const result = await merge(base, [ehr, claims], mergeOptions);
+```
+
+Both pairs collapse to one canonical patient each:
+
+```text
+merged nodes: 9
+merged edges: 10
+entity resolutions: 2
+```
+
+That's six nodes staged on the EHR branch plus five on claims, minus the two
+patients that folded into their counterparts, and all ten edges survive
+without duplicates.
+
+## Disagreements get flagged, not hidden
+
+Merge doesn't quietly pick a value when branches disagree. The properties
+that don't agree are flagged, and the flags also show which identity mechanism
+was in play:
+
+```text
+conflicts:
+  - Patient.fhirId on patient-ana: claims-agent="Patient/claims-ana", ehr-agent="Patient/ehr-anna"
+  - Patient.name on patient-ana: claims-agent="Ana Rivera", ehr-agent="Anna Rivera"
+  - Patient.fhirId on patient-mohamed: claims-agent="Patient/claims-mohamed", ehr-agent="Patient/ehr-mohammed"
+  - Patient.mrn on patient-mohamed: claims-agent="MRN-205", ehr-agent="MRN-204"
+  - Patient.name on patient-mohamed: claims-agent="Mohamed Ali", ehr-agent="Mohammed Ali"
+```
+
+There's no `mrn` conflict for `patient-ana`, because Anna and Ana share
+`MRN-001` exactly. The Mohammed/Mohamed pair does flag `mrn`, since their
+merge was based on name similarity and never required the MRNs to agree.
+
+## Every edge lands on the survivor
+
+This is the part I like best: everything attached to either duplicate ends
+up on the one canonical patient. Here it is read back through each survivor's
+`forPatient` edges rather than a table scan:
+
+```text
+Ana Rivera (MRN-001, 1974-03-09)
+  - Encounter: Hypertension follow-up (2026-04-11T09:30:00-07:00)
+  - Encounter: Kidney function review (2026-04-14T10:00:00-07:00)
+  - MedicationRequest: Lisinopril 10 MG Oral Tablet - Take one tablet by mouth daily
+  - Observation: Blood pressure panel = 152/96 mmHg (high)
+  - Observation: Estimated glomerular filtration rate = 54 mL/min/1.73m2 (low)
+Mohamed Ali (MRN-205, 1990-08-21)
+  - Encounter: Cardiology consult (2026-05-02T13:00:00-07:00)
+  - Observation: LDL cholesterol = 168 mg/dL (high)
+```
+
+Ana Rivera's five resources came from both branches (the EHR encounter and
+medication, the claims encounter and lab result), and they now hang off a
+single patient node that neither branch created on its own, so anyone
+reading this record sees the full history. If an edge had been repointed
+wrongly, it would be missing from the list.
+
+## Who contributed what
+
+With `provenance: true`, the merge reports which branch contributed each
+committed node and edge:
+
+```text
+provenance:
+  - ehr-agent: 6 node(s), 6 edge(s)
+  - claims-agent: 5 node(s), 4 edge(s)
+```
+
+That report lives only as long as the call. Pass `persistProvenance: true`
+and each contribution is also written as a durable
+`{branch, sourceId} → canonical` row in a separate provenance graph on the
+same backend, so "what did this provider ever contribute?" is a query you
+can run next month, without adding anything to your domain schema.
+
+## Merging into a graph that kept moving
+
+`merge()` is a snapshot operation: every branch must fork from the target's
+_current_ state, or it fails with `BaseVersionMismatchError` rather than risk
+clobbering newer data. That works when you fork, write, and merge in one
+round, but real ingestion keeps going, and
+[Example 19](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/19-incremental-merge.ts)
+covers folding new batches into a target that has already moved on.
+
+In that example a company knowledge base already has `Acme Corp` (`acme.com`),
+and a provider batch reports the same company under another spelling along
+with one company that's new:
+
+```text
+Target before: [ 'Acme Corp (acme.com)' ]
+Target after:  [ 'Acme Corp (acme.com)', 'Globex (globex.io)' ]
+
+No duplicate was created: the provider's "ACME Corporation" merged onto the
+committed "Acme Corp" via the shared domain.
+```
+
+`mergeIncremental()` finds the already-committed row by its unique `domain`
+and merges onto it instead of creating a duplicate. It's the same mechanism
+as the shared-MRN case, matched against live data instead of another branch:
+
+```typescript
+const result = await mergeIncremental({
+  forkPoint, // the frozen ancestor the branch forked from
+  target, // the live committed graph, which may have advanced
+  branches: [provider],
+  options: {
+    resolve: {
+      Company: {
+        similarity: { kind: "fulltext", fields: ["name"] },
+        threshold: 0.9,
+      },
+    },
+    onPropertyConflict: "flag",
+    onBasePropertyConflict: "flag", // required: never let a stale branch value win
+    persistProvenance: true,
+  },
+});
+```
+
+`onBasePropertyConflict: "flag"` is required so that a stale branch can't
+overwrite something newer than the point it forked from. If the live target
+changed the same row after the fork, the target's value wins and the
+disagreement is reported.
+
+## Try it
+
+- [Graph Merge](/graph-merge): entity resolution, blocking, similarity
+  strategies, conflicts, scaling guards, and determinism
+- [FHIR Graph Merge](/examples/fhir-graph-merge) and
+  [Incremental Graph Merge](/examples/incremental-merge): the docs
+  walkthroughs
+- [Example 18](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/18-fhir-graph-merge.ts)
+  and
+  [Example 19](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/19-incremental-merge.ts):
+  the runnable source behind this post
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -158,6 +158,120 @@ export function registerSetNodeMutationIntegrationTests(
           'compareAndSet() expected property "metadata" must be a JSON scalar or compareAndSetAbsent',
         );
       }
+    });
+
+    it.each(["updateWhere", "compareAndSet"] as const)(
+      "%s preserves omitted defaults and validates supplied fields",
+      async (operation) => {
+        const Counter = defineNode("Counter", {
+          schema: z.object({
+            label: z.string(),
+            step: z.number().int().positive().default(1),
+            active: z.boolean().default(false),
+            note: z.string().optional(),
+          }),
+        });
+        const store = await context.createStore(
+          defineGraph({
+            id: `set_update_defaults_${operation}`,
+            nodes: { Counter: { type: Counter } },
+            edges: {},
+          }),
+        );
+        const counters = await store.nodes.Counter.bulkCreate([
+          { props: { label: "a", step: 10, active: false, note: "remove" } },
+          { props: { label: "b", step: 20, active: false, note: "remove" } },
+        ]);
+        async function patchCounters(
+          patch: Partial<z.infer<typeof Counter.schema>>,
+        ) {
+          if (operation === "updateWhere") {
+            return store.nodes.Counter.updateWhere({
+              patch,
+              where: (counter) => counter.active.eq(false),
+            });
+          }
+          return Promise.all(
+            counters.map((counter) =>
+              store.nodes.Counter.compareAndSet(counter.id, {
+                expected: { active: false },
+                patch,
+              }),
+            ),
+          );
+        }
+
+        await expect(patchCounters({ step: -1 })).rejects.toBeInstanceOf(
+          ValidationError,
+        );
+        expect(await patchCounters({ active: true, note: undefined })).toEqual(
+          operation === "updateWhere" ? { affectedCount: 2 } : [true, true],
+        );
+        for (const counter of counters) {
+          const updated = await store.nodes.Counter.getById(counter.id);
+          expect(updated).toMatchObject({
+            label: counter.label,
+            step: counter.step,
+            active: true,
+          });
+          expect(updated).not.toHaveProperty("note");
+        }
+
+        const first = requireDefined(counters[0]);
+        if (operation === "updateWhere") {
+          await store.nodes.Counter.updateWhere({
+            patch: { step: undefined },
+            where: (counter) => counter.id.eq(first.id),
+          });
+        } else {
+          await store.nodes.Counter.compareAndSet(first.id, {
+            expected: { active: true },
+            patch: { step: undefined },
+          });
+        }
+        await expect(
+          store.nodes.Counter.getById(first.id),
+        ).resolves.toMatchObject({ step: 1 });
+      },
+    );
+
+    it("does not evaluate omitted default callbacks in patches or expectations", async () => {
+      const defaultStep = vi.fn(() => 1);
+      const Counter = defineNode("Counter", {
+        schema: z.object({
+          label: z.string(),
+          step: z.number().default(defaultStep),
+        }),
+      });
+      const store = await context.createStore(
+        defineGraph({
+          id: "set_update_default_callback",
+          nodes: { Counter: { type: Counter } },
+          edges: {},
+        }),
+      );
+      const counter = await store.nodes.Counter.create({
+        label: "a",
+        step: 10,
+      });
+      defaultStep.mockClear();
+      await expect(
+        store.nodes.Counter.updateWhere({
+          patch: { label: "b" },
+          where: (candidate) => candidate.id.eq(counter.id),
+        }),
+      ).resolves.toEqual({ affectedCount: 1 });
+      expect(defaultStep).not.toHaveBeenCalled();
+      await expect(
+        store.nodes.Counter.compareAndSet(counter.id, {
+          expected: { label: "b" },
+          patch: { label: "c", step: 20 },
+        }),
+      ).resolves.toBe(true);
+      expect(defaultStep).not.toHaveBeenCalled();
+      await expect(
+        store.nodes.Counter.getById(counter.id),
+      ).resolves.toMatchObject({ label: "c", step: 20 });
     });
 
     it("validates refined node schemas on the complete after-image", async () => {

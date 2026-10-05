@@ -240,6 +240,21 @@ before running migrations:
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
+When multiple allocations share one PostgreSQL database, give each backend a
+stable namespace so its pgvector tables and indexes remain physically isolated:
+
+```typescript
+import { createPgvectorStrategy } from "@nicia-ai/typegraph";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+
+const backend = createPostgresBackend(pool, {
+  vector: createPgvectorStrategy("tenant-a"),
+});
+```
+
+Keep the namespace stable for the lifetime of the allocation. The default
+`pgvectorStrategy` continues to use the existing `tg_vec` / `tg_vecidx` names.
+
 Then in your schema:
 
 ```typescript

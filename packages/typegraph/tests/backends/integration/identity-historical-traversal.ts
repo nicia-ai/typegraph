@@ -15,7 +15,9 @@
  * outer join inner each fail it.
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { createStore, defineEdge, defineGraph, defineNode } from "../../../src";
 import { compareStrings } from "../../../src/utils/compare";
 import {
   expectedOneHopRows,
@@ -28,6 +30,55 @@ import {
   settle,
 } from "./identity-traversal-model";
 import { type IntegrationTestContext } from "./test-context";
+
+const HistoricalA = defineNode("HistoricalA", {
+  schema: z.object({ name: z.string() }),
+});
+const HistoricalRetired = defineNode("HistoricalRetired", {
+  schema: z.object({ name: z.string() }),
+});
+const HistoricalB = defineNode("HistoricalB", {
+  schema: z.object({ name: z.string() }),
+});
+const HistoricalTarget = defineNode("HistoricalTarget", {
+  schema: z.object({ name: z.string() }),
+});
+const historicalLink = defineEdge("historicalLink", {
+  schema: z.object({}),
+});
+const historicalRetiredKindGraph = defineGraph({
+  id: "historical_retired_identity_kind",
+  nodes: {
+    HistoricalA: { type: HistoricalA },
+    HistoricalRetired: { type: HistoricalRetired },
+    HistoricalB: { type: HistoricalB },
+    HistoricalTarget: { type: HistoricalTarget },
+  },
+  edges: {
+    historicalLink: {
+      type: historicalLink,
+      from: [HistoricalB],
+      to: [HistoricalTarget],
+    },
+  },
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+const historicalCurrentKindGraph = defineGraph({
+  id: "historical_retired_identity_kind",
+  nodes: {
+    HistoricalA: { type: HistoricalA },
+    HistoricalB: { type: HistoricalB },
+    HistoricalTarget: { type: HistoricalTarget },
+  },
+  edges: {
+    historicalLink: {
+      type: historicalLink,
+      from: [HistoricalB],
+      to: [HistoricalTarget],
+    },
+  },
+  identity: { sameIdAcrossKinds: "ignore" },
+});
 
 export function registerHistoricalIdentityTraversalTests(
   context: IntegrationTestContext,
@@ -163,6 +214,81 @@ export function registerHistoricalIdentityTraversalTests(
         });
       });
     }
+
+    it("does not conduct identity through a kind removed from the current graph", async () => {
+      const historicalStore = await context.createStore(
+        historicalRetiredKindGraph,
+      );
+      const first = await historicalStore.nodes.HistoricalA.create(
+        { name: "First" },
+        { id: "retired-bridge-first" },
+      );
+      const retired = await historicalStore.nodes.HistoricalRetired.create(
+        { name: "Retired bridge" },
+        { id: "retired-bridge-middle" },
+      );
+      const second = await historicalStore.nodes.HistoricalB.create(
+        { name: "Second" },
+        { id: "retired-bridge-second" },
+      );
+      const target = await historicalStore.nodes.HistoricalTarget.create(
+        { name: "Target" },
+        { id: "retired-bridge-target" },
+      );
+      await historicalStore.identity.assertSame(first, retired);
+      await historicalStore.identity.assertSame(retired, second);
+      await historicalStore.edges.historicalLink.create(second, target, {});
+      const instant = "2100-01-01T00:00:00.000Z";
+      expect(
+        await historicalStore.asOf(instant).identity.areSame(first, second),
+      ).toBe(true);
+
+      const currentStore = createStore(
+        historicalCurrentKindGraph,
+        historicalStore.backend,
+      );
+      const historical = currentStore.asOf(instant);
+      const firstRef = { kind: "HistoricalA", id: first.id } as const;
+
+      expect(await historical.identity.membersOf(firstRef)).toEqual([firstRef]);
+      expect(await historical.identity.representativeOf(firstRef)).toEqual(
+        firstRef,
+      );
+      expect(
+        await historical.identity.areSame(firstRef, {
+          kind: "HistoricalB",
+          id: second.id,
+        }),
+      ).toBe(false);
+      expect(
+        await historical.identity.explainSame(firstRef, {
+          kind: "HistoricalB",
+          id: second.id,
+        }),
+      ).toBeUndefined();
+      expect(
+        await historical.identity.classes({ kinds: ["HistoricalA"], limit: 5 }),
+      ).toMatchObject({
+        classes: [
+          {
+            representative: firstRef,
+            members: [firstRef],
+          },
+        ],
+      });
+
+      const traversed = await historical
+        .query()
+        .from("HistoricalA", "first")
+        .traverse("historicalLink", "edge", {
+          expand: "none",
+          includeIdentityMembers: true,
+        })
+        .to("HistoricalTarget", "target")
+        .select((queryContext) => queryContext.target.id)
+        .execute();
+      expect(traversed).toEqual([]);
+    });
 
     /**
      * `includeEnded` and `includeTombstones` drop node validity but keep

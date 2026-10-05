@@ -42,12 +42,34 @@ export const BASE_SCHEMA_RELEASES = [
   },
   {
     version: 4,
+    id: "revision-changes",
+    orderedShapeDigests: {
+      postgres:
+        "2a4c801c10b2c10d87b78bc66a91f23e0140c524e8cdf2fb5ab6b04a91b2ce32",
+      sqlite:
+        "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
+    },
+  },
+  {
+    version: 5,
+    // SQLite's shape is unchanged: its text indexes are already in byte order,
+    // so its digest is the previous release's.
+    id: "graph-id-byte-order-index",
+    orderedShapeDigests: {
+      postgres:
+        "9d254c4c28fdf3e084910fe50dcdba17bd7a7e705046b07f0377de4ff5aa2264",
+      sqlite:
+        "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
+    },
+  },
+  {
+    version: 6,
     id: "identity-transition-log",
     orderedShapeDigests: {
       postgres:
-        "eaf5ac6f9a8e07073395774c72bf618c557b62f77a523a575ecff60ae9cf2fd7",
+        "6c0977cd0c0fd2a73b685fcbc6b502f429f69704342d795b0f56e9cb790e1492",
       sqlite:
-        "04ceef5d851f2a2ef4176490625cd7b1f6bda458fbf9312a1979e81cd196475a",
+        "37978036648df400a50e0b59337b3c29ca66fdc16f69b927d645b6ec6cba0c0d",
     },
   },
 ] as const;

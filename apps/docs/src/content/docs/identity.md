@@ -73,6 +73,7 @@ await store.identity.representativeOf(alice);
 await store.identity.nodesOf(alice); // hydrated, kind-discriminated nodes
 await store.identity.areSame(alice, author);
 await store.identity.assertionsOf(alice);
+await store.identity.explainSame(alice, author);
 
 const ended = await store.identity.retractAssertion(result.assertion.id);
 // ended?.validTo is the exact assertion end instant
@@ -153,6 +154,31 @@ the method. A visible singleton returns itself from `membersOf` and
 explicit different assertion across both identity classes and also reflects
 ontology `disjointWith` constraints. Representatives are deterministic: the
 code-point-smallest `(kind, id)` visible member wins.
+
+`explainSame(a, b)` returns a shortest path of persisted `same` assertions and
+implicit same-ID folds connecting two visible references. Each step names its
+endpoints and either the assertion or `type: "same-id-fold"`. It returns `[]`
+for one visible reference and `undefined` when the references are distinct or
+not visible at the read coordinate. Use `store.asOf(instant).identity` for a
+historical explanation.
+Historical identity reads and identity-expanded traversals use the kinds
+registered on the current Store. Assertions involving a removed kind remain
+in recorded history but no longer connect active classes.
+
+`classes({ limit, kinds?, cursor? })` lists visible classes, including
+singletons, in representative order. A kind filter selects classes containing
+at least one visible member of the requested kinds; each result still includes
+all of that class's visible members. Pass `nextCursor` to the next call until
+it is absent. The cursor is exclusive and applies to the same graph, read
+coordinate, and kind filter. When `kinds` is omitted, the scan uses the
+registered runtime kinds present when each page is requested; adding a runtime
+kind during that scan changes the filter and invalidates its cursor. At current
+coordinates, the database finds visible representatives
+for the page and expands members only for those classes; discovering
+representatives still examines the visible node set. Historical coordinates
+reconstruct all visible classes before applying the page boundary. For paging
+across writes, use a recorded-time coordinate when recorded history is enabled:
+valid-time `asOf` reads still observe later changes to the live tables.
 
 ## Integrity and lifecycle
 

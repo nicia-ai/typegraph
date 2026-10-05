@@ -334,65 +334,22 @@ whose storage layer already tracks a whole-database revision and can answer
 supplies `lineage` directly.
 
 Both `revision` and `changesSince` take a **session** as their first
-argument — the connection the caller's decision is bound to, never one your
-implementation picks for itself. A caller planning outside any transaction
-(`branch()`'s fork-revision capture, `staging.ts`'s pruned-diff delta) passes
-the root backend it holds. The engine-anchored `base@V` guard's
-IN-TRANSACTION re-validation (`assertTargetUnchanged` in `graph-merge/
-merge.ts`) is the concrete caller a session-less bag could never serve
-correctly: it reads `lineage` off the PINNED TRANSACTION HANDLE and calls
-both members WITH that same handle as the session, so the read observes the
-transaction's own snapshot rather than a separate connection's possibly
-stale view. `requireLineage` refuses with `LINEAGE_UNAVAILABLE` (below) when
-the transaction handle carries no `lineage` of its own — there is no
-fallback to the root: a `lineage` reachable only through a `deriveBackend`
-overlay applied to the already-built root object never reaches a
-`transaction()` handle that way, so a profile that wants its `lineage`
-honored at commit time must thread it through `EngineProvisioning.lineage`,
-which reaches every `transaction()` handle the same way `catalog` does. For
-the same reason, never attach one `lineage` to the root object and a
-different one to the profile: the plan's anchor is minted from the root's
-`lineage` and the commit guard compares it against the handle's, and two
-sources' revisions are not comparable — an untouched target would be refused.
-Implement `revision`/`changesSince` by running the query ON the `session`
-argument (`session.execute`/`session.executeRaw`) — never on a connection
-you closed over instead. A `session` is always either the backend that
-declared this `lineage` or a `transaction()` handle it built, so nothing
-about implementing this member requires opening a connection of your own.
+argument. Run each read on that session (`session.execute` or
+`session.executeRaw`); a connection captured by the strategy may see a
+different snapshot. A caller planning outside a transaction passes the root
+backend. A backend that also needs lineage inside transactions must thread
+it through `EngineProvisioning.lineage` so transaction handles expose the
+same capability.
 
-`revision()` must return a token comparable only by equality against another
-revision the SAME `lineage` produced — never parsed, ordered, or compared
-across two different backends' `lineage`. It reports the engine's revision of
-the WHOLE DATABASE, not one graph, which is a stricter (and more useful)
-guarantee than the per-graph anchor `revisionTracking` keeps: a caller
-re-validating an engine anchor cannot treat a raw revision mismatch as a
-divergence the way it does for a per-graph one, because a commit to a
-completely unrelated graph on the same engine also bumps this revision — see
-`graph-merge/merge.ts`'s `engineAnchorMismatch`, which always confirms a
-mismatch through `changesSince` before refusing. `changesSince` must cover
-every way a row can change — insert, update, delete, and resurrection after a
-delete — deduplicated, and must answer `{ kind: "unbounded" }` rather than
-guess whenever it cannot bound the delta for a given revision (an unrecognized
-token, or history older than what it retains).
-
-**A revision must identify the database it came from, or the caller anchoring
-on it must.** Nothing in `EngineRevision`'s own shape distinguishes a revision
-minted by one physical database from a numerically coincidental one minted by
-an entirely different database — two independent engines whose counters both
-happen to read "r1" are indistinguishable by equality alone. `base-version.ts`
-does not trust a raw `lineage.revision()` for this reason: the engine anchor
-it mints pairs your revision with the store's own durable per-graph
-`typegraph_revision_origins` nonce (`engine:<origin>:<revision>`), the SAME
-namespacing the TypeGraph revision anchor already carries, and every
-re-validation checks that origin BEFORE ever comparing the bare revision (see
-[Lineage and pruned diffs](/graph-merge#lineage-and-pruned-diffs)'s engine
-anchor section). If your engine's own revision already carries a durable,
-per-database identity of its own (e.g. it is scoped to a specific cluster or
-instance and can never collide with another one), `revision()` may fold that
-identity into the token itself instead — `base@V`'s pairing still applies on
-top, so this is a belt-and-suspenders option, not a requirement. What you must
-never do is return a revision whose equality-comparable form could coincide
-with another database's, and rely on nothing to disambiguate them.
+`revision()` returns an opaque token comparable only with revisions from the
+same lineage source. `changesSince()` must report every changed node and edge
+key, including inserts, updates, deletes, and resurrection. Return
+`{ kind: "unbounded" }` when the delta cannot be bounded. TypeGraph uses
+lineage to prune branch diffs when it has a TypeGraph-owned revision anchor;
+for stores without revision tracking, `base@V` uses a complete content
+fingerprint regardless of engine lineage. That fingerprint covers current
+identity assertions and is recomputed inside the target commit transaction.
+Previously minted `engine:` base tokens are retired.
 
 Test a new `lineage` against `tests/backends/integration/lineage-conformance.ts`'s
 `registerLineageConformanceIntegrationTests` (registered per-dialect through

@@ -6,7 +6,9 @@
  */
 export {
   readIdentityAssertionPageAtTarget,
+  readIdentityAssertionsByIdsAtTarget,
   readIdentityAssertionsForInterchange,
+  readIdentityAssertionsTouchingAtTarget,
 } from "./interchange-read";
 export { toTransferAssertion } from "./row-codec";
 export { UnionFind } from "./service-components";

@@ -1,6 +1,5 @@
 export { bindExtraIfReachable } from "../backend/capabilities/bind";
 export { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
-export { requireLineage } from "../backend/capabilities/lineage";
 export {
   batchPointReadVerdict,
   recordedRevisionOriginsVerdict,
@@ -16,6 +15,10 @@ export {
   wrapWithManagedClose,
 } from "../backend/derive-backend";
 export {
+  GRAPH_RELATIONS,
+  resolveGraphRelationNames,
+} from "../backend/graph-relations";
+export {
   sharesSerializedTransactionResource,
   snapshotExportContention,
 } from "../backend/transaction-resource";
@@ -25,8 +28,6 @@ export type {
   GraphBackend,
   GraphReadBackend,
   LineageDelta,
-  LineageMembers,
-  LineageSession,
   NodeRow,
   TransactionBackend,
   TransactionOptions,
@@ -112,7 +113,9 @@ export {
   advanceRevisionClock,
   encodeRecordedLineageRevision,
   ensureRevisionOrigin,
+  ensureRevisionOriginRow,
   forceRecordedGraphRevision,
+  mintsOriginNamespacedAnchor,
   readRecordedClock,
   readRevisionOrigin,
   recordedRelationsLineage,
@@ -124,6 +127,7 @@ export {
   uncapturedGraphWriteLock,
 } from "../store/recorded-capture/clock";
 export {
+  hasScopedIdentityReads,
   storeBackend,
   storeCaptureEnabled,
   storeQueryBackend,

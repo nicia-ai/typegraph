@@ -1,4 +1,4 @@
-import { type SQLWrapper } from "drizzle-orm";
+import { sql as drizzleSql, type SQLWrapper } from "drizzle-orm";
 import {
   index as pgIndex,
   type IndexBuilder as PgIndexBuilder,
@@ -21,6 +21,7 @@ import {
   type IndexCompilationContext,
 } from "./compiler";
 import {
+  graphIdOrderIndexName,
   SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
   systemIndexName,
@@ -40,6 +41,7 @@ import {
 export function buildPostgresNodeIndexBuilders(
   table: NodeIndexTable,
   indexes: readonly IndexDeclaration[],
+  physicalName?: (index: NodeIndexDeclaration) => string,
 ): readonly PgIndexBuilder[] {
   // GIN-family declarations (method: "gin" / "trigram") are
   // materialize-only — like pgvector ANN indexes, they are a pure
@@ -62,7 +64,8 @@ export function buildPostgresNodeIndexBuilders(
     );
     assertNonEmpty(keys, `node index "${index.name}"`);
 
-    const base = index.unique ? pgUniqueIndex(index.name) : pgIndex(index.name);
+    const name = physicalName?.(index) ?? index.name;
+    const base = index.unique ? pgUniqueIndex(name) : pgIndex(name);
 
     const drizzleKeys = keys.map((key) => toDrizzleSql(key, "postgres"));
     assertNonEmpty(drizzleKeys, `node index "${index.name}"`);
@@ -87,6 +90,7 @@ export function buildPostgresNodeIndexBuilders(
 export function buildPostgresEdgeIndexBuilders(
   table: EdgeIndexTable,
   indexes: readonly IndexDeclaration[],
+  physicalName?: (index: EdgeIndexDeclaration) => string,
 ): readonly PgIndexBuilder[] {
   const edgeIndexes = indexes.filter(
     (index): index is EdgeIndexDeclaration =>
@@ -106,7 +110,8 @@ export function buildPostgresEdgeIndexBuilders(
     );
     assertNonEmpty(keys, `edge index "${index.name}"`);
 
-    const base = index.unique ? pgUniqueIndex(index.name) : pgIndex(index.name);
+    const name = physicalName?.(index) ?? index.name;
+    const base = index.unique ? pgUniqueIndex(name) : pgIndex(name);
 
     const drizzleKeys = keys.map((key) => toDrizzleSql(key, "postgres"));
     assertNonEmpty(drizzleKeys, `edge index "${index.name}"`);
@@ -474,6 +479,21 @@ export function buildSqliteSystemIndexBuilders(
     physicalTableName,
     columns,
     (name) => sqliteIndex(name),
+  );
+}
+
+/**
+ * The byte-ordered `graph_id` index (see `graphIdOrderIndexName`) as a Drizzle
+ * builder, so the schema factory, drizzle-kit and the generated DDL all carry
+ * the index the graph id listing seeks. PostgreSQL only: SQLite's text indexes
+ * are already in byte order.
+ */
+export function buildPostgresGraphIdOrderIndex(
+  physicalTableName: string,
+  graphIdColumn: PgColumn,
+): PgIndexBuilder {
+  return pgIndex(graphIdOrderIndexName(physicalTableName)).on(
+    drizzleSql`${graphIdColumn} COLLATE "C"`,
   );
 }
 

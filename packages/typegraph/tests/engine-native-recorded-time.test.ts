@@ -242,8 +242,8 @@ describe("engine-native recorded time: construction", () => {
     // history on its own and none of TypeGraph's recorded relations are
     // ever populated.
     expect(storeCaptureEnabled(store)).toBe(false);
-    // The backend's own engine anchor applies for graph-merge base tokens,
-    // not the TypeGraph revision-anchor path.
+    // Graph-merge base tokens use complete content fingerprints here,
+    // not TypeGraph's revision-anchor path.
     expect(store.revisionTrackingEnabled).toBe(false);
   });
 
@@ -839,7 +839,7 @@ describe("engine-native recorded time: revisionNow", () => {
    * `revisionNow()` is another consumer of `#engineRecordedInstant`,
    * alongside `recordedNow()` and the two transaction-commit sites — gating
    * it on `#revisionTrackingEnabled`
-   * alone (forced false under engine-native, since the engine anchor
+   * alone (forced false under engine-native, since the content fingerprint
    * applies instead) left it answering `undefined` even under `history:
    * true`. MUTATION-PROOF: removing the `#engineNativeHistory` branch here
    * (restoring the bare `if (!this.#revisionTrackingEnabled) return
@@ -866,12 +866,12 @@ describe("engine-native recorded time: revisionNow", () => {
 
   /**
    * Declared deviation: `revisionTrackingEnabled` stays false under
-   * engine-native ownership (the backend's own engine anchor applies
+   * engine-native ownership (a complete content fingerprint applies
    * instead of the TypeGraph revision-anchor path), and public merge planning's
    * capability gate (`assertPublicPlanCapability`, `graph-merge/merge.ts`)
    * checks exactly that flag, not `revisionNow()`'s availability. Fixing
    * `revisionNow()` above does not lift this refusal — extending public
-   * merge-plan capability to the engine-anchor path is a graph-merge
+   * merge-plan capability to this untracked path is a graph-merge
    * decision for the step that actually exercises engine-native branch/
    * merge, not this one. Pinned here so that step inherits an explicit,
    * tested starting point rather than a silent gap.

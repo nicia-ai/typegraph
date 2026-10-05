@@ -554,8 +554,9 @@ export class DurableOperationConflictError extends DurableOperationError {
 /**
  * Raised when a host cannot provide the atomic mutation-plus-evidence
  * guarantee. It carries the dimensions the host cannot honor. The portable
- * fallback is refusal; TypeGraph never emulates atomicity with callbacks or
- * best effort.
+ * fallback is refusal; TypeGraph never emulates atomicity with best effort or
+ * with callbacks that run outside the evidence transaction (see
+ * {@link DurableWorkingCopyStrategy.operations}).
  */
 export class DurableOperationUnsupportedError extends DurableOperationError {
   protected static override readonly errorCategory = "user";

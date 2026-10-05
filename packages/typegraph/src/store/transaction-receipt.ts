@@ -39,7 +39,7 @@ type _receiptEdgeSurfaceIsComplete = Assert<
 // IdentityFacade method that nobody adds here would silently bypass both the
 // receipt counters and the sealing guard.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
-type _receiptIdentitySurfaceIsComplete = Assert<
+type _receiptIdentityFacadeIsComplete = Assert<
   Equal<
     | (typeof IDENTITY_READ_NAMES)[number]
     | (typeof IDENTITY_WRITE_NAMES)[number]
@@ -280,12 +280,14 @@ export function wrapTransactionIdentity<G extends GraphDef>(
   recorder: TransactionReceiptRecorder,
 ): IdentityFacade<G> {
   return {
+    classes: (options) => identity.classes(options),
     representativeOf: (ref) => identity.representativeOf(ref),
     membersOf: (ref) => identity.membersOf(ref),
     nodesOf: (ref) => identity.nodesOf(ref),
     areSame: (a, b) => identity.areSame(a, b),
     areDifferent: (a, b) => identity.areDifferent(a, b),
     assertionsOf: (ref) => identity.assertionsOf(ref),
+    explainSame: (a, b) => identity.explainSame(a, b),
     transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
     replay: (ref, options) => identity.replay(ref, options),
     async assertSame(a, b) {

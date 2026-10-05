@@ -84,7 +84,12 @@ import {
 } from "../../backend/types";
 import { ConfigurationError, StaleVersionError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
-import { isSqliteStaleSnapshotError } from "../../utils/sql-errors";
+import { sql } from "../../query/sql-fragment";
+import { asCompiledRowsSql } from "../../query/sql-intent";
+import {
+  isPostgresFailedTransactionError,
+  isSqliteStaleSnapshotError,
+} from "../../utils/sql-errors";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
@@ -120,9 +125,20 @@ export type WriteTransactionContext = Readonly<{
 interface WriteTransactionSession {
   lock: GraphWriteLock | undefined;
   wrote: boolean;
+  aborted?: Readonly<{ error: unknown }>;
 }
 
 const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
+
+/** A failed PostgreSQL statement may doom the managed transaction even if caught. */
+export function markWriteTransactionAborted(
+  target: GraphBackend | TransactionBackend,
+  error: unknown,
+): void {
+  const session = writeTransactionSessions.get(target);
+  if (session !== undefined && session.aborted === undefined)
+    session.aborted = { error };
+}
 
 /**
  * Schema fences deliberately do not normally memoize: PostgreSQL releases a
@@ -382,6 +398,17 @@ export async function withWriteTransactionSession<T>(
   writeTransactionSessions.set(target, session);
   try {
     const result = await fn();
+    if (session.aborted !== undefined) {
+      // A caller with tx.sql may have rolled back a native savepoint after
+      // catching the error. Check the pinned session itself: 25P02 means the
+      // transaction is still doomed, while a successful read proves recovery.
+      try {
+        await target.execute(asCompiledRowsSql(sql`SELECT 1`));
+      } catch (probeError) {
+        if (!isPostgresFailedTransactionError(probeError)) throw probeError;
+        throw session.aborted.error;
+      }
+    }
     if (session.wrote && ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
       await advanceRevisionClock(target, ctx.revisionSchema, ctx.graphId, true);
     }

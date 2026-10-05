@@ -649,6 +649,9 @@ export type GraphReadBackend = Pick<
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
+  | "findNodesAcrossKinds"
+  | "findEdgesAcrossKinds"
   | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
 >;
@@ -2434,6 +2437,11 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindNodesByKindParams,
   ) => Promise<readonly NodeRow[]>;
+  /** Optional graph-wide keyset read for merge and interchange. */
+  findNodesAcrossKinds?: (
+    this: void,
+    params: FindRowsAcrossKindsParams,
+  ) => Promise<readonly NodeRow[]>;
   countNodesByKind: (
     this: void,
     params: CountNodesByKindParams,
@@ -2441,6 +2449,38 @@ export type GraphBackend = Readonly<{
   findEdgesByKind: (
     this: void,
     params: FindEdgesByKindParams,
+  ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Optional V1 keyed read for the `oneActive` claim population. Returns only
+   * undeleted edges with `valid_to IS NULL`, including future `valid_from`.
+   * An absent custom-backend method makes bounded candidate planning use its
+   * complete-clone path.
+   */
+  findActiveEdgesBySourceV1?: (
+    this: void,
+    params: Readonly<{
+      graphId: string;
+      edgeKind: string;
+      fromKind: string;
+      fromId: string;
+    }>,
+  ) => Promise<readonly EdgeRow[]>;
+  /** Exact lookup for durable identity owners, including tombstoned rows. */
+  findEdgesByMatchIdentity?: (
+    this: void,
+    params: Readonly<{
+      graphId: string;
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[];
+    }>,
+  ) => Promise<readonly EdgeRow[]>;
+  /** Optional graph-wide keyset read for merge and interchange. */
+  findEdgesAcrossKinds?: (
+    this: void,
+    params: FindRowsAcrossKindsParams,
   ) => Promise<readonly EdgeRow[]>;
   /**
    * Reads the edges of a SET of endpoints in one statement per bind-budget
@@ -2917,6 +2957,16 @@ export type GraphBackend = Readonly<{
    * without replaying all base-table DDL during a merge read.
    */
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+
+  /**
+   * Idempotently install the revision-change table and row triggers under a
+   * privileged schema owner. Runtime lineage verifies the installation with
+   * `revisionChangesJournalReady` and never invokes this DDL member.
+   */
+  ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+
+  /** Read-only proof that the revision journal and every row trigger are installed. */
+  revisionChangesJournalReady?: (this: void) => Promise<boolean>;
 
   /**
    * Idempotently add the durable edge-match identity columns, pair constraint,
@@ -3471,6 +3521,17 @@ export type GraphBackend = Readonly<{
   clearGraph: (this: void, graphId: string) => Promise<void>;
 
   /**
+   * Clears graph data while retaining contribution markers for physical
+   * storage that remains provisioned. Optional so custom backends can keep
+   * their existing `clearGraph` behavior; `Store.clear()` uses this member
+   * when available.
+   */
+  clearGraphPreservingContributionMaterializations?: (
+    this: void,
+    graphId: string,
+  ) => Promise<void>;
+
+  /**
    * Creates the base TypeGraph tables if they don't already exist.
    *
    * Called automatically by `createStoreWithSchema()` when a fresh database
@@ -3682,7 +3743,11 @@ export type BackendIdentity = Pick<
 
 export type NodeEntityReadBackend = Pick<
   GraphBackend,
-  "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind"
+  | "getNode"
+  | "getNodes"
+  | "findNodesByKind"
+  | "findNodesAcrossKinds"
+  | "countNodesByKind"
 >;
 
 export type NodeEntityWriteBackend = Pick<
@@ -3712,6 +3777,9 @@ export type EdgeEntityReadBackend = Pick<
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
+  | "findEdgesByMatchIdentity"
+  | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
   | "countEdgesByKind"
@@ -3824,7 +3892,9 @@ export type RemovalMaterializationBackend = Pick<
 
 export type GraphLifecycleBackend = Pick<
   GraphBackend,
-  "clearGraph" | "bootstrapTables"
+  | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
+  | "bootstrapTables"
 >;
 
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;
@@ -3967,6 +4037,9 @@ export function createTransactionReadBackend(
 ): TransactionReadBackend {
   const getNodes = backend.getNodes;
   const getEdges = backend.getEdges;
+  const findNodesAcrossKinds = backend.findNodesAcrossKinds;
+  const findEdgesAcrossKinds = backend.findEdgesAcrossKinds;
+  const findActiveEdgesBySourceV1 = backend.findActiveEdgesBySourceV1;
   const compileSql = backend.compileSql;
 
   return Object.freeze({
@@ -3999,8 +4072,26 @@ export function createTransactionReadBackend(
     edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
     findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
     findNodesByKind: (params) => backend.findNodesByKind(params),
+    ...(findNodesAcrossKinds === undefined ?
+      {}
+    : {
+        findNodesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
+          findNodesAcrossKinds(params),
+      }),
     countNodesByKind: (params) => backend.countNodesByKind(params),
     findEdgesByKind: (params) => backend.findEdgesByKind(params),
+    ...(findActiveEdgesBySourceV1 === undefined ?
+      {}
+    : {
+        findActiveEdgesBySourceV1: (params: FindActiveEdgesBySourceV1Params) =>
+          findActiveEdgesBySourceV1(params),
+      }),
+    ...(findEdgesAcrossKinds === undefined ?
+      {}
+    : {
+        findEdgesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
+          findEdgesAcrossKinds(params),
+      }),
     countEdgesByKind: (params) => backend.countEdgesByKind(params),
     getActiveSchema: (graphId) => backend.getActiveSchema(graphId),
     getSchemaVersion: (graphId, version) =>
@@ -4483,6 +4574,14 @@ export type CountEdgesAtEndpointParams = Readonly<{
   activeOnly?: boolean;
 }>;
 
+/** Exact source key of an active `oneActive` edge population. */
+export type FindActiveEdgesBySourceV1Params = Readonly<{
+  graphId: string;
+  edgeKind: string;
+  fromKind: string;
+  fromId: string;
+}>;
+
 /**
  * Parameters for checking if an edge exists between two nodes.
  */
@@ -4534,6 +4633,15 @@ export type FindNodesByKindParams = Readonly<{
   after?: string;
 }>;
 
+/** Keyset page ordered by `(kind, id)` in the backend's own collation. */
+export type FindRowsAcrossKindsParams = Readonly<{
+  graphId: string;
+  kinds: readonly string[];
+  limit: number;
+  after?: Readonly<{ kind: string; id: string }>;
+  excludeDeleted?: boolean;
+}>;
+
 /**
  * Parameters for counting nodes by kind.
  */
@@ -4580,6 +4688,16 @@ export type FindEdgesByKindParams = Readonly<{
    * `offset` — callers pick one. Mirrors {@link FindNodesByKindParams.after}.
    */
   after?: string;
+}>;
+
+/** Exact owner keys for a bounded durable edge identity lookup. */
+export type FindEdgesByMatchIdentityParams = Readonly<{
+  graphId: string;
+  identities: readonly Readonly<{
+    kind: string;
+    name: string;
+    key: string;
+  }>[];
 }>;
 
 /**

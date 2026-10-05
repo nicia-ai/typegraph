@@ -614,29 +614,21 @@ function compileProjectedSource(
   },
   ast: QueryAst,
   ctx: PredicateCompilerContext,
+  cteAliasOverride?: string,
 ): SqlFragment {
   const { dialect } = ctx;
+  const cteAlias = cteAliasOverride ?? field.cteAlias;
   if (field.source.__type === "database_expression") {
-    return compileStandardDatabaseExpression(
-      ast,
-      field.source,
-      ctx,
-      field.cteAlias,
-    );
+    return compileStandardDatabaseExpression(ast, field.source, ctx, cteAlias);
   }
   if (isAggregateExpr(field.source)) {
-    return compileAggregateExprFromSource(
-      field.source,
-      dialect,
-      field.cteAlias,
-    );
+    return compileAggregateExprFromSource(field.source, dialect, cteAlias);
   }
-  const cteAlias = field.cteAlias ?? `cte_${field.source.alias}`;
   return compileFieldValue(
     field.source,
     dialect,
     field.source.valueType,
-    cteAlias,
+    cteAlias ?? `cte_${field.source.alias}`,
   );
 }
 
@@ -664,7 +656,12 @@ export function buildStandardProjection(
   }
 
   const projectedFields = fields.map((field) => {
-    const source = compileProjectedSource(field, ast, ctx);
+    const source = compileProjectedSource(
+      field,
+      ast,
+      ctx,
+      collapsedTraversalCteAlias,
+    );
     return sql`${source} AS ${quoteIdentifier(field.outputName)}`;
   });
   return sql.join(projectedFields, sql`, `);

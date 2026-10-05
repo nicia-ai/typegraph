@@ -538,6 +538,8 @@ export type PredicateCompilerContext = Readonly<{
   recordedReadBinding?: RecordedReadBinding;
   /** Equal-id behavior for historical identity traversal reconstruction. */
   identitySameIdAcrossKinds?: "fold" | "ignore";
+  /** Registered node kinds allowed to conduct historical identity. */
+  identityRegisteredKinds?: readonly string[];
   compileFieldExpression?: DatabaseExpressionCompilerContext["compileFieldExpression"];
   /**
    * Whether the active backend can compute a bounded transitive closure in

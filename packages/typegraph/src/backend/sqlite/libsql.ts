@@ -38,9 +38,9 @@ import {
   ORDERED_AGGREGATE_PROBE_SQL,
 } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
+import { detectLibsqlTransactionMode } from "../drizzle/libsql-client";
 import {
   createSqliteBackend,
-  isLocalLibsqlClient,
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
@@ -127,14 +127,17 @@ export type LibsqlBackendResult = Readonly<{
  *
  * Handles DDL execution and configures the correct execution profile.
  * Local clients (`client.protocol === "file"`, covering `file:` paths and
- * `:memory:` databases — see `isLocalLibsqlClient`) run transactions as raw
- * BEGIN/COMMIT statements on the client's single stable connection
- * (`transactionMode: "sql"`): `client.transaction()` permanently hands that
- * connection to the transaction and lazily opens a fresh one afterwards, which
- * for an in-memory database is a fresh, empty database. Remote clients (`http` /
- * `ws`) run each transaction on its own stream via Drizzle's
- * `db.transaction()` (`transactionMode: "drizzle"`). The caller retains
- * ownership of the client and is responsible for closing it.
+ * `:memory:` databases — see `isLocalLibsqlClient`) from `@libsql/client`
+ * before 0.18 run transactions as raw BEGIN/COMMIT statements on the client's
+ * single stable connection (`transactionMode: "sql"`): there,
+ * `client.transaction()` permanently hands that connection to the transaction
+ * and lazily opens a fresh one afterwards, which for an in-memory database is
+ * a fresh, empty database. From 0.18 local clients pool their connections and
+ * `client.transaction()` returns its connection to the pool, so they run each
+ * transaction through Drizzle's `db.transaction()` (`transactionMode:
+ * "drizzle"`), as remote clients (`http` / `ws`) always have. Which behavior a
+ * local client has is probed once, at creation. The caller retains ownership
+ * of the client and is responsible for closing it.
  *
  * Because that single local connection is also what makes a snapshot export and
  * a concurrent write mutually exclusive, `createSqliteBackend` marks the backend
@@ -162,6 +165,7 @@ export async function createLibsqlBackend(
 ): Promise<LibsqlBackendResult> {
   const tables = options.tables ?? defaultTables;
   const db = drizzle(client);
+  const transactionMode = await detectLibsqlTransactionMode(client);
   const orderedAggregates = await detectOrderedAggregates(client);
   const backend = createSqliteBackend(db, {
     ...(options.schemaProvisioning === undefined ?
@@ -170,7 +174,7 @@ export async function createLibsqlBackend(
     capabilities: { orderedAggregates },
     executionProfile: {
       isSync: false,
-      transactionMode: isLocalLibsqlClient(client) ? "sql" : "drizzle",
+      transactionMode,
     },
     tables,
     // libSQL ships native vector search in core — no extension to load —

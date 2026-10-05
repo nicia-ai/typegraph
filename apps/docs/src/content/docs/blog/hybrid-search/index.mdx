@@ -1,0 +1,183 @@
+---
+title: "Embeddings Can't Find a SKU"
+date: 2026-04-30
+excerpt: "TypeGraph now has native BM25 fulltext search and hybrid retrieval with Reciprocal Rank Fusion, on SQLite and Postgres, with no search service to run."
+tags:
+  - announcements
+cover:
+  alt: "Diagram of Reciprocal Rank Fusion combining a vector-search ranking and a fulltext ranking into one fused list, where a product buried at vector rank 6 but ranked first by fulltext surfaces at fused rank 2"
+  image: "./cover.png"
+social:
+  alt: "Embeddings Can't Find a SKU"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Type `PROD-1005-E` into a search box and you expect one result: the product
+with that SKU. Vector search is bad at this in a way tuning won't fix: a rare
+alphanumeric code barely moves an embedding, so cosine similarity ranks on
+everything _else_ in the query, and the product whose exact code you typed
+ends up under a pile of vaguely similar ones.
+
+BM25 handles it easily, because it counts terms and a token that appears in
+exactly one document wins however odd it looks. Rather than trying to make
+embeddings better at exact matches, I wanted both signals fused in one place,
+so 0.21 added native fulltext search and hybrid retrieval that combines it
+with vector search, and 0.24 finished the job on SQLite.
+
+## Fulltext is a field modifier
+
+Mark a field `searchable()` and TypeGraph keeps a BM25 index in sync on every
+write. On Postgres that's `tsvector` + GIN; on SQLite it's FTS5. You don't
+need an Elasticsearch cluster for this, or a sync job to feed one.
+
+```typescript
+const Product = defineNode("Product", {
+  schema: z.object({
+    name: searchable({ language: "english" }),
+    description: searchable({ language: "english" }),
+    sku: searchable({ language: "english" }),
+    category: z.enum(["outerwear", "footwear", "accessories", "climbing"]),
+    embedding: embedding(16).optional(),
+  }),
+});
+```
+
+Query it with `store.search.fulltext()`, or use `$fulltext.matches()` as a
+predicate inside an ordinary query, where it combines with metadata filters
+and traversals in the same SQL statement:
+
+```typescript
+const activeOuterwear = await store
+  .query()
+  .from("Product", "p")
+  .whereNode("p", (p) =>
+    p.$fulltext
+      .matches("lightweight", 10)
+      .and(p.status.eq("active"))
+      .and(p.category.eq("outerwear")),
+  )
+  .select((ctx) => ({ sku: ctx.p.sku, name: ctx.p.name }))
+  .execute();
+```
+
+## Hybrid, fused with RRF
+
+`store.search.hybrid()` runs the vector search and the fulltext search and
+merges them with Reciprocal Rank Fusion. RRF only looks at rank positions, so
+it doesn't care that a cosine score and a BM25 score live on completely
+different scales, which makes it the least fiddly fusion method I know of.
+
+```typescript
+const hybridHits = await store.search.hybrid("Product", {
+  limit: 5,
+  vector: { fieldPath: "embedding", queryEmbedding, metric: "cosine", k: 20 },
+  fulltext: { query: "waterproof shell", k: 20, includeSnippets: true },
+  fusion: { method: "rrf", k: 60, weights: { vector: 1, fulltext: 1.25 } },
+});
+```
+
+Fulltext worked on both backends from 0.21, but hybrid needs the backend to
+run a vector search, which SQLite couldn't do yet, so on SQLite the hybrid call
+threw `ConfigurationError`. 0.24 gives SQLite a real vector search on top of
+`sqlite-vec`, built to the same shape as the Postgres version, and the hybrid
+call now takes the same options and returns the same results on both.
+
+SQLite also turned out to be the faster of the two. On the project's search
+benchmark (500 documents, 384 dimensions), SQLite hybrid runs in **0.8ms**
+against Postgres's 2.5ms, partly because SQLite runs in-process and doesn't
+pay for a round trip.
+
+## Running it
+
+[Example 15](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/15-fulltext-hybrid-search.ts)
+seeds nine outdoor-gear products (parkas, shells, a climbing harness, ski
+goggles), each with a searchable name, description, and SKU, plus a small
+embedding. A BM25 query for `"waterproof jacket"` finds the Expedition Parka,
+and the snippet shows why:
+
+```text
+Heavily insulated <mark>jacket</mark> for alpine expeditions and extreme
+cold. <mark>Waterproof</mark> outer shell with down fill.
+```
+
+Then the SKU:
+
+```text
+Query: "PROD-1005-E" (looking up an exact SKU)
+   1. [PROD-1005-E] Climbing Harness Pro     score=1.6328
+```
+
+It comes back as the only result, where a pure vector search on that string
+ranks unrelated products higher because the SKU barely registers in the
+embedding.
+
+Hybrid is where it gets interesting. Here's `"waterproof shell"` with `k=20` on
+each side, RRF `k=60`, and fulltext weighted at `1.25`:
+
+```text
+   1. [PROD-1001-A] Expedition Parka         score=0.0357 (v#3, f#3)
+   2. [PROD-1002-B] Arctic Shell             score=0.0356 (v#6, f#1)
+   3. [PROD-9901-Z] Legacy Rain Shell        score=0.0355 (v#5, f#2)
+   4. [PROD-1007-G] Compression Socks        score=0.0164 (v#1, f—)
+   5. [PROD-1008-H] Hiking Daypack 25L       score=0.0161 (v#2, f—)
+```
+
+The `(v#, f#)` tags are each hit's rank on each side. Arctic Shell was
+fulltext's top pick but only sixth by vector, so pure vector search would have
+buried it, and RRF lifts it to second because doing well on _either_ side
+counts. Compression Socks went the other way: they were the vector side's top
+hit, but with no fulltext match at all they end up at the bottom of the list.
+
+## It composes with everything else
+
+The same fusion is on the query builder as `.fuseWith()`, so a hybrid search
+can carry ordinary predicates. Filtering to `status = "active"` drops the
+discontinued Legacy Rain Shell in the same query, without a post-filter:
+
+```typescript
+const builderHybrid = await store
+  .query()
+  .from("Product", "p")
+  .whereNode("p", (p) =>
+    p.$fulltext
+      .matches("waterproof shell", 20)
+      .and(p.embedding.similarTo(queryEmbedding, 20))
+      .and(p.status.eq("active")),
+  )
+  .fuseWith({ k: 60, weights: { vector: 1, fulltext: 1.25 } })
+  .select((ctx) => ({ sku: ctx.p.sku, name: ctx.p.name }))
+  .limit(5)
+  .execute();
+
+// → Arctic Shell, Expedition Parka, Hiking Daypack 25L, Ski Goggles UV400,
+//   Compression Socks
+```
+
+There are four query modes for what a search box actually receives:
+`websearch` for Google-style syntax (`"ski goggles" -compression`), `phrase`
+for exact adjacency, `plain` for all-terms-must-match, and `raw` when you want
+the engine's native `tsquery` or FTS5 `MATCH` syntax.
+
+And if the index falls behind (you added a `searchable()` field, or a bulk
+write went around the store), `store.search.rebuildFulltext()` backfills it
+page by page:
+
+```text
+Before rebuild: "waterproof" → 0 hits (fulltext rows cleared).
+Rebuilt: kinds=Product processed=9 upserted=9 cleared=0 skipped=0
+After rebuild: "waterproof" → 3 hits restored.
+```
+
+## Try it
+
+- [Fulltext Search](/fulltext-search): RRF tuning, adding fulltext to
+  existing data, and alternate Postgres strategies (pg_trgm, ParadeDB,
+  pgroonga)
+- [Semantic Search](/semantic-search): the vector half
+- [Example 15](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/15-fulltext-hybrid-search.ts):
+  the runnable source behind this post
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

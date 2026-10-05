@@ -63,7 +63,11 @@ const SEAM_CONSTRUCTORS = [
   "wrapWithManagedClose",
 ] as const;
 
-const SEAM_QUERIES = ["backendDerivationRoot", "isBackendDerivedFrom"] as const;
+const SEAM_QUERIES = [
+  "backendDerivationChain",
+  "backendDerivationRoot",
+  "isBackendDerivedFrom",
+] as const;
 
 type SeamConstructor = (typeof SEAM_CONSTRUCTORS)[number];
 
@@ -125,6 +129,30 @@ const INVENTORY: readonly InventoryEntry[] = [
     line: "const trustedTx = deriveBackend(tx, {",
     reason:
       "Trusted import runs its bulk path against the caller's transaction with the temporary-write members overridden; the rest of the transaction backend must stay reachable.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const guarded = deriveBackend(backend, {",
+    reason:
+      "A table-backed working copy guards its exact allocated backend before exposing it as a Store while retaining the backend's transaction and resource identity.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "return deriveBackend(backend, { bootstrapTables: () => Promise.resolve() });",
+    reason:
+      "The allocator installs owned tables before Store bootstrap; this derived backend suppresses only repeat bootstrap while retaining the allocated connection and its backend proofs.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const disposableBackend = wrapWithManagedClose(",
+    reason:
+      "A makeBackend allocation closes its derived connection and then discards the empty, schema-mutable table set it owns, including vector tables created after allocation.",
+  },
+  {
+    file: "backend/drizzle/postgres-working-copy.ts",
+    line: "const disposableBackend = wrapWithManagedClose(created.backend, () =>",
+    reason:
+      "An ephemeral working copy closes its derived connection and then discards only the tables owned by its allocation.",
   },
   {
     file: "backend/postgres/pglite.ts",

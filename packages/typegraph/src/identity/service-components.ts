@@ -445,14 +445,22 @@ export async function readClosureRowsForGraph(
 export function closureMismatchError(
   graphId: string,
   detail: Record<string, unknown>,
+  mode: "current" | "historical" = "current",
 ): ConfigurationError {
   return new ConfigurationError(
-    "Operational Identity materialized closure does not match computed identity components.",
+    mode === "current" ?
+      "Operational Identity materialized closure does not match computed identity components."
+    : "Historical Identity class membership does not match its reconstructed proof graph.",
     { code: "IDENTITY_SCHEMA_CONTRADICTION", graphId, ...detail },
-    {
-      suggestion:
-        "Run rebuildIdentityClosure(store) to rebuild the materialized identity closure.",
-    },
+    mode === "current" ?
+      {
+        suggestion:
+          "Run rebuildIdentityClosure(store) to rebuild the materialized identity closure.",
+      }
+    : {
+        suggestion:
+          "Inspect the historical node and assertion rows at the requested coordinate for inconsistent identity history.",
+      },
   );
 }
 

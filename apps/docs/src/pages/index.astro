@@ -2,11 +2,25 @@
 import package_ from "../../../../packages/typegraph/package.json";
 import FeatureIcon from "../components/landing/FeatureIcon.astro";
 import HeroIllustration from "../components/landing/HeroIllustration.astro";
+import LatestPosts from "../components/landing/LatestPosts.astro";
 import NewsletterSignup from "../components/landing/NewsletterSignup.astro";
 import Layout from "../layouts/Landing.astro";
+import { getLatestBlogPosts } from "../lib/blog-posts";
 import { AUTHOR_ID, ORGANIZATION_ID, WEBSITE_ID } from "../lib/structured-data";
 
 const version = package_.version;
+
+const LATEST_POST_COUNT = 3;
+const latestPosts = await getLatestBlogPosts(LATEST_POST_COUNT);
+const newestPost = latestPosts.at(0);
+const heroPill =
+  newestPost === undefined ?
+    { href: "/changelog", label: "Changelog", ariaSuffix: "See changelog." }
+  : {
+      href: newestPost.href,
+      label: newestPost.title,
+      ariaSuffix: "Read the post.",
+    };
 
 const faqs = [
   {
@@ -64,15 +78,15 @@ const faqPageSchema = {
     <section class="grid grid-cols-1 md:grid-cols-[1.2fr_1fr] gap-16 items-center py-24 md:py-32">
       <div class="text-left">
         <a
-          href="/changelog"
+          href={heroPill.href}
           class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full border border-primary/30 bg-primary/10 text-sm font-mono text-primary hover:bg-primary/15 hover:border-primary/50 transition-colors no-underline"
-          aria-label={`Version ${version} - Bitemporal history. See changelog.`}
+          aria-label={`Version ${version} - ${heroPill.label}. ${heroPill.ariaSuffix}`}
         >
           <span
             class="inline-block w-2 h-2 rounded-full bg-primary"
             aria-hidden="true"
           ></span>
-          v{version} · Bitemporal history
+          v{version} · {heroPill.label}
           <span class="opacity-70" aria-hidden="true">
             →
           </span>
@@ -573,6 +587,8 @@ const faqPageSchema = {
         </div>
       </div>
     </section>
+
+    <LatestPosts posts={latestPosts} />
 
     <section class="py-20">
       <div class="text-center mb-12">

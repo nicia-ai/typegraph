@@ -26,10 +26,10 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 16 of the 98 optional
- * `GraphBackend` members are bundled here; the other 82 are classified in
- * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
- * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
+ * The bundles and {@link UNBUNDLED_OPTIONAL_MEMBERS} classify every optional
+ * `GraphBackend` member. Unbundled members are either `reasoned` (no bundle
+ * should own them) or `deferred` (a future bundle candidate with a measured
+ * access ceiling). The type assertion below enforces complete coverage.
  */
 import { type SqlDialect } from "../../query/dialect/types";
 import { type Assert, type Equal } from "../../utils/type-assert";
@@ -46,7 +46,7 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 /**
- * Every optional `GraphBackend` member — 98 of them, verified equal to the
+ * Every optional `GraphBackend` member — 106 of them, verified equal to the
  * names parsed from `etc/typegraph-backend.api.md` (§Baselines). Derived,
  * never hand-written: a member added or removed from `GraphBackend` changes
  * this type automatically, and the totality proof below fails loudly if the
@@ -817,7 +817,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 82, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 92, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -857,39 +857,38 @@ export type DeferredUnbundledMember = Readonly<{
 export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
-/**
- * The 32 `reasoned` + 49 `deferred` members
- * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
- * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access; resolving the write-fence spelling through the fence plan then
- * added `fenceSql` with two accesses; the catalog-introspection bag then
- * added `catalog`, a reasoned member with zero measured accesses — its own
- * absence refusal lives in this directory, which the live scanner excludes
- * wholesale; the forked working-copy strategy then reads the connected
- * backend's `tableNames` to fence them against the base store's resolved
- * schema — 90 → 91; the lineage capability then added `lineage`, a
- * reasoned member with two live accesses (`resolveLineage`'s two reads of
- * the backend's own member) — 91 → 93. A later fix briefly grew this to 95
- * by re-deriving `resolveLineage(target)`'s resolution and comparing it
- * against the transaction handle's own `lineage` by identity inside
- * `assertTargetUnchanged` — a dead read, since `LineageMembers` took no
- * session argument and the comparison never actually pinned anything to
- * the transaction. Giving `revision`/`changesSince` a real `session`
- * parameter made that comparison unnecessary — `assertTargetUnchanged` now
- * reaches `lineage` through `requireLineage(txBackend, …)`, a call the
- * live scanner does not see (it reads `.lineage` inside
- * `backend/capabilities/`, outside the scanned scope) — back to 93. The
- * engine-native recorded-time capability then added `recordedTime`, a
- * reasoned member with zero measured accesses: its own absence refusal
- * (`requireRecordedTime`) lives in the excluded `backend/capabilities/`
- * directory, and every other current read
- * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
- * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
- * type the receiver test's arm (b) does not recognize by name — still 93,
- * 16 + 84 = 100 members total. `setActiveVersionWithPreflight` then added a
- * reasoned member with one access (`rollbackSchema`) — 16 + 85 = 101.
- */
+/** Optional members without a bundle owner and their measured access ceiling. */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  findActiveEdgesBySourceV1: {
+    kind: "reasoned",
+    reason:
+      "Versioned active-only source read for bounded oneActive candidate planning. Custom backends without it keep the complete-clone path.",
+    accesses: 2,
+  },
+  findNodesAcrossKinds: {
+    kind: "reasoned",
+    reason:
+      "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.",
+    accesses: 2,
+  },
+  findEdgesAcrossKinds: {
+    kind: "reasoned",
+    reason:
+      "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.",
+    accesses: 2,
+  },
+  findEdgesByMatchIdentity: {
+    kind: "reasoned",
+    reason:
+      "Optional exact lookup for durable edge identity owners, including tombstones. Candidate planning uses it to seed active owners and falls back to full clone when the capability is absent or the owner is tombstoned.",
+    accesses: 2,
+  },
+  clearGraphPreservingContributionMaterializations: {
+    kind: "reasoned",
+    reason:
+      "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.",
+    accesses: 1,
+  },
   upsertHeterogeneousNodes: {
     kind: "reasoned",
     reason: "Exact-session PostgreSQL heterogeneous node upsert program.",
@@ -941,26 +940,30 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.",
-    // 29: schema-checked binding (25) plus three acyclicity readers plus the composition tightening probe.
-    accesses: 29,
+    // 32, including the namespace fork's and managed PostgreSQL copy's backend table-name probes, the graph storage inventory's one resolution of the graph-relation names, three acyclicity readers and the composition tightening probe. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+    // accesses on one physical line, which a line-keyed grep counts once but
+    // the type-aware scanner counts as two access nodes (§Baselines). The
+    // forked working-copy strategy and managed PostgreSQL copy read the
+    // connected backend's names to fence physical target bindings.
+    accesses: 32,
   },
   fenceSql: {
     kind: "reasoned",
     reason:
-      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.",
-    accesses: 2,
+      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The exceptions are the two session-isolation reads, which take the bare `isolationFactExpression` and are gated on `dialect`, not on a resolved fence plan, so there is no plan to read it through: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) reads `target.fenceSql` directly, and the graph storage inventory (`backend/graph-storage.ts`) folds the expression into its first count statement to report whether its counts shared one snapshot.",
+    accesses: 3,
   },
   commitSchemaVersionIfKindsEmpty: {
     kind: "reasoned",
     reason:
       "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.",
-    accesses: 2,
+    accesses: 3,
   },
   commitSchemaVersionWithPreflight: {
     kind: "reasoned",
     reason:
       "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.",
-    accesses: 3,
+    accesses: 4,
   },
   setActiveVersionWithPreflight: {
     kind: "reasoned",
@@ -984,19 +987,19 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.",
-    accesses: 4,
+    accesses: 5,
   },
   registerGraphTemplate: {
     kind: "reasoned",
     reason:
       "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.",
-    accesses: 1,
+    accesses: 2,
   },
   instantiateGraphTemplate: {
     kind: "reasoned",
     reason:
       "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.",
-    accesses: 1,
+    accesses: 2,
   },
   ensureIdentityTables: {
     kind: "reasoned",
@@ -1071,6 +1074,18 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.",
     accesses: 0,
   },
+  ensureRevisionChangesJournal: {
+    kind: "reasoned",
+    reason:
+      "Privileged journal installation is explicit; runtime lineage only reads readiness.",
+    accesses: 2,
+  },
+  revisionChangesJournalReady: {
+    kind: "reasoned",
+    reason:
+      "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.",
+    accesses: 2,
+  },
   getContributionMaterialization: {
     kind: "reasoned",
     reason:
@@ -1111,8 +1126,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   lineage: {
     kind: "reasoned",
     reason:
-      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.",
-    accesses: 2,
+      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.",
+    accesses: 3,
   },
   recordedTime: {
     kind: "reasoned",
@@ -1178,7 +1193,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorOperations",
-    ceiling: 0,
+    ceiling: 1,
   },
   ensureExtension: {
     kind: "deferred",
@@ -1228,7 +1243,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "ddlExecution",
-    ceiling: 13,
+    // The managed PostgreSQL copy provisions its ledger and checks cleanup
+    // DDL support before performing allocation or destroy work.
+    ceiling: 16,
   },
   executeRaw: {
     kind: "deferred",
@@ -1268,7 +1285,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "fulltextOperations",
-    ceiling: 2,
+    // The managed PostgreSQL copy refuses unsupported custom strategies, and
+    // the namespace fork reads it once to know whether the fulltext relation
+    // is provisioned.
+    ceiling: 4,
   },
   getIndexMaterialization: {
     kind: "deferred",
@@ -1382,7 +1402,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorOperations",
-    ceiling: 10,
+    // Managed vector copies verify the allocation backend's upsert port at
+    // allocation and reopen boundaries.
+    ceiling: 12,
   },
   upsertEmbeddingBatch: {
     kind: "deferred",
@@ -1412,7 +1434,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorOperations",
-    ceiling: 9,
+    // Managed copies require the bundled strategy on the source and verify
+    // the allocation-scoped strategy before cloning or reopening. The graph
+    // storage inventory reads it once to name a graph's vector tables.
+    ceiling: 15,
   },
 } as const satisfies Record<string, UnbundledOptionalMember>;
 
@@ -1543,7 +1568,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 98 optional members.
+// (i) Totality: the three-way partition covers every optional member.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

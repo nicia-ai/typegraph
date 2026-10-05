@@ -421,6 +421,49 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.nodes[0]).details).toContain("required");
     });
 
+    it("reports nested array differences at their JSON Pointer index", () => {
+      const before = createSchema({
+        version: 1,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: {
+                tags: { type: "array", items: { enum: ["a", "b"] } },
+              },
+              required: [],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: {
+                tags: { type: "array", items: { enum: ["a", "c"] } },
+              },
+              required: [],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(requireDefined(diff.nodes[0]).details).toContain("/items/enum/1");
+    });
+
     it("detects onDelete change as warning", () => {
       const before = createSchema({
         version: 1,

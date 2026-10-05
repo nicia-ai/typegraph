@@ -17,8 +17,7 @@ type DatabaseJsonValue =
 export type DatabaseLiteral = DatabaseJsonValue | Date | undefined;
 
 export type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
-export type ExpressionComparisonOperator =
-  "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
+type ExpressionComparisonOperator = "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
 export type AggregateOperator =
   "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
 

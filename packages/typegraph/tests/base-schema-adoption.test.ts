@@ -944,6 +944,178 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
+  it("catches an installed version-3 SQLite database up to version 4, gaining revision changes", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec('DROP TABLE "typegraph_revision_changes"');
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get("typegraph_revision_changes"),
+      ).toEqual({ name: "typegraph_revision_changes" });
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+          )
+          .get("typegraph_revision_changes_graph_revision_idx"),
+      ).toEqual({ name: "typegraph_revision_changes_graph_revision_idx" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-3 PGlite database up to version 4, gaining revision changes", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          'DROP TABLE "typegraph_revision_changes"',
+          'UPDATE "typegraph_base_schema_versions" SET version = 3 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const journal = await client.query<{ table_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes')::text AS table_name",
+      );
+      expect(journal.rows[0]?.table_name).toBe("typegraph_revision_changes");
+      const journalIndex = await client.query<{ index_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes_graph_revision_idx')::text AS index_name",
+      );
+      expect(journalIndex.rows[0]?.index_name).toBe(
+        "typegraph_revision_changes_graph_revision_idx",
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  describe("version 5: byte-ordered graph_id indexes", () => {
+    const byteOrderIndexNames = [
+      "typegraph_nodes_graph_id_bytes_idx",
+      "typegraph_edges_graph_id_bytes_idx",
+      "typegraph_schema_versions_graph_id_bytes_idx",
+    ] as const;
+
+    async function presentByteOrderIndexes(
+      client: PGlite,
+    ): Promise<readonly string[]> {
+      const rows = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${byteOrderIndexNames.map((name) => `'${name}'`).join(", ")}) ORDER BY indexname`,
+      );
+      return rows.rows.map((row) => row.indexname);
+    }
+
+    async function downgradeToVersion4(client: PGlite): Promise<void> {
+      await client.exec(
+        [
+          ...byteOrderIndexNames.map((name) => `DROP INDEX "${name}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 4 WHERE installation = 1',
+        ].join(";\n"),
+      );
+    }
+
+    it("catches an installed version-4 PGlite database up to version 5 through adoptBaseSchema() directly, gaining the indexes", async () => {
+      // The offline path never calls `generateDdl()`, so only the version-5
+      // step body can create the indexes here: gutting it fails this case.
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+        await downgradeToVersion4(client);
+        expect(await presentByteOrderIndexes(client)).toEqual([]);
+
+        await requireDefined(backend.adoptBaseSchema)();
+
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("catches an installed version-4 PGlite database up to version 5 when a store reopens it", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        await downgradeToVersion4(client);
+
+        await createStoreWithSchema(graph, backend);
+
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("advances an installed version-4 SQLite database to version 5 without adding an index", async () => {
+      // SQLite keeps text indexes in byte order already, so the step only
+      // moves the marker.
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        client.exec(
+          "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
+        );
+
+        await requireDefined(backend.adoptBaseSchema)();
+
+        expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+          CURRENT_BASE_SCHEMA_VERSION,
+        );
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%graph_id_bytes_idx'",
+            )
+            .all(),
+        ).toEqual([]);
+      } finally {
+        await backend.close();
+      }
+    });
+  });
+
   it("accepts pre-provisioned SQLite identity columns without a pair CHECK", async () => {
     const tableNames = {
       baseSchemaVersions: "tg_base_schema_versions",
@@ -1053,10 +1225,10 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-3 PGlite database up to version 4 through adoptBaseSchema() directly, gaining the identity transition log", async () => {
+  it("catches an installed version-5 PGlite database up to version 6 through adoptBaseSchema() directly, gaining the identity transition log", async () => {
     // `adoptBaseSchema()` is the offline path, which never calls
-    // `generateDdl()`, so only the version-4 step body itself can recreate
-    // the relations a real version-3 deployment lacks — including the
+    // `generateDdl()`, so only the version-6 step body itself can recreate
+    // the relations a real version-5 deployment lacks — including the
     // transition log's `restored_at` column, which ships with the table.
     const { backend, client } = await createLocalPgliteBackend({
       vector: false,
@@ -1067,7 +1239,7 @@ describe("deployment-wide base-schema adoption", () => {
         [
           'DROP TABLE "typegraph_identity_transitions"',
           'DROP TABLE "typegraph_identity_transition_retention"',
-          'UPDATE "typegraph_base_schema_versions" SET version = 3 WHERE installation = 1',
+          'UPDATE "typegraph_base_schema_versions" SET version = 5 WHERE installation = 1',
         ].join(";\n"),
       );
 
@@ -1154,7 +1326,7 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-3 SQLite database up to version 4, gaining the identity transition log", async () => {
+  it("catches an installed version-5 SQLite database up to version 6, gaining the identity transition log", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = sqliteClient(db);
     try {
@@ -1163,7 +1335,7 @@ describe("deployment-wide base-schema adoption", () => {
         [
           "DROP TABLE typegraph_identity_transitions",
           "DROP TABLE typegraph_identity_transition_retention",
-          "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+          "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
         ].join(";\n"),
       );
 

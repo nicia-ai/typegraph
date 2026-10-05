@@ -199,12 +199,10 @@ describe.each(BACKENDS)(
         // actual, post-clear row.
         expect(pruneTo).toBeUndefined();
 
-        const diff = await diffAgainstBase(
-          baseStore,
-          forkStore,
-          false,
+        const diff = await diffAgainstBase(baseStore, forkStore, {
+          captureForkState: false,
           pruneTo,
-        );
+        });
         const aliceModified = diff.nodes.modified.find(
           (node) => node.id === alice.id,
         );

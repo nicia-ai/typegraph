@@ -120,6 +120,9 @@ export {
   // or store author implementing the port needs it by name.
   type IdentityAssertionResult,
   type IdentityAssertionWriteFacade,
+  type IdentityClass,
+  type IdentityClassPage,
+  type IdentityClassPageOptions,
   type IdentityDecisionProvenance,
   type IdentityFacade,
   type IdentityNode,
@@ -131,6 +134,7 @@ export {
   type IdentityReplay,
   type IdentityReplayOptions,
   type IdentityReplayStep,
+  type IdentitySamePathStep,
   type IdentityTransition,
   type IdentityTransitionCause,
   // The archival transition page a port implementer reads and writes through
@@ -278,13 +282,29 @@ export {
 // ============================================================
 
 export { libsqlVectorStrategy } from "./query/dialect/vector/libsql-strategy";
-export { pgvectorStrategy } from "./query/dialect/vector/pgvector-strategy";
+export {
+  createPgvectorStrategy,
+  pgvectorStrategy,
+} from "./query/dialect/vector/pgvector-strategy";
 export { sqliteVecStrategy } from "./query/dialect/vector/sqlite-vec-strategy";
 export {
   buildVectorCapabilities,
   type VectorSlot,
   type VectorStrategy,
 } from "./query/dialect/vector-strategy";
+
+// ============================================================
+// Graph Storage Inventory (which graphs a database holds, and what each holds)
+// ============================================================
+
+export {
+  type GraphStorageConsistency,
+  type GraphStorageInspection,
+  type GraphStorageRelation,
+  listGraphIds,
+  type ListGraphIdsOptions,
+} from "./backend/graph-storage";
+export { inspectGraphStorage } from "./store/inspect-graph-storage";
 
 // ============================================================
 // Vector Storage Migration (one-time shared-table → per-field cutover)
@@ -617,6 +637,9 @@ export type {
   EdgeCollectionLookup,
   EdgeTemporalReads,
   EdgeWrites,
+  EngineRevision,
+  EntityKey,
+  LineageDelta,
   NodeCollectionLookup,
   NodeCurrentReads,
   NodeTemporalReads,
@@ -1036,8 +1059,10 @@ export {
 
 export type {
   GraphExtension,
+  GraphExtensionEdgeIntrospection,
   GraphExtensionIssue,
   GraphExtensionIssueCode,
+  GraphExtensionKindIntrospection,
   GraphExtensionVersion,
   IncompatibleChange,
   KindReferent,
@@ -1051,6 +1076,7 @@ export {
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   IncompatibleChangeError,
+  introspectGraphExtension,
   KindCollisionError,
   KindHasReferentsError,
   LEGACY_GRAPH_EXTENSION_VERSION,

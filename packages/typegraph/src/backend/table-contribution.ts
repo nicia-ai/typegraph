@@ -136,6 +136,21 @@ export type TableContribution = Readonly<{
    * DDL for — every base table.
    */
   runtimeEnsure: boolean;
+  /**
+   * Explicit PostgreSQL working-copy behavior. A PostgreSQL contribution
+   * without this declaration is refused at clone time. Optional here because
+   * SQLite and older third-party strategies use the same neutral contract.
+   */
+  workingCopyClonePolicy?:
+    | Readonly<{ kind: "graphRows"; graphIdColumn: string }>
+    | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+      }>
+    | Readonly<{ kind: "freshSeed" }>
+    | Readonly<{ kind: "rebuildAfterClone" }>
+    | Readonly<{ kind: "unsupported"; reason: string }>;
 }>;
 
 /**

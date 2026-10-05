@@ -30,6 +30,7 @@
  * `ensureTable` primitive plus the caller's own rendered DDL string, the
  * same way `graph-template-members.ts` builds `ensureGraphTemplatesTable`.
  */
+import { ConfigurationError } from "../../../../errors";
 import {
   type BaseSchemaLifecycle,
   createBaseSchemaLifecycle,
@@ -90,9 +91,22 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * are only exercised by offline `adopt()`.
    */
   sinceIndexDdl: readonly string[];
+  /** Idempotent DDL for the version-4 revision-change journal. Older callers may omit it; version-4 adoption then refuses with a clear error. */
+  revisionChangesTableDdl?: string;
+  /** Index DDL for the revision-change journal, installed during version-4 adoption. */
+  revisionChangesIndexDdl?: readonly string[];
+  /**
+   * Version-5 adoption: the byte-ordered `graph_id` index on each relation the
+   * graph id listing seeks. Omit on an engine whose text indexes are already
+   * kept in byte order (SQLite): there is nothing to add, and the step only
+   * advances the marker. An engine that needs the index but omits it still
+   * lists graph ids correctly, because the listing checks the catalog for the
+   * index and reads every anchor row without it.
+   */
+  graphIdOrderIndexDdl?: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
-   * statements for the identity transition log, the version-4 adoption
+   * statements for the identity transition log, the version-6 adoption
    * step — rendered once by the caller from its own dialect's DDL
    * generators, the same way `fencesTableDdl` is. A brand-new relation
    * needs no ALTER-shaped migration, so this step's `bootstrap` is
@@ -101,15 +115,34 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * exactly this relation (not the identity-enablement `ensureIdentityTables`
    * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
    * relation: a database that predates this release owes it regardless of
-   * whether any graph in it has Operational Identity enabled.
+   * whether any graph in it has Operational Identity enabled. Older callers
+   * may omit it; version-6 adoption then refuses with a clear error.
    */
-  identityTransitionsTableDdl: readonly string[];
+  identityTransitionsTableDdl?: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` for the transition log's per-graph
-   * retention watermark, the version-4 adoption step's other half.
+   * retention watermark, the version-6 adoption step's other half.
    */
-  identityTransitionRetentionTableDdl: string;
+  identityTransitionRetentionTableDdl?: string;
 }>;
+
+/**
+ * The refusal an adoption step raises when the profile omitted DDL it needs.
+ * A dep added after a profile was written is optional so that profile still
+ * constructs; the step that needs it is where its absence is an error.
+ */
+function missingAdoptionDeps(
+  adoptionVersion: number,
+  deps: Readonly<Record<string, unknown>>,
+): ConfigurationError {
+  const missingDependencies = Object.entries(deps)
+    .filter(([, value]) => value === undefined)
+    .map(([name]) => name);
+  return new ConfigurationError(
+    `Base-schema version ${adoptionVersion} adoption requires ${missingDependencies.join(" and ")}.`,
+    { missingDependencies, adoptionVersion },
+  );
+}
 
 export type BaseSchemaMembers = Readonly<{
   adoptBaseSchema: () => Promise<void>;
@@ -123,9 +156,11 @@ export type BaseSchemaMembers = Readonly<{
  * unchanged: version 1 (the graph-templates table plus edge-match-identity
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
  * rows table), version 3 (the recorded-relations' and recorded
- * identity-assertions relation's `since_idx` indexes), and version 4 (the
- * identity transition log plus its retention watermark) all follow the same
- * prepare/adopt-before/adopt-after bootstrap sequencing.
+ * identity-assertions relation's `since_idx` indexes), version 4 (the
+ * revision-changes relation), version 5 (the byte-ordered `graph_id`
+ * indexes), and version 6 (the identity transition log plus its retention
+ * watermark) all follow the same prepare/adopt-before/adopt-after bootstrap
+ * sequencing.
  */
 export function createBaseSchemaMembers(
   deps: CreateBaseSchemaMembersDeps,
@@ -141,6 +176,9 @@ export function createBaseSchemaMembers(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
     sinceIndexDdl,
+    revisionChangesTableDdl,
+    revisionChangesIndexDdl,
+    graphIdOrderIndexDdl = [],
     identityTransitionsTableDdl,
     identityTransitionRetentionTableDdl,
   } = deps;
@@ -182,6 +220,43 @@ export function createBaseSchemaMembers(
       {
         version: 4,
         async adopt(): Promise<void> {
+          if (
+            revisionChangesTableDdl === undefined ||
+            revisionChangesIndexDdl === undefined
+          ) {
+            throw missingAdoptionDeps(4, {
+              revisionChangesTableDdl,
+              revisionChangesIndexDdl,
+            });
+          }
+          await ensureTable(revisionChangesTableDdl);
+          for (const ddl of revisionChangesIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 5,
+        async adopt(): Promise<void> {
+          for (const ddl of graphIdOrderIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 6,
+        async adopt(): Promise<void> {
+          if (
+            identityTransitionsTableDdl === undefined ||
+            identityTransitionRetentionTableDdl === undefined
+          ) {
+            throw missingAdoptionDeps(6, {
+              identityTransitionsTableDdl,
+              identityTransitionRetentionTableDdl,
+            });
+          }
           for (const ddl of identityTransitionsTableDdl) {
             await ensureTable(ddl);
           }

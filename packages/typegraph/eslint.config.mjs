@@ -301,6 +301,20 @@ export const DIALECT_SEAM_RESTRICTIONS = [
  */
 export const DIALECT_LITERAL_EXEMPTIONS = [
   {
+    file: "src/backend/drizzle/postgres-working-copy.ts",
+    reason:
+      "The PostgreSQL working-copy lifecycle refuses a backend from another engine before using PostgreSQL DDL and catalog queries; this is a provisioning boundary, not query compilation.",
+    permanent: true,
+    sites: 1,
+  },
+  {
+    file: "src/graph-merge/namespace-fork.ts",
+    reason:
+      "One-shot PostgreSQL physical namespace copy requires a PostgreSQL database and catalog. The dialect check is a refusal boundary, not query compilation.",
+    permanent: true,
+    sites: 1,
+  },
+  {
     file: "src/store/recorded-capture.ts",
     reason:
       "transactionOwnsSqliteWriteLock is the one owner of whether a transaction handed to createRecordedTransactionScope already holds a SQLite write lock (its ownsWriteLock parameter) — every caller unable to prove that structurally (store.ts's schema-commit preflight, schema-transition.ts's own) calls this instead of re-spelling the dialect comparison inline.",
@@ -488,6 +502,11 @@ export const DRIZZLE_ZONE = [
   {
     file: "src/backend/drizzle/operation-backend-core.ts",
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/postgres-working-copy.ts",
+    reason:
+      "The PostgreSQL working-copy adapter reads Drizzle table names from its schema factory to bind generated DDL and copy inventory.",
   },
   {
     file: "src/backend/drizzle/operations/clear.ts",
@@ -1086,6 +1105,24 @@ const LINT_BLOCKS = [
   // to the general `src/**/*.ts` block above).
   {
     files: ["src/backend/drizzle/postgres.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
+      ],
+    },
+  },
+  // The working-copy manager decorates a proven target backend with a
+  // fixed-schema refusal while retaining its connection/resource lineage.
+  {
+    files: ["src/backend/drizzle/postgres-working-copy.ts"],
     rules: {
       "no-restricted-syntax": [
         "error",

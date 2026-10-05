@@ -24,7 +24,7 @@ import type {
   IngestionBranch,
   MergeBranch,
 } from "./types";
-import type { MakeBackend } from "./working-copy";
+import type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
 import {
   cloneIngestionWorkingCopyStrategy,
   coalescedWorkingCopyClose,
@@ -66,12 +66,22 @@ export async function ingestionBranch<G extends GraphDef>(
   makeBackend: MakeBackend,
   options?: BranchOptions,
 ): Promise<Result<IngestionBranch<G>, BranchError>> {
+  return ingestionBranchWithStrategy(baseStore, makeBackend, options);
+}
+
+/** Internal candidate path with a bounded working-copy strategy. */
+export async function ingestionBranchWithStrategy<G extends GraphDef>(
+  baseStore: GraphBranch<G>["store"],
+  makeBackend: MakeBackend,
+  options?: BranchOptions,
+  strategy?: WorkingCopyStrategy<G>,
+): Promise<Result<IngestionBranch<G>, BranchError>> {
   try {
     const created = await branch(
       baseStore,
       makeBackend,
       options,
-      cloneIngestionWorkingCopyStrategy<G>(makeBackend),
+      strategy ?? cloneIngestionWorkingCopyStrategy<G>(makeBackend),
     );
     if (isErr(created)) {
       return err(

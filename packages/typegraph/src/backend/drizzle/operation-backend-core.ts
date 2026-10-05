@@ -125,11 +125,14 @@ import type {
   EdgeEndpointAllowance,
   EdgeExistsBetweenParams,
   EdgeRow,
+  FindActiveEdgesBySourceV1Params,
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesByMatchIdentityParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
   GraphBackend,
   GraphCommand,
   GraphCommandResult,
@@ -610,6 +613,7 @@ export type CommonOperationBackend = Pick<
   | "checkUnique"
   | "checkUniqueBatch"
   | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
   | "compareAndSetNode"
   | "countEdgesByKind"
   | "countEdgesAtEndpoint"
@@ -621,10 +625,14 @@ export type CommonOperationBackend = Pick<
   | "edgeExistsBetween"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
+  | "findEdgesByMatchIdentity"
+  | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
   | "findNodesByKind"
+  | "findNodesAcrossKinds"
   | "getActiveSchema"
   | "getEdge"
   | "getEdges"
@@ -1757,6 +1765,16 @@ export async function commitSchemaVersionIfKindsEmpty(
     status: "committed",
     row: await backend.commitSchemaVersion(params),
   };
+}
+
+function hasAcrossKindsPage(params: FindRowsAcrossKindsParams): boolean {
+  if (!Number.isSafeInteger(params.limit) || params.limit <= 0) {
+    throw new ConfigurationError(
+      "Cross-kind page limit must be a positive integer.",
+      { code: "INVALID_GRAPH_ENUMERATION_LIMIT", limit: params.limit },
+    );
+  }
+  return params.kinds.length > 0;
 }
 
 export function createCommonOperationBackend(
@@ -4720,6 +4738,21 @@ export function createCommonOperationBackend(
     return { affectedCount: updatedRows.length, rows: updatedRows };
   }
 
+  async function clearGraphWithOptions(
+    graphId: string,
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ): Promise<void> {
+    const statements = operationStrategy.buildClearGraph(graphId, options);
+    for (const statement of statements) {
+      await runIgnorableClearStatement(statement);
+    }
+  }
+
+  const buildFindNodesAcrossKinds = operationStrategy.buildFindNodesAcrossKinds;
+  const buildFindEdgesAcrossKinds = operationStrategy.buildFindEdgesAcrossKinds;
+  const buildFindActiveEdgesBySourceV1 =
+    operationStrategy.buildFindActiveEdgesBySourceV1;
+
   return {
     tableExists,
 
@@ -5252,6 +5285,19 @@ export function createCommonOperationBackend(
       return rows.map((row) => rowMappers.toNodeRow(row));
     },
 
+    ...(buildFindNodesAcrossKinds === undefined ?
+      {}
+    : {
+        async findNodesAcrossKinds(
+          params: FindRowsAcrossKindsParams,
+        ): Promise<readonly NodeRow[]> {
+          if (!hasAcrossKindsPage(params)) return [];
+          const query = buildFindNodesAcrossKinds(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toNodeRow(row));
+        },
+      }),
+
     async countNodesByKind(params: CountNodesByKindParams): Promise<number> {
       const query = operationStrategy.buildCountNodesByKind(params);
       const row = await execution.execGet<{ count: string | number }>(query);
@@ -5265,6 +5311,58 @@ export function createCommonOperationBackend(
       const rows = await execution.execAll<Record<string, unknown>>(query);
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },
+
+    ...(buildFindActiveEdgesBySourceV1 === undefined ?
+      {}
+    : {
+        async findActiveEdgesBySourceV1(
+          params: FindActiveEdgesBySourceV1Params,
+        ): Promise<readonly EdgeRow[]> {
+          const query = buildFindActiveEdgesBySourceV1(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toEdgeRow(row));
+        },
+      }),
+    ...(operationStrategy.buildFindEdgesByMatchIdentity === undefined ?
+      {}
+    : {
+        async findEdgesByMatchIdentity(
+          params: FindEdgesByMatchIdentityParams,
+        ): Promise<readonly EdgeRow[]> {
+          const edgeRows: EdgeRow[] = [];
+          for (const identityChunk of chunkArray(
+            params.identities,
+            Math.max(1, Math.floor((maxBindParameters - 1) / 3)),
+          )) {
+            const query = operationStrategy.buildFindEdgesByMatchIdentity?.({
+              ...params,
+              identities: identityChunk,
+            });
+            if (query === undefined) {
+              throw new CompilerInvariantError(
+                "The backend operation strategy omitted its durable edge identity owner query.",
+              );
+            }
+            const rows =
+              await execution.execAll<Record<string, unknown>>(query);
+            edgeRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
+          }
+          return edgeRows;
+        },
+        }),
+
+    ...(buildFindEdgesAcrossKinds === undefined ?
+      {}
+    : {
+        async findEdgesAcrossKinds(
+          params: FindRowsAcrossKindsParams,
+        ): Promise<readonly EdgeRow[]> {
+          if (!hasAcrossKindsPage(params)) return [];
+          const query = buildFindEdgesAcrossKinds(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toEdgeRow(row));
+        },
+      }),
 
     async findEdgesByEndpointSet(
       params: FindEdgesByEndpointSetParams,
@@ -5780,10 +5878,15 @@ export function createCommonOperationBackend(
     },
 
     async clearGraph(graphId: string): Promise<void> {
-      const statements = operationStrategy.buildClearGraph(graphId);
-      for (const statement of statements) {
-        await runIgnorableClearStatement(statement);
-      }
+      await clearGraphWithOptions(graphId);
+    },
+
+    async clearGraphPreservingContributionMaterializations(
+      graphId: string,
+    ): Promise<void> {
+      await clearGraphWithOptions(graphId, {
+        preserveContributionMaterializations: true,
+      });
     },
   };
 }

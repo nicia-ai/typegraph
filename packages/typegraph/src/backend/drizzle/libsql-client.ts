@@ -25,6 +25,42 @@ export function isLibsqlClient(client: unknown): client is LibsqlClient {
 }
 
 /** Whether a positively identified libSQL client is backed by one local file. */
-export function isLocalLibsqlClient(client: unknown): boolean {
+export function isLocalLibsqlClient(client: unknown): client is LibsqlClient {
   return isLibsqlClient(client) && client.protocol === "file";
+}
+
+/**
+ * Whether successive `execute()` calls on a local client run on one session,
+ * so a raw BEGIN in one call is still open in the next.
+ *
+ * `@libsql/client` before 0.18 keeps one stable connection per local client.
+ * 0.18 pools local connections instead: every `execute()` borrows one and
+ * rolls back whatever transaction it leaves open when returning it, so raw
+ * BEGIN/COMMIT framing cannot span calls. The fact is observed on the client
+ * rather than inferred from a package version. Only a ROLLBACK that succeeds
+ * proves the session carried over; any failure means it did not, because on a
+ * session-preserving client the ROLLBACK directly follows its own BEGIN.
+ */
+async function localExecuteSharesSession(
+  client: LibsqlClient,
+): Promise<boolean> {
+  await client.execute("BEGIN");
+  try {
+    await client.execute("ROLLBACK");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How a libSQL client frames transactions: raw BEGIN/COMMIT on a local client
+ * whose `execute()` calls share one session, otherwise the client's own
+ * `transaction()` through Drizzle's `db.transaction()`.
+ */
+export async function detectLibsqlTransactionMode(
+  client: unknown,
+): Promise<"drizzle" | "sql"> {
+  if (!isLocalLibsqlClient(client)) return "drizzle";
+  return (await localExecuteSharesSession(client)) ? "sql" : "drizzle";
 }

@@ -158,11 +158,13 @@
  * for free by going through `revision()`/`changesSince()` rather than
  * comparing a bare clock value itself. `base-version.ts`'s OWN `base@V`
  * token grammar carries a separate, independently-checked origin pairing
- * for its own revision and engine anchors (see that module's doc and
+ * for its own revision anchor (see that module's doc and
  * `revisionOriginMatch`) — the two origin checks protect different tokens
  * and neither substitutes for the other, though both draw on the same
  * durable `typegraph_revision_origins` row.
  */
+import { isFirstPartyFactory } from "../../backend/capabilities/write-fence";
+import { assertRevisionChangesJournalReady } from "../../backend/revision-journal";
 import {
   type EngineRevision,
   type EntityKey,
@@ -177,7 +179,10 @@ import {
   recordedInstantRevision,
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
-import { type SqlSchema } from "../../query/compiler/schema";
+import {
+  resolveRevisionChangesTableName,
+  type SqlSchema,
+} from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
@@ -207,6 +212,7 @@ import { readRecordedClock, readRevisionOrigin } from "./clock";
 export type RecordedLineageStore<G extends GraphDef = GraphDef> = Readonly<{
   graphId: string;
   revisionTrackingEnabled: boolean;
+  revisionJournalEnabled?: boolean;
   revisionSchema: SqlSchema;
   /**
    * Mints (or returns) this graph's durable revision-origin nonce, always
@@ -552,30 +558,129 @@ export function recordedRelationsLineage<G extends GraphDef>(
 }
 
 /**
+ * Journal-backed lineage for live revision-tracked Stores. Bundled SQL
+ * backends use row triggers installed by a privileged schema owner to write
+ * every node/edge key into the same transaction as its mutation. A non-entity
+ * sidecar write leaves an incomplete journal row, so this source refuses to
+ * claim a complete delta.
+ */
+function revisionJournalLineage<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+): LineageMembers {
+  const schema = store.revisionSchema;
+  const graphId = store.graphId;
+  return Object.freeze({
+    async revision(session: LineageSession): Promise<EngineRevision> {
+      await assertRevisionChangesJournalReady(storeBackend(store));
+      const [origin, instant] = await Promise.all([
+        store.revisionOriginNow(),
+        readRecordedClock(session, schema, graphId),
+      ]);
+      return encodeRecordedLineageRevision(origin, instant);
+    },
+    async changesSince(
+      session: LineageSession,
+      since: EngineRevision,
+      requestedGraphId: string,
+    ): Promise<LineageDelta> {
+      await assertRevisionChangesJournalReady(storeBackend(store));
+      if (requestedGraphId !== graphId) {
+        throw new ConfigurationError(
+          "revision journal lineage was called for a different graph than the one it was derived from.",
+          { expectedGraphId: graphId, actualGraphId: requestedGraphId },
+        );
+      }
+      const parsed = parseLineageRevision(since);
+      if (parsed === undefined) return UNBOUNDED_DELTA;
+      const liveOrigin = await readRevisionOrigin(session, schema, graphId);
+      if (liveOrigin === undefined || liveOrigin !== parsed.origin) {
+        return UNBOUNDED_DELTA;
+      }
+      const currentInstant = await readRecordedClock(session, schema, graphId);
+      const current =
+        currentInstant === undefined ? 0 : (
+          recordedInstantRevision(currentInstant)
+        );
+      if (parsed.revision > current) return UNBOUNDED_DELTA;
+      if (parsed.revision === current) {
+        return { kind: "keys", nodes: [], edges: [] };
+      }
+
+      const rows = await session.execute<
+        Readonly<{
+          revision_count: string;
+          all_complete: number;
+          entity: unknown;
+          kind: unknown;
+          id: unknown;
+        }>
+      >(
+        asCompiledRowsSql(sql`
+          WITH changes AS (
+            SELECT revision, entity, kind, id, complete
+            FROM ${sql.identifier(resolveRevisionChangesTableName(schema.tables))}
+            WHERE graph_id = ${graphId} AND revision > ${parsed.revision}
+              AND revision <= ${current}
+          ), summary AS (
+            SELECT CAST(count(DISTINCT revision) AS text) AS revision_count,
+              COALESCE(min(CASE WHEN complete AND entity IN ('node', 'edge')
+                THEN 1 ELSE 0 END), 1) AS all_complete
+            FROM changes
+          )
+          SELECT summary.revision_count, summary.all_complete,
+            keys.entity, keys.kind, keys.id
+          FROM summary LEFT JOIN (
+            SELECT DISTINCT entity, kind, id FROM changes
+            WHERE entity IN ('node', 'edge')
+          ) AS keys ON TRUE
+          ORDER BY keys.entity, keys.kind, keys.id
+        `),
+      );
+      const summary = rows[0];
+      if (
+        summary === undefined ||
+        Number(summary.revision_count) !== current - parsed.revision ||
+        summary.all_complete !== 1
+      ) {
+        return UNBOUNDED_DELTA;
+      }
+      const nodes: EntityKey[] = [];
+      const edges: EntityKey[] = [];
+      for (const row of rows) {
+        if (typeof row.entity !== "string") continue;
+        if (typeof row.kind !== "string" || typeof row.id !== "string")
+          return UNBOUNDED_DELTA;
+        if (row.entity === "node") nodes.push({ kind: row.kind, id: row.id });
+        if (row.entity === "edge") edges.push({ kind: row.kind, id: row.id });
+      }
+      return { kind: "keys", nodes, edges };
+    },
+  });
+}
+
+/**
  * Whether this store's base token is namespaced by the graph's durable
- * revision origin — true for the revision anchor (tracking on) and for the
- * engine anchor (tracking off, a backend `lineage` present), false only for
- * the content-fingerprint fallback. The one spelling `Store.clear()` uses
- * to decide whether there is an origin to rotate, so it cannot drift from
- * the anchor precedence `computeBaseVersion` applies: a store that mints an
- * origin-namespaced anchor is exactly a store whose `clear()` must rotate
- * that origin. A backend whose `lineage` is present but which cannot
- * bootstrap the origins relation mints no anchor at all (`computeBaseVersion`
- * refuses), so it has nothing to rotate either.
+ * revision origin — true for TypeGraph revision tracking and for an untracked
+ * lineage store whose backend supports the origins relation. The latter uses
+ * a complete content fingerprint namespaced by that same origin. `Store.clear()`
+ * rotates exactly the origins that `computeBaseVersion` can include.
  */
 export function mintsOriginNamespacedAnchor<G extends GraphDef>(
   store: RecordedLineageStore<G>,
   originsSupported: boolean,
 ): boolean {
-  if (store.revisionTrackingEnabled) return true;
-  return resolveLineage(store) !== undefined && originsSupported;
+  return (
+    store.revisionTrackingEnabled ||
+    (resolveLineage(store) !== undefined && originsSupported)
+  );
 }
 
 /**
  * THE one owner of lineage source selection: the backend's own `lineage`
  * when it declares one, else the store's recorded-relations lineage when
- * this store captures history, else `undefined`. Every caller that wants a
- * `lineage` — graph-merge's base-token anchor and pruned diff among
+ * it captures history, else the trigger-backed revision journal for a
+ * revision-tracked first-party SQL backend, else `undefined`. Every caller that wants a
+ * `lineage` — graph-merge's pruned diff among
  * them — consults this function instead of re-deriving the choice.
  */
 export function resolveLineage<G extends GraphDef>(
@@ -584,5 +689,12 @@ export function resolveLineage<G extends GraphDef>(
   const backend = storeBackend(store);
   if (backend.lineage !== undefined) return backend.lineage;
   if (storeCaptureEnabled(store)) return recordedRelationsLineage(store);
+  if (
+    store.revisionTrackingEnabled &&
+    store.revisionJournalEnabled !== false &&
+    isFirstPartyFactory(backend)
+  ) {
+    return revisionJournalLineage(store);
+  }
   return undefined;
 }

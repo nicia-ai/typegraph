@@ -10,8 +10,16 @@
  */
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { Client, Pool } from "pg";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import {
@@ -24,6 +32,7 @@ import {
   NodeConstraintNotFoundError,
   StaleVersionError,
   subClassOf,
+  ValidationError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
@@ -41,13 +50,18 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
-import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledTemporaryStatementSql,
+} from "../../../src/query/sql-intent";
 import { migrateSchema } from "../../../src/schema";
 import {
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
 } from "../../../src/store";
+import * as idUtilities from "../../../src/utils/id";
 import { requireDefined } from "../../../src/utils/presence";
 import { isSerializationFailure } from "../../../src/utils/sql-errors";
 import {
@@ -320,6 +334,28 @@ const testGraph = defineGraph({
   ontology: [subClassOf(Company, Organization)],
 });
 
+const SavepointPerson = defineNode("SavepointPerson", {
+  schema: z.object({ email: z.string() }),
+});
+
+const savepointCollisionGraph = defineGraph({
+  id: "savepoint_collision",
+  nodes: {
+    SavepointPerson: {
+      type: SavepointPerson,
+      unique: [
+        {
+          name: "savepoint_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
 const testGraphWithoutCompany = defineGraph({
   id: testGraph.id,
   nodes: {
@@ -458,6 +494,33 @@ describe("PostgreSQL Adapter", () => {
 // ============================================================
 
 describe("PostgreSQL Backend - Adapter Specific", () => {
+  it("serializes overlapping statements across backends sharing a bare client", async (ctx) => {
+    requirePostgres(ctx);
+    const client = new Client({ connectionString: TEST_DATABASE_URL });
+    await client.connect();
+    try {
+      const db = drizzle(client);
+      const firstBackend = createPostgresBackend(db);
+      const secondBackend = createPostgresBackend(db);
+      const querySpy = vi.spyOn(client, "query");
+
+      const first = firstBackend.execute<{ value: number }>(
+        asCompiledRowsSql(portableSql`SELECT 1 AS value FROM pg_sleep(0.1)`),
+      );
+      const second = secondBackend.execute<{ value: number }>(
+        asCompiledRowsSql(portableSql`SELECT 2 AS value`),
+      );
+      await Promise.resolve();
+      expect(querySpy).toHaveBeenCalledTimes(1);
+      expect(await Promise.all([first, second])).toEqual([
+        [{ value: 1 }],
+        [{ value: 2 }],
+      ]);
+      expect(querySpy).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.end();
+    }
+  });
   beforeEach(async () => {
     if (!isPostgresAvailable) return;
     await clearTestData();
@@ -749,6 +812,53 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           excludeDeleted: false,
         }),
       ).toBe(0);
+    });
+
+    it("commits after a caught generated-ID collision is rolled back to a native savepoint", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db, {
+        capabilities: { atomicNodeInsertClaims: false },
+      });
+      const [store] = await createAdapterStoreWithSchema(
+        savepointCollisionGraph,
+        backend,
+      );
+      await store.nodes.SavepointPerson.create(
+        { email: "original@example.com" },
+        { id: "savepoint-collision" },
+      );
+
+      const generatedId = vi
+        .spyOn(idUtilities, "generateId")
+        .mockReturnValue("savepoint-collision");
+      try {
+        await store.transaction(async (tx) => {
+          if (tx.sqlAvailability !== "available")
+            throw new Error("PostgreSQL transaction did not expose native SQL");
+
+          await tx.sql.execute(sql.raw("SAVEPOINT collision_recovery"));
+          await expect(
+            tx.nodes.SavepointPerson.bulkCreate([
+              { props: { email: "colliding@example.com" } },
+            ]),
+          ).rejects.toBeInstanceOf(ValidationError);
+          await tx.sql.execute(
+            sql.raw("ROLLBACK TO SAVEPOINT collision_recovery"),
+          );
+          await tx.nodes.SavepointPerson.create(
+            { email: "survivor@example.com" },
+            { id: "savepoint-survivor" },
+          );
+        });
+      } finally {
+        generatedId.mockRestore();
+      }
+
+      expect(
+        await store.nodes.SavepointPerson.getById(
+          "savepoint-survivor" as never,
+        ),
+      ).toBeDefined();
     });
   });
 

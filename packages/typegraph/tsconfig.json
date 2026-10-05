@@ -34,6 +34,9 @@
       "@nicia-ai/typegraph/adapters/drizzle/postgres": [
         "./src/backend/postgres/index.ts"
       ],
+      "@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy": [
+        "./src/backend/postgres/working-copy.ts"
+      ],
       "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite": [
         "./src/backend/postgres/pglite.ts"
       ],

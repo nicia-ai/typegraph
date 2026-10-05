@@ -2113,7 +2113,12 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
       }),
   );
   if (returnedRows.length === 0) {
-    await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
+    await diagnoseAtomicNodeBatchNoRow(
+      ctx,
+      backend,
+      preparedCreates,
+      "replace",
+    );
   }
   if (returnedRows.length !== items.length) {
     throw new DatabaseOperationError(
@@ -2154,6 +2159,8 @@ async function withAtomicNodeClaimTranslation<TResult>(
 
 /** Bounds concurrent custom-backend reads on the exceptional diagnosis path. */
 const ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE = 32;
+/** Keeps optional custom getNodes ports below legacy SQLite bind ceilings. */
+const ATOMIC_NODE_CLAIM_DIAGNOSTIC_BATCH_SIZE = 512;
 
 type AtomicNodeClaimDiagnosticVerdict =
   Readonly<{ kind: "clear" }> | Readonly<{ kind: "refusal"; error: unknown }>;
@@ -2186,6 +2193,63 @@ async function runAtomicNodeClaimDiagnosticGroups<T>(
   )) {
     await Promise.all(window.map(async (group) => read(group)));
   }
+}
+
+async function diagnoseAtomicNodeIdentity<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  preparedCreates: readonly NodeCreatePrepared[],
+): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
+  const boundGetNodes = bindExtraIfReachable(
+    backend,
+    ctx.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  if (boundGetNodes === undefined) {
+    return captureAtomicNodeClaimDiagnosticVerdicts(
+      preparedCreates,
+      async (prepared) => {
+        const existing = await backend.getNode(
+          ctx.graphId,
+          prepared.kind,
+          prepared.id,
+        );
+        if (existing !== undefined && isLiveNodeRow(existing))
+          throw createAlreadyExistsError("node", prepared.kind, prepared.id);
+      },
+    );
+  }
+
+  const idsByKind = new Map<string, Set<string>>();
+  for (const prepared of preparedCreates) {
+    const ids = idsByKind.get(prepared.kind) ?? new Set<string>();
+    ids.add(prepared.id);
+    idsByKind.set(prepared.kind, ids);
+  }
+  const occupiedReferences = new Set<string>();
+  await runAtomicNodeClaimDiagnosticGroups(
+    [...idsByKind],
+    async ([kind, ids]) => {
+      for (const idsWindow of chunk(
+        [...ids],
+        ATOMIC_NODE_CLAIM_DIAGNOSTIC_BATCH_SIZE,
+      )) {
+        const rows = await boundGetNodes.getNodes(ctx.graphId, kind, idsWindow);
+        for (const row of rows) {
+          if (isLiveNodeRow(row))
+            occupiedReferences.add(refKey({ kind: row.kind, id: row.id }));
+        }
+      }
+    },
+  );
+  return preparedCreates.map((prepared) =>
+    occupiedReferences.has(refKey({ kind: prepared.kind, id: prepared.id })) ?
+      {
+        kind: "refusal",
+        error: createAlreadyExistsError("node", prepared.kind, prepared.id),
+      }
+    : ATOMIC_NODE_CLAIM_CLEAR,
+  );
 }
 
 async function diagnoseAtomicNodeDisjointness<G extends GraphDef>(
@@ -2359,6 +2423,7 @@ async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   backend: GraphBackend | TransactionBackend,
   preparedCreates: readonly NodeCreatePrepared[],
+  operation: "create" | "replace",
 ): Promise<never> {
   await diagnoseFusedSchemaFenceNoRow(ctx, backend);
   const hasSetOrientedDiagnosis =
@@ -2377,6 +2442,12 @@ async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
       [preparedCreates]
     : chunk(preparedCreates, ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE);
   for (const window of diagnosticWindows) {
+    // A replacement expects its ID to exist. Creates diagnose ID and claim
+    // verdicts for the same window, then report the first input's refusal.
+    const identityVerdicts =
+      operation === "create" ?
+        await diagnoseAtomicNodeIdentity(ctx, backend, window)
+      : window.map(() => ATOMIC_NODE_CLAIM_CLEAR);
     const [disjointnessVerdicts, uniquenessVerdicts] =
       hasSetOrientedDiagnosis ?
         await Promise.all([
@@ -2388,6 +2459,8 @@ async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
           await diagnoseAtomicNodeUniqueness(ctx, backend, window),
         ];
     for (const [index] of window.entries()) {
+      const identity = requireDefined(identityVerdicts[index]);
+      if (identity.kind === "refusal") throw identity.error;
       const disjointness = requireDefined(disjointnessVerdicts[index]);
       if (disjointness.kind === "refusal") throw disjointness.error;
       const uniqueness = requireDefined(uniquenessVerdicts[index]);
@@ -4080,7 +4153,12 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
           ),
       );
       if (insertedCount === 0) {
-        await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
+        await diagnoseAtomicNodeBatchNoRow(
+          ctx,
+          backend,
+          preparedCreates,
+          "create",
+        );
       }
       if (insertedCount !== inputs.length) {
         throw new DatabaseOperationError(
@@ -4218,7 +4296,12 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           ),
       );
       if (returnedRows.length === 0) {
-        await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
+        await diagnoseAtomicNodeBatchNoRow(
+          ctx,
+          backend,
+          preparedCreates,
+          "create",
+        );
       }
       if (returnedRows.length !== preparedCreates.length) {
         throw new DatabaseOperationError(
@@ -4473,8 +4556,13 @@ function validateNodePropertySubset(
 ) {
   // Reconstruct from `.shape` so object-level refinements stay on the complete
   // after-image. Zod 4 throws if `schema.partial()` is called on a refined object.
+  // Pick before parsing: Zod 4 applies defaults even inside optional fields,
+  // so a partial schema alone would inject values for omitted properties.
+  const suppliedProperties = Object.fromEntries(
+    Object.keys(properties).map((property) => [property, true as const]),
+  );
   return validateNodeProps(
-    z.object(schema.shape).partial(),
+    z.object(schema.shape).pick(suppliedProperties).partial(),
     properties,
     context,
   );

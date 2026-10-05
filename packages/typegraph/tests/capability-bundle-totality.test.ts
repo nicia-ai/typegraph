@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 85 unbundled = 101, with no member counted twice", () => {
+  it("16 pilot + 92 unbundled = 108, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(85);
+    expect(unbundledNames.length).toBe(92);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(101);
+    expect(bundledSet.size + unbundledNames.length).toBe(108);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("35 reasoned entries sum to 107 accesses; 50 deferred entries sum to 231", () => {
+  it("42 reasoned entries sum to 130 accesses; 50 deferred entries sum to 245", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(35);
+    expect(reasoned.length).toBe(42);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -147,27 +147,43 @@ describe("capability bundle totality (T9)", () => {
     // unnecessary: `assertTargetUnchanged` now reaches `lineage` through
     // `requireLineage(txBackend, …)`, which reads `.lineage` inside
     // `backend/capabilities/`, outside the scanner's scope — back to 93.
-    // The engine-native recorded-time capability then added `recordedTime`,
+    // The clear lifecycle preservation capability adds one reasoned member with one Store.clear access: 104 -> 105. The engine-native recorded-time capability then added `recordedTime`,
     // a reasoned member with zero measured accesses for the same reason as
     // `catalog`: every current read is either inside `backend/capabilities/`
     // or off `EngineProvisioning`, never off a `GraphBackend`/
     // `TransactionBackend`-typed receiver — still 93.
     // The checked-read schema binding adds one tableNames access: 93 -> 94.
+    // The optional durable identity owner lookup adds two bounded
+    // candidate-planning reads, increasing the active-only baseline from 115
+    // to 117. Custom backends without the method retain full-clone planning.
     // Adopted evolution hands the identity DDL factory into the transaction
     // and inspects its required storage on that session: 94 -> 96.
     // The exact-session heterogeneous node upsert adds six guarded backend
     // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
+    // Revision-change storage resolution adds one tableNames access: 102 -> 103.
+    // Readiness-first journal installation adds one guarded access. The
+    // managed PostgreSQL copy adds six probes for table bindings and schema
+    // provisioning. Candidate one-active and durable edge identity planning
+    // add four accesses. The graph storage inventory resolves the
+    // graph-relation names through one tableNames access and reads the session
+    // isolation expression through one fenceSql access: 123 -> 125.
     // `rollbackSchema` reads the optional preflight flip once to refuse a
-    // tightening on a backend without it: 106 -> 107.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(107);
+    // tightening on a backend without it, edge acyclicity adds three
+    // tableNames reads and composition tightening one more: 125 -> 130.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(130);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
     // The resolved-node batch update adds one optional member with a ceiling
     // of six live access sites: 223 -> 229.
-    // The composition cascade adds one heterogeneous endpoint-set consumer:
-    // 229 -> 230.
-    // Edge acyclicity adds three tableNames reads: 102 -> 105.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(231);
+    // IVFFlat materialization drops an unrecorded leftover index before
+    // building it: dropVectorIndex 0 -> 1, 229 -> 230. Managed PostgreSQL
+    // copies add two owned DDL paths and one fulltext strategy probe: 230 -> 233.
+    // Vector lifecycle inventory adds one executeDdl, two upsertEmbedding,
+    // and five vectorStrategy access sites: 233 -> 241. The graph storage
+    // inventory and the namespace fork add one guarded strategy read each: 241 -> 243.
+    // The composition cascade and the unattached-part read each add one
+    // heterogeneous endpoint-set consumer: 243 -> 245.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(245);
   });
 });

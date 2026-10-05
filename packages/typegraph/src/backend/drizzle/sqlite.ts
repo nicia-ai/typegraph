@@ -464,6 +464,57 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 );
 
 /** Every SQLite "atomic transactions unavailable" refusal shares this shape. */
+type RevisionJournalTableNames = Readonly<{
+  nodes: string;
+  edges: string;
+  identityAssertions: string;
+  recordedClock: string;
+  revisionChanges: string;
+}>;
+
+function quoteRevisionJournalIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function sqliteRevisionChangeTriggerSpecs(
+  names: RevisionJournalTableNames,
+): readonly Readonly<{
+  name: string;
+  table: string;
+  action: "INSERT" | "UPDATE" | "DELETE";
+  entity: "node" | "edge" | "identity";
+  complete: 0 | 1;
+}>[] {
+  const targets = [
+    { entity: "node", table: names.nodes, complete: 1 },
+    { entity: "edge", table: names.edges, complete: 1 },
+    { entity: "identity", table: names.identityAssertions, complete: 0 },
+  ] as const;
+  const actions = ["INSERT", "UPDATE", "DELETE"] as const;
+  return targets.flatMap(({ entity, table, complete }) =>
+    actions.map((action) => ({
+      name: `tg_rc_${table.slice(0, 38)}_${entity}_${action.toLowerCase()}`,
+      table,
+      action,
+      entity,
+      complete,
+    })),
+  );
+}
+
+function sqliteRevisionChangeTriggers(
+  names: RevisionJournalTableNames,
+): readonly string[] {
+  return sqliteRevisionChangeTriggerSpecs(names).map(
+    ({ name, table, action, entity, complete }) => {
+      const row = action === "DELETE" ? "OLD" : "NEW";
+      const kind = entity === "identity" ? "''" : `${row}.kind`;
+      const id = entity === "identity" ? "''" : `${row}.id`;
+      return `CREATE TRIGGER IF NOT EXISTS ${quoteRevisionJournalIdentifier(name)} AFTER ${action} ON ${quoteRevisionJournalIdentifier(table)} BEGIN INSERT INTO ${quoteRevisionJournalIdentifier(names.revisionChanges)} (entry_id, graph_id, revision, complete, entity, kind, id) SELECT lower(hex(randomblob(16))), ${row}.graph_id, COALESCE((SELECT revision FROM ${quoteRevisionJournalIdentifier(names.recordedClock)} WHERE graph_id = ${row}.graph_id), 0) + 1, ${complete}, '${entity}', ${kind}, ${id}; END`;
+    },
+  );
+}
+
 function throwSqliteTransactionsDisabled(
   message: string,
   details?: Readonly<Record<string, unknown>>,
@@ -1131,8 +1182,9 @@ function createSqliteOperationBackend(
 }
 
 /**
- * Whether a driver client is a LOCAL `@libsql/client`: one stable connection
- * that every statement from every wrapper over it runs on, in order.
+ * Whether a driver client is a LOCAL `@libsql/client`: before 0.18, one stable
+ * connection that every statement from every wrapper over it runs on, in
+ * order; from 0.18, a small pool of connections to one local database.
  *
  * `protocol === "file"` is the client's own answer to "am I local?" — it covers
  * `file:` paths, `:memory:` databases, and an embedded replica's local file. An
@@ -1148,10 +1200,13 @@ function createSqliteOperationBackend(
  * `protocol: "file"` is not adopted, and none of it imports `@libsql/client`,
  * which this bundler-friendly module must not depend on.
  *
- * Single owner of the local/remote distinction: `../sqlite/libsql.ts` picks its
- * transaction framing (raw BEGIN/COMMIT on the one local connection vs Drizzle's
- * per-stream `db.transaction()`) by asking here, so the framing and the
- * serialized-resource mark cannot drift apart.
+ * Single owner of the local/remote distinction. `detectLibsqlTransactionMode`
+ * asks here before probing a local client for whether raw BEGIN/COMMIT can
+ * span its `execute()` calls; remote clients always use Drizzle's per-stream
+ * `db.transaction()`. The serialized-resource mark stays on every local
+ * client, pooled or not: an in-memory database or embedded replica is still
+ * one connection, and for a pooled file the mark refuses concurrent streams
+ * conservatively rather than risk one waiting on the other's lock.
  */
 export { isLocalLibsqlClient } from "./libsql-client";
 
@@ -1178,11 +1233,11 @@ export { isLocalLibsqlClient } from "./libsql-client";
  *   `capabilities.execution.interactiveTransactions: true` nothing else abstains for it. Identified by
  *   {@link getDurableObjectStorageClient}, the same full-shape evidence the
  *   transaction runner requires, so the framing and the mark cannot drift apart.
- * - **a local `@libsql/client`**: also one stable connection — which is exactly
- *   why local clients frame transactions as raw BEGIN/COMMIT on it (see
- *   {@link isLocalLibsqlClient}). libsql clients expose no `prepare`, so no
- *   prepare-capable predicate can see them and the driver client is read
- *   directly here.
+ * - **a local `@libsql/client`**: one stable connection before 0.18, and still
+ *   one for in-memory databases and embedded replicas after it (see
+ *   {@link isLocalLibsqlClient} for why pooled files stay marked). libsql
+ *   clients expose no `prepare`, so no prepare-capable predicate can see them
+ *   and the driver client is read directly here.
  *
  * Unrecognized clients stay unmarked: SEPARATE connections to the same file are
  * genuinely concurrent under WAL and must not be treated as one serialized
@@ -1205,7 +1260,7 @@ function getSerializedSqliteConnection(
   // same `ctx.storage` shares its one connection and its ambient transaction.
   const storageClient = getDurableObjectStorageClient(db);
   if (storageClient !== undefined) return storageClient;
-  return isLocalLibsqlClient(client) ? (client as object) : undefined;
+  return isLocalLibsqlClient(client) ? (client) : undefined;
 }
 
 /**
@@ -1310,7 +1365,7 @@ export function buildSqliteEngineProfile(
   // .capabilities` — `buildOperations` and `lateMembers` below read it off
   // `ctx` rather than re-deriving a local copy.
 
-  const tableNames: ResolvedSqlTableNames = {
+  const tableNames = {
     schemaVersions: getTableName(tables.schemaVersions),
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -1318,6 +1373,7 @@ export function buildSqliteEngineProfile(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    revisionChanges: getTableName(tables.revisionChanges),
     identityAssertions: getTableName(tables.identityAssertions),
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
@@ -1330,7 +1386,13 @@ export function buildSqliteEngineProfile(
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
     fences: getTableName(tables.fences),
-  };
+    indexMaterializations: getTableName(tables.indexMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
+    kindRemovals: getTableName(tables.kindRemovals),
+    reconciliationMarkers: getTableName(tables.reconciliationMarkers),
+  } satisfies ResolvedSqlTableNames;
   // refreshStatistics() scopes ANALYZE to these — matching the Postgres
   // backend, which never touches unrelated tables sharing the database.
   // The recorded and identity relations are ANALYZEd separately under a
@@ -1465,6 +1527,35 @@ export function buildSqliteEngineProfile(
     revisionOriginsTableDdl: generateSqliteCreateTableSQL(
       tables.revisionOrigins,
     ),
+    revisionChangesTableDdl: generateSqliteCreateTableSQL(
+      tables.revisionChanges,
+    ),
+    revisionChangesTriggerDdl: sqliteRevisionChangeTriggers(tableNames),
+    revisionChangesJournalReady: () =>
+      runWithSerializedQueue(serializedQueue, async () => {
+        const specifications = sqliteRevisionChangeTriggerSpecs(tableNames);
+        const names = [tableNames.revisionChanges, ...specifications.map((specification) => specification.name)];
+        const rows = await executionAdapter.execute<Readonly<{
+          type: string;
+          name: string;
+          tbl_name: string;
+          sql: string | null;
+        }>>(portableSql`
+          SELECT type, name, tbl_name, sql FROM sqlite_master
+          WHERE name IN (${sqlValueList(names)})
+        `);
+        if (!rows.some((row) => row.type === "table" && row.name === tableNames.revisionChanges)) return false;
+        return specifications.every((specification) =>
+          rows.some((row) =>
+            row.type === "trigger" &&
+            row.name === specification.name &&
+            row.tbl_name === specification.table &&
+            row.sql?.includes(`AFTER ${specification.action} ON ${quoteRevisionJournalIdentifier(specification.table)}`) === true &&
+            row.sql.includes(`INSERT INTO ${quoteRevisionJournalIdentifier(tableNames.revisionChanges)}`),
+          ),
+        );
+      }),
+    executeDdl: runDdlStatement,
     contributionsForTableNames: (overrides) =>
       sqliteContributions(
         buildSqliteTables(overrides),
@@ -1684,6 +1775,15 @@ export function buildSqliteEngineProfile(
     identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
       tables.identityTransitionRetention,
     ),
+    revisionChangesTableDdl: generateSqliteCreateTableSQL(
+      tables.revisionChanges,
+    ),
+    revisionChangesIndexDdl: generateSqliteCreateIndexSQL(
+      tables.revisionChanges,
+    ),
+    // SQLite keeps text indexes in byte order, so the graph id listing seeks
+    // the graph_id-leading primary keys and version 5 adopts no index.
+    graphIdOrderIndexDdl: [],
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`
@@ -1769,8 +1869,10 @@ export function buildSqliteEngineProfile(
     const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
     const nativeRootClient = (db as Readonly<{ $client?: unknown }>).$client;
     const supportsSchemaWriteAdoption =
-      transactionMode !== "none" && transactionMode !== "do-sqlite" &&
-      typeof nativeRootClient === "object" && nativeRootClient !== null &&
+      transactionMode !== "none" &&
+      transactionMode !== "do-sqlite" &&
+      typeof nativeRootClient === "object" &&
+      nativeRootClient !== null &&
       "inTransaction" in nativeRootClient;
 
     /**
@@ -2081,10 +2183,11 @@ export function buildSqliteEngineProfile(
               // with manual BEGIN/COMMIT on the *outer* `db`, so it must
               // reuse that connection's already-built `executionAdapter`
               // rather than synthesize a fresh one for a distinct handle.
-              // Serves sync drivers AND local libsql connections: both keep
-              // one stable connection, where raw BEGIN/COMMIT composes and
-              // Drizzle's `db.transaction()` (which for libsql abandons the
-              // client's connection — fatal for `:memory:`) must be avoided.
+              // Serves sync drivers AND local libsql clients before 0.18:
+              // both keep one stable connection, where raw BEGIN/COMMIT
+              // composes and Drizzle's `db.transaction()` (which for those
+              // libsql clients abandons the client's connection — fatal for
+              // `:memory:`) must be avoided.
               const txBackend = createTransactionBackend({
                 capabilities,
                 db,
@@ -2197,130 +2300,160 @@ export function buildSqliteEngineProfile(
           return bindTransactionBackend(externalTx, false);
         },
 
-        ...(
-          supportsSchemaWriteAdoption ?
-            { adoptSchemaWriteTransaction: async function adoptSchemaWriteTransaction(
-          externalTx: AnySqliteDatabase,
-          graphId: string,
-          options: Readonly<{ waitBudgetMs: number }>,
-        ): Promise<AdoptedSchemaWriteTransaction> {
-          if (!Number.isSafeInteger(options.waitBudgetMs) || options.waitBudgetMs <= 0) {
-            throw new ConfigurationError(
-              "Schema fence waitBudgetMs must be a positive finite integer.",
-              { waitBudgetMs: options.waitBudgetMs },
-            );
-          }
-          assertAdoptedDialect<AnySqliteDatabase>(
-            externalTx,
-            BaseSQLiteDatabase,
-            "sqlite",
-          );
+        ...(supportsSchemaWriteAdoption ?
+          {
+            adoptSchemaWriteTransaction:
+              async function adoptSchemaWriteTransaction(
+                externalTx: AnySqliteDatabase,
+                graphId: string,
+                options: Readonly<{ waitBudgetMs: number }>,
+              ): Promise<AdoptedSchemaWriteTransaction> {
+                if (
+                  !Number.isSafeInteger(options.waitBudgetMs) ||
+                  options.waitBudgetMs <= 0
+                ) {
+                  throw new ConfigurationError(
+                    "Schema fence waitBudgetMs must be a positive finite integer.",
+                    { waitBudgetMs: options.waitBudgetMs },
+                  );
+                }
+                assertAdoptedDialect<AnySqliteDatabase>(
+                  externalTx,
+                  BaseSQLiteDatabase,
+                  "sqlite",
+                );
 
-          // SQLite has no SQL transaction-state query. The official sync
-          // client's inTransaction fact belongs to the exact connection this
-          // Drizzle transaction/session will execute on. A transaction-shaped
-          // object or a successful zero-row UPDATE alone proves neither fact.
-          const rootClient = (db as Readonly<{ $client?: unknown }>).$client;
-          const transactionClient =
-            externalTx instanceof SQLiteTransaction ?
-              (externalTx as unknown as Readonly<{
-                session?: Readonly<{ client?: unknown }>;
-              }>).session?.client
-            : (externalTx as Readonly<{ $client?: unknown }>).$client;
-          if (
-            typeof rootClient !== "object" || rootClient === null ||
-            rootClient !== transactionClient ||
-            !("inTransaction" in rootClient) ||
-            rootClient.inTransaction !== true
-          ) {
-            throw new ConfigurationError(
-              "Schema adoption requires the active transaction on this backend's exact SQLite connection.",
-              { capability: "sqliteClient.inTransaction", transactionMode },
-            );
-          }
+                // SQLite has no SQL transaction-state query. The official sync
+                // client's inTransaction fact belongs to the exact connection this
+                // Drizzle transaction/session will execute on. A transaction-shaped
+                // object or a successful zero-row UPDATE alone proves neither fact.
+                const rootClient = (db as Readonly<{ $client?: unknown }>)
+                  .$client;
+                const transactionClient =
+                  externalTx instanceof SQLiteTransaction ?
+                    (
+                      externalTx as unknown as Readonly<{
+                        session?: Readonly<{ client?: unknown }>;
+                      }>
+                    ).session?.client
+                  : (externalTx as Readonly<{ $client?: unknown }>).$client;
+                if (
+                  typeof rootClient !== "object" ||
+                  rootClient === null ||
+                  rootClient !== transactionClient ||
+                  !("inTransaction" in rootClient) ||
+                  rootClient.inTransaction !== true
+                ) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires the active transaction on this backend's exact SQLite connection.",
+                    {
+                      capability: "sqliteClient.inTransaction",
+                      transactionMode,
+                    },
+                  );
+                }
 
-          const backend = bindPrivilegedTransactionBackend(externalTx);
-          if (!(await backend.tableExists(tableNames.nodes))) {
-            throw new ConfigurationError(
-              "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
-              { tableName: tableNames.nodes },
-            );
+                const backend = bindPrivilegedTransactionBackend(externalTx);
+                if (!(await backend.tableExists(tableNames.nodes))) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
+                    { tableName: tableNames.nodes },
+                  );
+                }
+                const [busyTimeout] = await externalTx.all<{ timeout: number }>(
+                  sql`PRAGMA busy_timeout`,
+                );
+                if (
+                  busyTimeout === undefined ||
+                  !Number.isFinite(busyTimeout.timeout)
+                ) {
+                  throw new ConfigurationError(
+                    "This SQLite driver cannot report its busy_timeout for bounded schema adoption.",
+                    { capability: "sqlite.busy_timeout" },
+                  );
+                }
+                const effectiveTimeout = Math.min(
+                  busyTimeout.timeout,
+                  options.waitBudgetMs,
+                );
+                await externalTx.run(
+                  sql.raw(`PRAGMA busy_timeout = ${effectiveTimeout}`),
+                );
+                const deadline = performance.now() + options.waitBudgetMs;
+                let slotError: unknown;
+                try {
+                  // On a DEFERRED caller transaction this no-op UPDATE reserves the
+                  // one SQLite writer slot; in autocommit it would be meaningless,
+                  // which is why the native inTransaction witness came first.
+                  await backend.executeStatement(
+                    engineSerializedWriterSlotStatement(
+                      portableSql.identifier(tableNames.nodes),
+                    ),
+                  );
+                } catch (error) {
+                  slotError = error;
+                }
+                try {
+                  // busy_timeout belongs to the connection, not the transaction;
+                  // even a failed or rolled-back frame must leave it unchanged.
+                  await externalTx.run(
+                    sql.raw(`PRAGMA busy_timeout = ${busyTimeout.timeout}`),
+                  );
+                } catch (restoreError) {
+                  throw new ConfigurationError(
+                    "Could not restore the SQLite connection's busy_timeout after schema fencing.",
+                    { graphId, previousBusyTimeout: busyTimeout.timeout },
+                    { cause: restoreError },
+                  );
+                }
+                if (slotError !== undefined) {
+                  if (isSqliteWriterSlotBusy(slotError)) {
+                    throw new SchemaFenceTimeoutError(
+                      graphId,
+                      "writer-slot",
+                      options.waitBudgetMs,
+                      slotError,
+                    );
+                  }
+                  throw slotError;
+                }
+                if (performance.now() >= deadline) {
+                  throw new SchemaFenceTimeoutError(
+                    graphId,
+                    "writer-slot",
+                    options.waitBudgetMs,
+                  );
+                }
+                const activeSchema = await backend.getActiveSchema(graphId);
+                return {
+                  backend: Object.defineProperty(
+                    backend,
+                    "ensureVectorSlotContributions",
+                    {
+                      value: (
+                        slots: readonly VectorSlot[],
+                        slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>,
+                      ) =>
+                        ensureAdoptedVectorSlots(backend, slots, slotOptions, {
+                          dialect: "sqlite",
+                          fenceTarget,
+                          vectorStrategy,
+                          fulltextStrategy,
+                          fulltextTableName: tables.fulltextTableName,
+                          markerTableName: getTableName(
+                            tables.contributionMaterializations,
+                          ),
+                          decodeMarkerTimestamp:
+                            SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+                        }),
+                      enumerable: true,
+                    },
+                  ) as unknown as AdoptedSchemaWriteTransaction["backend"],
+                  activeSchema,
+                };
+              },
           }
-          const [busyTimeout] = await externalTx.all<{ timeout: number }>(
-            sql`PRAGMA busy_timeout`,
-          );
-          if (busyTimeout === undefined || !Number.isFinite(busyTimeout.timeout)) {
-            throw new ConfigurationError(
-              "This SQLite driver cannot report its busy_timeout for bounded schema adoption.",
-              { capability: "sqlite.busy_timeout" },
-            );
-          }
-          const effectiveTimeout =
-            Math.min(busyTimeout.timeout, options.waitBudgetMs);
-          await externalTx.run(sql.raw(`PRAGMA busy_timeout = ${effectiveTimeout}`));
-          const deadline = performance.now() + options.waitBudgetMs;
-          let slotError: unknown;
-          try {
-            // On a DEFERRED caller transaction this no-op UPDATE reserves the
-            // one SQLite writer slot; in autocommit it would be meaningless,
-            // which is why the native inTransaction witness came first.
-            await backend.executeStatement(
-              engineSerializedWriterSlotStatement(
-                portableSql.identifier(tableNames.nodes),
-              ),
-            );
-          } catch (error) {
-            slotError = error;
-          }
-          try {
-            // busy_timeout belongs to the connection, not the transaction;
-            // even a failed or rolled-back frame must leave it unchanged.
-            await externalTx.run(sql.raw(`PRAGMA busy_timeout = ${busyTimeout.timeout}`));
-          } catch (restoreError) {
-            throw new ConfigurationError(
-              "Could not restore the SQLite connection's busy_timeout after schema fencing.",
-              { graphId, previousBusyTimeout: busyTimeout.timeout },
-              { cause: restoreError },
-            );
-          }
-          if (slotError !== undefined) {
-            if (isSqliteWriterSlotBusy(slotError)) {
-              throw new SchemaFenceTimeoutError(
-                graphId,
-                "writer-slot",
-                options.waitBudgetMs,
-                slotError,
-              );
-            }
-            throw slotError;
-          }
-          if (performance.now() >= deadline) {
-            throw new SchemaFenceTimeoutError(
-              graphId,
-              "writer-slot",
-              options.waitBudgetMs,
-            );
-          }
-          const activeSchema = await backend.getActiveSchema(graphId);
-          return {
-            backend: Object.defineProperty(backend, "ensureVectorSlotContributions", {
-              value: (slots: readonly VectorSlot[], slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>) =>
-                ensureAdoptedVectorSlots(backend, slots, slotOptions, {
-                  dialect: "sqlite",
-                  fenceTarget,
-                  vectorStrategy,
-                  fulltextStrategy,
-                  fulltextTableName: tables.fulltextTableName,
-                  markerTableName: getTableName(tables.contributionMaterializations),
-                  decodeMarkerTimestamp: SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-                }),
-              enumerable: true,
-            }) as unknown as AdoptedSchemaWriteTransaction["backend"],
-            activeSchema,
-          };
-        } }
-          : {}
-        ),
+        : {}),
 
         async schemaWriteTransaction<T>(
           _graphId: string,

@@ -338,6 +338,35 @@ export function explainQueryPlan(
   return rows.map((row) => row.detail).join("\n");
 }
 
+const GRAPH_ID_LISTING_TAIL =
+  /\s*SELECT\s+"graph_id"\s+FROM graph_ids\b[\s\S]*$/;
+
+/**
+ * A captured `listGraphIds` statement reduced to counting the graph ids its walk
+ * visited (not the NULL that ends an exhausted walk), before the page's cursor, prefix and limit are applied: the
+ * observable cost of a page, independent of timing. The placeholders the
+ * dropped page filter used are dropped with it.
+ */
+export function graphIdWalkVisitCount(
+  statement: CapturedStatement,
+): CapturedStatement {
+  const walk = statement.sql.replace(
+    GRAPH_ID_LISTING_TAIL,
+    '\nSELECT count("graph_id") AS visited FROM graph_ids',
+  );
+  if (walk === statement.sql) {
+    throw new Error("Statement is not a listGraphIds walk");
+  }
+  const dollarPlaceholders = [...walk.matchAll(/\$(\d+)/g)].map((match) =>
+    Number(match[1]),
+  );
+  const parameterCount =
+    dollarPlaceholders.length > 0 ?
+      Math.max(...dollarPlaceholders)
+    : walk.split("?").length - 1;
+  return { sql: walk, params: statement.params.slice(0, parameterCount) };
+}
+
 /**
  * Wraps a real backend so any unconditional `transaction(...)` rejects and it
  * reports `capabilities.execution.interactiveTransactions: false` — the shape of

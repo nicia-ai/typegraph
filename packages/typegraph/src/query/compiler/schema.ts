@@ -48,6 +48,8 @@ export type SqlTableNames = Readonly<{
   recordedClock?: string | undefined;
   /** Durable per-graph revision-origin table name (default: "typegraph_revision_origins") */
   revisionOrigins?: string | undefined;
+  /** Per-revision entity-key journal used when revision tracking runs without history. */
+  revisionChanges?: string | undefined;
   /** Identity assertion ledger (default: "typegraph_identity_assertions") */
   identityAssertions?: string | undefined;
   /** Recorded identity assertion relation */
@@ -73,6 +75,14 @@ export type SqlTableNames = Readonly<{
    * not any target ever declares `writeFence.mechanism: "row"`.
    */
   fences?: string | undefined;
+  /** Per-deployment index materialization status (default: "typegraph_index_materializations") */
+  indexMaterializations?: string | undefined;
+  /** Strategy-owned table contribution markers (default: "typegraph_contribution_materializations") */
+  contributionMaterializations?: string | undefined;
+  /** Pending extension-kind removal cleanup (default: "typegraph_kind_removals") */
+  kindRemovals?: string | undefined;
+  /** Removal reconciliation high-water marks (default: "typegraph_reconciliation_markers") */
+  reconciliationMarkers?: string | undefined;
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{
@@ -90,6 +100,7 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedClock: string;
   /** Durable per-graph revision-origin table name */
   revisionOrigins: string;
+  revisionChanges?: string;
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
@@ -104,6 +115,14 @@ export type ResolvedSqlTableNames = Readonly<{
   edgeClaims: string;
   /** Write-fence rows table name */
   fences: string;
+  /** Index materialization status table name */
+  indexMaterializations?: string;
+  /** Contribution marker table name */
+  contributionMaterializations?: string;
+  /** Kind removal cleanup table name */
+  kindRemovals?: string;
+  /** Removal reconciliation marker table name */
+  reconciliationMarkers?: string;
 }>;
 
 type SqlSchemaFields = Readonly<{
@@ -218,6 +237,7 @@ const DEFAULT_TABLE_NAMES = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   revisionOrigins: "typegraph_revision_origins",
+  revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
@@ -228,11 +248,22 @@ const DEFAULT_TABLE_NAMES = {
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   fences: "typegraph_fences",
+  indexMaterializations: "typegraph_index_materializations",
+  contributionMaterializations: "typegraph_contribution_materializations",
+  kindRemovals: "typegraph_kind_removals",
+  reconciliationMarkers: "typegraph_reconciliation_markers",
 } satisfies ResolvedSqlTableNames;
 
 function resolveTableNames(
   names: Partial<SqlTableNames>,
-): ResolvedSqlTableNames {
+): ResolvedSqlTableNames &
+  Readonly<{
+    revisionChanges: string;
+    indexMaterializations: string;
+    contributionMaterializations: string;
+    kindRemovals: string;
+    reconciliationMarkers: string;
+  }> {
   return {
     nodes: names.nodes ?? DEFAULT_TABLE_NAMES.nodes,
     edges: names.edges ?? DEFAULT_TABLE_NAMES.edges,
@@ -241,6 +272,7 @@ function resolveTableNames(
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
     revisionOrigins:
       names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
+    revisionChanges: resolveRevisionChangesTableName(names),
     identityAssertions:
       names.identityAssertions ?? DEFAULT_TABLE_NAMES.identityAssertions,
     recordedIdentityAssertions:
@@ -260,7 +292,21 @@ function resolveTableNames(
     edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
     fences: names.fences ?? DEFAULT_TABLE_NAMES.fences,
     schemaVersions: names.schemaVersions ?? DEFAULT_TABLE_NAMES.schemaVersions,
+    indexMaterializations:
+      names.indexMaterializations ?? DEFAULT_TABLE_NAMES.indexMaterializations,
+    contributionMaterializations:
+      names.contributionMaterializations ??
+      DEFAULT_TABLE_NAMES.contributionMaterializations,
+    kindRemovals: names.kindRemovals ?? DEFAULT_TABLE_NAMES.kindRemovals,
+    reconciliationMarkers:
+      names.reconciliationMarkers ?? DEFAULT_TABLE_NAMES.reconciliationMarkers,
   };
+}
+
+export function resolveRevisionChangesTableName(
+  tables: Readonly<{ revisionChanges?: string | undefined }>,
+): string {
+  return tables.revisionChanges ?? DEFAULT_TABLE_NAMES.revisionChanges;
 }
 
 /**
@@ -364,6 +410,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.recordedEdges, "recordedEdges");
   validateTableName(tables.recordedClock, "recordedClock");
   validateTableName(tables.revisionOrigins, "revisionOrigins");
+  validateTableName(tables.revisionChanges, "revisionChanges");
   validateTableName(tables.identityAssertions, "identityAssertions");
   validateTableName(
     tables.recordedIdentityAssertions,
@@ -380,6 +427,13 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.uniques, "uniques");
   validateTableName(tables.edgeClaims, "edgeClaims");
   validateTableName(tables.fences, "fences");
+  validateTableName(tables.indexMaterializations, "indexMaterializations");
+  validateTableName(
+    tables.contributionMaterializations,
+    "contributionMaterializations",
+  );
+  validateTableName(tables.kindRemovals, "kindRemovals");
+  validateTableName(tables.reconciliationMarkers, "reconciliationMarkers");
 
   return freezeSqlSchema({
     tables: Object.freeze(tables),

@@ -69,6 +69,8 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
+  "ensureRevisionChangesJournal",
+  "revisionChangesJournalReady",
   "ensureRuntimeContributions",
   "ensureTrigramExtension",
   "ensureVectorSlotContribution",
@@ -76,10 +78,13 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "execute",
   "executeTemporaryStatement",
   "findEdgesByKind",
+  "findActiveEdgesBySourceV1",
+  "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "findEdgesConnectedTo",
   "findNodesByKind",
+  "findNodesAcrossKinds",
   "fulltextSearch",
   "fulltextStrategy",
   "getActiveSchema",
@@ -164,7 +169,9 @@ type _historyStoreContainsClaimsCore = Assert<
 >;
 
 type UnsafeHistoryStoreBackendMember =
+  | "findEdgesByMatchIdentity"
   | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
   | "commitSchemaVersionWithPreflight"
   | "instantiateGraphTemplate"
   | "executeDdl"

@@ -147,7 +147,7 @@ describe.each(backendMatrix())(
 
       // The disagreement is still REPORTED (flag does not suppress it).
       const nameConflict = result.data.conflicts.find(
-        (c) => c.property === "name" && `${c.entityId}` === "base-ana",
+        (c) => c.property === "name" && c.entityId === "base-ana",
       );
       expect(nameConflict).toBeDefined();
       expect(nameConflict?.resolution).toBe("Anna Rivera");

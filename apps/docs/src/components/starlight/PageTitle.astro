@@ -1,0 +1,21 @@
+---
+import Default from "@astrojs/starlight/components/PageTitle.astro";
+
+import type { BlogIndexLink } from "../../starlight-route-data";
+
+// Set by src/starlight-route-data.ts on blog pages other than the post list;
+// absent everywhere else. Typed locally for the same reason as Head.astro:
+// Astro's ambient `App.Locals` isn't reachable from this file.
+const { blogIndexLink } = Astro.locals as unknown as {
+  blogIndexLink?: BlogIndexLink;
+};
+---
+
+{blogIndexLink !== undefined && (
+  <a class="blog-back-link" href={blogIndexLink.href}>
+    <span aria-hidden="true">←</span> {blogIndexLink.label}
+  </a>
+)}
+<Default {...Astro.props}>
+  <slot />
+</Default>

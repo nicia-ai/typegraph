@@ -160,6 +160,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     recordedEdges: `${prefix}_recorded_edges`,
     recordedClock: `${prefix}_recorded_clock`,
     revisionOrigins: `${prefix}_revision_origins`,
+    revisionChanges: `${prefix}_revision_changes`,
     identityAssertions: `${prefix}_identity_assertions`,
     recordedIdentityAssertions: `${prefix}_recorded_identity_assertions`,
     identityClosure: `${prefix}_identity_closure`,

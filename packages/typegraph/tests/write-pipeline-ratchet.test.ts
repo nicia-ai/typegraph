@@ -124,11 +124,15 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * graph-entity write surface: it is the guarded row statement for portable
  * resolved batches and is routed through recorded capture like updateNode.
  * `upsertHeterogeneousNodes` (131→132) is the exact-session, closed node
- * program and follows the same recorded-capture classification.
- * `setActiveVersionWithPreflight` (132→133) joined the schema-version
+ * program and follows the same recorded-capture classification. The clear
+ * preservation capability (133→134) remains in the lifecycle class.
+ * `findActiveEdgesBySourceV1` (137→138) is an optional graph-entity read.
+ * The optional durable edge identity owner read (138→139) joins the read
+ * surface: it is a bounded lookup and never mutates rows.
+ * `setActiveVersionWithPreflight` (139→140) joined the schema-version
  * lifecycle beside `setActiveVersion`, owned by the schema manager.
  */
-const MEMBER_COUNT = 133;
+const MEMBER_COUNT = 140;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

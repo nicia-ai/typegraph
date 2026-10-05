@@ -1,14 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  asEdgeId,
   asNodeId,
   createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   defineNodeIndex,
+  disjointWith,
   type Store,
+  subClassOf,
 } from "../../../src";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import {
@@ -16,14 +19,21 @@ import {
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
+  ingestionBranch,
   type MergeOptions,
   planCandidateWriteSet,
   planCandidateWriteSetReview,
+  planMergeIncremental,
   revalidateCandidateWriteSetReview,
   StaleMergePlanError,
 } from "../../../src/graph-merge";
 import { captureMergePlanTargetFence } from "../../../src/graph-merge/merge";
+import { canonicalMergePlanJson } from "../../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
+import { canUseSparseCandidatePlanning } from "../../../src/graph-merge/sparse-candidate-branch";
+import { asBranchId } from "../../../src/graph-merge/types";
+import { importGraph } from "../../../src/interchange";
+import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -44,6 +54,12 @@ const evidence = defineEdge("evidence", {
   schema: z.object({ note: z.string() }),
 });
 const primary = defineEdge("primary", { schema: z.object({}) });
+const limited = defineEdge("limited", { schema: z.object({}) });
+const paired = defineEdge("paired", { schema: z.object({}) });
+const activeLimited = defineEdge("activeLimited", { schema: z.object({}) });
+const identityOwned = defineEdge("identityOwned", {
+  schema: z.object({ code: z.string().default("shared") }),
+});
 const graph = defineGraph({
   id: "durable_merge_review",
   identity: { sameIdAcrossKinds: "fold" },
@@ -63,12 +79,105 @@ const graph = defineGraph({
     },
   },
 });
+const boundedGraph = defineGraph({
+  id: "bounded_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {},
+});
+const boundedIdentityGraph = defineGraph({
+  id: "bounded_identity_candidate_review",
+  identity: { sameIdAcrossKinds: "fold" },
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {},
+});
+const boundedCardinalityGraph = defineGraph({
+  id: "bounded_cardinality_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {
+    limited: {
+      type: limited,
+      from: [Item],
+      to: [Artifact],
+      cardinality: "one",
+    },
+    paired: {
+      type: paired,
+      from: [Item],
+      to: [Artifact],
+      cardinality: "unique",
+    },
+  },
+});
+const boundedActiveCardinalityGraph = defineGraph({
+  id: "bounded_active_cardinality_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {
+    activeLimited: {
+      type: activeLimited,
+      from: [Item],
+      to: [Artifact],
+      cardinality: "oneActive",
+    },
+  },
+});
+const boundedMatchIdentityGraph = defineGraph({
+  id: "bounded_match_identity_candidate_review",
+  nodes: { Item: { type: Item }, Artifact: { type: Artifact } },
+  edges: {
+    identityOwned: {
+      type: identityOwned,
+      from: [Item],
+      to: [Artifact],
+      matchIdentity: { name: "code", fields: ["code"] },
+    },
+  },
+});
+const BaseKind = defineNode("BaseKind", {
+  schema: z.object({ label: z.string() }),
+});
+const SpecificKind = defineNode("SpecificKind", {
+  schema: z.object({ label: z.string() }),
+});
+const ExcludedKind = defineNode("ExcludedKind", {
+  schema: z.object({ label: z.string() }),
+});
+const boundedOntologyGraph = defineGraph({
+  id: "bounded_ontology_candidate_review",
+  nodes: {
+    BaseKind: { type: BaseKind },
+    SpecificKind: { type: SpecificKind },
+    ExcludedKind: { type: ExcludedKind },
+  },
+  edges: {},
+  ontology: [
+    subClassOf(SpecificKind, BaseKind),
+    disjointWith(BaseKind, ExcludedKind),
+  ],
+});
+const boundedOntologyIdentityGraph = defineGraph({
+  id: "bounded_ontology_identity_candidate_review",
+  identity: { sameIdAcrossKinds: "fold" },
+  nodes: {
+    BaseKind: { type: BaseKind },
+    SpecificKind: { type: SpecificKind },
+    ExcludedKind: { type: ExcludedKind },
+  },
+  edges: {},
+  ontology: [
+    subClassOf(SpecificKind, BaseKind),
+    disjointWith(BaseKind, ExcludedKind),
+  ],
+});
 const policy = {
   id: "review-policy-v1",
   context: { minimumApprovals: 1 },
 } as const;
 const validFrom = "2026-01-01T00:00:00.000Z";
 type ReviewStore = Store<typeof graph>;
+
+function itemProps(id: string) {
+  return { label: id, status: "accepted" as const, group: id };
+}
 
 async function candidate(target: ReviewStore): Promise<CandidateWriteSet> {
   return {
@@ -102,6 +211,853 @@ export function registerGraphMergeReviewIntegrationTests(
     return { target, writeSet: await candidate(target), makeBackend, policy };
   }
   describe("durable merge review", () => {
+    it.each([
+      ["off", "compatible"],
+      ["off", "disjoint"],
+      ["off", "deleted"],
+      ["off", "absent"],
+      ["ontology", "compatible"],
+      ["ontology", "disjoint"],
+      ["ontology", "deleted"],
+      ["ontology", "absent"],
+    ] as const)(
+      "matches full-clone ontology decisions with %s reconciliation and %s peer",
+      async (reconcileTypes, peerState) => {
+        const prefix = `${reconcileTypes}-${peerState}`;
+        const target = await context.createHistoryStore(boundedOntologyGraph);
+        if (peerState === "compatible")
+          await target.nodes.BaseKind.create(
+            { label: prefix },
+            { id: prefix, validFrom },
+          );
+        if (peerState === "disjoint" || peerState === "deleted") {
+          const peer = await target.nodes.ExcludedKind.create(
+            { label: prefix },
+            { id: prefix, validFrom },
+          );
+          if (peerState === "deleted")
+            await target.nodes.ExcludedKind.delete(peer.id);
+        }
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `ontology-${prefix}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [
+            {
+              kind: "SpecificKind",
+              id: prefix,
+              properties: { label: `candidate-${prefix}` },
+              validFrom,
+            },
+          ],
+          edges: [],
+        };
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: writeSet.nodes,
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          const options = { reconcileTypes };
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+            options,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                    options,
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(canUseSparseCandidatePlanning(target)).toBe(true);
+          expect(imported.success).toBe(peerState !== "disjoint");
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it("revalidates scoped ontology evidence when a same-id disjoint peer appears", async () => {
+      const target = await context.createHistoryStore(boundedOntologyGraph);
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "ontology-reviewed",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "SpecificKind",
+            id: "ontology-reviewed",
+            properties: { label: "candidate" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      await target.nodes.ExcludedKind.create(
+        { label: "late disjoint sibling" },
+        { id: "ontology-reviewed", validFrom },
+      );
+      const revalidated = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review }),
+      );
+      expect(review.baseline.scope).toBe("referenced");
+      expect(revalidated.status).toBe("changed");
+    });
+    it("seeds same-id ontology peers through identity closure", async () => {
+      const target = await context.createHistoryStore(
+        boundedOntologyIdentityGraph,
+      );
+      await target.nodes.ExcludedKind.create(
+        { label: "disjoint incumbent" },
+        { id: "identity-disjoint", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "ontology-identity-disjoint",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "SpecificKind",
+            id: "identity-disjoint",
+            properties: { label: "candidate" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const full = unwrap(
+        await ingestionBranch(target, makeBackend, {
+          id: asBranchId(writeSet.sourceId),
+        }),
+      );
+      try {
+        const imported = await importGraph(
+          full,
+          {
+            formatVersion: "2.0",
+            exportedAt: "1970-01-01T00:00:00.000Z",
+            source: { type: "external" },
+            nodes: writeSet.nodes,
+            edges: writeSet.edges,
+          },
+          {
+            onConflict: "update",
+            onUnknownProperty: "error",
+            validateReferences: true,
+            refreshStatistics: false,
+          },
+        );
+        const bounded = await planCandidateWriteSet({
+          target,
+          writeSet,
+          makeBackend,
+        });
+        const boundedImportErrors =
+          isErr(bounded) && bounded.error instanceof CandidateWriteSetError ?
+            bounded.error.details["errors"]
+          : undefined;
+        expect(canUseSparseCandidatePlanning(target)).toBe(true);
+        expect(imported.success).toBe(false);
+        expect(boundedImportErrors).toEqual(imported.errors);
+      } finally {
+        await full.close();
+      }
+    });
+    it("revalidates identity-enabled ontology evidence for a late disjoint peer", async () => {
+      const target = await context.createHistoryStore(
+        boundedOntologyIdentityGraph,
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "ontology-identity-reviewed",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "SpecificKind",
+            id: "identity-reviewed",
+            properties: { label: "candidate" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      await target.nodes.ExcludedKind.create(
+        { label: "late disjoint sibling" },
+        { id: "identity-reviewed", validFrom },
+      );
+      const revalidated = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review }),
+      );
+      expect(review.baseline.scope).toBe("referenced");
+      expect(revalidated.status).toBe("changed");
+    });
+    it.each([
+      ["limited", "occupied"],
+      ["limited", "available"],
+      ["limited", "deleted"],
+      ["paired", "occupied"],
+      ["paired", "available"],
+      ["paired", "deleted"],
+    ] as const)(
+      "matches full-clone cardinality decisions for %s with %s peer",
+      async (edgeKind, peerState) => {
+        const prefix = `${edgeKind}-${peerState}`;
+        const target = await context.createHistoryStore(
+          boundedCardinalityGraph,
+        );
+        const source = await target.nodes.Item.create(
+          itemProps(`${prefix}-source`),
+          {
+            id: `${prefix}-source`,
+            validFrom,
+          },
+        );
+        const otherSource = await target.nodes.Item.create(
+          itemProps(`${prefix}-other-source`),
+          { id: `${prefix}-other-source`, validFrom },
+        );
+        const existing = await target.nodes.Artifact.create(
+          { content: "existing" },
+          { id: `${prefix}-existing`, validFrom },
+        );
+        const proposed = await target.nodes.Artifact.create(
+          { content: "proposed" },
+          { id: `${prefix}-proposed`, validFrom },
+        );
+        const existingSource =
+          edgeKind === "limited" && peerState === "available" ?
+            otherSource
+          : source;
+        const existingTarget =
+          edgeKind === "paired" && peerState === "occupied" ?
+            proposed
+          : existing;
+        const peer = await target.edges[edgeKind].create(
+          existingSource,
+          existingTarget,
+          {},
+          {
+            id: `${prefix}-existing-edge`,
+            validFrom,
+          },
+        );
+        if (peerState === "deleted") {
+          if (edgeKind === "limited")
+            await target.edges.limited.delete(
+              asEdgeId<typeof limited>(peer.id),
+            );
+          else
+            await target.edges.paired.delete(asEdgeId<typeof paired>(peer.id));
+        }
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `cardinality-${edgeKind}-${peerState}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [],
+          edges: [
+            {
+              kind: edgeKind,
+              id: `${prefix}-candidate-edge`,
+              from: { kind: "Item", id: source.id },
+              to: { kind: "Artifact", id: proposed.id },
+              properties: {},
+              validFrom,
+            },
+          ],
+        };
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: writeSet.nodes,
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it.each([
+      "occupied",
+      "available",
+      "ended",
+      "deleted",
+      "future-open",
+    ] as const)(
+      "matches full-clone oneActive decisions with a %s peer",
+      async (peerState) => {
+        const target = await context.createHistoryStore(
+          boundedActiveCardinalityGraph,
+        );
+        const source = await target.nodes.Item.create(itemProps("source"), {
+          id: "source",
+          validFrom,
+        });
+        const otherSource = await target.nodes.Item.create(
+          itemProps("other-source"),
+          { id: "other-source", validFrom },
+        );
+        const existing = await target.nodes.Artifact.create(
+          { content: "existing" },
+          { id: "existing", validFrom },
+        );
+        const proposed = await target.nodes.Artifact.create(
+          { content: "proposed" },
+          { id: "proposed", validFrom },
+        );
+        const peer = await target.edges.activeLimited.create(
+          peerState === "available" ? otherSource : source,
+          existing,
+          {},
+          {
+            id: "existing-edge",
+            validFrom:
+              peerState === "future-open" ?
+                "2099-01-01T00:00:00.000Z"
+              : validFrom,
+            ...(peerState === "ended" ?
+              { validTo: "2026-02-01T00:00:00.000Z" }
+            : {}),
+          },
+        );
+        if (peerState === "deleted")
+          await target.edges.activeLimited.delete(
+            asEdgeId<typeof activeLimited>(peer.id),
+          );
+        const readActive = target.backend.findActiveEdgesBySourceV1;
+        expect(readActive).toBeDefined();
+        if (readActive === undefined)
+          throw new Error("Bundled backend lacks active source read.");
+        const activeRows = await readActive({
+          graphId: target.graphId,
+          edgeKind: "activeLimited",
+          fromKind: "Item",
+          fromId: source.id,
+        });
+        expect(activeRows.map((row) => row.id)).toEqual(
+          peerState === "occupied" || peerState === "future-open" ?
+            [peer.id]
+          : [],
+        );
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `one-active-${peerState}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [],
+          edges: [
+            {
+              kind: "activeLimited",
+              id: "candidate-edge",
+              from: { kind: "Item", id: source.id },
+              to: { kind: "Artifact", id: proposed.id },
+              properties: {},
+              validFrom,
+            },
+          ],
+        };
+        expect(canUseSparseCandidatePlanning(target)).toBe(true);
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: writeSet.nodes,
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          const occupied =
+            peerState === "occupied" || peerState === "future-open";
+          expect(imported.success).toBe(!occupied);
+          const importError =
+            imported.success ? undefined : imported.errors[0]?.error;
+          expect(importError ?? "").toEqual(
+            expect.stringContaining(occupied ? "oneActive" : ""),
+          );
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it.each(["occupied", "deleted"] as const)(
+      "matches full-clone durable matchIdentity planning with a %s owner and schema defaults",
+      async (ownerState) => {
+        const target = await context.createHistoryStore(
+          boundedMatchIdentityGraph,
+        );
+        const source = await target.nodes.Item.create(
+          itemProps("match-source"),
+          { id: "match-source", validFrom },
+        );
+        const peer = await target.nodes.Artifact.create(
+          { content: "match-peer" },
+          { id: "match-peer", validFrom },
+        );
+        const owner = await target.edges.identityOwned.create(
+          source,
+          peer,
+          { code: "shared" },
+          { id: "durable-owner", validFrom },
+        );
+        if (ownerState === "deleted")
+          await target.edges.identityOwned.delete(
+            asEdgeId<typeof identityOwned>(owner.id),
+          );
+
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `match-identity-${ownerState}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [],
+          edges: [
+            {
+              kind: "identityOwned",
+              id: "candidate-owner",
+              from: { kind: "Item", id: source.id },
+              to: { kind: "Artifact", id: peer.id },
+              properties: {},
+              validFrom,
+            },
+          ],
+        };
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: [],
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "error",
+              onUnknownProperty: "allow",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          expect(imported.success).toBe(ownerState === "deleted");
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it("matches full-clone planning for an identity class and unrelated ended assertion", async () => {
+      const target = await context.createHistoryStore(boundedIdentityGraph);
+      const first = await target.nodes.Item.create(itemProps("first"), {
+        id: "first",
+        validFrom,
+      });
+      const bridge = await target.nodes.Item.create(itemProps("bridge"), {
+        id: "bridge",
+        validFrom,
+      });
+      await target.nodes.Artifact.create(
+        { content: "second" },
+        { id: "second", validFrom },
+      );
+      const unrelatedA = await target.nodes.Item.create(
+        itemProps("unrelated-a"),
+        {
+          id: "unrelated-a",
+          validFrom,
+        },
+      );
+      const unrelatedB = await target.nodes.Item.create(
+        itemProps("unrelated-b"),
+        {
+          id: "unrelated-b",
+          validFrom,
+        },
+      );
+      await target.identity.assertSame(first, bridge);
+      const ended = await target.identity.assertSame(unrelatedA, unrelatedB);
+      await target.identity.retractAssertion(ended.assertion.id);
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "cross-backend-identity-candidate",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: "typegraph-identity-v1",
+          mode: "state",
+          assertions: [
+            {
+              id: "candidate-same",
+              relation: "same",
+              a: { kind: "Artifact", id: "second" },
+              b: { kind: "Item", id: "bridge" },
+              validFrom,
+            },
+          ],
+        },
+      };
+      const full = unwrap(
+        await ingestionBranch(target, makeBackend, {
+          id: asBranchId(writeSet.sourceId),
+        }),
+      );
+      try {
+        const imported = await importGraph(
+          full,
+          {
+            formatVersion: "2.0",
+            exportedAt: "1970-01-01T00:00:00.000Z",
+            source: { type: "external" },
+            nodes: writeSet.nodes,
+            edges: writeSet.edges,
+            identity: writeSet.identity,
+          },
+          {
+            onConflict: "update",
+            onUnknownProperty: "error",
+            validateReferences: true,
+            refreshStatistics: false,
+          },
+        );
+        expect(imported.success).toBe(true);
+        const expected = unwrap(
+          await planMergeIncremental({
+            forkPoint: target,
+            target,
+            branches: [full],
+          }),
+        );
+        const actual = unwrap(
+          await planCandidateWriteSet({ target, writeSet, makeBackend }),
+        );
+        expect(canonicalMergePlanJson(actual)).toBe(
+          canonicalMergePlanJson(expected),
+        );
+      } finally {
+        await full.close();
+      }
+    });
+    it("keeps scoped review evidence stable across unrelated target growth", async () => {
+      const target = await context.createHistoryStore(boundedGraph);
+      const existing = await target.nodes.Item.create(
+        { label: "Existing", status: "proposed", group: "one" },
+        { id: "existing", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "bounded-source",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "Item",
+            id: "existing",
+            properties: {
+              label: "Updated",
+              status: "accepted",
+              group: "one",
+            },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.formatVersion).toBe(2);
+      expect(review.baseline.scope).toBe("referenced");
+      expect(await target.nodes.Item.getById(existing.id)).toMatchObject({
+        label: "Existing",
+      });
+      await target.nodes.Artifact.create(
+        { content: JSON.stringify(review) },
+        { id: "unrelated-review", validFrom },
+      );
+      expect(
+        unwrap(await revalidateCandidateWriteSetReview({ ...args, review }))
+          .status,
+      ).toBe("compatible");
+      await target.nodes.Item.update(existing.id, { label: "Changed" });
+      expect(
+        unwrap(await revalidateCandidateWriteSetReview({ ...args, review }))
+          .status,
+      ).toBe("changed");
+    });
+    it("preserves V1 and V2 approval decisions for an unrelated original row update", async () => {
+      const target = await context.createHistoryStore(boundedGraph);
+      const candidate = await target.nodes.Item.create(itemProps("candidate"), {
+        id: "candidate",
+        validFrom,
+      });
+      const unrelated = await target.nodes.Artifact.create(
+        { content: "original" },
+        { id: "unrelated", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "review-scope-decision",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "Item",
+            id: candidate.id,
+            properties: { ...itemProps("candidate"), label: "accepted" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = { target, writeSet, makeBackend, policy };
+      const v1 = unwrap(await planCandidateWriteSetReview(args));
+      const v2 = unwrap(
+        await planCandidateWriteSetReview({
+          ...args,
+          reviewScope: "candidate",
+        }),
+      );
+      expect(v1.formatVersion).toBe(1);
+      expect(v2.formatVersion).toBe(2);
+      expect(v2.plan.writes).toEqual(v1.plan.writes);
+
+      await target.nodes.Artifact.update(unrelated.id, { content: "revised" });
+      const v1Decision = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review: v1 }),
+      );
+      const v2Decision = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review: v2 }),
+      );
+      expect(v1Decision).toMatchObject({
+        status: "changed",
+        differences: [
+          {
+            category: "baseline",
+            path: "baseline.rows",
+            entity: { role: "node", kind: "Artifact", id: unrelated.id },
+          },
+        ],
+      });
+      expect(v2Decision.status).toBe("compatible");
+    });
+    it("bounds V2 review reads across unrelated rows and identity assertions", async () => {
+      const target = await context.createHistoryStore(boundedIdentityGraph);
+      const candidate = await target.nodes.Item.create(itemProps("candidate"), {
+        id: "candidate",
+        validFrom,
+      });
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "review-scope-budget",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "Item",
+            id: candidate.id,
+            properties: { ...itemProps("candidate"), label: "accepted" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      async function measure<T>(run: () => Promise<T>) {
+        const backend = context.getBackend();
+        const originalExecute = backend.execute;
+        const startingFence = await captureMergePlanTargetFence(target);
+        let statements = 0;
+        let returnedRows = 0;
+        const execute = vi
+          .spyOn(backend, "execute")
+          .mockImplementation(async <TRow>(query: CompiledRowsSql) => {
+            const rows = await originalExecute<TRow>(query);
+            statements += 1;
+            returnedRows += rows.length;
+            return rows;
+          });
+        try {
+          const value = await run();
+          return { value, statements, returnedRows };
+        } finally {
+          execute.mockRestore();
+          expect(await captureMergePlanTargetFence(target)).toEqual(
+            startingFence,
+          );
+        }
+      }
+      const before = await measure(() => planCandidateWriteSetReview(args));
+      const review = unwrap(before.value);
+      expect(review.baseline.scope).toBe("referenced");
+      for (let index = 0; index < 12; index += 1) {
+        const left = await target.nodes.Item.create(
+          itemProps(`left-${index}`),
+          {
+            id: `left-${index}`,
+            validFrom,
+          },
+        );
+        const right = await target.nodes.Item.create(
+          itemProps(`right-${index}`),
+          { id: `right-${index}`, validFrom },
+        );
+        await target.identity.assertDifferent(left, right, { validFrom });
+      }
+      const after = await measure(() => planCandidateWriteSetReview(args));
+      unwrap(after.value);
+      expect(after.statements).toBeLessThanOrEqual(before.statements);
+      expect(after.returnedRows).toBe(before.returnedRows);
+
+      const revalidation = await measure(() =>
+        revalidateCandidateWriteSetReview({ ...args, review }),
+      );
+      expect(unwrap(revalidation.value).status).toBe("compatible");
+      expect(revalidation.statements).toBeLessThanOrEqual(after.statements * 2);
+      expect(revalidation.returnedRows).toBeLessThanOrEqual(
+        after.returnedRows * 2,
+      );
+    });
     it("persists immutable review and approval evidence in the target before applying the fresh plan", async () => {
       const args = await setup();
       const proposed = await args.target.nodes.Item.create(

@@ -1,0 +1,274 @@
+---
+title: "Agent Memory That Knows Why It Believes Things"
+excerpt: "Bitemporal recorded time and provenance-backed retraction let a graph say why it believes a fact, recompute what still holds when a source turns out wrong, and replay what it believed at any commit."
+date: 2026-07-22
+tags:
+  - announcements
+cover:
+  alt: "Diagram of the post's retraction example: two sources back Vulnerable(svc-14), which stays blocked, while Vulnerable(svc-22) only had the retracted VulnFeed behind it and unblocks"
+  image: "./cover.png"
+social:
+  alt: "Agent Memory That Knows Why It Believes Things"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Say a vuln-feed agent in your overnight security pipeline flags 60 services
+as shipping a vulnerable library, blocks their deploys, opens fix PRs, and
+pages the owning teams. In the morning someone notices that the feed had a bad
+package-name mapping, which pinned a real CVE to the wrong package across a
+whole class of entries. What should happen to those 60 flags?
+
+Deleting all of them is wrong, because some were independently confirmed by a
+SAST run or an SBOM check and those services really are vulnerable. Leaving
+them is also wrong, because most were only ever the feed talking, and they're
+blocking shipments and paging people for nothing. What you need is the blast
+radius: which of the 60 flags depend only on the feed, and which have other
+evidence behind them.
+
+Most agent memory can't answer that, because "memory" today usually means
+retrieval: embed everything, fetch the nearest neighbors, and let the model
+sort it out. That works for recall, but a vector store only keeps what was
+said. It has no record of _why_ something was concluded, or of what should
+happen to a conclusion when one of its sources turns out to be wrong. You
+could live with that when an agent was a single chat transcript, but not once
+a fleet of agents writes into shared memory and acts on it.
+
+Over the last few releases I built the layer that answers the question: a
+second temporal axis (0.33), provenance-backed retraction on top of it
+(0.34), and the hardening that makes both hold up under real load (0.39 and
+0.40). I'm really happy with how this one came out.
+
+## The blast radius, as a query
+
+With the provenance layer, the support structure is right there in the
+graph:
+
+```plaintext
+VulnFeed ──▶ Vulnerable(svc-14) ──▶ BlockDeploy(svc-14)
+SASTRun  ──▶ Vulnerable(svc-14)          two sources, survives
+
+VulnFeed ──▶ Vulnerable(svc-22) ──▶ BlockDeploy(svc-22)
+                                         feed only, dies
+```
+
+Retract the feed and `Vulnerable(svc-22)` loses its only source, so it goes
+non-current. That takes away the premise of `BlockDeploy(svc-22)`, which goes
+non-current too, and the deploy unblocks. `Vulnerable(svc-14)` survives
+because the SAST run still backs it, so that block stands.
+
+```typescript
+const report = await provenance.retract({
+  kind: "VulnFeed",
+  id: badMappingSnapshotId,
+});
+
+// report.died:
+//   flags and deploy blocks that had only the feed behind them
+//
+// report.survivedVia:
+//   flags still confirmed by SAST or the SBOM check
+```
+
+Run that across all 60 services and `report` is your cleanup list: `died`
+tells you which deploys to unblock and which PRs to close, and `survivedVia`
+tells you which flags are still real. I wouldn't trust anyone to work that out
+by hand at 7am.
+
+The source doesn't have to be a feed; it can be another agent's run. If a
+triage agent combined an overnight feed-ingest run, a SAST scan, and an SBOM
+rebuild into block-and-page decisions, and the feed-ingest run turns out to
+have trusted bad data, you retract that run, not the whole fleet's memory:
+
+```typescript
+const report = await provenance.retract({
+  kind: "AgentRun",
+  id: overnightFeedRunId,
+});
+```
+
+Flags raised only by that run go non-current, while flags another run also
+supports survive, so one agent's mistake gets cleaned up without disturbing
+what the others established.
+
+## How retraction works
+
+The `@nicia-ai/typegraph/provenance` subpath maps your existing graph kinds
+onto four roles (sources, justifications, facts, and the edges between them)
+and gives you a `retract` that recomputes support instead of deleting
+blindly:
+
+```typescript
+import { createRetractionCapability } from "@nicia-ai/typegraph/provenance";
+
+const provenance = createRetractionCapability(store, {
+  source: { kinds: ["ScannerSource", "VendorSource"] },
+  justification: { kind: "Justification" },
+  fact: { kinds: ["Vulnerability", "DeployDecision"] },
+  premiseOf: { kind: "premiseOf" },
+  derives: { kind: "derives" },
+});
+```
+
+A fact stays believed while at least one of its justifications has all its
+premises still supported. Premises bottom out at sources. Retract a source
+and every justification that leaned on it stops counting; a fact loses
+currency only when it runs out of surviving justifications.
+
+Two properties make this safe to use. Retraction is **scoped**, touching
+only facts reachable from the sources that flipped, and it's **reversible**:
+it changes whether a fact is believed without deleting anything, and the
+fact's edges stay put, so `unRetract` is an exact inverse of `retract`.
+
+None of this is new theory. The storage follows the JTMS shape from Doyle's
+1979 _A Truth Maintenance System_: AND-justifications over premises, sources
+as the base case, a fact believed only if some justification has all its premises supported. The
+question `retract` answers (which facts keep support after a source drops
+out) is the ATMS question from de Kleer's 1986 work, and all of it runs on ordinary
+SQL. It covers the well-founded, monotonic part of classic truth maintenance
+rather than all of it. The new part is where it lives: your agent keeps
+writing ordinary graph data and gets retraction semantics without moving to a
+dedicated reasoning engine.
+
+## Replaying what the agent believed
+
+Retraction is much more useful with history. You want "why did the agent
+block svc-22 at 2am, and why doesn't it anymore?" to be a query rather than a
+dig through logs, and recorded time is what makes that possible.
+
+TypeGraph already had valid time: when a fact was true in the world, set
+with `validFrom` / `validTo` and read with `store.asOf(T)`. 0.33 adds the
+second axis, **recorded time**: when TypeGraph captured a fact, what the
+system knew as of a commit. It's the SQL:2011 `FOR SYSTEM_TIME` axis, or
+Datomic's system time. Turn it on per store:
+
+```typescript
+const store = createStore(graph, backend, { history: true });
+```
+
+Writes through that store are captured with a per-graph, monotonic commit
+anchor. `store.asOfRecorded(T)` gives you a read-only view of the graph as
+of that anchor, and `store.recordedNow()` hands you the current one. The two
+axes compose:
+
+```typescript
+store.asOf(validTime).asOfRecorded(recordedTime);
+```
+
+Retraction is a normal write under `history: true`, so the whole before and
+after replays:
+
+```typescript
+const before = await store.recordedNow();
+
+await provenance.retract({
+  kind: "VulnFeed",
+  id: badMappingSnapshotId,
+});
+
+const after = await store.recordedNow();
+
+await store.asOfRecorded(before).nodes.BlockDeploy.getById("svc-22"); // current
+await store.asOfRecorded(after).nodes.BlockDeploy.getById("svc-22"); // non-current
+```
+
+One naming note, since it trips up people coming from other systems:
+TypeGraph's `asOf` is valid time, the reverse of SQL:2011's
+`FOR SYSTEM_TIME AS OF` and Datomic's `d/as-of`, where a bare "as of" means
+system time. Valid-time reads are the common case here, so they got the
+short name.
+
+## Why plain SQL, and what it costs
+
+There's no portable, engine-native system versioning across Postgres and
+SQLite. Postgres needs an extension or an application-level pattern, and
+SQLite has nothing. So TypeGraph stores history in its own tables and
+reconstructs point-in-time views in the query compiler. One implementation
+runs on both backends, so the same memory model works from a solo agent's
+local SQLite file up to a fleet writing into shared Postgres.
+
+That isn't free:
+
+- **Only TypeGraph-managed writes are captured.** Raw `tx.sql` is disabled
+  on a history store, since it would bypass capture. This is an audit layer
+  for graph writes, not database-level CDC.
+- **No backfill.** Enable history on a fresh graph. An entity that already
+  existed is first recorded the next time it's written.
+- **Recorded reads are an audit and replay tool, not a hot path.** They
+  reconstruct from history, so they're slower than current-state reads, and
+  broad reads like `find`, `search`, and vector predicates aren't available
+  at a past anchor because those indexes only reflect the present.
+- **Writes cost more.** Roughly 2.5–6× an uncaptured write when each write is
+  its own transaction, dropping to about 1–1.5× when writes are batched.
+
+## Hardening it: 0.39 and 0.40
+
+Once real consumers started reading this axis, two gaps showed up.
+
+**Commits in the same millisecond.** 0.33 ordered commits by wall-clock
+timestamp alone, which breaks exactly when writes get fast. Five
+back-to-back writes:
+
+```text
+commit 0 anchor: r1:0000000000000001:2026-07-21T17:59:03.914Z
+commit 1 anchor: r1:0000000000000002:2026-07-21T17:59:03.914Z
+commit 2 anchor: r1:0000000000000003:2026-07-21T17:59:03.915Z
+commit 3 anchor: r1:0000000000000004:2026-07-21T17:59:03.915Z
+commit 4 anchor: r1:0000000000000005:2026-07-21T17:59:03.915Z
+```
+
+Commits 0 and 1 share `17:59:03.914Z`. With a timestamp-only anchor, "the
+graph right after commit 0 but before commit 1" doesn't have an answer.
+0.40 anchors are `r1:<revision>:<timestamp>`: the revision is a strict
+per-graph counter, so every commit gets its own position no matter how many
+share a millisecond. The timestamp is still there for display, and it never
+moves backwards, even if the system clock does. A raw ISO string no longer
+type-checks as an anchor, on purpose; get anchors from `recordedNow()`.
+Deployments that adopted the earlier format run `migrateLegacyRecordedTime()`
+once before opening the upgraded store.
+
+**Walking a whole snapshot.** 0.39 adds `scan()` to recorded collections:
+bounded, deterministic pages (up to 1,000 per call) ordered by id, with a
+cursor bound to the exact view it came from:
+
+```typescript
+const view = store.asOfRecorded(anchor);
+const page1 = await view.nodes.Item.scan({ limit: 2 });
+const page2 = await view.nodes.Item.scan({ limit: 2, after: page1.nextCursor });
+```
+
+Together those make "every row as of commit N, in order, one page at a time"
+a supported operation for a replication tap, an audit export, or a search
+index rebuild pinned to a point in history.
+
+## Why agent memory needs this
+
+A fact stored without provenance is organizational hearsay: the memory can't
+tell you why it believes something or what should change when a source goes
+bad. A single chat agent can get away with that because a lot of
+inconsistency hides inside one transcript, but agents that share memory will
+read stale feeds, trust bad mappings, and inherit each other's wrong
+assumptions.
+
+Memory that gates deploys, or maintains any long-lived model of a company,
+needs to answer three questions: what do we believe, why do we believe it,
+and what changes if this source turns out to be wrong. This layer is built to
+answer those, and it runs on the SQL database you already have.
+
+## Try it
+
+- [Provenance and Retraction](/provenance) and the
+  [Provenance Retraction example](/examples/provenance-retraction/)
+- [Bitemporal Time Travel example](/examples/bitemporal-time-travel/)
+- [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time):
+  the anchor format and diagonal bitemporal reads
+- [Migrating preview recorded time](/schema-management#migrating-preview-recorded-time)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+If you've mapped JTMS/ATMS-style truth maintenance onto relational storage
+elsewhere, or know of prior art that does, I'd like to hear about it. There's
+plenty written on truth maintenance systems and not much on doing it
+directly on ordinary SQL tables.
+
+<NewsletterSignup />

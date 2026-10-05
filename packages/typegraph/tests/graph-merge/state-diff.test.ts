@@ -1,5 +1,6 @@
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -17,9 +18,12 @@ import {
   revisionOriginOf,
 } from "../../src/graph-merge/base-version";
 import {
+  createGraphNodeKindReader,
   diffAgainstBase,
   enumerateAllEdges,
   enumerateAllNodes,
+  enumerateGraphEdges,
+  enumerateGraphNodes,
 } from "../../src/graph-merge/state-diff";
 import { requireDefined } from "../../src/utils/presence";
 import {
@@ -244,6 +248,120 @@ describe.each(backendMatrix())("state-diff [$name]", (entry) => {
     expect(diff.edges.new).toHaveLength(0);
     expect(diff.edges.modified).toHaveLength(0);
     expect(diff.edges.deleted).toHaveLength(0);
+  });
+
+  it("reads a store only once when it is both sides of a diff", async () => {
+    const backend = await makeBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    await store.edges.knows.create(alice, bob, { since: "2025" });
+    const nodeReads = vi.spyOn(backend, "findNodesAcrossKinds");
+    const edgeReads = vi.spyOn(backend, "findEdgesAcrossKinds");
+
+    const diff = await diffAgainstBase(store, store);
+
+    expect(nodeReads).toHaveBeenCalledTimes(1);
+    expect(edgeReads).toHaveBeenCalledTimes(1);
+    expect(diff.nodes.new).toHaveLength(0);
+    expect(diff.nodes.modified).toHaveLength(0);
+    expect(diff.edges.new).toHaveLength(0);
+    expect(diff.edges.modified).toHaveLength(0);
+  });
+
+  it("enumerates declared kinds in one page per relation", async () => {
+    const Place = defineNode("Place", {
+      schema: z.object({ name: z.string() }),
+    });
+    const expandedGraph = defineGraph({
+      id: "state-diff-across-kinds",
+      nodes: { Person: { type: Person }, Place: { type: Place } },
+      edges: { knows: { type: knows, from: [Person], to: [Person] } },
+    });
+    const backend = await makeBackend();
+    const [store] = await createStoreWithSchema(expandedGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Place.create({ name: "Harbor" });
+    await store.nodes.Person.delete(alice.id);
+    const nodePages = vi.spyOn(backend, "findNodesAcrossKinds");
+    const edgePages = vi.spyOn(backend, "findEdgesAcrossKinds");
+
+    const nodes = await enumerateGraphNodes(backend, store.graphId, [
+      "Person",
+      "Place",
+    ]);
+    const edges = await enumerateGraphEdges(backend, store.graphId, ["knows"]);
+
+    expect(nodePages).toHaveBeenCalledTimes(1);
+    expect(edgePages).toHaveBeenCalledTimes(1);
+    expect(nodes.get("Person")?.[0]?.deleted_at).toBeDefined();
+    expect(nodes.get("Place")).toHaveLength(1);
+    expect(edges.size).toBe(0);
+
+    const readPage = backend.findNodesAcrossKinds;
+    if (readPage === undefined) throw new Error("Expected cross-kind read");
+    const firstPage = await readPage({
+      graphId: store.graphId,
+      kinds: ["Person", "Place"],
+      limit: 1,
+      excludeDeleted: false,
+    });
+    const firstRow = requireDefined(firstPage[0]);
+    const secondPage = await readPage({
+      graphId: store.graphId,
+      kinds: ["Person", "Place"],
+      limit: 1,
+      after: { kind: firstRow.kind, id: firstRow.id },
+      excludeDeleted: false,
+    });
+    expect(
+      new Set([...firstPage, ...secondPage].map((row) => row.kind)),
+    ).toEqual(new Set(["Person", "Place"]));
+    await expect(
+      readPage({ graphId: store.graphId, kinds: ["Person"], limit: -1 }),
+    ).rejects.toThrow(ConfigurationError);
+  });
+
+  it("falls back to per-kind reads for a custom backend", async () => {
+    const Place = defineNode("Place", {
+      schema: z.object({ name: z.string() }),
+    });
+    const expandedGraph = defineGraph({
+      id: "state-diff-custom-enumeration",
+      nodes: { Person: { type: Person }, Place: { type: Place } },
+      edges: {},
+    });
+    const backend = await makeBackend();
+    const [store] = await createStoreWithSchema(expandedGraph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Place.create({ name: "Harbor" });
+    const perKindRead = vi.spyOn(backend, "findNodesByKind");
+    const customBackend = new Proxy(backend, {
+      get(target, property) {
+        if (property === "findNodesAcrossKinds") return;
+        return getBackendProperty(target, property);
+      },
+    });
+
+    const rows = await enumerateGraphNodes(customBackend, store.graphId, [
+      "Person",
+      "Place",
+    ]);
+
+    expect(perKindRead).toHaveBeenCalledTimes(2);
+    expect(rows.get("Person")).toHaveLength(1);
+    expect(rows.get("Place")).toHaveLength(1);
+  });
+
+  it("reads many empty kinds in bounded groups", async () => {
+    const backend = await makeBackend();
+    const kinds = Array.from({ length: 9 }, (_, index) => `Kind${index}`);
+    const readKind = createGraphNodeKindReader(backend, graph.id, kinds);
+    const readPages = vi.spyOn(backend, "findNodesAcrossKinds");
+
+    for (const kind of kinds) expect(await readKind(kind)).toEqual([]);
+
+    expect(readPages).toHaveBeenCalledTimes(2);
   });
 
   it("reports an edge whose props were modified in the fork", async () => {

@@ -1756,7 +1756,7 @@ async function processNodeSlice(
       });
       continue;
     }
-    const propsResult = validateProperties(
+    const propsResult = validateImportProperties(
       node.properties,
       schemaEntry.schema,
       options.onUnknownProperty,
@@ -2640,7 +2640,7 @@ async function processNode(
   }
 
   // Validate and transform properties
-  const propsResult = validateProperties(
+  const propsResult = validateImportProperties(
     node.properties,
     schemaEntry.schema,
     options.onUnknownProperty,
@@ -3236,7 +3236,7 @@ async function processEdgeSlice(
       record(edge, { status: "error", error: endpointError.message });
       continue;
     }
-    const propsResult = validateProperties(
+    const propsResult = validateImportProperties(
       edge.properties,
       schemaEntry.schema,
       options.onUnknownProperty,
@@ -3818,7 +3818,7 @@ async function processEdge(
   }
 
   // Validate and transform properties
-  const propsResult = validateProperties(
+  const propsResult = validateImportProperties(
     edge.properties,
     schemaEntry.schema,
     options.onUnknownProperty,
@@ -3991,15 +3991,13 @@ function importEdgeInsertWork(
 // Property Validation
 // ============================================================
 
-type ValidationResult =
-  | { success: true; data: Record<string, unknown> }
-  | { success: false; error: string };
-
-function validateProperties(
+export function validateImportProperties(
   properties: Record<string, unknown>,
   schema: z.ZodObject<z.ZodRawShape>,
   unknownStrategy: UnknownPropertyStrategy,
-): ValidationResult {
+):
+  | { success: true; data: Record<string, unknown> }
+  | { success: false; error: string } {
   try {
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));

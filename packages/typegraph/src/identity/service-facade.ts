@@ -5,6 +5,7 @@ import {
   type IdentityContradictionErrorDetails,
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
@@ -17,7 +18,16 @@ import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { identityAssertionSemanticKey } from "./assertion-key";
-import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
+import {
+  decodeIdentityClassCursor,
+  encodeIdentityClassCursor,
+} from "./class-cursor";
+import {
+  IDENTITY_ASSERTION_COLUMNS,
+  identityNodeSnapshotSource,
+  identityNodeVisibilitySql,
+  identitySqlCoordinate,
+} from "./historical-sql";
 import { identityReplay, identityTransitionsOf } from "./replay";
 import {
   normalizeIdentityAssertionRow,
@@ -27,6 +37,8 @@ import { isSeparated } from "./separation";
 import type { DifferentAssertionIndex } from "./service-components";
 import {
   classHasDisjointKinds,
+  closureMismatchError,
+  identityActiveKinds,
   indexDifferentAssertion,
   kindSetsHaveDisjointKinds,
   mergeDifferentAssertionRoots,
@@ -49,6 +61,7 @@ import type { Backend, IdentityTouch } from "./service-read";
 import {
   assertionResult,
   clampValidTo,
+  compareReferences,
   containsRef,
   isCurrentClosureCoordinate,
   loadAssertionsTouching,
@@ -78,10 +91,13 @@ import {
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   type IdentityAssertionResult,
+  type IdentityClassPage,
+  type IdentityClassPageOptions,
   type IdentityFacade,
   type IdentityNodeRefInput,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentitySamePathStep,
   type IdentityValidityWindow,
 } from "./types";
 import {
@@ -618,14 +634,305 @@ export async function runIdentityMutation<G extends GraphDef, T>(
   );
 }
 
+type CurrentIdentityClassPageRow = Readonly<{
+  page_index: number | string;
+  representative_kind: string;
+  representative_id: string;
+  member_kind: string | null;
+  member_id: string | null;
+}>;
+
+async function loadCurrentIdentityClassPage<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  allKinds: readonly string[],
+  kinds: readonly string[],
+  limit: number,
+  after: PlainNodeRef | undefined,
+): Promise<IdentityClassPage<G>> {
+  const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
+  const dialect = getDialect(ctx.backend.dialect);
+  const kindValues = sql.join(
+    kinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  );
+  const registeredKindValues = sql.join(
+    allKinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  );
+  const nodeSource = identityNodeSnapshotSource(
+    ctx.schema,
+    ctx.graphId,
+    coordinate,
+  );
+  const afterPredicate =
+    after === undefined ?
+      sql``
+    : sql`
+      AND (
+        ${dialect.binaryText(sql`representative_kind`)} > ${dialect.binaryText(sql`${after.kind}`)}
+        OR (
+          ${dialect.binaryText(sql`representative_kind`)} = ${dialect.binaryText(sql`${after.kind}`)}
+          AND ${dialect.binaryText(sql`representative_id`)} > ${dialect.binaryText(sql`${after.id}`)}
+        )
+      )
+    `;
+  const pageLimit = limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1;
+  // Ranking, kind eligibility, and page expansion all consume class_members.
+  // Without MATERIALIZED, SQLite may inline its node scan into the correlated
+  // eligibility check for every representative.
+  const rows = await ctx.backend.execute<CurrentIdentityClassPageRow>(
+    asCompiledRowsSql(sql`
+      WITH node_snapshot AS (${nodeSource}), visible_nodes AS (
+        SELECT n.kind, n.id
+        FROM node_snapshot n
+        WHERE n.kind IN (${registeredKindValues})
+          AND ${identityNodeVisibilitySql(coordinate, "n")}
+      ), class_members AS MATERIALIZED (
+        SELECT
+          COALESCE(anchor.class_kind, visible.kind) AS class_kind,
+          COALESCE(anchor.class_id, visible.id) AS class_id,
+          visible.kind AS member_kind,
+          visible.id AS member_id
+        FROM visible_nodes visible
+        LEFT JOIN ${ctx.schema.identityClosureTable} anchor
+          ON anchor.graph_id = ${ctx.graphId}
+         AND anchor.member_kind = visible.kind
+         AND anchor.member_id = visible.id
+      ), ranked_members AS (
+        SELECT
+          class_kind, class_id, member_kind, member_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY class_kind, class_id
+            ORDER BY ${dialect.binaryText(sql`member_kind`)},
+                     ${dialect.binaryText(sql`member_id`)}
+          ) AS representative_rank
+        FROM class_members
+      ), representatives AS (
+        SELECT
+          ranked.class_kind, ranked.class_id,
+          ranked.member_kind AS representative_kind,
+          ranked.member_id AS representative_id
+        FROM ranked_members ranked
+        WHERE ranked.representative_rank = 1
+          AND EXISTS (
+            SELECT 1
+            FROM class_members requested_member
+            WHERE requested_member.class_kind = ranked.class_kind
+              AND requested_member.class_id = ranked.class_id
+              AND requested_member.member_kind IN (${kindValues})
+          )
+      ), eligible AS (
+        SELECT * FROM representatives
+        WHERE 1 = 1 ${afterPredicate}
+      ), page_candidates AS (
+        SELECT
+          eligible.*,
+          ROW_NUMBER() OVER (
+            ORDER BY ${dialect.binaryText(sql`representative_kind`)},
+                     ${dialect.binaryText(sql`representative_id`)}
+          ) AS page_index
+        FROM eligible
+        ORDER BY ${dialect.binaryText(sql`representative_kind`)},
+                 ${dialect.binaryText(sql`representative_id`)}
+        LIMIT ${pageLimit}
+      )
+      SELECT
+        page.page_index,
+        page.representative_kind,
+        page.representative_id,
+        CASE WHEN page.page_index <= ${limit} THEN member.member_kind ELSE NULL END AS member_kind,
+        CASE WHEN page.page_index <= ${limit} THEN member.member_id ELSE NULL END AS member_id
+      FROM page_candidates page
+      LEFT JOIN class_members member
+        ON page.page_index <= ${limit}
+       AND member.class_kind = page.class_kind
+       AND member.class_id = page.class_id
+      ORDER BY page.page_index,
+               ${dialect.binaryText(sql`member.member_kind`)},
+               ${dialect.binaryText(sql`member.member_id`)}
+    `),
+  );
+  const membersByPage = new Map<number, PlainNodeRef[]>();
+  const representativesByPage = new Map<number, PlainNodeRef>();
+  let hasMore = false;
+  for (const row of rows) {
+    const pageIndex = Number(row.page_index);
+    if (pageIndex > limit) {
+      hasMore = true;
+      continue;
+    }
+    representativesByPage.set(pageIndex, {
+      kind: row.representative_kind,
+      id: row.representative_id,
+    });
+    if (row.member_kind === null || row.member_id === null) continue;
+    const members = membersByPage.get(pageIndex) ?? [];
+    members.push({ kind: row.member_kind, id: row.member_id });
+    membersByPage.set(pageIndex, members);
+  }
+  const pageClasses = [...representativesByPage]
+    .toSorted(([left], [right]) => left - right)
+    .map(([pageIndex, representative]) => {
+      const members = requireDefined(membersByPage.get(pageIndex));
+      return {
+        representative: publicNodeRef<G>(representative),
+        members: members.map((member) => publicNodeRef<G>(member)),
+      };
+    });
+  const last = pageClasses.at(-1)?.representative;
+  return {
+    classes: pageClasses,
+    ...(hasMore && last !== undefined ?
+      {
+        nextCursor: encodeIdentityClassCursor(
+          {
+            graphId: ctx.graphId,
+            coordinate: ctx.coordinate,
+            kinds,
+          },
+          last,
+        ),
+      }
+    : {}),
+  };
+}
+
 export function createIdentityReadFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): IdentityReadFacade<G> {
+  const activeKinds = identityActiveKinds(ctx.registry);
   return {
+    async classes(options: IdentityClassPageOptions) {
+      if (!Number.isSafeInteger(options.limit) || options.limit < 1)
+        throw new ConfigurationError(
+          "identity.classes limit must be a positive safe integer.",
+        );
+      const allKinds = [...activeKinds];
+      const kinds = options.kinds ?? allKinds;
+      for (const kind of kinds) {
+        if (!ctx.registry.nodeKinds.has(kind))
+          throw new ConfigurationError(
+            `identity.classes received unregistered node kind ${kind}.`,
+          );
+      }
+      let after: PlainNodeRef | undefined;
+      if (options.cursor !== undefined) {
+        after = decodeIdentityClassCursor(options.cursor, {
+          graphId: ctx.graphId,
+          coordinate: ctx.coordinate,
+          kinds,
+        });
+      }
+      if (kinds.length === 0) return { classes: [] };
+      if (
+        ctx.coordinate === undefined ||
+        isCurrentClosureCoordinate(ctx.coordinate)
+      ) {
+        if (!ctx.backend.capabilities.windowFunctions)
+          throw new ConfigurationError(
+            "identity.classes current page requires SQL window functions, but this backend profile declares windowFunctions: false.",
+            {
+              capability: "windowFunctions",
+              operation: "identity.classes current page",
+              windowFunctions: false,
+            },
+            {
+              suggestion:
+                "Use a backend profile that supports SQL window functions, or avoid this query shape.",
+            },
+          );
+        return loadCurrentIdentityClassPage(
+          ctx,
+          allKinds,
+          kinds,
+          options.limit,
+          after,
+        );
+      }
+      const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
+      const kindValues = sql.join(
+        allKinds.map((kind) => sql`${kind}`),
+        sql`, `,
+      );
+      const nodeSource = identityNodeSnapshotSource(
+        ctx.schema,
+        ctx.graphId,
+        coordinate,
+      );
+      const rows = await ctx.backend.execute<PlainNodeRef>(
+        asCompiledRowsSql(sql`
+          WITH node_snapshot AS (${nodeSource})
+          SELECT n.kind, n.id
+          FROM node_snapshot n
+          WHERE n.kind IN (${kindValues})
+            AND ${identityNodeVisibilitySql(coordinate, "n")}
+          ORDER BY n.kind, n.id
+        `),
+      );
+      const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
+      const grouped = new Map<string, Map<string, PlainNodeRef>>();
+      const historical = await loadHistoricalClasses(
+        ctx.backend,
+        ctx.schema,
+        ctx.graphId,
+        seeds,
+        ctx.coordinate,
+        ctx.sameIdAcrossKinds,
+        activeKinds,
+      );
+      for (const value of historical.values()) {
+        const members = value.visible;
+        if (members.length === 0) continue;
+        if (!members.some((member) => kinds.includes(member.kind))) continue;
+        const representative = members[0];
+        if (representative === undefined) continue;
+        const key = refKey(representative);
+        if (grouped.has(key)) continue;
+        grouped.set(
+          key,
+          new Map(members.map((member) => [refKey(member), member])),
+        );
+      }
+      const sorted = [...grouped.values()]
+        .map((members) =>
+          [...members.values()].toSorted((left, right) =>
+            compareReferences(left, right),
+          ),
+        )
+        .toSorted((left, right) =>
+          compareReferences(requireDefined(left[0]), requireDefined(right[0])),
+        );
+      const remaining = sorted.filter((members) => {
+        const first = requireDefined(members[0]);
+        return after === undefined || compareReferences(first, after) > 0;
+      });
+      const selected = remaining.slice(0, options.limit);
+      const classes = selected.map((members) => ({
+        representative: publicNodeRef<G>(requireDefined(members[0])),
+        members: members.map((member) => publicNodeRef<G>(member)),
+      }));
+      const last = selected.at(-1)?.[0];
+      return {
+        classes,
+        ...(remaining.length > selected.length && last !== undefined ?
+          {
+            nextCursor: encodeIdentityClassCursor(
+              {
+                graphId: ctx.graphId,
+                coordinate: ctx.coordinate,
+                kinds,
+              },
+              last,
+            ),
+          }
+        : {}),
+      };
+    },
     async representativeOf(input) {
       const members = await visibleMembersAtCoordinate(
         ctx,
         registeredPlainRef(ctx, input),
+        activeKinds,
       );
       return members[0] === undefined ? undefined : publicNodeRef(members[0]);
     },
@@ -634,6 +941,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const members = await visibleMembersAtCoordinate(
         ctx,
         registeredPlainRef(ctx, input),
+        activeKinds,
       );
       return members.map((member) => publicNodeRef<G>(member));
     },
@@ -642,6 +950,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const members = await visibleMembersAtCoordinate(
         ctx,
         registeredPlainRef(ctx, input),
+        activeKinds,
       );
       const nodes = await ctx.loadNodes(members, ctx.coordinate);
       return nodes.filter((node) => node !== undefined);
@@ -650,7 +959,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
     async areSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const members = await visibleMembersAtCoordinate(ctx, first);
+      const members = await visibleMembersAtCoordinate(ctx, first, activeKinds);
       return containsRef(members, second);
     },
 
@@ -707,6 +1016,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         [first, second],
         coordinate,
         ctx.sameIdAcrossKinds,
+        activeKinds,
       );
       const firstClass = requireDefined(classes.get(refKey(first)));
       const secondClass = requireDefined(classes.get(refKey(second)));
@@ -732,7 +1042,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
 
     async assertionsOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const members = await visibleMembersAtCoordinate(ctx, ref);
+      const members = await visibleMembersAtCoordinate(ctx, ref, activeKinds);
       if (members.length === 0) return [];
       const assertions = await loadAssertionsTouching(
         ctx.backend,
@@ -749,6 +1059,189 @@ export function createIdentityReadFacade<G extends GraphDef>(
         )
         .toSorted((left, right) => compareCodePoints(left.id, right.id))
         .map((assertion) => publicAssertion<G>(assertion));
+    },
+
+    async explainSame(firstInput, secondInput) {
+      const first = registeredPlainRef(ctx, firstInput);
+      const second = registeredPlainRef(ctx, secondInput);
+      let structuralMembers: readonly PlainNodeRef[];
+      let foldEligibleMembers: readonly PlainNodeRef[];
+      if (
+        ctx.coordinate === undefined ||
+        isCurrentClosureCoordinate(ctx.coordinate)
+      ) {
+        const visibleMembers = await visibleMembersAtCoordinate(
+          ctx,
+          first,
+          activeKinds,
+        );
+        if (!containsRef(visibleMembers, second)) return;
+        if (refKey(first) === refKey(second)) return [];
+        const classes = await loadCurrentStructuralClassComponents(
+          ctx.backend,
+          ctx.schema,
+          ctx.graphId,
+          [first],
+        );
+        structuralMembers = [...classes.values()].find((members) =>
+          containsRef(members, first),
+        ) ?? [first];
+        foldEligibleMembers = structuralMembers;
+      } else {
+        const classes = await loadHistoricalClasses(
+          ctx.backend,
+          ctx.schema,
+          ctx.graphId,
+          [first],
+          ctx.coordinate,
+          ctx.sameIdAcrossKinds,
+          activeKinds,
+        );
+        const historicalClass = requireDefined(classes.get(refKey(first)));
+        if (!containsRef(historicalClass.visible, second)) return;
+        if (refKey(first) === refKey(second)) return [];
+        structuralMembers = historicalClass.structural;
+        foldEligibleMembers = historicalClass.foldEligible;
+      }
+      if (!containsRef(structuralMembers, second))
+        throw closureMismatchError(
+          ctx.graphId,
+          { first, second, invariant: "class member missing from structure" },
+          (
+            ctx.coordinate === undefined ||
+              isCurrentClosureCoordinate(ctx.coordinate)
+          ) ?
+            "current"
+          : "historical",
+        );
+      const classKeys = new Set(
+        structuralMembers.map((member) => refKey(member)),
+      );
+      const classAssertions = await loadAssertionsTouching(
+        ctx.backend,
+        ctx.schema,
+        ctx.graphId,
+        structuralMembers,
+        ctx.coordinate,
+        "same",
+      );
+
+      type Previous = Readonly<{
+        ref: PlainNodeRef;
+        step: IdentitySamePathStep<G>;
+      }>;
+      const structuralById = new Map<string, PlainNodeRef[]>();
+      for (const ref of foldEligibleMembers) {
+        const group = structuralById.get(ref.id) ?? [];
+        group.push(ref);
+        structuralById.set(ref.id, group);
+      }
+      const assertionEdges = classAssertions
+        .filter(
+          (assertion) =>
+            assertion.rel === "same" &&
+            classKeys.has(
+              refKey({ kind: assertion.a_kind, id: assertion.a_id }),
+            ) &&
+            classKeys.has(
+              refKey({ kind: assertion.b_kind, id: assertion.b_id }),
+            ),
+        )
+        .map((assertion) => ({
+          a: { kind: assertion.a_kind, id: assertion.a_id },
+          b: { kind: assertion.b_kind, id: assertion.b_id },
+          assertion,
+        }));
+      const assertionAdjacency = new Map<
+        string,
+        { ref: PlainNodeRef; via: Previous["step"]["via"] }[]
+      >();
+      for (const edge of assertionEdges) {
+        const edgeValue = publicAssertion<G>(edge.assertion);
+        const neighborsA = assertionAdjacency.get(refKey(edge.a)) ?? [];
+        neighborsA.push({
+          ref: edge.b,
+          via: { type: "assertion", assertion: edgeValue },
+        });
+        assertionAdjacency.set(refKey(edge.a), neighborsA);
+        const neighborsB = assertionAdjacency.get(refKey(edge.b)) ?? [];
+        neighborsB.push({
+          ref: edge.a,
+          via: { type: "assertion", assertion: edgeValue },
+        });
+        assertionAdjacency.set(refKey(edge.b), neighborsB);
+      }
+      for (const members of structuralById.values()) {
+        members.sort((left, right) => compareReferences(left, right));
+      }
+      const visited = new Set([refKey(first)]);
+      const previous = new Map<string, Previous>();
+      const queue = [first];
+      for (
+        let index = 0;
+        index < queue.length && !visited.has(refKey(second));
+        index += 1
+      ) {
+        const current = queue[index];
+        if (current === undefined) continue;
+        const neighbors: readonly Readonly<{
+          ref: PlainNodeRef;
+          via: Previous["step"]["via"];
+        }>[] = [
+          ...(assertionAdjacency.get(refKey(current)) ?? []),
+          ...(ctx.sameIdAcrossKinds === "fold" ?
+            (structuralById.get(current.id) ?? [])
+              .filter((member) => member.kind !== current.kind)
+              .map((member) => ({
+                ref: member,
+                via: { type: "same-id-fold" as const },
+              }))
+          : []),
+        ];
+        const orderedNeighbors = [...neighbors].toSorted((left, right) => {
+          const refOrder = compareReferences(left.ref, right.ref);
+          if (refOrder !== 0) return refOrder;
+          if (left.via.type === "same-id-fold") return -1;
+          if (right.via.type === "same-id-fold") return 1;
+          return compareCodePoints(
+            left.via.assertion.id,
+            right.via.assertion.id,
+          );
+        });
+        for (const neighbor of orderedNeighbors) {
+          const key = refKey(neighbor.ref);
+          if (visited.has(key)) continue;
+          visited.add(key);
+          previous.set(key, {
+            ref: current,
+            step: {
+              from: publicNodeRef<G>(current),
+              to: publicNodeRef<G>(neighbor.ref),
+              via: neighbor.via,
+            },
+          });
+          queue.push(neighbor.ref);
+        }
+      }
+      const path: IdentitySamePathStep<G>[] = [];
+      let cursor = refKey(second);
+      while (cursor !== refKey(first)) {
+        const entry = previous.get(cursor);
+        if (entry === undefined)
+          throw closureMismatchError(
+            ctx.graphId,
+            { first, second, invariant: "same-class pair has no proof" },
+            (
+              ctx.coordinate === undefined ||
+                isCurrentClosureCoordinate(ctx.coordinate)
+            ) ?
+              "current"
+            : "historical",
+          );
+        path.push(entry.step);
+        cursor = refKey(entry.ref);
+      }
+      return path.toReversed();
     },
   };
 }

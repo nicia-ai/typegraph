@@ -779,6 +779,14 @@ declared durable edge `matchIdentity` is different for endpoint convergence:
 its canonical key has a database arbiter, so the eligible root create/found
 command can be authoritative in one statement.
 
+Backend implementations may also expose the optional
+`findEdgesByMatchIdentity` read capability for bounded merge planning. It must
+match the complete `(graphId, kind, name, key)` tuple and return tombstoned
+owners as well as active rows; omitting it keeps the portable full-clone path.
+Custom Drizzle operation strategies can opt in by supplying the corresponding
+owner-query builder. A strategy without that builder does not expose the
+capability, so callers can detect and retain the portable path.
+
 ### Connection Pooling
 
 For production, always use connection pooling:
@@ -869,6 +877,39 @@ GIN index than carry them unused:
 const backend = createPostgresBackend(db, { fulltext: false });
 ```
 
+#### `createPostgresTransactionBackend(tx, options?)`
+
+Creates a full backend on a Drizzle PostgreSQL transaction opened by the
+application. Use it when TypeGraph's tables share a transaction with other
+application tables, especially when TypeGraph uses prefixed table names. Pass
+the same `PostgresBackendOptions` as `createPostgresBackend`:
+
+```typescript
+import {
+  createPostgresTransactionBackend,
+  createPostgresTables,
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+
+const graphTables = createPostgresTables({ nodes: "app_graph_nodes" });
+
+await db.transaction(async (tx) => {
+  const backend = createPostgresTransactionBackend(tx, {
+    tables: graphTables,
+  });
+  // Use the backend or a Store built from it within this callback.
+});
+```
+
+The factory requires a transaction handle and serializes TypeGraph statements
+on its single pinned connection, including concurrent reads started by the
+same Store operation. Backends created for the same transaction handle share
+one queue. The application owns commit and rollback and must await all work
+using these backends before its transaction callback returns.
+`createPostgresBackend(tx)` also routes a PostgreSQL transaction handle to the
+transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
+when you want the transaction-scoped intent to be explicit; a regular database
+handle passed to `createPostgresBackend(db)` still creates the pooled backend.
+
 #### `createLocalPgliteBackend(options?)`
 
 Creates an in-process PGlite backend with automatic engine construction,
@@ -930,6 +971,24 @@ function generatePostgresDDL(
   tables?: PostgresTables,
   fulltextStrategy?: FulltextStrategy | false,
 ): string[];
+```
+
+#### `generatePostgresDropSQL(tables?, fulltextStrategy?)`
+
+Returns one `DROP TABLE IF EXISTS` statement for the base and fulltext tables
+that `generatePostgresDDL()` would create. Use it to clean up an isolated,
+prefixed PostgreSQL table set after closing every backend connected to it.
+Pass the same tables and fulltext strategy used at installation. The statement
+does not use `CASCADE`: PostgreSQL refuses the drop if an application-owned
+object depends on one of these tables. It does not drop graph-scoped vector
+tables materialized later at runtime, so a working copy using those tables
+needs additional graph-scoped cleanup.
+
+```typescript
+function generatePostgresDropSQL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string;
 ```
 
 ### Upgrading deployment-wide base storage
@@ -1070,6 +1129,44 @@ including tombstones. Export the affected edges, hard-delete them, publish the
 new schema, and import them again so every row receives a key under the new
 declaration.
 
+### Base-schema version 5: byte-ordered `graph_id` indexes (PostgreSQL)
+
+Version 5 adds one index to each relation `listGraphIds` seeks (`nodes`, `edges` and
+`schema_versions`), ordering `graph_id` by bytes instead of by the database collation so that a page's
+cursor, prefix and limit bound the walk. SQLite already keeps text indexes in byte order, so its step
+only advances the marker. The index is a single-column `graph_id` index: PostgreSQL deduplicates the
+repeated values, so it stays small (about 7 MB beside a 97 MB `nodes` heap of one million rows) and
+adds 1 to 2% to writes on the relation it lands on (single creates and 1,000-row bulk writes alike).
+
+The privileged open builds the three indexes with a plain `CREATE INDEX`, which blocks writes to the
+table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). This
+happens inline at boot even when `systemIndexes: "skip"` is set: that option only defers system index
+materialization, not base-schema adoption. For a large deployment, build the indexes first with
+`CONCURRENTLY`; the adoption step is `IF NOT EXISTS` and then finds them in place. Run each statement
+outside a transaction, and never run the same concurrent build from two sessions at once. Use the
+adapter's table names throughout:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx"
+  ON "typegraph_nodes" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx"
+  ON "typegraph_edges" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx"
+  ON "typegraph_schema_versions" ("graph_id" COLLATE "C");
+```
+
+`CREATE INDEX CONCURRENTLY` can leave an invalid index behind if it is interrupted; drop it and rerun.
+`listGraphIds` checks only that each index exists and is valid, not its definition, so an index you
+create by hand under one of these names with a different definition is trusted and makes the walk slow
+rather than wrong. Create them exactly as shown.
+
+Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
+database stamped 5, so roll forward rather than back once any process has adopted it.
+
+Externally managed DDL applies the same statements, then advances the marker to 5 with the
+monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
+correct pages, by reading and de-duplicating the anchor relations instead of walking them.
+
 ## Drizzle-Free Entrypoints
 
 TypeGraph keeps its public core and backend contracts independent of Drizzle:
@@ -1186,6 +1283,7 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
+- `@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy` — PostgreSQL table-backed working-copy manager
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
 - `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend`, `deriveEngineProfile`, the bundled builders, `SqlEngineProfile`
 

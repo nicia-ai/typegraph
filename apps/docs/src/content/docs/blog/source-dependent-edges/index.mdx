@@ -1,0 +1,141 @@
+---
+title: "Letting an Edge's Targets Depend on Its Source"
+date: 2026-09-04
+excerpt: "Since 0.55 an edge kind can allow different targets for each source kind, so an assignedTo edge can link employees to departments and students to courses while the other two combinations fail at compile time and at runtime."
+tags:
+  - announcements
+cover:
+  alt: "Two horizontal blue lanes lit against a faint crosshatched field of every possible source-to-target line, with two of the crossing lines picked out in dashed red and marked with an X"
+  image: "./cover.png"
+social:
+  alt: "Letting an Edge's Targets Depend on Its Source"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+This schema looks reasonable, but it allows more than you probably meant:
+
+```typescript
+const assignedTo = defineEdge("assignedTo", {
+  from: [Employee, Student],
+  to: [Department, Course],
+});
+```
+
+You want employees assigned to departments and students assigned to courses,
+but array-valued `from` and `to` declare the Cartesian product, so every
+source may point at every target and both
+`store.edges.assignedTo.create(student, department)` and
+`create(employee, course)` succeed. Until 0.55 the only way to rule those two
+combinations out was to split the edge into two kinds and query them
+separately.
+
+## Say which source gets which targets
+
+`to` can now be a map from source kind to its own allowed targets:
+
+```typescript
+const assignedTo = defineEdge("assignedTo", {
+  from: [Employee, Student],
+  to: {
+    Employee: [Department],
+    Student: [Course],
+  },
+});
+
+const graph = defineGraph({
+  id: "assignments",
+  nodes: {
+    Employee: { type: Employee },
+    Student: { type: Student },
+    Department: { type: Department },
+    Course: { type: Course },
+  },
+  edges: { assignedTo },
+});
+```
+
+`create(employee, department)` and `create(student, course)` still work, and
+the other two combinations fail before anything is written:
+
+```text
+EndpointPairError: assignedTo: undeclared endpoint pair
+  { edgeKind: "assignedTo", endpoint: "pair",
+    fromKind: "Employee", toKind: "Course",
+    allowedPairs: [
+      { from: "Employee", to: "Department" },
+      { from: "Student", to: "Course" },
+    ] }
+```
+
+In typed code you won't get that far, because the collection's `create()`
+signature narrows per source and handing it an employee and a course is a
+compile error. The runtime check covers the paths a type checker can't see, such
+as dynamic collections, bulk writes, and imports. An endpoint kind that isn't in
+`from` at all still throws the existing `EndpointError`; `EndpointPairError` is
+specifically for two kinds that are each valid but were never declared together.
+
+The map itself is checked when you call `defineEdge()`: every kind in `from`
+needs an entry, extra keys aren't allowed, and no entry may be empty. A
+mistake throws `ConfigurationError` at that point rather than turning up later
+as a confusing write failure.
+
+## Narrowing, never widening
+
+An edge's map is its outer bound, and a graph or a runtime
+[graph extension](/blog/runtime-schema-evolution) can register a narrower
+version:
+
+```typescript
+edges: {
+  assignedTo: {
+    type: assignedTo,
+    from: [Employee],
+    to: { Employee: [Department] }, // this graph has no students
+  },
+}
+```
+
+A registration can't add a pair the edge never declared. That includes the
+easy mistake of registering the old array form, `to: [Department, Course]`,
+against an edge whose map only allows the correlated pairs, which would
+quietly re-admit the cross-pairs the map is there to forbid, so it's rejected.
+
+Subclasses are checked against the declared pairs. With `SubTask subClassOf
+Task` and an edge that allows `Task: [Task]`, every mix of `Task` and `SubTask`
+works, but a `SubTask` can't borrow a target that only some other source kind is
+allowed.
+
+## Bulk writes are all or nothing
+
+```typescript
+await store.edges.assignedTo.bulkCreate([
+  { from: employeeA, to: departmentA }, // valid
+  { from: employeeB, to: courseA }, // undeclared pair
+]);
+// throws EndpointPairError; store.edges.assignedTo.count() is still 0
+```
+
+A single undeclared pair rejects the whole batch, because committing the
+valid half and quietly dropping the rest would leave you guessing which rows
+made it.
+
+## Pairs are stored in the schema
+
+The pairs are stored in the serialized schema, and declaring them in a
+different key order doesn't change the schema hash. Replacing an array `to`
+with a map removes pairs even though it removes no kinds, so it counts as a
+breaking change and follows the same migration rules as any other breaking
+edge change. See
+[endpoint pair changes](/schema-management#endpoint-pair-changes).
+
+## Try it
+
+- [Source-Dependent Targets](/core-concepts#source-dependent-targets): the
+  full reference
+- [`EndpointPairError`](/errors#endpointpairerror)
+- [Endpoint pair changes](/schema-management#endpoint-pair-changes)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

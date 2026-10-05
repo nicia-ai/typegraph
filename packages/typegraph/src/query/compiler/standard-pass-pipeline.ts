@@ -347,7 +347,8 @@ function resolveTraversalCteLimit(
   return Math.max(ast.limit, pushdownLimit);
 }
 
-function canCollapseSelectiveTraversalRowset(
+/** The last CTE carries each whole path only when every traversal extends the prior row. */
+function canCollapseLinearTraversalRowset(
   ast: QueryAst,
   vectorPredicate: VectorSimilarityPredicate | undefined,
   fulltextPredicate: FulltextMatchPredicate | undefined,
@@ -376,16 +377,17 @@ function canCollapseSelectiveTraversalRowset(
     expectedJoinFromAlias = traversal.nodeAlias;
   }
 
-  if (!ast.selectiveFields || ast.selectiveFields.length === 0) {
-    return false;
-  }
-
   if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
     return false;
   }
 
   if (
-    ast.projection.fields.some((field) => field.source.__type === "aggregate")
+    ast.projection.fields.some(
+      (field) =>
+        field.source.__type === "aggregate" ||
+        (field.source.__type === "database_expression" &&
+          expressionContainsAggregate(field.source)),
+    )
   ) {
     return false;
   }
@@ -419,7 +421,7 @@ type StandardQueryPassState = Readonly<{
   logicalPlan: LogicalPlan | undefined;
   predicateIndex: PredicateIndex;
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
-  shouldCollapseSelectiveTraversalRowset: boolean;
+  shouldCollapseLinearTraversalRowset: boolean;
   temporalFilterPass: TemporalFilterPass | undefined;
   traversalCteLimit: number | undefined;
   vectorPredicate: VectorSimilarityPredicate | undefined;
@@ -440,7 +442,7 @@ export function runStandardQueryPassPipeline(
     logicalPlan: undefined,
     predicateIndex: buildPredicateIndex(ast),
     requiredColumnsByAlias: undefined,
-    shouldCollapseSelectiveTraversalRowset: false,
+    shouldCollapseLinearTraversalRowset: false,
     temporalFilterPass: undefined,
     traversalCteLimit: undefined,
     vectorPredicate: undefined,
@@ -540,36 +542,36 @@ export function runStandardQueryPassPipeline(
   state = columnPruningPass.state;
 
   const selectiveTraversalRowsetPass = runCompilerPass(state, {
-    name: "selective_traversal_rowset",
+    name: "linear_traversal_rowset",
     execute(currentState): Readonly<{
       collapsedTraversalCteAlias: string | undefined;
-      shouldCollapseSelectiveTraversalRowset: boolean;
+      shouldCollapseLinearTraversalRowset: boolean;
     }> {
-      const shouldCollapseSelectiveTraversalRowset =
-        canCollapseSelectiveTraversalRowset(
+      const shouldCollapseLinearTraversalRowset =
+        canCollapseLinearTraversalRowset(
           currentState.ast,
           currentState.vectorPredicate,
           currentState.fulltextPredicate,
         );
       const lastTraversal = currentState.ast.traversals.at(-1);
       const collapsedTraversalCteAlias =
-        shouldCollapseSelectiveTraversalRowset && lastTraversal !== undefined ?
+        shouldCollapseLinearTraversalRowset && lastTraversal !== undefined ?
           `cte_${lastTraversal.nodeAlias}`
         : undefined;
 
       return {
         collapsedTraversalCteAlias,
-        shouldCollapseSelectiveTraversalRowset,
+        shouldCollapseLinearTraversalRowset,
       };
     },
     update(
       currentState,
-      { collapsedTraversalCteAlias, shouldCollapseSelectiveTraversalRowset },
+      { collapsedTraversalCteAlias, shouldCollapseLinearTraversalRowset },
     ): StandardQueryPassState {
       return {
         ...currentState,
         collapsedTraversalCteAlias,
-        shouldCollapseSelectiveTraversalRowset,
+        shouldCollapseLinearTraversalRowset,
       };
     },
   });

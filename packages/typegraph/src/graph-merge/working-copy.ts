@@ -189,13 +189,22 @@ async function assertWorkingCopyMatchesBase<G extends GraphDef>(
  *
  * @param makeBackend - Constructs the fresh, EMPTY backend the working copy is
  *   built on.
+ * @param options - Set `revisionJournal: false` when the clone does not need
+ *   journal-backed changed-key lineage. This avoids installing journal
+ *   triggers on its tables. Set `refreshStatistics: false` for a short-lived
+ *   copy that will not benefit from refreshed query statistics.
  */
 export function cloneWorkingCopyStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
+  options: Readonly<{
+    revisionJournal?: false;
+    refreshStatistics?: false;
+  }> = {},
 ): WorkingCopyStrategy<G> {
   return cloneWorkingCopyWithGraphStrategy(
     makeBackend,
     (baseStore) => baseStore.graph,
+    options,
   );
 }
 
@@ -210,14 +219,20 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
 export function cloneIngestionWorkingCopyStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
 ): WorkingCopyStrategy<G> {
-  return cloneWorkingCopyWithGraphStrategy(makeBackend, (baseStore) =>
-    graphWithoutNodeUniqueness(baseStore.graph),
+  return cloneWorkingCopyWithGraphStrategy(
+    makeBackend,
+    (baseStore) => graphWithoutNodeUniqueness(baseStore.graph),
+    { revisionJournal: false, refreshStatistics: false },
   );
 }
 
 function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
   graphForClone: (baseStore: Store<G>) => G,
+  options: Readonly<{
+    revisionJournal?: false;
+    refreshStatistics?: false;
+  }> = {},
 ): WorkingCopyStrategy<G> {
   return {
     create: async (baseStore: Store<G>): Promise<Store<G>> => {
@@ -244,6 +259,9 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
             // branchability contract (`revisionTracking`) is load-bearing
             // enough to thread through unconditionally.
             revisionTracking: baseStore.revisionTrackingEnabled,
+            ...(options.revisionJournal === false ?
+              { revisionJournal: false as const }
+            : {}),
           },
         );
         const exportOptions = {
@@ -257,6 +275,9 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           onUnknownProperty: "allow",
           validateReferences: true,
           batchSize: CLONE_IMPORT_BATCH_SIZE,
+          ...(options.refreshStatistics === false ?
+            { refreshStatistics: false as const }
+          : {}),
         } as const;
         // Materialize the export instead of streaming it whenever the
         // streamed import would refuse: when the fresh backend writes through
@@ -669,7 +690,7 @@ export function forkedWorkingCopyStrategy<
  * on the clone during staging. `tests/graph-merge/ingestion-branch.test.ts`
  * asserts that split through `nodeClaimEntries` itself rather than restating it.
  */
-function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
+export function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
   const nodes = Object.fromEntries(
     Object.entries(graph.nodes).map(([name, registration]) => {
       const { unique: _omitted, ...withoutUnique } = registration;

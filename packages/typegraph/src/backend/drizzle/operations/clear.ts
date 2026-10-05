@@ -4,7 +4,12 @@ import {
   buildFulltextGraphDelete,
   type FulltextStrategy,
 } from "../../../query/dialect/fulltext-strategy";
+import {
+  GRAPH_RELATION_CLEAR_SEQUENCE,
+  type GraphRelationClearStep,
+} from "../../graph-relations";
 import { type ExecutableSql } from "../execution/types";
+import { graphScopedTable } from "../graph-relation-tables";
 import { type Tables } from "./shared";
 
 export type ClearGraphStatement = Readonly<{
@@ -15,13 +20,14 @@ export type ClearGraphStatement = Readonly<{
 
 /**
  * Builds DELETE FROM statements for all per-graph base tables filtered by
- * graph_id. Delete order respects implicit FK-like dependencies:
- * fulltext → recorded identity/edges/nodes → identity transition log/retention
- * → identity closure/assertions → recorded_clock → uniques → edge_claims →
- * edges → nodes → schema_versions.
+ * graph_id. The relations, their order, and which of them tolerate a missing
+ * table or may be preserved are declared once in `../../graph-relations`
+ * (`GRAPH_RELATION_CLEAR_SEQUENCE`); this builder only renders that sequence.
  * The fulltext delete is omitted entirely when `fulltextStrategy` is
  * `undefined` — the table does not exist on a backend with no fulltext
- * strategy.
+ * strategy. The revision-origins row is deleted here like any other graph
+ * relation, so a graph cleared by a store that mints no origin still leaves no
+ * origin behind.
  *
  * Embeddings are NOT cleared here: they live in per-`(nodeKind, fieldPath)`
  * strategy-owned tables that this graph-agnostic builder cannot enumerate.
@@ -29,118 +35,65 @@ export type ClearGraphStatement = Readonly<{
  * vector strategy.
  *
  * Per-deployment status tables (`indexMaterializations`, `kindRemovals`,
- * `reconciliationMarkers`, `contributionMaterializations`) also get cleaned
+ * and `reconciliationMarkers`) also get cleaned
  * because reuse of the same graphId after `clearGraph` would otherwise inherit
  * stale state. The reconciliation marker is the sharpest case: a stale
  * high-water mark would cause `materializeRemovals` to skip the recovery walk
- * entirely for the freshly-created graph. For the contribution markers the
- * graph-scoped delete removes the graph's own rows — full markers for
- * graph-scoped contributions and graph-local activation markers for
- * deployment-scoped ones — while a deployment contribution's physical marker
- * survives, because it is keyed by the reserved deployment graph id (which
- * `defineGraph` refuses for user graphs) and attests shared storage this
- * per-graph delete never touches. The next privileged boot re-records the
- * graph-local rows from that surviving physical marker.
+ * entirely for the freshly-created graph. By default, graph-scoped contribution
+ * markers are deleted too; `Store.clear()` may preserve them when it retains
+ * initialized storage for immediate reuse. Deployment contributions' physical
+ * markers remain keyed by the reserved deployment graph id.
  */
 export function buildClearGraph(
   tables: Tables,
   graphId: string,
   fulltextStrategy: FulltextStrategy | undefined,
+  options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
 ): readonly ClearGraphStatement[] {
-  return [
-    // The fulltext table is shared by every graph in the database, so its
-    // graph-scoped delete is owned by one builder the destructive
-    // contribution rebuild calls too — see `buildFulltextGraphDelete`. Omitted
-    // entirely when no fulltext strategy is active: the table was never
-    // created, so there is nothing to delete from.
-    ...(fulltextStrategy === undefined ?
-      []
-    : [{ query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) }]),
-    {
-      query: sql`DELETE FROM ${tables.recordedIdentityAssertions} WHERE ${tables.recordedIdentityAssertions.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.recordedIdentityAssertions),
-    },
-    {
-      query: sql`DELETE FROM ${tables.recordedEdges} WHERE ${tables.recordedEdges.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.recordedEdges),
-    },
-    {
-      query: sql`DELETE FROM ${tables.recordedNodes} WHERE ${tables.recordedNodes.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.recordedNodes),
-    },
-    {
-      query: sql`DELETE FROM ${tables.recordedClock} WHERE ${tables.recordedClock.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.recordedClock),
-    },
-    {
-      query: sql`DELETE FROM ${tables.identityTransitionRetention} WHERE ${tables.identityTransitionRetention.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.identityTransitionRetention),
-    },
-    {
-      query: sql`DELETE FROM ${tables.identityTransitions} WHERE ${tables.identityTransitions.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.identityTransitions),
-    },
-    {
-      query: sql`DELETE FROM ${tables.identitySeparation} WHERE ${tables.identitySeparation.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.identitySeparation),
-    },
-    {
-      query: sql`DELETE FROM ${tables.identityClosure} WHERE ${tables.identityClosure.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.identityClosure),
-    },
-    {
-      query: sql`DELETE FROM ${tables.identityAssertions} WHERE ${tables.identityAssertions.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.identityAssertions),
-    },
-    {
-      query: sql`DELETE FROM ${tables.uniques} WHERE ${tables.uniques.graphId} = ${graphId}`,
-    },
-    // Edge claims name the edges they are held by, so they are cleared
-    // BEFORE the edges — the same ordering `uniques` gets against `nodes`.
-    // Tolerates absence for the reason the recorded relations do: bootstrap DDL
-    // runs only on first boot, so a database initialized before this relation
-    // existed has no such table, and clearing a graph must not become the
-    // operation that fails on it.
-    {
-      query: sql`DELETE FROM ${tables.edgeClaims} WHERE ${tables.edgeClaims.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.edgeClaims),
-    },
-    {
-      query: sql`DELETE FROM ${tables.edges} WHERE ${tables.edges.graphId} = ${graphId}`,
-    },
-    {
-      query: sql`DELETE FROM ${tables.nodes} WHERE ${tables.nodes.graphId} = ${graphId}`,
-    },
-    {
-      query: sql`DELETE FROM ${tables.indexMaterializations} WHERE ${tables.indexMaterializations.graphId} = ${graphId}`,
-    },
-    {
-      query: sql`DELETE FROM ${tables.kindRemovals} WHERE ${tables.kindRemovals.graphId} = ${graphId}`,
-    },
-    {
-      query: sql`DELETE FROM ${tables.reconciliationMarkers} WHERE ${tables.reconciliationMarkers.graphId} = ${graphId}`,
-    },
-    // Tolerates absence for the same reason the recorded relations do: the
-    // marker table is provisioned lazily by the materializer's ensure, so a
-    // database that never materialized a contribution has no such table, and
-    // clearing a graph must not become the operation that fails on it.
-    {
-      query: sql`DELETE FROM ${tables.contributionMaterializations} WHERE ${tables.contributionMaterializations.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.contributionMaterializations),
-    },
-    {
-      query: sql`DELETE FROM ${tables.schemaVersions} WHERE ${tables.schemaVersions.graphId} = ${graphId}`,
-    },
-  ];
+  return GRAPH_RELATION_CLEAR_SEQUENCE.flatMap((step) => {
+    const statement = clearStatement(step, tables, graphId, fulltextStrategy, options);
+    return statement === undefined ? [] : [statement];
+  });
+}
+
+function clearStatement(
+  step: GraphRelationClearStep,
+  tables: Tables,
+  graphId: string,
+  fulltextStrategy: FulltextStrategy | undefined,
+  options: Readonly<{ preserveContributionMaterializations?: boolean }> | undefined,
+): ClearGraphStatement | undefined {
+  const { clear } = step;
+  switch (clear.kind) {
+    case "fulltextStrategy": {
+      // The fulltext table is shared by every graph in the database, so its
+      // graph-scoped delete is owned by one builder the destructive
+      // contribution rebuild calls too — see `buildFulltextGraphDelete`.
+      // Omitted entirely when no fulltext strategy is active: the table was
+      // never created, so there is nothing to delete from.
+      return fulltextStrategy === undefined ? undefined : (
+          { query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) }
+        );
+    }
+    case "delete": {
+      if (
+        clear.preservable === true &&
+        options?.preserveContributionMaterializations === true
+      ) {
+        return undefined;
+      }
+      const table = graphScopedTable(tables, step.key);
+      const query = sql`DELETE FROM ${table} WHERE ${table.graphId} = ${graphId}`;
+      // A tolerated relation is provisioned lazily or after first boot, so a
+      // database initialized before it existed has no such table, and clearing
+      // a graph must not become the operation that fails on it.
+      return clear.missingTable === "tolerated" ?
+          {
+            query,
+            ignoreMissingTable: true,
+            requiredTableName: getTableName(table),
+          }
+        : { query };
+    }
+  }
 }

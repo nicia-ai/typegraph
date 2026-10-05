@@ -75,7 +75,9 @@ import {
   registerGraphMergeCallbackIntegrationTests,
   registerGraphMergePlanIntegrationTests,
   registerGraphMergeReviewIntegrationTests,
+  registerGraphMergeReviewV2IntegrationTests,
   registerGraphMergeTargetCardinalityIntegrationTests,
+  registerGraphStorageIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
@@ -379,6 +381,7 @@ export function createIntegrationTestSuite<
     registerStoreViewIntegrationTests(context);
     registerStoreAnalysisIntegrationTests(context);
     registerClearIntegrationTests(context);
+    registerGraphStorageIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
@@ -386,6 +389,7 @@ export function createIntegrationTestSuite<
     registerGraphMergePlanIntegrationTests(context);
     registerGraphMergeTargetCardinalityIntegrationTests(context);
     registerGraphMergeReviewIntegrationTests(context);
+    registerGraphMergeReviewV2IntegrationTests(context);
     registerImportTargetCardinalityIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);

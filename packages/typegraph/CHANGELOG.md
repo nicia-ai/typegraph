@@ -1,5 +1,267 @@
 # @nicia-ai/typegraph
 
+## 0.73.1
+
+### Highlights
+
+`updateWhere()` and `compareAndSet()` now preserve stored values for defaulted properties omitted from a patch, matching `update()`. Previously, changing one property could silently reset unrelated properties to their schema defaults on every matched row. Defaults are also no longer evaluated for omitted compare-and-set expectations.
+
+### Upgrade notes
+
+- After upgrading, remove workarounds that restate every defaulted property in `updateWhere()` or `compareAndSet()` patches. Omitted properties retain their stored values; to reset a property, supply the desired value explicitly.
+- Check rows previously changed by `updateWhere()` or `compareAndSet()` on node kinds with defaulted properties, and restore any unintended resets from application history or backups. Upgrading prevents future resets but does not recover overwritten values.
+
+### Patch Changes
+
+- [#783](https://github.com/nicia-ai/typegraph/pull/783) [`d5560e5`](https://github.com/nicia-ai/typegraph/commit/d5560e5dd220e6682799e94e55c26927d7638310) Thanks [@pdlug](https://github.com/pdlug)! - Preserve omitted defaulted properties in `updateWhere()` and `compareAndSet()` patches. Validate only supplied patch and expected-state fields so defaults cannot silently overwrite stored values or run for omitted expectations.
+
+## 0.73.0
+
+### Highlights
+
+The PostgreSQL working-copy manager now covers the whole branch lifecycle. `makeBackend` hands `branch`, `ingestionBranch`, candidate write-set planning, and evolution previews an empty, schema-mutable allocation recorded in the manager's ledger, so they no longer need a hand-rolled backend factory: closing the backend drops it, and `listUnsealedAllocations` and `abortAllocation` recover it after a crash. Durable working copies can now apply a host mutation and commit its operation evidence in one transaction (`operations: { graph, apply }`), with idempotent replay, commit-ordered scans, delivery marking, and a destroy fence that refuses while evidence is undelivered. Every allocation lives in one recorded schema, so a pooled connection whose `search_path` leads elsewhere can no longer scatter tables that cleanup never finds, and removal either drops everything the allocation owns or refuses with a `BranchError` naming where its relations went.
+
+Operators can list the graphs in a database with `listGraphIds` and count one graph's rows per relation with `inspectGraphStorage`, on SQLite and PostgreSQL alike, without depending on TypeGraph's physical tables. `inspectGraphStorage` reports whether its counts came from one snapshot. The set of graph-scoped relations now has a single owner shared by `store.clear()`, namespace forks, working-copy cloning, and these reads, which fixed a few places that disagreed about it. On PostgreSQL, a new byte-ordered `graph_id` index keeps a page of `listGraphIds` at about 3 ms with 20,000 graphs in the database, and adds 1 to 2% to writes on the tables it covers.
+
+Writes through an ephemeral PostgreSQL working copy of a history-enabled store work again; since 0.72.0 every create, update, or delete on such a copy failed with a `ConfigurationError`.
+
+### Upgrade notes
+
+- The base-schema marker advances from 4 to 5. Open each database once with `createStoreWithSchema` under a DDL-capable role, or apply the version-5 migration if you manage DDL externally, before starting workers that use `createVerifiedStore`, `assertSchemaCurrent`, or the DML-only graph-template APIs; until then they throw `BaseSchemaMigrationError`. Earlier releases refuse a database stamped 5, so do not roll back once any process has adopted it.
+- On PostgreSQL, if `nodes` or `edges` see continuous writes, create the three `<table>_graph_id_bytes_idx` indexes with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` (as `backend-setup` shows) before upgrading. Otherwise the version-5 adoption builds them inline at boot, blocking writes to each table while it builds, even when `systemIndexes: "skip"` is set.
+- Run the working-copy manager's `control` and every `connect` session as the same database role. A different role, including one that is merely a member of `control`'s role, is now refused with `WORKING_COPY_ROLE_MISMATCH` on every path. Drop by hand any tables that allocations created under a different role left behind.
+- In `connect`, build the backend's tables with `createPostgresTables(names)` from the object `connect` receives, not a copy of it, use a driver that supports interactive transactions (not `drizzle-orm/neon-http`), and keep the allocation's schema on the connection's `search_path`.
+- If you wrap the `control` or `connect` backend, forward the transaction `isolationLevel` option. Otherwise destroy, `abortAllocation`, closing ephemeral or `makeBackend` copies, and durable operations fail with `WORKING_COPY_ISOLATION_UNSUPPORTED` whenever the session's default isolation is not READ COMMITTED.
+- Upgrade every process that shares a working-copy ledger before any of them creates or destroys a durable allocation. An earlier manager destroys allocations without checking their operation evidence and leaves the evidence table behind; the #777 entry below describes how to recover it.
+
+### Minor Changes
+
+- [#778](https://github.com/nicia-ai/typegraph/pull/778) [`de9054b`](https://github.com/nicia-ai/typegraph/commit/de9054bd86b13fc01356802203ed1717bc0369eb) Thanks [@pdlug](https://github.com/pdlug)! - Add `listGraphIds(backend, { prefix, after, limit })` and `inspectGraphStorage(store)` so operators can list the graphs in a database and count one graph's rows per relation, including per-field vector tables, without depending on TypeGraph's physical table layout. Both behave identically on SQLite and PostgreSQL: ids page in byte order regardless of database collation, only graphs a default `store.clear()` would empty are listed (a cleared graph stops being listed even though its contribution markers are kept), each page walks graph ids by index seek instead of scanning every row, bounded by the cursor, prefix and page size (about 3 ms a page on PostgreSQL at 20,000 graphs, against about 400 ms for the equivalent walk over the database collation), prefixes match as case-sensitive literal text, and relations that were never provisioned count as empty.
+  
+  `inspectGraphStorage` reports whether its counts share one snapshot in a new `consistency` field, `"snapshot"` or `"per-statement"`. It requests a read-only `repeatable read` transaction, then reads the isolation level the counting session actually ran under inside its first count statement instead of trusting the request: SQLite transactions are always one snapshot, PostgreSQL reports `"snapshot"` only when the session was observed at `repeatable read` or `serializable`, and everything else reports `"per-statement"`: a backend without interactive transactions, a session observed at `read committed` (which is what a wrapper that drops the isolation option gets under a `read committed` default; under a `repeatable read` default the same wrapper still reports `"snapshot"`, because the level is observed rather than requested), or a backend that declares no session isolation read and so cannot be observed. With `"per-statement"`, a write between two counts can make the result describe a state that never existed. A graph with fewer than two count statements reports `"snapshot"`. The evidence proves the isolation of the session that ran the first count, so a backend wrapper that violates the transaction contract by handing the root pool through as its transaction backend can still run later counts on other sessions. It does not refuse on a weaker level.
+  
+  The set of graph-scoped relations now has one owner. `store.clear()`, namespace forks, PostgreSQL working-copy clone policies, the provenance sidecar occupancy probe and the new reads all consume the same declaration, and a ratchet test fails when a bundled table gains a `graph_id` column without being classified. `SqlTableNames` now also carries the `indexMaterializations`, `contributionMaterializations`, `kindRemovals` and `reconciliationMarkers` names (optional, defaulting to the bundled names), and the SQLite backend reports them in `backend.tableNames` as PostgreSQL already did.
+  
+  Inconsistencies the shared declaration exposed are fixed. `store.clear()` now removes the graph's revision-origin row whichever store clears it; before, a store that did not mint origin-namespaced tokens left a row that a revision-tracking store had minted, so the graph still read as occupied. `forkGraphNamespace` and `prepareNamespaceForkTarget` no longer fail with a raw missing-relation error on a PostgreSQL backend created with `fulltext: false`, and refuse a source and target whose fulltext storage differs with a `BranchError`. The provenance sidecar occupancy probe now counts revision-journal rows as occupancy, so a graph id whose only rows are journal entries is no longer treated as free.
+  
+  PostgreSQL gains base-schema version 5: a byte-ordered (`COLLATE "C"`) single-column `graph_id` index on `nodes`, `edges` and `schema_versions`, named `<table>_graph_id_bytes_idx`, which is what lets the listing bound its walk (SQLite already keeps text indexes in byte order, so its step only advances the marker). The privileged open adopts it on existing databases with a plain `CREATE INDEX IF NOT EXISTS` per relation, which blocks writes to that relation while it builds (about 0.1 second per million `nodes` rows). This happens inline at boot even when `systemIndexes: "skip"` is set, because that option does not defer base-schema adoption; for a large deployment, build the three indexes with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` beforehand, as `backend-setup` describes. The index adds 1 to 2% to writes on the relations it lands on. The index names are reserved like the other system indexes, and a database whose indexes are absent still lists correct pages by de-duplicating the anchor relations instead of walking them.
+  
+  ## Breaking
+  
+  - The base-schema marker advances from 4 to 5, so a database stamped 4 is stale until it is adopted: a store opened with `createStoreWithSchema` adopts it automatically under a DDL-capable role, while `createVerifiedStore`, `assertSchemaCurrent` and the DML-only graph-template APIs throw `BaseSchemaMigrationError` (`BASE_SCHEMA_MIGRATION_REQUIRED`) until it is. Open once with `createStoreWithSchema` before DML-only workers start, or apply the version-5 migration for externally managed DDL. Older library versions refuse the newer marker, so do not roll back to a release that predates version 5 once any process has adopted it.
+  - On PostgreSQL, build the three `graph_id_bytes_idx` indexes with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` before upgrading a database whose `nodes` or `edges` tables see continuous writes, so the adoption step finds them in place and does not block writers.
+
+- [#777](https://github.com/nicia-ai/typegraph/pull/777) [`38c3a21`](https://github.com/nicia-ai/typegraph/commit/38c3a2164dd9d8e27510e7ebb3b0baa2147deea2) Thanks [@pdlug](https://github.com/pdlug)! - Implement the durable operation capability on the bundled PostgreSQL working-copy manager. Passing `operations: { graph, apply }` to `createPostgresWorkingCopyManager` makes `durable.operations` apply the host's opaque mutation inside the transaction that commits its evidence, with idempotent replay, digest conflicts, commit-ordered scan cursors, delivery marking, and a destroy fence that refuses with `DurableEvidenceUndeliveredError` while undelivered evidence remains. Evidence coordinates carry `base` and, when the working copy tracks history or revisions, the engine `revision`.
+  
+  Each durable allocation owns an evidence table, created in the allocation's schema and removed with the rest of the allocation (the destroy fence reads it only there, follows the manager's removal rule for allocations whose relations were moved or dropped, and runs only when the evidence relation still exists, so an allocation whose evidence relation is gone is removed like any other relation that exists nowhere), and the working-copy ledger gains an `operation_evidence` column. `operate`, `markDelivered`, destroy, and `abortAllocation` serialize per allocation on a transaction-scoped advisory lock keyed on the allocation id, in a namespace of its own, so the evidence sequence is commit order. Each requests READ COMMITTED and observes the isolation its session actually runs at; any other level is refused with a `ConfigurationError` (`details.code` `WORKING_COPY_ISOLATION_UNSUPPORTED`) before anything is read or written, so a `control` or `connect` wrapper must forward the transaction `isolationLevel` option. Every member checks `operations.graph` against the sealed allocation's graph id and definition hash before opening a connection. `apply` runs under the graph-wide write lock, which blocks tracked writes to the source graph and its sibling working copies for its duration.
+  
+  Allocations created by earlier releases report `unsupported` (`evidenceStore`) for `operate` and no evidence for the read members, answered from the ledger row alone: one read-only ledger `SELECT` through `control`, with no DDL, no lock, and no `connect` call.
+  
+  ### Upgrade notes
+  
+  - Upgrade every process that shares a working-copy ledger before any of them creates or destroys a durable allocation. Only managers on this version take the allocation lock and honor the evidence fence. A manager from an earlier release destroys an allocation without consulting its evidence, so undelivered evidence is lost with it, and it leaves the evidence table behind.
+  - If an earlier manager destroyed a durable allocation created by this version, a later allocation with the same id is refused because `<prefix>op_evidence` exists without a ledger row; the refusal names the table. Read its undelivered rows (`WHERE NOT delivered`) and deliver them, then `DROP TABLE` the named relation and retry. TypeGraph does not drop it, because it may hold the only copy of undelivered evidence.
+  - A `control` or `connect` backend wrapper that drops the transaction `isolationLevel` option now fails destroy, `abortAllocation`, and durable operations with `WORKING_COPY_ISOLATION_UNSUPPORTED` when the session's default is not READ COMMITTED. Forward the option.
+  - The same check now runs wherever the manager drops an allocation, because dropping takes the allocation lock: closing an ephemeral working-copy store, closing a `makeBackend` backend, and cleanup after a failed allocation. The first two throw the refusal from `close()`. The cleanup swallows it so the allocation's original failure reaches the caller, and the allocation is left behind. List such orphans with `listUnsealedAllocations` and remove them with `abortAllocation` once `control` forwards the option.
+
+- [#776](https://github.com/nicia-ai/typegraph/pull/776) [`e4a9419`](https://github.com/nicia-ai/typegraph/commit/e4a941998f9a311fda2189205eda92431b04a821) Thanks [@pdlug](https://github.com/pdlug)! - Add `makeBackend` to the PostgreSQL working-copy manager so `branch`, `ingestionBranch`, `planCandidateWriteSet`, `planCandidateWriteSetReview`, `branchForEvolution`, and `planCandidateWriteSetForEvolution` no longer need a hand-rolled PostgreSQL backend factory. Each call records a fresh, empty, schema-mutable allocation in the manager's ledger; closing the backend drops it, it is listed by `listUnsealedAllocations()` while live, and `abortAllocation()` removes it after a crash. Dropping any allocation now also removes the vector tables created under its reserved physical prefix after the ledger manifest was written, and declared graph indexes on a `makeBackend` allocation are scoped to it so they cannot collide with the source's or another allocation's index names. `connect` always receives the allocation vector strategy for `makeBackend` and must bind it or disable vector support. Backends derived from the returned one with `deriveBackend` inherit that index scoping.
+  
+  Every allocation now lives in one explicit schema, the `control` session's current schema when it is allocated, recorded in a new `schema_name` ledger column (added to an existing ledger on first use; a row written by 0.72.0 carries no schema and is resolved through the removing session). Provisioning fixes its transaction to that schema, the connected backend runs the DDL it issues lazily with that schema leading its search path, the allocation's pgvector strategy creates and drops its tables and indexes schema-qualified, and clone inserts name their target relations through it, so a pooled `connect` connection whose `search_path` leads with another schema can no longer create relations that removal never finds. Removal searches the catalog across every schema for relations named with the allocation's reserved prefixes, drops those in the recorded schema schema-qualified, and deletes the ledger row in the same transaction, so a failed drop keeps the row and the allocation stays listed and recoverable. When such relations exist in another schema, removal refuses with a `BranchError` that keeps the row and carries `allocationId`, the recorded `schema`, the schemas found in `foundIn`, and a recovery `suggestion`: a renamed schema or moved tables read "not in its schema" (move them back or correct the row's `schema_name`); a stale copy left in another schema, such as a backup or restore schema, reads "also has relations" and blocks removal until that copy is dropped, and is only called a stale copy when every relation found elsewhere has a same-named relation in the recorded schema; a partial move (some relations moved, others stayed) reads "is split across schemas" and suggests dropping nothing, because the relations elsewhere may be the only copy; when they exist nowhere (the tables were dropped entirely) there is nothing to recover and the row is removed, so a crashed owner's allocation cannot stay listed forever. The same rule applies to a legacy row that records no schema. A backend built over a caller's own transaction never has that transaction's `search_path` rewritten: its lazy DDL (including extension DDL on the non-lock fence path), schema writes, and schema adoption run only when the session's current schema is the allocation's, and are refused with a `ConfigurationError` (`ALLOCATION_SCHEMA_SESSION_MISMATCH`) otherwise; extension installation under a lock fence makes no session check, running in its own transaction on a pooled backend and as a savepoint inside the caller's transaction on a backend built over one. The connected backend's catalog probes (`tablesExist`, `indexStates`, `columnTypes`) read the allocation's schema rather than the session's current schema, so a history-enabled allocation opens through a connection whose `search_path` leads with another schema. Trusted import drops and recreates the allocation's secondary indexes by the schema the catalog found them in, so a same-named index earlier on the connection's `search_path` is left alone.
+  
+  **Breaking:** the PostgreSQL working-copy manager now supports one deployment shape, in which `control` and every `connect` session run as the same database role. The `ephemeral` and `durable` clone paths and durable reopen, which shipped in 0.72.0 without this check, now compare `current_user` on the two sessions and refuse a difference with a `ConfigurationError` (`details.code` `WORKING_COPY_ROLE_MISMATCH`). The comparison is by role name, so a `connect` role that is merely a member of `control`'s role, which worked before, is now refused too. `makeBackend` applies the same rule and refuses before it writes the ledger or any DDL. The clone paths and reopen run `connect` after the allocation tables exist, as before, so they refuse right after `connect` returns, before any clone or Store write: a refused clone removes the allocation it just created, and a refused reopen leaves the sealed allocation untouched.
+  
+  **Breaking:** because the schema reaches a connected backend through the names `connect` receives, build the backend's tables with `createPostgresTables(names)` from that object, not a copy: a connection built over a copy is refused with a `BranchError` on every path (and a refused clone removes its allocation), and a `connect` driver that cannot hold an interactive transaction (`drizzle-orm/neon-http`) is refused with a `ConfigurationError` (`ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS`). The connection's `search_path` must still include the allocation schema so it can resolve the allocation's tables.
+  
+  **Migration:** run `control` and every `connect` session as the same database role, which needs `CREATE` on the schema. The reason is ownership: a connected Store creates tables and indexes that only their owner can drop, and `control` removes every allocation. If you connect as a different role today, allocations created that way can leave tables behind on close and `abortAllocation`; after switching roles, drop any such leftovers by hand.
+
+### Patch Changes
+
+- [#780](https://github.com/nicia-ai/typegraph/pull/780) [`e0be095`](https://github.com/nicia-ai/typegraph/commit/e0be095310f6c82f96bb36a17a907feaed07b7f8) Thanks [@pdlug](https://github.com/pdlug)! - Fix writes through an ephemeral PostgreSQL working copy of a history-enabled store. The copy's store was built over the allocation store's already capture-wrapped backend, so recorded capture wrapped twice and every create, update, or delete failed with a `ConfigurationError` from the raw-write guard. The ephemeral store is now built over the unwrapped owned backend, and its writes are captured in the copy's own recorded history.
+
+## 0.72.0
+
+### Highlights
+
+PostgreSQL graphs using bundled table, tsvector, and pgvector storage can now use table-backed working copies. Each allocation owns its tables, indexes, and vector sidecars under a recovery ledger; graph-scoped cloning, durable reopen, and cleanup keep copies isolated from the source. Copies use a fixed schema, so migrate the source before allocating one when schema changes are needed.
+
+On revision-tracked graphs, candidate merge planning stages the affected rows and their required identity, ontology, cardinality, and durable edge-identity dependencies instead of cloning the whole target. Candidate-scoped durable review is opt-in. Stores without a revision fence and custom backends missing the keyed reads needed for safe staging retain the complete-clone path.
+
+Bulk node creation now reports a generated ID collision as `ValidationError` with `ENTITY_ALREADY_EXISTS_CODE` across the bundled SQLite and PostgreSQL drivers, including atomic batches and the portable fallback.
+
+### Upgrade notes
+
+- If a custom PostgreSQL table contribution participates in table-backed working copies, declare its `workingCopyClonePolicy`. Use `graphRows` or `graphDocument` only for graph-scoped content; use `freshSeed` or `rebuildAfterClone` for installation or physical status. An absent or unsupported policy now refuses allocation.
+- If you handle generated ID collisions from `bulkCreate` or `bulkInsert`, branch on `ValidationError` with `ENTITY_ALREADY_EXISTS_CODE` rather than a driver error or `DatabaseOperationError`.
+
+### Minor Changes
+
+- [#759](https://github.com/nicia-ai/typegraph/pull/759) [`d3e74f8`](https://github.com/nicia-ai/typegraph/commit/d3e74f8aff5948038351539c3479ed3b3339989f) Thanks [@pdlug](https://github.com/pdlug)! - Plan candidate write sets on revision-tracked graphs, including Operational Identity and ontology graphs, from bounded candidate dependencies instead of cloning the complete target. Unsupported custom backend reads and candidate owners excluded from the clone projection retain full clone staging. Add opt-in candidate-scoped durable review evidence while retaining the existing whole-graph review default.
+
+- [#757](https://github.com/nicia-ai/typegraph/pull/757) [`afe153b`](https://github.com/nicia-ai/typegraph/commit/afe153bd720c56ca17c67b527a4d981e8aefab66) Thanks [@pdlug](https://github.com/pdlug)! - Export `generatePostgresDropSQL()` for cleaning up isolated PostgreSQL table sets from the same contribution inventory used by installation DDL. Quote custom PostgreSQL table and index names consistently in generated DDL.
+
+- [#762](https://github.com/nicia-ai/typegraph/pull/762) [`d793eff`](https://github.com/nicia-ai/typegraph/commit/d793efff201b78f2aff8fcf0b6be45b6ad9592a8) Thanks [@pdlug](https://github.com/pdlug)! - Support graph-declared PostgreSQL indexes in table-backed working copies with stable allocation-scoped physical names. B-tree, GIN, and trigram indexes retain their logical declaration names and schema hashes while copy allocation, durable reopen, retry, and cleanup use isolated physical indexes.
+
+- [#761](https://github.com/nicia-ai/typegraph/pull/761) [`c6130a1`](https://github.com/nicia-ai/typegraph/commit/c6130a1dd05b3a0b19c13623b494069d1792527f) Thanks [@pdlug](https://github.com/pdlug)! - Add a PostgreSQL table-backed working-copy manager for graphs using bundled table and tsvector storage. It owns ephemeral and durable allocation, a persistent recovery ledger, origin-attested reopen and destroy, graph-scoped SQL cloning under source locks, and bounded inventory of unsealed allocations. Inventory rows may still be active, so callers confirm ownership before explicitly aborting one. Copies have a fixed schema and refuse evolution before mutation. Custom fulltext strategies remain available through host-level database forks.
+
+- [#769](https://github.com/nicia-ai/typegraph/pull/769) [`ac8c781`](https://github.com/nicia-ai/typegraph/commit/ac8c781d80deb3ff51f061d89d15360d8c5753c7) Thanks [@pdlug](https://github.com/pdlug)! - Bound candidate merge planning and opt-in candidate-scoped review for `oneActive` graphs on bundled backends. An active-only source read excludes ended edge history while preserving the claim rule that an open edge counts even when its `validFrom` is in the future. Custom backends without the optional read continue to use complete-clone candidate planning.
+
+- [#766](https://github.com/nicia-ai/typegraph/pull/766) [`c589e00`](https://github.com/nicia-ai/typegraph/commit/c589e00ad3b96960c89c58f8012decdedfdbb10a) Thanks [@pdlug](https://github.com/pdlug)! - Bound candidate merge planning on revision-tracked graphs with `one` or `unique` edge cardinality. The transient working copy now includes only cardinality peers for candidate sources or endpoint pairs, so staging preserves full-clone constraint decisions without reading unrelated edges. A `oneActive` graph uses complete-clone staging when its backend lacks the active-only keyed peer read.
+
+- [#756](https://github.com/nicia-ai/typegraph/pull/756) [`ae813a5`](https://github.com/nicia-ai/typegraph/commit/ae813a55056c5eec6c72c7add53b59a1833e160a) Thanks [@pdlug](https://github.com/pdlug)! - Read graph rows across declared kinds in keyset pages for merge planning and review, avoiding an empty query for each unused kind. Reuse one row read when the target is both sides of a diff, and skip statistics refresh for disposable ingestion clones. Custom backends continue using the existing per-kind read path.
+
+- [#768](https://github.com/nicia-ai/typegraph/pull/768) [`79bfa87`](https://github.com/nicia-ai/typegraph/commit/79bfa876765b84be6feb30e7f88237c7fbf3e0ca) Thanks [@pdlug](https://github.com/pdlug)! - Bound candidate merge planning on revision-tracked ontology graphs by reading live same-id peers across node kinds. This preserves full-clone disjointness and type-reconciliation decisions without scanning unrelated nodes, and extends opt-in candidate-scoped review evidence to ontology graphs.
+
+- [#764](https://github.com/nicia-ai/typegraph/pull/764) [`a3c2d9c`](https://github.com/nicia-ai/typegraph/commit/a3c2d9c718dc6f7ccb4dfcaac7136a036aabe83a) Thanks [@pdlug](https://github.com/pdlug)! - PostgreSQL table-backed working copies now isolate pgvector sidecars under each allocation's ledger-reserved physical prefix, preserve their embeddings through clone and reopen, and remove their owned tables during destroy. Allocation claims and initial table/vector provisioning commit atomically.
+
+- [#770](https://github.com/nicia-ai/typegraph/pull/770) [`7f69a44`](https://github.com/nicia-ai/typegraph/commit/7f69a4466ee36084f5866d0e3476794e687c1d4e) Thanks [@pdlug](https://github.com/pdlug)! - Add an optional backend read for exact durable edge match-identity owners, including tombstones. Candidate planning uses the bounded read to seed active owners into sparse working copies and falls back to full cloning for custom backends without the capability or when a durable owner is tombstoned.
+
+- [#764](https://github.com/nicia-ai/typegraph/pull/764) [`a3c2d9c`](https://github.com/nicia-ai/typegraph/commit/a3c2d9c718dc6f7ccb4dfcaac7136a036aabe83a) Thanks [@pdlug](https://github.com/pdlug)! - Add `createPgvectorStrategy(namespace)` for allocation-scoped pgvector table and index names while preserving the default strategy's existing names.
+
+### Patch Changes
+
+- [#774](https://github.com/nicia-ai/typegraph/pull/774) [`14dacc4`](https://github.com/nicia-ai/typegraph/commit/14dacc4a1b057671fab06e56380448692a330c36) Thanks [@pdlug](https://github.com/pdlug)! - Preserve the typed duplicate-ID error when PostgreSQL rejects claim cleanup after a failed bulk node insert.
+
+- [#760](https://github.com/nicia-ai/typegraph/pull/760) [`9198fa8`](https://github.com/nicia-ai/typegraph/commit/9198fa8b1c64e256d30665d913bc4ba82842f303) Thanks [@pdlug](https://github.com/pdlug)! - Compare cloned branch identity assertions with the base's current state so assertions ended before the fork do not appear as new branch retractions.
+
+- [#775](https://github.com/nicia-ai/typegraph/pull/775) [`6820b04`](https://github.com/nicia-ai/typegraph/commit/6820b04f2f63b10abd0d17daf414369cf4085c47) Thanks [@pdlug](https://github.com/pdlug)! - Require explicit PostgreSQL working-copy clone policies for table contributions so physical status rows cannot be copied by column-shape inference.
+
+- [#765](https://github.com/nicia-ai/typegraph/pull/765) [`d28c8cb`](https://github.com/nicia-ai/typegraph/commit/d28c8cba346b988c724e760a79f758d3c1b9a885) Thanks [@pdlug](https://github.com/pdlug)! - Refuse PostgreSQL working-copy allocation or durable reopen when the target connection changes the bundled fulltext strategy. This prevents copied fulltext projections from being exposed through a backend with different storage or disabled fulltext support.
+
+- [#763](https://github.com/nicia-ai/typegraph/pull/763) [`857f578`](https://github.com/nicia-ai/typegraph/commit/857f578b402d35c9ac3f929a18f7d78405c838ba) Thanks [@pdlug](https://github.com/pdlug)! - Add opt-in candidate-scoped V2 merge review evidence for identity-enabled graphs. Revalidation expands the retained endpoint and assertion-ID scope again and detects connected identity changes while leaving V1's global baseline as the default.
+
+## 0.71.1
+
+### Patch Changes
+
+- [#752](https://github.com/nicia-ai/typegraph/pull/752) [`2d40378`](https://github.com/nicia-ai/typegraph/commit/2d403780090d39e0aa8e5ef3e62cf229cfed3a14) Thanks [@pdlug](https://github.com/pdlug)! - Materialize class membership once while paging current identity classes. SQLite could otherwise repeat the full node scan inside the kind filter for every class, making `identity.classes()` much slower than the earlier in-memory read on graphs with many unrelated node kinds.
+
+## 0.71.0
+
+### Highlights
+
+TypeGraph 0.71 makes identity groups easier to inspect. `identity.classes()` pages through visible classes, including singletons, at current or historical read coordinates. `identity.explainSame(a, b)` returns a shortest proof through persisted `same` assertions and eligible same-ID folds, so applications can show why two references belong together. Cursors are bound to the graph, coordinate, and kind scope, and remain compact as the graph schema grows.
+
+Historical identity reads and traversals now agree on which kinds belong to the current graph. Explanations at a historical coordinate use only folds that existed then. Schema migration errors also identify changed validators with exact JSON Pointers and before-and-after patterns, making a blocked migration easier to diagnose.
+
+### Upgrade notes
+
+- Replace `IdentityReadSurface<G>` with `IdentityReadFacade<G>` and `IdentitySurface<G>` with `IdentityFacade<G>`. The surface aliases are no longer exported. If you implement `IdentityReadFacade<G>` yourself, add `classes` and `explainSame`; these methods are also part of merge callback read contexts.
+- Before removing a node kind that connects retained identities through `same` assertions, move the needed assertions to retained kinds if those identities should remain joined. Historical identity reads and identity-expanded traversals now exclude kinds absent from the current graph.
+- To use current-coordinate `identity.classes()` with a custom backend, provide SQL window-function support and declare `capabilities.windowFunctions: true`. A backend profile that declares `false` raises `ConfigurationError` for this read.
+
+### Minor Changes
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Add `identity.classes({ kinds, cursor, limit })` to read visible identity classes in deterministic pages at the current or a historical coordinate. Pages include visible singleton classes and expose registered visible members of each matching class. Opaque cursors are bound to the graph, read coordinate, and kind filter.
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Add `identity.explainSame(a, b)` to return a shortest path of persisted same assertions and implicit same-ID folds at the facade's read coordinate.
+
+- [#750](https://github.com/nicia-ai/typegraph/pull/750) [`b305ad9`](https://github.com/nicia-ai/typegraph/commit/b305ad9e9b7f890a4d497135ad9fc38422ebf0e0) Thanks [@pdlug](https://github.com/pdlug)! - Make `IdentityReadFacade` and `IdentityFacade` the complete public identity surfaces, including `classes` and `explainSame`. Replace the exported `IdentityReadSurface` and `IdentitySurface` aliases with those facade types.
+  
+  Historical identity reads and traversals now agree on registered kinds, and `explainSame` cites an implicit same-ID fold only when both nodes existed at the requested coordinate. Class cursors keep a fixed size as kind filters grow. Identity invariant errors include graph details and an appropriate current or historical recovery hint.
+
+### Patch Changes
+
+- [#748](https://github.com/nicia-ai/typegraph/pull/748) [`d1c8322`](https://github.com/nicia-ai/typegraph/commit/d1c83228cb4a83c9a99eb6af2c0663dd7eaddc4f) Thanks [@pdlug](https://github.com/pdlug)! - Report exact JSON Pointers and before-and-after pattern values in schema migration diagnostics so validator changes can be located and reviewed precisely.
+
+## 0.70.0
+
+### Highlights
+
+TypeGraph 0.70 strengthens durable branch identity and recovery. Each allocation has its own ID, which is checked against the sealed host origin when a branch is reopened, destroyed, or merged. Hosts can persist the branch and allocation IDs before creation to reconcile an uncertain result. Durable merge plans now retain recorded fork points, and strategies can keep older locator formats readable while writing a new format.
+
+PostgreSQL namespace forks now support the bundled pgvector storage. Embedding rows join the same verified snapshot as the rest of the graph, and owner-side preparation builds the target's vector tables and eligible indexes before the runtime copy. IVFFlat indexes are deferred until a post-copy `materializeIndexes()` call so they cluster the forked rows. Base-version tokens are now printable and can be stored directly in PostgreSQL text and JSON columns.
+
+Incremental merges now preserve a node already committed by the target when another branch proposes the same entity. This prevents a second merge from trying to change the endpoints of existing committed edges. Local `@libsql/client` 0.18 clients also use transaction framing compatible with pooled connections.
+
+### Upgrade notes
+
+- Finish or remove durable branches created by an earlier release before upgrading, then create new descriptors and sealed host origins with allocation IDs. Earlier descriptors cannot be reopened, destroyed, merged, or used for evidence access in 0.70. Re-branch other work whose legacy `base@V` token is needed for merge planning; existing plans can still apply when their target fence has not moved.
+- Update custom durable strategies: accept the allocation ID in `create()`, return `{ operations, cursor, hasMore }` from operation scans, and capture `forkRevision` inside `create()` only when it is atomic with allocation. Remove native `merge` implementations; durable plans now apply through the target Store transaction. Use `readableVersions` if a new strategy version must read older locator formats.
+- Replace `installNamespaceForkLedger(target)` with owner-side `prepareNamespaceForkTarget(source, target)` before runtime namespace forks. Use matching vector storage on both backends for graphs with embedding fields, and call `materializeIndexes()` on the forked store after copying a graph with IVFFlat indexes.
+- Re-branch or re-plan work that uses an old `engine:` anchor or untracked content token. New untracked tokens include the complete graph content and active schema version.
+
+### Minor Changes
+
+- [#745](https://github.com/nicia-ai/typegraph/pull/745) [`01b8149`](https://github.com/nicia-ai/typegraph/commit/01b814961c61b038fd71f6ad383bfdb0e350914b) Thanks [@pdlug](https://github.com/pdlug)! - Durable branch descriptors now carry a unique allocation ID, independent of the caller's branch ID. Reopen, destroy, and durable merge compare this ID with the host's sealed origin, so two copies using the same branch ID cannot be confused by a swapped locator. Callers may persist a stable branch ID and allocation ID before creation for host-side reconciliation after an uncertain result. A durable branch handle has the `DurableGraphBranch` type, which binds it to its allocation. `applyDurableMergePlan()` also carries the recorded fork point when comparing a branch with its descriptor, allowing plans for history-enabled durable branches to apply.
+  
+  Strategies may declare `readableVersions` alongside the locator format `version` they write, allowing upgraded strategies to continue reading and managing older locator formats. The descriptor version is passed to every read, destroy, and evidence method. A strategy may supply a `forkRevision` captured atomically with allocation; when it cannot, TypeGraph uses a full diff to avoid missing writes between allocation and sealing. Durable operation scans now return `hasMore` and retain their cursor at the end of a page, so callers can resume after later commits; strategies must order evidence by a monotonic commit position.
+  
+  Untracked stores now use the complete graph-content fingerprint and active schema version even when their backend offers lineage. The previous engine anchor could miss identity-only writes and did not read the planned graph state inside the commit transaction. The optional host-native `merge` strategy method is removed; `applyDurableMergePlan()` applies through the target Store transaction until a native merge contract can prove its target fence across the native operation's commit boundary.
+  
+  ### Upgrade notes
+  
+  - Re-create durable branch descriptors and sealed host origins from earlier releases. They lack the required `allocationId` fence and are refused on reopen, destroy, merge, and evidence access. Keep the previous release available to finish or remove those branches before upgrading.
+  - Update `DurableOperationCapability.scan` implementations to return `{ operations, cursor, hasMore }`. The cursor must identify the last observed commit position even when `hasMore` is `false`; an empty page echoes `after`.
+  - Move any strategy revision capture into `create()` and return it as `forkRevision` only when it was captured atomically with the physical fork. Omit it when the host cannot prove that cut.
+  - Update `DurableWorkingCopyStrategy.create` to accept the allocation ID and refuse a duplicate until the host has explicitly reconciled it. Callers that need crash recovery should persist both IDs before calling `branchDurable` and pass them in options.
+  - Re-branch or re-plan work whose base version uses the retired `engine:` anchor or an older untracked content token. New untracked tokens fingerprint current identity assertions and include the active schema version.
+  - Remove `DurableWorkingCopyStrategy.merge` implementations and use `applyDurableMergePlan()`'s transactional apply. Database-native working-copy allocation remains supported.
+
+- [#744](https://github.com/nicia-ai/typegraph/pull/744) [`3f7da34`](https://github.com/nicia-ai/typegraph/commit/3f7da34e23265941cffc52cb984aa60d657a2014) Thanks [@pdlug](https://github.com/pdlug)! - `forkGraphNamespace()` now forks graphs that use the bundled pgvector storage. Embedding rows are copied inside the same repeatable-read snapshot, included in the content digest that the copy, retries and `abort()` verify, and removed by `abort()`. A graph with embedding fields forks only between backends with the same vector storage, pgvector on both sides or `vector: false` on both; custom vector and fulltext strategies are still refused.
+  
+  `prepareNamespaceForkTarget(source, target)` is the owner-side step. It installs the retry ledger, creates the graph's pgvector tables, and builds every index the source has materialized for the graph with the DDL the source used. It writes no graph rows and no materialization records, and the runtime fork still issues no DDL. IVFFlat indexes need the copied rows to cluster well, so preparation skips them, the fork does not copy their records, and `fork.store.materializeIndexes()` builds them after the copy.
+  
+  `materializeIndexes()` now rebuilds an IVFFlat index that exists without a materialization record, for example one an aborted fork left behind, instead of keeping it with `IF NOT EXISTS`: it was clustered for other rows. A backend without `dropVectorIndex` keeps the previous behavior.
+  
+  A materialized vector index no longer makes the fork refuse, and indexes whose build never completed on the source are neither built on nor required of the target.
+  
+  ### Upgrade notes
+  
+  - Replace `installNamespaceForkLedger(target)` with `prepareNamespaceForkTarget(source, target)`, run with the schema owner role before the runtime fork. `installNamespaceForkLedger` is removed.
+  - Namespace-fork backends no longer need `vector: false`. For a graph with embedding fields, open source and target with the same vector storage: pgvector on both, or `vector: false` on both.
+  - After forking a graph that declares IVFFlat indexes, run `materializeIndexes()` on the forked store under the owner role to build them.
+
+- [#743](https://github.com/nicia-ai/typegraph/pull/743) [`b69ec0b`](https://github.com/nicia-ai/typegraph/commit/b69ec0b9f4dc358b031e39eb8728b6ea11be871a) Thanks [@pdlug](https://github.com/pdlug)! - `base@V` tokens are now printable text. Their two components were joined by a NUL character, which PostgreSQL `text` and `jsonb` columns reject, so an application could not persist a durable branch descriptor, a recorded fork point, a merge plan, or durable operation evidence in PostgreSQL without re-encoding it. The separator is now `|`.
+  
+  ### Upgrade notes
+  
+  - Merge or re-create branches and durable branches minted by an earlier release. Their `base@V` tokens are refused with `BaseVersionMismatchError` and `details.reason: "legacy-token-format"` when `planMerge()`, `merge()`, `planMergeIncremental()`, or `mergeIncremental()` validates the branch's base, and when an incremental plan starts from a persisted `RecordedForkPoint`. Reopening a durable branch still succeeds; planning a merge from it does not.
+  - Existing merge plans are unaffected. Applying a plan, including through `applyDurableMergePlan()`, validates the plan's target fence (graph id, schema, and revision anchor), not the format of the tokens recorded in its anchors. A plan whose target has not moved since planning still applies after the upgrade.
+  - Durable operation evidence stores the coordinates the host supplied and is not compared with newly minted tokens, so existing evidence remains readable.
+  - Code that stored tokens in a re-encoded form (base64, or JSON text in a `text` column) keeps working and may store them directly.
+
+### Patch Changes
+
+- [#740](https://github.com/nicia-ai/typegraph/pull/740) [`fe345b0`](https://github.com/nicia-ai/typegraph/commit/fe345b0e08213d414dc71321bc39bfe30c345e07) Thanks [@pdlug](https://github.com/pdlug)! - Update `nanoid` to 6.0, which requires Node.js 22 or later, matching the package's existing `engines` range. `ExportOptionsSchema.signal` keeps its declared `ZodCustom<AbortSignal, AbortSignal>` type, so the published declarations stay valid across the whole `zod ^4.0.0` peer range.
+
+- [#746](https://github.com/nicia-ai/typegraph/pull/746) [`6ad8c03`](https://github.com/nicia-ai/typegraph/commit/6ad8c030a5786ad09a73ddbc204bdc6c2d68f730) Thanks [@pdlug](https://github.com/pdlug)! - Incremental merges now keep a node the target committed after the fork point as the survivor when a branch proposes the same entity. Two branches forked from one point that both added an entity could previously fail on the second merge: when the second branch's node had the lexicographically smaller id, it won survivor selection, and the plan tried to repoint the committed edges of the first branch's node, which `applyMergePlan()` refused as an immutable-endpoint change. Merges that resolved through `blockIndex` or a unique constraint were not affected.
+
+- [#741](https://github.com/nicia-ai/typegraph/pull/741) [`b8fd08e`](https://github.com/nicia-ai/typegraph/commit/b8fd08e2854d609325928038725c5502027b4b81) Thanks [@pdlug](https://github.com/pdlug)! - Support `@libsql/client` 0.18 local clients. From 0.18 a local client pools its connections and rolls back any transaction a single `execute()` leaves open, so the raw `BEGIN`/`COMMIT` framing used for local clients failed every transaction with "no transaction is active". `createLibsqlBackend()` now probes whether a local client's `execute()` calls share one session and frames transactions through `client.transaction()` when they do not; clients before 0.18 keep raw `BEGIN`/`COMMIT`.
+
+## 0.69.0
+
+### Highlights
+
+TypeGraph 0.69 can copy one graph namespace into a separately allocated PostgreSQL database without discarding its recorded history. `forkGraphNamespace()` verifies a repeatable-read source snapshot against the target before commit and records a durable proof for exact retries. Durable branches can carry recorded fork points, allowing incremental merge planning to use changes since that point when lineage proves them complete.
+
+Revision-tracked stores without recorded history can now use a revision-change journal for bounded changed-key lineage. The schema owner installs the journal, while runtime reads verify its readiness without running DDL. Disposable working copies can opt out with `revisionJournal: false`, including clones created by `branchForEvolution()`. PostgreSQL backends opened over transaction handles serialize statements on their pinned connection, and contribution-marker reads inside transactions use that same session.
+
+Schema tooling can inspect a graph extension without opening a Store through `introspectGraphExtension()`. Linear traversal queries also carry their final hop directly into the projection.
+
+### Upgrade notes
+
+- Adopt base schema version 4 with the schema owner before deploying runtime roles. On existing PostgreSQL databases, run the generated migration or open once with privileged `createStoreWithSchema()` or `createAdapterStoreWithSchema()`. Older library versions refuse the newer base-schema marker.
+- If a revision-tracked store without history needs journal-backed lineage, call `installRevisionChangesJournal()` once as the schema owner before runtime use. Without a ready journal, lineage raises `REVISION_JOURNAL_NOT_READY`; pass `revisionJournal: false` for a working copy that does not need it. Journal triggers capture every graph writing to their physical tables and rows have no automatic retention, so plan storage and retention before installing them on shared tables.
+- Install the namespace fork ledger with `installNamespaceForkLedger()` on a private target before calling `forkGraphNamespace()`. Allocate an independent target database and size the worker for the largest copied relation; the source holds one repeatable-read snapshot for the full copy.
+- `Store.clear()` now preserves graph-local contribution materialization markers by default. Pass `{ preserveContributionMaterializations: false }` when a full cutover purge must remove them.
+- Custom engine profiles adopting base schema version 4 need revision-change table and index DDL. To enable journal-backed lineage, also provide trigger installation and a readiness probe.
+
+### Minor Changes
+
+- [#738](https://github.com/nicia-ai/typegraph/pull/738) [`8f26c78`](https://github.com/nicia-ai/typegraph/commit/8f26c78ec021668281e7f4dd44e743f32d779b73) Thanks [@pdlug](https://github.com/pdlug)! - Add history-preserving PostgreSQL graph namespace forks, store-free graph-extension introspection, recorded fork points for incremental merge, and bounded change enumeration for revision-tracked stores. Linear traversal queries now read their final hop directly. PostgreSQL transaction backends and bare client sessions serialize statements on their pinned connection; transaction marker checks read that same connection.
+  
+  Install the revision-change journal with `installRevisionChangesJournal()` during privileged schema setup. Runtime lineage verifies that its table and triggers are ready without running DDL; short-lived clones, including `branchForEvolution()` working copies, may set `revisionJournal: false`. Install the namespace fork retry ledger with `installNamespaceForkLedger()` on the private target before runtime use. `Store.clear({ preserveContributionMaterializations: false })` also removes graph-local contribution markers for cutover purges.
+  
+  ### Upgrade notes
+  
+  Adopt base schema version 4 with the schema owner before deploying runtime roles. Existing PostgreSQL installations need the generated migration or a privileged `createStoreWithSchema()` / `createAdapterStoreWithSchema()` open; the new revision-change table and index are part of that base schema. Install the optional revision-change function and triggers once with `installRevisionChangesJournal()` under the owner role. Runtime lineage only checks readiness and never runs DDL; a revision-tracked store without history throws `REVISION_JOURNAL_NOT_READY` when the journal is missing. Set `revisionJournal: false` for clones that do not need journal-backed lineage, including the fourth `branchForEvolution()` argument.
+  
+  `Store.clear()` preserves graph-local contribution materialization markers by default; pass `{ preserveContributionMaterializations: false }` to remove them during a full cutover purge. Journal triggers attach to whole physical tables, so on shared tables they record writes for every graph using those tables, and journal rows have no automatic cleanup or retention policy. Avoid enabling the journal on shared tables unless that cross-graph capture and unbounded retention are acceptable.
+  
+  `forkGraphNamespace()` holds one repeatable-read source transaction open for the entire copy, including row reads, target inserts, and digest checks. Long-running copies therefore retain the source snapshot until the copy finishes.
+  
+  Custom engine profiles need revision-change table and index DDL for base-schema version 4 adoption, and trigger DDL plus a readiness probe to enable the change journal. Missing dependencies raise `ConfigurationError` when those operations are requested.
+
 ## 0.68.1
 
 ### Patch Changes

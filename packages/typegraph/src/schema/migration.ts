@@ -7,6 +7,7 @@
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
 import { isSubsumptionMetaEdge } from "../ontology/constants";
+import { encodeJsonPointerSegment } from "../query/json-pointer";
 import { compareStrings } from "../utils/compare";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -696,6 +697,7 @@ function diffNodeDef(
       name,
       before.properties,
       after.properties,
+      `/nodes/${encodeJsonPointerSegment(name)}/properties/properties`,
     );
 
     changes.push({
@@ -789,6 +791,62 @@ export function stripSchemaMetadata(
     if (!NON_CONSTRAINING_KEYWORDS.has(key)) stripped[key] = value;
   }
   return stripped;
+}
+
+/** Describe leaf-level JSON-Schema differences using RFC 6901 pointers. */
+function describeSchemaDifferences(
+  before: unknown,
+  after: unknown,
+  pointer: string,
+): readonly string[] {
+  if (canonicalEqual(before, after)) return [];
+  if (
+    before !== null &&
+    after !== null &&
+    typeof before === "object" &&
+    typeof after === "object" &&
+    !Array.isArray(before) &&
+    !Array.isArray(after)
+  ) {
+    const beforeRecord = before as Record<string, unknown>;
+    const afterRecord = after as Record<string, unknown>;
+    const keys = new Set([
+      ...Object.keys(beforeRecord),
+      ...Object.keys(afterRecord),
+    ]);
+    return [...keys].flatMap((key) =>
+      describeSchemaDifferences(
+        beforeRecord[key],
+        afterRecord[key],
+        `${pointer}/${encodeJsonPointerSegment(key)}`,
+      ),
+    );
+  }
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const differences: string[] = [];
+    const length = Math.max(before.length, after.length);
+    for (let index = 0; index < length; index += 1) {
+      if (index >= before.length) {
+        differences.push(
+          `${pointer}/${index}: undefined → ${JSON.stringify(after[index])}`,
+        );
+      } else if (index >= after.length) {
+        differences.push(
+          `${pointer}/${index}: ${JSON.stringify(before[index])} → undefined`,
+        );
+      } else {
+        differences.push(
+          ...describeSchemaDifferences(
+            before[index],
+            after[index],
+            `${pointer}/${index}`,
+          ),
+        );
+      }
+    }
+    return differences;
+  }
+  return [`${pointer}: ${JSON.stringify(before)} → ${JSON.stringify(after)}`];
 }
 
 export function isObjectSchema(schema: JsonSchema): boolean {
@@ -887,6 +945,7 @@ function classifyPropertyChanges(
   kind: string,
   before: JsonSchema,
   after: JsonSchema,
+  pointer: string,
 ): { severity: ChangeSeverity; details: string } {
   const beforeProps = before.properties ?? {};
   const afterProps = after.properties ?? {};
@@ -922,9 +981,18 @@ function classifyPropertyChanges(
     };
   }
   if (breakingProps.length > 0) {
+    const differences = breakingProps.flatMap((property) =>
+      describeSchemaDifferences(
+        beforeProps[property],
+        afterProps[property],
+        `${pointer}/${encodeJsonPointerSegment(property)}`,
+      ),
+    );
     return {
       severity: "breaking",
-      details: `Property schemas changed incompatibly in "${kind}": ${breakingProps.join(", ")}`,
+      details:
+        `Property schemas changed incompatibly in "${kind}": ${breakingProps.join(", ")}. ` +
+        `Differences: ${differences.join("; ")}`,
     };
   }
   if (newRequired.length > 0) {
@@ -1118,6 +1186,7 @@ function diffEdgeDef(
       name,
       before.properties,
       after.properties,
+      `/edges/${encodeJsonPointerSegment(name)}/properties/properties`,
     );
     changes.push({
       type: "modified",

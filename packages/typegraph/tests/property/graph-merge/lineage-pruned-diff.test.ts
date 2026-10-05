@@ -524,17 +524,13 @@ describe.each(backendMatrix())(
               }
 
               const pruneTo = await branchPruneTo(baseStore, branch);
-              const fullDiff = await diffAgainstBase(
-                baseStore,
-                forkStore,
-                scenario.captureForkState,
-              );
-              const prunedDiff = await diffAgainstBase(
-                baseStore,
-                forkStore,
-                scenario.captureForkState,
+              const fullDiff = await diffAgainstBase(baseStore, forkStore, {
+                captureForkState: scenario.captureForkState,
+              });
+              const prunedDiff = await diffAgainstBase(baseStore, forkStore, {
+                captureForkState: scenario.captureForkState,
                 pruneTo,
-              );
+              });
 
               expect(prunedDiff).toEqual(fullDiff);
             } finally {
@@ -562,17 +558,17 @@ describe.each(backendMatrix())(
           ),
         ).toBe(true);
 
-        const fullDiff = await diffAgainstBase(baseStore, forkStore, false);
+        const fullDiff = await diffAgainstBase(baseStore, forkStore, {
+          captureForkState: false,
+        });
         expect(fullDiff.nodes.modified.map((node) => node.id)).toContain("n0");
 
         // Mutate the delta: drop the ONLY key naming the real change.
         const brokenPruneTo = { kind: "keys" as const, nodes: [], edges: [] };
-        const brokenDiff = await diffAgainstBase(
-          baseStore,
-          forkStore,
-          false,
-          brokenPruneTo,
-        );
+        const brokenDiff = await diffAgainstBase(baseStore, forkStore, {
+          captureForkState: false,
+          pruneTo: brokenPruneTo,
+        });
 
         expect(brokenDiff.nodes.modified).toEqual([]);
         expect(brokenDiff).not.toEqual(fullDiff);
@@ -593,13 +589,13 @@ describe.each(backendMatrix())(
         await applyEdgeOp(forkStore, { id: "e0", op: "switchKind", tag: 1 });
 
         const pruneTo = await branchPruneTo(baseStore, branch);
-        const fullDiff = await diffAgainstBase(baseStore, forkStore, true);
-        const prunedDiff = await diffAgainstBase(
-          baseStore,
-          forkStore,
-          true,
+        const fullDiff = await diffAgainstBase(baseStore, forkStore, {
+          captureForkState: true,
+        });
+        const prunedDiff = await diffAgainstBase(baseStore, forkStore, {
+          captureForkState: true,
           pruneTo,
-        );
+        });
 
         expect(prunedDiff).toEqual(fullDiff);
         // The full diff itself must show the reuse as a delete under the
@@ -653,7 +649,10 @@ describe.each(backendMatrix())(
       // `captureForkState: false` — matching `stageBranches`' call for every
       // branch except the one incremental merge captures in full — is the
       // shape that must skip enumeration entirely on BOTH sides.
-      await diffAgainstBase(baseStore, forkStore, false, pruneTo);
+      await diffAgainstBase(baseStore, forkStore, {
+        captureForkState: false,
+        pruneTo,
+      });
 
       expect(baseNodeEnumeration).not.toHaveBeenCalled();
       expect(baseEdgeEnumeration).not.toHaveBeenCalled();

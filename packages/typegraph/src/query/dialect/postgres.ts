@@ -173,6 +173,8 @@ export const postgresDialect: DialectAdapter = {
     vectorMetrics: ["cosine", "l2", "inner_product"] as const,
     supportsFulltext: true,
     subgraphMembershipStrategy: "materialized-ids",
+    textIndexOrderIsBinary: false,
+    transactionReadsShareOneSnapshot: false,
   },
 
   binaryText(expression) {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { EdgeRow } from "../backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -11,15 +12,28 @@ import { isCanonicalIsoDate } from "../utils/date";
 import { computeSchemaComponent } from "./base-version";
 import { CandidateWriteSetError, MergeError } from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
-import { ingestionBranch } from "./ingestion-branch";
 import {
+  ingestionBranch,
+  ingestionBranchWithStrategy,
+} from "./ingestion-branch";
+import {
+  assertPlanningFenceUnchanged,
   captureMergePlanTargetFence,
   planMergeIncremental,
   planMergeIncrementalForEvolution,
+  planMergeIncrementalWithCandidateKeys,
+  sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
+import {
+  boundedCandidateKeys,
+  canUseSparseCandidatePlanning,
+  matchIdentityOwnersAreCloneVisible,
+  readCandidateMatchIdentityOwners,
+  sparseCandidateWorkingCopyStrategy,
+} from "./sparse-candidate-branch";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { storeBackend } from "./typegraph-internal";
 import type { MergeOptions } from "./types";
@@ -215,10 +229,50 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
+  let bounded = canUseSparseCandidatePlanning(args.target);
+  let boundedFence:
+    Awaited<ReturnType<typeof captureMergePlanTargetFence>> | undefined;
+  let matchIdentityOwners: readonly EdgeRow[] = [];
+  if (bounded) {
+    try {
+      // The owner query controls whether sparse import sees an existing edge.
+      // Bind that read and the sparse seed to one target revision.
+      boundedFence = await captureMergePlanTargetFence(args.target);
+      const owners = await readCandidateMatchIdentityOwners(
+        args.target,
+        writeSet,
+      );
+      if (owners === undefined || !matchIdentityOwnersAreCloneVisible(owners)) {
+        bounded = false;
+      } else {
+        matchIdentityOwners = owners;
+      }
+    } catch (error) {
+      return err(
+        new CandidateWriteSetError(
+          "Unable to read exact durable edge identity owners for candidate planning.",
+          { cause: error },
+        ),
+      );
+    }
+  }
+  const sparse =
+    bounded ?
+      sparseCandidateWorkingCopyStrategy<G>(
+        writeSet,
+        args.makeBackend,
+        matchIdentityOwners,
+      )
+    : undefined;
   try {
-    created = await ingestionBranch(args.target, args.makeBackend, {
-      id: asBranchId(writeSet.sourceId),
-    });
+    created = await ingestionBranchWithStrategy(
+      args.target,
+      args.makeBackend,
+      {
+        id: asBranchId(writeSet.sourceId),
+      },
+      sparse?.strategy,
+    );
   } catch (error) {
     return err(
       new CandidateWriteSetError(
@@ -255,20 +309,49 @@ export async function planCandidateWriteSet<G extends GraphDef>(
         ),
       );
     }
-    return await planMergeIncremental({
+    const mergeArgs = {
       forkPoint: args.target,
       target: args.target,
       branches: [candidate],
       ...(args.options === undefined ? {} : { options: args.options }),
-    });
+    };
+    const identityScope = sparse?.identityScope();
+    if (
+      bounded &&
+      args.target.graph.identity !== undefined &&
+      identityScope === undefined
+    ) {
+      return err(
+        new CandidateWriteSetError(
+          "The bounded identity baseline was not captured.",
+        ),
+      );
+    }
+    const planned =
+      bounded ?
+        await planMergeIncrementalWithCandidateKeys(
+          mergeArgs,
+          boundedCandidateKeys(writeSet),
+          identityScope,
+        )
+      : await planMergeIncremental(mergeArgs);
+    if (boundedFence !== undefined && planned.success) {
+      await assertPlanningFenceUnchanged(args.target, boundedFence);
+      if (!sameMergePlanTargetFence(boundedFence, planned.data.target)) {
+        throw new CandidateWriteSetError(
+          "The bounded candidate baseline does not match the merge plan target fence.",
+        );
+      }
+    }
+    return planned;
   } catch (error) {
     return err(
-      error instanceof CandidateWriteSetError ? error : (
-        new CandidateWriteSetError(
+      error instanceof CandidateWriteSetError || error instanceof MergeError ?
+        error
+      : new CandidateWriteSetError(
           "Candidate write-set staging or planning failed.",
           { cause: error },
-        )
-      ),
+        ),
     );
   } finally {
     try {

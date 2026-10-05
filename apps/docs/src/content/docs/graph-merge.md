@@ -254,9 +254,15 @@ planner refuses the artifact; replan outside the transaction.
 Branches forked from the original baseline can merge existing kinds. To
 include a newly added kind, call
 `branchForEvolution(target, evolutionPlan, makeBackend)` before the caller
-transaction, then add data on that isolated branch. The planner accepts
+transaction (on PostgreSQL, pass the working-copy manager's `makeBackend`; see
+[PostgreSQL table-backed working copies](#postgresql-table-backed-working-copies)),
+then add data on that isolated branch. The planner accepts
 branches from either one matching baseline; a mixed set of old-schema and
 resulting-schema forks is refused.
+Pass `{ revisionJournal: false }` as the fourth `branchForEvolution()` argument
+when its working copy does not need journal-backed changed-key lineage. The
+branch remains revision-tracked, and merge planning uses the portable diff
+when no other lineage source is available.
 
 ```typescript
 const evolutionPlan = await target.planEvolution(extension);
@@ -361,6 +367,29 @@ if (!isOk(planned)) throw planned.error;
 const applied = await applyMergePlan(target, planned.data);
 ```
 
+When `target` records history, a durable branch can use its sealed recorded
+fork point without keeping a second frozen Store:
+
+```typescript
+const forkPoint = created.branch.recordedForkPoint;
+if (forkPoint === undefined) throw new Error("History was not captured at fork");
+const planned = await planMergeIncremental({
+  forkPoint,
+  target,
+  branches: [created.branch],
+  options: { onBasePropertyConflict: "flag" },
+});
+```
+
+`recordedForkPoint` is available when the source captured history at fork time;
+it contains both the recorded instant and the branch's `base@V` token. The
+planner reads ancestor rows from the target's recorded relations, validates the
+origin, schema, and revision anchor, and enumerates only changed keys when
+lineage can prove a complete delta. A missing or incompatible anchor is refused
+before planning. The direct `mergeIncremental()` wrapper accepts the same fork
+point. Keep the durable descriptor with the branch: reopening restores the
+recorded fork point from the sealed origin.
+
 The same target revision must still be current when the reviewed plan is
 applied. If it moved during planning, planning returns
 `MergePlanningStaleError` and no artifact. This is an expected retry-and-replan
@@ -402,11 +431,31 @@ identity/context, and target baseline. You can persist this artifact and later
 approval records in the target before calling
 `revalidateCandidateWriteSetReview()` to compute a fresh execution plan.
 
-V1 supports candidate write sets only. It does not rebase arbitrary artifacts
+Both review versions support candidate write sets only. They do not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
-Planning and revalidation clone the target into a transient working copy. When
-that copy and the target really share one serialized connection, clone export
+Candidate planning on revision-tracked graphs reads existing candidate ids and
+edge endpoints by key, then seeds only those rows in the transient working
+copy. On identity-enabled graphs, it also follows live same-id peers and
+current identity assertions from those references to a fixed point. The
+planner reads peers of a candidate edge with `one` cardinality by source,
+peers of a `unique` edge by its endpoint pair, and the active peer of a
+`oneActive` edge by source. The active-only read checks an open `validTo` even
+when `validFrom` is in the future, and does not return ended history. These reads
+let the transient copy enforce the same cardinality rule as a complete clone.
+On graphs with ontology relations, it also reads live nodes sharing each
+candidate reference's id across kinds, so disjointness sees the same peers as a
+complete clone. Ontology subtype relationships remain graph metadata.
+The candidate diff and its target baseline are bounded to that dependency set and
+any committed rows recalled by configured unique or index sources. Planning
+still fences the target revision before and after these reads. With edge
+match-identity constraints, a backend offering `findEdgesByMatchIdentity`
+seeds the exact durable owners named by the candidate. A missing keyed read,
+an owner excluded from the clone projection, or a target without revision
+tracking uses the complete clone path. A custom backend lacking the optional
+`findActiveEdgesBySourceV1` read also uses that path for `oneActive` graphs.
+
+On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
 exclusive stream lease while it is collected. Concurrent review calls on that
 resource can therefore return a merge error caused by a `ConfigurationError`
@@ -524,6 +573,27 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
+For an eligible revision-tracked graph, pass
+`reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
+candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
+edge endpoints, resolved writes, and plan guards, including expected absences
+across kinds. On Operational Identity graphs it also records the reachable
+identity assertion and same-id peer closure, plus assertion-ID collision
+evidence. Revalidation expands that retained identity scope, rereads the
+referenced rows, and replans the candidate under a new target fence. An unrelated original row may change
+without invalidating V2 when it cannot affect the fresh resolved plan; V1
+would report that row change. Applications whose approval policy needs the
+V1 whole-graph rule should omit `reviewScope`. The review artifact records
+its version and scope, so revalidation applies the rule originally reviewed.
+Candidate-scoped review refuses graphs outside those eligibility rules.
+On a `oneActive` graph, a custom backend must expose
+`findActiveEdgesBySourceV1` for candidate-scoped review; the complete-clone
+candidate planner and V1 review remain available when it does not.
+On an Operational Identity graph, a custom Store runtime must also expose
+endpoint-scoped and assertion-ID-scoped identity reads. Without both reads,
+ordinary candidate planning uses the complete working-copy clone and V1 review
+remains available; an explicit V2 candidate-scoped review request is refused.
+
 Applicable store constraints still run during atomic application. Compatibility
 does not promise that apply will succeed: new rows may introduce constraint
 conflicts, and any write between revalidation and apply causes
@@ -563,12 +633,11 @@ reuse approval. Enforce artifact immutability and access control in your storage
 or application. The review contains candidate data and an entire reviewed plan,
 so protect it with the same care as graph data.
 
-Review capture and revalidation read/fingerprint the complete target graph and
-archival identity ledger. The artifact stores one fingerprint per original row
-plus expected absences. Fresh candidate planning additionally clones the whole
-graph into its disposable working copy. Budget graph-sized reads, memory,
-artifact storage, and cloning for this workflow; it is intended for bounded
-review batches.
+V1 review capture and revalidation read and fingerprint the complete target
+graph and archival identity ledger. The artifact stores one fingerprint per
+original row plus expected absences. Budget graph-sized reads and artifact
+storage for V1. V2 candidate-scoped review uses bounded point and identity
+closure reads for its baseline on eligible graphs.
 
 The execution receipt above is a separate commit. If its write fails or the
 process stops after apply, the merge may already be committed without a receipt.
@@ -722,8 +791,11 @@ This unlocks:
 
 Streaming removes the graph-sized heap spike, but a physical working copy still
 copies `O(graph)` rows and snapshot merge staging still compares branch state to
-the base. Copy-on-write logical branches and delta-only staging remain the next
-larger architectural step; they are not hidden behind a micro-optimization.
+the base. Bundled backends page those comparisons across declared kinds, so
+unused kinds do not each cost a database statement; custom backends without the
+cross-kind read retain per-kind keyset pagination. Disposable candidate clones
+also skip statistics refresh. Copy-on-write logical branches and delta-only
+staging remain the next larger architectural step.
 
 Revision tracking covers writes through the Store API. Direct backend writes and
 raw graph-table writes through `tx.sql` bypass the anchor, so applications using
@@ -1079,9 +1151,12 @@ being flagged incompatible.
 ## Choosing the survivor
 
 By default a cluster's canonical survivor is the member with the
-lexicographically-minimal id (and, on new-vs-base merges, a committed base
-member always wins so its committed identity stays stable). Override the
-staged-vs-staged choice with `canonical`:
+lexicographically-minimal id. A committed member always wins instead, so its
+committed identity and the edges already attached to it stay stable: on
+new-vs-base merges that is a committed base member, and on incremental merges
+it is also a node the live target committed after the fork point, such as one
+an earlier branch's merge added. Override the staged-vs-staged choice with
+`canonical`:
 
 ```typescript
 const result = await merge(base, branches, {
@@ -1309,16 +1384,31 @@ const store = await openProvenanceStore(backend, targetGraphId);
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash
-with an anchor chosen by one precedence: the store's durable revision anchor
-when `revisionTracking: true` or `history: true` is on; otherwise an **engine
-anchor** when the backend itself declares a `lineage` capability (see
-[Lineage and pruned diffs](#lineage-and-pruned-diffs) below); otherwise the
-compatibility fingerprint of live content. Both the revision anchor and the
-engine anchor are namespaced by the SAME durable per-graph origin, so neither
-is transferable between independently created stores, and `Store.clear()`
-rotates that origin — a branch forked before a clear can never match the
-same store again, even once it is repopulated to look the same. The two
-merge entry points differ in how they treat that token.
+with the store's durable revision anchor when `revisionTracking: true` or
+`history: true` is on, or a complete live-content fingerprint otherwise.
+The revision anchor is namespaced by a durable per-graph origin, which
+`Store.clear()` rotates. A lineage-capable untracked store whose backend
+supports that origin relation also carries it beside its content fingerprint.
+The two merge entry points differ in how they
+treat that token.
+
+The token is printable text, so it can be stored anywhere an application
+keeps descriptors, plans, and fork points, including PostgreSQL `text` and
+`jsonb` columns. Treat it as opaque: compare it whole and never parse it.
+Tokens minted by releases before this format, which separated components
+with a NUL character, are refused with a `BaseVersionMismatchError` whose
+`details.reason` is `"legacy-token-format"`. Re-branch or re-plan from the
+current target. Earlier `engine:` anchors and untracked content tokens without
+the active schema version also require re-branching; they cannot match the
+current target's token.
+
+The token is printable text, so it can be stored anywhere an application
+keeps descriptors, plans, and fork points, including PostgreSQL `text` and
+`jsonb` columns. Treat it as opaque: compare it whole and never parse it.
+Tokens minted by releases before this format, which separated components
+with a NUL character, are refused with a `BaseVersionMismatchError` whose
+`details.reason` is `"legacy-token-format"`. Re-branch or re-plan from the
+current target.
 
 **`merge()` is a snapshot merge.** Every branch must have forked from the
 target's *current* `base@V`. If the target advanced since the branch was taken,
@@ -1370,14 +1460,36 @@ A backend may declare a `lineage` capability: an opaque, whole-database
 `revision(session)` it can report and compare, plus `changesSince(session,
 revision, graphId)`, which names every node and edge of one graph that
 changed (inserted, updated, deleted, or resurrected) after that revision — or
-admits `{ kind: "unbounded" }` when it cannot bound the answer (an
-unrecognized revision, or history older than what it retains). Neither
-bundled backend implements this itself; when a store has `history: true`, it
-derives one from its own recorded relations instead, and `resolveLineage(store)`
-is the one place that picks between the two — the backend's own `lineage`
-first, else the store's recorded-relations one, else nothing. A `lineage`
-source is consulted only to avoid rework; it never changes what a merge
-decides.
+admits `{ kind: "unbounded" }` when it cannot bound the answer. Bundled SQLite
+and PostgreSQL stores with `revisionTracking: true` also provide bounded
+lineage through a DML journal when history capture is disabled. `lineageRevisionNow()`
+mints a public anchor and `changesSince(anchor)` returns changed node and edge
+keys. Use that anchor API rather than `revisionNow()`, which returns a clock
+value without the graph's origin identity. The journal is installed when the
+store is provisioned through `createStoreWithSchema()`, or explicitly with
+`installRevisionChangesJournal(backend)` from `@nicia-ai/typegraph/schema`
+under a schema owner role. Existing installations must first adopt base schema
+version 4 through a privileged schema open or generated base-schema migration.
+Runtime lineage checks the journal and its triggers without issuing DDL; a
+revision-tracked store without history fails with `REVISION_JOURNAL_NOT_READY`
+when the journal is not ready. Short-lived clones that do not need this bounded
+lineage can set `revisionJournal: false`. Writes before the first anchor are
+outside that anchor's range.
+Node and edge inserts, updates, and deletes are recorded by database triggers.
+Identity-only revisions and revisions whose write provenance is incomplete
+produce `{ kind: "unbounded" }` rather than an incomplete key list. Custom
+backends must provide their own lineage capability to get bounded results.
+Each trigger is attached to a whole physical node, edge, or identity table; it
+records every write to that table and uses `graph_id` to identify the affected
+graph. On shared tables this captures writes from every graph, not only graphs
+whose stores enabled the journal. Journal rows are retained per revision and
+never cleaned up automatically; applications should avoid installing triggers
+on shared tables unless cross-graph capture is intended, and should plan an
+external retention policy that preserves every revision still used as a branch
+anchor. `resolveLineage(store)`
+selects backend lineage first, then captured history, then the first-party
+revision journal. A lineage source is consulted only to avoid rework; it never
+changes what a merge decides.
 
 `revision()` reports `<origin>:<clock>`, never the bare clock value alone:
 the durable, random per-graph revision-origin nonce
@@ -1410,68 +1522,24 @@ exhaustive.
 session-less bag could never be pinned to anything, so this one always
 carries one. A caller planning outside any transaction (`branch()`'s
 fork-revision capture, the pruning below) passes the root backend it holds;
-a caller re-validating an anchor from inside an open commit transaction
-passes that transaction's own handle, so the read observes the transaction's
-snapshot rather than a separate connection's possibly stale view — see the
-engine anchor's re-validation just below for the concrete case.
+a caller re-validating a content fingerprint inside an open commit transaction
+reads through that transaction's own handle, so the fingerprint observes the
+transaction's snapshot and establishes dependencies on the rows it covers.
 
-**The engine anchor.** When a store has no revision tracking but its backend
-declares `lineage`, `base@V`'s anchor is `engine:<origin>:<revision>` — the
-SAME durable per-graph revision-origin nonce the revision anchor carries
-(`typegraph_revision_origins`, ensured at mint time on the store's own
-backend), paired with the engine's own whole-database revision at fork time.
-(A capturing store never reaches this form: `history: true` also turns
-revision tracking on, so the per-graph revision anchor wins first — the
-recorded-relations lineage can back an engine anchor only for a caller that
-builds one by hand.) The origin exists because the engine's revision is NOT
-per-graph: two independent databases whose engines both happen to report the
-same bare revision string (a fresh counter starting at "r1", say) would
-otherwise mint indistinguishable anchors, letting a branch forked from one
-database satisfy the merge precondition of a completely unrelated one.
-Re-validating an engine anchor checks the origin FIRST — the live
-`typegraph_revision_origins` row for this graph, via the same
-`revisionOriginMatch` predicate the revision anchor's own guard uses — and
-raises `BaseVersionMismatchError` ("forked from a different store") on a
-mismatch before ever consulting `changesSince`. Once the origin matches, the
-guard still cannot stop at a raw revision inequality the way a revision
-anchor does, because the engine's revision is whole-database: a commit to a
-completely unrelated graph on the same engine also bumps it. So a bare
-revision mismatch calls `changesSince(session, anchored, graphId)` — an
-empty `keys` delta means nothing in *this* graph moved and the merge
-proceeds as unchanged; a non-empty delta, or `unbounded`, is a real
-divergence and raises `BaseVersionMismatchError` with
-`details: { expectedRevision, liveRevision, changedKeys? }`. This
-re-validation runs strictly INSIDE the target's own open commit transaction
-(no advisory lock pins an engine-anchored store's write path the way a
-revision-anchored one is pinned), and it passes that PINNED TRANSACTION
-HANDLE as `session` — never the root backend. A `lineage` threaded through
-`EngineProvisioning.lineage` reaches every transaction handle a profile
-builds, so this is the ordinary path; a `lineage` reachable only through a
-`deriveBackend` overlay applied to the already-built root object never
-reaches a transaction handle that way, and this re-validation then refuses
-the commit with a `LINEAGE_UNAVAILABLE` `ConfigurationError` rather than
-silently falling back to a different connection's answer. One known gap:
-`changesSince` names only node and edge keys, so a commit that changes
-nothing but a graph's current identity assertions is invisible to an
-engine-anchored guard and is tolerated as unchanged — the content-fingerprint
-fallback does not share this gap (its fingerprint folds identity assertions
-in), and neither does a revision anchor (any store write advances its shared
-clock).
+**Untracked stores use a complete fingerprint.** An engine-wide revision and
+node/edge-only `changesSince` result cannot fence an identity-only write. It
+also cannot establish read dependencies on the graph state used in planning.
+For this reason, a store without TypeGraph revision tracking fingerprints live
+nodes, edges, and current identity assertions even if its backend exposes
+`lineage`. Where supported, the token also carries the durable graph origin.
+The commit transaction checks the origin and recomputes the fingerprint before
+applying its writes. Previously minted `engine:` base tokens are retired; re-branch
+from the current store rather than applying an old merge.
 
-**`Store.clear()` rotates the origin.** Both origin-namespaced anchor forms
-share one `typegraph_revision_origins` row per graph, and `clear()` deletes
-and re-mints it — inside the same transaction as the rest of the clear — for
-any store able to mint EITHER form: one with `revisionTracking` or `history`
-enabled (the revision anchor), and, separately, an engine-anchored store
-whose backend declares `lineage` directly with tracking off. Without this, a
-graph cleared and repopulated to look the same — the same revision COUNT for
-a tracked store, or a coincidentally-matching engine revision for an
-engine-anchored one — would mint a `base@V` byte-identical to one minted
-before the clear (origin unchanged), and a branch forked before the clear
-would merge as if the clear had never happened. A branch forked from a store
-before it was cleared therefore always fails the `base@V` precondition
-against that store once cleared, even after it is repopulated to look the
-same — re-branch from the post-clear store instead.
+**`Store.clear()` rotates the revision origin.** For revision-tracked stores,
+`clear()` deletes and re-mints the per-graph origin in the same transaction.
+A branch forked before that clear cannot merge into the post-clear store even
+when its revision clock has the same numeric value.
 
 The origin row is also read fresh on every mint (`computeBaseVersion`,
 `Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
@@ -1507,8 +1575,8 @@ REJECTING (a transient engine error never fails a merge the full diff would
 have completed); and the base's own anchor failing to resolve against the
 base store's lineage at all — an origin mismatch between a revision-anchored
 `base` and the base store's live revision row, a revision anchor minted
-before the base store's first tracked write, or an engine anchor whose store
-now resolves no `lineage`. Nothing about *what* a merge decides depends on
+before the base store's first tracked write, or an old engine anchor that
+must be re-branched. Nothing about *what* a merge decides depends on
 whether its diff was pruned.
 
 ## Working copies
@@ -1542,6 +1610,276 @@ round-trip migration that restores the original document hash. Those
 operations mutate rows through their own preflights, and projecting the side
 effects into a merge would detach them from the schema change that caused
 them. Apply schema changes to the target first (or re-fork), then merge.
+
+### PostgreSQL table-backed working copies
+
+`createPostgresWorkingCopyManager` allocates a private set of TypeGraph tables
+in the source PostgreSQL database. It derives the table inventory and base
+schema marker from TypeGraph's PostgreSQL schema contributions, copies the
+source graph with fenced `INSERT ... SELECT` statements, and records ownership
+in `typegraph_working_copy_allocations`. The control backend, source backend,
+and backends returned by `connect` must all reach the same database, and
+`control` and `connect` must run as the same role
+([One database role](#one-database-role)). TypeGraph checks the allocation's
+private ownership token through each connection.
+The control backend must execute DDL inside its PostgreSQL transactions;
+its root `executeDdl` port is not required.
+
+```typescript
+import { drizzle } from "drizzle-orm/node-postgres";
+import {
+  createPostgresBackend,
+  createPostgresTables,
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createPostgresWorkingCopyManager } from "@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy";
+import {
+  asBranchId,
+  branchDurable,
+  destroyDurableBranch,
+  reopenDurableBranch,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const control = createPostgresBackend(drizzle(pool));
+const copies = createPostgresWorkingCopyManager<typeof graph>({
+  control,
+  connect: (names, allocation) =>
+    Promise.resolve(
+      createPostgresBackend(drizzle(pool), {
+        tables: createPostgresTables(names),
+        ...(allocation === undefined ?
+          {}
+        : { vector: allocation.vectorStrategy }),
+      }),
+    ),
+});
+
+const { branch: copy, descriptor } = unwrap(
+  await branchDurable(sourceStore, copies.durable, {
+    id: asBranchId("candidate-42"),
+    allocationId: "candidate-allocation-42",
+  }),
+);
+await copy.close(); // Releases the connection; the tables remain.
+
+const reopened = unwrap(
+  await reopenDurableBranch(graph, descriptor, copies.durable),
+);
+await reopened.close();
+unwrap(await destroyDurableBranch(descriptor, copies.durable));
+```
+
+The same manager exposes `ephemeral` for `branch()`; closing that branch drops
+its tables. `listUnsealedAllocations({ after, limit })` pages through durable
+allocations awaiting seal and ephemeral allocations. These rows may still have
+active owners; the ledger alone cannot identify a crashed process. After
+confirming that no live branch or allocation uses a row, call
+`abortAllocation(id)` to remove it. A durable branch's descriptor contains only
+the allocation ID, not connection credentials. Pass `sourceTableNames` when the source backend uses
+custom status table names; pass `reopenOptions` to restore process-local hooks
+or query options on a later process. An external `recordedRead` binding is
+refused because its relation is outside the owned table inventory. Reopen
+options cannot replace the allocation's schema, recorded-read binding,
+history mode, or revision-tracking mode. Pass `operations` to let
+`durable.operations` commit host mutations atomically with immutable evidence;
+see [Atomic operations and immutable evidence](#atomic-operations-and-immutable-evidence).
+Each durable allocation also owns an evidence table (`<prefix>op_evidence`) in
+the allocation's schema, addressed through that schema rather than the
+connection's `search_path`; destroy refuses to drop it while undelivered
+evidence remains.
+
+The source backend and every backend returned by `connect` must expose the
+complete PostgreSQL `tableNames` inventory, including history, identity, and
+status relations. The manager refuses missing or mismatched bindings with a
+`BranchError` before cloning or opening a Store. For `ephemeral` and `durable`,
+`connect` runs after the allocation tables are created, so custom callbacks may
+inspect those tables; on binding failure, the manager removes the new tables and
+ledger row. `makeBackend` connects earlier, before it provisions anything.
+
+The table-backed strategy supports bundled tsvector fulltext, declared
+PostgreSQL B-tree, GIN, and trigram graph indexes, and pgvector sidecars. It
+builds each declared graph index on private tables under stable
+allocation-scoped physical names while keeping logical index names and schema
+hashes unchanged. `materializeIndexes()` can retry or repair indexes after
+reopen; destroy removes their owned tables and indexes. When `connect` receives
+an allocation vector strategy, pass it to `createPostgresBackend`; the strategy
+assigns stable table and index names from the ledger-reserved physical prefix.
+Allocation claims and all initial table and vector DDL commit together, so a
+colliding or failed provision leaves no partly owned sidecars. Source vector sidecars
+are copied under the same transaction locks as TypeGraph relations. The ledger
+stores every relation name declared by each slot's `ownedTables()` contribution,
+so destroy can remove them in reverse declaration order without a graph object.
+Reopening requires the graph's vector slots and owned-relation inventory to
+match the persisted allocation manifest. Older ledger rows that stored only
+`tableName()` remain readable as single-relation slots. A declared vector slot
+whose source sidecar is absent is refused because its contents cannot be
+snapshotted exactly.
+
+The `ephemeral` and `durable` copies have a fixed schema: `evolve`, kind
+removal, and deprecation refuse before mutation. Use `makeBackend`, below, when
+the working copy's schema must change. Custom fulltext strategies still need a host-level database
+fork. The source and every copy connection, including durable reopen, must use
+the bundled `tsvectorStrategy`: a custom strategy may own additional physical
+tables whose rows cannot be copied safely from the generic contribution
+inventory. A connection with fulltext disabled is refused for the same reason.
+System index maintenance remains available. Source table locks cover the
+entire TypeGraph relation set and vector sidecars while the SQL clone runs, so a
+large clone briefly blocks writes to other graphs in the same database.
+
+#### One database role
+
+The manager supports one deployment shape: the `control` backend and every
+session `connect` returns run as the **same PostgreSQL role**. TypeGraph reads
+`current_user` on both sessions and refuses a difference with a
+`ConfigurationError` whose `details.code` is `WORKING_COPY_ROLE_MISMATCH`, and
+the refused allocation is not left behind.
+
+The reason is ownership. A `control` session provisions and removes every
+allocation, but the Store that opens on a connected backend issues its own DDL:
+runtime-contribution markers, the revision journal and its triggers, system and
+declared indexes, and vector tables an evolved graph introduces. Only a table's
+owner (or a member of the owning role, or a superuser) can drop it, and the
+comparison is by role name, so a `connect` role that is merely a member of
+`control`'s role is refused rather than trusted. A different role would leave
+the tables it creates behind on close and `abortAllocation`. The shared role
+therefore needs `CREATE` on the schema.
+
+`makeBackend` calls `connect` before it writes the ledger row or any DDL and
+refuses a mismatch there, so nothing is allocated. `ephemeral` and `durable`
+call `connect` after their allocation tables exist, so they refuse right after
+it, before cloning or opening a Store, and remove the new allocation; a durable
+reopen refuses the same way and leaves the sealed allocation untouched.
+
+#### One schema per allocation
+
+Every allocation lives in one schema: the `control` session's current schema when
+the allocation is made, recorded in the ledger's `schema_name` column. No
+`search_path` decides where an allocation's relations are created or dropped, so
+a `connect` pool whose connections lead with different schemas cannot strand
+tables that removal never finds.
+
+- **Provisioning** fixes its transaction's search path to that schema before it
+  claims the ledger row, so the tables it creates land there whichever pooled
+  connection runs it, and the claim records the schema the statement itself
+  observed.
+- **The connected backend** receives table names that carry the schema. A
+  backend built with `createPostgresTables(names)` over that object runs the DDL
+  it issues lazily (bundled tables a Store ensures on first use, fulltext and
+  contribution storage, schema-write transactions) with the schema leading its
+  search path, and the allocation's pgvector strategy names its tables and
+  indexes through the schema. `CREATE INDEX CONCURRENTLY` cannot run in a
+  transaction; it creates the index in the schema of the table it names, which
+  is already the allocation's. The backend's catalog probes (table, index, and
+  column lookups, including the recorded-time compatibility check a
+  `history: true` Store runs) read the allocation's schema, not the session's
+  current one. Extensions are database-global and create no
+  allocation relation, but their DDL still runs through the same DDL runner
+  wherever the write fence takes no lock: there, a backend built over a caller's
+  own transaction is subject to the same session check as any other lazy DDL
+  (below). Under a lock fence, a pooled backend installs the extension in its own
+  transaction, as before; a backend built over a caller's own transaction runs it
+  as a savepoint inside that transaction and makes no session check, because the
+  extension creates no allocation relation.
+- **Refusals.** A connection whose backend was built over a *copy* of `names`
+  (which carries no schema) is refused with a `BranchError`. A `connect` driver
+  that cannot hold an interactive transaction (`drizzle-orm/neon-http`) is
+  refused with a `ConfigurationError`
+  (`ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS`), because it cannot run
+  its DDL under a fixed schema. A backend built over a caller's own transaction
+  runs its lazy DDL and schema writes, and adopts that transaction for a schema
+  write, only when that session's current schema is the allocation's; otherwise
+  it is refused with a `ConfigurationError`
+  (`ALLOCATION_SCHEMA_SESSION_MISMATCH`). The caller owns that session's search
+  path, so it is checked rather than rewritten.
+- **Removal** (`close`, `abort`, `destroy`, `abortAllocation`) searches the
+  catalog across every schema for relations named with the allocation's reserved
+  prefixes. It drops those in the recorded schema, schema-qualified in one
+  statement, and deletes the ledger row in the same transaction. If a drop fails
+  (a view that depends on an allocation table, for example) the transaction rolls
+  back, the row stays, and the allocation remains in `listUnsealedAllocations()`
+  for `abortAllocation()` once the dependency is gone. If any such relation sits
+  in a different schema, removal refuses with a `BranchError` that names the
+  schemas found and keeps the row, because deleting the row would discard the
+  only pointer to them. Three cases are worded differently. When the recorded
+  schema holds none of them, the schema was renamed or the tables moved (the
+  message says the relations are "not in its schema"; move the tables back or
+  correct the row's `schema_name` and remove again). When every relation found
+  elsewhere has a same-named relation in the recorded schema, it is a stale copy
+  left in another schema, such as a backup or restore schema (the message says
+  the allocation "also has relations" there; drop the copy and remove again,
+  since the copy blocks removal until it is gone). When some relations moved and
+  others stayed, for example one table moved to a backup schema while the rest
+  remain, the allocation is split and the relations elsewhere may be the only
+  copy (the message says the allocation "is split across schemas"; the
+  suggestion drops nothing, so move the relations back or correct the row's
+  `schema_name`). `details` carries `allocationId`, `schema`, `foundIn`, and
+  `schemas`, and `suggestion` names the recovery step. If the
+  allocation's relations exist nowhere (its tables were dropped entirely) there
+  is nothing to recover, and removal deletes the ledger row, so a crashed owner's
+  allocation cannot stay listed forever.
+- **Ledger rows from before the schema was recorded** (written by 0.72.0) carry
+  no schema. They resolve through the session that removes them and reopen
+  without binding, and follow the same removal rule: relations found in a schema
+  other than the removing session's refuse removal and name that schema. `control` adds the column to an
+  existing ledger the first time it runs.
+
+The connection must still be able to *resolve* the allocation's tables, so its
+`search_path` must include the schema, typically `public`. A per-role `"$user"`
+schema ahead of it is fine. The ledger itself lives where `control`'s session
+creates it, so run `control` with one consistent `search_path`.
+
+#### `makeBackend` for branches, candidate planning, and evolution previews
+
+`copies.makeBackend` is a `MakeBackend`, so PostgreSQL callers no longer
+hand-roll table prefixes, DDL, and cleanup. It fits every API that takes one:
+`branch`, `ingestionBranch`, `planCandidateWriteSet`,
+`planCandidateWriteSetReview` (including sparse staging), `branchForEvolution`,
+and `planCandidateWriteSetForEvolution`.
+
+```typescript
+import { branch, branchForEvolution } from "@nicia-ai/typegraph/graph-merge";
+
+const fork = unwrap(await branch(sourceStore, copies.makeBackend));
+const preview = unwrap(
+  await branchForEvolution(sourceStore, evolutionPlan, copies.makeBackend),
+);
+```
+
+Each call allocates a fresh allocation in the same ledger, in the `ephemeral`
+state, and returns an **empty, schema-mutable** backend: the caller (or the
+branch API) seeds it and may commit new kinds and fields, which the fixed-schema
+`ephemeral` and `durable` copies refuse. Closing the backend drops the
+allocation. While it is live it appears in `listUnsealedAllocations()`, and if
+its owner crashes without closing it, `abortAllocation(id)` removes everything
+it owns.
+
+Because the graph is unknown when the backend is allocated:
+
+- **Vector tables.** A graph that declares embeddings creates its per-field
+  pgvector tables after allocation, so the ledger manifest cannot list them.
+  Dropping an allocation therefore also removes every table in its schema whose
+  name starts with the allocation's reserved vector prefix. That prefix is
+  fixed-length and never truncated, so it cannot match another allocation's
+  tables. `connect` always receives the allocation vector strategy for
+  `makeBackend`; bind it with
+  `createPostgresBackend({ vector: allocation.vectorStrategy })`. A connection
+  that binds any other vector strategy is refused with a `BranchError`, because
+  it could create tables the allocation does not own. Pass `vector: false` to
+  opt out of vector support.
+- **Graph indexes.** PostgreSQL index names are database-global, so a declared
+  index cannot reuse its logical name on a private table. `makeBackend` scopes
+  each declaration to the allocation (`<prefix>gix_<hash>`) the first time the
+  Store's `materializeIndexes()` sees it, leaving logical names and schema
+  hashes unchanged and never touching the source's or another allocation's
+  indexes. A backend you derive from the returned one with `deriveBackend`
+  inherits the scoping; one you build by copying its members does not.
+- **Fulltext.** The same bundled `tsvectorStrategy` requirement applies as for
+  the cloned copies.
+
+`control` and `connect` must run as the same role
+([One database role](#one-database-role)). Both must also use the allocation's
+schema ([One schema per allocation](#one-schema-per-allocation)); a pooled
+connection's own `search_path` does not decide where anything is created.
 
 ### Forked working copies
 
@@ -1614,6 +1952,21 @@ await worker.close();
 ```
 
 `TFork` must extend `ForkHandle` (`{ dispose?: () => Promise<void> }`).
+`forkedWorkingCopyStrategy` supplies ephemeral copies only. Its base-version
+comparison checks the graph's schema and revision or live-content anchor;
+the host fork must preserve the full physical database, including TypeGraph
+sidecars and extensions. A durable host strategy must persist its branch ID
+and attest the sealed origin when reopening it.
+
+For a hosted PostgreSQL branch such as [Neon](https://neon.com/docs/get-started-with-neon/workflow-primer),
+`connect` must use that branch's connection string and compute endpoint for
+every pooled checkout and transaction. Reusing the source pool can appear to
+pass a base-version check while writing to the source. Doltgres can pin a
+connection through a [database revision specifier](https://www.doltgres.com/docs/reference/version-control/branches/);
+avoid session-level branch switching on a pool whose checkouts may retain
+different branch state. Doltgres exposes native branch and merge commands,
+but TypeGraph continues to use its own merge planner and apply path; native
+merge and Doltgres backend support require separate conformance testing.
 `create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
 backend's `close` is composed with the fork's `dispose` through `deriveBackend`
 (never a spread), so `worker.close()` — the branch's public release call —
@@ -1732,6 +2085,14 @@ returns a non-secret JSON locator. TypeGraph seals the immutable fork origin
 beside that allocation and returns a `DurableBranchDescriptor` that can cross a
 queue, process, deployment, or machine boundary.
 
+For a remote host, persist a chosen `{ id, allocationId }` before calling
+`branchDurable(base, strategy, { id, allocationId })`. `create()` receives both
+and must refuse an allocation ID that may already exist. If the host allocates
+a branch but its response is lost, use host tooling to inspect the ID and
+recover or remove the allocation before retrying. A failed create reports both
+IDs for that reconciliation. The host must never allocate a second physical
+copy for the same ID or return a sealed copy as though it were new.
+
 ```typescript
 import {
   applyDurableMergePlan,
@@ -1756,8 +2117,7 @@ const reopened = unwrap(
 );
 const plan = unwrap(await planMerge(base, [reopened]));
 
-// Uses a proven-equivalent host-native merge when the strategy supports one;
-// otherwise applies the complete TypeGraph plan transactionally.
+// Applies the complete TypeGraph plan inside the target transaction.
 const report = unwrap(
   await applyDurableMergePlan({
     target: base,
@@ -1776,9 +2136,15 @@ Closing and destroying are deliberately separate. `GraphBranch.close()` closes
 the backend and releases its access lease, but leaves the persistent allocation
 reopenable. `destroyDurableBranch()` asks the strategy to attest the complete
 origin and delete or archive that allocation atomically. A descriptor is
-untrusted input: TypeGraph checks its graph definition, branch id, base token,
-schema anchor, and engine revision against the origin the host sealed. Swapping
-or relabeling a locator cannot authorize deletion of another allocation.
+untrusted input: TypeGraph checks its allocation id, graph definition, branch
+id, base token, schema anchor, and engine revision against the origin the host
+sealed. The allocation id is independent of the caller's branch id, so
+swapping or relabeling a locator cannot authorize deletion of another copy
+even when two copies were given the same branch id.
+
+Strategies write new locators using `version` and may list older supported
+locator versions in `readableVersions`. Every method must understand each
+listed version, including destroy and evidence access.
 
 The strategy locator must be JSON-safe and **must not contain secrets**. Use a
 branch id, database id, or other lookup key, then resolve credentials from
@@ -1797,6 +2163,10 @@ equivalent persistent copy with an independent revision namespace, TypeGraph
 instead verifies that its complete merge-visible graph state has no delta from
 the source, fencing the source again after enumeration. The host remains
 responsible for physical fidelity outside TypeGraph's graph semantics.
+To enable lineage-pruned merge diffs, `create()` may return `forkRevision`
+captured atomically with the physical fork. When it cannot prove that cut, omit
+the revision and TypeGraph compares the complete graph state; reading a later
+revision after the copy was opened could miss an intervening branch write.
 
 Every `create()` and `reopen()` also returns a `DurableWorkingCopyAccess`:
 
@@ -1814,40 +2184,30 @@ instance, so two reopened pools or two processes still race. Such an engine must
 use a host-wide `exclusive` lease, and a concurrent reopen must wait or refuse.
 Merge planning also assumes the working copy is quiescent while it is diffed.
 
-#### Native merge is an optimization attempt
+#### Native database branches
 
-A strategy may implement `merge()` to apply an approved plan through a database
-branch primitive. `applyDurableMergePlan()` validates the plan and descriptor,
-then calls that method only when no apply callbacks or persisted provenance were
-requested and the plan carries no identity or composition work: identity
-assertion or retraction writes, an identity separation conflict, a
-reported composition orphan, or a write to a composition whole, part, or edge
-kind. Those plans always take the portable path. The result has two outcomes:
+A strategy may allocate a working copy using a database-native branch, but
+`applyDurableMergePlan()` always applies the approved TypeGraph plan through
+the target Store transaction. The former native-merge callback was removed:
+it could commit outside the transaction that checked the target revision.
+A future native merge capability needs a host-native compare-and-swap on the
+actual target, plus proof that the full physical diff equals the approved
+TypeGraph writes, including schema, history, identity, composition, and
+sidecars.
 
-- `applied`: the strategy proved the branch origin and target fence on the
-  resources being merged, proved the complete physical diff is exactly the
-  approved TypeGraph write set, applied it atomically, and returned actual
-  counts.
-- `unsupported`: the strategy executed **no** merge SQL or host mutation.
-  TypeGraph re-enters the complete portable `applyMergePlan()` path.
-
-A thrown or uncertain native failure never falls back: the host may have applied
-part of a change, and replaying the portable plan could double-apply it.
-
-This boundary matters for whole-database branch engines. TypeGraph plans one
-graph and may canonicalize nodes, repoint edges, arbitrate conflicts, maintain
-identity state, run callbacks, or persist provenance. A raw database merge that
-bypasses those decisions is not equivalent. The strategy must return
-`unsupported` unless it can prove that the entire native diff—including schema,
-history, revision, identity, index, and contribution sidecars, plus the absence
-of other application graphs—is byte-for-byte represented by the approved plan.
+For a Doltgres strategy, pin each Store connection to the intended database
+branch. [Doltgres revision specifiers](https://www.doltgres.com/docs/reference/version-control/branches/)
+provide that connection-level selection. Its
+[`DOLT_BRANCH()` and `DOLT_MERGE()` functions](https://www.doltgres.com/docs/reference/version-control/dolt-sql-functions/)
+implicitly commit the current transaction, so a fence checked before those
+functions cannot by itself protect their target.
 
 #### Atomic operations and immutable evidence
 
 A `DurableWorkingCopyStrategy` may also expose an optional `operations`
 capability (`DurableOperationCapability`). It lets a durable host combine one
 opaque graph mutation with its immutable operation evidence in a **single host
-transaction** — the branch's durable analogue of the native merge command above.
+transaction**.
 TypeGraph owns descriptor validation, sealed-origin attestation, request
 canonicalization, and evidence validation; the host owns the database mechanics.
 
@@ -1873,8 +2233,9 @@ const outcome = unwrap(
   await operateDurableBranch(descriptor, durableStrategy, request),
 );
 if (outcome.outcome === "unsupported") {
-  // The strategy executed no host SQL; TypeGraph refuses rather than emulating
-  // atomicity with callbacks or best effort.
+  // The strategy applied no mutation and wrote no evidence; TypeGraph refuses
+  // rather than emulating atomicity with best effort or callbacks that run
+  // outside the evidence transaction.
   throw new Error(`Missing capabilities: ${outcome.dimensions.join(", ")}`);
 }
 console.log(outcome.outcome); // "applied" | "replayed"
@@ -1893,7 +2254,7 @@ refused before any host call.
 `metadata` is retained as evidence; `mutation` is the host's own description of
 the graph change it must apply atomically with the evidence row. The strategy
 attests the caller's `expectedOrigin` against the allocation the descriptor
-names, exactly as reopen, destroy, and native merge do. Every committed
+names, exactly as reopen and destroy do. Every committed
 operation returns `before`/`after` coordinates — the merge-visible `base`
 fingerprint and, when the working copy resolves lineage, the engine `revision`.
 TypeGraph validates that the returned evidence echoes the canonical request and
@@ -1919,9 +2280,10 @@ host outcome envelope: malformed outcomes and empty, duplicate, or unknown
 - `getDurableOperation(descriptor, strategy, idempotencyKey)` reads one
   operation's evidence, or `undefined` when it was never committed.
 - `scanDurableOperations(descriptor, strategy, { after?, limit? })` returns
-  `{ operations, cursor }` in the strategy's stable total order (commit order,
-  ties broken deterministically). Pass the opaque `cursor` back as `after` to
-  resume; an absent `cursor` means the scan reached the end. `limit` defaults to
+  `{ operations, cursor, hasMore }` in monotonic commit order, with ties broken
+  deterministically. Pass the opaque `cursor` back as `after` to resume, even
+  after `hasMore: false`; later commits must sort after that cursor. An empty
+  page echoes `after`, and only an empty initial scan omits `cursor`. `limit` defaults to
   `DURABLE_OPERATION_SCAN_DEFAULT_LIMIT` (100) and may not exceed
   `DURABLE_OPERATION_SCAN_MAX_LIMIT` (1000); a larger page is refused.
 - `markDurableOperationDelivered(descriptor, strategy, idempotencyKey)` marks
@@ -1937,7 +2299,9 @@ capability: a strategy with no `operations` returns the explicit `unsupported`
 outcome (`dimensions: ["atomicMutation"]`) having executed no host call. `get`,
 `scan`, `markDelivered`, and `hasUndelivered` instead refuse with a typed
 `DurableOperationUnsupportedError`. TypeGraph never emulates the atomic
-guarantee.
+guarantee: a callback that runs inside the strategy's own evidence transaction
+(as `apply` does in the bundled PostgreSQL manager below) is the host's atomic
+mutation, while best effort or a callback outside that transaction is refused.
 
 **Destroy fence.** A strategy with `operations` MUST refuse destruction while
 undelivered evidence remains, throwing `DurableEvidenceUndeliveredError`;
@@ -1949,6 +2313,141 @@ either the operation commits first (destroy then observes undelivered evidence
 and refuses) or destroy commits first (the operation fails against the removed
 allocation). No partial state is ever observable.
 
+##### Bundled PostgreSQL manager
+
+`createPostgresWorkingCopyManager` implements the capability when given an
+`operations` option. `apply` is how the host's opaque mutation reaches the
+graph; TypeGraph still never interprets `mutation`.
+
+```typescript
+const copies = createPostgresWorkingCopyManager<typeof graph>({
+  control,
+  connect,
+  operations: {
+    graph,
+    // Runs inside the transaction that commits the evidence row. A throw rolls
+    // back both the mutation and the evidence.
+    apply: async (transaction, mutation) => {
+      await applyHostMutation(transaction, mutation);
+    },
+  },
+});
+
+const outcome = unwrap(
+  await operateDurableBranch(descriptor, copies.durable, request),
+);
+```
+
+`operations.graph` is required because a capability member receives only the
+descriptor, so the manager must reopen the allocation from the graph the host
+names. Before any connection or transaction opens, every member checks that
+graph against the sealed allocation's attested origin: its graph id and its
+version-blind definition hash must equal the ones the branch was forked with, so
+a graph that reuses the id with a different definition is refused. `apply`
+receives the transaction-scoped context of the allocation's fixed-schema Store,
+the same context `store.transaction` provides, so the allocation's fixed schema
+applies. Without the option, `copies.durable.operations` is undefined and
+`operateDurableBranch()` returns `unsupported` (`atomicMutation`).
+
+Each durable allocation owns one evidence relation under its ledger-reserved
+physical prefix, created in the provisioning transaction and dropped by destroy.
+The ledger records whether an allocation has one (`operation_evidence`).
+`operate` takes the allocation lock on the allocation's own transaction session,
+attests the sealed origin, resolves idempotency, takes the graph write lock,
+computes the `before` coordinates, calls `apply`, computes the `after`
+coordinates once the transaction's revision bookkeeping has run, and inserts
+undelivered evidence, all in one transaction. The allocation lock is a
+transaction-scoped advisory lock keyed on the allocation id, in a namespace of
+its own so it can never collide with a graph's write lock. It serializes
+operations per allocation, so the evidence sequence that backs the opaque scan
+cursor is commit order, and each operation's `before` equals the previous
+operation's `after` whenever every writer to the allocation goes through
+`operate` or takes the graph write lock. Ordinary writes take that lock on an
+allocation that tracks history or revisions, so a direct write cannot commit
+between `before` and `apply`; on an allocation that tracks neither, a direct
+write is not fenced and the evidence's `before`/`after` pair may include it.
+
+The graph write lock is graph-wide. While `apply` runs, tracked writes to the
+source graph and to every sibling working copy of it wait on that lock, so keep
+`apply` short and do not wait on other graph writers inside it.
+
+Coordinates always carry `base`. They also carry `revision`, the engine
+revision, when the allocation resolves lineage, which is when it tracks history
+or revisions; both are read on the transaction's own session so they describe
+one state. An allocation that tracks neither reports no `revision`, and its
+`base` values are content fingerprints, which read the whole graph twice per
+operation.
+
+**Isolation is observed, not assumed.** `operate`, `markDelivered`, and destroy
+each request READ COMMITTED, and the statement that takes the allocation lock
+also reports the isolation level its session actually runs at. Any other level
+is refused before anything is read or written, with a `ConfigurationError` whose
+`details.code` is `WORKING_COPY_ISOLATION_UNSUPPORTED`, because the request is
+honored only where a backend supports it and a role or server default of
+REPEATABLE READ would otherwise give the fence and the idempotency lookup a
+snapshot older than the lock wait. A `control` or `connect` wrapper must
+therefore forward the transaction `isolationLevel` option. The refusal only
+fires when a wrapper drops the requested option and the session's default is
+not READ COMMITTED.
+
+The same check runs everywhere the manager drops an allocation, not only in
+destroy and `abortAllocation`: closing an ephemeral working-copy store, closing
+a `makeBackend` backend, and the cleanup after a failed allocation. The first
+two surface the refusal from `close()`. The cleanup swallows it so the
+allocation's original failure reaches the caller, which leaves the allocation
+behind. Every such orphan is discoverable with `listUnsealedAllocations` and is
+removed by `abortAllocation` once `control` forwards the option.
+
+**Destroy fence.** Destroy (and `abortAllocation`) takes the same allocation
+lock. `destroyDurableBranch()` refuses with `DurableEvidenceUndeliveredError`
+while undelivered evidence exists, even from a manager built without
+`operations`; delivering the evidence requires a manager built with
+`operations`. An in-flight `operate` and a destroy on one allocation serialize
+on the lock: whichever commits first decides the other's outcome. The destroy
+waits at most `cleanupLockTimeoutMs` (5000 ms by default); one that outwaits a
+long `apply` fails with the database's lock timeout having committed nothing,
+and can be retried after the operation settles. `get`, `scan`, and
+`hasUndelivered` take no allocation lock, so they never wait behind an `apply`.
+A destroy that commits after any member has attested the sealed row but before
+that member holds the allocation (before its connection is attested, before
+`operate` mints the revision origin, or before `get`, `scan`, or `hasUndelivered`
+reads the evidence relation) fails the member with one `BranchError`
+(`changed owner or was destroyed during the operation`), the same error
+`operate` and `markDelivered` raise against a removed allocation. It is never a
+raw missing-relation error or the "connection is not bound to the allocation
+database" refusal, which is reserved for a connection that reaches a different
+database than the one the ledger names.
+
+The fence follows the manager's [removal rule](#one-schema-per-allocation). It
+reads the evidence relation only in the allocation's own schema. Evidence
+relations that sit in another schema refuse removal before the fence runs and
+are kept. The fence runs only when the evidence relation is among the
+relations removal drops. An allocation whose evidence relation is gone has no
+evidence left to deliver and nothing to recover, so destroy removes its
+remaining relations and its ledger row, exactly as it does for an allocation
+whose relations exist nowhere.
+
+**Mixed-version deployments.** Only managers on this version take the allocation
+lock and honor the destroy fence. A manager from an earlier release that shares
+the ledger destroys an allocation without consulting its evidence, so
+undelivered evidence is lost with the allocation, and it does not drop the
+evidence relation, so a later `allocate` with the same id refuses because
+`<prefix>op_evidence` exists without a ledger row. Upgrade every process that
+shares a working-copy ledger before any of them creates or destroys a durable
+allocation. To recover an orphaned evidence relation, read its undelivered rows
+(`WHERE NOT delivered`) and deliver them, then drop the relation the refusal
+names and retry. TypeGraph never drops it for you, because it may hold the only
+copy of undelivered evidence.
+
+An allocation provisioned by an earlier release has no evidence relation, and
+its ledger row says so without any statement that changes the database.
+`operate` returns `unsupported` with `dimensions: ["evidenceStore"]`. The only
+statement it runs is one read-only ledger `SELECT` through `control`; it runs no
+DDL, takes no lock, calls no `connect`, and applies and writes nothing. The read
+members report no evidence: `get` and `markDelivered` return `undefined`, `scan`
+returns an empty page (echoing `after`), and `hasUndelivered` returns `false`.
+Re-fork the branch to gain evidence.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient
@@ -1958,11 +2457,19 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-Planning clones the complete target graph into a disposable working copy before
-staging the candidate set. Existing undeclared properties on the target survive
-that clone; extra properties on the candidate document itself are still refused.
-Use it for bounded review workflows, not as a hot-path comparison primitive
-against a large graph.
+On eligible revision-tracked graphs, planning
+seeds existing candidate rows, edge
+endpoints, cardinality peers, live same-id ontology peers, and any reachable
+current identity component into the disposable working copy.
+The resolver still queries the live target for declared unique and index peers,
+and the plan retains its ordinary provenance, conflicts, digest, and commit-time
+fences. Existing undeclared target properties survive staging; extra candidate
+properties are refused. A custom backend without the active-only source read
+uses the complete clone path for `oneActive` graphs. A custom backend without
+the keyed match-identity owner read, or a candidate whose owner is excluded
+from the clone projection, also uses that path. Other ineligible graphs use
+the complete clone path so staging
+still checks constraints that can depend on rows beyond the candidate's ids.
 
 ```typescript
 import {
@@ -2221,6 +2728,79 @@ Full interval reconciliation (intersecting `[validFrom, validTo]` across
 branches) is deliberately out of scope — it needs a write path that moves a live
 row's lower bound, which contradicts the temporal model, and it would silently
 discard a branch's extension.
+
+## Forking one graph namespace
+
+`forkGraphNamespace(sourceStore, privateBackend, operationKey)` copies one
+history-enabled graph into an independently allocated PostgreSQL database. It
+copies the graph's committed schema, current rows, tombstones, recorded-time
+relations, revision clock and journal, identity relations, and TypeGraph
+materialization records. It checks a repeatable-read source snapshot against a
+pre-cut `base@V` token, compares every copied row before target commit, and
+returns `{ store, proof, abort }`. One source transaction holds that snapshot
+for the entire copy, from its first source read through the target copy and
+digest checks. The source can accept writes after the snapshot cut, while the
+long-lived snapshot remains open until copying finishes; `proof.sourceBase`
+identifies the copied cut.
+
+```typescript
+import {
+  forkGraphNamespace,
+  prepareNamespaceForkTarget,
+} from "@nicia-ai/typegraph/graph-merge";
+
+// Run with the schema owner role before the runtime fork.
+await prepareNamespaceForkTarget(sourceStore, privateBackend);
+const fork = await forkGraphNamespace(sourceStore, privateBackend, "restore-42");
+// Owner role again: builds IVFFlat indexes over the copied rows.
+await fork.store.materializeIndexes();
+const historical = await fork.store
+  .asOfRecorded(receipt.recorded)
+  .nodes.Item.getById(receipt.itemId);
+
+// Publish the private database through your own placement registry only after
+// checking the fork and any application-specific restore invariants.
+// Before publication, await fork.abort() to discard an unchanged copy.
+```
+
+The caller provisions and owns `privateBackend`. It may contain other graph
+namespaces, but it must contain no rows for the source graph. TypeGraph refuses
+a connection to the source database, including an aliased backend object.
+
+`prepareNamespaceForkTarget()` is the owner-side step, and the fork itself
+issues no DDL. It installs the retry ledger, creates the graph's per-field
+pgvector tables, and builds every index the source has materialized for the
+graph with the DDL the source used. It writes no graph rows and no
+materialization records, so it can run before the target is empty-checked,
+and running it again is harmless. Indexes whose build never completed on the
+source are neither built nor required. IVFFlat indexes are the exception:
+IVFFlat clusters the rows present when it is built, so building one on an
+empty table gives poor recall. They are not built by preparation and their
+materialization records are not copied; run `fork.store.materializeIndexes()`
+after the fork to build them over the copied rows. Every other index the fork
+carried is already recorded, so that call only builds the IVFFlat ones. An
+IVFFlat index left on the target by an aborted fork has no record, so the
+next fork's `materializeIndexes()` drops and rebuilds it over the new rows. The target stays private
+until the caller changes its own placement pointer;
+TypeGraph does not publish it. `abort()` atomically removes the copied graph
+and operation marker while preserving unrelated namespaces, and refuses if the
+target has changed. A retry with the same operation key returns the same proof
+after checking the target digest and base token; a different key cannot reuse
+the populated target.
+
+This first-party copy supports the bundled PostgreSQL table layout, bundled
+`pgvector` embedding storage, and default `tsvector` fulltext storage.
+Embeddings are copied, digested, and verified like every other graph relation,
+and `abort()` removes them. A graph with embedding fields forks only between
+backends with the same vector storage: pgvector on both sides, or
+`vector: false` on both, where embeddings live only in node properties. A
+vector-disabled source never wrote the vector tables a pgvector target would
+search, so that pair is refused. The fork refuses custom table mappings, custom vector or fulltext
+strategies, and contribution-owned tables it cannot copy and validate. The
+current copy buffers one relation at a time and
+inserts rows in bounded batches, so operators should size the private copy
+process for its largest graph relation. It does not use interchange, whose payload lacks
+recorded history and tombstones.
 
 ## Determinism
 

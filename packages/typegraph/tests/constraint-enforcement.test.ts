@@ -1057,7 +1057,7 @@ const protoWhereGraph = defineGraph({
           // Dot notation cannot name this field: `fields.toString` resolves to
           // the builder object's inherited `toString` method, which is exactly
           // the confusion under test.
-          // eslint-disable-next-line @typescript-eslint/dot-notation
+          // eslint-disable-next-line @typescript-eslint/dot-notation, @typescript-eslint/unbound-method
           where: (fields) => requireDefined(fields["toString"]).isNull(),
         },
         {
@@ -1065,7 +1065,7 @@ const protoWhereGraph = defineGraph({
           fields: ["label"],
           scope: "kind",
           collation: "binary",
-          // eslint-disable-next-line @typescript-eslint/dot-notation
+          // eslint-disable-next-line @typescript-eslint/dot-notation, @typescript-eslint/unbound-method
           where: (fields) => requireDefined(fields["toString"]).isNotNull(),
         },
       ],

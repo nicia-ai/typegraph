@@ -1,0 +1,230 @@
+---
+title: "Five Bugs That Didn't Crash"
+date: 2026-08-14
+excerpt: "Five TypeGraph bugs from the last few months that returned plausible answers instead of throwing, how each was fixed, and the tools for checking whether your data was affected."
+tags:
+  - announcements
+cover:
+  alt: "Validity windows on a time axis with an asOf(t) scan line marking each window it falls inside; one window's arrow runs backwards down the axis and takes no mark"
+  image: "./cover.png"
+social:
+  alt: "Five Bugs That Didn't Crash"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+A bug that crashes is the easy kind, because it tells you where it is. The ones
+I worry about in a database library are the ones that return a
+reasonable-looking answer (zero rows, a successful write, a clean startup)
+while the data is wrong, so you find out weeks later or not at all.
+
+Over the last stretch of releases (0.44 through 0.50, plus one older fix) I've
+fixed five of those in TypeGraph. None of them warrants a post of its own, but
+together they show how I want the library to behave, and one of them you
+could hit just by doing what TypeGraph's own error message told you to do.
+
+## Rows that exist at no point in time
+
+A valid-time window is half-open, so `asOf(t)` returns a row when
+`valid_from <= t < valid_to`. If you backfilled a record you knew had already
+ended, you'd pass a `validTo` in the past and no `validFrom`, and the write
+stamped its own instant as `validFrom`, which put the start after the end. A
+window that runs backwards contains no `t` at all, so the row was stored,
+counted, and exported, but no temporal read could ever return it.
+
+Since 0.48, a write that creates a row (or resets its window) with a `validTo`
+at or before its own instant and no `validFrom` stores no lower bound instead,
+so the row reads as "ended at T, start unknown", which is what you meant. A
+future `validTo` behaves as before. Custom backends can call the same helper
+the built-in ones use, `resolveStampedValidityLowerBound`, so the rule lives
+in one place.
+
+While I was in there, 0.47 added the thing people were faking with
+delete-and-recreate: `clearValidTo: true` reopens a window you closed too
+early, on the same row, with `oneActive` edges rechecked because reopening can
+create a second active edge.
+
+```typescript
+await store.nodes.Employment.updateById(employmentId, {
+  patch: { department: "Research" },
+  clearValidTo: true,
+});
+```
+
+### Upgrading doesn't repair old rows, on purpose
+
+Older versions could store inverted windows, and upgrading leaves them alone.
+I think that's the right call: an upgrade that made invisible rows start
+appearing in historical queries would change your reports and replays without
+telling you which rows had moved, which is its own quiet bug.
+
+So the repair is an explicit operator action, with a dry run:
+
+```typescript
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph";
+
+const report = await repairInvertedValidityWindows({
+  backend: anyBackend,
+  relations: "live-and-recorded",
+  mode: "report",
+});
+// report.counts.recordedNodes === undefined means NOT SCANNED, never "clean"
+```
+
+`mode: "apply"` rewrites what `report` counted. Stop writers first, pass the raw
+backend on a history-enabled store, and repair `"live-and-recorded"` unless you
+have a reason not to, because fixing only the live rows leaves the recorded
+history carrying the same backwards window and `asOfRecorded` will keep serving
+it. The [runbook](/schema-management#repairing-inverted-validity-windows) has
+the details.
+
+## Constraints that `importGraph` walked straight past
+
+TypeGraph lets you declare hierarchy-wide uniqueness
+(`scope: "kindWithSubClasses"`), `disjointWith(Person, Organization)`, and
+edge cardinality (`one`, `unique`, `oneActive`). Plain per-kind uniqueness was
+always backed by a real database key, but these three were enforced by a
+writer that took the per-graph write lock, checked, and then wrote.
+
+That works only as long as every writer takes the lock, and `importGraph`
+didn't. It also skipped the disjointness and cardinality checks entirely, so
+an import could commit a `Person` and an `Organization` with the same id, or
+three edges on a `cardinality: "one"` relationship, and report success. Import
+is also the path most likely to be carrying data you didn't write yourself.
+
+As of 0.50, each of those constraints is also backed by a reservation row
+whose primary key admits exactly one owner. Taking the constraint means
+winning that insert, so a writer holding no lock still loses the race it
+should lose. Import now enforces all three and reports rejected rows in its
+`errors` like any other violation. Every store and import write also goes
+through a single write pipeline now. Import had drifted because it had its own
+hand-built write path, and nobody noticed which rules it was missing.
+
+There are two caveats. This only covers writes that go through TypeGraph, so
+raw SQL inserting into the node or edge tables skips the reservation. And
+databases created before 0.50 need the new edge-claims table, which the normal
+bootstrap or the generated migration SQL provides.
+
+As with validity windows, the fix prevents new violations and leaves old ones
+where they are. To find those:
+
+```typescript
+for (const violation of await store.verifyConstraintFences()) {
+  console.warn(violation.family, violation.target.axis, violation.target.key);
+}
+```
+
+The audit reads the nodes and edges themselves rather than the new
+reservation tables, because a database written before those tables existed
+has no reservations in it, and an audit that only looked there would report
+zero violations on exactly the data you're worried about. It writes and
+repairs nothing, since picking which of two conflicting rows survives destroys
+data either way, and that decision should be yours.
+
+## A search index that said it was fine
+
+Fulltext and vector search need their own tables. TypeGraph creates them on
+first use and writes a marker row saying so, and from then on it trusted the
+marker without checking that the tables were still there.
+
+When one went missing out of band (a partial restore, a migration that
+recreated a schema, or an edge runtime that lost a file), the store opened
+cleanly and then failed on the first search with a raw driver error about a
+missing relation. This mostly showed up on Cloudflare Durable Objects, where
+[one SQLite database per tenant](/blog/infinite-graph-databases) means
+thousands of small databases that nobody is watching individually.
+
+That error is now a `ContributionUnavailableError` with
+`state: "physical-storage-missing"` and rebuild guidance. The check only runs
+on the error path, so healthy stores don't pay for it. There's also a
+three-step ladder for when search is broken, from cheapest to most drastic:
+
+| Step    | Call                                    | Writes                                |
+| ------- | --------------------------------------- | ------------------------------------- |
+| Probe   | `store.probeContributions()`            | Nothing. Safe on a replica            |
+| Repair  | `store.repairContributions()`           | Marker rows, `IF NOT EXISTS`          |
+| Rebuild | `store.rebuildContribution("fulltext")` | Deletes and refills this graph's rows |
+
+Start at the top and stop when the probe says `ready`. Rebuild is the only
+fix when the table exists in a shape the current code no longer produces, and
+it needs a maintenance window. Vector storage can't be rebuilt, because the
+embeddings exist only in the table a rebuild would drop, so TypeGraph won't
+drop it. The
+[troubleshooting guide](/troubleshooting#contribution-health-probe-repair-rebuild)
+walks through each state.
+
+## A migration that deleted your runtime kinds
+
+This one stings. [Runtime schema evolution](/blog/runtime-schema-evolution)
+lets an agent add node and edge kinds with `store.evolve()`, and those kinds
+live in the stored schema rather than in your TypeScript graph definition.
+
+`migrateSchema()` committed whatever graph you passed it, so if you migrated
+with your compile-time graph, every kind added at runtime disappeared from the
+schema while its rows stayed in the tables where nothing could reach them. The
+usual way you'd end up calling `migrateSchema()` was the library's own error
+message telling you to review the changes and run it, so following my advice
+hid your data.
+
+0.44 folds the stored runtime additions in before committing, the same way
+store creation already did. It also throws if a migration would drop a kind
+that still holds rows, unless you pass `{ discardDroppedKindRows: true }`.
+
+Two races in the same area got fixed alongside it:
+
+- A schema commit could land while another writer was mid-write against the
+  version being replaced. Managed writes now recheck their schema version
+  while holding a lock the commit also needs, so a stale write fails instead
+  of landing against a schema that no longer accepts it.
+- Removing a kind and adding it back before its cleanup ran made the old
+  rows reappear next to the new ones, and the cleanup then skipped them
+  because the kind was live again. `evolve()` now won't re-add a kind while
+  its cleanup is pending, and cleanup rechecks the schema under the same lock.
+
+## An `implies()` that folded nonsense rows
+
+This is the older one, from 0.35. `implies(edgeA, edgeB)` means "a traversal
+of `edgeB` can include `edgeA` edges", which only makes sense if `edgeA`'s
+endpoints could stand in for `edgeB`'s. Nothing checked that, so this was
+accepted:
+
+```typescript
+edges: {
+  authored: { type: authored, from: [Author], to: [Paper] },
+  covers: { type: covers, from: [Paper], to: [Topic] },
+},
+ontology: [implies(authored, covers)],
+```
+
+and a `covers` traversal with `expand: "implying"` would fold in rows that
+start at an `Author`. Now it fails when the graph is built or loaded:
+
+```text
+ConfigurationError: implies("authored", "covers") is endpoint-incompatible:
+from kind(s) [Author] declared on "authored" cannot be assigned to any of
+"covers"'s from kind(s) [Paper].
+```
+
+The check also runs on schemas loaded from the database, so a bad relation
+saved by an older version fails on first load after upgrading. The same
+release made projected ids keep their `NodeId<N>` brand through `.select()`
+and gave every fixed-shape error class a typed `details`, so fewer mistakes
+make it to runtime in the first place.
+
+## What they have in common
+
+All five fixes follow the rules I now hold the whole library to. If TypeGraph
+can't do what you asked, it throws and tells you why rather than returning an
+empty result that looks like a clean one, and it doesn't rewrite your data
+behind your back, even to fix it. You get a report first and decide what to
+do.
+
+## Try it
+
+- [Repairing inverted validity windows](/schema-management#repairing-inverted-validity-windows)
+- [Claim relations, and what they do not promise](/backend-setup#claim-relations-and-what-they-do-not-promise)
+- [Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild)
+- [Schema Management](/schema-management): migrations and kind removal
+
+<NewsletterSignup />

@@ -1020,6 +1020,24 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // at `.`, and `IdentityRelation` and `MergeErrorOptions` at `./graph-merge`.
 // Gate: the per-entrypoint deltas above are exact, and no entrypoint's delta
 // differs from the branch's pre-rebase delta against 0.57.0.
+//
+// Changes merged from main after that re-baseline:
+// Graph-extension introspection now exports its function and two result types
+// from the root, removing those three names from root forgotten-export debt.
+// Identity class paging and same-class explanations export their four result
+// types at the root. Store-bearing secondary entrypoints reach those types
+// through IdentityReadFacade without exporting them directly, so each gains
+// the same four forgotten names.
+// The complete IdentityReadFacade/IdentityFacade types replace the two
+// compatibility surface aliases, removing those two forgotten names from each
+// Store-bearing secondary entrypoint. The exact new fingerprints are below.
+// Graph-wide keyset reads make FindRowsAcrossKindsParams transitively reachable
+// through GraphBackend at 14 entrypoints. Removing exactly that name from each
+// measured set reproduces its previous fingerprint; ./backend exports it.
+// Durable edge owner reads expose their inline key shape through the
+// GraphBackend/engine strategy surfaces. Internal query-builder aliases are
+// intentionally not re-exported from the backend barrel; the engine's exact
+// transitive forgotten-export set is recorded here.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -1074,6 +1092,14 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 273,
     sha256: "1ee96057653d27d30ac7f43b5c3bbdd29d009e8842c59f407747dc2ec87fafff",
   },
+  // The dedicated working-copy adapter exposes Store and durable strategy
+  // signatures, making their portable implementation types transitively
+  // visible here. Keep that large type graph isolated from the established
+  // PostgreSQL adapter and pin its exact symbol set.
+  "./adapters/drizzle/postgres/working-copy": {
+    count: 875,
+    sha256: "f2b80fac099e4bdefa511ca56b100500424aded7a185b8f97ea1eed39580fe1d",
+  },
   "./adapters/drizzle/postgres/pglite": {
     count: 277,
     sha256: "b94d74c5650b41735eeadfdb63c444afdd0495caff3116d3857224e60a103851",
@@ -1098,6 +1124,7 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 73,
     sha256: "558fb671c7c7fc1053c0bc22a807110516596cd49364a1804abcce8d2878d621",
   },
+  // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
     count: 20,
     sha256: "f88c3ebb710441aa204483f98147921b40dd8ba978c7b87b803c561c82137638",

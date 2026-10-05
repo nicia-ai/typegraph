@@ -58,6 +58,7 @@ const READ_MEMBERS = [
   "getNode",
   "getNodes",
   "findNodesByKind",
+  "findNodesAcrossKinds",
   "countNodesByKind",
   "getEdge",
   "getEdges",
@@ -66,6 +67,9 @@ const READ_MEMBERS = [
   "edgeExistsBetween",
   "findEdgesConnectedTo",
   "findEdgesByKind",
+  "findActiveEdgesBySourceV1",
+  "findEdgesByMatchIdentity",
+  "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "checkUnique",
@@ -88,6 +92,7 @@ const READ_MEMBERS = [
   // `checkUnique` — and for the same reason it must NOT be a write member: the
   // audit runs from `store.ts`, outside any write frame.
   "readConstraintFenceViolations",
+  "revisionChangesJournalReady",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**
@@ -223,6 +228,7 @@ const PROVISIONING_MEMBERS = [
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
+  "ensureRevisionChangesJournal",
   "ensureEdgeMatchIdentityStorage",
   "ensureRuntimeContributions",
   "ensureVectorSlotContribution",
@@ -261,6 +267,7 @@ const LIFECYCLE_MEMBERS = [
   "transaction",
   "close",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**

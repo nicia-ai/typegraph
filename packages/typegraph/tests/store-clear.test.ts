@@ -4,7 +4,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import {
+  createAdapterStore,
+  createAdapterStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  MigrationError,
+} from "../src";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -16,7 +23,7 @@ import type {
 } from "../src/backend/types";
 import {
   computeBaseVersion,
-  engineAnchorOf,
+  contentOriginOf,
   hasRevisionAnchor,
 } from "../src/graph-merge/base-version";
 import { createSqlSchema } from "../src/query/compiler/schema";
@@ -99,6 +106,43 @@ describe("store.clear()", () => {
 
   beforeEach(() => {
     backend = createTestBackend();
+  });
+
+  it("clears a graph whose breaking schema prevents store initialization", async () => {
+    const adapterBackend = createTestBackend();
+    const [oldStore] = await createAdapterStoreWithSchema(
+      graph,
+      adapterBackend,
+    );
+    await oldStore.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const renamedPerson = defineNode("Person", {
+      schema: z.object({ email: z.string(), fullName: z.string() }),
+    });
+    const breakingGraph = defineGraph({
+      id: graph.id,
+      nodes: { Person: { type: renamedPerson } },
+      edges: {},
+    });
+    await expect(
+      createAdapterStoreWithSchema(breakingGraph, adapterBackend),
+    ).rejects.toThrow(MigrationError);
+
+    const recoveryStore = createAdapterStore(breakingGraph, adapterBackend);
+    await recoveryStore.clear();
+    expect(await adapterBackend.getActiveSchema(graph.id)).toBeUndefined();
+
+    const [reopened] = await createAdapterStoreWithSchema(
+      breakingGraph,
+      adapterBackend,
+    );
+    const person = await reopened.nodes.Person.create({
+      email: "alice@example.com",
+      fullName: "Alice",
+    });
+    expect(person.fullName).toBe("Alice");
   });
 
   it("removes all nodes and edges for the graph", async () => {
@@ -270,9 +314,11 @@ describe("store.clear() rotates the durable revision origin", () => {
     await store.clear();
 
     const originAfterClear = await store.revisionOriginNow();
-    // Mutation-proof: commenting out `clear()`'s `resetRevisionOrigin` call
-    // (`store.ts`) makes this equality hold instead — a pre-clear branch's
-    // revision anchor would silently match
+    // Mutation-proof: the origin row is deleted both by the `revisionOrigins`
+    // step of the graph-relation clear sequence and by `clear()`'s own
+    // `resetRevisionOrigin` call (`store.ts`, the guarantee for a backend whose
+    // `clearGraph` skips the inventory). Removing BOTH makes this equality hold
+    // instead — a pre-clear branch's revision anchor would silently match
     // again once the graph is repopulated to the same revision count.
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
@@ -328,24 +374,23 @@ describe("store.clear() and the anchor-origin predicate", () => {
     const tracked = createStore(graph, createTestBackend(), {
       revisionTracking: true,
     });
-    const engineAnchored = createStore(
+    const lineageStore = createStore(
       graph,
       deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
     );
     const fingerprinted = createStore(graph, createTestBackend());
-    for (const store of [tracked, engineAnchored, fingerprinted]) {
+    for (const store of [tracked, lineageStore, fingerprinted]) {
       const token = await computeBaseVersion(store);
       const originNamespaced =
-        hasRevisionAnchor(token) || engineAnchorOf(token) !== undefined;
+        hasRevisionAnchor(token) || contentOriginOf(token) !== undefined;
       expect(mintsOriginNamespacedAnchor(store, true)).toBe(originNamespaced);
     }
     expect(mintsOriginNamespacedAnchor(fingerprinted, true)).toBe(false);
   });
 
   it("clears a store whose backend declares lineage but cannot bootstrap revision origins", async () => {
-    // Such a store mints no engine anchor at all (computeBaseVersion refuses
-    // it), so there is no origin to rotate and clear() must not refuse
-    // either — it did once the rotation was gated on lineage alone.
+    // An untracked store with lineage still uses a content fingerprint,
+    // so no origin needs rotation during clear().
     const backend = projectBackendWithout(
       deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
       ["ensureRevisionOriginsTable"],

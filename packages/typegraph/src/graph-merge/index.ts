@@ -46,16 +46,19 @@ export {
 export type {
   DurableBranch,
   DurableBranchDescriptor,
+  DurableBranchOptions,
   DurableBranchOrigin,
+  DurableGraphBranch,
   DurableStoreDescriptor,
   DurableWorkingCopyAccess,
   DurableWorkingCopyStrategy,
-  NativeDurableMergeResult,
-  NativeDurableMergeUnsupportedDimension,
 } from "./durable-branch";
 export {
   branchDurable,
   destroyDurableBranch,
+  durableDescriptorRefusal,
+  durableOriginOfDescriptor,
+  durableOriginsEqual,
   reopenDurableBranch,
 } from "./durable-branch";
 export type { ApplyDurableMergePlanArgs } from "./durable-merge";
@@ -127,6 +130,7 @@ export type {
   MatchSource,
   MatchStrategy,
 } from "./evidence";
+export type { EvolutionBranchOptions } from "./evolution-branch";
 export { branchForEvolution } from "./evolution-branch";
 export { ingestionBranch } from "./ingestion-branch";
 export {
@@ -138,6 +142,11 @@ export {
   planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
+export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
+export {
+  forkGraphNamespace,
+  prepareNamespaceForkTarget,
+} from "./namespace-fork";
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
@@ -197,7 +206,10 @@ export type {
   MergeReviewRevalidation,
   MergeReviewRow,
 } from "./review-schema";
-export { MERGE_REVIEW_FORMAT_VERSION } from "./review-schema";
+export {
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+} from "./review-schema";
 export type {
   BaseNodeLookup,
   CandidateSource,
@@ -238,6 +250,7 @@ export type {
   ProvenanceIndex,
   ProvenanceRecord,
   ReconcileTypesMode,
+  RecordedForkPoint,
   ResolveConfig,
   ResolvedCluster,
   ResolveMap,

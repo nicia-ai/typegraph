@@ -496,15 +496,29 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
 
 /**
  * The only string or template literals anywhere under `src/`, outside
- * {@link FENCE_MODULE_FILE}, that mention one of {@link FENCE_TOKENS}. Empty:
- * `unfencedRefusalMessage`'s single declaration-line message names the
- * capability to declare (`writeFenceDeclarationLine`), not a lock statement
- * itself, so no prose row is needed today. The whole source tree is
- * scanned, so a new file that spells a lock statement itself fails here; a
- * new prose mention is declared as a row, with its reason, or it fails too.
+ * {@link FENCE_MODULE_FILE}, that mention one of {@link FENCE_TOKENS}. The
+ * namespace fork's alias lock is a separate one-shot serialization lock and
+ * is declared below; write-fence builders still have exactly one owner. The
+ * whole source tree is scanned, so a new lock spelling fails here unless its
+ * distinct responsibility is recorded with an exact source line and reason.
  * Asserted both directions.
  */
-const FENCE_TOKEN_PROSE_EXEMPTIONS: readonly InventoryEntry[] = [];
+const FENCE_TOKEN_PROSE_EXEMPTIONS: readonly InventoryEntry[] = [
+  {
+    file: "graph-merge/namespace-fork.ts",
+    line: "sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}), hashtext(${aliasKey}))`,",
+    site: "N1",
+    reason:
+      "Serializes allocation of one namespace alias during fork; it is not a write-fence decision or reusable fence SQL.",
+  },
+  {
+    file: "graph-merge/namespace-fork.ts",
+    line: "sql`SELECT pg_try_advisory_xact_lock(hashtext(${graphId}), hashtext(${aliasKey})) AS acquired`,",
+    site: "N2",
+    reason:
+      "Probes namespace alias ownership during fork; it is not a write-fence decision or reusable fence SQL.",
+  },
+];
 
 /** String and template-literal AST tokens — comments and identifiers never match. */
 function isStringOrTemplatePart(

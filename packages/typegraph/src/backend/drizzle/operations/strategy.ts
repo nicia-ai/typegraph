@@ -41,6 +41,7 @@ import type {
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
@@ -79,9 +80,13 @@ import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
+  buildFindActiveEdgesBySourceV1,
+  buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,
   buildFindEdgesByKind,
+  buildFindEdgesByMatchIdentity,
+  buildFindNodesAcrossKinds,
   buildFindNodesByKind,
 } from "./collections";
 import {
@@ -512,8 +517,28 @@ export type CommonOperationStrategy = Readonly<{
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
+  buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
+  buildFindActiveEdgesBySourceV1?: (
+    params: Readonly<{
+      graphId: string;
+      edgeKind: string;
+      fromKind: string;
+      fromId: string;
+    }>,
+  ) => SQL;
+  buildFindEdgesByMatchIdentity?: (
+    params: Readonly<{
+      graphId: string;
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[];
+    }>,
+  ) => SQL;
+  buildFindEdgesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   /**
    * Interface member rather than an optional one: every dialect must supply
    * an endpoint-set read, so the operation can never be silently skipped by a
@@ -653,7 +678,10 @@ export type CommonOperationStrategy = Readonly<{
     identity: ContributionMaterializationIdentity,
   ) => SQL;
   buildTableExists: (tableName: string) => SQL;
-  buildClearGraph: (graphId: string) => readonly ClearGraphStatement[];
+  buildClearGraph: (
+    graphId: string,
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ) => readonly ClearGraphStatement[];
 }>;
 
 /**
@@ -740,8 +768,12 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
   buildFindNodesByKind,
+  buildFindNodesAcrossKinds,
   buildCountNodesByKind,
   buildFindEdgesByKind,
+  buildFindActiveEdgesBySourceV1,
+  buildFindEdgesByMatchIdentity,
+  buildFindEdgesAcrossKinds,
   buildFindEdgesByEndpointSet,
   buildFindEdgesByHeterogeneousEndpointSet,
   buildCountEdgesByKind,
@@ -1346,8 +1378,11 @@ function createCommonOperationStrategy(
     buildTableExists(tableName: string): SQL {
       return TABLE_EXISTS_QUERIES[dialect](tableName);
     },
-    buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
-      return buildClearGraph(tables, graphId, fulltextStrategy);
+    buildClearGraph(
+      graphId: string,
+      options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+    ): readonly ClearGraphStatement[] {
+      return buildClearGraph(tables, graphId, fulltextStrategy, options);
     },
   };
 }

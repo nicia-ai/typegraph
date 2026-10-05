@@ -101,7 +101,7 @@ describe("createDataKeyedBag", () => {
     const bag = createDataKeyedBag<string>();
     expect(Object.hasOwn(bag, "toString")).toBe(false);
     // Naming the key is the point: dot notation reads the inherited method.
-    // eslint-disable-next-line @typescript-eslint/dot-notation
+    // eslint-disable-next-line @typescript-eslint/dot-notation, @typescript-eslint/unbound-method
     expect(bag["toString"]).toBeUndefined();
   });
 });

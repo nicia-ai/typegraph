@@ -65,6 +65,8 @@ import {
   StaleVersionError,
 } from "../../errors";
 import {
+  generateGraphIdOrderIndexDDL,
+  graphIdOrderIndexTables,
   sinceIndexAdoptionDdl,
 } from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
@@ -75,6 +77,7 @@ import {
 } from "../../query/dialect/fulltext-strategy";
 import {
   assertPgvectorEfSearch,
+  isPgvectorStrategy,
   pgvectorStrategy,
 } from "../../query/dialect/vector/pgvector-strategy";
 import {
@@ -162,6 +165,7 @@ import {
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type EngineRecordedTimeMembers,
+  type GraphBackend,
   type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -192,7 +196,9 @@ import {
   type ContributionMaterializer,
   ensureAdoptedVectorSlots,
   gateFulltext,
+  mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
+  type RawContributionMaterializationRow,
 } from "./contribution-materializations";
 import {
   edgeMatchIdentityPairCheckName,
@@ -234,6 +240,7 @@ import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   getPgliteClient,
+  getPinnedPostgresTransactionClient,
   hasFunctionProperty,
   isNeonHttpClient,
   isPgliteDatabase,
@@ -269,11 +276,20 @@ import {
   tableExistsFromRow,
 } from "./operations/strategy";
 import {
+  allocationSchemaOfTables,
+  allocationSchemaPin,
+  backendRelationSchema,
+  markAllocationSchemaBackend,
+  relationInBackendSchema,
+} from "./postgres-allocation-schema";
+import {
   advisoryLockSingleExpression,
+  postgresDdlLockStatement,
   postgresFenceSql,
 } from "./postgres-fence-sql";
 import {
   createPostgresTables as buildPostgresTables,
+  type PostgresTableNames,
   type PostgresTables,
   tables as defaultTables,
 } from "./schema/postgres";
@@ -329,7 +345,9 @@ export type PostgresBackendOptions = Readonly<{
    * ANN index lifecycle — and advertises `strategy.capabilities` as
    * `capabilities.vector`. Pass a custom strategy to swap the entire
    * vector stack for an alternate Postgres extension without forking
-   * TypeGraph.
+   * TypeGraph. For multiple TypeGraph allocations sharing a database,
+   * `createPgvectorStrategy(allocationId)` gives each allocation its own
+   * physical table and index namespace.
    *
    * Pass `false` to disable vector support entirely. The backend then
    * advertises no `capabilities.vector` and omits the embedding/search
@@ -420,6 +438,79 @@ type PostgresBatchChunkSizes = Readonly<{
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
+
+type RevisionJournalTableNames = Readonly<{
+  nodes: string;
+  edges: string;
+  identityAssertions: string;
+  recordedClock: string;
+  revisionChanges: string;
+}>;
+
+function quoteRevisionJournalIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+const REVISION_CHANGE_FUNCTION = "typegraph_record_revision_change";
+
+function postgresRevisionChangeTargets(names: RevisionJournalTableNames) {
+  return [
+    { entity: "node", table: names.nodes },
+    { entity: "edge", table: names.edges },
+    { entity: "identity", table: names.identityAssertions },
+  ] as const;
+}
+
+function revisionChangeTriggerName(entity: string, table: string): string {
+  return `tg_rc_${entity}_${table.slice(0, 32)}`;
+}
+
+function postgresRevisionChangeTriggers(
+  names: RevisionJournalTableNames,
+): readonly string[] {
+  const functionDdl = `CREATE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}()
+RETURNS trigger LANGUAGE plpgsql AS $tg$
+DECLARE changed_graph text; changed_kind text; changed_id text; next_revision bigint;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    changed_graph := OLD.graph_id;
+    changed_kind := COALESCE(to_jsonb(OLD)->>'kind', '');
+    changed_id := COALESCE(to_jsonb(OLD)->>'id', '');
+  ELSE
+    changed_graph := NEW.graph_id;
+    changed_kind := COALESCE(to_jsonb(NEW)->>'kind', '');
+    changed_id := COALESCE(to_jsonb(NEW)->>'id', '');
+  END IF;
+  IF TG_ARGV[2] = 'identity' THEN
+    changed_kind := '';
+    changed_id := '';
+  END IF;
+  IF to_regclass(format('%I', TG_ARGV[1])) IS NULL THEN
+    next_revision := 1;
+  ELSE
+    EXECUTE format('SELECT COALESCE((SELECT revision FROM %I WHERE graph_id = $1), 0) + 1', TG_ARGV[1])
+      INTO next_revision USING changed_graph;
+  END IF;
+  EXECUTE format('INSERT INTO %I (entry_id, graph_id, revision, complete, entity, kind, id) VALUES (md5(random()::text || clock_timestamp()::text || txid_current()::text || $1), $1, $2, $3, $4, $5, $6)', TG_ARGV[0])
+    USING changed_graph, next_revision, TG_ARGV[2] <> 'identity', TG_ARGV[2], changed_kind, changed_id;
+  RETURN NULL;
+END; $tg$`;
+  const installFunctionDdl = `DO $install$ BEGIN
+  ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)}
+  IF to_regprocedure('${REVISION_CHANGE_FUNCTION}()') IS NULL THEN
+    EXECUTE $definition$ ${functionDdl} $definition$;
+  END IF;
+END; $install$`;
+  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
+    const triggerName = revisionChangeTriggerName(entity, table);
+    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
+    const trigger = triggerName.replaceAll("'", "''");
+    const journal = names.revisionChanges.replaceAll("'", "''");
+    const clock = names.recordedClock.replaceAll("'", "''");
+    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+  });
+  return [installFunctionDdl, ...triggerDdl];
+}
 
 function vectorSlotsFromManagedNodeCreatePlan(
   params: InsertNodeParams,
@@ -564,12 +655,24 @@ function postgresLockTimeoutMilliseconds(value: string): number | undefined {
   const amount = Number(match[1]);
   const unit = match[2] ?? "";
   switch (unit) {
-    case "ms": { return amount; }
-    case "s": { return amount * 1000; }
-    case "min": { return amount * 60_000; }
-    case "h": { return amount * 3_600_000; }
-    case "d": { return amount * 86_400_000; }
-    default: { return undefined; }
+    case "ms": {
+      return amount;
+    }
+    case "s": {
+      return amount * 1000;
+    }
+    case "min": {
+      return amount * 60_000;
+    }
+    case "h": {
+      return amount * 3_600_000;
+    }
+    case "d": {
+      return amount * 86_400_000;
+    }
+    default: {
+      return undefined;
+    }
   }
 }
 
@@ -596,9 +699,46 @@ function normalizePostgresColumnKind(
   return "other";
 }
 
+/** DDL PostgreSQL refuses inside a transaction block: `CREATE`/`DROP INDEX CONCURRENTLY`. */
+function isTransactionRefusedDdl(ddl: string): boolean {
+  return /\bCONCURRENTLY\b/iu.test(ddl);
+}
+
 /** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
-async function executeRawDdl(db: AnyPgDatabase, ddl: string): Promise<void> {
+async function executeRawDdl(
+  db: AnyPgDatabase,
+  ddl: string,
+  adapter?: PostgresExecutionAdapter,
+): Promise<void> {
+  if (adapter !== undefined) {
+    await adapter.execute(portableSql.raw(ddl));
+    return;
+  }
   await db.execute(sql.raw(ddl));
+}
+
+/**
+ * The one decision that a caller-owned session may run an allocation's DDL:
+ * its current schema is the allocation's. The caller owns that session's
+ * search path, so it is checked, never rewritten.
+ */
+async function assertCallerSessionInAllocationSchema(
+  adapter: PostgresExecutionAdapter,
+  allocationSchema: string,
+  operation: string,
+): Promise<void> {
+  const [session] = await adapter.execute<{ schema: string | null }>(
+    sql`SELECT current_schema() AS schema`,
+  );
+  if (session?.schema === allocationSchema) return;
+  throw new ConfigurationError(
+    `${operation} over a working-copy allocation must run on a session whose current schema is "${allocationSchema}".`,
+    {
+      code: "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+      allocationSchema,
+      sessionSchema: session?.schema,
+    },
+  );
 }
 
 /**
@@ -620,13 +760,15 @@ function createPostgresCatalogProbes(
   executionAdapter: PostgresExecutionAdapter,
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
   transactionScoped: boolean,
+  allocationSchema: string | undefined,
 ): BackendCatalogProbes {
   async function indexStates(
     names: readonly string[],
   ): Promise<readonly IndexState[]> {
     if (names.length === 0) return [];
     // Scoped to `search_path`, matching the unqualified CREATE/DROP INDEX
-    // DDL a caller issues against these names.
+    // DDL a caller issues against these names, unless the backend is bound to
+    // an allocation: then to the allocation's schema.
     const rows = await executionAdapter.execute<{
       name: string;
       valid: boolean;
@@ -636,7 +778,7 @@ function createPostgresCatalogProbes(
           FROM pg_class c
           JOIN pg_index i ON i.indexrelid = c.oid
           WHERE c.relname IN (${sqlValueList(names)})
-            AND pg_catalog.pg_table_is_visible(c.oid)
+            AND ${relationInBackendSchema(allocationSchema)}
         `,
     );
     const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
@@ -663,7 +805,7 @@ function createPostgresCatalogProbes(
           FROM pg_class c
           WHERE c.relname IN (${sqlValueList(names)})
             AND c.relkind IN ('r', 'p')
-            AND pg_catalog.pg_table_is_visible(c.oid)
+            AND ${relationInBackendSchema(allocationSchema)}
         `,
       );
       const existing = new Set(rows.map((row) => row.name));
@@ -699,7 +841,7 @@ function createPostgresCatalogProbes(
         portableSql`
           SELECT column_name AS name, data_type AS type
           FROM information_schema.columns
-          WHERE table_schema = current_schema()
+          WHERE table_schema = ${backendRelationSchema(allocationSchema)}
             AND table_name = ${table}
         `,
       );
@@ -832,7 +974,7 @@ export async function runPostgresVectorIndexBuild(
   indexStatement: ExecutableSql,
   dropStatement?: ExecutableSql,
 ): Promise<void> {
-  if (vectorStrategy !== pgvectorStrategy) {
+  if (!isPgvectorStrategy(vectorStrategy)) {
     await execute(indexStatement);
     return;
   }
@@ -910,7 +1052,47 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
-  return createSqlBackend(buildPostgresEngineProfile(db, options));
+  if (db instanceof PgTransaction) {
+    assertAdoptedDialect<AnyPgTransaction>(db, PgTransaction, "postgres");
+    return createPostgresTransactionBackend(db, options);
+  }
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfile(db, options)),
+    options,
+  );
+}
+
+/**
+ * Creates a full PostgreSQL backend on a transaction owned by the caller.
+ * Every TypeGraph statement is queued on the transaction's pinned connection,
+ * including statements started concurrently by one Store operation. The caller
+ * must await its work before the transaction callback returns.
+ *
+ * Use this when TypeGraph has its own tables in a host application's
+ * transaction. Pass custom `tables` when those tables use a prefix.
+ */
+export function createPostgresTransactionBackend(
+  tx: AnyPgTransaction,
+  options: PostgresBackendOptions = {},
+): AdapterBackend<AnyPgTransaction> {
+  assertAdoptedDialect<AnyPgTransaction>(tx, PgTransaction, "postgres");
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
+    options,
+  );
+}
+
+/** Records the allocation schema the backend's tables are bound to, so a working-copy manager can attest it. */
+function markAllocationBound<TBackend extends GraphBackend>(
+  backend: TBackend,
+  options: PostgresBackendOptions,
+): TBackend {
+  const schema =
+    options.tables === undefined ?
+      undefined
+    : allocationSchemaOfTables(options.tables);
+  if (schema !== undefined) markAllocationSchemaBackend(backend, schema);
+  return backend;
 }
 
 /**
@@ -927,6 +1109,20 @@ export function buildPostgresEngineProfile(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): SqlEngineProfile<AnyPgTransaction> {
+  if (db instanceof PgTransaction) {
+    throw new ConfigurationError(
+      "A PostgreSQL transaction requires createPostgresTransactionBackend(tx, options).",
+      { backend: "postgres", code: "TRANSACTION_REQUIRES_SCOPED_BACKEND" },
+    );
+  }
+  return buildPostgresEngineProfileInternal(db, options, false);
+}
+
+function buildPostgresEngineProfileInternal(
+  db: AnyPgDatabase,
+  options: PostgresBackendOptions,
+  transactionScoped: boolean,
+): SqlEngineProfile<AnyPgTransaction> {
   assertNoLegacyTransactionCapability(options.capabilities);
   // Resolved before the backend exists so marking it below is a lookup, never
   // work that could fail after a wrapper already observed an unmarked backend.
@@ -937,6 +1133,13 @@ export function buildPostgresEngineProfile(
     options.serializedResource,
   );
   const tables = options.tables ?? defaultTables;
+  // Set only for tables built from a working-copy allocation's names: every
+  // DDL this backend issues then runs where the allocation lives.
+  const allocationSchema = allocationSchemaOfTables(tables);
+  const allocationPin =
+    allocationSchema === undefined ?
+      undefined
+    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1023,6 +1226,23 @@ export function buildPostgresEngineProfile(
       ...driverBindParameterOverrides,
     }),
   );
+  if (
+    allocationSchema !== undefined &&
+    !declaredCapabilities.execution.interactiveTransactions
+  ) {
+    throw new ConfigurationError(
+      "A backend over a working-copy allocation needs interactive transactions: its DDL runs in a transaction that fixes the allocation schema, which a driver that cannot hold a session (drizzle-orm/neon-http) cannot provide.",
+      {
+        code: "ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS",
+        allocationSchema,
+        capability: "execution.interactiveTransactions",
+      },
+      {
+        suggestion:
+          "Connect the working copy with a node-postgres, postgres-js, or neon-serverless (WebSocket) driver.",
+      },
+    );
+  }
   // Derived last and not overridable: how far up the contribution health
   // ladder this backend goes is a structural fact about the wiring below
   // (durable markers, a catalog probe, a strategy that declares teardown
@@ -1043,7 +1263,23 @@ export function buildPostgresEngineProfile(
       declaredCapabilities.execution.interactiveTransactions &&
       (resourceAudit.kind === "independent" || isPgliteDatabase(db)),
   };
-  const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
+  const unqueuedExecutionAdapter = createPostgresExecutionAdapter(
+    db,
+    adapterOptions,
+  );
+  const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  const bareClient =
+    typeof rawClient === "object" &&
+    rawClient !== null &&
+    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+      rawClient
+    : undefined;
+  const queueOwner =
+    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
+  const executionAdapter =
+    queueOwner === undefined ?
+      unqueuedExecutionAdapter
+    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
@@ -1054,7 +1290,7 @@ export function buildPostgresEngineProfile(
   // back through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
   // .capabilities` — `buildOperations` and `lateMembers` below read it off
   // `ctx` rather than re-deriving a local copy.
-  const tableNames: ResolvedSqlTableNames = {
+  const tableNames = {
     schemaVersions: getTableName(tables.schemaVersions),
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -1062,6 +1298,7 @@ export function buildPostgresEngineProfile(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    revisionChanges: getTableName(tables.revisionChanges),
     identityAssertions: getTableName(tables.identityAssertions),
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
@@ -1074,7 +1311,13 @@ export function buildPostgresEngineProfile(
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
     fences: getTableName(tables.fences),
-  };
+    baseSchemaVersions: getTableName(tables.baseSchemaVersions),
+    graphTemplates: getTableName(tables.graphTemplates),
+    indexMaterializations: getTableName(tables.indexMaterializations),
+    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    kindRemovals: getTableName(tables.kindRemovals),
+    reconciliationMarkers: getTableName(tables.reconciliationMarkers),
+  } satisfies PostgresTableNames;
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations
   // are ANALYZEd separately under an existence guard (see refreshStatistics):
@@ -1150,9 +1393,72 @@ export function buildPostgresEngineProfile(
    */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
-    await withConcurrentCreateRetry(async () => {
+    await withConcurrentCreateRetry(() => runDdlStatement(statement));
+  }
+
+  /**
+   * Runs one DDL statement where this backend's relations live. Over an
+   * allocation the statement shares a transaction with the search-path pin, so
+   * an unqualified `CREATE ... IF NOT EXISTS` finds the allocation's relation
+   * or creates it there, whatever the pooled connection's own `search_path`.
+   * A statement PostgreSQL refuses inside a transaction (`CONCURRENTLY`) takes
+   * {@link executeUnpinnedDdl}: an index is created in its table's schema, so
+   * the table it names anchors it. A backend over a caller's own transaction
+   * does not rewrite that session's search path: it checks the session's
+   * schema instead.
+   */
+  async function runDdlStatement(
+    statement: ReturnType<typeof sql.raw>,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) {
       await db.execute(statement);
+      return;
+    }
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        executionAdapter,
+        allocationSchema,
+        "Lazy DDL",
+      );
+      await db.execute(statement);
+      return;
+    }
+    await db.transaction(async (transaction) => {
+      await transaction.execute(allocationPin);
+      await transaction.execute(statement);
     });
+  }
+
+  /**
+   * Fixes the session a schema write's DDL runs on to the allocation schema. A
+   * transaction this backend opened is pinned; when the backend was built over
+   * a caller's transaction, `tx` is a savepoint whose `set_config` would
+   * outlive it, so the caller's schema is checked instead.
+   */
+  async function bindSchemaWriteSessionToAllocation(
+    tx: AnyPgTransaction,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) return;
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        createPostgresExecutionAdapter(tx, adapterOptions),
+        allocationSchema,
+        "Schema write",
+      );
+      return;
+    }
+    await tx.execute(allocationPin);
+  }
+
+  function executeUnpinnedDdl(ddl: string): Promise<void> {
+    return executeRawDdl(db, ddl, executionAdapter);
+  }
+
+  /** The `executeDdl` primitive: one statement, no concurrency handling. */
+  function executeSingleDdl(ddl: string): Promise<void> {
+    return allocationPin === undefined || isTransactionRefusedDdl(ddl) ?
+        executeUnpinnedDdl(ddl)
+      : runDdlStatement(sql.raw(ddl));
   }
 
   /**
@@ -1297,6 +1603,37 @@ export function buildPostgresEngineProfile(
   // `createSqlBackend` builds first).
   const identityRuntime: IdentityRuntime = {
     revisionOriginsTableDdl: generatePgCreateTableSQL(tables.revisionOrigins),
+    revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
+    revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
+    async revisionChangesJournalReady(): Promise<boolean> {
+      const expectedTriggers = portableSql.join(
+        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
+          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        ),
+        portableSql`, `,
+      );
+      const [state] = await executionAdapter.execute<{ ready?: unknown }>(
+        portableSql`SELECT
+          to_regclass(${postgresIdentifierRegclassName(tableNames.revisionChanges)}) IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM (VALUES ${expectedTriggers}) AS expected(relation_name, trigger_name, entity)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM pg_trigger AS trigger
+              WHERE trigger.tgrelid = to_regclass(expected.relation_name)
+                AND trigger.tgname = expected.trigger_name
+                AND trigger.tgenabled IN ('O', 'A')
+                AND (trigger.tgtype & 31) = 29
+                AND trigger.tgfoid = to_regprocedure(${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION) + "()"})
+                AND trigger.tgargs =
+                  convert_to(${tableNames.revisionChanges}, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(${tableNames.recordedClock}, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(expected.entity, 'UTF8') || decode('00', 'hex')
+            )
+          ) AS ready`,
+      );
+      return state?.ready === true;
+    },
+    executeDdl: executeSingleDdl,
     contributionsForTableNames: (overrides) =>
       postgresContributions(
         buildPostgresTables(overrides),
@@ -1333,7 +1670,7 @@ export function buildPostgresEngineProfile(
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
       fenceTarget: ctx.fenceTarget,
-      transactionScoped: false,
+      transactionScoped,
       // The SAME object exposed as `backend.catalog` (via
       // `provisioning.catalog`), not a second one built from this call's own
       // `db`/`executionAdapter` — see `CreatePostgresOperationBackendOptions.catalog`.
@@ -1438,7 +1775,7 @@ export function buildPostgresEngineProfile(
   }
 
   const provisioning: EngineProvisioning = {
-    executeDdl: (ddl) => executeRawDdl(db, ddl),
+    executeDdl: executeSingleDdl,
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
@@ -1446,7 +1783,8 @@ export function buildPostgresEngineProfile(
       db,
       executionAdapter,
       operationStrategy,
-      false,
+      transactionScoped,
+      allocationSchema,
     ),
   };
 
@@ -1589,6 +1927,11 @@ export function buildPostgresEngineProfile(
         ),
       }),
     ],
+    revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
+    revisionChangesIndexDdl: generatePgCreateIndexSQL(tables.revisionChanges),
+    graphIdOrderIndexDdl: graphIdOrderIndexTables(tableNames).map(({ table }) =>
+      generateGraphIdOrderIndexDDL(table),
+    ),
     identityTransitionsTableDdl: [
       generatePgCreateTableSQL(tables.identityTransitions),
       ...generatePgCreateIndexSQL(tables.identityTransitions),
@@ -1863,6 +2206,8 @@ export function buildPostgresEngineProfile(
       const attempt = (): Promise<T> =>
         db.transaction(async (tx) => {
           await acquireSchemaWriteFence(tx, graphId);
+          // Schema writes run DDL: over an allocation, where it lives.
+          await bindSchemaWriteSessionToAllocation(tx);
           // The fence resolved above is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
           const { backend: txBackend, drainAndClose } =
@@ -1877,7 +2222,10 @@ export function buildPostgresEngineProfile(
               contributionMaterializer: ctx.contributionMaterializer,
               iterativeScanProbe,
               schemaVersionsTable: tables.schemaVersions,
+              contributionMaterializationsTable:
+                tables.contributionMaterializations,
               fenceTarget,
+              allocationSchema,
               lineage: provisioning.lineage,
               recordedTime: provisioning.recordedTime,
               isFirstParty,
@@ -1916,28 +2264,32 @@ export function buildPostgresEngineProfile(
       privilegedBackend: InternalOperationBackend;
       drainAndClose: () => Promise<void>;
     }> {
-      const { backend, drainAndClose } = createTransactionBackend({
-        db: tx,
-        adapterOptions,
-        operationStrategy,
-        tableNames,
-        capabilities,
-        fulltextStrategy,
-        vectorStrategy,
-        contributionMaterializer: ctx.contributionMaterializer,
-        iterativeScanProbe,
-        schemaVersionsTable: tables.schemaVersions,
-        fenceTarget,
-        lineage: provisioning.lineage,
-        recordedTime: provisioning.recordedTime,
-        isFirstParty: txIsFirstParty,
-      });
+      const { backend, contributionReadGate, drainAndClose } =
+        createTransactionBackend({
+          db: tx,
+          adapterOptions,
+          operationStrategy,
+          tableNames,
+          capabilities,
+          fulltextStrategy,
+          vectorStrategy,
+          contributionMaterializer: ctx.contributionMaterializer,
+          iterativeScanProbe,
+          schemaVersionsTable: tables.schemaVersions,
+          contributionMaterializationsTable:
+            tables.contributionMaterializations,
+          fenceTarget,
+          allocationSchema,
+          lineage: provisioning.lineage,
+          recordedTime: provisioning.recordedTime,
+          isFirstParty: txIsFirstParty,
+        });
       const gatedBackend = carryAtomicMutationSessionRegistration(
         backend,
         gateFulltext(
           backend,
-          ctx.contributionMaterializer.assertInitialized,
-          ctx.contributionMaterializer.refuseUnavailableFulltext,
+          contributionReadGate.assertInitialized,
+          contributionReadGate.refuseUnavailableFulltext,
         ),
       );
       return {
@@ -2067,133 +2419,199 @@ export function buildPostgresEngineProfile(
         },
 
         ...(capabilities.execution.interactiveTransactions ?
-          { adoptSchemaWriteTransaction: async function adoptSchemaWriteTransaction(
-          externalTx: AnyPgTransaction,
-          graphId: string,
-          options: Readonly<{ waitBudgetMs: number }>,
-        ): Promise<AdoptedSchemaWriteTransaction> {
-          if (!capabilities.execution.interactiveTransactions) {
-            throw new ConfigurationError(
-              "Schema-write adoption requires an interactive PostgreSQL transaction.",
-              { capability: "execution.interactiveTransactions" },
-            );
-          }
-          assertAdoptedDialect<AnyPgTransaction>(
-            externalTx,
-            PgTransaction,
-            "postgres",
-          );
-          if (!Number.isSafeInteger(options.waitBudgetMs) || options.waitBudgetMs <= 0) {
-            throw new ConfigurationError(
-              "Schema fence waitBudgetMs must be a positive finite integer.",
-              { waitBudgetMs: options.waitBudgetMs },
-            );
-          }
-          const schemaFencePlan = resolveWriteFencePlan(fenceTarget);
-          if (schemaFencePlan.kind !== "lock" && schemaFencePlan.kind !== "row") {
-            throw new ConfigurationError(
-              "Schema adoption requires a database-enforced PostgreSQL schema fence on the caller's session.",
-              { capability: "schemaWriteAdoption.fence", fenceKind: schemaFencePlan.kind },
-            );
-          }
-
-          // SAVEPOINT refuses outside an explicit transaction. Release it
-          // immediately: this proves the literal pinned session is active,
-          // without opening another transaction or changing application data.
-          try {
-            await externalTx.execute(sql`SAVEPOINT typegraph_schema_adoption_probe`);
-            await externalTx.execute(sql`RELEASE SAVEPOINT typegraph_schema_adoption_probe`);
-          } catch (error) {
-            throw new ConfigurationError(
-              "Schema adoption requires a live caller-owned PostgreSQL transaction on this session.",
-              { capability: "postgres.activeNativeTransaction" },
-              { cause: error },
-            );
-          }
-
-          const { privilegedBackend } = bindTransactionBackend(externalTx, false);
-          const schemaVersionsTableName = getTableName(tables.schemaVersions);
-          if (!(await privilegedBackend.tableExists(schemaVersionsTableName))) {
-            throw new ConfigurationError(
-              "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
-              { tableName: schemaVersionsTableName },
-            );
-          }
-
-          const settingAdapter = createPostgresExecutionAdapter(
-            externalTx,
-            adapterOptions,
-          );
-          const [setting] = await settingAdapter.execute<{ value: string }>(
-            sql`SELECT current_setting('lock_timeout') AS value`,
-          );
-          const previousTimeout = setting?.value;
-          const callerTimeout =
-            previousTimeout === undefined ? undefined :
-              postgresLockTimeoutMilliseconds(previousTimeout);
-          if (callerTimeout === undefined || previousTimeout === undefined) {
-            throw new ConfigurationError(
-              "Cannot preserve this transaction's PostgreSQL lock_timeout setting.",
-              { lockTimeout: previousTimeout },
-            );
-          }
-
-          const deadline = performance.now() + options.waitBudgetMs;
-          let phase: "schema-advisory" | "schema-row" = "schema-advisory";
-          try {
-            await acquireSchemaWriteFence(externalTx, graphId, async (acquisitionPhase) => {
-              phase = acquisitionPhase;
-              const remainingMs = deadline - performance.now();
-              if (remainingMs <= 0) {
-                throw new SchemaFenceTimeoutError(
-                  graphId,
-                  acquisitionPhase,
-                  options.waitBudgetMs,
+          {
+            adoptSchemaWriteTransaction:
+              async function adoptSchemaWriteTransaction(
+                externalTx: AnyPgTransaction,
+                graphId: string,
+                options: Readonly<{ waitBudgetMs: number }>,
+              ): Promise<AdoptedSchemaWriteTransaction> {
+                if (!capabilities.execution.interactiveTransactions) {
+                  throw new ConfigurationError(
+                    "Schema-write adoption requires an interactive PostgreSQL transaction.",
+                    { capability: "execution.interactiveTransactions" },
+                  );
+                }
+                assertAdoptedDialect<AnyPgTransaction>(
+                  externalTx,
+                  PgTransaction,
+                  "postgres",
                 );
-              }
-              const effectiveMs =
-                callerTimeout === 0 ? remainingMs :
-                  Math.min(callerTimeout, remainingMs);
-              await externalTx.execute(
-                sql`SELECT set_config('lock_timeout', ${`${Math.max(1, Math.floor(effectiveMs))}ms`}, true)`,
-              );
-            });
-            // A lock_timeout is per acquisition, so confirm that the entire
-            // ordered advisory/row sequence respected the caller's deadline.
-            if (performance.now() >= deadline) {
-              throw new SchemaFenceTimeoutError(graphId, phase, options.waitBudgetMs);
-            }
-            await externalTx.execute(
-              sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
-            );
-          } catch (error) {
-            // A database lock timeout aborts the native transaction. Do not
-            // issue a restore or diagnostic statement on that failed session.
-            if (isPostgresLockTimeout(error)) {
-              throw new SchemaFenceTimeoutError(graphId, phase, options.waitBudgetMs, error);
-            }
-            throw error;
-          }
+                if (
+                  !Number.isSafeInteger(options.waitBudgetMs) ||
+                  options.waitBudgetMs <= 0
+                ) {
+                  throw new ConfigurationError(
+                    "Schema fence waitBudgetMs must be a positive finite integer.",
+                    { waitBudgetMs: options.waitBudgetMs },
+                  );
+                }
+                const schemaFencePlan = resolveWriteFencePlan(fenceTarget);
+                if (
+                  schemaFencePlan.kind !== "lock" &&
+                  schemaFencePlan.kind !== "row"
+                ) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires a database-enforced PostgreSQL schema fence on the caller's session.",
+                    {
+                      capability: "schemaWriteAdoption.fence",
+                      fenceKind: schemaFencePlan.kind,
+                    },
+                  );
+                }
 
-          const activeSchema = await privilegedBackend.getActiveSchema(graphId);
-          return {
-            backend: Object.defineProperty(privilegedBackend, "ensureVectorSlotContributions", {
-              value: (slots: readonly VectorSlot[], slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>) =>
-                ensureAdoptedVectorSlots(privilegedBackend, slots, slotOptions, {
-                  dialect: "postgres",
-                  fenceTarget,
-                  vectorStrategy,
-                  fulltextStrategy,
-                  fulltextTableName: tables.fulltextTableName,
-                  markerTableName: getTableName(tables.contributionMaterializations),
-                  decodeMarkerTimestamp: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-                }),
-              enumerable: true,
-            }) as unknown as AdoptedSchemaWriteTransaction["backend"],
-            activeSchema,
-          };
-        } }
-          : {}),
+                // SAVEPOINT refuses outside an explicit transaction. Release it
+                // immediately: this proves the literal pinned session is active,
+                // without opening another transaction or changing application data.
+                try {
+                  await externalTx.execute(
+                    sql`SAVEPOINT typegraph_schema_adoption_probe`,
+                  );
+                  await externalTx.execute(
+                    sql`RELEASE SAVEPOINT typegraph_schema_adoption_probe`,
+                  );
+                } catch (error) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires a live caller-owned PostgreSQL transaction on this session.",
+                    { capability: "postgres.activeNativeTransaction" },
+                    { cause: error },
+                  );
+                }
+
+                const { privilegedBackend } = bindTransactionBackend(
+                  externalTx,
+                  false,
+                );
+                const schemaVersionsTableName = getTableName(
+                  tables.schemaVersions,
+                );
+                if (
+                  !(await privilegedBackend.tableExists(
+                    schemaVersionsTableName,
+                  ))
+                ) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
+                    { tableName: schemaVersionsTableName },
+                  );
+                }
+
+                const settingAdapter = createPostgresExecutionAdapter(
+                  externalTx,
+                  adapterOptions,
+                );
+                if (allocationSchema !== undefined) {
+                  await assertCallerSessionInAllocationSchema(
+                    settingAdapter,
+                    allocationSchema,
+                    "Schema adoption",
+                  );
+                }
+                const [setting] = await settingAdapter.execute<{
+                  value: string;
+                }>(sql`SELECT current_setting('lock_timeout') AS value`);
+                const previousTimeout = setting?.value;
+                const callerTimeout =
+                  previousTimeout === undefined ? undefined : (
+                    postgresLockTimeoutMilliseconds(previousTimeout)
+                  );
+                if (
+                  callerTimeout === undefined ||
+                  previousTimeout === undefined
+                ) {
+                  throw new ConfigurationError(
+                    "Cannot preserve this transaction's PostgreSQL lock_timeout setting.",
+                    { lockTimeout: previousTimeout },
+                  );
+                }
+
+                const deadline = performance.now() + options.waitBudgetMs;
+                let phase: "schema-advisory" | "schema-row" = "schema-advisory";
+                try {
+                  await acquireSchemaWriteFence(
+                    externalTx,
+                    graphId,
+                    async (acquisitionPhase) => {
+                      phase = acquisitionPhase;
+                      const remainingMs = deadline - performance.now();
+                      if (remainingMs <= 0) {
+                        throw new SchemaFenceTimeoutError(
+                          graphId,
+                          acquisitionPhase,
+                          options.waitBudgetMs,
+                        );
+                      }
+                      const effectiveMs =
+                        callerTimeout === 0 ? remainingMs : (
+                          Math.min(callerTimeout, remainingMs)
+                        );
+                      await externalTx.execute(
+                        sql`SELECT set_config('lock_timeout', ${`${Math.max(1, Math.floor(effectiveMs))}ms`}, true)`,
+                      );
+                    },
+                  );
+                  // A lock_timeout is per acquisition, so confirm that the entire
+                  // ordered advisory/row sequence respected the caller's deadline.
+                  if (performance.now() >= deadline) {
+                    throw new SchemaFenceTimeoutError(
+                      graphId,
+                      phase,
+                      options.waitBudgetMs,
+                    );
+                  }
+                  await externalTx.execute(
+                    sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
+                  );
+                } catch (error) {
+                  // A database lock timeout aborts the native transaction. Do not
+                  // issue a restore or diagnostic statement on that failed session.
+                  if (isPostgresLockTimeout(error)) {
+                    throw new SchemaFenceTimeoutError(
+                      graphId,
+                      phase,
+                      options.waitBudgetMs,
+                      error,
+                    );
+                  }
+                  throw error;
+                }
+
+                const activeSchema =
+                  await privilegedBackend.getActiveSchema(graphId);
+                return {
+                  backend: Object.defineProperty(
+                    privilegedBackend,
+                    "ensureVectorSlotContributions",
+                    {
+                      value: (
+                        slots: readonly VectorSlot[],
+                        slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>,
+                      ) =>
+                        ensureAdoptedVectorSlots(
+                          privilegedBackend,
+                          slots,
+                          slotOptions,
+                          {
+                            dialect: "postgres",
+                            fenceTarget,
+                            vectorStrategy,
+                            fulltextStrategy,
+                            fulltextTableName: tables.fulltextTableName,
+                            markerTableName: getTableName(
+                              tables.contributionMaterializations,
+                            ),
+                            decodeMarkerTimestamp:
+                              POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+                          },
+                        ),
+                      enumerable: true,
+                    },
+                  ) as unknown as AdoptedSchemaWriteTransaction["backend"],
+                  activeSchema,
+                };
+              },
+          }
+        : {}),
 
         async schemaWriteTransaction<T>(
           graphId: string,
@@ -2288,6 +2706,7 @@ export function buildPostgresEngineProfile(
               const indexDefinitions = await suspendPostgresSecondaryIndexes(
                 trustedTx,
                 tableNames,
+                allocationSchema,
               );
               const result = await fn(
                 createPostgresTrustedImportSession(trustedTx, tableNames),
@@ -2395,7 +2814,10 @@ export function buildPostgresEngineProfile(
     },
     assembly: assembleEngine({ buildOperations, lateMembers }),
   };
-  return registerFirstPartyProfile(profile);
+  // The caller controls a supplied transaction's lifetime. The factory can
+  // serialize its statements, but it cannot attest that the transaction was
+  // opened under TypeGraph's schema-fence protocol.
+  return transactionScoped ? profile : registerFirstPartyProfile(profile);
 }
 
 /**
@@ -2667,11 +3089,10 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    */
   vectorStrategy: VectorStrategy | undefined;
   /**
-   * Shared durable-marker materializer. The vector methods assert a
-   * slot's marker (SELECT, never DDL) on the hot path and `createVectorIndex`
-   * ensures it (privileged) — replacing the old in-process ensure-latch.
-   * Shared across the outer backend and every transaction-scoped backend
-   * so a slot's marker is resolved at most once per process.
+   * Durable-marker materializer. Root operations use the root instance;
+   * transaction operations receive a read gate bound to their pinned session
+   * and its own cache, so an earlier transaction snapshot cannot reuse a
+   * marker witnessed by another session.
    */
   contributionMaterializer: ContributionMaterializer;
   /**
@@ -2698,6 +3119,8 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * builds its own probes bound to the transaction's own session.
    */
   catalog?: BackendCatalogProbes | undefined;
+  /** The allocation schema the backend's tables are bound to, if any; its catalog probes read there. */
+  allocationSchema?: string | undefined;
   /**
    * The root backend's own `lineage` bag, threaded through so a
    * transaction-scoped call exposes the SAME object — see
@@ -2730,11 +3153,12 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   fulltextStrategy: FulltextStrategy | undefined;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
   vectorStrategy: VectorStrategy | undefined;
-  /** Shared durable-marker materializer. See {@link CreatePostgresOperationBackendOptions}. */
+  /** Root materializer, rebound to this transaction's marker reads below. */
   contributionMaterializer: ContributionMaterializer;
   /** Shared iterative-scan probe. See {@link CreatePostgresOperationBackendOptions}. */
   iterativeScanProbe: IterativeScanProbe;
   schemaVersionsTable: PostgresTables["schemaVersions"];
+  contributionMaterializationsTable: PostgresTables["contributionMaterializations"];
   /** Shared write-fence target. See {@link CreatePostgresOperationBackendOptions}. */
   fenceTarget: WriteFenceTarget;
   /**
@@ -2745,6 +3169,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
    * caller's, not one TypeGraph has audited.
    */
   isFirstParty: boolean;
+  /** The allocation schema the backend's tables are bound to. See {@link CreatePostgresOperationBackendOptions}. */
+  allocationSchema?: string | undefined;
   /** The root backend's own `lineage` bag. See {@link CreatePostgresOperationBackendOptions}. */
   lineage?: LineageMembers | undefined;
   /** The root backend's own `recordedTime` bag. See {@link CreatePostgresOperationBackendOptions}. */
@@ -2770,6 +3196,7 @@ function createPostgresOperationBackend(
     fenceTarget,
     transactionScoped,
     catalog,
+    allocationSchema,
     lineage,
     recordedTime,
   } = options;
@@ -3454,66 +3881,67 @@ function createPostgresOperationBackend(
   // `catalog` does, and stays absent when the profile declares none.
   return {
     ...operations,
-    ...(transactionScoped ? {
-      async upsertHeterogeneousNodes(
-        params: HeterogeneousNodeUpsertParams,
-      ) {
-        if (params.entries.length === 0) return [];
-        const timestamp = nowIso();
-        const storedLowerBound = resolveStampedValidityLowerBound(
-          undefined,
-          undefined,
-          timestamp,
-        );
-        const inputRows = sql.join(
-          params.entries.map((entry, index) =>
-            sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${JSON.stringify(entry.props)}, ${JSON.stringify(entry.updateProps)}, ${index})`,
-          ),
-          sql`, `,
-        );
-        const nodes = sql.identifier(tableNames.nodes);
-        const schemaVersions = sql.identifier(
-          requireDefined(tableNames.schemaVersions),
-        );
-        const query = sql`
-          WITH "schema_fence" AS (
-            SELECT 1 FROM ${schemaVersions}
-            WHERE graph_id = ${params.schemaFence.graphId}
-              AND version = ${params.schemaFence.expectedVersion}
-              AND is_active = TRUE
-            FOR SHARE
-          ), "input_rows" (graph_id, kind, id, create_props, update_props, ord) AS (
-            VALUES ${inputRows}
-          ), "upserted" AS (
-            INSERT INTO ${nodes} AS "target"
-              (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
-            SELECT graph_id, kind, id, create_props::jsonb, 1, ${storedLowerBound}, NULL, ${timestamp}, ${timestamp}
-            FROM "input_rows" CROSS JOIN "schema_fence"
-            ON CONFLICT (graph_id, kind, id) DO UPDATE SET
-              props = CASE
-                WHEN "target".deleted_at IS NULL THEN "target".props || (
-                  SELECT update_props::jsonb FROM "input_rows"
-                  WHERE graph_id = "target".graph_id
-                    AND kind = "target".kind
-                    AND id = "target".id
-                )
-                ELSE EXCLUDED.props
-              END,
-              version = "target".version + 1,
-              valid_from = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_from ELSE EXCLUDED.valid_from END,
-              valid_to = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_to ELSE EXCLUDED.valid_to END,
-              deleted_at = NULL,
-              updated_at = EXCLUDED.updated_at
-            RETURNING *
-          )
-          SELECT "upserted".* FROM "upserted"
-          JOIN "input_rows" USING (graph_id, kind, id)
-          ORDER BY "input_rows".ord
-        `;
-        const rows = await execAll<Record<string, unknown>>(query);
-        return rows.map((row) => toNodeRow(row));
-      },
-    } : {}),
+    ...(transactionScoped ?
+      {
+        async upsertHeterogeneousNodes(params: HeterogeneousNodeUpsertParams) {
+          if (params.entries.length === 0) return [];
+          const timestamp = nowIso();
+          const storedLowerBound = resolveStampedValidityLowerBound(
+            undefined,
+            undefined,
+            timestamp,
+          );
+          const inputRows = sql.join(
+            params.entries.map(
+              (entry, index) =>
+                sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${JSON.stringify(entry.props)}, ${JSON.stringify(entry.updateProps)}, ${index})`,
+            ),
+            sql`, `,
+          );
+          const nodes = sql.identifier(tableNames.nodes);
+          const schemaVersions = sql.identifier(
+            requireDefined(tableNames.schemaVersions),
+          );
+          const query = sql`
+            WITH "schema_fence" AS (
+              SELECT 1 FROM ${schemaVersions}
+              WHERE graph_id = ${params.schemaFence.graphId}
+                AND version = ${params.schemaFence.expectedVersion}
+                AND is_active = TRUE
+              FOR SHARE
+            ), "input_rows" (graph_id, kind, id, create_props, update_props, ord) AS (
+              VALUES ${inputRows}
+            ), "upserted" AS (
+              INSERT INTO ${nodes} AS "target"
+                (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
+              SELECT graph_id, kind, id, create_props::jsonb, 1, ${storedLowerBound}, NULL, ${timestamp}, ${timestamp}
+              FROM "input_rows" CROSS JOIN "schema_fence"
+              ON CONFLICT (graph_id, kind, id) DO UPDATE SET
+                props = CASE
+                  WHEN "target".deleted_at IS NULL THEN "target".props || (
+                    SELECT update_props::jsonb FROM "input_rows"
+                    WHERE graph_id = "target".graph_id
+                      AND kind = "target".kind
+                      AND id = "target".id
+                  )
+                  ELSE EXCLUDED.props
+                END,
+                version = "target".version + 1,
+                valid_from = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_from ELSE EXCLUDED.valid_from END,
+                valid_to = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_to ELSE EXCLUDED.valid_to END,
+                deleted_at = NULL,
+                updated_at = EXCLUDED.updated_at
+              RETURNING *
+            )
+            SELECT "upserted".* FROM "upserted"
+            JOIN "input_rows" USING (graph_id, kind, id)
+            ORDER BY "input_rows".ord
+          `;
+          const rows = await execAll<Record<string, unknown>>(query);
+          return rows.map((row) => toNodeRow(row));
+        },
+      }
+    : {}),
     ...vectorEmbeddingMethods,
     catalog:
       catalog ??
@@ -3522,6 +3950,7 @@ function createPostgresOperationBackend(
         executionAdapter,
         operationStrategy,
         transactionScoped,
+        allocationSchema,
       ),
     ...(lineage === undefined ? {} : { lineage }),
     ...(recordedTime === undefined ? {} : { recordedTime }),
@@ -3534,6 +3963,7 @@ function createPostgresOperationBackend(
  */
 type BoundTransactionBackend = Readonly<{
   backend: InternalOperationBackend;
+  contributionReadGate: ContributionMaterializer;
   drainAndClose: () => Promise<void>;
 }>;
 
@@ -3593,6 +4023,7 @@ function createTransactionBackend(
   // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
     operationExecutionAdapter,
+    getPinnedPostgresTransactionClient(options.db) ?? options.db,
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =
@@ -3608,12 +4039,36 @@ function createTransactionBackend(
     sessionAtomicSqlProgramExecutor !== undefined,
   );
 
-  // The transaction-scoped backend shares the outer backend's
-  // contribution materializer: the per-field vector table is provisioned
-  // (DDL) only by the privileged outer backend, so a tx-scoped vector op
-  // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
-  // anything on rollback. The shared per-instance cache means a slot
-  // confirmed once stays a pure `Set.has` inside every later transaction.
+  // A marker confirmed by the root backend can be invisible to an older
+  // transaction snapshot. Resolve assertions on this exact pinned session;
+  // the bound materializer owns a cache that cannot leak across transactions.
+  const markerTable = portableSql.identifier(
+    getTableName(options.contributionMaterializationsTable),
+  );
+  const txContributionMaterializer =
+    options.contributionMaterializer.bindReadSession(async (graphIds) => {
+      if (graphIds.length === 0) return [];
+      const rows =
+        await txExecutionAdapter.execute<RawContributionMaterializationRow>(
+          portableSql`
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
+            graphIds.map((graphId) => portableSql`${graphId}`),
+            portableSql`, `,
+          )})
+        `,
+        );
+      return rows.map((row) =>
+        mapContributionMaterializationRow(
+          row,
+          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+        ),
+      );
+    });
   const txOperationBackend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -3626,13 +4081,14 @@ function createTransactionBackend(
     capabilities: sessionCapabilities,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    contributionMaterializer: options.contributionMaterializer,
+    contributionMaterializer: txContributionMaterializer,
     // The probe is process-wide truth, so the outer instance's is reused
     // rather than a fresh one per transaction.
     iterativeScanProbe: options.iterativeScanProbe,
     schemaVersionsTable: options.schemaVersionsTable,
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
+    allocationSchema: options.allocationSchema,
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
@@ -3653,7 +4109,11 @@ function createTransactionBackend(
     });
   }
 
-  return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
+  return {
+    backend,
+    contributionReadGate: txContributionMaterializer,
+    drainAndClose: txExecutionAdapter.drainAndClose,
+  };
 }
 
 // Re-export schema utilities

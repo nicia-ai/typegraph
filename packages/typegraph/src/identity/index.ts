@@ -22,6 +22,9 @@ export type {
   IdentityAssertionId,
   IdentityAssertionResult,
   IdentityAssertionWriteFacade,
+  IdentityClass,
+  IdentityClassPage,
+  IdentityClassPageOptions,
   IdentityFacade,
   IdentityNode,
   IdentityNodeReference,
@@ -29,6 +32,7 @@ export type {
   IdentityPair,
   IdentityReadFacade,
   IdentityRelation,
+  IdentitySamePathStep,
   IdentityValidityWindow,
   IdentityWriteSummary,
 } from "./types";

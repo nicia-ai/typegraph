@@ -1,11 +1,11 @@
 /**
- * G1R2-01: the identity transition log's two relations have no provisioning
- * path for a database that predates them.
+ * The identity transition log's two relations need a provisioning path for a
+ * database that predates them.
  *
  * `IDENTITY_TABLE_LOGICAL_NAMES` (identity-members.ts) and `IdentityTableNames`
  * (backend/types.ts) now name `identityTransitions` /
  * `identityTransitionRetention` alongside the four original identity
- * relations, and base-schema release 3 (`base-schema.ts`) provisions both
+ * relations, and base-schema release 6 (`base-schema.ts`) provisions both
  * relations deployment-wide — regardless of whether any graph in the
  * database has Operational Identity enabled — the same way release 2 did
  * for the `fences` relation. Together they cover both places a pre-existing

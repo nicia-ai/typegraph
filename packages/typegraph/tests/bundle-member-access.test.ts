@@ -33,19 +33,49 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-// `rollbackSchema` reads the optional preflight flip once.
-const REASONED_FLOOR = 107;
-const DEFERRED_LIVE_TOTAL = 227;
+// Adopted identity evolution adds a Store DDL-factory handoff and a same-session
+// catalog-driven provisioning decision, both guarded before schema commit.
+// Exact-session heterogeneous node upserts add six guarded accesses across
+// Store dispatch and recorded wrappers: 96 -> 102.
+// Namespace forks inspect the backend's physical table names once before
+// creating an isolated schema, raising the reasoned floor to 103.
+// Readiness-first journal installation adds one guarded backend member access.
+// The managed PostgreSQL copy checks target names and guards five optional
+// schema-writing ports before handing its backend to a fixed-schema Store.
+// Candidate one-active and durable edge identity planning add four accesses.
+// The graph storage inventory resolves the graph-relation names once and reads
+// the session isolation expression once: 123 -> 125.
+// `rollbackSchema` reads the optional preflight flip once; edge acyclicity
+// and composition tightening add four table-name reads: 125 -> 130.
+const REASONED_FLOOR = 130;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
 // invokes the adopted same-session facet only when the plan owes a slot.
 // The resolved-node batch update reads its optional port at five guarded call
 // sites and reserves one additional access in its declared ceiling.
-// The composition cascade adds one heterogeneous endpoint-set read.
-const DEFERRED_DECLARED_TOTAL = 231;
+// Namespace fork provisioning probes the fulltext/vector strategy and DDL
+// executor once each, within their existing declared ceilings.
+// IVFFlat materialization drops an unrecorded leftover index before building
+// it, one guarded dropVectorIndex read: 228 -> 229 live, 229 -> 230 declared.
+// The managed PostgreSQL copy uses its own ledger DDL executor, validates the
+// source and reopened allocation vector strategies, and verifies allocation
+// vector operations before exposing either copy.
+// Ledger creation and its legacy-column migration now use one transaction
+// session, removing two optional executeDdl accesses from the live scan. The
+// control backend no longer needs an executeDdl gate, removing a third.
+// The managed PostgreSQL copy decides "binds its allocation vector strategy"
+// in one predicate shared by clone, reopen, and makeBackend connections, so the
+// two inline copies collapse and makeBackend adds one disabled-vector probe.
+// The graph storage inventory and the namespace fork's fulltext provisioning
+// check each add one guarded strategy access: 236 -> 238 live, 241 -> 243
+// declared.
+// The composition cascade and unattached-part read each add one heterogeneous
+// endpoint-set read: 238 -> 240 live, 243 -> 245 declared.
+const DEFERRED_LIVE_TOTAL = 240;
+const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 348;
+const TOTAL_ROW_COUNT = 384;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -192,7 +222,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 343)", () => {
+  it("the class partition covers every scanned row (total 384)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

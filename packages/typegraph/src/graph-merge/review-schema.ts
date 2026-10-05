@@ -12,11 +12,35 @@ import type {
 import { mergePlanArtifactV2Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
-// Bumped 1 -> 2 alongside the embedded plan's own 1 -> 2 bump
-// (`MERGE_PLAN_FORMAT_VERSION`): a review embeds its plan under the strict
-// plan schema, so a review stored before that bump can never validate, and it
-// must be refused as an unsupported version rather than as malformed.
-export const MERGE_REVIEW_FORMAT_VERSION = 2 as const;
+// A review embeds its plan under the strict plan schema, so a review stored
+// before the plan's own 1 -> 2 bump (`MERGE_PLAN_FORMAT_VERSION`) can never
+// validate. Formats 1 (whole-target baseline) and 2 (candidate-scoped
+// baseline) embedded a version-1 plan; both evidence modes are numbered past
+// them so a stored one is refused as an unsupported version rather than as
+// malformed.
+
+/** The default review format: its baseline covers the whole target. */
+export const MERGE_REVIEW_FORMAT_VERSION = 3 as const;
+/** The opt-in review format whose baseline covers the candidate's own scope. */
+export const MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED = 4 as const;
+
+/** Every review format this library version validates, in ascending order. */
+export const SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS = [
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+] as const;
+
+type MergeReviewFormatVersion =
+  (typeof SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)[number];
+
+/** Whether a stored review's `formatVersion` is one this library validates. */
+export function isSupportedMergeReviewFormatVersion(
+  formatVersion: unknown,
+): formatVersion is MergeReviewFormatVersion {
+  return SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS.some(
+    (supported) => supported === formatVersion,
+  );
+}
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
 export type MergeReviewPolicy = Readonly<{
@@ -33,19 +57,27 @@ export type MergeReviewRow = MergePlanEntityRef &
     digest?: string | undefined;
   }>;
 
-/** Conservative baseline: all original rows and the complete identity ledger. */
+/**
+ * The default format retains a whole-target baseline; the candidate-scoped
+ * format records the exact candidate identity scope.
+ */
 export type MergeReviewBaseline = Readonly<{
   rows: readonly MergeReviewRow[];
   identityDigest: string;
+  scope?: "referenced" | undefined;
+  /** Present in the candidate-scoped format: endpoint scope retained to make revalidation exact. */
+  identityReferences?: readonly MergePlanEntityRef[] | undefined;
+  /** Candidate assertion IDs whose unrelated ID collisions affect import. */
+  identityAssertionIds?: readonly string[] | undefined;
 }>;
 
 /**
  * Immutable review evidence, distinct from its single-use execution plan.
- * Only candidate write sets are reviewable. Authenticate stored artifacts
+ * Both formats review candidate write sets. Authenticate stored artifacts
  * separately.
  */
 export type MergeReviewArtifact = Readonly<{
-  formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION;
+  formatVersion: MergeReviewFormatVersion;
   kind: "candidate-write-set";
   digest: MergePlanDigest;
   writeSet: CandidateWriteSet;
@@ -88,7 +120,10 @@ export const mergeReviewPolicySchema = z
 
 export const mergeReviewArtifactSchema = z
   .object({
-    formatVersion: z.literal(MERGE_REVIEW_FORMAT_VERSION),
+    formatVersion: z.union([
+      z.literal(MERGE_REVIEW_FORMAT_VERSION),
+      z.literal(MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED),
+    ]),
     kind: z.literal("candidate-write-set"),
     digest: z
       .object({ algorithm: z.literal("sha256"), value: digestSchema })
@@ -110,6 +145,15 @@ export const mergeReviewArtifactSchema = z
             .strict(),
         ),
         identityDigest: digestSchema,
+        scope: z.literal("referenced").optional(),
+        identityReferences: z
+          .array(
+            z
+              .object({ kind: z.string().min(1), id: z.string().min(1) })
+              .strict(),
+          )
+          .optional(),
+        identityAssertionIds: z.array(z.string().min(1)).optional(),
       })
       .strict(),
   })

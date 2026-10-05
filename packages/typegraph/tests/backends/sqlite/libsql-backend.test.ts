@@ -40,9 +40,8 @@ const concurrencyGraph = defineGraph({
 // ============================================================
 
 // Temp files exercise the persistent-file layout the shared suites assume.
-// (In-memory databases also work — local clients frame transactions with raw
-// BEGIN/COMMIT instead of client.transaction(), which would abandon the
-// connection: tursodatabase/libsql-client-ts#229 — see the specific tests.)
+// (In-memory databases also work — see the specific tests and
+// libsql-client-versions.test.ts for how each client version frames them.)
 // CI uses a RAM-backed directory for these disposable files. Keep file-client
 // semantics and default SQLite pragmas without paying the runner's disk fsync
 // latency on every schema statement and autocommit write.
@@ -195,11 +194,12 @@ describe("libsql Backend - Specific", () => {
     client.close();
   });
 
-  // Regression: local libsql clients must never route through
-  // client.transaction(), which permanently hands the client's connection to
-  // the transaction and lazily opens a fresh — empty — database afterwards
-  // (tursodatabase/libsql-client-ts#229). With raw BEGIN/COMMIT framing, the
-  // documented in-memory setup survives transactional writes.
+  // Regression: before @libsql/client 0.18, client.transaction() permanently
+  // hands a local client's connection to the transaction and lazily opens a
+  // fresh — empty — database afterwards (tursodatabase/libsql-client-ts#229),
+  // so those clients frame transactions as raw BEGIN/COMMIT. From 0.18 the
+  // transaction's connection returns to the pool. Either way the documented
+  // in-memory setup survives transactional writes.
   it("supports in-memory databases across transactional writes", async () => {
     const client = createClient({ url: "file::memory:" });
     const { backend } = await createLibsqlBackend(client);

@@ -240,7 +240,7 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(isOk(fork)).toBe(true);
     if (!isOk(fork)) throw fork.error;
     const forkBranch = unwrap(fork);
-    expect(forkBranch.base).toContain("\0revision:");
+    expect(forkBranch.base).toContain("|revision:");
     expect(forkBranch.store.revisionTrackingEnabled).toBe(true);
 
     await forkBranch.store.nodes.Person.create({ name: "From fork" });
@@ -266,7 +266,7 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(isOk(forkResult)).toBe(true);
     if (!isOk(forkResult)) throw forkResult.error;
     const fork = unwrap(forkResult);
-    expect(fork.base).toContain("\0revision:");
+    expect(fork.base).toContain("|revision:");
 
     await fork.store.nodes.Person.create({ name: "History fork" });
     const result = await merge(baseStore, [fork], {});

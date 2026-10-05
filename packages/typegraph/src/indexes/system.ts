@@ -26,6 +26,13 @@
  * strands the old physical index (the runner only adds). When the first
  * rename actually happens, add a retired-suffixes list + drop path here.
  */
+import {
+  GRAPH_ID_COLUMN,
+  GRAPH_PRESENCE_ANCHOR_KEYS,
+  type GraphRelationKey,
+  type GraphRelationNameSource,
+  resolveGraphRelationNames,
+} from "../backend/graph-relations";
 import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
 import { requireDefined } from "../utils/presence";
 
@@ -280,6 +287,61 @@ export function resolveSystemIndexTableName(
 }
 
 /**
+ * The suffix of the byte-ordered `graph_id` index the graph id listing seeks.
+ *
+ * Not a {@link SYSTEM_INDEX_DECLARATIONS} entry, on purpose: those are the
+ * indexes both dialects carry, and this one is PostgreSQL's alone. A SQLite
+ * text index is already kept in byte order, so the `graph_id`-leading primary
+ * keys serve the listing's seeks there and a second index would only add write
+ * cost. PostgreSQL orders text indexes by the database collation, so a
+ * byte-order bound on `graph_id` is only an index range when the index itself
+ * is `COLLATE "C"`.
+ */
+const GRAPH_ID_ORDER_INDEX_SUFFIX = "graph_id_bytes_idx";
+
+/** Physical name of the byte-ordered `graph_id` index on `physicalTableName`. */
+export function graphIdOrderIndexName(physicalTableName: string): string {
+  return systemIndexName(physicalTableName, GRAPH_ID_ORDER_INDEX_SUFFIX);
+}
+
+/**
+ * The physical tables that carry the byte-ordered `graph_id` index for a
+ * deployment's (possibly overridden) table names: the listing's presence
+ * anchors, so a relation that becomes an anchor gets its index name reserved
+ * and adopted with no further change here.
+ */
+export function graphIdOrderIndexTables(
+  overrides: GraphRelationNameSource | undefined,
+): readonly Readonly<{ relation: GraphRelationKey; table: string }>[] {
+  const tableNames = resolveGraphRelationNames(overrides);
+  return GRAPH_PRESENCE_ANCHOR_KEYS.map((relation) => ({
+    relation,
+    table: tableNames[relation],
+  }));
+}
+
+function graphIdOrderIndexNames(
+  overrides: GraphRelationNameSource | undefined,
+): readonly string[] {
+  return graphIdOrderIndexTables(overrides).map(({ table }) =>
+    graphIdOrderIndexName(table),
+  );
+}
+
+/**
+ * Runtime DDL for one byte-ordered `graph_id` index — byte-compatible with the
+ * index the PostgreSQL schema factory declares, so a fresh bootstrap and the
+ * base-schema adoption step agree. Non-concurrent, like every base-schema
+ * adoption index: adoption may be raced by several booting processes, and
+ * `CREATE INDEX CONCURRENTLY` of one index by two of them can deadlock.
+ */
+export function generateGraphIdOrderIndexDDL(
+  physicalTableName: string,
+): string {
+  return `CREATE INDEX IF NOT EXISTS ${quoteIdentifier(graphIdOrderIndexName(physicalTableName))} ON ${quoteIdentifier(physicalTableName)} (${quoteIdentifier(GRAPH_ID_COLUMN)} COLLATE "C");`;
+}
+
+/**
  * PostgreSQL truncates identifiers to NAMEDATALEN-1 = 63 bytes SILENTLY —
  * two suffixes of one long custom table name would collide after
  * truncation, and the catalog probes (which compare by exact name) would
@@ -315,17 +377,17 @@ export function systemIndexName(
  * guards in the schema factories and `materializeIndexes`.
  */
 export function resolveSystemIndexNames(
-  overrides:
-    Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
+  overrides: GraphRelationNameSource | undefined,
 ): ReadonlySet<string> {
-  return new Set(
-    SYSTEM_INDEX_DECLARATIONS.map((declaration) =>
+  return new Set([
+    ...SYSTEM_INDEX_DECLARATIONS.map((declaration) =>
       systemIndexName(
         resolveSystemIndexTableName(declaration.table, overrides),
         declaration.suffix,
       ),
     ),
-  );
+    ...graphIdOrderIndexNames(overrides),
+  ]);
 }
 
 /**
@@ -338,8 +400,7 @@ export function resolveSystemIndexNames(
  */
 export function assertNoSystemIndexNameCollision(
   indexes: readonly Readonly<{ name: string }>[],
-  overrides:
-    Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
+  overrides: GraphRelationNameSource | undefined,
 ): void {
   if (indexes.length === 0) return;
   const reserved = resolveSystemIndexNames(overrides);

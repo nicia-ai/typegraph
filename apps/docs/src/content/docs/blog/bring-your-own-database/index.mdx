@@ -1,0 +1,278 @@
+---
+title: "Bring Your Own Database"
+date: 2026-09-11
+excerpt: "How TypeGraph stopped assuming Drizzle, a pg pool, and an engine that locks like Postgres: Drizzle became an optional peer, backends now declare what they can't do, and engine profiles let you adapt a bundled backend to a different engine."
+tags:
+  - announcements
+cover:
+  alt: "Two concentric-circle diagrams: on the left, a thick drizzle-orm ring wraps a Store<G> core in 0.37; on the right, a thick Store<G> ring wraps a small dashed-outline drizzle circle in 0.38, showing Drizzle demoted from the public type surface to an internal detail"
+  image: "./cover.png"
+social:
+  alt: "Bring Your Own Database"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+The first versions of TypeGraph depended on Drizzle and assumed the database
+underneath was either a `pg` pool or `better-sqlite3`. That held up until
+people started running it on Cloudflare D1, inside Durable Objects, over
+Neon's HTTP driver, in PGlite, and on engines that speak the Postgres wire
+protocol but handle locking very differently from Postgres.
+
+Each of those broke an assumption somewhere, usually as a SQL error from deep
+inside a query the engine couldn't run, and over three releases (0.38, 0.51,
+and 0.57) I've been removing those assumptions. This post covers all three:
+how Drizzle became optional, how a backend can now declare what it can't do
+before a query fails, and how an engine that locks differently can describe
+that to TypeGraph.
+
+## Drizzle is an adapter now
+
+Before 0.38, every `Store<G>` carried Drizzle's types whether your code
+touched them or not. A strict TypeScript project that only ever called
+`store.nodes.Person.create(...)` still had to resolve Drizzle's dialect
+declarations to typecheck, which is a lot of ORM to pull into your type
+checking just to create a node.
+
+Now the portable `Store<G>` has no Drizzle in it. The managed factories own
+the connection and hand you a complete store:
+
+```typescript
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
+
+const store = await createLocalSqliteStore(graph, { path: "./graph.db" });
+const alice = await store.nodes.Person.create({ name: "Alice" });
+```
+
+```text
+created: LBPSjEoGPqI0P3C6kaJ5M Alice
+capabilities.execution.interactiveTransactions: true
+```
+
+`createLocalPgliteStore` does the same for Postgres-in-WASM. The full graph
+API is there, `store.transaction(...)` included.
+
+When you do want to write your own tables on the same connection, you opt in
+with `createAdapterStore`, and `tx.sql` hands you the native transaction:
+
+```typescript
+await store.transaction(async (tx) => {
+  await tx.nodes.Document.update(documentId, props);
+  if (tx.sqlAvailability !== "available") {
+    throw new Error(`Native transaction unavailable: ${tx.sqlAvailability}`);
+  }
+  await tx.sql.insert(documentVersions).values(versionRow);
+});
+```
+
+`sqlAvailability` is a discriminant because raw SQL is sometimes off on
+purpose: on a history-enabled store, writing around TypeGraph would skip
+recorded-time capture, so `tx.sql` isn't available there.
+
+## Drizzle is now an optional dependency
+
+In 0.51 `drizzle-orm` became an optional peer dependency, and ten
+entrypoints don't need it installed at all: the root, `backend`, `core`,
+`schema`, `indexes`, `graph-extension`, `interchange`, `profiler`,
+`graph-merge`, and `provenance`.
+
+That list is enforced by tests: a fixture imports all ten with `drizzle-orm`
+missing from `node_modules`, and source and build-output checks fail if an
+import ever drags it back in. The last three routes to Drizzle
+(recorded-time migration DDL, a claim comparison, and some removal-statement
+builders) moved to portable code with golden tests pinning byte-identical SQL
+on both dialects.
+
+If you use a managed store or a `/adapters/drizzle/...` entrypoint you still
+need Drizzle, and if your package manager skips optional peers you'll need to
+install it yourself. The managed factories tell you so with a typed error
+that includes the `npm install` command, instead of a module-resolution stack
+trace.
+
+## Backends say what they can't do
+
+Removing the dependency was the easier part. The harder problem is that
+TypeGraph emits SQL some engines can't run, and it used to find that out in
+production, halfway through a query.
+
+Recursive CTEs are the clearest case, since variable-length traversals,
+subgraph extraction, and a few identity reads depend on them. An engine
+without them can now say so:
+
+```typescript
+const capabilities: Partial<BackendCapabilities> = {
+  recursiveTraversal: {
+    supported: false,
+    reason: "engine has no WITH RECURSIVE / equivalent",
+  },
+};
+```
+
+With that declared, the operations that need recursion throw a
+`ConfigurationError` naming the operation, instead of sending the engine SQL
+it can't parse. `weightedShortestPath` falls back to walking the path one hop
+at a time, which returns the same answer in more round trips. Leaving the
+capability out means it's supported, so every existing custom backend keeps
+working as it did.
+
+## How your engine keeps writers apart
+
+Some writes (Operational Identity, and the recorded-time clock behind
+`history` and `revisionTracking`) need exactly one writer per graph at a
+time. TypeGraph used to pick the lock by checking which dialect it was
+talking to, which went badly if your engine said "postgres" but had no
+advisory locks.
+
+Now the backend declares how it keeps writers apart, which for the two bundled
+engines is one line each:
+
+```typescript
+// PostgreSQL
+writeFence: { mechanism: "advisory", drain: "table-lock" }
+// SQLite
+writeFence: { mechanism: "engine-serialized" }
+```
+
+A custom backend that hosts identity or recorded history without declaring
+one is rejected at construction, and the error message prints the line to add
+for your dialect.
+
+0.57 added two more mechanisms. `caller-serialized` is your promise that
+nothing else writes to the database; TypeGraph enforces the in-process half
+and trusts you with the rest. `row` is for engines with no advisory locks at
+all: TypeGraph takes the lock by upserting a row in its own
+`typegraph_fences` table. If your engine settles write conflicts at commit
+time rather than blocking, declare `conflict: "commit-time"` and TypeGraph
+retries its own transactions as a whole unit when they lose, up to three
+attempts.
+
+## Engine profiles
+
+The piece I'm happiest about is that 0.57 made the two bundled backends
+_data_. `createPostgresBackend` and `createSqliteBackend` are now the same
+function, `createSqlBackend`, applied to an engine profile: the dialect, how
+it executes, how it provisions, and what it declares. That means you can take
+a bundled profile, change what's different about your engine, and get a real
+backend:
+
+```ts
+import {
+  buildSqliteEngineProfile,
+  createSqlBackend,
+  deriveEngineProfile,
+} from "@nicia-ai/typegraph/adapters/drizzle/engine";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+
+const { db } = createLocalSqliteBackend();
+const base = buildSqliteEngineProfile(db);
+
+const derived = deriveEngineProfile(base, {
+  declaredCapabilities: {
+    ...base.declaredCapabilities,
+    writeFence: {
+      mechanism: "row",
+      drain: "quiescent",
+      conflict: "commit-time",
+    },
+  },
+});
+const backend = createSqlBackend(derived);
+
+console.log(backend.capabilities.execution?.unitOfWork);
+// "optimistic-retry"
+```
+
+(It's SQLite here only because that's what runs on a laptop.) You never set
+`unitOfWork` yourself; TypeGraph works it out from what the engine declared
+rather than guessing from the engine's name.
+
+Derivation is narrow on purpose. You can override declared capabilities, the
+lock SQL, and a handful of runtime hooks, but not `dialect` or `execution`,
+because the bundled builders capture those in more than one place, and I'd
+rather throw at construction than hand you a backend that's half one engine
+and half another.
+
+## One error for "you lost the race"
+
+A Postgres serialization failure or deadlock used to surface as whatever the
+driver felt like throwing. Now every conflict comes back as
+`TransactionConflictError`, with the driver error as `cause`, and
+`store.transaction()` can retry for you:
+
+```ts
+// SQLite never raises 40001; this stands in for what PostgreSQL would.
+function serializationFailure(): Error {
+  return Object.assign(new Error("could not serialize access"), {
+    code: "40001",
+  });
+}
+
+let attempts = 0;
+await store.transaction(
+  async (tx) => {
+    attempts += 1;
+    await tx.nodes.Account.create({ owner: "ada", balance: 100 });
+    if (attempts < 3) throw serializationFailure();
+  },
+  { retry: { attempts: 3 } },
+);
+console.log(attempts, (await store.nodes.Account.find()).length);
+// 3 1 — two rolled-back attempts left nothing behind
+```
+
+The callback reruns from the top, so it has to be safe to run more than once:
+read inside it, don't reuse values from outside it, and don't cause side
+effects that escape the transaction.
+
+## Branches your host can copy
+
+`branch()` normally copies a graph by streaming it into a fresh database.
+0.57 also adds `forkedWorkingCopyStrategy`, which hands the copy to whatever
+your host is good at, such as a file copy, `CREATE DATABASE ... TEMPLATE`, or
+a provider's branch API. Because the fork is a physical copy of the database,
+it keeps things a streamed copy can't, including recorded history, so a forked
+branch can answer `asOfRecorded` queries from before the fork was taken.
+
+## What isn't there yet
+
+You can't build an engine from scratch yet. `deriveEngineProfile` adapts one
+of the two bundled profiles, and building a profile from nothing needs pieces
+that aren't exported. No third engine has been run through this in production
+yet either: the commit-time retry path is tested by injecting conflicts into
+real SQLite and PGlite transactions rather than against an engine that
+produces them on its own. If you have one, I'd like to hear how it goes.
+
+## Upgrading
+
+From 0.37, the Drizzle-specific entrypoints moved under `/adapters/drizzle`
+and the old paths are gone rather than aliased:
+
+| 0.37               | 0.38 and later                      |
+| ------------------ | ----------------------------------- |
+| `/sqlite`          | `/adapters/drizzle/sqlite`          |
+| `/sqlite/local`    | `/adapters/drizzle/sqlite/local`    |
+| `/sqlite/libsql`   | `/adapters/drizzle/sqlite/libsql`   |
+| `/postgres`        | `/adapters/drizzle/postgres`        |
+| `/postgres/pglite` | `/adapters/drizzle/postgres/pglite` |
+
+`/sqlite/local` and `/postgres/pglite` now mean the managed store factories.
+If you read `tx.sql`, switch to `createAdapterStore` /
+`createAdapterStoreWithSchema`; if you don't, nothing changes.
+
+Custom backend authors: `capabilities.pessimisticLocks` is now
+`capabilities.writeFence`, and conflicts should be matched as
+`TransactionConflictError` rather than by SQLSTATE. The
+[0.57.0 changelog](/changelog#0570) has the full list.
+
+## Try it
+
+- [Backend Setup](/backend-setup#drizzle-free-entrypoints): entrypoints,
+  capabilities, and the parity matrix
+- [Write fence declaration](/backend-setup#write-fence-declaration-writefence):
+  every mechanism and what each error means
+- [Authoring an engine profile](/backend-authoring): the derivable fields and
+  worked examples
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />
