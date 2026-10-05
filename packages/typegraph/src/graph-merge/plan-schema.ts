@@ -63,6 +63,8 @@ export type MergePlanNodeUpsert = Readonly<{
   unsetProps: readonly string[];
   validFrom?: string | null | undefined;
   validTo?: string | undefined;
+  /** Reopens the row: its upper bound is cleared. Exclusive with `validTo`. */
+  clearValidTo?: true | undefined;
 }>;
 
 export type MergePlanEdgeDelete = MergePlanEntityRef;
@@ -76,6 +78,8 @@ export type MergePlanEdgeUpsert = Readonly<{
   unsetProps: readonly string[];
   validFrom?: string | null | undefined;
   validTo?: string | undefined;
+  /** Reopens the row: its upper bound is cleared. Exclusive with `validTo`. */
+  clearValidTo?: true | undefined;
 }>;
 
 export type MergePlanIdentityAssertion = Readonly<{
@@ -362,8 +366,13 @@ const nodeUpsertSchema = z
     unsetProps: z.array(nonEmptyStringSchema),
     validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
   })
-  .strict();
+  .strict()
+  .refine((upsert) => upsert.validTo === undefined || !upsert.clearValidTo, {
+    message: 'A write states either "validTo" or "clearValidTo", never both',
+    path: ["clearValidTo"],
+  });
 
 const edgeUpsertSchema = z
   .object({
@@ -375,8 +384,13 @@ const edgeUpsertSchema = z
     unsetProps: z.array(nonEmptyStringSchema),
     validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
   })
-  .strict();
+  .strict()
+  .refine((upsert) => upsert.validTo === undefined || !upsert.clearValidTo, {
+    message: 'A write states either "validTo" or "clearValidTo", never both',
+    path: ["clearValidTo"],
+  });
 
 const mergePlanIdentityAssertionSchema = z
   .object({
@@ -676,11 +690,22 @@ const mergePlanReviewSchema = z
           entity: z.enum(["node", "edge"]),
           kind: nonEmptyStringSchema,
           id: nonEmptyStringSchema,
-          validTo: nonEmptyStringSchema,
+          validTo: nonEmptyStringSchema.optional(),
+          clearValidTo: z.literal(true).optional(),
           claimedBy: z.array(nonEmptyStringSchema),
           precedence: z.literal("target").optional(),
         })
-        .strict(),
+        .strict()
+        .refine(
+          (resolution) =>
+            (resolution.validTo === undefined) ===
+            (resolution.clearValidTo === true),
+          {
+            message:
+              'A validity end states exactly one of "validTo" or "clearValidTo"',
+            path: ["clearValidTo"],
+          },
+        ),
     ),
     baseAmbiguities: z.array(
       z

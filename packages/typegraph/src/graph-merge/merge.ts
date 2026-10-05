@@ -2196,13 +2196,23 @@ function nodeWriteWindowOptions(
 ): NodeWriteWindowOptions {
   const validFrom =
     write.validFrom === undefined ? {} : { validFrom: write.validFrom };
-  if (write.clearValidTo === true) {
-    return { ...validFrom, clearValidTo: true };
-  }
-  return {
-    ...validFrom,
-    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
-  };
+  return { ...validFrom, ...validityEndMutationOf(write) };
+}
+
+/**
+ * THE projection of a write's end-of-validity state — a stated instant, or an
+ * explicit reopening — onto the mutation the collections accept. The live plan,
+ * its wire artifact, and the replayed artifact all read it, so a reopening can
+ * never be dropped by one of them.
+ */
+function validityEndMutationOf(
+  write: Readonly<{
+    validTo?: string | undefined;
+    clearValidTo?: boolean | undefined;
+  }>,
+): ValidityEndMutation {
+  if (write.clearValidTo === true) return { clearValidTo: true };
+  return write.validTo === undefined ? {} : { validTo: write.validTo };
 }
 
 type MechanicalNodeWrite = Readonly<{
@@ -2244,9 +2254,7 @@ function plannedNodeUpserts<G extends GraphDef>(
       commitModificationProps(modification.baseProps, modification.forkProps),
     ),
     ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
-    ...(write.clearValidTo === true ? { clearValidTo: true as const }
-    : write.validTo === undefined ? {}
-    : { validTo: write.validTo }),
+    ...validityEndMutationOf(write),
   }));
 }
 
@@ -2524,9 +2532,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
         to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
         props,
         ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-        ...(edge.clearValidTo === true ? { clearValidTo: true as const }
-        : edge.validTo === undefined ? {}
-        : { validTo: edge.validTo }),
+        ...validityEndMutationOf(edge),
       },
     });
   }
@@ -3175,7 +3181,7 @@ function resolvedNodeUpserts<G extends GraphDef>(
       ),
     ),
     ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
-    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
+    ...validityEndMutationOf(write),
   }));
 }
 
@@ -3195,7 +3201,7 @@ function resolvedEdgeUpserts<G extends GraphDef>(
       to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
       ...splitWireProps(props),
       ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
+      ...validityEndMutationOf(edge),
     };
   });
 }
@@ -5260,7 +5266,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
         ...(upsert.validFrom === undefined ?
           {}
         : { validFrom: upsert.validFrom }),
-        ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+        ...validityEndMutationOf(upsert),
       })),
       identityRetractions,
     },
@@ -5289,7 +5295,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
         ...(upsert.validFrom === undefined ?
           {}
         : { validFrom: upsert.validFrom }),
-        ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+        ...validityEndMutationOf(upsert),
       },
     })),
   );

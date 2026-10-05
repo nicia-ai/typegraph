@@ -14,8 +14,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asEdgeId,
   asNodeId,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   type Store,
@@ -118,5 +120,122 @@ describe("a retraction paired with an endpoint window end", () => {
 
     expect(report.merged).toEqual(MERGED);
     expect(await landedState(target)).toEqual(LANDED);
+  });
+});
+
+/**
+ * A reopening — `update(id, {}, { clearValidTo: true })` — is a window mutation
+ * a plan artifact must carry as faithfully as an ending: a wire write that
+ * lost the clear would leave the row ended while the report claimed otherwise.
+ */
+const Follows = defineEdge("follows", { schema: z.object({}) });
+
+const reopenGraph = defineGraph({
+  id: "apply_path_parity_reopen",
+  nodes: { Person: { type: Person } },
+  edges: {
+    follows: { type: Follows, from: [Person], to: [Person] },
+  },
+});
+
+const FOLLOWS_ID = asEdgeId<typeof Follows>("follows-ab");
+
+async function branchReopeningEndedRows() {
+  const [target] = await createStoreWithSchema(reopenGraph, openBackend(), {
+    history: true,
+  });
+  await target.nodes.Person.create(
+    { name: "a" },
+    { id: PERSON_A.id, validTo: WINDOW_END },
+  );
+  await target.nodes.Person.create({ name: "b" }, { id: PERSON_B.id });
+  await target.edges.follows.create(
+    { kind: "Person", id: PERSON_B.id },
+    { kind: "Person", id: PERSON_A.id },
+    {},
+    { id: FOLLOWS_ID, validTo: WINDOW_END },
+  );
+  const source = unwrap(
+    await branch(target, () => Promise.resolve(openBackend()), {
+      id: asBranchId("branch-a"),
+    }),
+  );
+  await source.store.nodes.Person.update(
+    asNodeId(PERSON_A.id),
+    {},
+    { clearValidTo: true },
+  );
+  await source.store.edges.follows.update(
+    FOLLOWS_ID,
+    {},
+    { clearValidTo: true },
+  );
+  return { target, source };
+}
+
+async function reopenedState(target: Store<typeof reopenGraph>) {
+  const person = await target.nodes.Person.getById(asNodeId(PERSON_A.id));
+  const edge = await target.edges.follows.getById(FOLLOWS_ID);
+  const state = {
+    personValidTo: person?.meta.validTo,
+    edgeValidTo: edge?.meta.validTo,
+    violations: await target.verifyConstraintFences(),
+  };
+  console.info("reopened state", JSON.stringify(state));
+  return state;
+}
+
+const REOPENED = {
+  personValidTo: undefined,
+  edgeValidTo: undefined,
+  violations: [],
+};
+
+describe("a branch that reopens an ended node and edge window", () => {
+  it("lands through merge()", async () => {
+    const { target, source } = await branchReopeningEndedRows();
+    unwrap(await merge(target, [source]));
+
+    expect(await reopenedState(target)).toEqual(REOPENED);
+  });
+
+  it("lands through applyMergePlan", async () => {
+    const { target, source } = await branchReopeningEndedRows();
+    const plan = unwrap(await planMerge(target, [source]));
+    unwrap(await applyMergePlan(target, plan));
+
+    expect(await reopenedState(target)).toEqual(REOPENED);
+  });
+
+  it("lands through applyMergePlan after a JSON round trip of the plan", async () => {
+    const { target, source } = await branchReopeningEndedRows();
+    const plan = unwrap(await planMerge(target, [source]));
+    const replayed = JSON.parse(JSON.stringify(plan)) as typeof plan;
+    unwrap(await applyMergePlan(target, replayed));
+
+    expect(await reopenedState(target)).toEqual(REOPENED);
+  });
+
+  it("lands through applyMergePlanInTransaction", async () => {
+    const { target, source } = await branchReopeningEndedRows();
+    const plan = unwrap(await planMerge(target, [source]));
+    await target.transaction((tx) =>
+      applyMergePlanInTransaction(target, tx, plan),
+    );
+
+    expect(await reopenedState(target)).toEqual(REOPENED);
+  });
+
+  it("reports the reopenings the artifact carries", async () => {
+    const { target, source } = await branchReopeningEndedRows();
+    const plan = unwrap(await planMerge(target, [source]));
+
+    expect(plan.writes.nodeUpserts).toContainEqual(
+      expect.objectContaining({ id: PERSON_A.id, clearValidTo: true }),
+    );
+    expect(plan.writes.edgeUpserts).toContainEqual(
+      expect.objectContaining({ id: FOLLOWS_ID, clearValidTo: true }),
+    );
+    expect(plan.review.validityEnds).toHaveLength(2);
   });
 });

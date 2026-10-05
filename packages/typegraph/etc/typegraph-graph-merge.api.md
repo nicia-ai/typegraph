@@ -5366,6 +5366,7 @@ export type MergePlanEdgeUpsert = Readonly<{
     unsetProps: readonly string[];
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
+    clearValidTo?: true | undefined;
 }>;
 
 // @public (undocumented)
@@ -5468,6 +5469,7 @@ export type MergePlanNodeUpsert = Readonly<{
     unsetProps: readonly string[];
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
+    clearValidTo?: true | undefined;
 }>;
 
 // @public
