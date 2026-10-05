@@ -16,6 +16,7 @@ import {
   defineGraph,
   defineNode,
   GraphAlgorithmConvergenceError,
+  KindNotFoundError,
   type Store,
 } from "../../../src";
 import {
@@ -1897,6 +1898,63 @@ export function registerAlgorithmIntegrationTests(
             temporalMode: "asOf",
           }),
         ).rejects.toThrow(/asOf/);
+      });
+    });
+
+    describe("unregistered kinds", () => {
+      it("refuses an unregistered edge kind or node-kind scope instead of answering over nothing", async () => {
+        const store = context.getStore();
+        const alice = await store.nodes.Person.create({ name: "Alice" });
+        const bob = await store.nodes.Person.create({ name: "Bob" });
+        await store.edges.knows.create(alice, bob);
+        const unknownEdges = { edges: ["knowz"] } as never;
+        const unknownScope = {
+          edges: ["knows"],
+          nodeKinds: ["Persn"],
+        } as never;
+        const reads: Record<string, () => Promise<unknown>> = {
+          shortestPath: () =>
+            store.algorithms.shortestPath(alice, bob, unknownEdges),
+          weightedShortestPath: () =>
+            store.algorithms.weightedShortestPath(alice, bob, {
+              edges: ["knowz"],
+              weight: "since",
+            } as never),
+          reachable: () => store.algorithms.reachable(alice, unknownEdges),
+          canReach: () => store.algorithms.canReach(alice, bob, unknownEdges),
+          neighbors: () => store.algorithms.neighbors(alice, unknownEdges),
+          degree: () => store.algorithms.degree(alice, unknownEdges),
+          labelPropagation: () =>
+            store.algorithms.labelPropagation(unknownEdges),
+          weaklyConnectedComponents: () =>
+            store.algorithms.weaklyConnectedComponents(unknownEdges),
+          pageRank: () => store.algorithms.pageRank(unknownEdges),
+          "labelPropagation nodeKinds": () =>
+            store.algorithms.labelPropagation(unknownScope),
+          "weaklyConnectedComponents nodeKinds": () =>
+            store.algorithms.weaklyConnectedComponents(unknownScope),
+          "pageRank nodeKinds": () => store.algorithms.pageRank(unknownScope),
+        };
+
+        const refusals: Record<string, unknown> = {};
+        for (const [name, read] of Object.entries(reads)) {
+          refusals[name] = await Promise.resolve()
+            .then(() => read())
+            .then(
+              () => "answered",
+              (error: unknown) =>
+                error instanceof KindNotFoundError ? error.kindName : error,
+            );
+        }
+
+        expect(refusals).toEqual(
+          Object.fromEntries(
+            Object.keys(reads).map((name) => [
+              name,
+              name.endsWith("nodeKinds") ? "Persn" : "knowz",
+            ]),
+          ),
+        );
       });
     });
   });

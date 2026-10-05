@@ -135,7 +135,7 @@ export async function executeWeightedShortestPath<G extends GraphDef>(
   targetId: string,
   options: InternalWeightedShortestPathOptions<G>,
 ): Promise<WeightedShortestPathResult | undefined> {
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
   assertWeightOptions(options.weightProperty, options.defaultWeight);
   const maxIterations = resolveMaxIterations(
     options.maxIterations,

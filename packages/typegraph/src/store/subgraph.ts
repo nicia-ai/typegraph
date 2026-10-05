@@ -76,6 +76,10 @@ import {
   buildReachableCte,
   buildWindowedEdgesCte,
 } from "./recursive-cte";
+import {
+  assertRegisteredEdgeKinds,
+  assertRegisteredNodeKinds,
+} from "./registered-kinds";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -640,6 +644,8 @@ function buildSubgraphPlan<
 ): SubgraphPlan {
   const { options } = params;
   validateSubgraphTraversalOptions(options);
+  assertRegisteredEdgeKinds(params.graph, options.edges);
+  assertRegisteredNodeKinds(params.graph, options.includeKinds ?? []);
   if (
     surface === "batchOnce.subgraph" &&
     compositionRequested(options.composition)
