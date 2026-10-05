@@ -787,11 +787,14 @@ type SidecarProbeRow = Readonly<{ present: number }>;
  * tables happen to be empty is the same colonization refusing a stray node row
  * exists to prevent.
  *
- * `scope: "foreign"` narrows only the NODE table, to rows this module could not
- * have written: node rows of any other kind. Every other table is occupancy in
- * both scopes — a sidecar declares no edges, tracks no revisions, asserts no
- * identities, and projects no fulltext or unique keys, so a row in any of them
- * is not ours whatever the schema says. `ProvenanceOwner` rows are NOT excused
+ * `scope: "foreign"` narrows the NODE table, to rows this module could not have
+ * written: node rows of any other kind. It narrows the revision journal the same
+ * way, because the journal is written by database-wide triggers rather than by
+ * the graph that owns the row: see {@link unaccountedJournalEntryFilter}. Every
+ * other table is occupancy in both scopes — a sidecar declares no edges, mints
+ * no revisions, asserts no identities, and projects no fulltext or unique keys,
+ * so a row in any of them is not ours whatever the schema says.
+ * `ProvenanceOwner` rows are NOT excused
  * either: the marker probe has already classified every one of them, so a row
  * this raw probe can see and `findNodesByKind` cannot is unaccounted-for
  * occupancy and must refuse. It cannot be expressed through `findNodesByKind`,
@@ -819,10 +822,45 @@ async function hasRowsUnderGraphId(
   if (await hasRowsInTable(port, schema.tables.edges, graphId, sql.empty())) {
     return true;
   }
+  const journal = resolveGraphRelationNames(schema.tables).revisionChanges;
   for (const tableName of secondaryRowTableNames(schema.tables)) {
-    if (await hasRowsInSecondaryTable(port, tableName, graphId)) return true;
+    const filter =
+      scope === "foreign" && tableName === journal ?
+        unaccountedJournalEntryFilter(journal, schema.tables.nodes)
+      : sql.empty();
+    if (await hasRowsInSecondaryTable(port, tableName, graphId, filter)) {
+      return true;
+    }
   }
   return false;
+}
+
+/** The `entity` the revision journal records for a node-table write. */
+const JOURNALED_NODE_ENTITY = "node";
+
+/**
+ * Narrows the revision journal to the entries a pre-marker sidecar's own rows
+ * cannot account for.
+ *
+ * The journal's triggers are installed per database, not per graph, so on a
+ * database that has them every `Provenance` row a pre-marker sidecar wrote left
+ * an entry under the sidecar's graph id. An entry is accounted for only when it
+ * records a node of the `Provenance` kind whose row is STILL STORED under that
+ * `(kind, id)`: that row is then verified by {@link isOwnedProvenanceRow} like
+ * every other, so the entry says nothing the node table has not already said.
+ *
+ * Everything else stays occupancy. An entry for an edge, an identity assertion
+ * or a node of another kind records content a sidecar never holds, and an entry
+ * for a `Provenance` id with no stored row records a hard-deleted row nothing
+ * can verify.
+ */
+function unaccountedJournalEntryFilter(
+  journalTable: string,
+  nodesTable: string,
+): ReturnType<typeof sql.empty> {
+  const journal = sql.identifier(journalTable);
+  const nodes = sql.identifier(nodesTable);
+  return sql` AND NOT (${journal}.entity = ${JOURNALED_NODE_ENTITY} AND ${journal}.kind = ${PROVENANCE_KIND} AND EXISTS (SELECT 1 FROM ${nodes} WHERE ${nodes}.graph_id = ${journal}.graph_id AND ${nodes}.kind = ${journal}.kind AND ${nodes}.id = ${journal}.id))`;
 }
 
 /**
@@ -886,16 +924,17 @@ async function hasRowsInSecondaryTable(
   port: SidecarInspectionPort,
   tableName: string,
   graphId: string,
+  filter: ReturnType<typeof sql.empty>,
 ): Promise<boolean> {
   const tableExists = port.tableExists;
   if (tableExists !== undefined) {
     return (
       (await tableExists(tableName)) &&
-      (await hasRowsInTable(port, tableName, graphId, sql.empty()))
+      (await hasRowsInTable(port, tableName, graphId, filter))
     );
   }
   try {
-    return await hasRowsInTable(port, tableName, graphId, sql.empty());
+    return await hasRowsInTable(port, tableName, graphId, filter);
   } catch {
     return false;
   }
