@@ -200,7 +200,8 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * `ref`'s identity class, ascending by recorded revision, in pages of at
      * most `options.limit` boundaries (default 200, maximum 2000). A capped
      * page carries `nextCursor`, naming the first boundary it stopped
-     * short of: pass it back as `options.cursor` for the next page. Requires the store to be opened with `history: true`.
+     * short of: pass it back as `options.cursor` for the next page. Requires
+     * the store to be opened with `history: true`.
      *
      * On `tx.identity` specifically: reads the transition log itself, which
      * — unlike every other read on this facade — is NOT read-your-writes

@@ -468,7 +468,7 @@ export class QueryBuilder<
    * Properties used in predicates and expressions must be shared by all kinds.
    *
    * The alias's expansion axis is one option, `expansion` (default
-   * `"subclasses"`, roadmap Q3 — a supertype query is polymorphic unless
+   * `"subclasses"` — a supertype query is polymorphic unless
    * narrowed). `"exact"` restores the exact-kind reading; `"narrower"`
    * expands through `broader`/`narrower` instead (C.3, untyped alias — no
    * schema relationship is claimed). Omitting the option, passing `{}`, or

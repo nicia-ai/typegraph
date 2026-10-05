@@ -1,5 +1,5 @@
 /**
- * The one owner of "which expansion axis does this alias use" (Q3, C.3).
+ * The one owner of "which expansion axis does this alias use".
  *
  * An alias carries EXACTLY ONE expansion axis, and states it as one option
  * value rather than as a set of booleans a caller could combine into a
@@ -7,8 +7,8 @@
  *
  * - `"exact"` — only the named kind.
  * - `"subclasses"` — the kind and every `subClassOf`/`equivalentTo`
- *   descendant (`registry.expandSubClasses`). The store-wide default
- *   (roadmap Q3): a supertype query is polymorphic unless narrowed.
+ *   descendant (`registry.expandSubClasses`). The store-wide default:
+ *   a supertype query is polymorphic unless narrowed.
  * - `"narrower"` — the kind and every `broader`/`narrower` descendant
  *   (`registry.expandNarrower`, C.3). No schema relationship is claimed, so
  *   the alias type is untyped.
@@ -32,8 +32,8 @@ export type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
 export type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
 
 /**
- * The axis an alias takes when neither the call nor the store states one
- * (roadmap Q3). Named here because both places that resolve a store-wide
+ * The axis an alias takes when neither the call nor the store states one.
+ * Named here because both places that resolve a store-wide
  * default — `createQueryBuilder` and `Store`'s `queryDefaults` — must agree
  * on it; two spellings of the same literal would let a store-issued builder
  * and a standalone one drift apart.

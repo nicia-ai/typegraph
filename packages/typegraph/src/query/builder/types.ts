@@ -398,7 +398,7 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
 
 /**
  * The alias type a `from(kind, alias)` call with NO explicit
- * `expansion` resolves to, under the Q3 polymorphic-by-default
+ * `expansion` resolves to, under the polymorphic-by-default
  * axis. `PolymorphicNodeType` only when `K` is actually
  * {@link SubsumptionAffected} — a compile-time subtype guarantee (C.1/C.2)
  * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
@@ -1019,7 +1019,7 @@ export type QueryBuilderConfig = Readonly<{
   defaultTraversalExpansion: TraversalExpansion;
   /**
    * Store-level default for the `from`/`to`/`fromDynamic`/`toDynamic`
-   * expansion axis when an alias states no `expansion` (roadmap Q3).
+   * expansion axis when an alias states no `expansion`.
    * `"subclasses"` (the default everywhere a store doesn't override it)
    * makes a supertype query polymorphic.
    */
@@ -1084,7 +1084,7 @@ export type CreateQueryBuilderOptions = Readonly<{
   defaultTraversalExpansion?: TraversalExpansion;
   /**
    * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an
-   * alias states no `expansion` (default: `"subclasses"`, roadmap Q3). A
+   * alias states no `expansion` (default: `"subclasses"`). A
    * store-issued builder threads its own `queryDefaults.expansion`; a
    * standalone `createQueryBuilder` defaults to `"subclasses"` too, so a
    * store-less builder and a store-issued one agree.
