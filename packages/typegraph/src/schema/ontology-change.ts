@@ -65,9 +65,16 @@
  * `parts()`/`wholes()` stop resolving), not a row-level fact a data check
  * could falsify, so — like `inverseOf`/`implies` — it cannot auto-migrate.
  *
- * A relation whose `from` or `to` names a kind THIS COMMIT REMOVES is always
- * `safe` with no probe — see {@link classifyOntologyChanges}'s removed-kind
- * rule.
+ * A relation whose `from` or `to` names a kind THIS COMMIT REMOVES is itself
+ * `safe` with no probe — see `classifyRelation`'s removed-kind rule.
+ *
+ * An edge kind that stops admitting an endpoint pair between SURVIVING kinds
+ * is `warning`, probed by `edgeEndpointAssignability`, whatever caused the
+ * loss: a subsumption relation removed, a kind removed from the middle of a
+ * subclass chain, or the edge kind's own `from` / `to` declaration narrowed.
+ * `edgeEndpointAdmissionLosses` is the one owner of that decision; a relation
+ * removal carries its probe, and a loss no relation change carries is
+ * reported as its own `entity: "edgeRegistration"` change.
  *
  * This module has exactly ONE owner for "did the ontology change, and how
  * severely": the RELATION-level diff above. `SerializedOntology.metaEdges`
@@ -228,9 +235,9 @@ export function probeCoversViolationFamily(
  * A change to the ontology. Moved here from `migration.ts`, which
  * re-exports it so the public path (`src/schema/index.ts`) is unchanged.
  *
- * `entity: "edgeRegistration"` is item D.2's addition: `acyclic` is an
- * edge-registration property, not an ontology meta-edge/relation, but it
- * shares this classifier and the tightening-probe machinery rather than
+ * `entity: "edgeRegistration"` covers an edge kind's own registration:
+ * `acyclic` and its admitted endpoint pairs are edge-registration
+ * properties, not ontology meta-edges/relations, but they share this classifier and the tightening-probe machinery rather than
  * forking a second implementation of "what does a schema change do to
  * existing data".
  */
@@ -418,7 +425,7 @@ function nodeDisjointnessDelta(
  * docblock for why that is a known, documented no-op rather than a bug.
  *
  * Uses `isProperSubset`, not `lostAnyMember` (contrast
- * `edgeEndpointAssignabilityDelta`): this loop checks every AFTER node kind
+ * `edgeEndpointDeclarationsNarrowed`): this loop checks every AFTER node kind
  * against its OWN before/after component, not one diff-wide set. A merge
  * always grows the component of every kind newly folded into it — there is
  * no same-size "swap" case here the way there is for a single edge kind's
@@ -467,20 +474,83 @@ function nodeUniquenessComponentGroups(
   );
 }
 
+/** One edge kind's admission loss: the pairs it stopped admitting, and what the probe still allows. */
+type EdgeEndpointAdmissionLoss = Readonly<{
+  /**
+   * Admitted concrete pairs the proposal drops, between kinds that SURVIVE
+   * this commit. Sorted like `EdgeEndpointAllowance.allowedPairs`.
+   */
+  lostPairs: readonly (readonly [string, string])[];
+  /**
+   * What a live row may still sit on: the proposal's own admitted pairs,
+   * plus every previously admitted pair naming a node kind this commit
+   * removes. Rows of a removed kind are reclaimed by the removal itself, so
+   * the probe must not refuse the commit over them — while every other row
+   * of the edge kind is still checked.
+   */
+  allowance: EdgeEndpointAllowance;
+}>;
+
+function endpointPairKey(pair: readonly [string, string]): string {
+  return encodeTupleKey(pair);
+}
+
 /**
- * Edge kinds present on both sides whose admitted concrete endpoint pairs
- * SHRANK, with the (post-shrink) allowance that still remains.
+ * Whether any edge kind present on both sides DECLARES fewer endpoint pairs
+ * than before — read off the two documents alone, no registry. With no
+ * relation change the subsumption expansion is the same function on both
+ * sides, so a lost declared pair is the only way an admitted pair can be
+ * lost; this is the cheap gate deciding whether
+ * {@link edgeEndpointAdmissionLosses} needs registries at all.
  */
-function edgeEndpointAssignabilityDelta(
+function edgeEndpointDeclarationsNarrowed(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+): boolean {
+  const beforeEndpoints = buildSerializedEdgeKindFacts(before.edges);
+  const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
+  for (const [edgeKind, afterKinds] of afterEndpoints) {
+    const beforeKinds = beforeEndpoints.get(edgeKind);
+    if (beforeKinds === undefined) continue;
+    if (
+      lostAnyMember(
+        beforeKinds.pairs.map((pair) => endpointPairKey([pair.from, pair.to])),
+        afterKinds.pairs.map((pair) => endpointPairKey([pair.from, pair.to])),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * THE owner of "did an edge kind stop admitting an endpoint pair live rows
+ * may sit on": edge kinds present on both sides whose admitted concrete
+ * endpoint pairs SHRANK, whatever shrank them — a `subClassOf` /
+ * `equivalentTo` / `sameAs` relation removed, a kind removed from the middle
+ * of a subclass chain, or the edge kind's own `from` / `to` /
+ * source-dependent target declaration narrowed.
+ *
+ * A lost pair naming a node kind THIS COMMIT removes is not a loss: the
+ * removal reclaims that kind's rows, edges touching them included. Every
+ * other lost pair is, so removing `Mammal` from `Dog ⊂ Mammal ⊂ Animal`
+ * still reports `likes(Person → Dog)` losing its admission while never
+ * holding the commit to a `Mammal` row.
+ */
+function edgeEndpointAdmissionLosses(
   before: OntologySnapshot,
   after: OntologySnapshot,
   beforeRegistry: KindRegistry,
   afterRegistry: KindRegistry,
-): readonly EdgeEndpointAllowance[] {
+  removedKindNames: ReadonlySet<string>,
+): readonly EdgeEndpointAdmissionLoss[] {
   const beforeEndpoints = buildSerializedEdgeKindFacts(before.edges);
   const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
+  const namesRemovedKind = ([from, to]: readonly [string, string]): boolean =>
+    removedKindNames.has(from) || removedKindNames.has(to);
 
-  const allowances: EdgeEndpointAllowance[] = [];
+  const losses: EdgeEndpointAdmissionLoss[] = [];
   for (const edgeKind of Object.keys(after.edges)) {
     if (!hasOwnKey(before.edges, edgeKind)) continue;
     const beforeKinds = beforeEndpoints.get(edgeKind);
@@ -497,18 +567,28 @@ function edgeEndpointAssignabilityDelta(
       afterKinds,
       afterRegistry,
     );
-    const beforePairKeys = beforeAllowed.allowedPairs.map(
-      ([from, to]) => `${from}\0${to}`,
+    const afterPairKeys = new Set(
+      afterAllowed.allowedPairs.map((pair) => endpointPairKey(pair)),
     );
-    const afterPairKeys = afterAllowed.allowedPairs.map(
-      ([from, to]) => `${from}\0${to}`,
+    const droppedPairs = beforeAllowed.allowedPairs.filter(
+      (pair) => !afterPairKeys.has(endpointPairKey(pair)),
     );
-    if (lostAnyMember(beforePairKeys, afterPairKeys)) {
-      allowances.push(afterAllowed);
-    }
+    const lostPairs = droppedPairs.filter((pair) => !namesRemovedKind(pair));
+    if (lostPairs.length === 0) continue;
+
+    losses.push({
+      lostPairs,
+      allowance: {
+        edgeKind,
+        allowedPairs: [
+          ...afterAllowed.allowedPairs,
+          ...droppedPairs.filter((pair) => namesRemovedKind(pair)),
+        ].toSorted((left, right) => compareStringTuples(left, right)),
+      },
+    });
   }
-  return allowances.toSorted((left, right) =>
-    compareStrings(left.edgeKind, right.edgeKind),
+  return losses.toSorted((left, right) =>
+    compareStrings(left.allowance.edgeKind, right.allowance.edgeKind),
   );
 }
 
@@ -680,6 +760,43 @@ type RelationClassificationContext = Readonly<{
   endpointAllowances: readonly EdgeEndpointAllowance[];
 }>;
 
+function carriesEndpointAssignabilityProbe(change: OntologyChange): boolean {
+  return (change.probes ?? []).some(
+    (probe) => probe.kind === "edgeEndpointAssignability",
+  );
+}
+
+function describeEndpointPairs(
+  pairs: readonly (readonly [string, string])[],
+): string {
+  return pairs.map(([from, to]) => `(${from} -> ${to})`).join(", ");
+}
+
+/**
+ * The change an admission loss is reported as when no relation change in
+ * the same diff already carries the diff-wide `edgeEndpointAssignability`
+ * probe — a narrowed `from` / `to` declaration, or a removed kind whose
+ * relations the removed-kind rule classified `safe`.
+ */
+function classifyEndpointAdmissionLoss(
+  loss: EdgeEndpointAdmissionLoss,
+): OntologyChange {
+  const { edgeKind } = loss.allowance;
+  return {
+    type: "modified",
+    entity: "edgeRegistration",
+    name: edgeKind,
+    severity: "warning",
+    details: `Edge "${edgeKind}" no longer admits endpoint pairs: ${describeEndpointPairs(loss.lostPairs)}`,
+    probes: [
+      stampProbeFamilies({
+        kind: "edgeEndpointAssignability",
+        allowances: [loss.allowance],
+      }),
+    ],
+  };
+}
+
 function buildProbe(
   kind: ProbeKind,
   context: RelationClassificationContext,
@@ -717,10 +834,12 @@ function classifyRelation(
   const verb = direction === "added" ? "added" : "removed";
 
   // The removed-kind rule (load-bearing): a relation naming a kind THIS
-  // COMMIT removes is always safe with no probe. Without it,
+  // COMMIT removes is itself safe with no probe. Without it,
   // `Store.removeKinds("Company")` would be refused for edges pointing at
   // `Company` rows the removal itself reclaims. Same reasoning as
-  // `migrateSchema`'s dropped-kind handling.
+  // `migrateSchema`'s dropped-kind handling. What the removal costs a
+  // SURVIVING kind is not decided here: `edgeEndpointAdmissionLosses`
+  // reports it, and `classifyOntologyChanges` attaches the probe.
   if (
     context.removedKindNames.has(relation.from) ||
     context.removedKindNames.has(relation.to)
@@ -781,19 +900,6 @@ function classifyExistenceChange(
   const beforeExistence = before.existence ?? "optional";
   const afterExistence = after.existence ?? "optional";
 
-  if (
-    context.removedKindNames.has(after.from) ||
-    context.removedKindNames.has(after.to)
-  ) {
-    return {
-      type: "modified",
-      entity: "relation",
-      name,
-      severity: "safe",
-      details: `Relation ${relationDescription(after)} had its existence changed alongside a removed kind`,
-    };
-  }
-
   if (afterExistence === "optional") {
     // required → optional: loosening.
     return {
@@ -825,8 +931,9 @@ function classifyExistenceChange(
  *
  * @throws ConfigurationError when `buildRegistryFromSerializedSchema` cannot
  *   interpret `before` or `after`. Only reached when the diff contains at
- *   least one relation change; a diff that adds or removes no relation never
- *   needs a registry and so can never throw for this reason. See the module
+ *   least one relation change or narrows an edge kind's declared endpoints;
+ *   a diff that does neither never needs a registry and so can never throw
+ *   for this reason. See the module
  *   docblock for why the BEFORE side of this throw is new behavior, not an
  *   existing store-open refusal, and for the fix-forward wedge it implies.
  */
@@ -891,16 +998,17 @@ export function classifyOntologyChanges(
   if (
     removedRelations.length === 0 &&
     addedRelations.length === 0 &&
-    modifiedExistenceRelations.length === 0
+    modifiedExistenceRelations.length === 0 &&
+    !edgeEndpointDeclarationsNarrowed(before, after)
   ) {
     return changes;
   }
 
-  // Built only when at least one relation changed: a diff that touches no
-  // ontology relation (the overwhelming majority of schema commits) never
-  // pays for a registry build, and never risks surfacing an incoherent
-  // legacy ontology's `ConfigurationError` on a commit that has nothing to
-  // do with it.
+  // Built only when a relation changed or an edge kind's declared endpoints
+  // narrowed: a diff that does neither (the overwhelming majority of schema
+  // commits) never pays for a registry build, and never risks surfacing an
+  // incoherent legacy ontology's `ConfigurationError` on a commit that has
+  // nothing to do with it.
   // BEFORE is a delta input (disjointness, uniqueness groups, endpoint
   // allowances), never a registry a store reads or writes through —
   // enforcing structural subsumption on it would wedge the fix-forward
@@ -914,8 +1022,16 @@ export function classifyOntologyChanges(
   );
   const afterRegistry = buildRegistryFromSerializedSchema(after);
 
+  const removedKindNames = computeRemovedKindNames(before, after);
+  const endpointAdmissionLosses = edgeEndpointAdmissionLosses(
+    before,
+    after,
+    beforeRegistry,
+    afterRegistry,
+    removedKindNames,
+  );
   const context: RelationClassificationContext = {
-    removedKindNames: computeRemovedKindNames(before, after),
+    removedKindNames,
     disjointnessPairs: nodeDisjointnessDelta(beforeRegistry, afterRegistry),
     uniquenessGroups: nodeUniquenessComponentGroups(
       before,
@@ -923,12 +1039,7 @@ export function classifyOntologyChanges(
       beforeRegistry,
       afterRegistry,
     ),
-    endpointAllowances: edgeEndpointAssignabilityDelta(
-      before,
-      after,
-      beforeRegistry,
-      afterRegistry,
-    ),
+    endpointAllowances: endpointAdmissionLosses.map((loss) => loss.allowance),
   };
 
   for (const relation of removedRelations) {
@@ -941,6 +1052,15 @@ export function classifyOntologyChanges(
     changes.push(
       classifyExistenceChange(beforeRelation, afterRelation, context),
     );
+  }
+
+  // The probe payload is diff-wide, so one relation change carrying it
+  // already covers every loss. Otherwise each loss is its own change, so
+  // the admission loss is never committed unprobed.
+  if (!changes.some((change) => carriesEndpointAssignabilityProbe(change))) {
+    for (const loss of endpointAdmissionLosses) {
+      changes.push(classifyEndpointAdmissionLoss(loss));
+    }
   }
 
   return changes;

@@ -132,6 +132,13 @@ function probeOfKind<K extends OntologyDataProbe["kind"]>(
   return requireDefined(found, `expected a "${kind}" probe`);
 }
 
+function admissionLossOf(changes: ReturnType<typeof classifyOntologyChanges>) {
+  return requireDefined(
+    changes.find((change) => change.entity === "edgeRegistration"),
+    "expected an edgeRegistration change",
+  );
+}
+
 /** `implies` only requires same-side assignability, so a same-shape pair is valid. */
 const EDGES_FOR_IMPLIES: Record<string, SerializedEdgeDef> = {
   edgeA: edgeDef("edgeA", ["X"], ["Y"]),
@@ -580,12 +587,199 @@ describe("classifyOntologyChanges", () => {
         },
       ]);
     });
-    // MUTATION CHECK (verified): restoring
-    // `isProperSubset(afterPairKeys, beforePairKeys)` in place of
-    // `lostAnyMember(beforePairKeys, afterPairKeys)`
-    // (`edgeEndpointAssignabilityDelta`, `src/schema/ontology-change.ts`)
-    // makes `removed.probes` undefined (equal-length before/after pair
-    // lists never count as a proper subset) and this assertion fails.
+    // MUTATION CHECK (verified): gating `edgeEndpointAdmissionLosses`
+    // (`src/schema/ontology-change.ts`) on the after pair list being
+    // strictly SHORTER than the before list drops the swap (equal-length
+    // lists) and this assertion fails.
+  });
+
+  describe("an edge kind's endpoint admission loss no relation change carries", () => {
+    it("probes a surviving subclass that loses admission when a mid-chain kind is removed, exempting the removed kind's own rows", () => {
+      const likes = edgeDef("likes", ["Person"], ["Animal"]);
+      const before = snapshot(
+        {
+          Person: nodeDef("Person"),
+          Animal: nodeDef("Animal"),
+          Mammal: nodeDef("Mammal"),
+          Dog: nodeDef("Dog"),
+        },
+        { likes },
+        [
+          relation("subClassOf", "Mammal", "Animal"),
+          relation("subClassOf", "Dog", "Mammal"),
+        ],
+      );
+      const after = snapshot(
+        {
+          Person: nodeDef("Person"),
+          Animal: nodeDef("Animal"),
+          Dog: nodeDef("Dog"),
+        },
+        { likes },
+        [],
+      );
+
+      const changes = classifyOntologyChanges(before, after);
+
+      expect(
+        changes
+          .filter((change) => change.entity === "relation")
+          .map((change) => [change.severity, change.probes]),
+      ).toEqual([
+        ["safe", undefined],
+        ["safe", undefined],
+      ]);
+      const loss = admissionLossOf(changes);
+      expect(loss).toMatchObject({
+        type: "modified",
+        name: "likes",
+        severity: "warning",
+        details:
+          'Edge "likes" no longer admits endpoint pairs: (Person -> Dog)',
+      });
+      expect(
+        probeOfKind(loss.probes, "edgeEndpointAssignability").allowances,
+      ).toEqual([
+        {
+          edgeKind: "likes",
+          allowedPairs: [
+            ["Person", "Animal"],
+            ["Person", "Mammal"],
+          ],
+        },
+      ]);
+    });
+
+    it("owes nothing when the only pairs lost name the removed kind", () => {
+      const likes = edgeDef("likes", ["Person"], ["Animal"]);
+      const before = snapshot(
+        {
+          Person: nodeDef("Person"),
+          Animal: nodeDef("Animal"),
+          Mammal: nodeDef("Mammal"),
+        },
+        { likes },
+        [relation("subClassOf", "Mammal", "Animal")],
+      );
+      const after = snapshot(
+        { Person: nodeDef("Person"), Animal: nodeDef("Animal") },
+        { likes },
+        [],
+      );
+
+      const changes = classifyOntologyChanges(before, after);
+
+      expect(changes.flatMap((change) => change.probes ?? [])).toEqual([]);
+      expect(changes.map((change) => change.entity)).toEqual(["relation"]);
+    });
+
+    it("probes a directly narrowed `to` declaration with no relation change at all", () => {
+      const nodes = { A: nodeDef("A"), B: nodeDef("B"), C: nodeDef("C") };
+      const before = snapshot(
+        nodes,
+        { e: edgeDef("e", ["A"], ["B", "C"]) },
+        [],
+      );
+      const after = snapshot(nodes, { e: edgeDef("e", ["A"], ["B"]) }, []);
+
+      const loss = admissionLossOf(classifyOntologyChanges(before, after));
+
+      expect(loss.details).toBe(
+        'Edge "e" no longer admits endpoint pairs: (A -> C)',
+      );
+      expect(
+        probeOfKind(loss.probes, "edgeEndpointAssignability").allowances,
+      ).toEqual([{ edgeKind: "e", allowedPairs: [["A", "B"]] }]);
+    });
+
+    it("probes a narrowed source-dependent target map", () => {
+      const nodes = { A: nodeDef("A"), B: nodeDef("B"), C: nodeDef("C") };
+      const before = snapshot(
+        nodes,
+        { e: edgeDef("e", ["A"], ["B", "C"]) },
+        [],
+      );
+      const after = snapshot(
+        nodes,
+        {
+          e: {
+            ...edgeDef("e", ["A"], ["B", "C"]),
+            targetKindsBySource: { A: ["B"] },
+          },
+        },
+        [],
+      );
+
+      const loss = admissionLossOf(classifyOntologyChanges(before, after));
+
+      expect(
+        probeOfKind(loss.probes, "edgeEndpointAssignability").allowances,
+      ).toEqual([{ edgeKind: "e", allowedPairs: [["A", "B"]] }]);
+    });
+
+    it("owes nothing when a dropped declared endpoint is still admitted through subsumption", () => {
+      const nodes = { A: nodeDef("A"), B: nodeDef("B"), C: nodeDef("C") };
+      const relations = [relation("subClassOf", "C", "B")];
+      const before = snapshot(
+        nodes,
+        { e: edgeDef("e", ["A"], ["B", "C"]) },
+        relations,
+      );
+      const after = snapshot(
+        nodes,
+        { e: edgeDef("e", ["A"], ["B"]) },
+        relations,
+      );
+
+      expect(classifyOntologyChanges(before, after)).toEqual([]);
+    });
+
+    it("reports the loss once, on the relation change, when one already carries the diff-wide probe", () => {
+      const nodes = {
+        Person: nodeDef("Person"),
+        Organization: nodeDef("Organization"),
+        Company: nodeDef("Company"),
+        Shop: nodeDef("Shop"),
+      };
+      const before = snapshot(
+        nodes,
+        { worksFor: edgeDef("worksFor", ["Person"], ["Organization", "Shop"]) },
+        [relation("subClassOf", "Company", "Organization")],
+      );
+      const after = snapshot(
+        nodes,
+        { worksFor: edgeDef("worksFor", ["Person"], ["Organization"]) },
+        [],
+      );
+
+      const changes = classifyOntologyChanges(before, after);
+
+      expect(changes.map((change) => change.entity)).toEqual(["relation"]);
+      expect(
+        probeOfKind(changes[0]?.probes, "edgeEndpointAssignability").allowances,
+      ).toEqual([
+        { edgeKind: "worksFor", allowedPairs: [["Person", "Organization"]] },
+      ]);
+    });
+
+    it("does not build a registry for a widened or reordered endpoint declaration", () => {
+      const incoherentRelations = [
+        relation("disjointWith", "A", "B"),
+        relation("subClassOf", "A", "B"),
+      ];
+      const before = snapshot(
+        {},
+        { e: edgeDef("e", ["A"], ["B", "C"]) },
+        incoherentRelations,
+      );
+      const after = snapshot(
+        {},
+        { e: edgeDef("e", ["A"], ["C", "B", "D"]) },
+        incoherentRelations,
+      );
+
+      expect(classifyOntologyChanges(before, after)).toEqual([]);
+    });
   });
 
   describe("an incoherent ontology", () => {

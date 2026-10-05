@@ -7006,6 +7006,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   compile-time kind.
    * @throws {KindHasReferentsError} when an extension kind being
    *   removed is referenced by a compile-time declaration.
+   * @throws {MigrationError} (`reason: "ontology-tightening-violated"`)
+   *   when a surviving kind was assignable to an edge endpoint only through
+   *   a removed kind and a live edge still relies on it.
    * @throws {StaleVersionError} on a CAS race with another writer.
    * @throws {SchemaContentConflictError} on a same-version content
    *   conflict.
@@ -7061,9 +7064,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       finalGraph,
       plan.removedNodeKinds,
     );
-    // A removal only drops declarations, so the tightening step is expected
-    // to owe nothing — but that is the preflight's decision, made from the
-    // same before/after documents every commit path hands it.
+    // A removal usually only drops declarations, but removing a kind from
+    // the middle of a subclass chain cuts its surviving descendants off from
+    // every edge kind that admitted them through it. The preflight decides,
+    // from the same before/after documents every commit path hands it.
     const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
       graphId: this.graphId,
       fromVersion: activeRow.version,

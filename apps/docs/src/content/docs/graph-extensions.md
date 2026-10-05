@@ -1124,6 +1124,14 @@ removed. The edge kind survives while another valid pair remains; it is cascaded
 only when no pairs remain. For example, removing `Course` from the `assignedTo`
 extension above preserves `Employee → Department`.
 
+Removing a kind from the middle of a subclass chain cuts its surviving
+subclasses off from every edge kind that admitted them through it. When a live
+edge still relies on that admission, `removeKinds()` refuses with
+`MigrationError` (`reason: "ontology-tightening-violated"`) and lists the
+edges in `details.violations`; see
+[Ontology changes are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+Edges touching rows of the removed kind itself never block the removal.
+
 Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code
 for compile-time schema removal. Removing a graph-extension kind that is still
