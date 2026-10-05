@@ -469,6 +469,13 @@ rollback. Per the same rule `rebuildIdentityClosure` follows, **a prune does
 not advance the content revision**: it destroys retained explanation, never
 truth, so branch staleness tracks truth, not explanation.
 
+The watermark states that history below it is gone, so it can never sit above
+history the graph has yet to record. The highest instant a prune accepts is
+the revision the graph's next commit will take — `store.recordedNow()` plus
+one, which prunes everything recorded so far. A `beforeRecorded` beyond that
+is refused with `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` and changes nothing:
+installing it would report every later commit as already pruned.
+
 Once anything has been pruned, `replay` reports the gap honestly rather than
 silently answering from an incomplete log: a call whose range lies entirely
 below the watermark throws `IDENTITY_REPLAY_HISTORY_TRUNCATED`, and an

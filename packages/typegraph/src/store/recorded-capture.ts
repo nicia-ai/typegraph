@@ -91,6 +91,7 @@ export {
   ensureRevisionOriginRow,
   ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
+  readNextRecordedRevision,
   readRecordedClock,
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,

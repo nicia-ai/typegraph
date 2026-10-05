@@ -1064,6 +1064,14 @@ export type IdentityReplayErrorDetails =
   | Readonly<{
       code: "IDENTITY_REPLAY_WALK_INCOMPLETE";
       ceiling: number;
+    }>
+  | Readonly<{
+      code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK";
+      /** The caller's own `beforeRecorded`. */
+      requestedBefore: string;
+      requestedRevision: number;
+      /** The revision the graph's next commit takes: the highest watermark a prune can install. */
+      highestPrunableRevision: number;
     }>;
 
 /**
@@ -1073,7 +1081,8 @@ export type IdentityReplayErrorDetails =
  * lies entirely below the retention watermark, or the lineage walk's own
  * internal read ceiling was reached before the seed set converged. A range
  * with more boundaries than the caller's `limit` is NOT a refusal — it pages,
- * through the `nextCursor` on the result.
+ * through the `nextCursor` on the result. `pruneIdentityTransitions` also
+ * raises it for a `beforeRecorded` beyond the graph's recorded clock.
  */
 export class IdentityReplayError extends TypeGraphError {
   declare readonly details: IdentityReplayErrorDetails;

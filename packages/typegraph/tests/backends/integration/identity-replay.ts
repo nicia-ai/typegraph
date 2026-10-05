@@ -16,8 +16,15 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  IdentityReplayError,
+  pruneIdentityTransitions,
   type TransitionPageCursor,
 } from "../../../src";
+import {
+  createRecordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+} from "../../../src/core/temporal";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -55,6 +62,67 @@ async function provisionPagedLineage(context: IntegrationTestContext) {
 export function registerIdentityReplayIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("identity transition retention", () => {
+    it("refuses a prune watermark beyond the revision the next commit takes, and accepts exactly that revision", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = { kind: "Person" as const, id: "prune-a" };
+      const b = { kind: "Person" as const, id: "prune-b" };
+      const c = { kind: "Person" as const, id: "prune-c" };
+      const d = { kind: "Person" as const, id: "prune-d" };
+      for (const ref of [a, b, c, d]) {
+        await store.nodes.Person.create({}, { id: ref.id });
+      }
+      await store.identity.assertSame(a, b);
+      const clock = requireDefined(await store.recordedNow());
+      const clockRevision = recordedInstantRevision(clock);
+      const wallTime = recordedInstantWallTime(clock);
+      const beyondNextCommit = createRecordedInstant(
+        clockRevision + 2,
+        wallTime,
+      );
+
+      const refusal = await pruneIdentityTransitions(store, {
+        beforeRecorded: beyondNextCommit,
+      }).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(IdentityReplayError);
+      expect((refusal as IdentityReplayError).details).toEqual({
+        code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK",
+        requestedBefore: beyondNextCommit,
+        requestedRevision: clockRevision + 2,
+        highestPrunableRevision: clockRevision + 1,
+      });
+
+      // The refusal installed nothing and deleted nothing.
+      const untouched = await store.identity.replay(a);
+      expect(untouched.truncatedBefore).toBeUndefined();
+      expect(untouched.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+      ]);
+
+      // The next commit's own revision is the highest truthful watermark:
+      // everything recorded so far is below it, everything later is not.
+      const nextCommit = createRecordedInstant(clockRevision + 1, wallTime);
+      const pruned = await pruneIdentityTransitions(store, {
+        beforeRecorded: nextCommit,
+      });
+      expect(pruned).toEqual({
+        pruned: 1,
+        prunedBeforeRevision: clockRevision + 1,
+      });
+
+      await store.identity.assertSame(c, d);
+      const latest = requireDefined(await store.recordedNow());
+      const fresh = await store.identity.replay(c, {
+        fromRecorded: latest,
+        toRecorded: latest,
+      });
+      expect(fresh.truncatedBefore).toBeUndefined();
+      expect(fresh.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+      ]);
+    });
+  });
+
   describe("identity replay equivalence", () => {
     it("replays merge / split / re-merge: four steps, causes assert/assert/retract/assert, after matching the live closure at EVERY revision", async () => {
       const store = await provisionIdentityReplayStore(context);

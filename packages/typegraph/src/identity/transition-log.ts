@@ -24,6 +24,7 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { readNextRecordedRevision } from "../store/recorded-capture";
 import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { chunk } from "../utils/array";
@@ -869,7 +870,9 @@ export async function writeIdentityTransitionRetentionWatermark(
  * Prunes retained explanation: deletes every transition row strictly below
  * the resolved revision and advances the retention watermark monotonically.
  * A prune at an earlier revision than the current watermark is a successful
- * no-op, never a rollback.
+ * no-op, never a rollback. A prune beyond the revision the graph's next commit
+ * will take is refused: that watermark would sit above history the graph has
+ * yet to record and report it as truncated the moment it is written.
  *
  * Explicit operator action only — no automatic retention policy exists. Per
  * the ratified ruling, a prune does NOT advance the content revision (the
@@ -892,6 +895,26 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
       ctx.schema,
       ctx.graphId,
     );
+    const highestWatermark = await readNextRecordedRevision(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    if (targetRevision > highestWatermark) {
+      throw new IdentityReplayError(
+        `Cannot prune identity transitions before ${options.beforeRecorded}: the graph has recorded nothing at or above revision ${String(highestWatermark)}, so a watermark beyond it would claim history that does not exist yet as already pruned.`,
+        {
+          code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK",
+          requestedBefore: options.beforeRecorded,
+          requestedRevision: targetRevision,
+          highestPrunableRevision: highestWatermark,
+        },
+        {
+          suggestion:
+            "Pass a recorded instant this graph has reached, such as store.recordedNow(), as beforeRecorded.",
+        },
+      );
+    }
     const resolvedWatermark = Math.max(existingWatermark, targetRevision);
     if (resolvedWatermark === existingWatermark) {
       return { pruned: 0, prunedBeforeRevision: existingWatermark };
