@@ -47,7 +47,9 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // the session isolation expression once: 123 -> 125.
 // `rollbackSchema` reads the optional preflight flip once; edge acyclicity
 // and composition tightening add four table-name reads: 125 -> 130.
-const REASONED_FLOOR = 130;
+// The managed PostgreSQL copy guards the preflight-carrying version flip
+// beside its five other schema-writing ports: 130 -> 131.
+const REASONED_FLOOR = 131;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -75,7 +77,7 @@ const REASONED_FLOOR = 130;
 const DEFERRED_LIVE_TOTAL = 240;
 const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 384;
+const TOTAL_ROW_COUNT = 385;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -222,7 +224,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 384)", () => {
+  it("the class partition covers every scanned row (total 385)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

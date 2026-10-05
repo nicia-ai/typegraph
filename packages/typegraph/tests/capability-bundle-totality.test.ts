@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("42 reasoned entries sum to 130 accesses; 50 deferred entries sum to 245", () => {
+  it("42 reasoned entries sum to 131 accesses; 50 deferred entries sum to 245", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -170,7 +170,9 @@ describe("capability bundle totality (T9)", () => {
     // `rollbackSchema` reads the optional preflight flip once to refuse a
     // tightening on a backend without it, edge acyclicity adds three
     // tableNames reads and composition tightening one more: 125 -> 130.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(130);
+    // The managed PostgreSQL copy's fixed-schema guard reads the optional
+    // preflight flip once to refuse it: 130 -> 131.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(131);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

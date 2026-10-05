@@ -968,8 +968,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   setActiveVersionWithPreflight: {
     kind: "reasoned",
     reason:
-      "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent.",
-    accesses: 1,
+      "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent, and a fixed-schema working copy refuses it when present.",
+    accesses: 2,
   },
   lockSchemaVersionForWrite: {
     kind: "reasoned",
