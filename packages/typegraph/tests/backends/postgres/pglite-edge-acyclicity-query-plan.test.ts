@@ -265,7 +265,7 @@ describe("edge-acyclicity probe (PostgreSQL dialect, PGlite): query plan (item D
     }
   }, 30_000);
 
-  it("a bulkCreate batch's post-insert probe compiles no candidates CTE and its recursive step seeks a worktable-correlated index, never a Seq Scan of typegraph_edges", async () => {
+  it("a bulkCreate batch's pre-insert probe compiles no candidates CTE and its recursive step seeks a worktable-correlated index, never a Seq Scan of typegraph_edges", async () => {
     const { backend: raw, client } = await createLocalPgliteBackend({
       vector: false,
     });

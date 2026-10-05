@@ -31,7 +31,7 @@
  * takes no per-graph write lock (see `assertResolvedPlanEdgesAcyclic`'s
  * docblock) and is inherently racy against a concurrent writer, so a cycle
  * that only appears from a write landing between planning and commit is
- * still caught by the ordinary insert-then-probe write-path fence and
+ * still caught by the ordinary write-path fence and
  * surfaces as `MergeConstraintConflictError` wrapping `EdgeAcyclicityError`,
  * exactly as before this change. The write path's own in-batch-cycle
  * refusal (`bulkCreate`) is pinned unchanged in
