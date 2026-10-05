@@ -1567,6 +1567,132 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
         };
         dialect: "pg";
     }>;
+    readonly revisionChanges: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            entryId: drizzle_orm_pg_core.PgColumn<{
+                name: "entry_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: true;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            revision: drizzle_orm_pg_core.PgColumn<{
+                name: "revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            complete: drizzle_orm_pg_core.PgColumn<{
+                name: "complete";
+                tableName: string;
+                dataType: "boolean";
+                columnType: "PgBoolean";
+                data: boolean;
+                driverParam: boolean;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            entity: drizzle_orm_pg_core.PgColumn<{
+                name: "entity";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kind: drizzle_orm_pg_core.PgColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
     readonly identityAssertions: drizzle_orm_pg_core.PgTableWithColumns<{
         name: string;
         schema: undefined;
@@ -3772,6 +3898,7 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
 // @public (undocumented)
 type CreatePostgresTablesOptions = Readonly<{
     indexes?: readonly IndexDeclaration[] | undefined;
+    physicalIndexName?: ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
 // @public
@@ -3969,7 +4096,7 @@ type EdgeEndpointAllowance = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -4280,6 +4407,18 @@ type FindNodesByKindParams = Readonly<{
 }>;
 
 // @public
+type FindRowsAcrossKindsParams = Readonly<{
+    graphId: string;
+    kinds: readonly string[];
+    limit: number;
+    after?: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    excludeDeleted?: boolean;
+}>;
+
+// @public
 type FulltextBatchRow = Readonly<{
     nodeId: string;
     content: string;
@@ -4396,8 +4535,24 @@ type GraphBackend = Readonly<{
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
+    findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findActiveEdgesBySourceV1?: (this: void, params: Readonly<{
+        graphId: string;
+        edgeKind: string;
+        fromKind: string;
+        fromId: string;
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesByMatchIdentity?: (this: void, params: Readonly<{
+        graphId: string;
+        identities: readonly Readonly<{
+            kind: string;
+            name: string;
+            key: string;
+        }>[];
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly EdgeRow[]>;
     findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
@@ -4465,6 +4620,8 @@ type GraphBackend = Readonly<{
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -4510,6 +4667,7 @@ type GraphBackend = Readonly<{
     adoptBaseSchema?: (this: void) => Promise<void>;
     assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
+    clearGraphPreservingContributionMaterializations?: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
     trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>, options?: Readonly<{
@@ -4589,7 +4747,7 @@ export type GraphIdentityConfig = Readonly<{
 }>;
 
 // @public (undocumented)
-type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "clearGraphPreservingContributionMaterializations" | "bootstrapTables">;
 
 // @public
 type GraphTemplateRow = Readonly<{
@@ -4853,7 +5011,7 @@ type JsonSchema = Readonly<{
     type?: string | readonly string[];
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
-    items?: JsonSchema;
+    items?: JsonSchema | boolean;
     prefixItems?: readonly JsonSchema[];
     minItems?: number;
     maxItems?: number;
@@ -5006,7 +5164,7 @@ type NodeCreateCommandResult = Readonly<{
 }>;
 
 // @public (undocumented)
-type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
+type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
 type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
@@ -5115,6 +5273,7 @@ type PostgresTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     revisionOrigins: string;
+    revisionChanges: string;
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
@@ -5456,6 +5615,7 @@ type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
@@ -5466,6 +5626,10 @@ type SqlTableNames = Readonly<{
     uniques: string;
     edgeClaims?: string | undefined;
     fences?: string | undefined;
+    indexMaterializations?: string | undefined;
+    contributionMaterializations?: string | undefined;
+    kindRemovals?: string | undefined;
+    reconciliationMarkers?: string | undefined;
 }>;
 
 // @public (undocumented)
@@ -5489,6 +5653,21 @@ type TableContribution = Readonly<{
     createDdl: readonly string[];
     dropDdl?: readonly string[];
     runtimeEnsure: boolean;
+    workingCopyClonePolicy?: Readonly<{
+        kind: "graphRows";
+        graphIdColumn: string;
+    }> | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+    }> | Readonly<{
+        kind: "freshSeed";
+    }> | Readonly<{
+        kind: "rebuildAfterClone";
+    }> | Readonly<{
+        kind: "unsupported";
+        reason: string;
+    }>;
 }>;
 
 // @public

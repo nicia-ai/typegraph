@@ -20,6 +20,8 @@ import {
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   ingestionBranch,
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   type MergeOptions,
   planCandidateWriteSet,
   planCandidateWriteSetReview,
@@ -902,7 +904,9 @@ export function registerGraphMergeReviewIntegrationTests(
         reviewScope: "candidate" as const,
       };
       const review = unwrap(await planCandidateWriteSetReview(args));
-      expect(review.formatVersion).toBe(2);
+      expect(review.formatVersion).toBe(
+        MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+      );
       expect(review.baseline.scope).toBe("referenced");
       expect(await target.nodes.Item.getById(existing.id)).toMatchObject({
         label: "Existing",
@@ -921,7 +925,7 @@ export function registerGraphMergeReviewIntegrationTests(
           .status,
       ).toBe("changed");
     });
-    it("preserves V1 and V2 approval decisions for an unrelated original row update", async () => {
+    it("preserves whole-target and candidate-scoped approval decisions for an unrelated original row update", async () => {
       const target = await context.createHistoryStore(boundedGraph);
       const candidate = await target.nodes.Item.create(itemProps("candidate"), {
         id: "candidate",
@@ -953,8 +957,10 @@ export function registerGraphMergeReviewIntegrationTests(
           reviewScope: "candidate",
         }),
       );
-      expect(v1.formatVersion).toBe(1);
-      expect(v2.formatVersion).toBe(2);
+      expect(v1.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+      expect(v2.formatVersion).toBe(
+        MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+      );
       expect(v2.plan.writes).toEqual(v1.plan.writes);
 
       await target.nodes.Artifact.update(unrelated.id, { content: "revised" });
@@ -976,7 +982,7 @@ export function registerGraphMergeReviewIntegrationTests(
       });
       expect(v2Decision.status).toBe("compatible");
     });
-    it("bounds V2 review reads across unrelated rows and identity assertions", async () => {
+    it("bounds candidate-scoped review reads across unrelated rows and identity assertions", async () => {
       const target = await context.createHistoryStore(boundedIdentityGraph);
       const candidate = await target.nodes.Item.create(itemProps("candidate"), {
         id: "candidate",

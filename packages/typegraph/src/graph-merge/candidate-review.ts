@@ -38,8 +38,8 @@ import {
   type MergeReviewDifference,
   type MergeReviewPolicy,
   mergeReviewPolicySchema,
-  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
   type MergeReviewRevalidation,
+  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
 } from "./review-schema";
 import { canUseSparseCandidatePlanning } from "./sparse-candidate-branch";
 import type { GraphDef } from "./typegraph-internal";
@@ -170,8 +170,7 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
       );
     }
     const startingFence = await captureMergePlanTargetFence(args.target);
-    if (candidateScoped && startingFence.revision.revision === null
-    ) {
+    if (candidateScoped && startingFence.revision.revision === null) {
       throw new MergeReviewError(
         "Candidate-scoped review evidence requires revision tracking for exact revalidation.",
         { details: { reason: "revision-tracking-required" } },

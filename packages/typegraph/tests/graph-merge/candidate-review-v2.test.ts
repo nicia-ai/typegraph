@@ -8,7 +8,10 @@ import {
   defineNode,
 } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
-import { MERGE_REVIEW_FORMAT_VERSION } from "../../src/graph-merge";
+import {
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+} from "../../src/graph-merge";
 import {
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
@@ -55,7 +58,7 @@ async function setup() {
   return store;
 }
 
-describe("candidate-scoped V2 review baseline", () => {
+describe("candidate-scoped review baseline", () => {
   it("includes future-start open assertions with the interchange state predicate", async () => {
     const { backend } = createLocalSqliteBackend();
     cleanups.push(() => backend.close());
@@ -98,7 +101,7 @@ describe("candidate-scoped V2 review baseline", () => {
     expect(after.identityDigest).not.toBe(before.identityDigest);
   });
 
-  it("captures format V2 and requires renewed review after connected identity changes", async () => {
+  it("captures the candidate-scoped format and requires renewed review after connected identity changes", async () => {
     const store = await setup();
     const seed = await store.nodes.Person.create(
       { name: "seed" },
@@ -144,7 +147,9 @@ describe("candidate-scoped V2 review baseline", () => {
       reviewScope: "candidate" as const,
     };
     const review = unwrap(await planCandidateWriteSetReview(args));
-    expect(review.formatVersion).toBe(2);
+    expect(review.formatVersion).toBe(
+      MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+    );
     const defaultReview = unwrap(
       await planCandidateWriteSetReview({
         target: store,
@@ -176,7 +181,7 @@ describe("candidate-scoped V2 review baseline", () => {
       });
   });
 
-  it("keeps candidate-scoped V2 available for identity-disabled graphs", async () => {
+  it("keeps candidate-scoped review available for identity-disabled graphs", async () => {
     const { backend } = createLocalSqliteBackend();
     cleanups.push(() => backend.close());
     const plainGraph = defineGraph({
@@ -215,7 +220,9 @@ describe("candidate-scoped V2 review baseline", () => {
         reviewScope: "candidate",
       }),
     );
-    expect(review.formatVersion).toBe(2);
+    expect(review.formatVersion).toBe(
+      MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+    );
     expect(review.baseline.scope).toBe("referenced");
     const { digest: _digest, ...content } = review;
     const legacyContent = {
@@ -244,7 +251,7 @@ describe("candidate-scoped V2 review baseline", () => {
     expect(revalidated.status).toBe("compatible");
   });
 
-  it("refuses a V2 review when identity changes after its starting fence", async () => {
+  it("refuses a candidate-scoped review when identity changes after its starting fence", async () => {
     const store = await setup();
     const seed = await store.nodes.Person.create(
       { name: "seed" },

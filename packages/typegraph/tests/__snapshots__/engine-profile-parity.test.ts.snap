@@ -94,6 +94,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "claimEdgeCardinalityGuarded",
   "claimIndexMaterialization",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
   "close",
   "commands",
   "commitSchemaVersion",
@@ -126,6 +127,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
+  "ensureRevisionChangesJournal",
   "ensureRevisionOriginsTable",
   "ensureRuntimeContributions",
   "ensureTrigramExtension",
@@ -147,10 +149,14 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "executeStatement",
   "executeTemporaryStatement",
   "fenceSql",
+  "findActiveEdgesBySourceV1",
+  "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "findEdgesByKind",
+  "findEdgesByMatchIdentity",
   "findEdgesConnectedTo",
+  "findNodesAcrossKinds",
   "findNodesByKind",
   "fulltextSearch",
   "fulltextStrategy",
@@ -201,6 +207,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "registerGraphTemplate",
   "releaseIndexMaterializationClaim",
   "repairContributions",
+  "revisionChangesJournalReady",
   "schemaProvisioning",
   "schemaWriteTransaction",
   "setActiveVersion",
@@ -302,6 +309,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "claimEdgeCardinalityGuarded",
   "claimIndexMaterialization",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
   "close",
   "commands",
   "commitSchemaVersion",
@@ -332,6 +340,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
+  "ensureRevisionChangesJournal",
   "ensureRevisionOriginsTable",
   "ensureRuntimeContributions",
   "ensureTrigramExtension",
@@ -353,10 +362,14 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "executeStatement",
   "executeTemporaryStatement",
   "fenceSql",
+  "findActiveEdgesBySourceV1",
+  "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "findEdgesByKind",
+  "findEdgesByMatchIdentity",
   "findEdgesConnectedTo",
+  "findNodesAcrossKinds",
   "findNodesByKind",
   "getActiveSchema",
   "getAllKindRemovals",
@@ -404,6 +417,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "registerGraphTemplate",
   "releaseIndexMaterializationClaim",
   "repairContributions",
+  "revisionChangesJournalReady",
   "schemaProvisioning",
   "schemaWriteTransaction",
   "setActiveVersion",
@@ -507,6 +521,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "claimEdgeCardinalityBatch",
   "claimEdgeCardinalityGuarded",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
   "close",
   "commands",
   "commitSchemaVersion",
@@ -538,6 +553,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
+  "ensureRevisionChangesJournal",
   "ensureRevisionOriginsTable",
   "ensureRuntimeContributions",
   "ensureVectorSlotContribution",
@@ -548,10 +564,14 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "executeSchemaDdl",
   "executeStatement",
   "executeTemporaryStatement",
+  "findActiveEdgesBySourceV1",
+  "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "findEdgesByKind",
+  "findEdgesByMatchIdentity",
   "findEdgesConnectedTo",
+  "findNodesAcrossKinds",
   "findNodesByKind",
   "fulltextSearch",
   "fulltextStrategy",
@@ -601,6 +621,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "refreshStatistics",
   "registerGraphTemplate",
   "repairContributions",
+  "revisionChangesJournalReady",
   "schemaProvisioning",
   "schemaWriteTransaction",
   "setActiveVersion",
@@ -695,6 +716,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "claimEdgeCardinalityBatch",
   "claimEdgeCardinalityGuarded",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
   "close",
   "commands",
   "commitSchemaVersion",
@@ -724,6 +746,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
+  "ensureRevisionChangesJournal",
   "ensureRevisionOriginsTable",
   "ensureRuntimeContributions",
   "ensureVectorSlotContribution",
@@ -734,10 +757,14 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "executeSchemaDdl",
   "executeStatement",
   "executeTemporaryStatement",
+  "findActiveEdgesBySourceV1",
+  "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "findEdgesByKind",
+  "findEdgesByMatchIdentity",
   "findEdgesConnectedTo",
+  "findNodesAcrossKinds",
   "findNodesByKind",
   "getActiveSchema",
   "getAllKindRemovals",
@@ -784,6 +811,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "refreshStatistics",
   "registerGraphTemplate",
   "repairContributions",
+  "revisionChangesJournalReady",
   "schemaProvisioning",
   "schemaWriteTransaction",
   "setActiveVersion",
@@ -880,6 +908,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx" ON "typegraph_nodes" ("graph_id" COLLATE "C");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_edges" (
   "graph_id" TEXT NOT NULL,
   "id" TEXT NOT NULL,
@@ -931,6 +963,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_cardinality_idx" ON "typegraph_edges" ("graph_id", "kind", "from_kind", "from_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx" ON "typegraph_edges" ("graph_id" COLLATE "C");",
   },
   {
     "params": [],
@@ -1041,6 +1077,22 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   "origin" TEXT NOT NULL,
   PRIMARY KEY ("graph_id")
 );",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_changes" (
+  "entry_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "revision" BIGINT NOT NULL,
+  "complete" BOOLEAN NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_revision_changes_graph_revision_idx" ON "typegraph_revision_changes" ("graph_id", "revision");",
   },
   {
     "params": [],
@@ -1256,6 +1308,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx" ON "typegraph_schema_versions" ("graph_id" COLLATE "C");",
+  },
+  {
+    "params": [],
     "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_schema_versions_one_active_per_graph_idx" ON "typegraph_schema_versions" ("graph_id") WHERE "is_active" = TRUE;",
   },
   {
@@ -1411,6 +1467,40 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
   },
   {
+    "params": [
+      1,
+      5,
+      "<<TIMESTAMP>>",
+      5,
+      "<<TIMESTAMP>>",
+      5,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      6,
+      "<<TIMESTAMP>>",
+      6,
+      "<<TIMESTAMP>>",
+      6,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
     "params": [],
     "sql": "-- BEGIN (native transaction) --",
   },
@@ -1430,7 +1520,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       "typegraph_nodes",
       "typegraph_edges",
     ],
-    "sql": "SELECT index_class.relname AS index_name,
+    "sql": "SELECT namespace.nspname AS index_schema,
+            index_class.relname AS index_name,
             pg_get_indexdef(index_class.oid) AS index_definition
        FROM pg_class AS table_class
        JOIN pg_namespace AS namespace
@@ -1449,55 +1540,63 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_cardinality_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_cardinality_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_deleted_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_deleted_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_from_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_from_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_kind_created_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_graph_id_bytes_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_kind_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_kind_created_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_match_identity_uq"",
+    "sql": "DROP INDEX "public"."typegraph_edges_kind_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_to_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_match_identity_uq"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_edges_valid_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_to_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_deleted_idx"",
+    "sql": "DROP INDEX "public"."typegraph_edges_valid_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_id_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_deleted_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_kind_created_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_graph_id_bytes_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_kind_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_id_idx"",
   },
   {
     "params": [],
-    "sql": "DROP INDEX "typegraph_nodes_valid_idx"",
+    "sql": "DROP INDEX "public"."typegraph_nodes_kind_created_idx"",
+  },
+  {
+    "params": [],
+    "sql": "DROP INDEX "public"."typegraph_nodes_kind_idx"",
+  },
+  {
+    "params": [],
+    "sql": "DROP INDEX "public"."typegraph_nodes_valid_idx"",
   },
   {
     "params": [
@@ -1531,6 +1630,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE INDEX typegraph_edges_graph_id_bytes_idx ON public.typegraph_edges USING btree (graph_id COLLATE "C")",
+  },
+  {
+    "params": [],
     "sql": "CREATE INDEX typegraph_edges_kind_created_idx ON public.typegraph_edges USING btree (graph_id, kind, deleted_at, created_at)",
   },
   {
@@ -1552,6 +1655,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [],
     "sql": "CREATE INDEX typegraph_nodes_deleted_idx ON public.typegraph_nodes USING btree (graph_id, deleted_at)",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX typegraph_nodes_graph_id_bytes_idx ON public.typegraph_nodes USING btree (graph_id COLLATE "C")",
   },
   {
     "params": [],
@@ -1947,6 +2054,48 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [
       "engine_profile_parity_script",
+    ],
+    "sql": "
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM "typegraph_contribution_materializations" WHERE graph_id IN ($1)
+        ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_script",
+      "doc-1",
+      "[1,0,0]",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "
+        INSERT INTO "tg_vec_engine_profile_parity_script_document_embedding_74fd603b" ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+        VALUES ($1, $2, $3::vector, $4, $5)
+        ON CONFLICT ("graph_id", "node_id")
+        DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
+      ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_script",
+      "__typegraph_deployment__",
+    ],
+    "sql": "
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM "typegraph_contribution_materializations" WHERE graph_id IN ($1, $2)
+        ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_script",
       "Document",
       "doc-1",
       "Climate patterns",
@@ -1965,21 +2114,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
           "content" = EXCLUDED."content",
           "language" = EXCLUDED."language",
           "updated_at" = EXCLUDED."updated_at"
-      ",
-  },
-  {
-    "params": [
-      "engine_profile_parity_script",
-      "doc-1",
-      "[1,0,0]",
-      "<<TIMESTAMP>>",
-      "<<TIMESTAMP>>",
-    ],
-    "sql": "
-        INSERT INTO "tg_vec_engine_profile_parity_script_document_embedding_74fd603b" ("graph_id", "node_id", "embedding", "created_at", "updated_at")
-        VALUES ($1, $2, $3::vector, $4, $5)
-        ON CONFLICT ("graph_id", "node_id")
-        DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
       ",
   },
   {
@@ -2229,6 +2363,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx" ON "typegraph_nodes" ("graph_id" COLLATE "C");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_edges" (
   "graph_id" TEXT NOT NULL,
   "id" TEXT NOT NULL,
@@ -2280,6 +2418,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_cardinality_idx" ON "typegraph_edges" ("graph_id", "kind", "from_kind", "from_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx" ON "typegraph_edges" ("graph_id" COLLATE "C");",
   },
   {
     "params": [],
@@ -2390,6 +2532,22 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   "origin" TEXT NOT NULL,
   PRIMARY KEY ("graph_id")
 );",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_changes" (
+  "entry_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "revision" BIGINT NOT NULL,
+  "complete" BOOLEAN NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_revision_changes_graph_revision_idx" ON "typegraph_revision_changes" ("graph_id", "revision");",
   },
   {
     "params": [],
@@ -2605,6 +2763,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx" ON "typegraph_schema_versions" ("graph_id" COLLATE "C");",
+  },
+  {
+    "params": [],
     "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_schema_versions_one_active_per_graph_idx" ON "typegraph_schema_versions" ("graph_id") WHERE "is_active" = TRUE;",
   },
   {
@@ -2750,6 +2912,40 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       4,
       "<<TIMESTAMP>>",
       4,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      5,
+      "<<TIMESTAMP>>",
+      5,
+      "<<TIMESTAMP>>",
+      5,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      6,
+      "<<TIMESTAMP>>",
+      6,
+      "<<TIMESTAMP>>",
+      6,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -3348,6 +3544,22 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_changes" (
+  "entry_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "revision" INTEGER NOT NULL,
+  "complete" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_revision_changes_graph_revision_idx" ON "typegraph_revision_changes" ("graph_id", "revision");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_assertions" (
   "graph_id" TEXT NOT NULL,
   "id" TEXT NOT NULL,
@@ -3693,6 +3905,40 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       4,
       "<<TIMESTAMP>>",
       4,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      5,
+      "<<TIMESTAMP>>",
+      5,
+      "<<TIMESTAMP>>",
+      5,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      6,
+      "<<TIMESTAMP>>",
+      6,
+      "<<TIMESTAMP>>",
+      6,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },
@@ -4541,6 +4787,22 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_changes" (
+  "entry_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "revision" INTEGER NOT NULL,
+  "complete" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_revision_changes_graph_revision_idx" ON "typegraph_revision_changes" ("graph_id", "revision");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_assertions" (
   "graph_id" TEXT NOT NULL,
   "id" TEXT NOT NULL,
@@ -4886,6 +5148,40 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       4,
       "<<TIMESTAMP>>",
       4,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      5,
+      "<<TIMESTAMP>>",
+      5,
+      "<<TIMESTAMP>>",
+      5,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      6,
+      "<<TIMESTAMP>>",
+      6,
+      "<<TIMESTAMP>>",
+      6,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },

@@ -60,7 +60,7 @@ function collectProjectedKeywords(schema: JsonSchema, into: Set<string>): void {
   if (schema.propertyNames !== undefined) {
     collectProjectedKeywords(schema.propertyNames, into);
   }
-  if (schema.items !== undefined) {
+  if (typeof schema.items === "object") {
     collectProjectedKeywords(schema.items, into);
   }
   for (const member of schema.prefixItems ?? []) {
@@ -721,12 +721,52 @@ describe("unions and nullability", () => {
     );
   });
 
-  it("z.union([z.string(), z.number()]) not subtype z.string() at anyOf[1]", () => {
+  // A union of bare primitives projects as a `type` token array, so the
+  // offending member is named by its token's position.
+  it("z.union([z.string(), z.number()]) not subtype z.string() at type[1]", () => {
     const result = verdict(z.union([z.string(), z.number()]), z.string());
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "no-matching-union-member",
+      path: ["type[1]"],
+    });
+  });
+
+  it("a union with a constrained member not subtype z.string() at anyOf[1]", () => {
+    const result = verdict(
+      z.union([z.string().min(2), z.number()]),
+      z.string(),
+    );
+    expect(result).toMatchObject({
+      verdict: "not-subtype",
+      reason: "no-matching-union-member",
       path: ["anyOf[1]"],
+    });
+  });
+
+  // A stored document may spell the same union either way: `anyOf` members
+  // from an earlier projection, a `type` token array from the current one.
+  it("reads a type token array and the equivalent anyOf as the same union, in both directions", () => {
+    const tokens: JsonSchema = { type: ["string", "null"] };
+    const members: JsonSchema = {
+      anyOf: [{ type: "string" }, { type: "null" }],
+    };
+    expect(isStructuralSubtype(tokens, members)).toEqual({
+      verdict: "subtype",
+    });
+    expect(isStructuralSubtype(members, tokens)).toEqual({
+      verdict: "subtype",
+    });
+  });
+
+  it("carries a token array's sibling keywords into every member", () => {
+    const loose: JsonSchema = { type: ["string", "null"] };
+    const tight: JsonSchema = { type: ["string", "null"], minLength: 3 };
+    expect(isStructuralSubtype(tight, loose)).toEqual({ verdict: "subtype" });
+    expect(isStructuralSubtype(loose, tight)).toMatchObject({
+      verdict: "not-subtype",
+      reason: "no-matching-union-member",
+      path: ["type[0]"],
     });
   });
 
@@ -924,10 +964,12 @@ describe("incomparable constructs", () => {
     });
   });
 
-  it("z.intersection(...) is incomparable via unsupported-keyword (D4)", () => {
+  // An intersection the projection cannot merge into one schema stays an
+  // `allOf`, which this predicate does not model.
+  it("z.intersection(...) that projects as allOf is incomparable via unsupported-keyword", () => {
     const result = verdict(
-      z.intersection(z.object({ a: z.string() }), z.object({ b: z.number() })),
-      z.object({ a: z.string() }),
+      z.intersection(z.string(), z.string().min(3)),
+      z.string(),
     );
     expect(result).toMatchObject({
       verdict: "incomparable",
@@ -935,21 +977,26 @@ describe("incomparable constructs", () => {
     });
   });
 
+  // The projection merges an intersection of two object schemas into one
+  // ordinary object schema, which is judged like any other.
+  it("z.intersection(...) of two objects is judged as the merged object", () => {
+    assertVerdict(
+      verdict(
+        z.intersection(
+          z.object({ a: z.string() }),
+          z.object({ b: z.number() }),
+        ),
+        z.object({ a: z.string() }),
+      ),
+      "subtype",
+    );
+  });
+
   it("z.file() is incomparable via unsupported-keyword", () => {
     const result = verdict(z.file(), z.string());
     expect(result).toMatchObject({
       verdict: "incomparable",
       reason: "unsupported-keyword",
-    });
-  });
-
-  it('a hand-written type:["string","null"] is incomparable via type-token-array', () => {
-    const child: JsonSchema = { type: ["string", "null"] };
-    const parent: JsonSchema = { type: "string" };
-    const result = isStructuralSubtype(child, parent);
-    expect(result).toMatchObject({
-      verdict: "incomparable",
-      reason: "type-token-array",
     });
   });
 
@@ -1209,18 +1256,10 @@ describe("projection coverage", () => {
     [
       "two DIFFERENT z.intersection(...) schemas",
       () => {
-        const a = projected(
-          z.intersection(
-            z.object({ a: z.string() }),
-            z.object({ b: z.number() }),
-          ),
-        );
-        const b = projected(
-          z.intersection(
-            z.object({ a: z.string() }),
-            z.object({ c: z.boolean() }),
-          ),
-        );
+        // Intersections of two object schemas project as one merged object;
+        // these stay `allOf`.
+        const a = projected(z.intersection(z.string(), z.string().min(3)));
+        const b = projected(z.intersection(z.string(), z.string().min(5)));
         return [a, b];
       },
     ],

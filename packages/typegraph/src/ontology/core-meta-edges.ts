@@ -207,17 +207,15 @@ export function equivalentTo<A extends NodeType | AnyEdgeType>(
   kindA: A,
   kindBOrIri: string,
 ): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, string>;
-/* eslint-disable @typescript-eslint/unified-signatures -- the node-to-node
-   overload above constrains `A` to NodeType and applies EquivalentToCheck to
-   its partner; this edge-to-node form constrains `A` to AnyEdgeType and
-   carries no structural check. Merging the two would also admit
-   `equivalentTo(nodeKind, edgeKind)`, which this overload set refuses on
-   purpose (see the docblock above). */
+// Kept apart from the node-to-node overload above, which constrains `A` to
+// NodeType and applies EquivalentToCheck to its partner: this edge-to-node
+// form constrains `A` to AnyEdgeType and carries no structural check. Merging
+// the two would also admit `equivalentTo(nodeKind, edgeKind)`, which this
+// overload set refuses on purpose (see the docblock above).
 export function equivalentTo<A extends AnyEdgeType, B extends NodeType>(
   kindA: A,
   kindB: B,
 ): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
-/* eslint-enable @typescript-eslint/unified-signatures */
 export function equivalentTo(
   kindA: NodeType | AnyEdgeType,
   kindBOrIri: NodeType | string,

@@ -431,7 +431,7 @@ identity/context, and target baseline. You can persist this artifact and later
 approval records in the target before calling
 `revalidateCandidateWriteSetReview()` to compute a fresh execution plan.
 
-Both review versions support candidate write sets only. They do not rebase arbitrary artifacts
+Both review formats support candidate write sets only. They do not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
 Candidate planning on revision-tracked graphs reads existing candidate ids and
@@ -574,25 +574,36 @@ The V1 baseline is deliberately conservative:
   regenerated. There is no exemption for an “audit” kind.
 
 For an eligible revision-tracked graph, pass
-`reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
-candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
+`reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit
+candidate-scoped evidence (`formatVersion`
+`MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED`, 4). It fingerprints the
+candidate's node and edge ids,
 edge endpoints, resolved writes, and plan guards, including expected absences
 across kinds. On Operational Identity graphs it also records the reachable
 identity assertion and same-id peer closure, plus assertion-ID collision
 evidence. Revalidation expands that retained identity scope, rereads the
 referenced rows, and replans the candidate under a new target fence. An unrelated original row may change
-without invalidating V2 when it cannot affect the fresh resolved plan; V1
-would report that row change. Applications whose approval policy needs the
-V1 whole-graph rule should omit `reviewScope`. The review artifact records
-its version and scope, so revalidation applies the rule originally reviewed.
+without invalidating a candidate-scoped review when it cannot affect the
+fresh resolved plan; the default whole-target review (`formatVersion`
+`MERGE_REVIEW_FORMAT_VERSION`, 3) would report that row change. Applications
+whose approval policy needs the whole-graph rule should omit `reviewScope`.
+The review artifact records its format and scope, so revalidation applies the
+rule originally reviewed. A review stored under format 1 or 2 embeds a
+version-1 plan and is refused with `MergeReviewError`
+`details.reason: "unsupported-version"`; plan and review the candidate write
+set again.
 Candidate-scoped review refuses graphs outside those eligibility rules.
 On a `oneActive` graph, a custom backend must expose
 `findActiveEdgesBySourceV1` for candidate-scoped review; the complete-clone
-candidate planner and V1 review remain available when it does not.
+candidate planner and whole-target review remain available when it does not.
+A graph that declares a target-side cardinality, an `acyclic` edge or a
+composition pair is not eligible either: those constraints depend on rows
+outside the candidate's own scope.
 On an Operational Identity graph, a custom Store runtime must also expose
 endpoint-scoped and assertion-ID-scoped identity reads. Without both reads,
-ordinary candidate planning uses the complete working-copy clone and V1 review
-remains available; an explicit V2 candidate-scoped review request is refused.
+ordinary candidate planning uses the complete working-copy clone and
+whole-target review remains available; an explicit candidate-scoped review
+request is refused.
 
 Applicable store constraints still run during atomic application. Compatibility
 does not promise that apply will succeed: new rows may introduce constraint
@@ -633,10 +644,10 @@ reuse approval. Enforce artifact immutability and access control in your storage
 or application. The review contains candidate data and an entire reviewed plan,
 so protect it with the same care as graph data.
 
-V1 review capture and revalidation read and fingerprint the complete target
+Whole-target review capture and revalidation read and fingerprint the complete target
 graph and archival identity ledger. The artifact stores one fingerprint per
 original row plus expected absences. Budget graph-sized reads and artifact
-storage for V1. V2 candidate-scoped review uses bounded point and identity
+storage for it. Candidate-scoped review uses bounded point and identity
 closure reads for its baseline on eligible graphs.
 
 The execution receipt above is a separate commit. If its write fails or the

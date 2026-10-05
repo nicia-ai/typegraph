@@ -138,26 +138,21 @@ describe("C.2 — subClassOf refused when the child is not a structural subtype"
   it("refuses an opaque construct (z.intersection) as incomparable, never silently accepted", () => {
     // Child's `tag` differs from Parent's `tag` ONLY by a value-level
     // constraint (`minLength: 3`) TypeScript's z.infer cannot see, so the
-    // pair still compiles under C.1 (both project to the same `{ a: string,
-    // b: string }` output type) — but the projected JSON Schema is NOT
-    // byte-identical, so the identity rule (C13-R1-03) cannot fire, and the
-    // opaque `allOf` keyword must still surface the refusal. Width
-    // subtyping (the child adding "note") must not mask it either.
+    // pair still compiles under C.1 (both infer `string`) — but the
+    // projected JSON Schema is NOT byte-identical, so the identity rule
+    // (C13-R1-03) cannot fire, and the opaque `allOf` keyword must still
+    // surface the refusal. Width subtyping (the child adding "note") must
+    // not mask it either. Two string schemas, because the projection merges
+    // an intersection of two object schemas into one comparable object.
     const Child = defineNode("Child", {
       schema: z.object({
-        tag: z.intersection(
-          z.object({ a: z.string().min(3) }),
-          z.object({ b: z.string() }),
-        ),
+        tag: z.intersection(z.string().min(3), z.string().max(10)),
         note: z.string(),
       }),
     });
     const Parent = defineNode("Parent", {
       schema: z.object({
-        tag: z.intersection(
-          z.object({ a: z.string() }),
-          z.object({ b: z.string() }),
-        ),
+        tag: z.intersection(z.string(), z.string().max(10)),
       }),
     });
 

@@ -33,8 +33,8 @@
  * naming the file. *Mutation*: remove the ONE writer (`flush.ts`) from the
  * allowlist while its INSERT still stands → also fails "undeclared" (the
  * file is unnamed but the reference still exists). *Mutation*: delete an
- * allowlisted file's only reference (e.g. rewrite `clear.ts` to skip the
- * relation) while its entry survives → the "stale" assertion fails, naming
+ * allowlisted file's only reference (e.g. drop the relation from
+ * `graph-relations.ts`) while its entry survives → the "stale" assertion fails, naming
  * the entry.
  */
 import fs from "node:fs";
@@ -114,9 +114,14 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
       "The ONE writer: flushIdentityTransitions INSERTs the buffered notes against the recorded commit the same flush allocates for every other recorded relation.",
   },
   {
-    file: "backend/drizzle/operations/clear.ts",
+    file: "backend/graph-relations.ts",
     reason:
-      "store.clear()'s whole-graph sweep DELETEs every row for the graph, exactly as it does for every other graph-scoped relation — not a membership read.",
+      "The graph-relation inventory declares the relation's key and how store.clear(), a namespace fork, a working-copy clone and the storage inventory treat its rows — whole-relation sweeps, copies and counts, never a membership read.",
+  },
+  {
+    file: "backend/drizzle/schema/postgres-table-names.ts",
+    reason:
+      "The bundled PostgreSQL table names declare the relation's default physical name — structural schema wiring, not a read.",
   },
   {
     file: "query/compiler/schema.ts",

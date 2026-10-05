@@ -70,14 +70,18 @@
  * 7. If either side is a union (`anyOf`, or `oneOf` — read as `anyOf`; the
  *    projection emits `oneOf` only for `z.discriminatedUnion`, whose members
  *    are mutually exclusive by construction, so the two readings coincide
- *    over this fragment, with no overlap detection performed), every child
+ *    over this fragment, with no overlap detection performed — or a `type`
+ *    token array, which the projection emits for a union of bare primitives
+ *    such as `z.string().nullable()` and which is read as one member per
+ *    token, each carrying every sibling keyword), every child
  *    member must find SOME parent member it subtypes — checking every parent
  *    member before concluding `incomparable`, so the verdict never depends on
  *    the order the parent declared its members in (a member that cannot be
  *    judged does not stop the search for a later member that matches). This
  *    is also what handles nullability with no special case: `z.string()` is a
- *    subtype of `z.string().nullable()` (`anyOf: [string, null]`) because the
- *    lone child member matches the union's first member; the reverse is not,
+ *    subtype of `z.string().nullable()` (`type: ["string", "null"]`, or
+ *    `anyOf: [string, null]` in a document stored by an earlier projection)
+ *    because the lone child member matches the union's first member; the reverse is not,
  *    because the union's `null` member matches nothing on a bare `string`
  *    parent. A union keyword is ANDed with any sibling keyword on the same
  *    schema object, not replaced by it — `{ type: "string", anyOf: [...] }`
@@ -97,9 +101,9 @@
  *    rather than skipped, since an open child does not actually omit the
  *    property — it just declares no NAMED constraint for it), arrays compare
  *    bounds/items/tuple prefixes (a closed parent tuple — `prefixItems` with
- *    no `items` — additionally requires the child be bounded to the same
- *    arity, since the Zod tuple projection encodes "no rest element" only by
- *    omitting `items`, not with an explicit length bound), strings compare
+ *    `items: false`, or with no `items` at all in a document stored by an
+ *    earlier projection — additionally requires the child be closed at the
+ *    same arity), strings compare
  *    length bounds, `pattern`, and `format` (a constraint, not an
  *    annotation — see {@link COMPARABLE_KEYWORDS}), and numbers compare
  *    bounds folding `exclusiveMinimum` /
@@ -143,7 +147,6 @@ export type StructuralSubtypeReason =
 export type StructuralIncomparableReason =
   | "unsupported-keyword"
   | "schema-reference"
-  | "type-token-array"
   | "unsupported-construct"
   | "max-depth-exceeded";
 
@@ -220,9 +223,6 @@ function projectTypeVisibleValue(key: string, value: unknown): unknown {
       }
       return projected;
     }
-    case "items": {
-      return projectTypeVisible(value as JsonSchema);
-    }
     case "prefixItems":
     case "anyOf":
     case "oneOf": {
@@ -230,6 +230,7 @@ function projectTypeVisibleValue(key: string, value: unknown): unknown {
         projectTypeVisible(member),
       );
     }
+    case "items":
     case "additionalProperties": {
       return typeof value === "boolean" ? value : (
           projectTypeVisible(value as JsonSchema)
@@ -300,6 +301,10 @@ function tupleIndexSegment(index: number): string {
 
 function unionMemberSegment(index: number): string {
   return `anyOf[${index}]`;
+}
+
+function typeTokenSegment(index: number): string {
+  return `type[${index}]`;
 }
 
 const OBJECT_TYPE_TOKEN = "object";
@@ -533,16 +538,58 @@ function compareSchemas(
  * silently hide its union from a caller using it as a union detector) and is
  * not the right owner for this question.
  */
-function isUnionSchema(schema: JsonSchema): boolean {
+function declaresUnionMembers(schema: JsonSchema): boolean {
   return hasOwnKey(schema, "anyOf") || hasOwnKey(schema, "oneOf");
+}
+
+/**
+ * Whether `schema` admits more than one alternative: declared members, or a
+ * `type` token array. A token array is a union in its own right — `{ type:
+ * ["string", "null"] }` admits exactly what `anyOf: [{ type: "string" }, {
+ * type: "null" }]` does — and it is how the projection writes a union of bare
+ * primitives.
+ */
+function isUnionSchema(schema: JsonSchema): boolean {
+  return declaresUnionMembers(schema) || Array.isArray(schema.type);
 }
 
 // ============================================================
 // Unions
 // ============================================================
 
-function unionMembers(schema: JsonSchema): readonly JsonSchema[] {
-  return schema.anyOf ?? schema.oneOf ?? [schema];
+type UnionMember = Readonly<{
+  schema: JsonSchema;
+  segment: string | undefined;
+}>;
+
+/**
+ * The alternatives `schema` admits, each with the path segment that names it.
+ * Declared members win when a schema carries both forms: its token array is
+ * then a sibling keyword, compared like any other. A schema that is not a
+ * union is its own single alternative and has no segment: one would point a
+ * caller at a path the schema never actually has.
+ *
+ * A token-array member is the whole schema narrowed to one token. Every
+ * other keyword rides along, because a keyword constrains only values of the
+ * type it applies to: `{ type: ["string", "null"], minLength: 3 }` is a
+ * string of at least three characters, or null.
+ */
+function unionMembers(schema: JsonSchema): readonly UnionMember[] {
+  const declared = schema.anyOf ?? schema.oneOf;
+  if (declared !== undefined) {
+    return declared.map((member, index) => ({
+      schema: member,
+      segment: unionMemberSegment(index),
+    }));
+  }
+  const type = schema.type;
+  if (typeof type === "string" || type === undefined) {
+    return [{ schema, segment: undefined }];
+  }
+  return type.map((token, index) => ({
+    schema: { ...schema, type: token },
+    segment: typeTokenSegment(index),
+  }));
 }
 
 /**
@@ -577,7 +624,8 @@ function compareUnionSiblingConstraints(
   path: readonly string[],
   depth: number,
 ): StructuralSubtypeResult {
-  if (!isUnionSchema(parent)) return SUBTYPE;
+  // A token array's members already carry every sibling keyword.
+  if (!declaresUnionMembers(parent)) return SUBTYPE;
   const parentSiblings = withoutUnionKeywords(parent);
   if (Object.keys(stripSchemaMetadata(parentSiblings)).length === 0) {
     return SUBTYPE;
@@ -591,18 +639,11 @@ function compareUnion(
   path: readonly string[],
   depth: number,
 ): StructuralSubtypeResult {
-  const childMembers = unionMembers(child);
   const parentMembers = unionMembers(parent);
-  const childIsUnion = isUnionSchema(child);
 
-  for (const [childIndex, childMember] of childMembers.entries()) {
-    // Only a real union member gets an `anyOf[i]` segment. When `child`
-    // itself carries no `anyOf`/`oneOf` (`compareUnion` was reached because
-    // `parent` is the union), `unionMembers` synthesizes a single-element
-    // `[child]` — appending a segment for that synthesized member would
-    // point a caller at a path the child schema never actually has.
+  for (const childMember of unionMembers(child)) {
     const memberPath =
-      childIsUnion ? [...path, unionMemberSegment(childIndex)] : path;
+      childMember.segment === undefined ? path : [...path, childMember.segment];
     let matchedParentMember = false;
     // A parent member that is itself incomparable does not end the search:
     // the schema is order-insensitive by construction (unions are sets), so
@@ -612,8 +653,8 @@ function compareUnion(
     let firstIncomparable: StructuralSubtypeResult | undefined;
     for (const parentMember of parentMembers) {
       const probeResult = compareSchemas(
-        childMember,
-        parentMember,
+        childMember.schema,
+        parentMember.schema,
         memberPath,
         depth + 1,
       );
@@ -651,12 +692,9 @@ function compareLeaf(
   const valueSetResult = compareValueSets(child, parent, path);
   if (valueSetResult.verdict !== "subtype") return valueSetResult;
 
+  // Never a token array here: `compareSchemas` reads one as a union.
   const childType = child.type;
   const parentType = parent.type;
-
-  if (Array.isArray(childType) || Array.isArray(parentType)) {
-    return incomparable("type-token-array", path);
-  }
 
   if (parentType !== undefined && childType === undefined) {
     return notSubtype("unconstrained-where-parent-constrains", path);
@@ -875,27 +913,52 @@ function compareObject(
 // Arrays and tuples
 // ============================================================
 
+const CLOSED_TAIL = "closed";
+const OPEN_TAIL = "open";
+
+/** What an array admits past its `prefixItems`: nothing, anything, or a schema. */
+type ArrayTail = typeof CLOSED_TAIL | typeof OPEN_TAIL | JsonSchema;
+
+/**
+ * The projection closes a tuple that has no rest element with `items: false`.
+ * A document stored by an earlier projection closes one by omitting `items`
+ * beside `prefixItems`, so that spelling is read as closed too; the current
+ * projection never emits it.
+ */
+function arrayTail(schema: JsonSchema): ArrayTail {
+  const { items } = schema;
+  if (items === false) return CLOSED_TAIL;
+  if (items === true) return OPEN_TAIL;
+  if (items !== undefined) return items;
+  return schema.prefixItems === undefined ? OPEN_TAIL : CLOSED_TAIL;
+}
+
+function isTailSchema(tail: ArrayTail): tail is JsonSchema {
+  return typeof tail !== "string";
+}
+
+/** A closed array with no declared prefix is the empty tuple. */
+function tuplePrefix(
+  schema: JsonSchema,
+  tail: ArrayTail,
+): readonly JsonSchema[] | undefined {
+  return schema.prefixItems ?? (tail === CLOSED_TAIL ? [] : undefined);
+}
+
 function compareArray(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
   depth: number,
 ): StructuralSubtypeResult {
-  const childMinItems = child.minItems ?? 0;
-  const parentMinItems = parent.minItems ?? 0;
-  if (childMinItems < parentMinItems) {
-    return notSubtype("array-bounds-not-tighter", path);
-  }
+  const childTail = arrayTail(child);
+  const parentTail = arrayTail(parent);
+  const childPrefix = tuplePrefix(child, childTail);
+  const parentPrefix = tuplePrefix(parent, parentTail);
 
-  const childMaxItems = child.maxItems ?? Number.POSITIVE_INFINITY;
-  const parentMaxItems = parent.maxItems ?? Number.POSITIVE_INFINITY;
-  if (childMaxItems > parentMaxItems) {
-    return notSubtype("array-bounds-not-tighter", path);
-  }
-
-  const childPrefix = child.prefixItems;
-  const parentPrefix = parent.prefixItems;
-
+  // Tuple shape before length bounds: the projection states a closed tuple's
+  // arity as `minItems`/`maxItems` too, and a mismatched arity is the more
+  // precise refusal.
   if (parentPrefix !== undefined) {
     if (childPrefix?.length !== parentPrefix.length) {
       return notSubtype("tuple-arity-mismatch", path);
@@ -909,22 +972,20 @@ function compareArray(
       );
       if (memberResult.verdict !== "subtype") return memberResult;
     }
-    // A parent tuple with no rest element (`prefixItems` present, `items`
-    // absent) has no elements beyond its declared prefix under the Zod tuple
-    // projection (see the `childIsClosedTuple` comment below for the mirror
-    // case). A child of equal prefix arity that ALSO carries `items` (a rest
-    // element, e.g. `z.tuple([string], number)`) permits values longer than
-    // the parent ever allows, even though the prefix lengths matched above.
-    if (parent.items === undefined && child.items !== undefined) {
+    // A closed parent tuple has no elements beyond its declared prefix. A
+    // child of equal prefix arity that is not closed too (a rest element,
+    // e.g. `z.tuple([string], number)`) permits values longer than the parent
+    // ever allows, even though the prefix lengths matched above.
+    if (parentTail === CLOSED_TAIL && childTail !== CLOSED_TAIL) {
       return notSubtype("tuple-arity-mismatch", path);
     }
-  } else if (childPrefix !== undefined && parent.items !== undefined) {
+  } else if (childPrefix !== undefined && isTailSchema(parentTail)) {
     // A tuple narrowing a homogeneous parent array: every prefix member must
     // itself narrow the parent's item type.
     for (const [index, childMember] of childPrefix.entries()) {
       const memberResult = compareSchemas(
         childMember,
-        parent.items,
+        parentTail,
         [...path, tupleIndexSegment(index)],
         depth + 1,
       );
@@ -932,31 +993,33 @@ function compareArray(
     }
   }
 
-  if (parent.items !== undefined) {
-    // A tuple with no rest element (`prefixItems` present, `items` absent)
-    // has no elements beyond its prefix under the Zod tuple projection, even
-    // though the JSON Schema alone does not encode a bound — so there is no
-    // tail left to compare against `parent.items`.
-    const childIsClosedTuple =
-      childPrefix !== undefined && child.items === undefined;
-    if (!childIsClosedTuple) {
-      if (child.items === undefined) {
-        return notSubtype("unconstrained-where-parent-constrains", [
-          ...path,
-          ARRAY_ITEM_SEGMENT,
-        ]);
-      }
-      const itemsResult = compareSchemas(
-        child.items,
-        parent.items,
-        [...path, ARRAY_ITEM_SEGMENT],
-        depth + 1,
-      );
-      if (itemsResult.verdict !== "subtype") return itemsResult;
-    }
+  const childMinItems = child.minItems ?? 0;
+  const parentMinItems = parent.minItems ?? 0;
+  if (childMinItems < parentMinItems) {
+    return notSubtype("array-bounds-not-tighter", path);
   }
 
-  return SUBTYPE;
+  const childMaxItems = child.maxItems ?? Number.POSITIVE_INFINITY;
+  const parentMaxItems = parent.maxItems ?? Number.POSITIVE_INFINITY;
+  if (childMaxItems > parentMaxItems) {
+    return notSubtype("array-bounds-not-tighter", path);
+  }
+
+  // A closed child has no elements beyond its prefix, so there is no tail
+  // left to compare against the parent's.
+  if (!isTailSchema(parentTail) || childTail === CLOSED_TAIL) return SUBTYPE;
+  if (childTail === OPEN_TAIL) {
+    return notSubtype("unconstrained-where-parent-constrains", [
+      ...path,
+      ARRAY_ITEM_SEGMENT,
+    ]);
+  }
+  return compareSchemas(
+    childTail,
+    parentTail,
+    [...path, ARRAY_ITEM_SEGMENT],
+    depth + 1,
+  );
 }
 
 // ============================================================

@@ -8,6 +8,7 @@ import {
   captureCandidateWriteSetTarget,
   isErr,
   MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   MergePlanningStaleError,
   MergeReviewError,
   planCandidateWriteSetReview,
@@ -138,29 +139,37 @@ describe("candidate review wire and coherent capture", () => {
     },
   );
 
-  it("refuses a review stored under an earlier format as an unsupported version, not as malformed", async () => {
-    const { args } = await setup();
-    const review = unwrap(await planCandidateWriteSetReview(args));
-    expect(review.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
-    const stored: unknown = { ...review, formatVersion: 1 };
-    const makeBackend = vi.fn(args.makeBackend);
+  // Formats 1 and 2 are the whole-target and candidate-scoped formats that
+  // embedded a version-1 plan.
+  it.each([1, 2])(
+    "refuses a review stored under earlier format %d as an unsupported version, not as malformed",
+    async (earlierFormat) => {
+      const { args } = await setup();
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+      const stored: unknown = { ...review, formatVersion: earlierFormat };
+      const makeBackend = vi.fn(args.makeBackend);
 
-    const result = await revalidateCandidateWriteSetReview({
-      ...args,
-      makeBackend,
-      review: stored,
-    });
+      const result = await revalidateCandidateWriteSetReview({
+        ...args,
+        makeBackend,
+        review: stored,
+      });
 
-    if (!isErr(result))
-      throw new Error("Expected an unsupported-version refusal.");
-    expect(result.error).toBeInstanceOf(MergeReviewError);
-    expect(result.error.details).toEqual({
-      reason: "unsupported-version",
-      received: 1,
-      supported: MERGE_REVIEW_FORMAT_VERSION,
-    });
-    expect(makeBackend).not.toHaveBeenCalled();
-  });
+      if (!isErr(result))
+        throw new Error("Expected an unsupported-version refusal.");
+      expect(result.error).toBeInstanceOf(MergeReviewError);
+      expect(result.error.details).toEqual({
+        reason: "unsupported-version",
+        received: earlierFormat,
+        supported: [
+          MERGE_REVIEW_FORMAT_VERSION,
+          MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+        ],
+      });
+      expect(makeBackend).not.toHaveBeenCalled();
+    },
+  );
 
   it("refuses a mixed-revision baseline even when the inner planner sees a stable newer target", async () => {
     const { args, backend } = await setup();

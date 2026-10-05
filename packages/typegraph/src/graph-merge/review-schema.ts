@@ -37,8 +37,9 @@ type MergeReviewFormatVersion =
 export function isSupportedMergeReviewFormatVersion(
   formatVersion: unknown,
 ): formatVersion is MergeReviewFormatVersion {
-  return SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS.some(
-    (supported) => supported === formatVersion,
+  return (
+    formatVersion === MERGE_REVIEW_FORMAT_VERSION ||
+    formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED
   );
 }
 

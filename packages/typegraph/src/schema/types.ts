@@ -398,7 +398,8 @@ export type JsonSchema = Readonly<{
   type?: string | readonly string[];
   properties?: Record<string, JsonSchema>;
   required?: readonly string[];
-  items?: JsonSchema;
+  /** `false` closes a tuple: no element past `prefixItems`. */
+  items?: JsonSchema | boolean;
   prefixItems?: readonly JsonSchema[];
   minItems?: number;
   maxItems?: number;

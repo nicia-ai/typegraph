@@ -1966,6 +1966,8 @@ export type DialectCapabilities = Readonly<{
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+    textIndexOrderIsBinary: boolean;
+    transactionReadsShareOneSnapshot: boolean;
 }>;
 
 // @public
@@ -2097,7 +2099,7 @@ export type EdgeEndpointAllowance = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2539,6 +2541,18 @@ export type FindNodesByKindParams = Readonly<{
     after?: string;
 }>;
 
+// @public
+export type FindRowsAcrossKindsParams = Readonly<{
+    graphId: string;
+    kinds: readonly string[];
+    limit: number;
+    after?: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    excludeDeleted?: boolean;
+}>;
+
 // @public (undocumented)
 export const fts5Strategy: FulltextStrategy;
 
@@ -2697,8 +2711,24 @@ export type GraphBackend = Readonly<{
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
+    findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findActiveEdgesBySourceV1?: (this: void, params: Readonly<{
+        graphId: string;
+        edgeKind: string;
+        fromKind: string;
+        fromId: string;
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesByMatchIdentity?: (this: void, params: Readonly<{
+        graphId: string;
+        identities: readonly Readonly<{
+            kind: string;
+            name: string;
+            key: string;
+        }>[];
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly EdgeRow[]>;
     findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
@@ -2766,6 +2796,8 @@ export type GraphBackend = Readonly<{
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -2811,6 +2843,7 @@ export type GraphBackend = Readonly<{
     adoptBaseSchema?: (this: void) => Promise<void>;
     assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
+    clearGraphPreservingContributionMaterializations?: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
     trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>, options?: Readonly<{
@@ -2893,10 +2926,10 @@ export type GraphIdentityConfig = Readonly<{
 }>;
 
 // @public (undocumented)
-export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "clearGraphPreservingContributionMaterializations" | "bootstrapTables">;
 
 // @public
-export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getNodes" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
+export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getNodes" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findNodesAcrossKinds" | "findEdgesAcrossKinds" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
 
 // @public
 type GraphTemplateRow = Readonly<{
@@ -3193,7 +3226,7 @@ export type JsonSchema = Readonly<{
     type?: string | readonly string[];
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
-    items?: JsonSchema;
+    items?: JsonSchema | boolean;
     prefixItems?: readonly JsonSchema[];
     minItems?: number;
     maxItems?: number;
@@ -3371,7 +3404,7 @@ export type NodeCreateCommandResult = Readonly<{
 }>;
 
 // @public (undocumented)
-export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
+export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
 export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
@@ -3785,6 +3818,7 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     revisionOrigins: string;
+    revisionChanges?: string;
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
@@ -3795,6 +3829,10 @@ export type ResolvedSqlTableNames = Readonly<{
     uniques: string;
     edgeClaims: string;
     fences: string;
+    indexMaterializations?: string;
+    contributionMaterializations?: string;
+    kindRemovals?: string;
+    reconciliationMarkers?: string;
 }>;
 
 // @public
@@ -4047,6 +4085,7 @@ export type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
@@ -4057,6 +4096,10 @@ export type SqlTableNames = Readonly<{
     uniques: string;
     edgeClaims?: string | undefined;
     fences?: string | undefined;
+    indexMaterializations?: string | undefined;
+    contributionMaterializations?: string | undefined;
+    kindRemovals?: string | undefined;
+    reconciliationMarkers?: string | undefined;
 }>;
 
 // @public
@@ -4227,6 +4270,21 @@ export type TableContribution = Readonly<{
     createDdl: readonly string[];
     dropDdl?: readonly string[];
     runtimeEnsure: boolean;
+    workingCopyClonePolicy?: Readonly<{
+        kind: "graphRows";
+        graphIdColumn: string;
+    }> | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+    }> | Readonly<{
+        kind: "freshSeed";
+    }> | Readonly<{
+        kind: "rebuildAfterClone";
+    }> | Readonly<{
+        kind: "unsupported";
+        reason: string;
+    }>;
 }>;
 
 // @public
@@ -4296,6 +4354,31 @@ type TypeGraphErrorOptions = Readonly<{
 
 // @public
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly findActiveEdgesBySourceV1: {
+        readonly kind: "reasoned";
+        readonly reason: "Versioned active-only source read for bounded oneActive candidate planning. Custom backends without it keep the complete-clone path.";
+        readonly accesses: 2;
+    };
+    readonly findNodesAcrossKinds: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
+        readonly accesses: 2;
+    };
+    readonly findEdgesAcrossKinds: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
+        readonly accesses: 2;
+    };
+    readonly findEdgesByMatchIdentity: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional exact lookup for durable edge identity owners, including tombstones. Candidate planning uses it to seed active owners and falls back to full clone when the capability is absent or the owner is tombstoned.";
+        readonly accesses: 2;
+    };
+    readonly clearGraphPreservingContributionMaterializations: {
+        readonly kind: "reasoned";
+        readonly reason: "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.";
+        readonly accesses: 1;
+    };
     readonly upsertHeterogeneousNodes: {
         readonly kind: "reasoned";
         readonly reason: "Exact-session PostgreSQL heterogeneous node upsert program.";
@@ -4339,22 +4422,22 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.";
-        readonly accesses: 29;
+        readonly accesses: 32;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
-        readonly reason: "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.";
-        readonly accesses: 2;
+        readonly reason: "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The exceptions are the two session-isolation reads, which take the bare `isolationFactExpression` and are gated on `dialect`, not on a resolved fence plan, so there is no plan to read it through: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) reads `target.fenceSql` directly, and the graph storage inventory (`backend/graph-storage.ts`) folds the expression into its first count statement to report whether its counts shared one snapshot.";
+        readonly accesses: 3;
     };
     readonly commitSchemaVersionIfKindsEmpty: {
         readonly kind: "reasoned";
         readonly reason: "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.";
-        readonly accesses: 2;
+        readonly accesses: 3;
     };
     readonly commitSchemaVersionWithPreflight: {
         readonly kind: "reasoned";
         readonly reason: "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.";
-        readonly accesses: 3;
+        readonly accesses: 4;
     };
     readonly setActiveVersionWithPreflight: {
         readonly kind: "reasoned";
@@ -4374,17 +4457,17 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly schemaWriteTransaction: {
         readonly kind: "reasoned";
         readonly reason: "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.";
-        readonly accesses: 4;
+        readonly accesses: 5;
     };
     readonly registerGraphTemplate: {
         readonly kind: "reasoned";
         readonly reason: "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.";
-        readonly accesses: 1;
+        readonly accesses: 2;
     };
     readonly instantiateGraphTemplate: {
         readonly kind: "reasoned";
         readonly reason: "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.";
-        readonly accesses: 1;
+        readonly accesses: 2;
     };
     readonly ensureIdentityTables: {
         readonly kind: "reasoned";
@@ -4446,6 +4529,16 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.";
         readonly accesses: 0;
     };
+    readonly ensureRevisionChangesJournal: {
+        readonly kind: "reasoned";
+        readonly reason: "Privileged journal installation is explicit; runtime lineage only reads readiness.";
+        readonly accesses: 2;
+    };
+    readonly revisionChangesJournalReady: {
+        readonly kind: "reasoned";
+        readonly reason: "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.";
+        readonly accesses: 2;
+    };
     readonly getContributionMaterialization: {
         readonly kind: "reasoned";
         readonly reason: "Same zero-consumer family as ensureContributionMaterializationsTable.";
@@ -4481,8 +4574,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly lineage: {
         readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.";
-        readonly accesses: 2;
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.";
+        readonly accesses: 3;
     };
     readonly recordedTime: {
         readonly kind: "reasoned";
@@ -4547,7 +4640,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 0;
+        readonly ceiling: 1;
     };
     readonly ensureExtension: {
         readonly kind: "deferred";
@@ -4595,7 +4688,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "ddlExecution";
-        readonly ceiling: 13;
+        readonly ceiling: 16;
     };
     readonly executeRaw: {
         readonly kind: "deferred";
@@ -4625,7 +4718,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "fulltextOperations";
-        readonly ceiling: 2;
+        readonly ceiling: 4;
     };
     readonly getIndexMaterialization: {
         readonly kind: "deferred";
@@ -4739,7 +4832,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 10;
+        readonly ceiling: 12;
     };
     readonly upsertEmbeddingBatch: {
         readonly kind: "deferred";
@@ -4769,7 +4862,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 9;
+        readonly ceiling: 15;
     };
 };
 
