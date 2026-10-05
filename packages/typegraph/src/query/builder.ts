@@ -10,7 +10,7 @@
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
-import { DEFAULT_ALIAS_EXPANSION_AXIS } from "./builder/alias-expansion";
+import { resolveDefaultAliasExpansion } from "./builder/alias-expansion";
 import {
   type CreateQueryBuilderOptions,
   type EmptyAliasMap,
@@ -213,7 +213,10 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
-    defaultExpansion: options?.defaultExpansion ?? DEFAULT_ALIAS_EXPANSION_AXIS,
+    defaultExpansion: resolveDefaultAliasExpansion(
+      options?.defaultExpansion,
+      "defaultExpansion",
+    ),
     identityEnabled:
       options?.identityEnabled ?? registry.identity !== undefined,
     identitySameIdAcrossKinds:

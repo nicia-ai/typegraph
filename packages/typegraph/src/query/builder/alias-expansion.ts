@@ -33,13 +33,21 @@ export type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
 
 /**
  * The axis an alias takes when neither the call nor the store states one.
- * Named here because both places that resolve a store-wide
- * default — `createQueryBuilder` and `Store`'s `queryDefaults` — must agree
- * on it; two spellings of the same literal would let a store-issued builder
- * and a standalone one drift apart.
+ * Both places that accept a store-wide default — `createQueryBuilder` and
+ * `Store`'s `queryDefaults` — resolve it through
+ * {@link resolveDefaultAliasExpansion}, so a store-issued builder and a
+ * standalone one cannot drift apart.
  */
 export const DEFAULT_ALIAS_EXPANSION_AXIS: DefaultAliasExpansionAxis =
   "subclasses";
+
+/**
+ * {@link DefaultAliasExpansionAxis} as a runtime list: what a store-wide
+ * default may name, and what the `store.search()` facade offers. One list for
+ * both, because both exclude `"narrower"` for the reason that type states.
+ */
+export const DEFAULT_ALIAS_EXPANSION_AXES: readonly DefaultAliasExpansionAxis[] =
+  ["exact", "subclasses"];
 
 /**
  * `search()`'s default, distinct from {@link DEFAULT_ALIAS_EXPANSION_AXIS}.
@@ -95,6 +103,29 @@ export function assertPermittedExpansionAxis(
       suggestion: `Pass one of ${permittedAxes.map((axis) => `"${axis}"`).join(", ")}.`,
     },
   );
+}
+
+/**
+ * Resolves the store-wide default a `Store` (`queryDefaults.expansion`) or a
+ * standalone `createQueryBuilder` (`defaultExpansion`) was constructed with:
+ * the stated axis, or {@link DEFAULT_ALIAS_EXPANSION_AXIS} when none is
+ * stated.
+ *
+ * Called at construction, so a default no alias could resolve is refused
+ * where it was stated instead of at the first `from()` that falls back to
+ * it. `surface` names the option for the refusal.
+ *
+ * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_INVALID`) when the
+ *   stated default is not one of {@link DEFAULT_ALIAS_EXPANSION_AXES} — an
+ *   out-of-domain value, or `"narrower"`.
+ */
+export function resolveDefaultAliasExpansion(
+  stated: DefaultAliasExpansionAxis | undefined,
+  surface: string,
+): DefaultAliasExpansionAxis {
+  if (stated === undefined) return DEFAULT_ALIAS_EXPANSION_AXIS;
+  assertPermittedExpansionAxis(stated, DEFAULT_ALIAS_EXPANSION_AXES, surface);
+  return stated;
 }
 
 /**

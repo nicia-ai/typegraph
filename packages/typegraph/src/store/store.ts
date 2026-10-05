@@ -222,8 +222,8 @@ import {
   type QueryCoordinateState,
 } from "../query/builder";
 import {
-  DEFAULT_ALIAS_EXPANSION_AXIS,
   type DefaultAliasExpansionAxis,
+  resolveDefaultAliasExpansion,
 } from "../query/builder/alias-expansion";
 import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import {
@@ -1601,8 +1601,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
-    this.#defaultExpansion =
-      options?.queryDefaults?.expansion ?? DEFAULT_ALIAS_EXPANSION_AXIS;
+    this.#defaultExpansion = resolveDefaultAliasExpansion(
+      options?.queryDefaults?.expansion,
+      "queryDefaults",
+    );
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
