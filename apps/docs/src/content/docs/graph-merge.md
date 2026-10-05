@@ -1998,9 +1998,12 @@ read once through `Store.workingCopyOptions`, plus `history`/
 `revisionTrackingEnabled`. This is safe precisely because a fork is the SAME
 physical database as the base: a custom `schema` names relations the fork
 carries too, and an external `recordedRead` binding points at one. The clone
-strategy inherits only `revisionTracking` — its fresh backend is a distinct,
+strategy inherits `revisionTracking` and `queryDefaults` only — a query answers
+alike on the base and on its clone, but the clone's fresh backend is a distinct,
 empty database, so a schema naming the base's tables or a `recordedRead`
-binding populated nowhere on the clone would misdirect it.
+binding populated nowhere on the clone would misdirect it. Hooks, upsert
+coalescing, and the auto-refresh-statistics threshold are not carried to a
+clone.
 
 Because the fork's store reads and writes through the base's table names,
 `connect()`'s backend must bind those SAME names. `create()` compares the

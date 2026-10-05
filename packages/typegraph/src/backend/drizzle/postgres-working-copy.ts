@@ -83,6 +83,10 @@ import {
   lockAllocation,
 } from "./postgres-working-copy-lock";
 import {
+  allocationNames,
+  allocationPhysicalPrefix,
+} from "./postgres-working-copy-names";
+import {
   allocationRemovedError,
   createPostgresOperationCapability,
   hasUndeliveredEvidence,
@@ -489,22 +493,6 @@ function assertVectorManifestOwned(
   }
 }
 
-function allocationNames(allocationId: string): Promise<PostgresTableNames> {
-  return sha256Hex(allocationId, 12).then(
-    (digest) =>
-      Object.fromEntries(
-        Object.keys(defaultPostgresTableNames).map((key) => [
-          key,
-          `tgw_${digest}_${key.slice(0, 15)}`,
-        ]),
-      ) as PostgresTableNames,
-  );
-}
-
-function allocationPhysicalPrefix(names: PostgresTableNames): string {
-  return names.nodes.slice(0, -"nodes".length);
-}
-
 function assertAllocationPrefix(
   row: AllocationRow,
   names: PostgresTableNames,
@@ -523,7 +511,7 @@ async function resolveAllocationIndexNames(
   declarations: readonly IndexDeclaration[],
   names: PostgresTableNames,
 ): Promise<ReadonlyMap<string, string>> {
-  const prefix = names.nodes.slice(0, -"nodes".length);
+  const prefix = allocationPhysicalPrefix(names);
   const reserved = resolveSystemIndexNames(names);
   const entries = await Promise.all(
     declarations
@@ -680,6 +668,12 @@ function fixedSchemaBackend(
     : {
         commitSchemaVersionWithPreflight: () =>
           Promise.reject(fixedSchemaError("commitSchemaVersionWithPreflight")),
+      }),
+    ...(backend.setActiveVersionWithPreflight === undefined ?
+      {}
+    : {
+        setActiveVersionWithPreflight: () =>
+          Promise.reject(fixedSchemaError("setActiveVersionWithPreflight")),
       }),
     ...(backend.instantiateGraphTemplate === undefined ?
       {}

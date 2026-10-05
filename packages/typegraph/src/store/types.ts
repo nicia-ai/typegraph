@@ -813,8 +813,12 @@ export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
  *
  * `history` and `revisionTracking` are deliberately excluded: a working-copy
  * strategy decides those for itself (a fork mirrors the base's own
- * `historyEnabled`/`revisionTrackingEnabled`; a clone documents why it keeps
- * a narrower subset — see `cloneWorkingCopyStrategy`'s doc comment).
+ * `historyEnabled`/`revisionTrackingEnabled`). A working copy allocated from
+ * a live base store carries its `queryDefaults`, so a query answers alike on
+ * the store and on its working copy; a durable copy reopened later starts
+ * from library defaults unless the caller passes `reopenOptions`. A clone
+ * carries nothing else from this set — see `cloneWorkingCopyStrategy`'s doc
+ * comment.
  */
 export type WorkingCopyOptions = Omit<
   LiveStoreOptions,
