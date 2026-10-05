@@ -264,6 +264,7 @@ import {
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
   uncapturedGraphWriteLock,
+  withRecordedIdentityDecision,
 } from "./typegraph-internal";
 import type {
   BaseAmbiguity,
@@ -2397,6 +2398,77 @@ async function applyIdentityRows<G extends GraphDef>(
   }
 }
 
+type MergeNodeWritePhase = Readonly<{
+  deletions: readonly MergePlanEntityRef[];
+  upserts: readonly MechanicalNodeWrite[];
+  identityRetractions: readonly IdentityTransferAssertion[];
+}>;
+
+/**
+ * The node write phase of every merge apply — the live plan and the replayed
+ * artifact both land their node rows through here, so they order the same
+ * writes the same way.
+ *
+ * A retraction naming a node whose validity window this merge ends is applied
+ * BEFORE the node rows: the store refuses to end the window of an endpoint a
+ * current assertion still names, so the only order a branch could have staged
+ * the pair in is the only order the apply can land it in. Every other
+ * retraction waits for the identity phase, which is handed the complete list
+ * again and skips the ones already ended here. A window end the plan did not
+ * pair with a retraction is still refused, as the typed identity conflict.
+ *
+ * The rows are written under the merge's governing decision, so a membership
+ * transition a node write causes as a side effect — a deleted node's same-ID
+ * fold detaching, an upserted node folding into a class — names the merge
+ * that caused it, as the identity rows' own transitions do. Edge writes cause
+ * no membership transition and so carry none.
+ */
+async function applyNodeWritePhase<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  nodesApi: TxNodes,
+  phase: MergeNodeWritePhase,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
+): Promise<Readonly<{ nodes: number; retracted: number }>> {
+  const validityEndedNodes = new Set(
+    phase.upserts
+      .filter((write) => "validTo" in write)
+      .map((write) => mergeKey(write.kind, write.id)),
+  );
+  const earlyIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    [],
+    phase.identityRetractions.filter(
+      (retraction) =>
+        validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
+        validityEndedNodes.has(mergeKeyOf(retraction.b)),
+    ),
+    decision,
+  );
+  const applyRows = (): Promise<number> =>
+    applyNodeRows(
+      target,
+      txBackend,
+      nodesApi,
+      phase.deletions,
+      phase.upserts,
+      deleteNodeWithPolicy,
+    );
+  try {
+    const nodes =
+      decision === undefined ?
+        await applyRows()
+      : await withRecordedIdentityDecision(txBackend, decision, applyRows);
+    return { nodes, retracted: earlyIdentity.retracted };
+  } catch (error) {
+    throw error instanceof IdentityEndpointValidityError ?
+        translateIdentityCommitError(error)
+      : error;
+  }
+}
+
 /**
  * Applies a resolved {@link MergePlan} through a transaction's collection API.
  * Shared by `commitPlan()` and the guarded `mergeIncremental()` commit path so
@@ -2411,40 +2483,18 @@ async function applyInternalMergePlan<G extends GraphDef>(
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
-  const nodeDeletions = plannedNodeReleases(plan);
-  const nodeUpserts = plannedNodeUpserts(plan);
-  const validityEndedNodes = new Set(
-    nodeUpserts
-      .filter((write) => "validTo" in write)
-      .map((write) => mergeKey(write.kind, write.id)),
-  );
-  const earlyIdentityRetractions = plan.identityRetractions.filter(
-    (retraction) =>
-      validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
-      validityEndedNodes.has(mergeKeyOf(retraction.b)),
-  );
-  const earlyIdentity = await applyIdentityRows(
+  const nodePhase = await applyNodeWritePhase(
     target,
     txBackend,
-    [],
-    earlyIdentityRetractions,
+    nodesApi,
+    {
+      deletions: plannedNodeReleases(plan),
+      upserts: plannedNodeUpserts(plan),
+      identityRetractions: plan.identityRetractions,
+    },
+    deleteNodeWithPolicy,
     decision,
   );
-  let committedNodes: number;
-  try {
-    committedNodes = await applyNodeRows(
-      target,
-      txBackend,
-      nodesApi,
-      nodeDeletions,
-      nodeUpserts,
-      deleteNodeWithPolicy,
-    );
-  } catch (error) {
-    throw error instanceof IdentityEndpointValidityError ?
-        translateIdentityCommitError(error)
-      : error;
-  }
 
   const edgeDeletions = [...plan.edgeDeletions].map(([identity, kind]) => ({
     kind,
@@ -2527,7 +2577,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   );
 
   return {
-    nodes: committedNodes,
+    nodes: nodePhase.nodes,
     edges: committedEdges,
     // ACTUAL ledger effects from the applier: rows created (idempotent
     // exact/pair matches the target already held are excluded — the normal
@@ -2537,7 +2587,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
     // partial commit.
     identity: {
       asserted: appliedIdentity.asserted,
-      retracted: earlyIdentity.retracted + appliedIdentity.retracted,
+      retracted: nodePhase.retracted + appliedIdentity.retracted,
     },
   };
 }
@@ -5193,21 +5243,29 @@ async function applyWireMergeWrites<G extends GraphDef>(
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
-  const committedNodes = await applyNodeRows(
+  const identityAssertions = artifact.writes
+    .identityAssertions as readonly IdentityTransferAssertion[];
+  const identityRetractions = artifact.writes
+    .identityRetractions as readonly IdentityTransferAssertion[];
+  const nodePhase = await applyNodeWritePhase(
     target,
     txBackend,
     nodesApi,
-    artifact.writes.nodeDeletes,
-    artifact.writes.nodeUpserts.map((upsert) => ({
-      kind: upsert.kind,
-      id: upsert.id,
-      props: wireWriteProps(upsert.setProps, upsert.unsetProps),
-      ...(upsert.validFrom === undefined ?
-        {}
-      : { validFrom: upsert.validFrom }),
-      ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
-    })),
+    {
+      deletions: artifact.writes.nodeDeletes,
+      upserts: artifact.writes.nodeUpserts.map((upsert) => ({
+        kind: upsert.kind,
+        id: upsert.id,
+        props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+        ...(upsert.validFrom === undefined ?
+          {}
+        : { validFrom: upsert.validFrom }),
+        ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+      })),
+      identityRetractions,
+    },
     deleteNodeWithPolicy,
+    decision,
   );
   // Resolved BEFORE `applyEdgeRows` below deletes
   // any of `artifact.writes.edgeDeletes` — same reasoning as
@@ -5247,10 +5305,6 @@ async function applyWireMergeWrites<G extends GraphDef>(
     unattachedCandidates,
   );
 
-  const identityAssertions = artifact.writes
-    .identityAssertions as readonly IdentityTransferAssertion[];
-  const identityRetractions = artifact.writes
-    .identityRetractions as readonly IdentityTransferAssertion[];
   const appliedIdentity = await applyIdentityRows(
     target,
     txBackend,
@@ -5278,11 +5332,11 @@ async function applyWireMergeWrites<G extends GraphDef>(
     );
   }
   return {
-    nodes: committedNodes,
+    nodes: nodePhase.nodes,
     edges: committedEdges,
     identity: {
       asserted: appliedIdentity.asserted,
-      retracted: appliedIdentity.retracted,
+      retracted: nodePhase.retracted + appliedIdentity.retracted,
     },
   };
 }

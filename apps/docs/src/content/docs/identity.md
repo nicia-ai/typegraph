@@ -364,6 +364,13 @@ watermark](#archival-transitions-and-the-retention-watermark)).
 | `schema-transition` | A schema evolution reinterpreted membership under new `sameIdAcrossKinds` or ontology rules |
 | `reconcile` | A graph merge applied the assertion or retraction; the transition's `decision` names the branch, the branch ancestry, and the plan and review digests when a reviewed plan was applied (see [Graph merge](/graph-merge/#identity-conflicts)) |
 
+`cause` names the mechanism that moved the membership; `decision` names what
+governed it. A graph merge therefore stamps its `decision` on **every**
+transition it causes, not only the `reconcile` ones: a class member the merge
+deleted is a `detach` and a same-ID peer it created is a `fold`, each carrying
+the same branch, ancestry and digests as the merge's `reconcile` rows. A
+transition with no `decision` came from an ordinary API write.
+
 `store.identity.replay(ref, options?)` pairs every transition with the class
 membership immediately before and after it, reconstructed through the exact
 same historical reader `asOf` and `asOfRecorded` reads use
