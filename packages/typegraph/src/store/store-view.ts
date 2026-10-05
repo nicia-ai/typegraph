@@ -266,6 +266,53 @@ const NON_KIND_KEYS: ReadonlySet<string> = new Set([
   "toJSON",
 ]);
 
+/** The option keys a read states its own temporal coordinate with. */
+const STATED_COORDINATE_KEYS = [
+  "temporalMode",
+  "asOf",
+  "recordedAsOf",
+] as const;
+
+/**
+ * A view read's options with the view's coordinate applied: the one place a
+ * pinned read merges the two, so no read can spread the pin over a
+ * coordinate its caller stated.
+ *
+ * The view's option types omit the temporal keys, but an untyped caller (or
+ * a cast) can still state them. Answering at the pin anyway would drop a
+ * stated value without a word, and honoring it would break the seal, so the
+ * read is refused — the same answer `view.query().temporal(...)` gives, on a
+ * `current` view and an `asOf` view alike.
+ *
+ * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
+ */
+function pinnedOptions<Options extends object, Pin extends object>(
+  method: string,
+  options: Options | undefined,
+  coordinate: ReadCoordinate,
+  pin: Pin,
+): Options & Pin {
+  const stated = STATED_COORDINATE_KEYS.filter(
+    (key) =>
+      options !== undefined &&
+      (options as Readonly<Record<string, unknown>>)[key] !== undefined,
+  );
+  if (stated.length > 0) {
+    throw new ConfigurationError(
+      `'${method}' on a StoreView does not accept ${stated.map((key) => `\`${key}\``).join(", ")} — the view's ` +
+        `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+        `Read at another coordinate through the live Store or store.view(...).`,
+      {
+        code: "STORE_VIEW_SEALED_COORDINATE",
+        method,
+        stated,
+        ...coordinateContext(coordinate),
+      },
+    );
+  }
+  return { ...options, ...pin } as Options & Pin;
+}
+
 /**
  * Returns a function that refuses a write or unsupported-read method on a
  * read-only view with a descriptive error, rather than silently ignoring
@@ -525,10 +572,16 @@ function pinnedEdgeCollection(
     count: (filter) => live.count(filter, temporal),
     findFrom: (from) => live.findFrom(from, temporal),
     findTo: (to) => live.findTo(to, temporal),
-    bulkFindFrom: (froms, options) =>
-      live.bulkFindFrom(froms, { ...options, ...temporal }),
-    bulkFindTo: (tos, options) =>
-      live.bulkFindTo(tos, { ...options, ...temporal }),
+    bulkFindFrom: async (froms, options) =>
+      live.bulkFindFrom(
+        froms,
+        pinnedOptions("bulkFindFrom", options, coordinate, temporal),
+      ),
+    bulkFindTo: async (tos, options) =>
+      live.bulkFindTo(
+        tos,
+        pinnedOptions("bulkFindTo", options, coordinate, temporal),
+      ),
     findByEndpoints: (from, to, options) =>
       live.findByEndpoints(from, to, options, temporal),
   };
@@ -896,7 +949,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   }
 
   /** Extracts a subgraph at this view's pinned coordinate. */
-  subgraph<
+  async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
@@ -905,10 +958,12 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     rootId: NodeId<AllNodeTypes<G>>,
     options: StoreViewSubgraphOptions<G, EK, NK, P, C>,
   ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
-    const internalOptions = {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    } as InternalSubgraphOptions<G, EK, NK, P, C>;
+    const internalOptions = pinnedOptions(
+      "subgraph",
+      options,
+      this.coordinate,
+      withCoordinate(this.coordinate),
+    ) as InternalSubgraphOptions<G, EK, NK, P, C>;
     return storeRuntime(this.store).subgraphAtCoordinate(
       rootId,
       internalOptions,
@@ -916,112 +971,161 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   }
 
   /** Shortest path between two nodes at this view's pinned coordinate. */
-  shortestPath(
+  async shortestPath(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewShortestPathOptions<G>,
   ): Promise<ShortestPathResult | undefined> {
-    return this.internalAlgorithms().shortestPath(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().shortestPath(
+      from,
+      to,
+      pinnedOptions(
+        "shortestPath",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Minimum-total-weight path at this view's pinned coordinate. */
-  weightedShortestPath(
+  async weightedShortestPath(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewWeightedShortestPathOptions<G>,
   ): Promise<WeightedShortestPathResult | undefined> {
-    return this.internalAlgorithms().weightedShortestPath(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().weightedShortestPath(
+      from,
+      to,
+      pinnedOptions(
+        "weightedShortestPath",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Nodes reachable from `from` at this view's pinned coordinate. */
-  reachable(
+  async reachable(
     from: NodeIdentifier,
     options: StoreViewReachableOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.internalAlgorithms().reachable(from, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().reachable(
+      from,
+      pinnedOptions(
+        "reachable",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Whether `to` is reachable from `from` at this view's pinned coordinate. */
-  canReach(
+  async canReach(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewCanReachOptions<G>,
   ): Promise<boolean> {
-    return this.internalAlgorithms().canReach(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().canReach(
+      from,
+      to,
+      pinnedOptions(
+        "canReach",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** The k-hop neighborhood of `node` at this view's pinned coordinate. */
-  neighbors(
+  async neighbors(
     node: NodeIdentifier,
     options: StoreViewNeighborsOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.internalAlgorithms().neighbors(node, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().neighbors(
+      node,
+      pinnedOptions(
+        "neighbors",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Counts active edges incident to `node` at this view's pinned coordinate. */
-  degree(
+  async degree(
     node: NodeIdentifier,
     options?: StoreViewDegreeOptions<G>,
   ): Promise<number> {
-    return this.internalAlgorithms().degree(node, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().degree(
+      node,
+      pinnedOptions(
+        "degree",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Deterministic label-propagation memberships at this view's coordinate. */
-  labelPropagation(
+  async labelPropagation(
     options: StoreViewLabelPropagationOptions<G>,
   ): Promise<readonly LabelPropagationMembership[]> {
-    return this.internalAlgorithms().labelPropagation({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().labelPropagation(
+      pinnedOptions(
+        "labelPropagation",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Exact WCC memberships at this view's pinned coordinate. */
-  weaklyConnectedComponents(
+  async weaklyConnectedComponents(
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ): Promise<readonly WeaklyConnectedComponentMembership[]> {
-    return this.internalAlgorithms().weaklyConnectedComponents({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().weaklyConnectedComponents(
+      pinnedOptions(
+        "weaklyConnectedComponents",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Global PageRank scores at this view's pinned coordinate. */
-  pageRank(
+  async pageRank(
     options: StoreViewPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
-    return this.internalAlgorithms().pageRank({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().pageRank(
+      pinnedOptions(
+        "pageRank",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Personalized PageRank scores at this view's pinned coordinate. */
-  personalizedPageRank(
+  async personalizedPageRank(
     options: StoreViewPersonalizedPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
-    return this.internalAlgorithms().personalizedPageRank({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().personalizedPageRank(
+      pinnedOptions(
+        "personalizedPageRank",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 }
 
@@ -1097,25 +1201,35 @@ class StoreViewImplementation<
   }
 
   /** Heterogeneous multi-kind edge read pinned to this view's coordinate. */
-  bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
+  async bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
     params: BulkFindEdgesFromParams<G, K>,
     options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
   ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
-    return this.store.bulkFindEdgesFrom(params, {
-      ...options,
-      ...withValidCoordinate(this.coordinate),
-    });
+    return this.store.bulkFindEdgesFrom(
+      params,
+      pinnedOptions(
+        "bulkFindEdgesFrom",
+        options,
+        this.coordinate,
+        withValidCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Inbound multi-kind edge read pinned to this view's coordinate. */
-  bulkFindEdgesTo<const K extends EdgeKinds<G>>(
+  async bulkFindEdgesTo<const K extends EdgeKinds<G>>(
     params: BulkFindEdgesToParams<G, K>,
     options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
   ): Promise<readonly BulkFindEdgesToResult<G, K>[]> {
-    return this.store.bulkFindEdgesTo(params, {
-      ...options,
-      ...withValidCoordinate(this.coordinate),
-    });
+    return this.store.bulkFindEdgesTo(
+      params,
+      pinnedOptions(
+        "bulkFindEdgesTo",
+        options,
+        this.coordinate,
+        withValidCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /**
