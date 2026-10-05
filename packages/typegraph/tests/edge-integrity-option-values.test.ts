@@ -111,7 +111,13 @@ describe("edge integrity option values", () => {
   });
 
   it("never opens a store whose declared acyclicity would go unenforced", async () => {
-    const graph = graphDeclaring({ acyclic: true });
+    const graph = defineGraph({
+      id: "edge_integrity_option_values_acyclic",
+      nodes: { Item: { type: Item } },
+      edges: {
+        linksTo: { type: linksTo, from: [Item], to: [Item], acyclic: true },
+      },
+    });
     const [store] = await createStoreWithSchema(graph, createTestBackend());
     const first = await store.nodes.Item.create({});
     const second = await store.nodes.Item.create({});

@@ -2,7 +2,6 @@
  * TraversalBuilder - Intermediate builder for edge traversals.
  */
 import { type GraphDef } from "../../core/define-graph";
-import { isEdgeTargetMap } from "../../core/edge-endpoints";
 import {
   resolveRuntimeKindInput,
   type RuntimeNodeKind,
@@ -997,23 +996,13 @@ export class TraversalBuilder<
    */
   #assertValidEndpoint(targetKind: string): void {
     const expectedKinds = new Set<string>();
+    // The registry's edge-kind facts, not the edge type's own `from`/`to`:
+    // the facts are the registration's endpoints wherever they were declared
+    // (on the type, or on the graph's `{ type, from, to }` entry), and are
+    // what every other endpoint decision reads.
     const collectFromEdge = (edgeName: string, side: "to" | "from"): void => {
-      const edgeType = this.#config.registry.getEdgeType(edgeName);
-      const endpoints = edgeType?.[side];
-      if (!endpoints) return;
-      if (side === "to" && isEdgeTargetMap(endpoints)) {
-        for (const targets of Object.values(
-          endpoints,
-        ) as (readonly NodeType[])[]) {
-          for (const endpoint of targets) {
-            expectedKinds.add(endpoint.kind);
-          }
-        }
-      } else if (Array.isArray(endpoints)) {
-        for (const endpoint of endpoints as readonly NodeType[]) {
-          expectedKinds.add(endpoint.kind);
-        }
-      }
+      const facts = this.#config.registry.edgeKindFacts(edgeName);
+      for (const kind of facts?.[side] ?? []) expectedKinds.add(kind);
     };
     const forwardSide = this.#direction === "out" ? "to" : "from";
     const inverseSide = this.#direction === "out" ? "from" : "to";
@@ -1024,8 +1013,8 @@ export class TraversalBuilder<
       collectFromEdge(edgeName, inverseSide);
     }
 
-    // No declared endpoints anywhere — edge kinds in the registry can
-    // legally have undefined `to` / `from`; nothing to validate against.
+    // No endpoint facts for any traversed edge kind — nothing to validate
+    // against.
     if (expectedKinds.size === 0) return;
 
     for (const expected of expectedKinds) {

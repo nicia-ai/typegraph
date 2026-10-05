@@ -14,7 +14,10 @@ import {
 import { type JsonSchema } from "../schema/types";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
-import { buildCompositionRelation } from "./composition-relation";
+import {
+  buildCompositionRelation,
+  EMPTY_COMPOSITION_RELATION,
+} from "./composition-relation";
 import { type EdgeKindFacts } from "./edge-kind-facts";
 import {
   computeClosuresFromNamedOntology,
@@ -186,6 +189,8 @@ export function buildValidatedKindRegistry(
       input.edgeKinds,
       createEmptyClosures(),
       input.identity,
+      EMPTY_COMPOSITION_RELATION,
+      input.edgeFacts,
     );
     validateImpliesEndpointCompatibility(input.edgeFacts, registry);
     return registry;
@@ -263,6 +268,7 @@ function buildRegistryWithComposition(
     closures,
     input.identity,
     composition,
+    input.edgeFacts,
   );
   assertStructuralSubsumption(
     registry,

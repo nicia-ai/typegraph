@@ -32,6 +32,7 @@ import {
   EMPTY_COMPOSITION_RELATION,
   normalizePartWhole,
 } from "./composition-relation";
+import { type EdgeKindFacts } from "./edge-kind-facts";
 
 /** Which end of a composition pair a traversal moves toward. */
 type CompositionSide = "part" | "whole";
@@ -230,6 +231,13 @@ export class KindRegistry {
     CompositionPair | undefined
   >();
 
+  /**
+   * Each registered edge kind's declared endpoints and cardinalities, as the
+   * builder that read the declaration resolved them. Defaults to empty for
+   * the same call sites {@link #composition} does.
+   */
+  readonly #edgeFacts: ReadonlyMap<string, EdgeKindFacts>;
+
   // === Edge Relationships ===
   readonly edgeInverses: ReadonlyMap<string, string>;
   readonly edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
@@ -241,7 +249,9 @@ export class KindRegistry {
     closures: RegistryClosures,
     identity?: GraphIdentityConfig,
     composition: CompositionRelation = EMPTY_COMPOSITION_RELATION,
+    edgeFacts: ReadonlyMap<string, EdgeKindFacts> = new Map(),
   ) {
+    this.#edgeFacts = edgeFacts;
     this.nodeKinds = nodeKinds;
     this.edgeKinds = edgeKinds;
     this.identity = identity;
@@ -787,6 +797,16 @@ export class KindRegistry {
   /**
    * Gets an edge kind by name.
    */
+  /**
+   * The endpoints and cardinalities an edge kind's REGISTRATION declares,
+   * wherever they were stated (on the edge type, or on the graph's
+   * `{ type, from, to }` entry). `getEdgeType(name).from`/`.to` carry only
+   * the former, so an endpoint decision reads these facts instead.
+   */
+  edgeKindFacts(edgeKind: string): EdgeKindFacts | undefined {
+    return this.#edgeFacts.get(edgeKind);
+  }
+
   getEdgeType(name: string): AnyEdgeType | undefined {
     return this.edgeKinds.get(name);
   }
