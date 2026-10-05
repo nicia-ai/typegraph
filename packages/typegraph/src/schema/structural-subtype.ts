@@ -30,8 +30,10 @@
  *    the guard mirrors `MAX_JSON_POINTER_DEPTH` (src/query/json-pointer.ts).
  * 2. If child and parent are the SAME schema — every keyword equal, once only
  *    non-constraining metadata (`description`/`title`/`default`/`$schema`)
- *    is dropped — child is trivially a subtype of parent, regardless of
- *    which keywords either side carries. This runs before rules 3–4 on
+ *    is dropped and projection spellings are folded (`propertySchemasEqual`:
+ *    a union of bare primitives as `anyOf` or a `type` token array, a tuple
+ *    with or without its arity restated) — child is trivially a subtype of
+ *    parent, regardless of which keywords either side carries. This runs before rules 3–4 on
  *    purpose: it is what lets a child that copies a `$ref` (recursive
  *    `z.lazy`) or `allOf` (`z.intersection`) property VERBATIM from its
  *    parent still compare as a subtype for that property, even though rules
@@ -116,6 +118,7 @@ import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { sortedReplacer } from "./canonical";
 import {
+  closesTupleByOmission,
   isObjectSchema,
   propertySchemasEqual,
   stripSchemaMetadata,
@@ -930,7 +933,7 @@ function arrayTail(schema: JsonSchema): ArrayTail {
   if (items === false) return CLOSED_TAIL;
   if (items === true) return OPEN_TAIL;
   if (items !== undefined) return items;
-  return schema.prefixItems === undefined ? OPEN_TAIL : CLOSED_TAIL;
+  return closesTupleByOmission(schema) ? CLOSED_TAIL : OPEN_TAIL;
 }
 
 function isTailSchema(tail: ArrayTail): tail is JsonSchema {

@@ -547,24 +547,107 @@ function sortedByCanonicalForm(items: readonly unknown[]): readonly unknown[] {
 }
 
 /**
- * Recursively order-normalizes {@link SET_VALUED_KEYWORDS} arrays so that a
- * pure reordering compares equal.
+ * Whether `schema` closes a tuple by OMITTING `items` beside `prefixItems`.
+ *
+ * The projection closes a tuple that has no rest element with `items: false`.
+ * A document stored by an earlier projection closes one by omission instead,
+ * so both spellings read as closed. The one owner of that reading: the diff
+ * ({@link projectionSpellingNormalized}) and the structural-subtype predicate
+ * (`arrayTail`, `./structural-subtype`) both ask here.
+ */
+export function closesTupleByOmission(
+  schema: Readonly<{ prefixItems?: unknown; items?: unknown }>,
+): boolean {
+  return schema.prefixItems !== undefined && schema.items === undefined;
+}
+
+/** A union member that is exactly one bare type token: `{ type: "string" }`. */
+function bareTypeToken(member: unknown): string | undefined {
+  if (member === null || typeof member !== "object") return undefined;
+  const entries: readonly (readonly [string, unknown])[] =
+    Object.entries(member);
+  const [only, ...others] = entries;
+  if (only === undefined || others.length > 0) return undefined;
+  const [key, token] = only;
+  return key === "type" && typeof token === "string" ? token : undefined;
+}
+
+/**
+ * Folds the spellings different projections give ONE schema into a single
+ * form, so a stored document and the same graph projected today compare
+ * equal instead of reading as a breaking property change.
+ *
+ * Two spellings changed between projections, and each rule rewrites only the
+ * known keywords that spell it — every other key, unknown extension keys
+ * included, passes through untouched:
+ *
+ *  - **A union of bare primitives.** `anyOf: [{ type: "string" }, { type:
+ *    "null" }]` and `type: ["string", "null"]` admit the same values; sibling
+ *    keywords are ANDed with either form. Folded to the token array, in member
+ *    order. A member carrying any other keyword keeps the union as written.
+ *  - **A tuple's arity.** `prefixItems` alone and `prefixItems` with the
+ *    arity restated — `items: false` closing a tuple that has no rest element
+ *    ({@link closesTupleByOmission}), `minItems`, and a closed tuple's
+ *    `maxItems` — are the same tuple. Folded to an explicit `items: false`
+ *    with each bound dropped when it only restates the prefix length. A
+ *    `minItems` below the prefix length (an optional trailing member) is
+ *    kept: it is information the shorter spelling never carried, so the two
+ *    still differ and the change is surfaced rather than assumed away.
+ */
+function projectionSpellingNormalized(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = createDataKeyedBag<unknown>();
+  for (const [key, entry] of Object.entries(schema)) normalized[key] = entry;
+
+  const { anyOf } = normalized;
+  if (
+    normalized["type"] === undefined &&
+    Array.isArray(anyOf) &&
+    anyOf.length > 1
+  ) {
+    const tokens = anyOf.map((member) => bareTypeToken(member));
+    if (tokens.every((token) => token !== undefined)) {
+      delete normalized["anyOf"];
+      normalized["type"] = tokens;
+    }
+  }
+
+  const { prefixItems } = normalized;
+  if (Array.isArray(prefixItems)) {
+    if (closesTupleByOmission(normalized)) normalized["items"] = false;
+    const restatesArity = (bound: "minItems" | "maxItems"): boolean =>
+      normalized[bound] === prefixItems.length;
+    if (restatesArity("minItems")) delete normalized["minItems"];
+    if (normalized["items"] === false && restatesArity("maxItems")) {
+      delete normalized["maxItems"];
+    }
+  }
+  return normalized;
+}
+
+/**
+ * The form two property schemas are compared in: {@link SET_VALUED_KEYWORDS}
+ * arrays order-normalized so a pure reordering compares equal, and
+ * projection spellings folded ({@link projectionSpellingNormalized}) so a
+ * respelling does too. Recursive over the {@link SCHEMA_VALUED_KEYWORDS}
+ * allowlist only.
  *
  * Deliberately *not* folded into `canonicalEqual` / `sortedReplacer`: that
- * canonical form also feeds `computeSchemaHash`, and normalizing arrays there
- * would change the hash of every schema already committed to a database.
- * This normalization is scoped to diff comparison only.
+ * canonical form also feeds `computeSchemaHash`, and normalizing there would
+ * change the hash of every schema already committed to a database. This
+ * normalization is scoped to diff comparison only.
  */
-function orderNormalizedSchema(value: unknown): unknown {
+function comparisonNormalizedSchema(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => orderNormalizedSchema(item));
+    return value.map((item) => comparisonNormalizedSchema(item));
   }
   if (value !== null && typeof value === "object") {
     const normalized = createDataKeyedBag<unknown>();
     for (const [key, entry] of Object.entries(value)) {
       normalized[key] = normalizedKeywordValue(key, entry);
     }
-    return normalized;
+    return projectionSpellingNormalized(normalized);
   }
   return value;
 }
@@ -586,7 +669,7 @@ function normalizedKeywordValue(key: string, value: unknown): unknown {
   if (key === DEPENDENT_REQUIRED_KEYWORD) {
     return normalizedDependentRequired(value);
   }
-  if (SCHEMA_VALUED_KEYWORDS.has(key)) return orderNormalizedSchema(value);
+  if (SCHEMA_VALUED_KEYWORDS.has(key)) return comparisonNormalizedSchema(value);
   // Everything else is preserved verbatim: annotations (`title`), instance
   // data (`default`, `const`, `examples`), and unknown extension keys. See
   // {@link SCHEMA_VALUED_KEYWORDS} for why recursion is an allowlist.
@@ -613,25 +696,27 @@ function normalizedDependentRequired(value: unknown): unknown {
  */
 function normalizedSubschemaMap(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return orderNormalizedSchema(value);
+    return comparisonNormalizedSchema(value);
   }
   const normalized = createDataKeyedBag<unknown>();
   for (const [name, subschema] of Object.entries(value)) {
-    normalized[name] = orderNormalizedSchema(subschema);
+    normalized[name] = comparisonNormalizedSchema(subschema);
   }
   return normalized;
 }
 
 /**
  * Whether two property JSON-Schemas are the same schema. Insensitive to the
- * order of set-valued keywords, so restating a kind with its fields declared
- * in a different order is correctly a no-op rather than a "modified" kind that
- * forces a migration.
+ * order of set-valued keywords and to which projection spelled them, so
+ * restating a kind with its fields declared in a different order — or
+ * reopening a stored document after the projection changed how it spells a
+ * union of primitives or a closed tuple — is correctly a no-op rather than a
+ * "modified" kind that forces a migration.
  */
 export function propertySchemasEqual(before: unknown, after: unknown): boolean {
   return canonicalEqual(
-    orderNormalizedSchema(before),
-    orderNormalizedSchema(after),
+    comparisonNormalizedSchema(before),
+    comparisonNormalizedSchema(after),
   );
 }
 
@@ -968,7 +1053,7 @@ function classifyPropertyChanges(
   for (const [property, beforeProperty] of Object.entries(beforeProps)) {
     const afterProperty = afterProps[property];
     if (afterProperty === undefined) continue; // removed — handled below
-    if (canonicalEqual(beforeProperty, afterProperty)) continue; // unchanged
+    if (propertySchemasEqual(beforeProperty, afterProperty)) continue; // unchanged
     if (isBreakingPropertyChange(beforeProperty, afterProperty)) {
       breakingProps.push(property);
     }
