@@ -3022,8 +3022,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend) =>
-        executeEdgeCreateBatch(ctx, inputs, backend),
+      executeCreateBatch: (inputs, backend, options) =>
+        executeEdgeCreateBatch(ctx, inputs, backend, options),
       executeCreateNoReturnBatch: (inputs, backend) =>
         executeEdgeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),

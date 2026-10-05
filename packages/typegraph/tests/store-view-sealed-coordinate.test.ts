@@ -17,6 +17,7 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -42,8 +43,8 @@ async function seededStore() {
   const [store] = await createStoreWithSchema(graph, createTestBackend());
   const alice = await store.nodes.Person.create({ name: "alice" });
   const bob = await store.nodes.Person.create({ name: "bob" });
-  await store.edges.knows.create(alice, bob, {});
-  return { store, alice, bob };
+  const edge = await store.edges.knows.create(alice, bob, {});
+  return { store, alice, bob, edgeId: edge.id };
 }
 
 type Seeded = Awaited<ReturnType<typeof seededStore>>;
@@ -91,6 +92,48 @@ function readsStating(
   };
 }
 
+type Reader = Readonly<
+  Record<string, (...args: unknown[]) => Promise<unknown>>
+>;
+
+/** Calls a collection read by name, past the view's declared signatures. */
+function call(
+  reader: Reader,
+  method: string,
+  ...args: readonly unknown[]
+): Promise<unknown> {
+  return requireDefined(reader[method])(...args);
+}
+
+/**
+ * Every pinned point read, with `stated` in the argument position the live
+ * collection takes its own temporal options in.
+ */
+function pointReadsStating(
+  view: View,
+  { alice, bob, edgeId }: Seeded,
+  stated: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, () => Promise<unknown>>> {
+  const people: Reader = view.nodes.Person as never;
+  const knowsEdges: Reader = view.edges.knows as never;
+  return {
+    "nodes.getById": () => call(people, "getById", alice.id, stated),
+    "nodes.getByIds": () => call(people, "getByIds", [alice.id], stated),
+    "nodes.find": () => call(people, "find", {}, stated),
+    "nodes.count": () => call(people, "count", stated),
+    "edges.getById": () => call(knowsEdges, "getById", edgeId, stated),
+    "edges.getByIds": () => call(knowsEdges, "getByIds", [edgeId], stated),
+    "edges.find": () => call(knowsEdges, "find", {}, stated),
+    "edges.count": () => call(knowsEdges, "count", {}, stated),
+    "edges.findFrom": () => call(knowsEdges, "findFrom", alice, stated),
+    "edges.findTo": () => call(knowsEdges, "findTo", bob, stated),
+    "edges.findByEndpoints (options)": () =>
+      call(knowsEdges, "findByEndpoints", alice, bob, stated),
+    "edges.findByEndpoints (temporal)": () =>
+      call(knowsEdges, "findByEndpoints", alice, bob, {}, stated),
+  };
+}
+
 async function refusalCodes(
   reads: Readonly<Record<string, () => Promise<unknown>>>,
 ): Promise<Readonly<Record<string, unknown>>> {
@@ -128,6 +171,32 @@ describe("a StoreView read refuses a caller-stated coordinate", () => {
       },
     );
   });
+
+  describe.each(["current", "asOf"] as const)(
+    "on a %s view's point reads",
+    (mode) => {
+      it.each(Object.entries(STATED_COORDINATES))(
+        "refuses every point read that states %s",
+        async (_label, stated) => {
+          const seeded = await seededStore();
+          const view =
+            mode === "current" ?
+              seeded.store.view({ mode: "current" })
+            : seeded.store.asOf(new Date().toISOString());
+          const reads = pointReadsStating(view, seeded, stated);
+
+          expect(await refusalCodes(reads)).toEqual(
+            Object.fromEntries(
+              Object.keys(reads).map((name) => [
+                name,
+                "STORE_VIEW_SEALED_COORDINATE",
+              ]),
+            ),
+          );
+        },
+      );
+    },
+  );
 
   it("names the read, the stated keys and the pinned coordinate", async () => {
     const seeded = await seededStore();
@@ -168,5 +237,11 @@ describe("a StoreView read refuses a caller-stated coordinate", () => {
     expect(await names(before)).toEqual([]);
     expect(await now.degree(seeded.alice, { edges: ["knows"] })).toBe(1);
     expect(await now.edges.knows.bulkFindFrom([seeded.alice])).toHaveLength(1);
+    expect(await now.nodes.Person.getById(seeded.alice.id)).toBeDefined();
+    expect(await now.edges.knows.findFrom(seeded.alice)).toHaveLength(1);
+    expect(
+      await now.edges.knows.findByEndpoints(seeded.alice, seeded.bob),
+    ).toBeDefined();
+    expect(await before.edges.knows.findFrom(seeded.alice)).toHaveLength(0);
   });
 });

@@ -19,6 +19,57 @@ import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
+type AcyclicIntegrationStore = ReturnType<IntegrationTestContext["getStore"]>;
+
+/** `b → a` stored then soft-deleted: re-admitting it closes a cycle with `a → b`. */
+async function tombstonedBackEdge(store: AcyclicIntegrationStore) {
+  const a = await store.nodes.Task.create({ name: "a" });
+  const b = await store.nodes.Task.create({ name: "b" });
+  const c = await store.nodes.Task.create({ name: "c" });
+  const back = await store.edges.dependsOn.create(b, a);
+  await store.edges.dependsOn.delete(back.id);
+  return { store, a, b, c, back };
+}
+
+/** `a → b` live, `b → c` and `c → a` tombstoned: only both together close a cycle. */
+async function resurrectionsClosingACycleTogether(
+  store: AcyclicIntegrationStore,
+) {
+  const a = await store.nodes.Task.create({ name: "a" });
+  const b = await store.nodes.Task.create({ name: "b" });
+  const c = await store.nodes.Task.create({ name: "c" });
+  const bToC = await store.edges.dependsOn.create(b, c);
+  const cToA = await store.edges.dependsOn.create(c, a);
+  await store.edges.dependsOn.delete(bToC.id);
+  await store.edges.dependsOn.delete(cToA.id);
+  await store.edges.dependsOn.create(a, b);
+  return { store, a, b, c, bToC, cToA };
+}
+
+async function refusalNamesWithin(
+  store: AcyclicIntegrationStore,
+  write: (
+    edges: AcyclicIntegrationStore["edges"]["dependsOn"],
+  ) => Promise<unknown>,
+): Promise<readonly unknown[]> {
+  const refusals: unknown[] = [];
+  await store.transaction(async (tx) => {
+    await write(tx.edges.dependsOn as never).catch((error: unknown) =>
+      refusals.push(error instanceof Error ? error.name : error),
+    );
+  });
+  return refusals;
+}
+
+async function storedEndpoints(
+  store: AcyclicIntegrationStore,
+): Promise<readonly string[]> {
+  const edges = await store.edges.dependsOn.find({});
+  return edges
+    .map((edge) => `${edge.fromId}>${edge.toId}`)
+    .toSorted(compareStrings);
+}
+
 export function registerEdgeAcyclicityIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -274,6 +325,74 @@ export function registerEdgeAcyclicityIntegrationTests(
         ),
       );
       expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    describe("a batch that resurrects tombstoned edges", () => {
+      it("bulkUpsertById stores no create when a resurrection in the same batch is refused", async () => {
+        const { store, a, b, back } = await tombstonedBackEdge(
+          context.getStore(),
+        );
+
+        const refusals = await refusalNamesWithin(store, (edges) =>
+          edges.bulkUpsertById([
+            { id: "fresh-a-b" as never, from: a, to: b, props: {} },
+            { id: back.id, from: b, to: a, props: {} },
+          ]),
+        );
+
+        expect(refusals).toEqual(["EdgeAcyclicityError"]);
+        expect(await storedEndpoints(store)).toEqual([]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      });
+
+      it("bulkUpsertById stores no resurrection when a later one is refused", async () => {
+        const { store, a, b, c, bToC, cToA } =
+          await resurrectionsClosingACycleTogether(context.getStore());
+
+        const refusals = await refusalNamesWithin(store, (edges) =>
+          edges.bulkUpsertById([
+            { id: bToC.id, from: b, to: c, props: {} },
+            { id: cToA.id, from: c, to: a, props: {} },
+          ]),
+        );
+
+        expect(refusals).toEqual(["EdgeAcyclicityError"]);
+        expect(await storedEndpoints(store)).toEqual([`${a.id}>${b.id}`]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      });
+
+      it("bulkGetOrCreateByEndpoints stores no create when a resurrection in the same batch is refused", async () => {
+        const { store, a, b, c } = await tombstonedBackEdge(context.getStore());
+
+        const refusals = await refusalNamesWithin(store, (edges) =>
+          edges.bulkGetOrCreateByEndpoints([
+            { from: a, to: b, props: {} },
+            { from: c, to: a, props: {} },
+            { from: b, to: a, props: {} },
+          ]),
+        );
+
+        expect(refusals).toEqual(["EdgeAcyclicityError"]);
+        expect(await storedEndpoints(store)).toEqual([]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      });
+
+      it("bulkGetOrCreateByEndpoints stores no resurrection when a later one is refused", async () => {
+        const { store, a, b, c } = await resurrectionsClosingACycleTogether(
+          context.getStore(),
+        );
+
+        const refusals = await refusalNamesWithin(store, (edges) =>
+          edges.bulkGetOrCreateByEndpoints([
+            { from: b, to: c, props: {} },
+            { from: c, to: a, props: {} },
+          ]),
+        );
+
+        expect(refusals).toEqual(["EdgeAcyclicityError"]);
+        expect(await storedEndpoints(store)).toEqual([`${a.id}>${b.id}`]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      });
     });
 
     it("refuses a batch whose own rows close a cycle through a stored edge, before writing any of them", async () => {

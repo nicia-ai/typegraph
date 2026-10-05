@@ -18,7 +18,10 @@ import type { CompiledSelectSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
-import { type EdgeUpsertUpdateBatchEntry } from "./collections/edge-collection";
+import {
+  type EdgeCreateBatchOptions,
+  type EdgeUpsertUpdateBatchEntry,
+} from "./collections/edge-collection";
 import {
   type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
@@ -194,6 +197,7 @@ export type EdgeOperations = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],

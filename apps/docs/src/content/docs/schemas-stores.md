@@ -3435,8 +3435,10 @@ coordinate:
 The algorithm and `subgraph` option objects are the same as on the live `Store`
 **minus** `temporalMode` / `asOf`, which the pin supplies. Stating one anyway (possible from untyped code) is refused with
 `ConfigurationError` `STORE_VIEW_SEALED_COORDINATE` on every view, `"current"` included; the
-heterogeneous `bulkFindEdgesFrom` / `bulkFindEdgesTo` reads and the edge collections'
-`bulkFindFrom` / `bulkFindTo` refuse the same way.
+heterogeneous `bulkFindEdgesFrom` / `bulkFindEdgesTo` reads, the edge collections'
+`bulkFindFrom` / `bulkFindTo`, and the collections' point reads (`getById`, `getByIds`,
+`find`, `count`, `findFrom`, `findTo`, `findByEndpoints`) refuse the same way when a
+coordinate is stated in the position the live collection takes its temporal options.
 
 `view.query()` is a **capability-safe** pinned read context: the returned query
 builder seeds the view's coordinate and seals the temporal axis, so calling

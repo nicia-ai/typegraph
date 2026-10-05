@@ -12,6 +12,7 @@ import { z } from "zod";
 import { type GraphIdentityConfig } from "../core/define-graph";
 import {
   CARDINALITY_VALUES,
+  ENDPOINT_EXISTENCE_VALUES,
   TARGET_CARDINALITY_VALUES,
 } from "../core/edge-integrity-options";
 import {
@@ -60,7 +61,7 @@ const cardinalityZod = z.enum(CARDINALITY_VALUES);
 
 const targetCardinalityZod = z.enum(TARGET_CARDINALITY_VALUES);
 
-const endpointExistenceZod = z.enum(["notDeleted", "currentlyValid", "ever"]);
+const endpointExistenceZod = z.enum(ENDPOINT_EXISTENCE_VALUES);
 
 const temporalModeZod = z.enum([
   "current",

@@ -274,15 +274,44 @@ const STATED_COORDINATE_KEYS = [
 ] as const;
 
 /**
- * A view read's options with the view's coordinate applied: the one place a
- * pinned read merges the two, so no read can spread the pin over a
- * coordinate its caller stated.
+ * Refuses a read that states its own temporal coordinate.
  *
  * The view's option types omit the temporal keys, but an untyped caller (or
  * a cast) can still state them. Answering at the pin anyway would drop a
  * stated value without a word, and honoring it would break the seal, so the
  * read is refused — the same answer `view.query().temporal(...)` gives, on a
- * `current` view and an `asOf` view alike.
+ * `current` view and an `asOf` view alike. `stated` is whatever argument sits
+ * where the live collection would take its options.
+ *
+ * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
+ */
+function assertNoStatedCoordinate(
+  method: string,
+  stated: unknown,
+  coordinate: ReadCoordinate,
+): void {
+  if (typeof stated !== "object" || stated === null) return;
+  const statedKeys = STATED_COORDINATE_KEYS.filter(
+    (key) => (stated as Readonly<Record<string, unknown>>)[key] !== undefined,
+  );
+  if (statedKeys.length === 0) return;
+  throw new ConfigurationError(
+    `'${method}' on a StoreView does not accept ${statedKeys.map((key) => `\`${key}\``).join(", ")} — the view's ` +
+      `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+      `Read at another coordinate through the live Store or store.view(...).`,
+    {
+      code: "STORE_VIEW_SEALED_COORDINATE",
+      method,
+      stated: statedKeys,
+      ...coordinateContext(coordinate),
+    },
+  );
+}
+
+/**
+ * A view read's options with the view's coordinate applied: the one place a
+ * pinned read merges the two, so no read can spread the pin over a
+ * coordinate its caller stated ({@link assertNoStatedCoordinate}).
  *
  * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
  */
@@ -292,24 +321,7 @@ function pinnedOptions<Options extends object, Pin extends object>(
   coordinate: ReadCoordinate,
   pin: Pin,
 ): Options & Pin {
-  const stated = STATED_COORDINATE_KEYS.filter(
-    (key) =>
-      options !== undefined &&
-      (options as Readonly<Record<string, unknown>>)[key] !== undefined,
-  );
-  if (stated.length > 0) {
-    throw new ConfigurationError(
-      `'${method}' on a StoreView does not accept ${stated.map((key) => `\`${key}\``).join(", ")} — the view's ` +
-        `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
-        `Read at another coordinate through the live Store or store.view(...).`,
-      {
-        code: "STORE_VIEW_SEALED_COORDINATE",
-        method,
-        stated,
-        ...coordinateContext(coordinate),
-      },
-    );
-  }
+  assertNoStatedCoordinate(method, options, coordinate);
   return { ...options, ...pin } as Options & Pin;
 }
 
@@ -542,10 +554,22 @@ function pinnedNodeCollection(
         Method in (typeof NODE_TEMPORAL_READ_NAMES)[number]
       ]: StoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) => live.getById(id, temporal),
-    getByIds: (ids) => live.getByIds(ids, temporal),
-    find: (filter) => live.find(filter, temporal),
-    count: () => live.count(temporal),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return live.getById(id, temporal);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return live.getByIds(ids, temporal);
+    },
+    find: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("find", stated, coordinate);
+      return live.find(filter, temporal);
+    },
+    count: async (stated?: unknown) => {
+      assertNoStatedCoordinate("count", stated, coordinate);
+      return live.count(temporal);
+    },
   };
   return readOnlyCollectionProxy(
     reads,
@@ -566,12 +590,30 @@ function pinnedEdgeCollection(
         Method in (typeof EDGE_TEMPORAL_READ_NAMES)[number]
       ]: StoreViewEdgeCollection<AnyEdgeType, NodeType, NodeType>[Method];
     }> = {
-    getById: (id) => live.getById(id, temporal),
-    getByIds: (ids) => live.getByIds(ids, temporal),
-    find: (filter) => live.find(filter, temporal),
-    count: (filter) => live.count(filter, temporal),
-    findFrom: (from) => live.findFrom(from, temporal),
-    findTo: (to) => live.findTo(to, temporal),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return live.getById(id, temporal);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return live.getByIds(ids, temporal);
+    },
+    find: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("find", stated, coordinate);
+      return live.find(filter, temporal);
+    },
+    count: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("count", stated, coordinate);
+      return live.count(filter, temporal);
+    },
+    findFrom: async (from, stated?: unknown) => {
+      assertNoStatedCoordinate("findFrom", stated, coordinate);
+      return live.findFrom(from, temporal);
+    },
+    findTo: async (to, stated?: unknown) => {
+      assertNoStatedCoordinate("findTo", stated, coordinate);
+      return live.findTo(to, temporal);
+    },
     bulkFindFrom: async (froms, options) =>
       live.bulkFindFrom(
         froms,
@@ -582,8 +624,11 @@ function pinnedEdgeCollection(
         tos,
         pinnedOptions("bulkFindTo", options, coordinate, temporal),
       ),
-    findByEndpoints: (from, to, options) =>
-      live.findByEndpoints(from, to, options, temporal),
+    findByEndpoints: async (from, to, options, stated?: unknown) => {
+      assertNoStatedCoordinate("findByEndpoints", options, coordinate);
+      assertNoStatedCoordinate("findByEndpoints", stated, coordinate);
+      return live.findByEndpoints(from, to, options, temporal);
+    },
   };
   return readOnlyCollectionProxy(reads, live, coordinate, "edge");
 }

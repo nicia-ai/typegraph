@@ -1226,7 +1226,7 @@ check is for untyped callers:
 
 | `details.code` | Raised when |
 | --- | --- |
-| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
+| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
 
 #### Durable edge match identity guard codes
 
