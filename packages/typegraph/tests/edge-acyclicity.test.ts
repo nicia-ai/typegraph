@@ -609,15 +609,14 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
 // with nothing live yet is only found by hopping through a `seed` source
 // that is NOT yet in the table — the `"planned"` form. `assertEdgeRelationsAcyclic`
 // (the write-path predicate) now passes `"proposed"`, which asserts its
-// rows are ALREADY inserted whenever it proposes more than one — every real
-// write path satisfies this by probing after its own insert (see
+// rows are ALREADY inserted whenever it proposes more than one (see
 // `AcyclicityProbeSeed`'s docblock, `src/store/recursive-cte.ts`), so the two
-// tests below insert the edges directly through the backend first, exactly
-// as `assertBatchEdgesRelationsAcyclic` does via `bulkCreate`.
-// `readProposedEdgeAcyclicityViolations` is the ONE caller that still probes
-// genuinely unwritten rows — the graph-merge plan-time preview
-// (`src/graph-merge/merge.ts`) — via the `"planned"` form, unaffected by
-// this split.
+// tests below insert the edges directly through the backend first.
+// `readProposedEdgeAcyclicityViolations` probes genuinely unwritten rows for
+// the graph-merge plan-time preview (`src/graph-merge/merge.ts`) via the
+// `"planned"` form, unaffected by this split; a batch create probes its own
+// unwritten rows through `assertUnwrittenEdgeRelationsAcyclic`, covered by
+// the describe block after this one.
 //
 // Mutation check (recorded in the lane's load-bearing log): reverting
 // `buildAcyclicityAncestryStepDirect` back to joining the old compound
@@ -678,10 +677,9 @@ function threeEdgeCycle(nodes: Readonly<{ a: string; b: string; c: string }>) {
  * Inserts every edge in `edges` directly through the backend, bypassing the
  * acyclicity fence — the same pattern the mixed-orientation and
  * `verifyConstraintFences` tests above use to put rows in the table without
- * routing through the (fenced) store API. Mirrors what a real batch write
- * already did by the time it calls `assertEdgeRelationsAcyclic` with more
- * than one `"proposed"` row: `assertBatchEdgesRelationsAcyclic` runs its
- * probe strictly AFTER `bulkCreate`'s own insert.
+ * routing through the (fenced) store API — the state
+ * `assertEdgeRelationsAcyclic` requires of a caller naming more than one
+ * `"proposed"` row.
  */
 async function insertEdgesDirectly(
   backend: GraphBackend,
@@ -702,12 +700,12 @@ async function insertEdgesDirectly(
 }
 
 describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERTED rows', () => {
-  it("assertEdgeRelationsAcyclic refuses a three-edge cycle already inserted in this transaction (bulkCreate's own shape)", async () => {
+  it("assertEdgeRelationsAcyclic refuses a three-edge cycle already inserted in this transaction", async () => {
     const backend = createTestBackend();
     const nodes = await seedThreeNodes(backend);
     const edges = threeEdgeCycle(nodes);
     // `"proposed"` asserts its rows are already inserted whenever it names
-    // more than one — exactly what a real bulkCreate does before probing.
+    // more than one.
     await insertEdgesDirectly(backend, edges);
 
     await expect(
@@ -807,5 +805,101 @@ describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-I
     expect(violations).toEqual([
       { family: "edgeAcyclicity", relation: "dependsOn", edgeIds: ["self"] },
     ]);
+  });
+});
+
+describe("assertUnwrittenEdgeRelationsAcyclic: a batch probed before its insert", () => {
+  function probeContext(backend: GraphBackend) {
+    return {
+      graphId: graph.id,
+      graph,
+      registry,
+      schema: createSqlSchema(backend.tableNames),
+      dialect: getDialect(backend.dialect),
+      target: backend,
+      lock: uncapturedGraphWriteLock(),
+      operation: "test",
+    };
+  }
+
+  it("refuses a three-edge cycle none of whose rows is written", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+
+    await expect(
+      acyclicityModule.assertUnwrittenEdgeRelationsAcyclic(
+        probeContext(backend),
+        threeEdgeCycle(nodes),
+      ),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        name: "EdgeAcyclicityError",
+        details: matchingObject({ edgeId: "ab", selfLoop: false }),
+      }),
+    );
+  });
+
+  it("refuses a cycle that alternates stored and unwritten edges", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+    const [ab, bc, ca] = threeEdgeCycle(nodes);
+    if (ab === undefined || bc === undefined || ca === undefined) {
+      throw new Error("expected three edges");
+    }
+    await insertEdgesDirectly(backend, [bc]);
+
+    await expect(
+      acyclicityModule.assertUnwrittenEdgeRelationsAcyclic(
+        probeContext(backend),
+        [ab, ca],
+      ),
+    ).rejects.toThrow(expect.objectContaining({ name: "EdgeAcyclicityError" }));
+  });
+
+  it("names the edge on the cycle, not an unwritten edge that merely leads into it", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+    const store = createStore(graph, backend);
+    const outside = await store.nodes.Task.create({ name: "outside" });
+    const [ab, bc, ca] = threeEdgeCycle(nodes);
+    if (ab === undefined || bc === undefined || ca === undefined) {
+      throw new Error("expected three edges");
+    }
+    const leadIn = {
+      edgeId: "lead-in",
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      fromId: outside.id,
+      toKind: "Task",
+      toId: nodes.a,
+    };
+
+    await expect(
+      acyclicityModule.assertUnwrittenEdgeRelationsAcyclic(
+        probeContext(backend),
+        [leadIn, ab, bc, ca],
+      ),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        details: matchingObject({ edgeId: "ab" }),
+      }),
+    );
+  });
+
+  it("accepts an unwritten chain and a diamond that close no cycle", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+    const [ab, bc] = threeEdgeCycle(nodes);
+    if (ab === undefined || bc === undefined) {
+      throw new Error("expected two edges");
+    }
+    const ac = { ...ab, edgeId: "ac", toId: nodes.c };
+
+    await expect(
+      acyclicityModule.assertUnwrittenEdgeRelationsAcyclic(
+        probeContext(backend),
+        [ab, bc, ac],
+      ),
+    ).resolves.toBeUndefined();
   });
 });

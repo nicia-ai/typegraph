@@ -218,6 +218,80 @@ export function registerEdgeAcyclicityIntegrationTests(
       expect(remaining).toEqual([]);
     });
 
+    it("leaves no cycle behind when a batch refusal is caught inside an enclosing transaction", async () => {
+      const batchWrites = {
+        bulkCreate: (edges, closing) => edges.bulkCreate([closing]),
+        bulkInsert: (edges, closing) => edges.bulkInsert([closing]),
+        bulkUpsertById: (edges, closing) =>
+          edges.bulkUpsertById([
+            { id: `closing-${closing.from.id}` as never, ...closing },
+          ]),
+        bulkGetOrCreateByEndpoints: (edges, closing) =>
+          edges.bulkGetOrCreateByEndpoints([closing]),
+      } satisfies Record<
+        string,
+        (
+          edges: ReturnType<typeof context.getStore>["edges"]["dependsOn"],
+          closing: Readonly<{
+            from: Readonly<{ kind: "Task"; id: string }>;
+            to: Readonly<{ kind: "Task"; id: string }>;
+            props: Record<string, never>;
+          }>,
+        ) => Promise<unknown>
+      >;
+
+      const store = context.getStore();
+      for (const [variant, write] of Object.entries(batchWrites)) {
+        const a = await store.nodes.Task.create({ name: `${variant}-a` });
+        const b = await store.nodes.Task.create({ name: `${variant}-b` });
+        const c = await store.nodes.Task.create({ name: `${variant}-c` });
+        await store.edges.dependsOn.create(a, b);
+        await store.edges.dependsOn.create(b, c);
+
+        const refusals: unknown[] = [];
+        await store.transaction(async (tx) => {
+          await write(tx.edges.dependsOn as never, {
+            from: c,
+            to: a,
+            props: {},
+          }).catch((error: unknown) => refusals.push(error));
+        });
+
+        expect(refusals, variant).toEqual([
+          expect.objectContaining({ name: "EdgeAcyclicityError" }),
+        ]);
+        expect(
+          await store.edges.dependsOn.findFrom(c),
+          `${variant} left its refused edge stored`,
+        ).toEqual([]);
+      }
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses a batch whose own rows close a cycle through a stored edge, before writing any of them", async () => {
+      const store = context.getStore();
+      const a = await store.nodes.Task.create({ name: "a" });
+      const b = await store.nodes.Task.create({ name: "b" });
+      const c = await store.nodes.Task.create({ name: "c" });
+      await store.edges.dependsOn.create(b, c);
+
+      const refusals: unknown[] = [];
+      await store.transaction(async (tx) => {
+        await tx.edges.dependsOn
+          .bulkCreate([
+            { from: a, to: b },
+            { from: c, to: a },
+          ])
+          .catch((error: unknown) => refusals.push(error));
+      });
+
+      expect(refusals).toEqual([
+        expect.objectContaining({ name: "EdgeAcyclicityError" }),
+      ]);
+      expect(await store.edges.dependsOn.find({})).toHaveLength(1);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
     it("treats two acyclic edge kinds as two independent relations", async () => {
       const store = context.getStore();
       const a = await store.nodes.Task.create({ name: "a" });

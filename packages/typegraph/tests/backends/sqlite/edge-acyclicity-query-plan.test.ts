@@ -118,7 +118,7 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
     expect(plan).not.toContain("MATERIALIZE candidates");
   });
 
-  it("a bulkCreate batch's post-insert probe seeks typegraph_edges_from_idx directly, no MATERIALIZE candidates", async () => {
+  it("a bulkCreate batch's pre-insert probe seeks typegraph_edges_from_idx directly, no MATERIALIZE candidates", async () => {
     const { backend, captured, client } = createPlanCaptureBackend();
     const store = createStore(buildGraph(), backend);
 
@@ -137,7 +137,7 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
 
     captured.length = 0;
     // Two more edges in ONE batch, extending the chain — not a cycle. The
-    // batch's own probe runs AFTER this insert, with both rows as origins.
+    // batch's own probe runs BEFORE this insert, with both rows as origins.
     await store.edges.dependsOn.bulkCreate([
       { from: requireDefined(nodes.at(-3)), to: requireDefined(nodes.at(-2)) },
       { from: requireDefined(nodes.at(-2)), to: requireDefined(nodes.at(-1)) },

@@ -142,6 +142,7 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import {
   type AcyclicityProbeContext,
   assertEdgeRelationsAcyclic,
+  assertUnwrittenEdgeRelationsAcyclic,
   edgeKindIsInAcyclicRelation,
   type ProposedRelationEdge,
 } from "../acyclicity";
@@ -423,8 +424,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     /**
      * Whether this call owes the acyclicity probe when the edge kind
      * declares `acyclic: true`. Defaults to `true`; callers that already
-     * covered it earlier in the same write frame (or that will re-probe the
-     * combined post-insert set, as batch create does) pass `false` so the
+     * covered it earlier in the same write frame (or that probe the whole
+     * prepared set once before inserting, as batch create does) pass `false` so the
      * relation is not walked twice for one write. `lock` is required
      * whenever the probe actually runs — see
      * `assertEdgeRelationsAcyclic`'s isolation-freshness guard.
@@ -1375,13 +1376,10 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
       input,
       id,
       validationBackend,
-      // Acyclicity's recursive reachability probe cannot be overlaid the
-      // way the in-batch cardinality/endpoint cache above is: it is
-      // executed through `execute`, not intercepted per predicate. An
-      // acyclic kind's batch is checked once, combined, against every row
-      // this batch inserts, after the insert lands (see the batch create
-      // callers below) — probing here would also miss in-batch cycles
-      // entirely (each row's probe would see only committed state).
+      // A per-row probe here would see only stored state and miss a cycle
+      // two rows of this batch close through each other. The batch create
+      // callers below probe the whole prepared set once, as an overlay on
+      // the stored relation, before their insert.
       { validateAcyclicity: false },
     );
     preparedCreates.push(prepared);
@@ -1837,26 +1835,26 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           }
           return;
         }
-        const rows = await withAlreadyExistsTranslation("edge", () =>
-          requireDefined(session.createEdgesDurable)(batchInsertWork),
-        );
-        assertDurableBatchRows(batchInsertWork, rows);
         await assertBatchEdgesRelationsAcyclic(
           ctx,
           target,
           lock,
           batchInsertWork,
         );
+        const rows = await withAlreadyExistsTranslation("edge", () =>
+          requireDefined(session.createEdgesDurable)(batchInsertWork),
+        );
+        assertDurableBatchRows(batchInsertWork, rows);
         return;
       }
-      await withAlreadyExistsTranslation("edge", () =>
-        session.createEdgesNoReturn(batchInsertWork),
-      );
       await assertBatchEdgesRelationsAcyclic(
         ctx,
         target,
         lock,
         batchInsertWork,
+      );
+      await withAlreadyExistsTranslation("edge", () =>
+        session.createEdgesNoReturn(batchInsertWork),
       );
     },
   );
@@ -1949,27 +1947,27 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           }
           return fallbackRows;
         }
-        const rows = await withAlreadyExistsTranslation("edge", () =>
-          requireDefined(session.createEdgesDurable)(batchInsertWork),
-        );
-        assertDurableBatchRows(batchInsertWork, rows);
         await assertBatchEdgesRelationsAcyclic(
           ctx,
           target,
           lock,
           batchInsertWork,
         );
+        const rows = await withAlreadyExistsTranslation("edge", () =>
+          requireDefined(session.createEdgesDurable)(batchInsertWork),
+        );
+        assertDurableBatchRows(batchInsertWork, rows);
         return rows.map((row) => rowToEdge(row));
       }
 
-      const rows = await withAlreadyExistsTranslation("edge", () =>
-        session.createEdges(batchInsertWork),
-      );
       await assertBatchEdgesRelationsAcyclic(
         ctx,
         target,
         lock,
         batchInsertWork,
+      );
+      const rows = await withAlreadyExistsTranslation("edge", () =>
+        session.createEdges(batchInsertWork),
       );
 
       return rows.map((row) => rowToEdge(row));
@@ -1999,7 +1997,7 @@ function batchFencesConstraintProbe<G extends GraphDef>(
 
 /**
  * One insert's row params as the acyclicity probe's proposed edge — the one
- * spelling shared by every post-insert probe, whether its rows arrive as a
+ * spelling shared by every batch probe, whether its rows arrive as a
  * batch's insert units ({@link proposedRelationEdgesFromInsertWork}) or as
  * prepared creates ({@link assertPreparedEdgeCreatesAcyclic}).
  */
@@ -2016,7 +2014,7 @@ function proposedRelationEdgeFromInsertParams(
   };
 }
 
-/** The proposed edges a batch create's post-insert acyclicity probe answers for. */
+/** The proposed edges a batch create's acyclicity probe answers for. */
 function proposedRelationEdgesFromInsertWork(
   batchInsertWork: readonly EdgeInsertWork[],
 ): readonly ProposedRelationEdge[] {
@@ -2026,21 +2024,19 @@ function proposedRelationEdgesFromInsertWork(
 }
 
 /**
- * ONE acyclicity probe for a set of edge creates a frame has already
- * inserted, for a caller outside this module that issues its own inserts:
- * the node batch create's composition attach loop
- * (`attachBatchCompositionCreateEdges`, `node-operations.ts`), which prepares
- * each item's composition edge with `validateAcyclicity: false` and reaches
- * this once for the whole batch.
+ * ONE acyclicity probe for a set of prepared edge creates, for a caller
+ * outside this module that issues its own inserts: the node batch create's
+ * composition attach loop (`attachBatchCompositionCreateEdges`,
+ * `node-operations.ts`), which prepares each item's composition edge with
+ * `validateAcyclicity: false` and reaches this once for the whole batch.
  *
- * Same reasoning as {@link assertBatchEdgesRelationsAcyclic}, whose rows this
- * function's callers cannot use: a composition batch's inserts are issued one
- * at a time (each item's cardinality probe must see the rows before it), so
- * what it holds at the end is the prepared creates, not one batch insert
- * unit. `assertEdgeRelationsAcyclic` drops rows whose kind is in no acyclic
- * relation and issues no statement for an empty remainder, so a batch of
- * composition edges is probed in exactly one walk per relation, and a graph
- * that declares no acyclic relation pays nothing.
+ * Probes the prepared set as an overlay on the stored relation
+ * (`assertUnwrittenEdgeRelationsAcyclic`), so the answer is the same whether
+ * the caller has inserted none, some, or all of the rows. The probe drops
+ * rows whose kind is in no acyclic relation and issues no statement for an
+ * empty remainder, so a batch of composition edges is probed in exactly one
+ * walk per relation, and a graph that declares no acyclic relation pays
+ * nothing.
  */
 export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -2049,7 +2045,7 @@ export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   operation: string,
   prepared: readonly EdgeCreatePrepared[],
 ): Promise<void> {
-  await assertEdgeRelationsAcyclic(
+  await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, operation),
     prepared.map((create) =>
       proposedRelationEdgeFromInsertParams(create.insertParams),
@@ -2058,17 +2054,14 @@ export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
 }
 
 /**
- * The batch acyclicity probe: run once against every row this batch just
- * inserted, treating them all as origins in one combined recursive walk.
+ * The batch acyclicity probe: one combined recursive walk over the stored
+ * relation overlaid with every row this batch is about to insert.
  *
- * Run AFTER the insert, never before: the in-batch overlay
- * (`createEdgeBatchValidationBackend`) that lets cardinality/endpoint checks
- * see earlier rows in the same batch intercepts `countEdgesFrom` /
- * `edgeExistsBetween`, not a recursive `execute` statement, so it cannot
- * account for an in-batch cycle. Inserting first and then checking the whole
- * committed set together is what makes an in-batch cycle (`a→b` and `b→a` in
- * one `bulkCreate`) visible at all, and a thrown `EdgeAcyclicityError` here
- * rolls the whole transaction back — no partial batch commits.
+ * Run BEFORE the insert, so a refusal precedes the batch's first write: a
+ * caller that catches the `EdgeAcyclicityError` inside an enclosing
+ * transaction and commits has written none of the refused rows. The overlay
+ * is what makes an in-batch cycle (`a→b` and `b→a` in one `bulkCreate`)
+ * visible without the rows being stored.
  */
 async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -2076,7 +2069,7 @@ async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
   lock: GraphWriteLock,
   batchInsertWork: readonly EdgeInsertWork[],
 ): Promise<void> {
-  await assertEdgeRelationsAcyclic(
+  await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
     proposedRelationEdgesFromInsertWork(batchInsertWork),
   );
