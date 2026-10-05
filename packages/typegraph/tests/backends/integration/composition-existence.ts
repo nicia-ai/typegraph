@@ -25,6 +25,7 @@ import {
   EndpointNotFoundError,
   hasPart,
   partOf,
+  RestrictedDeleteError,
   subClassOf,
   TypeGraphError,
   ValidationError,
@@ -59,7 +60,13 @@ const EeShow = defineNode("EeShow", { schema: z.object({}) });
 const EeEngine = defineNode("EeEngine", { schema: z.object({}) });
 const EeCar = defineNode("EeCar", { schema: z.object({}) });
 
+/** A part that severs its own edges on delete, under a `restrict` folder. */
+const EeNote = defineNode("EeNote", { schema: z.object({}) });
+
 const eeSegmentOf = defineEdge("eeSegmentOf", { schema: z.object({}) });
+const eeNoteOf = defineEdge("eeNoteOf", { schema: z.object({}) });
+/** A plain (non-composition) edge: the `restrict` obstacle of the cascade cases. */
+const eeCites = defineEdge("eeCites", { schema: z.object({}) });
 const eeEngineOf = defineEdge("eeEngineOf", { schema: z.object({}) });
 const eeTagOf = defineEdge("eeTagOf", { schema: z.object({}) });
 const eeHasTrack = defineEdge("eeHasTrack", { schema: z.object({}) });
@@ -83,6 +90,7 @@ function buildGraph(id: string) {
       EeFolder: { type: EeFolder },
       EeEngine: { type: EeEngine },
       EeCar: { type: EeCar },
+      EeNote: { type: EeNote, onDelete: "disconnect" },
     },
     edges: {
       eeSegmentOf: {
@@ -114,6 +122,17 @@ function buildGraph(id: string) {
         from: [EeFolder],
         to: [EeFolder],
         cardinality: "one",
+      },
+      eeNoteOf: {
+        type: eeNoteOf,
+        from: [EeNote],
+        to: [EeFolder],
+        cardinality: "one",
+      },
+      eeCites: {
+        type: eeCites,
+        from: [EeFolder, EeNote],
+        to: [EePodcast, EeFolder],
       },
       eeEngineOf: {
         type: eeEngineOf,
@@ -149,6 +168,7 @@ function buildGraph(id: string) {
       // Reflexive, so the orientation must be stated explicitly.
       partOf(EeFolder, EeFolder, { via: eeFolderOf, partSide: "from" }),
       partOf(EeEngine, EeCar, { via: eeEngineOf, existence: "required" }),
+      partOf(EeNote, EeFolder, { via: eeNoteOf }),
     ],
   });
 }
@@ -517,6 +537,91 @@ export function registerCompositionExistenceIntegrationTests(
     // `applyEdgeHardDelete` instead of `backend.deleteEdge`/
     // `hardDeleteEdgesBatch` directly. Every cascade of a required part then
     // starts refusing (this test throws instead of resolving).
+
+    it("case 9b: a whole delete a part's `restrict` refuses, caught in a transaction, deletes nothing", async () => {
+      type ExistenceStore = Awaited<
+        ReturnType<typeof context.createStore<ReturnType<typeof buildGraph>>>
+      >;
+      const root = { kind: "EeFolder", id: "ee-root" } as const;
+      const deletes: Readonly<
+        Record<string, (tx: ExistenceStore) => Promise<unknown>>
+      > = {
+        delete: (tx) => tx.nodes.EeFolder.delete(root.id as never),
+        hardDelete: (tx) => tx.nodes.EeFolder.hardDelete(root.id as never),
+        bulkDelete: (tx) => tx.nodes.EeFolder.bulkDelete([root.id as never]),
+        // The refused whole comes second: the free folder before it must
+        // survive the batch's refusal too.
+        "bulkDelete after a deletable item": (tx) =>
+          tx.nodes.EeFolder.bulkDelete(["ee-free" as never, root.id as never]),
+      };
+
+      // MUTATION CHECK: drop the member loop from `planCascadingNodeDelete`
+      // (src/store/operations/node-operations.ts) — the middle folder's
+      // refusal is then reached only as the cascade deletes it, after the
+      // leaf beneath it is gone, and the caught transaction commits that.
+      for (const [name, run] of Object.entries(deletes)) {
+        const store = await context.createStore(buildGraph(nextGraphId()));
+        const podcast = await store.nodes.EePodcast.create({});
+        await store.nodes.EeFolder.create({}, { id: "ee-free" });
+        await store.nodes.EeFolder.create({}, { id: root.id });
+        const middle = await store.nodes.EeFolder.create(
+          {},
+          { id: "ee-middle", partOf: { whole: root } },
+        );
+        await store.nodes.EeFolder.create(
+          {},
+          { id: "ee-leaf", partOf: { whole: middle } },
+        );
+        // The middle folder is `restrict` (the default) and holds a plain
+        // edge, so deleting the root must refuse — leaf-first, after the leaf.
+        await store.edges.eeCites.create(middle, podcast, {});
+
+        let refusal: unknown;
+        await store.transaction(async (tx) => {
+          refusal = await run(tx as unknown as ExistenceStore).catch(
+            (error: unknown) => error,
+          );
+        });
+
+        expect(refusal, name).toBeInstanceOf(RestrictedDeleteError);
+        expect(
+          (refusal as RestrictedDeleteError).details.nodeId,
+          name,
+        ).toBe("ee-middle");
+        expect(
+          (await store.nodes.EeFolder.find({})).map((node) => node.id).toSorted(),
+          name,
+        ).toEqual(["ee-free", "ee-leaf", "ee-middle", "ee-root"]);
+        expect(await store.edges.eeFolderOf.find({}), name).toHaveLength(2);
+        expect(await store.verifyConstraintFences(), name).toEqual([]);
+      }
+    });
+
+    it("case 9c: a part's `restrict` is judged against the edges the parts deleted before it remove", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.EeFolder.create({});
+      const middle = await store.nodes.EeFolder.create(
+        {},
+        { partOf: { whole: root } },
+      );
+      const note = await store.nodes.EeNote.create(
+        {},
+        { partOf: { whole: middle } },
+      );
+      // The note is deleted first and, being `disconnect`, takes this edge
+      // with it — so by the middle folder's turn nothing restricts it.
+      await store.edges.eeCites.create(note, middle, {});
+
+      // MUTATION CHECK: in `planCascadingNodeDelete`, judge every node
+      // against the frame's starting graph (stop folding
+      // `verdict.removedEdgeIds` into `effects`) — the middle folder is then
+      // refused for an edge its own cascade removes first.
+      await store.nodes.EeFolder.delete(root.id);
+
+      expect(await store.nodes.EeFolder.count()).toBe(0);
+      expect(await store.nodes.EeNote.count()).toBe(0);
+      expect(await store.edges.eeCites.find({})).toEqual([]);
+    });
 
     it("case 10: a required-existence bulk create takes the portable path (no partial row, no fused executor)", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));

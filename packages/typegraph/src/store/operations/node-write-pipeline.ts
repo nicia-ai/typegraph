@@ -133,7 +133,7 @@ export type NodeDeletePolicy = Readonly<{
    * once — by whichever caller planned the consumption, not a second time by
    * this delete's own delete-behavior enforcement.
    *
-   * Populated by `runCompositionCascade` (`node-operations.ts`): every
+   * Populated by the composition cascade (`node-operations.ts`): every
    * composition edge id a whole's cascade consumes is folded into the
    * ROOT's own policy via `withCascadeConsumedEdges`, and each individual
    * MEMBER delete the cascade drives is itself given a policy naming the
@@ -147,8 +147,8 @@ export type NodeDeletePolicy = Readonly<{
   consumedEdgeIds?: ReadonlySet<string>;
   /**
    * Whether a whole delete cascades to its parts. Default `true`.
-   * `runCompositionCascade` reads this: `false` makes it a no-op that
-   * returns an empty plan without touching a single part row. Merge apply
+   * `planCascadingNodeDelete` (`node-operations.ts`) reads this: `false`
+   * yields an empty plan without touching a single part row. Merge apply
    * passes `false` (`graph-merge/merge.ts`) because its plan already
    * carries every part deletion the cascade would otherwise recompute —
    * apply trusts the plan rather than re-walking the closure a second time
@@ -260,7 +260,47 @@ async function enforceNodeDeleteBehavior(
   backend: Backend,
   policy?: NodeDeletePolicy,
 ): Promise<void> {
-  if (policy?.enforceDeleteBehavior === false) return;
+  const verdict = await judgeNodeDeleteBehavior(ctx, args, backend, policy);
+  if (verdict.removedEdgeIds.length === 0) return;
+  await deleteEdgesById(ctx, backend, args.mode, verdict.removedEdgeIds);
+}
+
+/**
+ * What one node's delete behavior decides about its connected edges: the edge
+ * rows the delete removes alongside the node. A `restrict` node with a
+ * non-composition edge left has no verdict at all — it refuses.
+ */
+type NodeDeleteBehaviorVerdict = Readonly<{
+  removedEdgeIds: readonly string[];
+}>;
+
+const NO_EDGES_REMOVED: NodeDeleteBehaviorVerdict = { removedEdgeIds: [] };
+
+/**
+ * THE delete-behavior decision, read-only: what {@link enforceNodeDeleteBehavior}
+ * applies, and what a frame that deletes MORE than one node asks for every one
+ * of them before its first statement (the composition cascade and the batch
+ * delete, `node-operations.ts`), so a `restrict` refusal on a later node is
+ * reached while nothing has been written.
+ *
+ * `policy.consumedEdgeIds` is how such a frame states the edges its EARLIER
+ * deletes will already have removed by the time this node's turn comes: the
+ * verdict is then the one the node's own delete reaches in sequence.
+ *
+ * @throws RestrictedDeleteError when a `restrict` node keeps a
+ *   non-composition edge.
+ */
+export async function judgeNodeDeleteBehavior(
+  ctx: Pick<NodeWriteContext, "graphId" | "registry">,
+  args: Readonly<{
+    kind: string;
+    id: string;
+    onDelete: DeleteBehavior | undefined;
+  }>,
+  backend: Pick<Backend, "findEdgesConnectedTo">,
+  policy?: NodeDeletePolicy,
+): Promise<NodeDeleteBehaviorVerdict> {
+  if (policy?.enforceDeleteBehavior === false) return NO_EDGES_REMOVED;
   const behavior = args.onDelete ?? "restrict";
   const connectedEdges = await backend.findEdgesConnectedTo({
     graphId: ctx.graphId,
@@ -268,14 +308,15 @@ async function enforceNodeDeleteBehavior(
     nodeId: args.id,
   });
 
-  if (connectedEdges.length === 0) return;
+  if (connectedEdges.length === 0) return NO_EDGES_REMOVED;
 
   const { consumedEdgeIds } = policy ?? {};
   const unconsumedEdges =
     consumedEdgeIds === undefined ? connectedEdges : (
       connectedEdges.filter((edge) => !consumedEdgeIds.has(edge.id))
     );
-  if (unconsumedEdges.length === 0) return;
+  if (unconsumedEdges.length === 0) return NO_EDGES_REMOVED;
+  const removedEdgeIds = unconsumedEdges.map((edge) => edge.id);
 
   switch (behavior) {
     case "restrict": {
@@ -289,16 +330,10 @@ async function enforceNodeDeleteBehavior(
         // nothing else removes their rows. Leaving them live would point a
         // composition edge at the node this delete is about to tombstone —
         // the exact state the comment above the cascade/disconnect arm says
-        // cannot exist. Remove them here through the same owner that arm
+        // cannot exist. They are removed through the same owner that arm
         // uses, so a restrict-behaved delete leaves no dangling composition
         // edge on either the part or an intermediate whole's upward edge.
-        await deleteEdgesById(
-          ctx,
-          backend,
-          args.mode,
-          unconsumedEdges.map((edge) => edge.id),
-        );
-        return;
+        return { removedEdgeIds };
       }
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
@@ -314,13 +349,7 @@ async function enforceNodeDeleteBehavior(
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
       // without both endpoints.
-      await deleteEdgesById(
-        ctx,
-        backend,
-        args.mode,
-        unconsumedEdges.map((edge) => edge.id),
-      );
-      break;
+      return { removedEdgeIds };
     }
   }
 }
