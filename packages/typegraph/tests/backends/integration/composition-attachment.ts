@@ -1167,22 +1167,26 @@ export function registerCompositionAttachmentIntegrationTests(
           { slug: "a" },
           { partOf: { whole: book, ...held, ...stored } },
         );
-        const windows = async () =>
-          (
-            await store.edges.caChapterOf.find(
-              {},
-              { temporalMode: "includeEnded" },
-            )
-          ).map((edge) => ({
+        const windows = async () => {
+          const edges = await store.edges.caChapterOf.find(
+            {},
+            { temporalMode: "includeEnded" },
+          );
+          return edges.map((edge) => ({
             validFrom: edge.meta.validFrom,
             validTo: edge.meta.validTo,
           }));
+        };
 
         // MUTATION CHECK: drop the window comparison from
         // `judgeSatisfiedAttachment`
         // (src/store/operations/composition-create.ts) — every call below
         // then resolves, with the conflicting bound silently discarded.
-        const partOf = { whole: book, via: "caChapterOf", [field]: conflicting[field] };
+        const partOf = {
+          whole: book,
+          via: "caChapterOf",
+          [field]: conflicting[field],
+        };
         const calls: readonly (() => Promise<unknown>)[] = [
           () =>
             store.nodes.CaChapter.getOrCreateByConstraint(
@@ -1298,9 +1302,9 @@ export function registerCompositionAttachmentIntegrationTests(
           );
         }
         // One validation, so the satisfied legs name the same fault create does.
-        expect(new Set(refusals.map((issues) => JSON.stringify(issues)))).toEqual(
-          new Set([JSON.stringify(refusals[0])]),
-        );
+        expect(
+          new Set(refusals.map((issues) => JSON.stringify(issues))),
+        ).toEqual(new Set([JSON.stringify(refusals[0])]));
       }
       expect(await store.nodes.CaChapter.find({})).toHaveLength(1);
     });
@@ -1356,9 +1360,8 @@ export function registerCompositionAttachmentIntegrationTests(
           ]);
         }
       }
-      expect((await store.nodes.CaReel.find({})).map((reel) => reel.id)).toEqual(
-        [existing.id],
-      );
+      const reels = await store.nodes.CaReel.find({});
+      expect(reels.map((reel) => reel.id)).toEqual([existing.id]);
       expect(
         await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" }),
       ).toEqual([]);

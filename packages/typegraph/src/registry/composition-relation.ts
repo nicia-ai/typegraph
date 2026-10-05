@@ -52,7 +52,8 @@ export type CompositionPartSide = "from" | "to";
  * refused while the part is live). Default `"optional"`, so a declaration
  * that states no existence keeps its semantics.
  */
-export type CompositionExistence = (typeof COMPOSITION_EXISTENCE_VALUES)[number];
+export type CompositionExistence =
+  (typeof COMPOSITION_EXISTENCE_VALUES)[number];
 
 /** Every value `existence` may state, in declaration order. */
 export const COMPOSITION_EXISTENCE_VALUES = ["optional", "required"] as const;

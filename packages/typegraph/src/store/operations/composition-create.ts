@@ -552,7 +552,7 @@ export function compositionEdgeHasRequiredExistencePart(
  * function adds only the `deleted_at` gate `compositionEdgeCounts`'s callers
  * are each individually documented to apply themselves.
  */
-export function edgeCurrentlyAttachesPart(
+function edgeCurrentlyAttachesPart(
   registry: KindRegistry,
   partKind: string,
   edge: Pick<EdgeRow, "kind" | "deleted_at" | "valid_to">,
@@ -895,9 +895,7 @@ function assertSatisfiedAttachmentHonored(
   }
   const path = `${PART_OF_SURFACE.path}.${verdict.bound}`;
   const storedDescription =
-    verdict.stored === undefined ?
-      "no such bound"
-    : `"${verdict.stored}"`;
+    verdict.stored === undefined ? "no such bound" : `"${verdict.stored}"`;
   throw new ValidationError(
     `Unappliable ${path} for ${partKind} "${partId}": it already holds this whole via "${currentEdge.kind}" (edge ${currentEdge.id}) with a different window.`,
     {

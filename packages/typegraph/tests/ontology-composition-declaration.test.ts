@@ -591,8 +591,10 @@ describe("composition registration checks (buildKindRegistry)", () => {
     // `compositionRelationOptions` (src/ontology/core-meta-edges.ts) — both
     // factories then return a relation carrying the misspelling.
     for (const factory of [
-      () => partOf(Part, Whole, { via: realizes, existence: "require" as never }),
-      () => hasPart(Whole, Part, { via: realizes, existence: "require" as never }),
+      () =>
+        partOf(Part, Whole, { via: realizes, existence: "require" as never }),
+      () =>
+        hasPart(Whole, Part, { via: realizes, existence: "require" as never }),
     ]) {
       expectCompositionCode(factory, "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID");
     }

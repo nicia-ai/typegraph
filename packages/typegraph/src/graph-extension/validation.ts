@@ -870,10 +870,7 @@ function validateOntologySection(
     }
 
     const existence = entry["existence"];
-    if (
-      existence !== undefined &&
-      !isCompositionExistence(existence)
-    ) {
+    if (existence !== undefined && !isCompositionExistence(existence)) {
       issues.push({
         path: `${path}/existence`,
         message: `Ontology relation \`existence\` must be one of ${COMPOSITION_EXISTENCE_VALUES.join(", ")} when present.`,

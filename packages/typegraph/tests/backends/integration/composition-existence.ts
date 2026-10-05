@@ -583,17 +583,24 @@ export function registerCompositionExistenceIntegrationTests(
           );
         });
 
-        expect(refusal, name).toBeInstanceOf(RestrictedDeleteError);
-        expect(
-          (refusal as RestrictedDeleteError).details.nodeId,
+        const folders = await store.nodes.EeFolder.find({});
+        const attachments = await store.edges.eeFolderOf.find({});
+        expect({
           name,
-        ).toBe("ee-middle");
-        expect(
-          (await store.nodes.EeFolder.find({})).map((node) => node.id).toSorted(),
+          refused:
+            refusal instanceof RestrictedDeleteError ?
+              refusal.details.nodeId
+            : refusal,
+          folders: folders.map((node) => node.id).toSorted(),
+          attachments: attachments.length,
+          violations: await store.verifyConstraintFences(),
+        }).toEqual({
           name,
-        ).toEqual(["ee-free", "ee-leaf", "ee-middle", "ee-root"]);
-        expect(await store.edges.eeFolderOf.find({}), name).toHaveLength(2);
-        expect(await store.verifyConstraintFences(), name).toEqual([]);
+          refused: "ee-middle",
+          folders: ["ee-free", "ee-leaf", "ee-middle", "ee-root"],
+          attachments: 2,
+          violations: [],
+        });
       }
     });
 
@@ -990,19 +997,24 @@ export function registerCompositionExistenceIntegrationTests(
             (error_: unknown) => error_,
           );
           const label = `${name} after ${retirement}`;
-          expect(error, label).toBeInstanceOf(CompositionExistenceError);
-          expect(
-            (error as CompositionExistenceError).details,
+          expect({
             label,
-          ).toMatchObject({
-            situation: "create",
-            partKind: "EeSegment",
-            partId: segment.id,
+            refused:
+              error instanceof CompositionExistenceError ?
+                error.details
+              : error,
+            restored: await store.nodes.EeSegment.getById(segment.id),
+            violations: await store.verifyConstraintFences(),
+          }).toEqual({
+            label,
+            refused: {
+              situation: "create",
+              partKind: "EeSegment",
+              partId: segment.id,
+            },
+            restored: undefined,
+            violations: [],
           });
-          expect(await store.nodes.EeSegment.getById(segment.id), label).toBe(
-            undefined,
-          );
-          expect(await store.verifyConstraintFences(), label).toEqual([]);
         }
       }
 
@@ -1088,11 +1100,21 @@ export function registerCompositionExistenceIntegrationTests(
           );
         });
 
-        expect(refusal, name).toBeInstanceOf(TypeGraphError);
-        expect(await store.nodes.EeSegment.count(), name).toBe(0);
-        expect(await store.nodes.EeFolder.count(), name).toBe(0);
-        expect(await store.nodes.EeEngine.count(), name).toBe(0);
-        expect(await store.verifyConstraintFences(), name).toEqual([]);
+        expect({
+          name,
+          refused: refusal instanceof TypeGraphError,
+          segments: await store.nodes.EeSegment.count(),
+          folders: await store.nodes.EeFolder.count(),
+          engines: await store.nodes.EeEngine.count(),
+          violations: await store.verifyConstraintFences(),
+        }).toEqual({
+          name,
+          refused: true,
+          segments: 0,
+          folders: 0,
+          engines: 0,
+          violations: [],
+        });
       }
     });
 

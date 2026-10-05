@@ -2955,13 +2955,14 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
   if (registration === undefined) return false;
   // Read BEFORE the purge, which removes them with the node: the edges this
   // import created that are about to go.
-  const removedEdges = (
-    await frame.target.findEdgesConnectedTo({
-      graphId,
-      nodeKind: part.kind,
-      nodeId: part.id,
-    })
-  ).filter((edge) => ledger.createdEdgeIds.has(edge.id));
+  const connectedEdges = await frame.target.findEdgesConnectedTo({
+    graphId,
+    nodeKind: part.kind,
+    nodeId: part.id,
+  });
+  const removedEdges = connectedEdges.filter((edge) =>
+    ledger.createdEdgeIds.has(edge.id),
+  );
   try {
     await frame.session.purgeNode(
       {

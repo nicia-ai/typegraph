@@ -449,15 +449,17 @@ describe("validating import: an accepted composition edge is not evidence of att
         { onConflict: "error" },
       );
 
-      expect(result.errors.map((error) => [error.entityType, error.id])).toEqual(
-        [
-          ["node", "mid-1"],
-          ["edge", "e-mid-1"],
-        ],
-      );
+      expect(
+        result.errors.map((error) => [error.entityType, error.id]),
+      ).toEqual([
+        ["node", "mid-1"],
+        ["edge", "e-mid-1"],
+      ]);
       expect(result.nodes.created).toBe(0);
       expect(result.edges.created).toBe(0);
-      expect(await store.nodes.CeiMid.getById("mid-1" as never)).toBeUndefined();
+      expect(
+        await store.nodes.CeiMid.getById("mid-1" as never),
+      ).toBeUndefined();
       expect(await store.verifyConstraintFences()).toEqual([]);
     } finally {
       await backend.close();
@@ -493,13 +495,15 @@ describe("validating import: an accepted composition edge is not evidence of att
         { onConflict: "error", validateReferences: false },
       );
 
-      expect(result.errors.map((error) => [error.entityType, error.id])).toEqual(
-        [
-          ["node", "mid-1"],
-          ["edge", "e-mid-1"],
-        ],
-      );
-      expect(await store.nodes.CeiMid.getById("mid-1" as never)).toBeUndefined();
+      expect(
+        result.errors.map((error) => [error.entityType, error.id]),
+      ).toEqual([
+        ["node", "mid-1"],
+        ["edge", "e-mid-1"],
+      ]);
+      expect(
+        await store.nodes.CeiMid.getById("mid-1" as never),
+      ).toBeUndefined();
       expect(await store.verifyConstraintFences()).toEqual([]);
     } finally {
       await backend.close();
@@ -568,10 +572,8 @@ describe("validating import: an accepted composition edge is not evidence of att
         {},
         { partOf: { whole: root, validFrom: ENDED_FROM } },
       );
-      const attachment = requireDefined(
-        (await store.edges.ceiMidOf.find({}))[0],
-        "the realizing edge",
-      );
+      const attachments = await store.edges.ceiMidOf.find({});
+      const attachment = requireDefined(attachments[0], "the realizing edge");
       const document = (batchSize: number) =>
         importGraph(
           store,

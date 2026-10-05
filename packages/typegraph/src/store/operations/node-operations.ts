@@ -108,7 +108,6 @@ import {
 } from "../../core/types";
 import {
   CompilerInvariantError,
-  CompositionExistenceError,
   ConfigurationError,
   DatabaseOperationError,
   KindNotFoundError,
@@ -261,7 +260,6 @@ import {
   type CompositionCreateWork,
   type CompositionIncumbentDisposition,
   decideCompositionAttachmentUnderFence,
-  edgeCurrentlyAttachesPart,
   type FencedCompositionAttachment,
   findLiveCompositionAttachment,
   incumbentSatisfiesRequestedAttachment,
@@ -5073,7 +5071,10 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     async (session, target, _overlaidSession, lock) => {
       // A resurrection that states an attachment is decided below; one that
       // states none may only restore a part that still holds a live whole.
-      if (options?.clearDeleted === true && compositionAttachment === undefined) {
+      if (
+        options?.clearDeleted === true &&
+        compositionAttachment === undefined
+      ) {
         await assertRestoredRequiredPartsAttached(
           { graphId: ctx.graphId, registry: ctx.registry, lock },
           target,
