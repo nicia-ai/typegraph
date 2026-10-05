@@ -120,6 +120,7 @@ export {
   readRevisionOrigin,
   recordedRelationsLineage,
   resolveLineage,
+  withRecordedIdentityDecision,
 } from "../store/recorded-capture";
 export {
   type GraphWriteLock,
