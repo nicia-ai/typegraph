@@ -795,12 +795,12 @@ type SidecarProbeRow = Readonly<{ present: number }>;
  * other table is occupancy in both scopes — a sidecar declares no edges, mints
  * no revisions, asserts no identities, and projects no fulltext or unique keys,
  * so a row in any of them is not ours whatever the schema says.
- * `ProvenanceOwner` rows are NOT excused
- * either: the marker probe has already classified every one of them, so a row
- * this raw probe can see and `findNodesByKind` cannot is unaccounted-for
- * occupancy and must refuse. It cannot be expressed through `findNodesByKind`,
- * which needs the kinds of a graph whose schema — by construction, in the case
- * that matters — was never registered.
+ * `ProvenanceOwner` rows are NOT excused either: the marker probe has already
+ * classified every one of them, so a row this raw probe can see and
+ * `findNodesByKind` cannot is unaccounted-for occupancy and must refuse. It
+ * cannot be expressed through `findNodesByKind`, which needs the kinds of a
+ * graph whose schema — by construction, in the case that matters — was never
+ * registered.
  *
  * The probed set is every graph-scoped content relation of the shared
  * inventory, named through the backend's `tableNames` port. The bookkeeping
@@ -843,9 +843,13 @@ async function hasRowsUnderGraphId(
  * The journal's triggers are installed per database, not per graph, so on a
  * database that has them every `Provenance` row a pre-marker sidecar wrote left
  * an entry under the sidecar's graph id. An entry is accounted for only when it
- * records a node of the `Provenance` kind whose row is STILL STORED under that
- * `(kind, id)`: that row is then verified by {@link isOwnedProvenanceRow} like
- * every other, so the entry says nothing the node table has not already said.
+ * records a node whose row is STILL STORED under that graph id and `(kind, id)`,
+ * so the entry says nothing the node table has not already said.
+ *
+ * The kind is restricted by that correlation alone. {@link hasRowsUnderGraphId}
+ * applies this filter only after its node probe found no stored row of another
+ * kind, so a stored row an entry can match is a `Provenance` row, verified by
+ * {@link isOwnedProvenanceRow} like every other.
  *
  * Everything else stays occupancy. An entry for an edge, an identity assertion
  * or a node of another kind records content a sidecar never holds, and an entry
@@ -858,7 +862,7 @@ function unaccountedJournalEntryFilter(
 ): ReturnType<typeof sql.empty> {
   const journal = sql.identifier(journalTable);
   const nodes = sql.identifier(nodesTable);
-  return sql` AND NOT (${journal}.entity = ${REVISION_JOURNAL_ENTITY.node} AND ${journal}.kind = ${PROVENANCE_KIND} AND EXISTS (SELECT 1 FROM ${nodes} WHERE ${nodes}.graph_id = ${journal}.graph_id AND ${nodes}.kind = ${journal}.kind AND ${nodes}.id = ${journal}.id))`;
+  return sql` AND NOT (${journal}.entity = ${REVISION_JOURNAL_ENTITY.node} AND EXISTS (SELECT 1 FROM ${nodes} WHERE ${nodes}.graph_id = ${journal}.graph_id AND ${nodes}.kind = ${journal}.kind AND ${nodes}.id = ${journal}.id))`;
 }
 
 /**

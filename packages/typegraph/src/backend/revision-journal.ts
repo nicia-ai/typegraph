@@ -3,8 +3,9 @@ import type { GraphBackend } from "./types";
 
 /**
  * The `entity` a revision-journal entry records for a write to each journaled
- * relation. The trigger builders write these values and journal readers match
- * on them.
+ * relation. The trigger builders pass these values as each trigger's target and
+ * the provenance sidecar's occupancy probe matches on them. The PostgreSQL
+ * trigger function body and the lineage reader still spell their own literals.
  */
 export const REVISION_JOURNAL_ENTITY = {
   node: "node",
