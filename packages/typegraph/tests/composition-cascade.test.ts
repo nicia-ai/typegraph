@@ -336,7 +336,7 @@ describe("planCompositionCascade", () => {
     // sorted by id, not in the order the walk collected them — so two cascades
     // over overlapping closures cannot take these row locks in opposite
     // orders.
-    // MUTATION: reverse the sort in `runCompositionCascade`'s
+    // MUTATION: reverse the sort in `applyCompositionCascade`'s
     // `deleteCompositionEdges` call (src/store/operations/node-operations.ts)
     // and this assertion fails.
     expect(consumedEdgeIdArguments).toHaveLength(1);
@@ -547,7 +547,7 @@ describe("composition cascade — delete", () => {
     ).toHaveLength(1);
   });
   // MUTATION: stop passing `member.row` as `deleteNodeRowInFrame`'s `existing`
-  // in `runCompositionCascade` (src/store/operations/node-operations.ts) —
+  // in `applyCompositionCascade` (src/store/operations/node-operations.ts) —
   // each member is then read a second time for its own pre-image and both
   // filters find 2 reads.
 

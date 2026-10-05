@@ -227,6 +227,7 @@ import {
 import {
   assertCompositionExistencePreserved,
   assertEndpointRowLive,
+  edgeWriteEndsOpenWindow,
 } from "./composition-create";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
@@ -2026,21 +2027,21 @@ function proposedRelationEdgesFromInsertWork(
 }
 
 /**
- * ONE acyclicity probe for a set of edge creates a frame has already
- * inserted, for a caller outside this module that issues its own inserts:
- * the node batch create's composition attach loop
- * (`attachBatchCompositionCreateEdges`, `node-operations.ts`), which prepares
+ * ONE acyclicity probe for a set of prepared edge creates, run BEFORE any of
+ * them is inserted, for a caller outside this module that issues its own
+ * inserts: the node batch create's composition preparation
+ * (`prepareBatchCompositionCreateEdges`, `node-operations.ts`), which prepares
  * each item's composition edge with `validateAcyclicity: false` and reaches
- * this once for the whole batch.
+ * this once for the whole batch, ahead of the batch's first statement.
  *
- * Same reasoning as {@link assertBatchEdgesRelationsAcyclic}, whose rows this
- * function's callers cannot use: a composition batch's inserts are issued one
- * at a time (each item's cardinality probe must see the rows before it), so
- * what it holds at the end is the prepared creates, not one batch insert
- * unit. `assertEdgeRelationsAcyclic` drops rows whose kind is in no acyclic
- * relation and issues no statement for an empty remainder, so a batch of
- * composition edges is probed in exactly one walk per relation, and a graph
- * that declares no acyclic relation pays nothing.
+ * `rowsMayChain` is the caller's own knowledge of its rows: whether a cycle
+ * could run through more than one of them. When it cannot, each row is judged
+ * against the live relation alone — the index-seek form. When it can, the
+ * walk hops through the prepared rows too, so a cycle closed entirely by the
+ * batch's own rows is refused before anything is written.
+ * `assertEdgeRelationsAcyclic` drops rows whose kind is in no acyclic relation
+ * and issues no statement for an empty remainder, so a graph that declares no
+ * acyclic relation pays nothing.
  */
 export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -2048,12 +2049,14 @@ export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   lock: GraphWriteLock,
   operation: string,
   prepared: readonly EdgeCreatePrepared[],
+  rowsMayChain: boolean,
 ): Promise<void> {
   await assertEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, operation),
     prepared.map((create) =>
       proposedRelationEdgeFromInsertParams(create.insertParams),
     ),
+    rowsMayChain ? "planned" : "proposed",
   );
 }
 
@@ -2421,12 +2424,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     claims: reentryClaims,
   };
 
-  // The refusal fires only for the write that ENDS a currently
-  // OPEN window — `existing.valid_to === undefined` — not for one that
-  // merely restates or tightens an end the row already carries: the moment
-  // of detachment already passed the first time the window closed, so
-  // re-touching an already-ended edge is not what orphans a live part.
-  if (work.validTo !== undefined && existing.valid_to === undefined) {
+  if (edgeWriteEndsOpenWindow(existing, work.validTo)) {
     await assertCompositionExistencePreserved(
       {
         graphId: ctx.graphId,

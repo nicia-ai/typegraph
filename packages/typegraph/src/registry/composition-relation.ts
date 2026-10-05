@@ -44,6 +44,25 @@ export function compositionViaKind(via: CompositionViaRef): string {
 /** Which endpoint of the realizing edge carries the PART. */
 export type CompositionPartSide = "from" | "to";
 
+/** Every value `partSide` may state, in declaration order. */
+export const COMPOSITION_PART_SIDE_VALUES = [
+  "from",
+  "to",
+] as const satisfies readonly CompositionPartSide[];
+
+/**
+ * THE check that a stated `partSide` is one this library knows, shared by the
+ * `partOf` / `hasPart` factories, the registry build, and the schema-document
+ * validators for the same reason {@link isCompositionExistence} is: a value
+ * one surface admits and another refuses is a schema that persists and cannot
+ * be read back.
+ */
+export function isCompositionPartSide(
+  value: unknown,
+): value is CompositionPartSide {
+  return (COMPOSITION_PART_SIDE_VALUES as readonly unknown[]).includes(value);
+}
+
 /**
  * Whether a composition part can exist with no whole.
  * `"required"` — the part cannot exist without a live whole, enforced at
@@ -52,7 +71,25 @@ export type CompositionPartSide = "from" | "to";
  * refused while the part is live). Default `"optional"`, so a declaration
  * that states no existence keeps its semantics.
  */
-export type CompositionExistence = "optional" | "required";
+export type CompositionExistence =
+  (typeof COMPOSITION_EXISTENCE_VALUES)[number];
+
+/** Every value `existence` may state, in declaration order. */
+export const COMPOSITION_EXISTENCE_VALUES = ["optional", "required"] as const;
+
+/**
+ * THE check that a stated `existence` is one this library knows. One
+ * predicate for every surface that accepts the value — the `partOf` /
+ * `hasPart` factories, the registry build behind `defineGraph` and
+ * `store.evolve`, and the extension-document validator — so none of them can
+ * admit a value another refuses, and a misspelling can never be persisted
+ * into a schema document that no longer loads.
+ */
+export function isCompositionExistence(
+  value: unknown,
+): value is CompositionExistence {
+  return (COMPOSITION_EXISTENCE_VALUES as readonly unknown[]).includes(value);
+}
 
 /** One declared composition pair and the edge that realizes it. */
 export type CompositionPair = Readonly<{
@@ -100,7 +137,8 @@ export type CompositionIssueCode =
   | "ONTOLOGY_COMPOSITION_CARDINALITY"
   | "ONTOLOGY_COMPOSITION_VIA_MIXED"
   | "ONTOLOGY_COMPOSITION_POPULATION_MIXED"
-  | "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED";
+  | "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED"
+  | "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID";
 
 export type CompositionIssue = Readonly<{
   code: CompositionIssueCode;
@@ -176,6 +214,10 @@ export function inferCompositionPartSide(
 
   if (!forwardOk && !reverseOk) {
     return { code: "ONTOLOGY_COMPOSITION_VIA_ENDPOINTS" };
+  }
+
+  if (pair.declared !== undefined && !isCompositionPartSide(pair.declared)) {
+    return { code: "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID" };
   }
 
   if (forwardOk && reverseOk) {
@@ -369,7 +411,7 @@ function inferenceIssueMessage(
       );
     }
     case "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID": {
-      return `Composition relation ${relationLabel} declares a \`partSide\` that contradicts edge "${viaEdgeKind}"'s endpoints.`;
+      return `Composition relation ${relationLabel} declares a \`partSide\` that is not one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} or contradicts edge "${viaEdgeKind}"'s endpoints.`;
     }
   }
 }
@@ -428,6 +470,7 @@ export function buildCompositionRelation(
   const issues: CompositionIssue[] = [];
   const pairs: CompositionPair[] = [];
   const seenPairKeys = new Set<string>();
+  const existenceByPairKey = new Map<string, CompositionExistence>();
   const partSideByEdgeKind = new Map<string, CompositionPartSide>();
   const representativeByEdgeKind = new Map<string, NamedOntologyRelation>();
 
@@ -437,6 +480,21 @@ export function buildCompositionRelation(
     }
     const viaEdgeKind = relation.via;
     if (viaEdgeKind === undefined) continue;
+
+    // A relation object need not come from a factory, so the value is
+    // judged here too: an unknown `existence` would otherwise read as
+    // "not required" everywhere and be serialized as written.
+    if (
+      relation.existence !== undefined &&
+      !isCompositionExistence(relation.existence)
+    ) {
+      issues.push({
+        code: "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID",
+        message: `Composition relation ${relation.metaEdge}(${relation.from}, ${relation.to}) declares \`existence: ${JSON.stringify(relation.existence)}\`; it must be one of ${COMPOSITION_EXISTENCE_VALUES.join(", ")}.`,
+        relation,
+      });
+      continue;
+    }
 
     const facts = edgeFacts.get(viaEdgeKind);
     if (facts === undefined) {
@@ -519,7 +577,27 @@ export function buildCompositionRelation(
     // normalizes to the identical (partKind, wholeKind, viaEdgeKind) tuple.
     // Keep one `CompositionPair` per tuple so every `pairs` consumer
     // (exactness, population, cascade, navigation) processes it once.
+    //
+    // The two declarations of that one pair must agree on `existence`, and
+    // that is judged BEFORE the second one is folded away: keeping the first
+    // and dropping the other would make "is this part required" depend on
+    // declaration order. An unstated `existence` reads as the default on
+    // either side.
     const pairKey = encodeTupleKey([partKind, wholeKind, viaEdgeKind]);
+    const existence = relation.existence ?? "optional";
+    const declaredExistence = existenceByPairKey.get(pairKey);
+    if (declaredExistence !== undefined && declaredExistence !== existence) {
+      issues.push({
+        code: "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+        message:
+          `Composition pair ("${partKind}" part of "${wholeKind}" via "${viaEdgeKind}") is declared twice with different \`existence\` ` +
+          `(${[declaredExistence, existence].toSorted((left, right) => compareStrings(left, right)).join(", ")}); ` +
+          `a mirrored partOf/hasPart declaration must state the same existence.`,
+        relation,
+      });
+      continue;
+    }
+    existenceByPairKey.set(pairKey, existence);
     if (seenPairKeys.has(pairKey)) continue;
     seenPairKeys.add(pairKey);
 
@@ -529,7 +607,7 @@ export function buildCompositionRelation(
       viaEdgeKind,
       partSide,
       population,
-      existence: relation.existence ?? "optional",
+      existence,
     });
   }
 

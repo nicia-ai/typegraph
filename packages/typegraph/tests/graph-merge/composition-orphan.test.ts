@@ -34,7 +34,7 @@
  * silent no-op regardless of which of the two co-planned rows the deletion
  * loop reaches first. The runtime-cascade DISABLE mutation is instead
  * verified directly in `composition-cascade.test.ts` (disabling
- * `runCompositionCascade` itself fails six other tests there), and this
+ * `applyCompositionCascade` itself fails six other tests there), and this
  * file's own first scenario proves the orphan refusal fires with zero rows
  * changed regardless of `cascadeComposition`.
  */

@@ -16,6 +16,7 @@
  *   CaTrack   --(caHasTrack,       hasPart, whole->part)-- CaAlbum
  *   CaFolder  --(caParentFolder,   partOf, part->whole, reflexive)-- CaFolder
  *   CaRelic   --(caRelicOf,        partOf, part->whole, oneActive)-- CaVault
+ *   CaReel    --(caReelOf,         partOf, part->whole, oneActive)-- CaShow
  *
  * CaVault's OWN schema declares properties named `via`, `props`, `validFrom`
  * and `validTo` — the attachment's option names — so a whole passed as a
@@ -75,6 +76,16 @@ const CaVault = defineNode("CaVault", {
   }),
 });
 const CaRelic = defineNode("CaRelic", { schema: z.object({}) });
+/** An OPTIONAL `oneActive` part with a unique key, for get-or-create. */
+const CaReel = defineNode("CaReel", {
+  schema: z.object({ slug: z.string() }),
+});
+const CA_REEL_SLUG_UNIQUE = {
+  name: "ca_reel_slug",
+  fields: ["slug"],
+  scope: "kind",
+  collation: "binary",
+} as const;
 const CA_VAULT_PROPS = {
   via: "caChapterOf",
   props: { order: 7 },
@@ -98,6 +109,8 @@ const caRelicOf = defineEdge("caRelicOf", {
   schema: z.object({ order: z.number().optional() }),
 });
 
+const caReelOf = defineEdge("caReelOf", { schema: z.object({}) });
+
 function buildGraph(id: string) {
   return defineGraph({
     id,
@@ -110,10 +123,11 @@ function buildGraph(id: string) {
       CaClip: { type: CaClip },
       CaAlbum: { type: CaAlbum },
       CaTrack: { type: CaTrack },
-      CaFolder: { type: CaFolder },
+      CaFolder: { type: CaFolder, onDelete: "cascade" },
       CaReader: { type: CaReader },
       CaVault: { type: CaVault },
       CaRelic: { type: CaRelic },
+      CaReel: { type: CaReel, unique: [CA_REEL_SLUG_UNIQUE] },
     },
     edges: {
       caChapterOf: {
@@ -164,6 +178,12 @@ function buildGraph(id: string) {
         to: [CaVault],
         cardinality: "oneActive",
       },
+      caReelOf: {
+        type: caReelOf,
+        from: [CaReel],
+        to: [CaShow],
+        cardinality: "oneActive",
+      },
     },
     ontology: [
       partOf(CaChapter, CaBook, { via: caChapterOf }),
@@ -177,6 +197,7 @@ function buildGraph(id: string) {
         partSide: "from",
       }),
       partOf(CaRelic, CaVault, { via: caRelicOf }),
+      partOf(CaReel, CaShow, { via: caReelOf }),
     ],
   });
 }
@@ -578,6 +599,57 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(moved).toHaveLength(1);
       expect(requireDefined(moved[0]).toId).toBe(anthology.id);
       expect(await store.edges.caChapterOf.find({})).toHaveLength(0);
+    });
+
+    it("bulkDelete naming a part before its own whole deletes each node once and reports each cascaded part once", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaFolder.create({});
+      const child = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: root.id } } },
+      );
+      const leaf = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: child.id } } },
+      );
+
+      // MUTATION CHECK: drop `withoutPlannedDeleteEffects` from
+      // `planCascadingNodeDelete` (src/store/operations/node-operations.ts) —
+      // the root's plan, read before any delete of the batch ran, still names
+      // the child and the leaf, so both are deleted a second time and
+      // `cascadedParts` reads [leaf, leaf, child].
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        await tx.nodes.CaFolder.bulkDelete([child.id, root.id]);
+      });
+
+      expect(receipt.cascadedParts).toEqual([
+        { kind: "CaFolder", id: leaf.id },
+      ]);
+      expect(await store.nodes.CaFolder.find({})).toEqual([]);
+      expect(await store.edges.caParentFolder.find({})).toEqual([]);
+    });
+
+    it("bulkDelete naming a whole before its own part reports the part as cascaded once", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaFolder.create({});
+      const child = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: root.id } } },
+      );
+      const leaf = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { whole: { kind: "CaFolder", id: child.id } } },
+      );
+
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        await tx.nodes.CaFolder.bulkDelete([root.id, child.id]);
+      });
+
+      expect(receipt.cascadedParts).toEqual([
+        { kind: "CaFolder", id: leaf.id },
+        { kind: "CaFolder", id: child.id },
+      ]);
+      expect(await store.nodes.CaFolder.find({})).toEqual([]);
     });
 
     // ========================================================
@@ -1020,6 +1092,50 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
     });
 
+    it("bulkGetOrCreateByConstraint creates nothing when a matched item's refusal is caught inside an enclosing transaction", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const held = await store.nodes.CaBook.create({});
+      const requested = await store.nodes.CaBook.create({});
+      await store.nodes.CaChapter.create(
+        { slug: "held" },
+        {
+          partOf: {
+            whole: { kind: "CaBook", id: held.id },
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      let caught: unknown;
+      // MUTATION CHECK: run the batch's creates before its matched items
+      // (swap steps 4 and 5 of `executeNodeBulkGetOrCreateByConstraint`,
+      // src/store/operations/node-operations.ts) — "fresh" is then created
+      // and attached before "held" refuses, and survives the caught refusal.
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
+            "ca_chapter_slug",
+            [{ props: { slug: "fresh" } }, { props: { slug: "held" } }],
+            {
+              partOf: {
+                whole: { kind: "CaBook", id: requested.id },
+                via: "caChapterOf",
+                props: { order: 1 },
+              },
+            },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(CompositionExistenceError);
+      const chapters = await store.nodes.CaChapter.find({});
+      expect(chapters.map((chapter) => chapter.slug)).toEqual(["held"]);
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
+    });
+
     // ========================================================
     // The attachment object itself: `whole`, and nothing unstated
     // ========================================================
@@ -1124,6 +1240,250 @@ export function registerCompositionAttachmentIntegrationTests(
       );
       expect(revived.action).toBe("resurrected");
       expect(await windowOf("revived")).toEqual(window);
+    });
+
+    it("verifies a stated window against an already-satisfied attachment instead of dropping it", async () => {
+      const stored = {
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2090-01-01T00:00:00.000Z",
+      } as const;
+      const conflicting = {
+        validFrom: "2021-06-01T00:00:00.000Z",
+        validTo: "2095-06-01T00:00:00.000Z",
+      } as const;
+      const held = { via: "caChapterOf", props: { order: 1 } } as const;
+      const fields = ["validFrom", "validTo"] as const;
+
+      for (const field of fields) {
+        const store = await context.createStore(buildGraph(nextGraphId()));
+        const book = await store.nodes.CaBook.create({});
+        await store.nodes.CaChapter.getOrCreateByConstraint(
+          "ca_chapter_slug",
+          { slug: "a" },
+          { partOf: { whole: book, ...held, ...stored } },
+        );
+        const windows = async () => {
+          const edges = await store.edges.caChapterOf.find(
+            {},
+            { temporalMode: "includeEnded" },
+          );
+          return edges.map((edge) => ({
+            validFrom: edge.meta.validFrom,
+            validTo: edge.meta.validTo,
+          }));
+        };
+
+        // MUTATION CHECK: drop the window comparison from
+        // `judgeSatisfiedAttachment`
+        // (src/store/operations/composition-create.ts) — every call below
+        // then resolves, with the conflicting bound silently discarded.
+        const partOf = {
+          whole: book,
+          via: "caChapterOf",
+          [field]: conflicting[field],
+        };
+        const calls: readonly (() => Promise<unknown>)[] = [
+          () =>
+            store.nodes.CaChapter.getOrCreateByConstraint(
+              "ca_chapter_slug",
+              { slug: "a" },
+              { partOf },
+            ),
+          () =>
+            store.nodes.CaChapter.getOrCreateByConstraint(
+              "ca_chapter_slug",
+              { slug: "a" },
+              { ifExists: "update", partOf },
+            ),
+          () =>
+            store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+              "ca_chapter_slug",
+              [{ props: { slug: "a" } }],
+              { partOf },
+            ),
+          () =>
+            store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+              "ca_chapter_slug",
+              [{ props: { slug: "a" } }],
+              { ifExists: "update", partOf },
+            ),
+          () =>
+            store.transaction((tx) =>
+              tx.nodes.CaChapter.getOrCreateByConstraint(
+                "ca_chapter_slug",
+                { slug: "a" },
+                { partOf },
+              ),
+            ),
+        ];
+        for (const call of calls) {
+          const error = await call().catch((error_: unknown) => error_);
+          expect(error).toBeInstanceOf(ValidationError);
+          expect((error as ValidationError).details.issues).toEqual([
+            expect.objectContaining({
+              path: `partOf.${field}`,
+              code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
+            }),
+          ]);
+          expect(await windows()).toEqual([stored]);
+        }
+
+        // The stored window restated is verified equal: satisfied, no write.
+        const restated = await store.nodes.CaChapter.getOrCreateByConstraint(
+          "ca_chapter_slug",
+          { slug: "a" },
+          { partOf: { whole: book, ...held, ...stored } },
+        );
+        expect(restated.action).toBe("found");
+        expect(await windows()).toEqual([stored]);
+      }
+    });
+
+    it("validates a stated window on an already-satisfied attachment exactly as create does", async () => {
+      const malformed: readonly Readonly<{
+        validFrom?: string;
+        validTo?: string;
+      }>[] = [
+        { validFrom: "garbage" },
+        { validTo: "garbage" },
+        {
+          validFrom: "2090-01-01T00:00:00.000Z",
+          validTo: "2020-01-01T00:00:00.000Z",
+        },
+      ];
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const base = { whole: book, via: "caChapterOf", props: { order: 1 } };
+      await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "a" },
+        { partOf: base },
+      );
+
+      // MUTATION CHECK: remove the window validation from
+      // `readStatedAttachment` (src/store/operations/composition-create.ts) —
+      // the two get-or-create calls below then report a window CONFLICT with
+      // the held edge rather than the malformed input create refuses.
+      for (const window of malformed) {
+        const partOf = { ...base, ...window };
+        const calls: readonly (() => Promise<unknown>)[] = [
+          () => store.nodes.CaChapter.create({ slug: "fresh" }, { partOf }),
+          () =>
+            store.nodes.CaChapter.bulkCreate([
+              { props: { slug: "fresh" }, partOf },
+            ]),
+          () =>
+            store.nodes.CaChapter.getOrCreateByConstraint(
+              "ca_chapter_slug",
+              { slug: "a" },
+              { partOf },
+            ),
+          () =>
+            store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+              "ca_chapter_slug",
+              [{ props: { slug: "a" } }],
+              { partOf },
+            ),
+        ];
+        const refusals: unknown[] = [];
+        for (const call of calls) {
+          const error = await call().catch((error_: unknown) => error_);
+          expect(error).toBeInstanceOf(ValidationError);
+          refusals.push(
+            (error as ValidationError).details.issues.map((issue) => ({
+              path: issue.path,
+              code: issue.code,
+            })),
+          );
+        }
+        // One validation, so the satisfied legs name the same fault create does.
+        expect(
+          new Set(refusals.map((issues) => JSON.stringify(issues))),
+        ).toEqual(new Set([JSON.stringify(refusals[0])]));
+      }
+      expect(await store.nodes.CaChapter.find({})).toHaveLength(1);
+    });
+
+    it("refuses a bounded window on a oneActive pair on every partOf surface and writes nothing", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const show = await store.nodes.CaShow.create({});
+      const other = await store.nodes.CaShow.create({});
+      const existing = await store.nodes.CaReel.create({ slug: "bare" });
+
+      // MUTATION CHECK: drop `assertStatedWindowAttachesPart` from
+      // `compositionCreateWork` (src/store/operations/composition-create.ts) —
+      // every call below then writes an edge the incumbent read cannot see,
+      // so the repeat inserts a second one and `other` is accepted beside it.
+      for (const validTo of [
+        "2022-01-01T00:00:00.000Z",
+        "2090-01-01T00:00:00.000Z",
+      ]) {
+        const partOf = { whole: show, validTo };
+        const calls: readonly (() => Promise<unknown>)[] = [
+          () => store.nodes.CaReel.create({ slug: "create" }, { partOf }),
+          () =>
+            store.nodes.CaReel.bulkCreate([
+              { props: { slug: "bulk" }, partOf },
+            ]),
+          () =>
+            store.nodes.CaReel.getOrCreateByConstraint(
+              "ca_reel_slug",
+              { slug: "get-or-create" },
+              { partOf },
+            ),
+          () =>
+            store.nodes.CaReel.getOrCreateByConstraint(
+              "ca_reel_slug",
+              { slug: "bare" },
+              { partOf },
+            ),
+          () =>
+            store.nodes.CaReel.bulkGetOrCreateByConstraint(
+              "ca_reel_slug",
+              [{ props: { slug: "bare" } }, { props: { slug: "bulk-get" } }],
+              { partOf },
+            ),
+        ];
+        for (const call of calls) {
+          const error = await call().catch((error_: unknown) => error_);
+          expect(error).toBeInstanceOf(ValidationError);
+          expect((error as ValidationError).details.issues).toEqual([
+            expect.objectContaining({
+              path: "partOf.validTo",
+              code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+            }),
+          ]);
+        }
+      }
+      const reels = await store.nodes.CaReel.find({});
+      expect(reels.map((reel) => reel.id)).toEqual([existing.id]);
+      expect(
+        await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" }),
+      ).toEqual([]);
+
+      // The open attachment IS found again, and a different whole refuses.
+      const attach = () =>
+        store.nodes.CaReel.getOrCreateByConstraint(
+          "ca_reel_slug",
+          { slug: "bare" },
+          { partOf: { whole: show } },
+        );
+      await attach();
+      await attach();
+      expect(
+        await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" }),
+      ).toHaveLength(1);
+      await expect(
+        store.nodes.CaReel.getOrCreateByConstraint(
+          "ca_reel_slug",
+          { slug: "bare" },
+          { partOf: { whole: other } },
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: matchingObject({ situation: "existing" }),
+        }),
+      );
     });
 
     it("refuses the flat { kind, id } attachment on every surface and writes nothing", async () => {

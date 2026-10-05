@@ -433,7 +433,7 @@ export type NodeWriteSession = Readonly<{
   /**
    * Deletes a set of composition edges by id, in `mode` — the composition
    * cascade's explicit cleanup of the edges it consumed
-   * (`node-operations.ts`'s `runCompositionCascade`), which every member's
+   * (`node-operations.ts`'s `applyCompositionCascade`), which every member's
    * own delete-behavior enforcement was told to skip via
    * `NodeDeletePolicy.consumedEdgeIds`. Row work has no direct edge-write
    * member to call (only the session may write), so this is that write's

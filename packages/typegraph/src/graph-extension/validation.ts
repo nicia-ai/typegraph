@@ -23,9 +23,11 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import {
-  type CompositionExistence,
-  type CompositionPartSide,
+  COMPOSITION_EXISTENCE_VALUES,
+  COMPOSITION_PART_SIDE_VALUES,
   compositionRelationFields,
+  isCompositionExistence,
+  isCompositionPartSide,
 } from "../registry/composition-relation";
 import {
   isUnstorablePropertyName,
@@ -209,8 +211,6 @@ const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "partSide",
   "existence",
 ]);
-const COMPOSITION_PART_SIDE_VALUES = ["from", "to"] as const;
-const COMPOSITION_EXISTENCE_VALUES = ["optional", "required"] as const;
 const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "name",
   "fields",
@@ -857,10 +857,7 @@ function validateOntologySection(
     }
 
     const partSide = entry["partSide"];
-    if (
-      partSide !== undefined &&
-      !(COMPOSITION_PART_SIDE_VALUES as readonly unknown[]).includes(partSide)
-    ) {
+    if (partSide !== undefined && !isCompositionPartSide(partSide)) {
       issues.push({
         path: `${path}/partSide`,
         message: `Ontology relation \`partSide\` must be one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} when present.`,
@@ -870,10 +867,7 @@ function validateOntologySection(
     }
 
     const existence = entry["existence"];
-    if (
-      existence !== undefined &&
-      !(COMPOSITION_EXISTENCE_VALUES as readonly unknown[]).includes(existence)
-    ) {
+    if (existence !== undefined && !isCompositionExistence(existence)) {
       issues.push({
         path: `${path}/existence`,
         message: `Ontology relation \`existence\` must be one of ${COMPOSITION_EXISTENCE_VALUES.join(", ")} when present.`,
@@ -888,8 +882,8 @@ function validateOntologySection(
       to,
       ...compositionRelationFields({
         via,
-        partSide: partSide as CompositionPartSide | undefined,
-        existence: existence as CompositionExistence | undefined,
+        partSide: partSide,
+        existence,
       }),
     });
   }

@@ -434,7 +434,10 @@ const chapter = await store.nodes.Chapter.create(
 
 The node and its realizing composition edge are written in **one**
 transaction: a lost composition claim, a dead or missing whole, a cardinality
-refusal, or an acyclicity refusal aborts the node create too.
+refusal, or an acyclicity refusal aborts the node create too. Those refusals
+are reached before the node row is written (for `bulkCreate`, before any row
+of the batch), so catching one inside an enclosing `store.transaction(...)`
+leaves nothing of the refused create behind.
 
 - **`whole`** names the whole: a node you already hold, or a
   `{ kind, id }` reference when you only have the id
@@ -462,7 +465,14 @@ refusal, or an acyclicity refusal aborts the node create too.
   `subgraph({ composition: { via } })` take the same value and refuse a via
   that realizes no pair, rather than silently walking every realizing edge.
 - **`validFrom` / `validTo`** are the realizing edge's window, not the part
-  node's. A `validFrom` on `create` is not copied onto the edge.
+  node's. A `validFrom` on `create` is not copied onto the edge. A malformed
+  bound or an inverted pair is refused with `ValidationError` on every
+  surface, including a get-or-create that finds the attachment already held.
+  On a `population: "oneActive"` pair only an open-ended edge is a
+  membership, so stating `validTo` there is refused (issue path
+  `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`): the edge
+  it would write attaches nothing. Record a bounded membership as history
+  with `store.edges.<via>.create(...)` instead.
 - **`props`** are the realizing edge's own properties, validated against that
   edge kind's schema exactly as `store.edges.<via>.create(...)` would
   validate them. A realizing edge with required schema fields therefore needs
@@ -540,12 +550,14 @@ optional and required parts alike, and most of its outcomes are successes:
 | a soft-deleted match | — | restored, and attached in the same transaction | `"resurrected"` |
 | a live match | holds this whole through the resolved pair's realizing edge | **satisfied**: no write, no history; with `ifExists: "update"` the property update alone runs | `"found"` / `"updated"` |
 | a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`, `COMPOSITION_PROPS_CONFLICT`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
+| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `ValidationError` (issue path `partOf.validFrom` or `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`) — the same rule as `props` | — |
 | a live match | has no live whole | **attached now**, required or optional alike; with `ifExists: "update"` the attachment and the property update are one write plan | `"found"` / `"updated"` |
 | a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`, `COMPOSITION_WHOLE_CONFLICT`), naming the held and the requested attachment | — |
 
 "Satisfied" means the whole matches, the realizing edge matches the resolved
-pair, and any stated `props` are valid and canonically equal to the edge's
-live stored props — so an idempotent ingest that restates the attachment on
+pair, any stated `props` are valid and canonically equal to the edge's
+live stored props, and any stated window bound equals the stored one — so an
+idempotent ingest that restates the attachment on
 every run stays read-only. Moving a part is never a side effect of a lookup;
 that is [`reparent`](#reparent-moving-a-part-to-a-new-whole)'s decision, and
 two concurrent calls naming different wholes for one part end with exactly
@@ -578,7 +590,10 @@ Two refusals follow from that one declaration:
   (`COMPOSITION_WHOLE_REQUIRED`) before any row is written. Pass
   `partOf: { whole }` naming the whole; the node and its composition edge are written
   in the same transaction — a lost composition claim or a dead/missing whole
-  aborts the create too.
+  aborts the create too. Restoring a soft-deleted part is held to the same
+  rule: `upsertById`, `bulkUpsertById` and `bulkReplaceById` take no `partOf`,
+  so they refuse to restore one that holds no live whole. Restore it with
+  `getOrCreateByConstraint` and a `partOf`, or `create` with the same `id`.
 - **Detaching a live part is refused.** Ending, soft-deleting, or
   hard-deleting the composition edge of a LIVE required part throws the same
   error with `situation: "detach"` (`COMPOSITION_DETACH_REFUSED`). A part that
@@ -1095,6 +1110,17 @@ function partOf<Part extends NodeType, Whole extends NodeType>(
 
 Declares a compositional relationship (whole to part) — the mirror of
 `partOf`. Declaring both directions for the same pair is redundant; pick one.
+When both are declared they are one pair and must state the same `existence`
+(an omitted one reads as `"optional"`); a disagreement raises
+`ConfigurationError` (`ONTOLOGY_COMPOSITION_EXISTENCE_MIXED`) in either
+declaration order, from `defineGraph` and `store.evolve` alike.
+
+Both factories refuse an option key they do not know
+(`ONTOLOGY_COMPOSITION_OPTION_UNKNOWN`) and an `existence` outside
+`"optional" | "required"` (`ONTOLOGY_COMPOSITION_EXISTENCE_INVALID`), and a
+`partSide` outside `"from" | "to"` (`ONTOLOGY_COMPOSITION_PART_SIDE_INVALID`),
+so a misspelled option cannot silently declare an optional part or persist a
+schema that cannot be read back.
 
 ```typescript
 function hasPart<Whole extends NodeType, Part extends NodeType>(

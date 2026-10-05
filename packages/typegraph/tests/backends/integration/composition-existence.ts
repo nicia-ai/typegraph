@@ -25,7 +25,10 @@ import {
   EndpointNotFoundError,
   hasPart,
   partOf,
+  RestrictedDeleteError,
   subClassOf,
+  TypeGraphError,
+  ValidationError,
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -53,7 +56,18 @@ const EeFolder = defineNode("EeFolder", { schema: z.object({}) });
 const EeLiveClip = defineNode("EeLiveClip", { schema: z.object({}) });
 const EeShow = defineNode("EeShow", { schema: z.object({}) });
 
+/** A whole that holds at most ONE part: the whole-side cardinality coverage. */
+const EeEngine = defineNode("EeEngine", { schema: z.object({}) });
+const EeCar = defineNode("EeCar", { schema: z.object({}) });
+
+/** A part that severs its own edges on delete, under a `restrict` folder. */
+const EeNote = defineNode("EeNote", { schema: z.object({}) });
+
 const eeSegmentOf = defineEdge("eeSegmentOf", { schema: z.object({}) });
+const eeNoteOf = defineEdge("eeNoteOf", { schema: z.object({}) });
+/** A plain (non-composition) edge: the `restrict` obstacle of the cascade cases. */
+const eeCites = defineEdge("eeCites", { schema: z.object({}) });
+const eeEngineOf = defineEdge("eeEngineOf", { schema: z.object({}) });
 const eeTagOf = defineEdge("eeTagOf", { schema: z.object({}) });
 const eeHasTrack = defineEdge("eeHasTrack", { schema: z.object({}) });
 const eeLiveClipOf = defineEdge("eeLiveClipOf", { schema: z.object({}) });
@@ -74,6 +88,9 @@ function buildGraph(id: string) {
       EeLiveClip: { type: EeLiveClip },
       EeShow: { type: EeShow },
       EeFolder: { type: EeFolder },
+      EeEngine: { type: EeEngine },
+      EeCar: { type: EeCar },
+      EeNote: { type: EeNote, onDelete: "disconnect" },
     },
     edges: {
       eeSegmentOf: {
@@ -106,6 +123,24 @@ function buildGraph(id: string) {
         to: [EeFolder],
         cardinality: "one",
       },
+      eeNoteOf: {
+        type: eeNoteOf,
+        from: [EeNote],
+        to: [EeFolder],
+        cardinality: "one",
+      },
+      eeCites: {
+        type: eeCites,
+        from: [EeFolder, EeNote],
+        to: [EePodcast, EeFolder],
+      },
+      eeEngineOf: {
+        type: eeEngineOf,
+        from: [EeEngine],
+        to: [EeCar],
+        cardinality: "one",
+        targetCardinality: "one",
+      },
     },
     ontology: [
       // EeSegment is required-existence, declared only under EeEpisode —
@@ -132,6 +167,8 @@ function buildGraph(id: string) {
       }),
       // Reflexive, so the orientation must be stated explicitly.
       partOf(EeFolder, EeFolder, { via: eeFolderOf, partSide: "from" }),
+      partOf(EeEngine, EeCar, { via: eeEngineOf, existence: "required" }),
+      partOf(EeNote, EeFolder, { via: eeNoteOf }),
     ],
   });
 }
@@ -348,7 +385,7 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.edges.eeFolderOf.find({})).toHaveLength(0);
     });
     // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call at the
-    // end of `attachBatchCompositionCreateEdges`
+    // end of `prepareBatchCompositionCreateEdges`
     // (src/store/operations/node-operations.ts) — nothing probes a batch's
     // composition edges at all (each item prepares with
     // `validateAcyclicity: false`), so this batch commits the self-attaching
@@ -500,6 +537,98 @@ export function registerCompositionExistenceIntegrationTests(
     // `applyEdgeHardDelete` instead of `backend.deleteEdge`/
     // `hardDeleteEdgesBatch` directly. Every cascade of a required part then
     // starts refusing (this test throws instead of resolving).
+
+    it("case 9b: a whole delete a part's `restrict` refuses, caught in a transaction, deletes nothing", async () => {
+      type ExistenceStore = Awaited<
+        ReturnType<typeof context.createStore<ReturnType<typeof buildGraph>>>
+      >;
+      const root = { kind: "EeFolder", id: "ee-root" } as const;
+      const deletes: Readonly<
+        Record<string, (tx: ExistenceStore) => Promise<unknown>>
+      > = {
+        delete: (tx) => tx.nodes.EeFolder.delete(root.id as never),
+        hardDelete: (tx) => tx.nodes.EeFolder.hardDelete(root.id as never),
+        bulkDelete: (tx) => tx.nodes.EeFolder.bulkDelete([root.id as never]),
+        // The refused whole comes second: the free folder before it must
+        // survive the batch's refusal too.
+        "bulkDelete after a deletable item": (tx) =>
+          tx.nodes.EeFolder.bulkDelete(["ee-free" as never, root.id as never]),
+      };
+
+      // MUTATION CHECK: drop the member loop from `planCascadingNodeDelete`
+      // (src/store/operations/node-operations.ts) — the middle folder's
+      // refusal is then reached only as the cascade deletes it, after the
+      // leaf beneath it is gone, and the caught transaction commits that.
+      for (const [name, run] of Object.entries(deletes)) {
+        const store = await context.createStore(buildGraph(nextGraphId()));
+        const podcast = await store.nodes.EePodcast.create({});
+        await store.nodes.EeFolder.create({}, { id: "ee-free" });
+        await store.nodes.EeFolder.create({}, { id: root.id });
+        const middle = await store.nodes.EeFolder.create(
+          {},
+          { id: "ee-middle", partOf: { whole: root } },
+        );
+        await store.nodes.EeFolder.create(
+          {},
+          { id: "ee-leaf", partOf: { whole: middle } },
+        );
+        // The middle folder is `restrict` (the default) and holds a plain
+        // edge, so deleting the root must refuse — leaf-first, after the leaf.
+        await store.edges.eeCites.create(middle, podcast, {});
+
+        let refusal: unknown;
+        await store.transaction(async (tx) => {
+          refusal = await run(tx as unknown as ExistenceStore).catch(
+            (error: unknown) => error,
+          );
+        });
+
+        const folders = await store.nodes.EeFolder.find({});
+        const attachments = await store.edges.eeFolderOf.find({});
+        expect({
+          name,
+          refused:
+            refusal instanceof RestrictedDeleteError ?
+              refusal.details.nodeId
+            : refusal,
+          folders: folders.map((node) => node.id).toSorted(),
+          attachments: attachments.length,
+          violations: await store.verifyConstraintFences(),
+        }).toEqual({
+          name,
+          refused: "ee-middle",
+          folders: ["ee-free", "ee-leaf", "ee-middle", "ee-root"],
+          attachments: 2,
+          violations: [],
+        });
+      }
+    });
+
+    it("case 9c: a part's `restrict` is judged against the edges the parts deleted before it remove", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.EeFolder.create({});
+      const middle = await store.nodes.EeFolder.create(
+        {},
+        { partOf: { whole: root } },
+      );
+      const note = await store.nodes.EeNote.create(
+        {},
+        { partOf: { whole: middle } },
+      );
+      // The note is deleted first and, being `disconnect`, takes this edge
+      // with it — so by the middle folder's turn nothing restricts it.
+      await store.edges.eeCites.create(note, middle, {});
+
+      // MUTATION CHECK: in `planCascadingNodeDelete`, judge every node
+      // against the frame's starting graph (stop folding
+      // `verdict.removedEdgeIds` into `effects`) — the middle folder is then
+      // refused for an edge its own cascade removes first.
+      await store.nodes.EeFolder.delete(root.id);
+
+      expect(await store.nodes.EeFolder.count()).toBe(0);
+      expect(await store.nodes.EeNote.count()).toBe(0);
+      expect(await store.edges.eeCites.find({})).toEqual([]);
+    });
 
     it("case 10: a required-existence bulk create takes the portable path (no partial row, no fused executor)", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
@@ -666,10 +795,9 @@ export function registerCompositionExistenceIntegrationTests(
       const show = await store.nodes.EeShow.create({});
       // The attachment's `validTo` is the composition edge's own window
       // (`compositionEdgeWindow`): a `population: "oneActive"` edge born
-      // with its window already closed would never attach its part at all,
-      // which `resolveCompositionCreate`'s "a required part always has a
-      // live whole" rule must refuse just as it refuses a bare create with
-      // no `partOf` — admitting it would leave a state
+      // with a bounded window would never attach its part at all, which
+      // `resolveCompositionCreate` refuses for every part kind — for a
+      // required one, admitting it would leave a state
       // `store.verifyConstraintFences()` immediately reports as a
       // violation.
       const error = await store.nodes.EeLiveClip.create(
@@ -682,13 +810,13 @@ export function registerCompositionExistenceIntegrationTests(
         },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      expect((error as CompositionExistenceError).details.situation).toBe(
-        "create",
-      );
-      expect((error as CompositionExistenceError).details.partKind).toBe(
-        "EeLiveClip",
-      );
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).details.issues).toEqual([
+        expect.objectContaining({
+          path: "partOf.validTo",
+          code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+        }),
+      ]);
 
       // No node row, and no composition edge row, survive the refused
       // create — the whole write plan (node + composition edge) is one
@@ -713,9 +841,9 @@ export function registerCompositionExistenceIntegrationTests(
         ),
       ).toBe(false);
     });
-    // MUTATION CHECK: in `attachCompositionCreateEdge`
-    // (src/store/operations/node-operations.ts), delete the
-    // `edgeCurrentlyAttachesPart` guard this fix added (the create then
+    // MUTATION CHECK: in `compositionCreateWork`
+    // (src/store/operations/composition-create.ts), delete the
+    // `assertStatedWindowAttachesPart` call (the create then
     // succeeds unconditionally once the composition edge is built). The
     // `create` call above then resolves instead of rejecting, and the
     // subsequent `find({})`/`verifyConstraintFences` assertions fail.
@@ -749,9 +877,9 @@ export function registerCompositionExistenceIntegrationTests(
     });
     // MUTATION CHECK: in `executeNodeCreateInternal`
     // (src/store/operations/node-operations.ts), spread the part node's
-    // `input.validTo` into the window passed to `attachCompositionCreateEdge`.
-    // The edge is then born ended and the create is refused with
-    // `CompositionExistenceError`.
+    // `input.validTo` into the window passed to `prepareCompositionEdgeForCreate`.
+    // The edge is then born ended and the assertion above reads its
+    // `validTo`.
 
     it("case 12b: an already-unattached `oneActive` composition edge (planted through the RAW backend, bypassing case 12's create-time guard) is unattached, and cleaning it up is not refused", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
@@ -808,6 +936,229 @@ export function registerCompositionExistenceIntegrationTests(
     // live, regardless of the edge's own valid-time window). The
     // `hardDelete` above then rejects with `CompositionExistenceError`
     // instead of resolving.
+
+    it("case 13: an upsert never restores a required part without a live whole", async () => {
+      type ExistenceStore = Awaited<
+        ReturnType<typeof context.createStore<ReturnType<typeof buildGraph>>>
+      >;
+      type SegmentId = Awaited<
+        ReturnType<ExistenceStore["nodes"]["EeSegment"]["create"]>
+      >["id"];
+      type EpisodeId = Awaited<
+        ReturnType<ExistenceStore["nodes"]["EeEpisode"]["create"]>
+      >["id"];
+      const upserts: Readonly<
+        Record<
+          string,
+          (store: ExistenceStore, id: SegmentId) => Promise<unknown>
+        >
+      > = {
+        upsertById: (store, id) => store.nodes.EeSegment.upsertById(id, {}),
+        bulkUpsertById: (store, id) =>
+          store.nodes.EeSegment.bulkUpsertById([{ id, props: {} }]),
+        bulkReplaceById: (store, id) =>
+          store.nodes.EeSegment.bulkReplaceById([{ id, props: {} }]),
+        "bulkUpsertById in a caught transaction": (store, id) =>
+          store.transaction(async (tx) => {
+            await tx.nodes.EeSegment.bulkUpsertById([{ id, props: {} }]);
+          }),
+      };
+      const retirements: Readonly<
+        Record<
+          string,
+          (
+            store: ExistenceStore,
+            ids: Readonly<{ segment: SegmentId; episode: EpisodeId }>,
+          ) => Promise<void>
+        >
+      > = {
+        "the part was deleted": (store, ids) =>
+          store.nodes.EeSegment.delete(ids.segment),
+        "its whole was deleted": (store, ids) =>
+          store.nodes.EeEpisode.delete(ids.episode),
+      };
+
+      // MUTATION CHECK: drop the `assertRestoredRequiredPartsAttached` calls
+      // from `executeNodeUpdate` and `executeNodeUpsertUpdateBatch`
+      // (src/store/operations/node-operations.ts) — each upsert then restores
+      // the segment with its composition edge still deleted, and
+      // `verifyConstraintFences` reports it.
+      for (const [retirement, retire] of Object.entries(retirements)) {
+        for (const [name, upsert] of Object.entries(upserts)) {
+          const store = await context.createStore(buildGraph(nextGraphId()));
+          const episode = await store.nodes.EeEpisode.create({});
+          const segment = await store.nodes.EeSegment.create(
+            {},
+            { partOf: { whole: episode } },
+          );
+          await retire(store, { segment: segment.id, episode: episode.id });
+
+          const error = await upsert(store, segment.id).catch(
+            (error_: unknown) => error_,
+          );
+          const label = `${name} after ${retirement}`;
+          expect({
+            label,
+            refused:
+              error instanceof CompositionExistenceError ?
+                error.details
+              : error,
+            restored: await store.nodes.EeSegment.getById(segment.id),
+            violations: await store.verifyConstraintFences(),
+          }).toEqual({
+            label,
+            refused: {
+              situation: "create",
+              partKind: "EeSegment",
+              partId: segment.id,
+            },
+            restored: undefined,
+            violations: [],
+          });
+        }
+      }
+
+      // An optional part is restored bare, as before.
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const collection = await store.nodes.EeCollection.create({});
+      const tag = await store.nodes.EeTag.create(
+        {},
+        { partOf: { whole: collection } },
+      );
+      await store.nodes.EeTag.delete(tag.id);
+      await store.nodes.EeTag.upsertById(tag.id, {});
+      expect(await store.nodes.EeTag.getById(tag.id)).toBeDefined();
+    });
+
+    it("case 14: a composition create refused inside a caught transaction leaves no row of it behind", async () => {
+      type ExistenceStore = Awaited<
+        ReturnType<typeof context.createStore<ReturnType<typeof buildGraph>>>
+      >;
+      const deadWholeId = "ee-dead-episode";
+      const missing = { kind: "EeEpisode", id: "ee-missing-episode" } as const;
+      const dead = { kind: "EeEpisode", id: deadWholeId } as const;
+      const car = { kind: "EeCar", id: "ee-car" } as const;
+      const folder = (id: string) => ({ kind: "EeFolder", id }) as const;
+
+      // Every refusal an attachment can reach on a create: a missing whole, a
+      // tombstoned whole, a self-attach, a cycle among the batch's own items,
+      // and a whole-side cardinality two items of one batch exceed together.
+      const refusedWrites: Readonly<
+        Record<string, (tx: ExistenceStore) => Promise<unknown>>
+      > = {
+        "create, missing whole": (tx) =>
+          tx.nodes.EeSegment.create({}, { partOf: { whole: missing } }),
+        "create, dead whole": (tx) =>
+          tx.nodes.EeSegment.create({}, { partOf: { whole: dead } }),
+        "create, self-attach": (tx) =>
+          tx.nodes.EeFolder.create(
+            {},
+            { id: "ee-self", partOf: { whole: folder("ee-self") } },
+          ),
+        "bulkCreate, missing whole": (tx) =>
+          tx.nodes.EeSegment.bulkCreate([
+            { props: {}, partOf: { whole: missing } },
+          ]),
+        // `bulkInsert`'s item type states no `partOf`; the runtime shares
+        // `bulkCreate`'s write plan and honors one, which is what is probed.
+        "bulkInsert, dead whole": (tx) =>
+          tx.nodes.EeSegment.bulkInsert([
+            { props: {}, partOf: { whole: dead } },
+          ] as never),
+        "bulkCreate, in-batch cycle": (tx) =>
+          tx.nodes.EeFolder.bulkCreate([
+            { props: {}, id: "ee-a", partOf: { whole: folder("ee-b") } },
+            { props: {}, id: "ee-b", partOf: { whole: folder("ee-a") } },
+          ]),
+        "bulkInsert, in-batch cycle": (tx) =>
+          tx.nodes.EeFolder.bulkInsert([
+            { props: {}, id: "ee-a", partOf: { whole: folder("ee-b") } },
+            { props: {}, id: "ee-b", partOf: { whole: folder("ee-a") } },
+          ] as never),
+        "bulkCreate, in-batch cardinality": (tx) =>
+          tx.nodes.EeEngine.bulkCreate([
+            { props: {}, partOf: { whole: car } },
+            { props: {}, partOf: { whole: car } },
+          ]),
+      };
+
+      // MUTATION CHECK: in `executeNodeCreateInternal` and both batch
+      // executors (src/store/operations/node-operations.ts), run the
+      // composition edge's preparation AFTER the node insert again — every
+      // write below is still refused, but the part rows it had already
+      // written stay in the transaction that caught the refusal.
+      for (const [name, write] of Object.entries(refusedWrites)) {
+        const store = await context.createStore(buildGraph(nextGraphId()));
+        await store.nodes.EeEpisode.create({}, { id: deadWholeId });
+        await store.nodes.EeEpisode.delete(dead.id as never);
+        await store.nodes.EeCar.create({}, { id: car.id });
+
+        let refusal: unknown;
+        await store.transaction(async (tx) => {
+          refusal = await write(tx as unknown as ExistenceStore).catch(
+            (error: unknown) => error,
+          );
+        });
+
+        expect({
+          name,
+          refused: refusal instanceof TypeGraphError,
+          segments: await store.nodes.EeSegment.count(),
+          folders: await store.nodes.EeFolder.count(),
+          engines: await store.nodes.EeEngine.count(),
+          violations: await store.verifyConstraintFences(),
+        }).toEqual({
+          name,
+          refused: true,
+          segments: 0,
+          folders: 0,
+          engines: 0,
+          violations: [],
+        });
+      }
+    });
+
+    it("case 14b: a refused get-or-create attachment caught in a transaction leaves no part row", async () => {
+      const store = await context.createStore(buildKeyedGraph(nextGraphId()));
+
+      // MUTATION CHECK: as case 14 — the single create's preparation moved
+      // back behind the node insert leaves the keyed segment live and
+      // unattached.
+      let refusal: unknown;
+      await store.transaction(async (tx) => {
+        refusal = await tx.nodes.EeKeyedSegment.getOrCreateByConstraint(
+          "byKey",
+          { key: "k" },
+          { partOf: { whole: { kind: "EeEpisode", id: "ee-missing" } } },
+        ).catch((error: unknown) => error);
+      });
+
+      expect(refusal).toBeInstanceOf(EndpointNotFoundError);
+      expect(await store.nodes.EeKeyedSegment.count()).toBe(0);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("case 14c: a batch still attaches an item to a whole the same batch creates", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+
+      // MUTATION CHECK: in `prepareBatchCompositionCreateEdges`, judge every
+      // whole through the pre-insert read (drop the `wholeInFrame` evidence) —
+      // the child's whole has no row yet and the batch is refused.
+      await store.nodes.EeFolder.bulkCreate([
+        {
+          props: {},
+          id: "ee-child",
+          partOf: { whole: { kind: "EeFolder", id: "ee-parent" } },
+        },
+        { props: {}, id: "ee-parent" },
+      ]);
+
+      const edges = await store.edges.eeFolderOf.find({});
+      expect(edges.map((edge) => [edge.fromId, edge.toId])).toEqual([
+        ["ee-child", "ee-parent"],
+      ]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
 
     it("getOrCreateByConstraint: partOf applied on created, refused on found/updated naming the current whole", async () => {
       const store = await context.createStore(buildKeyedGraph(nextGraphId()));

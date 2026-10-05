@@ -645,6 +645,21 @@ otherwise it is reported as a per-row error on the node (`error` matches
 the import commits — no orphan node row survives, and the rest of the import
 is unaffected.
 
+"Attached" is judged on the written rows, by the same reader
+`store.verifyConstraintFences()` uses, so a composition edge in the payload is
+not enough on its own: an edge whose window does not attach the part (an
+ended `oneActive` window), or whose whole does not exist (possible with
+`validateReferences: false`), leaves the part refused. The check repeats until
+nothing changes, so a required part attached only to a part this import
+refuses is refused with it. Every edge removed with a refused part is
+reported as its own per-row error on the edge, and `result.nodes.created` /
+`result.edges.created` count only what was committed.
+
+With `onConflict: "update"`, a document whose `validTo` would end the open
+window of a live required part's composition edge is refused as a per-row
+error (`error` starts with `COMPOSITION_DETACH_REFUSED`), as the same update
+is through `store.edges.<kind>.update(...)`.
+
 ```typescript
 const result = await importGraph(store, data, { onConflict: "error" });
 const orphaned = result.errors.filter(
