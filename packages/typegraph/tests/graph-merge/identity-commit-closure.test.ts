@@ -103,7 +103,6 @@ function emptyFoldPlan(): MergePlan<FoldGraph> {
     warnings: [],
     identityAssertions: [],
     identityRetractions: [],
-    identityReconciliations: [],
     identityConflicts: [],
     canonicalOf: new Map(),
   };
@@ -329,7 +328,6 @@ describe("affectedIdentityClassSeeds", () => {
     canonicalEntities: [],
     identityAssertions: [],
     identityRetractions: [],
-    identityReconciliations: [],
     identityConflicts: [],
     nodeDeletions: new Map<string, string>(),
     retypeMap: new Map<string, string>(),

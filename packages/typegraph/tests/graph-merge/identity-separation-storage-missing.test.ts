@@ -1,11 +1,9 @@
 /**
- * The ONE state a stated `identity.pairing` cannot be honored in: the target's
- * identity separation relation is missing (or never filled) while its ledger
- * holds a live `different` assertion. `bulkIsSeparated` refuses that read with
- * `IDENTITY_STORAGE_MISSING`, and `captureSeparationFactsForPairing`
- * (src/graph-merge/merge.ts) re-raises it as an invalid-option refusal naming
- * `identity.pairing` — an accepted option the state cannot honor, refused as
- * that option rather than surfaced as an opaque storage fault.
+ * A merge never answers "not separated" for a target whose identity separation
+ * relation is unreadable. When the relation is missing (or never filled) while
+ * the ledger holds a live `different` assertion, `bulkIsSeparated` refuses the
+ * read with `IDENTITY_STORAGE_MISSING`, the merge's separation-fact capture
+ * surfaces that refusal, and nothing is written.
  *
  * SQLite-local on purpose: the fixture drops the relation out from under a
  * live handle through the raw client, which the merge backend matrix has no
@@ -29,7 +27,7 @@ const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
 });
 const graph = defineGraph({
-  id: "identity_pairing_storage_missing",
+  id: "identity_separation_storage_missing",
   nodes: { Person: { type: Person } },
   edges: {},
   identity: { sameIdAcrossKinds: "ignore" },
@@ -38,11 +36,20 @@ const graph = defineGraph({
 const BRANCH_A = asBranchId("branch-a");
 const SEPARATION_TABLE = "typegraph_identity_separation";
 
+/** `details` of an error and of every cause beneath it. */
+function errorChain(error: unknown): readonly unknown[] {
+  const details: unknown[] = [];
+  for (let current = error; current instanceof Error; current = current.cause) {
+    details.push((current as Error & { details?: unknown }).details);
+  }
+  return details;
+}
+
 function rawClient(result: LocalSqliteBackendResult): Database.Database {
   return (result.db as unknown as { $client: Database.Database }).$client;
 }
 
-describe("identity.pairing against a target whose separation relation is unreadable", () => {
+describe("a merge against a target whose separation relation is unreadable", () => {
   const disposers: (() => Promise<void>)[] = [];
   afterEach(async () => {
     for (const dispose of disposers.splice(0)) await dispose();
@@ -54,7 +61,7 @@ describe("identity.pairing against a target whose separation relation is unreada
     return result.backend;
   }
 
-  it("refuses the stated pairing as an invalid option naming identity.pairing, not as a storage fault", async () => {
+  it("refuses with the storage fault and writes nothing", async () => {
     const targetResult = createLocalSqliteBackend();
     disposers.push(() => targetResult.backend.close());
     const [target] = await createStoreWithSchema(graph, targetResult.backend, {
@@ -86,25 +93,25 @@ describe("identity.pairing against a target whose separation relation is unreada
     // read from here on is loud, and the merge's fact capture is one of them.
     rawClient(targetResult).exec(`DROP TABLE ${SEPARATION_TABLE}`);
 
-    const result = await merge(target, [source], {
+    // A scored candidate pair gives the veto a pair to judge, so the plan's
+    // own fact capture is what reads the relation.
+    const outcome = await merge(target, [source], {
       branchOrder: [BRANCH_A],
-      identity: { pairing: "definitional" },
-    });
-    if (isOk(result)) throw new Error("expected an invalid-options refusal");
-    console.info("refusal:", result.error.code, result.error.details);
-    expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
-    expect(result.error.details["option"]).toBe("identity.pairing");
-    expect(result.error.details["graphId"]).toBe(graph.id);
-    // The storage fault travels as the cause, never as the face of the refusal.
-    expect(
-      (result.error.cause as { details: Record<string, unknown> }).details[
-        "code"
-      ],
-    ).toBe("IDENTITY_STORAGE_MISSING");
+      resolve: {
+        Person: {
+          block: () => "all",
+          threshold: 0.5,
+          similarity: { kind: "custom", score: () => 1 },
+        },
+      },
+    }).then(
+      (result) => (isOk(result) ? undefined : result.error),
+      (error: unknown) => error,
+    );
+    console.info("refusal:", outcome);
+    expect(JSON.stringify(errorChain(outcome))).toContain(
+      "IDENTITY_STORAGE_MISSING",
+    );
+    expect(await target.nodes.Person.count()).toBe(2);
   });
-  // MUTATION CHECK: in `captureSeparationFactsForPairing` (src/graph-merge/
-  // merge.ts) restore the comparison to `error.code !==
-  // IDENTITY_STORAGE_MISSING_CODE` — `ConfigurationError.code` is always
-  // `CONFIGURATION_ERROR`, so the translation never fires, the raw storage
-  // fault propagates, and the `GRAPH_MERGE_INVALID_OPTIONS` assertion fails.
 });

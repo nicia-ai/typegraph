@@ -5,22 +5,15 @@
  * When a merge folds or splits an identity class, the transition log records
  * WHY. Without this, a fold triggered by a merged node create is filed as an
  * anonymous `fold` and a reviewer replaying the class can see that it happened
- * but not which plan, review, branch or policy arm produced it.
+ * but not which plan, review or branch produced it.
  *
  * Everything here is evidence ALREADY IN HAND at the apply site — the plan
- * artifact's own digest, the anchors it was built from, the policy the
- * classifier actually exercised. Nothing is read, recomputed, or invented; a
+ * artifact's own digest and the anchors it was built from. Nothing is read,
+ * recomputed, or invented; a
  * field the caller cannot evidence stays absent rather than being guessed.
  */
 import type { MergePlanAnchors, MergePlanArtifactV2 } from "./plan-schema";
-import type {
-  IdentityDecisionPolicyRecord,
-  IdentityDecisionProvenance,
-} from "./typegraph-internal";
-import type {
-  IdentityReconciliation,
-  IdentityUnresolvedConflict,
-} from "./types";
+import type { IdentityDecisionProvenance } from "./typegraph-internal";
 
 /**
  * Root-first branch ancestry: the base (or fork-point) graph, then each branch
@@ -51,59 +44,9 @@ function branchAncestryFromAnchors(
   );
 }
 
-/**
- * The policy arm that actually DECIDED something, or `undefined` when the merge
- * arbitrated nothing by policy.
- *
- * Read off the reconciliations the classifier produced rather than off the
- * stated options, so an ordinary apply never writes a policy string it did not
- * exercise — a stated `onAssertionConflict` that no conflict ever reached is
- * not a decision the transition log should claim was made.
- */
-function identityDecisionPolicy(
-  reconciliations: readonly IdentityReconciliation[],
-  conflicts: readonly IdentityUnresolvedConflict[],
-): IdentityDecisionPolicyRecord | undefined {
-  const assertion = [
-    ...new Set(
-      reconciliations.flatMap((reconciliation) =>
-        reconciliation.policy === undefined ? [] : [reconciliation.policy],
-      ),
-    ),
-  ].toSorted();
-  for (const conflict of conflicts) {
-    if (conflict.kind === "assertion" && !assertion.includes("flag")) {
-      assertion.push("flag");
-      assertion.sort();
-    }
-  }
-  const edge =
-    conflicts.some((conflict) => conflict.kind === "edge") ?
-      ("flag" as const)
-    : undefined;
-  const uniqueness =
-    conflicts.some((conflict) => conflict.kind === "uniqueness") ?
-      ("flag" as const)
-    : undefined;
-  if (
-    assertion.length === 0 &&
-    edge === undefined &&
-    uniqueness === undefined
-  ) {
-    return undefined;
-  }
-  return {
-    ...(assertion.length === 0 ? {} : { assertion }),
-    ...(edge === undefined ? {} : { edge }),
-    ...(uniqueness === undefined ? {} : { uniqueness }),
-  };
-}
-
 /** The evidence an apply site has for the decision it is about to record. */
 export type MergeIdentityDecisionInput = Readonly<{
   branchAncestry: readonly string[];
-  reconciliations: readonly IdentityReconciliation[];
-  conflicts?: readonly IdentityUnresolvedConflict[];
   mergePlanDigest?: string | undefined;
   reviewDigest?: string | undefined;
   sourceId?: string | undefined;
@@ -117,15 +60,10 @@ export type MergeIdentityDecisionInput = Readonly<{
 export function mergeIdentityDecision(
   input: MergeIdentityDecisionInput,
 ): IdentityDecisionProvenance {
-  const policy = identityDecisionPolicy(
-    input.reconciliations,
-    input.conflicts ?? [],
-  );
   // [root, branch] — exactly one branch merged, so naming it is unambiguous.
   const soleBranch =
     input.branchAncestry.length === 2 ? input.branchAncestry[1] : undefined;
   return {
-    ...(policy === undefined ? {} : { policy }),
     ...(soleBranch === undefined ? {} : { branchId: soleBranch }),
     ...(input.branchAncestry.length === 0 ?
       {}
@@ -141,11 +79,10 @@ export function mergeIdentityDecision(
 }
 
 /**
- * The decision an approved plan artifact evidences — its digest, anchors, and
- * the reconciliations and conflicts its review recorded — plus the review
- * context only the caller holds. The one builder every artifact apply site
- * calls, so the transition log records the same policy whichever entry point
- * applied the plan.
+ * The decision an approved plan artifact evidences — its digest and anchors —
+ * plus the review context only the caller holds. The one builder every
+ * artifact apply site calls, so the transition log records the same decision
+ * whichever entry point applied the plan.
  */
 export function mergeIdentityDecisionFromArtifact(
   artifact: MergePlanArtifactV2,
@@ -153,10 +90,6 @@ export function mergeIdentityDecisionFromArtifact(
 ): IdentityDecisionProvenance {
   return mergeIdentityDecision({
     branchAncestry: branchAncestryFromAnchors(artifact.anchors),
-    reconciliations: (artifact.review.identityReconciliations ??
-      []) as unknown as readonly IdentityReconciliation[],
-    conflicts: (artifact.review.identityConflicts ??
-      []) as unknown as readonly IdentityUnresolvedConflict[],
     mergePlanDigest: artifact.digest.value,
     reviewDigest: context.reviewDigest,
     sourceId: context.sourceId,

@@ -69,12 +69,9 @@ const MAX_SEPARATION_INSERT_CHUNK_SIZE = 100;
 /**
  * The one code every "this graph's derived identity storage is not readable"
  * refusal carries — an absent relation and a never-filled one are the same fact
- * for an operator, with the same remedy. Named so a consumer that must
- * recognize the refusal (graph-merge's separation veto, which re-raises it as
- * an invalid-option refusal when a merge stated `identity.pairing`) matches the
- * value rather than re-spelling the string.
+ * for an operator, with the same remedy.
  */
-export const IDENTITY_STORAGE_MISSING_CODE = "IDENTITY_STORAGE_MISSING";
+const IDENTITY_STORAGE_MISSING_CODE = "IDENTITY_STORAGE_MISSING";
 
 /**
  * The PERSISTED encoding of an identity class key.

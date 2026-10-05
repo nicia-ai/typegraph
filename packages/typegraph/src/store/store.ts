@@ -281,7 +281,6 @@ import {
 } from "./algorithms";
 import {
   applyResolvedNodeClaims,
-  findResolvedNodeClaimConflicts,
   type ResolvedNodeRelease,
   type ResolvedNodeUpsert,
 } from "./claims/resolved-node-claims";
@@ -1635,22 +1634,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           target,
           policy,
         ),
-      probeResolvedNodeUniqueness: (target, writes) => {
-        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
-        if (upserts.every((upsert) => upsert.constraints.length === 0)) {
-          return Promise.resolve([]);
-        }
-        return findResolvedNodeClaimConflicts(
-          {
-            graphId: this.graphId,
-            registry: this.#registry,
-            backend: target,
-            uniqueSidecarBatch: this.#uniqueSidecarBatch,
-          },
-          upserts,
-          releases,
-        );
-      },
       applyResolvedNodeUniqueness: async (target, writes, apply) => {
         const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
         if (

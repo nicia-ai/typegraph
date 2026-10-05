@@ -147,11 +147,6 @@ export type MergePlanMatchSource =
       kind: "custom";
       sourceId: string;
       metadata?: JsonValue | undefined;
-    }>
-  | Readonly<{
-      kind: "identity";
-      sourceId: string;
-      assertionIds: readonly string[];
     }>;
 
 export type MergePlanSimilarityStrategy =
@@ -255,8 +250,6 @@ export type MergePlanReview = Readonly<{
   warnings: readonly string[];
   compositionOrphans: readonly MergePlanCompositionOrphan[];
   diagnostics?: MergePlanDiagnostics | undefined;
-  /** Optional, omitted when empty — see the review schema's format-version note. */
-  identityReconciliations?: readonly JsonValue[] | undefined;
   /** Optional, omitted when empty — see the review schema's format-version note. */
   identityConflicts?: readonly JsonValue[] | undefined;
 }>;
@@ -496,13 +489,6 @@ const matchSourceSchema = z.discriminatedUnion("kind", [
       metadata: z.json().optional(),
     })
     .strict(),
-  z
-    .object({
-      kind: z.literal("identity"),
-      sourceId: nonEmptyStringSchema,
-      assertionIds: z.array(nonEmptyStringSchema),
-    })
-    .strict(),
 ]);
 
 const similarityStrategySchema = z.discriminatedUnion("kind", [
@@ -594,27 +580,6 @@ const diagnosticsSchema = z
   })
   .strict();
 
-const identityReconciliationSchema = z
-  .object({
-    semanticKey: nonEmptyStringSchema,
-    a: mergePlanEntityRefSchema,
-    b: mergePlanEntityRefSchema,
-    relation: z.enum(["same", "different"]),
-    survivorAssertionId: nonEmptyStringSchema.optional(),
-    supersededAssertionIds: z.array(nonEmptyStringSchema),
-    rule: z.enum([
-      "earliest-valid-from",
-      "code-point-id",
-      "committed-id",
-      "policy",
-    ]),
-    policy: z
-      .enum(["refuse", "assertWins", "retractWins", "flag", "callback"])
-      .optional(),
-    branches: z.array(nonEmptyStringSchema),
-  })
-  .strict();
-
 const identityProvenanceRecordSchema = z
   .object({
     role: z.enum(["node", "edge"]),
@@ -626,68 +591,20 @@ const identityProvenanceRecordSchema = z
   .strict();
 
 /**
- * Every arm of the public `IdentityUnresolvedConflict` union, validated
- * STRICTLY rather than as opaque JSON: an entry the merge could not have
- * produced fails at parse, where the plan artifact is read, rather than at the
- * point a consumer reaches into a field that is not there.
+ * The public `IdentityUnresolvedConflict`, validated STRICTLY rather than as
+ * opaque JSON: an entry the merge could not have produced fails at parse,
+ * where the plan artifact is read, rather than at the point a consumer reaches
+ * into a field that is not there.
  */
-const identityUnresolvedConflictSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("assertion"),
-      reason: z.enum([
-        "retract-reassert",
-        "opposing-relations",
-        "cross-kind-pairing",
-        "out-of-scope-pairing",
-      ]),
-      semanticKey: nonEmptyStringSchema,
-      a: mergePlanEntityRefSchema,
-      b: mergePlanEntityRefSchema,
-      relation: z.enum(["same", "different"]),
-      assertionIds: z.array(nonEmptyStringSchema),
-      branches: z.array(nonEmptyStringSchema),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("separation"),
-      a: mergePlanEntityRefSchema,
-      b: mergePlanEntityRefSchema,
-      assertionIds: z.array(nonEmptyStringSchema),
-      source: matchSourceSchema.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("edge"),
-      edgeKind: nonEmptyStringSchema,
-      a: mergePlanEntityRefSchema,
-      b: mergePlanEntityRefSchema,
-      canonical: mergePlanEntityRefSchema,
-      side: z.enum(["from", "to"]),
-      edgeIds: z.array(nonEmptyStringSchema),
-      assertionIds: z.array(nonEmptyStringSchema),
-      branches: z.array(nonEmptyStringSchema),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("uniqueness"),
-      constraintName: nonEmptyStringSchema,
-      fields: z.array(nonEmptyStringSchema),
-      canonical: mergePlanEntityRefSchema,
-      owner: mergePlanEntityRefSchema,
-      loser: mergePlanEntityRefSchema,
-      members: z.array(mergePlanEntityRefSchema),
-      assertionIds: z.array(nonEmptyStringSchema),
-      branches: z.array(nonEmptyStringSchema),
-    })
-    .strict(),
-  // No `"provenance"` arm: `onProvenanceConflict` has no reporting
-  // disposition that could ever place one on this array (see the matching
-  // note on `IdentityUnresolvedConflict` in types.ts).
-]);
+const identityUnresolvedConflictSchema = z
+  .object({
+    kind: z.literal("separation"),
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    assertionIds: z.array(nonEmptyStringSchema),
+    source: matchSourceSchema.optional(),
+  })
+  .strict();
 
 const mergePlanReviewSchema = z
   .object({
@@ -787,10 +704,9 @@ const mergePlanReviewSchema = z
     ),
     diagnostics: diagnosticsSchema.optional(),
     // Optional and omitted when empty (the `diagnostics` precedent above): a
-    // merge that reconciled nothing produces a review object byte-identical
-    // to today's, so `MERGE_PLAN_FORMAT_VERSION` stays at 2 and every plan
-    // artifact serialized before identity reconciliation existed still parses.
-    identityReconciliations: z.array(identityReconciliationSchema).optional(),
+    // merge the separation veto never touched produces a review object
+    // byte-identical to one written before the veto existed, so
+    // `MERGE_PLAN_FORMAT_VERSION` stays at 2 and those artifacts still parse.
     identityConflicts: z.array(identityUnresolvedConflictSchema).optional(),
   })
   .strict();

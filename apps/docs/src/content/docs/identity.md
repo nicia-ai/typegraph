@@ -290,12 +290,12 @@ const [store] = await createAdapterStoreWithSchema(graph, backend, {
 `store.identity.transitionsOf(ref)` returns a **page** of the transitions
 touching `ref`'s class lineage, oldest first — an assertion, a retraction, a
 same-ID fold, a delete or restore, a validity-window end, a kind drop, a
-schema transition, or a reconciliation decision made by a governed graph
-merge. A page covers at most `limit` recorded boundaries (default 200), and
-one boundary can hold several transitions, so a page's `transitions` can be
-longer than `limit`; when the lineage has more boundaries, the page carries
-`nextFrom`, and passing it back as `fromRecorded` reads the next one. Reading the whole lineage is therefore a
-loop, not a call:
+schema transition, or an identity change a graph merge applied. A page covers
+at most `limit` recorded boundaries (default 200), and one boundary can hold
+several transitions, so a page's `transitions` can be longer than `limit`;
+when the lineage has more boundaries, the page carries `nextFrom`, and passing
+it back as `fromRecorded` reads the next one. Reading the whole lineage is
+therefore a loop, not a call:
 
 ```typescript
 let cursor: RecordedInstant | undefined;
@@ -336,7 +336,7 @@ watermark](#archival-transitions-and-the-retention-watermark)).
 | `window-end` | A node's or assertion's validity window closed, ending its contribution |
 | `kind-drop` | A schema change removed a kind, hard-deleting the identity assertions it touched |
 | `schema-transition` | A schema evolution reinterpreted membership under new `sameIdAcrossKinds` or ontology rules |
-| `reconcile` | A reviewed graph merge's identity policy made the call (see [Graph merge](/graph-merge/)) |
+| `reconcile` | A graph merge applied the assertion or retraction; the transition's `decision` names the branch, the branch ancestry, and the plan and review digests when a reviewed plan was applied (see [Graph merge](/graph-merge/#identity-conflicts)) |
 
 `store.identity.replay(ref, options?)` pairs every transition with the class
 membership immediately before and after it, reconstructed through the exact

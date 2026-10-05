@@ -600,11 +600,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // each carry their own narrow barrel that has no business re-exporting an
 // identity type, so their entry is the honest cost of naming it on the port.
 //
-// `./graph-merge` nets DOWN: the identity reconciliation surface
-// (`IdentityReconciliationOptions`, the conflict/decision types, the
-// staged-assertion shapes a policy callback receives, the pairing scope) is
-// exported deliberately from `src/graph-merge/index.ts` rather than left as
-// debt, which retires more forgotten exports than the port adds.
+// `./graph-merge` exports the identity types its merge report and plan name
+// (`IdentityUnresolvedConflict`, `IdentityDecisionProvenance`,
+// `IdentityTransferAssertion`, `IdentityRelation`) deliberately from
+// `src/graph-merge/index.ts` rather than leaving them as debt.
 //
 // Ruling (2026-09-09): the five `IdentityDecisionProvenance` entries above
 // stay PERMANENT debt, not retired. The only retirement this ledger's own

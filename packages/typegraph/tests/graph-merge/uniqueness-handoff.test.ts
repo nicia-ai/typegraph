@@ -1,6 +1,6 @@
 /**
  * The RELEASE half of the resolved-write-set uniqueness decision
- * (`findResolvedNodeClaimConflicts`, src/store/claims/resolved-node-claims.ts):
+ * (`validateResolvedNodeClaims`, src/store/claims/resolved-node-claims.ts):
  * a claim the set itself gives back is available to the set. A merge that
  * deletes the row holding a unique key and creates a new row under that key
  * must commit, leaving only the new row — the persisted holder is among the

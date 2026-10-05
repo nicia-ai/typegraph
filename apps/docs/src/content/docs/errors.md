@@ -378,14 +378,11 @@ convergent, not a conflict, and merges cleanly), or a branch asserts an
 identity relation over a node another branch deleted. Extends `MergeError`, so
 an `instanceof MergeError` catch covers it alongside the other merge failures.
 
-The same error class also covers two policy-driven identity conflicts under
-the `identity` merge option bag (see the
-[graph merge guide](/graph-merge/#identity-conflicts)): a forced
-identity-paired match crossing a class-lifted `different` assertion
-(`GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`), and `onProvenanceConflict:
-"refuse"` finding contradictory branch attribution across a fused cluster
-(`GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT`). Check `error.code` to
-distinguish them from the default `GRAPH_MERGE_IDENTITY_CONFLICT`.
+The same error class also covers the identity separation veto (see the
+[graph merge guide](/graph-merge/#identity-separation-veto)): a definitional
+match, or a transitive cluster, crossing a class-lifted `different` assertion
+(`GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`). Check `error.code` to
+distinguish it from the default `GRAPH_MERGE_IDENTITY_CONFLICT`.
 
 `merge()` and `IdentityMergeConflictError` are both exported from
 `@nicia-ai/typegraph/graph-merge`, not the package root. `merge()` takes an
@@ -398,7 +395,7 @@ import { merge, IdentityMergeConflictError, isErr } from "@nicia-ai/typegraph/gr
 const result = await merge(store, [branch]);
 if (isErr(result)) {
   if (result.error instanceof IdentityMergeConflictError) {
-    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT", "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT", or "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT"
+    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT" or "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT"
     console.log(result.error.details);
   }
   throw result.error;
@@ -1881,8 +1878,7 @@ try {
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
 | `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
-| `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A forced identity-paired match crosses a class-lifted `different` assertion |
-| `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT` | `IdentityMergeConflictError` | system | `onProvenanceConflict: "refuse"` found contradictory branch attribution across a fused cluster |
+| `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions |

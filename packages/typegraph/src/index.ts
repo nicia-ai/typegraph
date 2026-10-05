@@ -118,10 +118,8 @@ export {
   // The governing decision a merge attaches to the identity transitions it
   // causes — named on `StoreRuntime.applyIdentityMergeAtTarget`, so a backend
   // or store author implementing the port needs it by name.
-  type IdentityAssertionPolicyLabel,
   type IdentityAssertionResult,
   type IdentityAssertionWriteFacade,
-  type IdentityDecisionPolicyRecord,
   type IdentityDecisionProvenance,
   type IdentityFacade,
   type IdentityNode,
