@@ -1063,40 +1063,67 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(again.moved).toBe(false);
     });
 
-    it("reparent applies a stated validTo to the new attachment, not to the retired one", async () => {
+    it("get-or-create states the attachment's window on every leg that writes the edge", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
-      const vaultA = await store.nodes.CaVault.create(CA_VAULT_PROPS);
-      const vaultB = await store.nodes.CaVault.create(CA_VAULT_PROPS);
-      const relic = await store.nodes.CaRelic.create(
-        {},
-        {
-          partOf: { whole: vaultA, validFrom: "2024-01-01T00:00:00.000Z" },
-        },
-      );
-      const at = "2024-06-01T00:00:00.000Z";
-      const validTo = "2999-01-01T00:00:00.000Z";
+      const book = await store.nodes.CaBook.create({});
+      const window = {
+        validFrom: "2021-01-01T00:00:00.000Z",
+        validTo: "2998-01-01T00:00:00.000Z",
+      };
+      const partOf = {
+        whole: book,
+        via: "caChapterOf",
+        props: { order: 1 },
+        ...window,
+      };
+      const windowOf = async (slug: string) => {
+        const chapter = await store.nodes.CaChapter.findByConstraint(
+          "ca_chapter_slug",
+          { slug },
+        );
+        const edges = await store.edges.caChapterOf.find({
+          from: requireDefined(chapter),
+        });
+        const edge = requireDefined(edges[0], `the edge of "${slug}"`);
+        return {
+          validFrom: edge.meta.validFrom,
+          validTo: edge.meta.validTo,
+        };
+      };
 
-      // MUTATION CHECK: make `attachmentWindow`
-      // (src/store/operations/node-operations.ts) return only
-      // `{ validFrom: moveAt }` for a move — the new edge is then open-ended.
-      const moved = await store.nodes.CaRelic.reparent(relic.id, {
-        whole: vaultB,
-        at,
-        validTo,
-      });
+      await store.nodes.CaChapter.create({ slug: "single" });
+      await store.nodes.CaChapter.create({ slug: "bulk" });
+      const doomed = await store.nodes.CaChapter.create({ slug: "revived" });
+      await store.nodes.CaChapter.delete(doomed.id);
 
-      expect(moved.edge.toId).toBe(vaultB.id);
-      expect(moved.edge.meta.validFrom).toBe(at);
-      expect(moved.edge.meta.validTo).toBe(validTo);
-      const history = await store.edges.caRelicOf.find(
-        {},
-        { temporalMode: "includeEnded" },
+      // MUTATION CHECK: pass `{}` instead of
+      // `decided.request.work.edgeWindow` in
+      // `prepareCompositionAttachmentDecision`
+      // (src/store/operations/node-operations.ts) — each edge below is then
+      // opened at the clock and never ends.
+      const single = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "single" },
+        { ifExists: "update", partOf },
       );
-      const retired = requireDefined(
-        history.find((edge) => edge.toId === vaultA.id),
-        "the retired attachment",
+      expect(single.action).toBe("updated");
+      expect(await windowOf("single")).toEqual(window);
+
+      const bulk = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+        "ca_chapter_slug",
+        [{ props: { slug: "bulk" } }],
+        { ifExists: "update", partOf },
       );
-      expect(retired.meta.validTo).toBe(at);
+      expect(bulk.map((entry) => entry.action)).toEqual(["updated"]);
+      expect(await windowOf("bulk")).toEqual(window);
+
+      const revived = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "revived" },
+        { ifExists: "update", partOf },
+      );
+      expect(revived.action).toBe("resurrected");
+      expect(await windowOf("revived")).toEqual(window);
     });
 
     it("refuses the flat { kind, id } attachment on every surface and writes nothing", async () => {

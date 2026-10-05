@@ -3065,13 +3065,7 @@ function attachmentWindow(
   work: CompositionCreateWork,
   moveAt: string | undefined,
 ): Readonly<{ validFrom?: string | null; validTo?: string }> {
-  if (moveAt === undefined) return work.edgeWindow;
-  return {
-    validFrom: moveAt,
-    ...(work.edgeWindow.validTo === undefined ?
-      {}
-    : { validTo: work.edgeWindow.validTo }),
-  };
+  return moveAt === undefined ? work.edgeWindow : { validFrom: moveAt };
 }
 
 async function applyCompositionAttachmentDecision<G extends GraphDef>(
@@ -3235,7 +3229,7 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
         lock,
         decided.request.work,
         partId,
-        {},
+        decided.request.work.edgeWindow,
         {
           endpoints:
             options.partRowRestoredByUpdate ?

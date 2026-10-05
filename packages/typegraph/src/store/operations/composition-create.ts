@@ -61,7 +61,7 @@ import {
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
-import { nowIso } from "../../utils/date";
+import { nowIso, validateCanonicalIsoDate } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -79,7 +79,7 @@ import {
 } from "./composition-cascade";
 
 const ATTACHMENT_KEYS = ["whole", "via", "props", "validFrom", "validTo"];
-const REPARENT_OPTION_KEYS = ["whole", "via", "props", "validTo", "at"];
+const REPARENT_OPTION_KEYS = ["whole", "via", "props", "at"];
 
 /**
  * Where an attachment was stated: the argument name its refusals are
@@ -133,8 +133,8 @@ function readWholeRef(whole: unknown): CompositionNodeRef | undefined {
  *   the attachment's;
  * - a top-level key the surface does not accept is refused rather than
  *   dropped — including the whole's `kind`/`id` stated beside `via` instead
- *   of under `whole`, and `validFrom` on `reparent`, whose one instant is
- *   `at`.
+ *   of under `whole`, and `validFrom` / `validTo` on `reparent`, whose one
+ *   instant is `at` and which states no window.
  */
 function readStatedAttachment(
   value: unknown,
@@ -202,6 +202,12 @@ export function readCompositionAttachment(
   return readStatedAttachment(partOf, PART_OF_SURFACE, part);
 }
 
+function readMoveInstant(at: string | undefined): string {
+  return at === undefined ? nowIso() : (
+      validateCanonicalIsoDate(at, `${REPARENT_SURFACE.path}.at`)
+    );
+}
+
 /**
  * Reads `reparent`'s options: the destination attachment and the move
  * instant, which is `at` or one clock read. The new edge's lower bound is
@@ -212,7 +218,7 @@ export function readReparentOptions(
   part: Readonly<{ kind: string; id: string }>,
 ): Readonly<{ attachment: StatedCompositionAttachment; moveAt: string }> {
   const attachment = readStatedAttachment(options, REPARENT_SURFACE, part);
-  return { attachment, moveAt: options.at ?? nowIso() };
+  return { attachment, moveAt: readMoveInstant(options.at) };
 }
 
 /**

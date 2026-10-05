@@ -203,6 +203,55 @@ describe("reparent's move instant", () => {
     expect(retired.meta.validTo).toBe(at);
   });
 
+  it("refuses a stated validTo or a malformed at, each under its own option name", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("reparent_refused_options"),
+      createTestBackend(),
+    );
+    const showA = await store.nodes.RiShow.create({});
+    const showB = await store.nodes.RiShow.create({});
+    const clip = await store.nodes.RiClip.create(
+      {},
+      { partOf: { whole: { kind: "RiShow", id: showA.id } } },
+    );
+    const whole = { kind: "RiShow", id: showB.id } as const;
+
+    const issuePaths = async (
+      attempt: Promise<unknown>,
+    ): Promise<readonly string[]> => {
+      const refusal = await attempt.catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(ValidationError);
+      return (refusal as ValidationError).details.issues.map(
+        (issue) => issue.path,
+      );
+    };
+
+    // MUTATION: add "validTo" to `REPARENT_OPTION_KEYS`
+    // (src/store/operations/composition-create.ts). The bound is then
+    // accepted and applied, so the move goes through and nothing is refused.
+    expect(
+      await issuePaths(
+        store.nodes.RiClip.reparent(clip.id, {
+          whole,
+          // @ts-expect-error a move states no window; `at` is its only instant
+          validTo: "2999-01-01T00:00:00.000Z",
+        }),
+      ),
+    ).toEqual(["options.validTo"]);
+
+    // MUTATION: return `at` unchecked from `readMoveInstant`. The malformed
+    // value then reaches the edge insert and is refused under "validFrom".
+    expect(
+      await issuePaths(
+        // @ts-expect-error `at` is a string
+        store.nodes.RiClip.reparent(clip.id, { whole, at: 5 }),
+      ),
+    ).toEqual(["options.at"]);
+
+    const untouched = await store.edges.riClipOf.find({});
+    expect(untouched.map((edge) => edge.toId)).toEqual([showA.id]);
+  });
+
   it("does not copy the part node's validity window onto the realizing edge", async () => {
     const [store] = await createStoreWithSchema(
       buildGraph("composition_edge_window"),

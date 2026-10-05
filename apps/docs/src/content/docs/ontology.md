@@ -440,7 +440,8 @@ refusal, or an acyclicity refusal aborts the node create too.
   way: a pair that is not declared between the two kinds raises
   `ConfigurationError` (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
   `store.getNodeCollection(kind)` takes any kind string, and a
-  `StoreProjection` accepts no attachment at all.
+  `StoreProjection` carries the same whole kinds its graph declares for each
+  projected kind.
 - **`via`** names the realizing edge. Pass the edge's type when you have it
   (a typo is a compile error, the same check `partOf`/`hasPart` apply) or its
   kind string when the edge is chosen at runtime. It is required only when the
@@ -480,10 +481,11 @@ transaction.
 
 `at` is the move instant, and its only spelling: the same timestamp ends the
 old window and opens the new one. Omit it to read the clock once. `reparent`
-takes no `validFrom` — stating one is a compile error and a `ValidationError`
-at runtime (issue path `options.validFrom`). `validTo` is still accepted and
-keeps its create-time meaning, the upper bound of the *new* attachment; like
-any ended attachment it is refused for an `existence: "required"` part.
+takes no `validFrom` or `validTo` — stating either is a compile error and a
+`ValidationError` at runtime (issue path `options.validFrom` or
+`options.validTo`). A move opens the new attachment; bounding a membership is
+a window edit on the realizing edge. A malformed `at` is refused under
+`options.at`.
 
 Moving a part is a first-class operation because neither half is legal on its
 own: the new attachment refuses while the old edge still holds the part's

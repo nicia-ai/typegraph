@@ -15,6 +15,7 @@ import {
   defineNode,
   hasPart,
   type Node,
+  type NodeCollection,
   type OntologyRelation,
   partOf,
   type Store,
@@ -196,12 +197,17 @@ expectAssignable<CreateNodeInput<typeof Episode>>({
 store.nodes.Episode.reparent(episodeId, {
   whole: show,
   at: "2026-01-01T00:00:00.000Z",
-  validTo: "2027-01-01T00:00:00.000Z",
 });
 expectError(
   store.nodes.Episode.reparent(episodeId, {
     whole: show,
     validFrom: "2026-01-01T00:00:00.000Z",
+  }),
+);
+expectError(
+  store.nodes.Episode.reparent(episodeId, {
+    whole: show,
+    validTo: "2027-01-01T00:00:00.000Z",
   }),
 );
 // Create-time attachments keep the realizing edge's whole window.
@@ -282,9 +288,25 @@ dynamicEpisodes?.create(
 type EpisodeProjection = StoreProjection<typeof graph, "Episode" | "Show">;
 expectAssignable<EpisodeProjection>(store);
 declare const projection: EpisodeProjection;
+projection.nodes.Episode.create({ title: "one" }, { partOf: { whole: show } });
+projection.nodes.Episode.reparent(episodeId, { whole: show });
 expectError(
   projection.nodes.Episode.create(
     { title: "one" },
-    { partOf: { whole: show } },
+    { partOf: { whole: album } },
   ),
 );
+expectError(projection.nodes.Episode.reparent(episodeId, { whole: album }));
+
+// A collection named with the default whole kinds is not the graph's own: the
+// kinds sit in contravariant positions, so it must say which kinds it takes.
+expectError<NodeCollection<typeof Episode, "episode_title">>(
+  store.nodes.Episode,
+);
+expectAssignable<
+  NodeCollection<
+    typeof Episode,
+    "episode_title",
+    CompositionWholeKinds<typeof graph, "Episode">
+  >
+>(store.nodes.Episode);

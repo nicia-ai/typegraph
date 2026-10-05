@@ -259,15 +259,15 @@ export type CompositionAttachment<
  * Options for {@link NodeCollection.reparent}: the destination attachment,
  * and the one instant the move happens at.
  *
- * There is no `validFrom` here. A move has one instant — the incumbent's
- * window ends where the new edge's begins — and `at` is its only spelling.
- * `validTo` keeps its create-time meaning: the upper bound of the NEW
- * attachment, for a membership that is already known to end.
+ * A move has one instant — the incumbent's window ends where the new edge's
+ * begins — and `at` is its only spelling, so there is no `validFrom` here.
+ * There is no `validTo` either: a move opens the new attachment, and bounding
+ * a membership is a window edit on the realizing edge, not part of moving.
  */
 export type NodeReparentOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
   WholeKind extends string = string,
-> = Omit<CompositionAttachment<Via, WholeKind>, "validFrom"> &
+> = Omit<CompositionAttachment<Via, WholeKind>, "validFrom" | "validTo"> &
   Readonly<{
     /**
      * The instant a `oneActive` incumbent window ends and the new edge's
@@ -2933,10 +2933,12 @@ export type BulkFindRuntimeEdgesFromResult<
  * This is intentional: unique constraints are graph-registration-level
  * details that differ between graphs sharing the same node types.
  *
- * Composition whole kinds are erased the same way, and for the same reason:
- * which wholes a kind may attach to is declared by each graph's ontology. A
- * projected collection therefore accepts no `partOf` attachment and no
- * `reparent`; type a helper that attaches parts against `Store<G>` itself.
+ * Composition whole kinds are NOT erased: they are the whole kinds `G`'s
+ * ontology declares for each projected kind (see
+ * {@link CompositionWholeKinds}), so `partOf` and `reparent` stay callable
+ * on a projection with the same compile-time check `Store<G>` applies. A
+ * store of another graph is assignable only when its collection accepts at
+ * least those whole kinds.
  *
  * @example
  * ```typescript
@@ -2965,6 +2967,12 @@ export type StoreProjection<
   N extends keyof G["nodes"] & string = never,
   E extends keyof G["edges"] & string = never,
 > = Readonly<{
-  nodes: { [K in N]-?: NodeCollection<G["nodes"][K]["type"], never, never> };
+  nodes: {
+    [K in N]-?: NodeCollection<
+      G["nodes"][K]["type"],
+      never,
+      CompositionWholeKinds<G, K>
+    >;
+  };
   edges: Pick<GraphEdgeCollections<G>, E>;
 }>;
