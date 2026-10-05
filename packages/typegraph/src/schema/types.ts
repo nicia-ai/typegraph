@@ -11,6 +11,10 @@ import { z } from "zod";
 
 import { type GraphIdentityConfig } from "../core/define-graph";
 import {
+  CARDINALITY_VALUES,
+  TARGET_CARDINALITY_VALUES,
+} from "../core/edge-integrity-options";
+import {
   type Cardinality,
   type Collation,
   type DeleteBehavior,
@@ -49,12 +53,12 @@ import {
 
 const deleteBehaviorZod = z.enum(["restrict", "cascade", "disconnect"]);
 
-const cardinalityZod = z.enum(["many", "one", "unique", "oneActive"]);
+// The stored-schema parser reads the same value lists `defineGraph` and the
+// graph-extension validator refuse against, so a value one layer accepts is
+// never one another rejects.
+const cardinalityZod = z.enum(CARDINALITY_VALUES);
 
-// A target cardinality is every cardinality except `"unique"`, which is a
-// source-side-only declaration. Excluding from the shared enum (rather than a
-// second hand-written list) keeps the two in sync as the union evolves.
-const targetCardinalityZod = cardinalityZod.exclude(["unique"]);
+const targetCardinalityZod = z.enum(TARGET_CARDINALITY_VALUES);
 
 const endpointExistenceZod = z.enum(["notDeleted", "currentlyValid", "ever"]);
 

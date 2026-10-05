@@ -1218,6 +1218,16 @@ and `store.search.hybrid` refuse every mismatched override on their own broader
 rule. See
 [Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
 
+#### Edge integrity option codes
+
+`defineGraph` refuses an edge registration whose integrity options are stated
+outside their domain. TypeScript rejects these at compile time; the runtime
+check is for untyped callers:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
+
 #### Durable edge match identity guard codes
 
 Durable edge match identity uses stable `ConfigurationError` detail codes:
