@@ -498,12 +498,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
             storeA.nodes.Book.getOrCreateByConstraint(
               "book_slug",
               { slug: "contested" },
-              { partOf: { kind: "Shelf", id: shelfA.id } },
+              { partOf: { whole: { kind: "Shelf", id: shelfA.id } } },
             ),
             storeB.nodes.Book.getOrCreateByConstraint(
               "book_slug",
               { slug: "contested" },
-              { partOf: { kind: "Shelf", id: shelfB.id } },
+              { partOf: { whole: { kind: "Shelf", id: shelfB.id } } },
             ),
           ]),
         );

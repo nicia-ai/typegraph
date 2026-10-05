@@ -211,7 +211,7 @@ describe.each(backendMatrix())(
       await base.nodes.UWhole.create({}, { id: "w1" });
       await base.nodes.UPart.create(
         {},
-        { id: "p1", partOf: { kind: "UWhole", id: "w1" } },
+        { id: "p1", partOf: { whole: { kind: "UWhole", id: "w1" } } },
       );
 
       const cloned = await branch(base, () => makeBackend(), { id: BRANCH_A });
@@ -244,7 +244,7 @@ describe.each(backendMatrix())(
       await forkPoint.nodes.UWhole.create({}, { id: "w1" });
       await forkPoint.nodes.UPart.create(
         {},
-        { id: "p1", partOf: { kind: "UWhole", id: "w1" } },
+        { id: "p1", partOf: { whole: { kind: "UWhole", id: "w1" } } },
       );
       const [forkEdge] = await forkPoint.edges.uHolds.find({});
       const forkEdgeId = requireDefined(forkEdge).id;
@@ -355,7 +355,7 @@ describe.each(backendMatrix())(
       for (const id of ["p-written", "p-detached", "p-ended"]) {
         await target.nodes.UPart.create(
           {},
-          { id, partOf: { kind: "UWhole", id: "w1" } },
+          { id, partOf: { whole: { kind: "UWhole", id: "w1" } } },
         );
       }
       const edgeOf = async (partId: string): Promise<EdgeId> => {

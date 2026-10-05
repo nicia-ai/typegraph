@@ -113,7 +113,7 @@ describe("tx.writeNodeUpsertBatch refuses required-existence part kinds", () => 
     const album = await recorded.store.nodes.Album.create({});
     const track = await recorded.store.nodes.Track.create(
       { title: "original" },
-      { id: "cascaded", partOf: { kind: "Album", id: album.id } },
+      { id: "cascaded", partOf: { whole: { kind: "Album", id: album.id } } },
     );
     await recorded.store.nodes.Album.delete(album.id);
     await expect(

@@ -63,6 +63,7 @@ export type {
   CommonPropertyKeys,
   CompiledOneStatementRead,
   CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,

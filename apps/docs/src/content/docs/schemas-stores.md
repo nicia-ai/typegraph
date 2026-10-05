@@ -2275,17 +2275,17 @@ const store = createStore(graph, backend, {
 const album = await store.nodes.Album.create({ title: "Origins" });
 const trackOne = await store.nodes.Track.create(
   { title: "Intro" },
-  { partOf: { kind: "Album", id: album.id } },
+  { partOf: { whole: album } },
 );
 const trackTwo = await store.nodes.Track.create(
   { title: "Outro" },
-  { partOf: { kind: "Album", id: album.id } },
+  { partOf: { whole: album } },
 );
 
 const albumTwo = await store.nodes.Album.create({ title: "Reissue" });
 const trackThree = await store.nodes.Track.create(
   { title: "Bonus" },
-  { partOf: { kind: "Album", id: albumTwo.id } },
+  { partOf: { whole: albumTwo } },
 );
 
 const { receipt, result } = await store.transactionWithReceipt(async (tx) => {

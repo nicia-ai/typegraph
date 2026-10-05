@@ -89,6 +89,7 @@ export {
   type BooleanFieldAccessor,
   type CommonPropertyKeys,
   type CompiledOneStatementRead,
+  type CompositionWholeKinds,
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,

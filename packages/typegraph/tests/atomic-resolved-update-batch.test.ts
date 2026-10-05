@@ -1079,7 +1079,7 @@ describe("resolveAtomicNodeResolvedMutationSetExecutor: composition gate (item E
             kind: "ArmPart",
             id: "part-1",
             props: {},
-            partOf: { kind: "ArmWhole", id: "whole-1" },
+            partOf: { whole: { kind: "ArmWhole", id: "whole-1" } },
           },
         ],
         updateCount: 0,

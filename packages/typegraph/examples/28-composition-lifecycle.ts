@@ -166,7 +166,7 @@ export async function main(): Promise<void> {
     const podcast = await store.nodes.Podcast.create({ title: "Deep Dive" });
     const episode = await store.nodes.Episode.create(
       { title: "Pilot" },
-      { partOf: { kind: "Podcast", id: podcast.id } },
+      { partOf: { whole: podcast } },
     );
     console.log(`  created podcast ${podcast.id} and episode ${episode.id}`);
 
@@ -196,7 +196,7 @@ export async function main(): Promise<void> {
     const coldOpen = await store.nodes.Segment.create(
       { label: "cold-open" },
       {
-        partOf: { kind: "Episode", id: episode.id, props: { order: 1 } },
+        partOf: { whole: episode, props: { order: 1 } },
       },
     );
     const coldOpenEdges = await store.edges.segmentOf.findFrom(coldOpen);
@@ -219,8 +219,7 @@ export async function main(): Promise<void> {
     );
 
     const attachment = {
-      kind: "Episode" as const,
-      id: episode.id,
+      whole: episode,
       via: "segmentOf" as const,
       props: { order: 2 },
     };
@@ -254,13 +253,13 @@ export async function main(): Promise<void> {
 
     const otherEpisode = await store.nodes.Episode.create(
       { title: "Bonus" },
-      { partOf: { kind: "Podcast", id: podcast.id } },
+      { partOf: { whole: podcast } },
     );
     const movedElsewhereError =
       await store.nodes.Segment.getOrCreateByConstraint(
         "segment_label",
         { label: "interview" },
-        { partOf: { kind: "Episode", id: otherEpisode.id } },
+        { partOf: { whole: otherEpisode } },
       ).catch((error: unknown) => error);
     assertTrue(
       movedElsewhereError instanceof CompositionExistenceError,
@@ -294,8 +293,7 @@ export async function main(): Promise<void> {
     );
 
     await store.nodes.Segment.reparent(firstCall.node.id, {
-      kind: "Episode",
-      id: otherEpisode.id,
+      whole: otherEpisode,
       props: { order: 2 },
     });
     const interviewEdgesAfterMove = await store.edges.segmentOf.findFrom(
@@ -326,8 +324,7 @@ export async function main(): Promise<void> {
     );
 
     await store.nodes.Segment.reparent(firstCall.node.id, {
-      kind: "Episode",
-      id: otherEpisode.id,
+      whole: otherEpisode,
     });
     const interviewEdgesAfterNoop = await store.edges.segmentOf.findFrom(
       firstCall.node,
@@ -352,14 +349,13 @@ export async function main(): Promise<void> {
     });
     const exportEpisode = await store.nodes.Episode.create(
       { title: "Launch Day" },
-      { partOf: { kind: "Podcast", id: exportPodcast.id } },
+      { partOf: { whole: exportPodcast } },
     );
     const exportSegmentOne = await store.nodes.Segment.create(
       { label: "intro" },
       {
         partOf: {
-          kind: "Episode",
-          id: exportEpisode.id,
+          whole: exportEpisode,
           props: { order: 1 },
         },
       },
@@ -368,8 +364,7 @@ export async function main(): Promise<void> {
       { label: "outro" },
       {
         partOf: {
-          kind: "Episode",
-          id: exportEpisode.id,
+          whole: exportEpisode,
           props: { order: 2 },
         },
       },

@@ -403,7 +403,7 @@ import, or by direct SQL) is not repaired by the declaration. Run
 adding a pair to a populated graph. Removing a pair only ever loosens a
 constraint, so it stays safe regardless.
 
-#### Attaching a part: `partOf: { kind, id, via?, props? }`
+#### Attaching a part: `partOf: { whole, via?, props? }`
 
 Every write that can give a part a whole takes the same attachment value:
 `create`, `bulkCreate` (per item), `getOrCreateByConstraint` /
@@ -415,9 +415,8 @@ const chapter = await store.nodes.Chapter.create(
   { title: "Openings" },
   {
     partOf: {
-      kind: "Book",
-      id: book.id,
-      via: "chapterOf",
+      whole: book,
+      via: chapterOf,
       props: { order: 1 },
     },
   },
@@ -428,9 +427,21 @@ The node and its realizing composition edge are written in **one**
 transaction: a lost composition claim, a dead or missing whole, a cardinality
 refusal, or an acyclicity refusal aborts the node create too.
 
-- **`kind` / `id`** name the whole. A pair that is not declared between the
-  two kinds raises `ConfigurationError`
-  (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+- **`whole`** names the whole: a node you already hold, or a
+  `{ kind, id }` reference when you only have the id
+  (`whole: { kind: "Book", id: bookId }`). Only its `kind` and `id` are read,
+  so a whole node's own properties never bleed into the attachment. On
+  `store.nodes.<Kind>`, `whole.kind` is limited at compile time to the whole
+  kinds the ontology declares for that part kind, in either declaration
+  direction (`partOf(Chapter, Book)` or `hasPart(Book, Chapter)`). When the
+  ontology also declares a subclass or equivalence relation, or was built in
+  a variable annotated `readonly OntologyRelation[]`, the type accepts any
+  node kind of the graph instead. The runtime check is authoritative either
+  way: a pair that is not declared between the two kinds raises
+  `ConfigurationError` (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+  `store.getNodeCollection(kind)` takes any kind string, and a
+  `StoreProjection` carries the same whole kinds its graph declares for each
+  projected kind.
 - **`via`** names the realizing edge. Pass the edge's type when you have it
   (a typo is a compile error, the same check `partOf`/`hasPart` apply) or its
   kind string when the edge is chosen at runtime. It is required only when the
@@ -448,21 +459,33 @@ refusal, or an acyclicity refusal aborts the node create too.
   validate them. A realizing edge with required schema fields therefore needs
   `props` here.
 
+Any other key on the attachment is refused with `ValidationError` (issue path
+`partOf.<key>`) rather than ignored, so a misspelled option, or the whole's
+`kind` / `id` stated beside `via` instead of under `whole`, cannot be dropped
+silently.
+
 #### `reparent`: moving a part to a new whole
 
 ```typescript
 await store.nodes.Chapter.reparent(chapter.id, {
-  kind: "Anthology",
-  id: anthology.id,
-  via: "includedIn",
+  whole: anthology,
+  via: includedIn,
 });
 ```
 
-`reparent` writes a brand-new realizing edge, so it takes the same
-`props` as `create`'s `partOf`: a realizing edge whose schema has required
-fields needs them restated on every move. It returns `{ edge, moved }`.
-`at` is the single instant both halves share; omit it to read the clock once.
-`bulkReparent` runs the same move for many parts in one transaction.
+`reparent` writes a brand-new realizing edge, so it takes the same `whole`,
+`via` and `props` as `create`'s `partOf`: a realizing edge whose schema has
+required fields needs them restated on every move. It returns
+`{ edge, moved }`. `bulkReparent` runs the same move for many parts in one
+transaction.
+
+`at` is the move instant, and its only spelling: the same timestamp ends the
+old window and opens the new one. Omit it to read the clock once. `reparent`
+takes no `validFrom` or `validTo` — stating either is a compile error and a
+`ValidationError` at runtime (issue path `options.validFrom` or
+`options.validTo`). A move opens the new attachment; bounding a membership is
+a window edit on the realizing edge. A malformed `at` is refused under
+`options.at`.
 
 Moving a part is a first-class operation because neither half is legal on its
 own: the new attachment refuses while the old edge still holds the part's
@@ -543,8 +566,8 @@ Two refusals follow from that one declaration:
 
 - **A bare create is refused.** `store.nodes.Segment.create({...})` with no
   `partOf` throws `CompositionExistenceError`
-  (`COMPOSITION_WHOLE_REQUIRED`) before any row is written. Pass `partOf: {
-  kind, id }` naming the whole; the node and its composition edge are written
+  (`COMPOSITION_WHOLE_REQUIRED`) before any row is written. Pass
+  `partOf: { whole }` naming the whole; the node and its composition edge are written
   in the same transaction — a lost composition claim or a dead/missing whole
   aborts the create too.
 - **Detaching a live part is refused.** Ending, soft-deleting, or

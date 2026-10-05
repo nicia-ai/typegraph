@@ -168,7 +168,7 @@ describe("get-or-create's partOf postcondition under the fence", () => {
       const attached = await store.nodes.AfPart.getOrCreateByConstraint(
         "af_part_slug",
         { slug: "contested", code: "c1" },
-        { partOf: { kind: "AfWhole", id: wholeA.id } },
+        { partOf: { whole: { kind: "AfWhole", id: wholeA.id } } },
       );
       expect(attached.action).toBe("found");
     };
@@ -182,7 +182,7 @@ describe("get-or-create's partOf postcondition under the fence", () => {
     const refusal = await store.nodes.AfPart.getOrCreateByConstraint(
       "af_part_slug",
       { slug: "contested", code: "c1" },
-      { partOf: { kind: "AfWhole", id: wholeB.id } },
+      { partOf: { whole: { kind: "AfWhole", id: wholeB.id } } },
     ).catch((error: unknown) => error);
 
     expect(refusal).toBeInstanceOf(CompositionExistenceError);
@@ -225,7 +225,7 @@ describe("get-or-create's partOf postcondition under the fence", () => {
       await store.nodes.AfPart.getOrCreateByConstraint(
         "af_part_slug",
         { slug: "converging", code: "c1" },
-        { partOf: { kind: "AfWhole", id: whole.id } },
+        { partOf: { whole: { kind: "AfWhole", id: whole.id } } },
       );
     };
 
@@ -236,7 +236,7 @@ describe("get-or-create's partOf postcondition under the fence", () => {
     const result = await store.nodes.AfPart.getOrCreateByConstraint(
       "af_part_slug",
       { slug: "converging", code: "c1" },
-      { partOf: { kind: "AfWhole", id: whole.id } },
+      { partOf: { whole: { kind: "AfWhole", id: whole.id } } },
     );
     expect(result.action).toBe("found");
 
@@ -275,7 +275,7 @@ describe("get-or-create's partOf postcondition under the fence", () => {
       { slug: "keeper", code: "taken" },
       {
         ifExists: "update",
-        partOf: { kind: "AfWhole", id: whole.id },
+        partOf: { whole: { kind: "AfWhole", id: whole.id } },
       },
     ).catch((error: unknown) => error);
     expect(refusal).toBeInstanceOf(UniquenessError);
@@ -318,8 +318,7 @@ describe("a refused attachment and the property update it came with", () => {
       code: "original",
     });
     await store.nodes.AfPart.reparent(part.id, {
-      kind: "AfWhole",
-      id: wholeA.id,
+      whole: { kind: "AfWhole", id: wholeA.id },
     });
 
     // MUTATION CHECK: move the `decideCompositionAttachmentUnderFence` call
@@ -333,7 +332,7 @@ describe("a refused attachment and the property update it came with", () => {
         { slug: "owned", code: "mutated" },
         {
           ifExists: "update",
-          partOf: { kind: "AfWhole", id: wholeB.id },
+          partOf: { whole: { kind: "AfWhole", id: wholeB.id } },
         },
       ).catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(CompositionExistenceError);
@@ -387,7 +386,7 @@ describe("a refused attachment and the property update it came with", () => {
         { slug: "unattached", code: "mutated" },
         {
           ifExists: "update",
-          partOf: { kind: "AfWhole", id: whole.id },
+          partOf: { whole: { kind: "AfWhole", id: whole.id } },
         },
       ).catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(EndpointNotFoundError);
@@ -420,7 +419,7 @@ describe("a refused attachment and the property update it came with", () => {
     const whole = await store.nodes.AfWhole.create({});
     const occupant = await store.nodes.AfPart.create(
       { slug: "occupant", code: "occupant" },
-      { partOf: { kind: "AfWhole", id: whole.id } },
+      { partOf: { whole: { kind: "AfWhole", id: whole.id } } },
     );
     const part = await store.nodes.AfPart.create({
       slug: "second",
@@ -438,7 +437,7 @@ describe("a refused attachment and the property update it came with", () => {
         { slug: "second", code: "mutated" },
         {
           ifExists: "update",
-          partOf: { kind: "AfWhole", id: whole.id },
+          partOf: { whole: { kind: "AfWhole", id: whole.id } },
         },
       ).catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(CardinalityError);
@@ -473,11 +472,11 @@ describe("a refused attachment and the property update it came with", () => {
     const wholeB = await store.nodes.AfWhole.create({});
     const part = await store.nodes.AfPart.create(
       { slug: "moving", code: "moving" },
-      { partOf: { kind: "AfWhole", id: wholeA.id } },
+      { partOf: { whole: { kind: "AfWhole", id: wholeA.id } } },
     );
     await store.nodes.AfPart.create(
       { slug: "occupant", code: "occupant" },
-      { partOf: { kind: "AfWhole", id: wholeB.id } },
+      { partOf: { whole: { kind: "AfWhole", id: wholeB.id } } },
     );
 
     // MUTATION CHECK: in `applyCompositionAttachmentDecision`
@@ -487,8 +486,7 @@ describe("a refused attachment and the property update it came with", () => {
     // is left with no live attachment.
     await store.transaction(async (tx) => {
       const refusal = await tx.nodes.AfPart.reparent(part.id, {
-        kind: "AfWhole",
-        id: wholeB.id,
+        whole: { kind: "AfWhole", id: wholeB.id },
       }).catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(CardinalityError);
     });
@@ -546,7 +544,12 @@ describe("an already-satisfied partOf resolve", () => {
     await store.nodes.AfPart.getOrCreateByConstraint(
       "af_part_slug",
       { slug: "ingested", code: "c1" },
-      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 3 } } },
+      {
+        partOf: {
+          whole: { kind: "AfWhole", id: whole.id },
+          props: { rank: 3 },
+        },
+      },
     );
 
     counter.transactions = 0;
@@ -558,7 +561,12 @@ describe("an already-satisfied partOf resolve", () => {
     const again = await store.nodes.AfPart.getOrCreateByConstraint(
       "af_part_slug",
       { slug: "ingested", code: "c1" },
-      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 3 } } },
+      {
+        partOf: {
+          whole: { kind: "AfWhole", id: whole.id },
+          props: { rank: 3 },
+        },
+      },
     );
     expect(again.action).toBe("found");
     expect(counter.transactions).toBe(0);
@@ -582,14 +590,24 @@ describe("an already-satisfied partOf resolve", () => {
     await store.nodes.AfPart.getOrCreateByConstraint(
       "af_part_slug",
       { slug: "ingested", code: "c1" },
-      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 3 } } },
+      {
+        partOf: {
+          whole: { kind: "AfWhole", id: whole.id },
+          props: { rank: 3 },
+        },
+      },
     );
 
     counter.transactions = 0;
     const refusal = await store.nodes.AfPart.getOrCreateByConstraint(
       "af_part_slug",
       { slug: "ingested", code: "c1" },
-      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 9 } } },
+      {
+        partOf: {
+          whole: { kind: "AfWhole", id: whole.id },
+          props: { rank: 9 },
+        },
+      },
     ).catch((error: unknown) => error);
     expect(refusal).toBeInstanceOf(CompositionExistenceError);
     expect((refusal as CompositionExistenceError).details.situation).toBe(

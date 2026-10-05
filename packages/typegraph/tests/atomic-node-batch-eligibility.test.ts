@@ -990,7 +990,7 @@ describe("atomic node batch eligibility: composition gate (item E.2)", () => {
           {
             kind: "CompPart",
             props: {},
-            partOf: { kind: "CompWhole", id: "whole-1" },
+            partOf: { whole: { kind: "CompWhole", id: "whole-1" } },
           },
         ],
         schemaVersion: 1,

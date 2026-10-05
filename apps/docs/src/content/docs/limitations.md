@@ -295,13 +295,18 @@ before the affected nodes can be deleted.
 
 ## Composition Existence (`existence: "required"`)
 
-- **No type-level narrowing of `partOf`'s whole kind.** `NodeCreateOptions.partOf`
-  is structurally typed `{ kind: string; id: string }` and checked against the
-  declared composition pairs at runtime (`ConfigurationError`,
-  `COMPOSITION_WHOLE_NOT_DECLARED`, for an undeclared pair) — not narrowed to a
-  union of the kinds a part is actually declared under. `OntologyRelation.from`/
-  `to` are not carried into `GraphDef`'s type parameters, so this would need a
-  separate, larger change to the ontology's compile-time representation.
+- **Type-level narrowing of `partOf`'s whole kind is conservative.** On
+  `store.nodes.<Kind>`, `partOf.whole.kind` is limited to the whole kinds the
+  ontology declares for that part kind, but only when that can be proven from
+  the ontology's declared tuple. A graph that also declares a `subClassOf`,
+  `equivalentTo` or `sameAs` relation, or whose ontology was built in a
+  variable annotated `readonly OntologyRelation[]`, accepts any node kind of
+  the graph at compile time. `via` is not narrowed from the ontology at all:
+  it takes any edge type or kind string. A composition pair added at runtime
+  through `store.evolve()` is invisible to the type; reach it through
+  `store.getNodeCollection(kind)`. The runtime check (`ConfigurationError`,
+  `COMPOSITION_WHOLE_NOT_DECLARED` / `COMPOSITION_VIA_NOT_DECLARED`) is
+  authoritative in every case.
 - **Trusted import refuses every declared composition pair, required or
   optional** (`composition_unsupported`), not just required ones: it writes rows
   without the store's validation, so it cannot honor either the one-whole claim

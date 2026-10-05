@@ -264,7 +264,9 @@ import {
   type FencedCompositionAttachment,
   findLiveCompositionAttachment,
   incumbentSatisfiesRequestedAttachment,
+  readCompositionAttachment,
   readCompositionWholeRows,
+  readReparentOptions,
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
 } from "./composition-create";
@@ -3063,13 +3065,7 @@ function attachmentWindow(
   work: CompositionCreateWork,
   moveAt: string | undefined,
 ): Readonly<{ validFrom?: string | null; validTo?: string }> {
-  if (moveAt === undefined) return work.edgeWindow;
-  return {
-    validFrom: moveAt,
-    ...(work.edgeWindow.validTo === undefined ?
-      {}
-    : { validTo: work.edgeWindow.validTo }),
-  };
+  return moveAt === undefined ? work.edgeWindow : { validFrom: moveAt };
 }
 
 async function applyCompositionAttachmentDecision<G extends GraphDef>(
@@ -3233,7 +3229,7 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
         lock,
         decided.request.work,
         partId,
-        {},
+        decided.request.work.edgeWindow,
         {
           endpoints:
             options.partRowRestoredByUpdate ?
@@ -3375,10 +3371,11 @@ function resolveGetOrCreateAttachmentRequest<G extends GraphDef>(
   concreteId: string,
   partOf: CompositionAttachment | undefined,
 ): CompositionAttachmentRequest | undefined {
+  const part = { kind: concreteKind, id: concreteId };
   return resolveCompositionAttachmentRequest(
     ctx.registry,
-    { kind: concreteKind, id: concreteId },
-    partOf,
+    part,
+    partOf === undefined ? undefined : readCompositionAttachment(partOf, part),
     "refuse",
   );
 }
@@ -3509,16 +3506,20 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
       },
     );
   }
-  const resolved = items.map((item) => ({
-    id: item.id,
-    moveAt: resolveReparentInstant(item.options),
-    request: resolveCompositionAttachmentRequest(
-      ctx.registry,
-      { kind, id: item.id },
-      item.options,
-      disposition.onIncumbent,
-    ),
-  }));
+  const resolved = items.map((item) => {
+    const part = { kind, id: item.id };
+    const { attachment, moveAt } = readReparentOptions(item.options, part);
+    return {
+      id: item.id,
+      moveAt,
+      request: resolveCompositionAttachmentRequest(
+        ctx.registry,
+        part,
+        attachment,
+        disposition.onIncumbent,
+      ),
+    };
+  });
   for (const item of resolved) {
     const gate = await backend.getNode(ctx.graphId, kind, item.id);
     if (!gate || !isLiveNodeRow(gate))
@@ -3561,34 +3562,6 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
     },
     { didWrite: (results) => results.some((result) => result.moved) },
   );
-}
-
-function resolveReparentInstant(options: NodeReparentOptions): string {
-  if (options.validFrom === null) {
-    throw new ConfigurationError(
-      "reparent cannot honor validFrom: null. A move has one instant, shared by the retired window's end and the new edge's start.",
-      { code: "COMPOSITION_REPARENT_INSTANT_CONFLICT" },
-      {
-        suggestion:
-          "Pass `at`, or a string `validFrom`, or omit both to read the clock once.",
-      },
-    );
-  }
-  if (
-    options.at !== undefined &&
-    options.validFrom !== undefined &&
-    options.at !== options.validFrom
-  ) {
-    throw new ConfigurationError(
-      `reparent cannot honor both at (${options.at}) and validFrom (${options.validFrom}): a move has one instant.`,
-      {
-        code: "COMPOSITION_REPARENT_INSTANT_CONFLICT",
-        at: options.at,
-        validFrom: options.validFrom,
-      },
-    );
-  }
-  return options.at ?? options.validFrom ?? nowIso();
 }
 
 /**

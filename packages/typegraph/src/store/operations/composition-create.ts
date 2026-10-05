@@ -52,6 +52,7 @@ import {
   CompositionExistenceError,
   ConfigurationError,
   EndpointNotFoundError,
+  ValidationError,
 } from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
 import {
@@ -60,6 +61,7 @@ import {
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
+import { nowIso, validateCanonicalIsoDate } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -68,12 +70,156 @@ import {
   type CompositionNodeRef,
   type CreateEdgeInput,
   type CreateNodeInput,
+  type NodeReparentOptions,
 } from "../types";
 import {
   compositionEdgeCounts,
   compositionRowEndpoints,
   wholeSide,
 } from "./composition-cascade";
+
+const ATTACHMENT_KEYS = ["whole", "via", "props", "validFrom", "validTo"];
+const REPARENT_OPTION_KEYS = ["whole", "via", "props", "at"];
+
+/**
+ * Where an attachment was stated: the argument name its refusals are
+ * reported under, and the top-level keys that argument accepts.
+ */
+type AttachmentSurface = Readonly<{ path: string; keys: readonly string[] }>;
+
+const PART_OF_SURFACE: AttachmentSurface = {
+  path: "partOf",
+  keys: ATTACHMENT_KEYS,
+};
+const REPARENT_SURFACE: AttachmentSurface = {
+  path: "options",
+  keys: REPARENT_OPTION_KEYS,
+};
+
+/**
+ * A caller's attachment as the rest of this module reads it: the whole
+ * reduced to its `kind` and `id`, `via` to its edge-kind string, the window
+ * gathered into the shape the edge insert takes. `props` stays optional
+ * because "no `props` stated" and `props: {}` are different requests to an
+ * already-satisfied attachment.
+ */
+export type StatedCompositionAttachment = Readonly<{
+  whole: CompositionNodeRef;
+  viaKind?: string;
+  props?: Record<string, unknown>;
+  edgeWindow: Readonly<{ validFrom?: string | null; validTo?: string }>;
+}>;
+
+function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readWholeRef(whole: unknown): CompositionNodeRef | undefined {
+  if (!isObject(whole)) return undefined;
+  const { kind, id } = whole;
+  return typeof kind === "string" && typeof id === "string" ?
+      { kind, id }
+    : undefined;
+}
+
+/**
+ * THE one place a caller-stated attachment object is read. Every surface —
+ * `create`, `bulkCreate`, both get-or-create entries, `reparent` — reaches
+ * the attachment through here, so:
+ *
+ * - only `whole.kind` and `whole.id` are ever taken from the whole. A whole
+ *   passed as a node object carries its own schema properties beside them,
+ *   and a property there called `via` or `props` must never be mistaken for
+ *   the attachment's;
+ * - a top-level key the surface does not accept is refused rather than
+ *   dropped — including the whole's `kind`/`id` stated beside `via` instead
+ *   of under `whole`, and `validFrom` / `validTo` on `reparent`, whose one
+ *   instant is `at` and which states no window.
+ */
+function readStatedAttachment(
+  value: unknown,
+  surface: AttachmentSurface,
+  part: Readonly<{ kind: string; id?: string }>,
+): StatedCompositionAttachment {
+  const stated = isObject(value) ? value : {};
+  const whole = readWholeRef(stated["whole"]);
+  const unknownKeys = Object.keys(stated).filter(
+    (key) => !surface.keys.includes(key),
+  );
+  if (whole === undefined || unknownKeys.length > 0) {
+    const issues = [
+      ...unknownKeys.map((key) => ({
+        path: `${surface.path}.${key}`,
+        message: `Unknown key. Accepted keys: ${surface.keys.join(", ")}.`,
+      })),
+      ...(whole === undefined ?
+        [
+          {
+            path: `${surface.path}.whole`,
+            message:
+              "Expected the whole as a node or a { kind, id } reference with string kind and id.",
+          },
+        ]
+      : []),
+    ];
+    throw new ValidationError(
+      `Invalid composition attachment for ${part.kind}: ${issues.map((issue) => issue.path).join(", ")}`,
+      {
+        entityType: "node",
+        kind: part.kind,
+        ...(part.id === undefined ? {} : { id: part.id }),
+        issues,
+      },
+      {
+        suggestion: `Pass \`${surface.path}: { whole: { kind, id }, ... }\` with only these keys: ${surface.keys.join(", ")}.`,
+      },
+    );
+  }
+
+  const attachment = stated as Omit<CompositionAttachment, "whole">;
+  return {
+    whole,
+    ...(attachment.via === undefined ?
+      {}
+    : { viaKind: compositionViaKind(attachment.via) }),
+    ...(attachment.props === undefined ? {} : { props: attachment.props }),
+    edgeWindow: {
+      ...(attachment.validFrom === undefined ?
+        {}
+      : { validFrom: attachment.validFrom }),
+      ...(attachment.validTo === undefined ?
+        {}
+      : { validTo: attachment.validTo }),
+    },
+  };
+}
+
+/** Reads a `partOf` attachment. See {@link readStatedAttachment}. */
+export function readCompositionAttachment(
+  partOf: CompositionAttachment,
+  part: Readonly<{ kind: string; id?: string }>,
+): StatedCompositionAttachment {
+  return readStatedAttachment(partOf, PART_OF_SURFACE, part);
+}
+
+function readMoveInstant(at: string | undefined): string {
+  return at === undefined ? nowIso() : (
+      validateCanonicalIsoDate(at, `${REPARENT_SURFACE.path}.at`)
+    );
+}
+
+/**
+ * Reads `reparent`'s options: the destination attachment and the move
+ * instant, which is `at` or one clock read. The new edge's lower bound is
+ * that instant, never a separately stated `validFrom`.
+ */
+export function readReparentOptions(
+  options: NodeReparentOptions,
+  part: Readonly<{ kind: string; id: string }>,
+): Readonly<{ attachment: StatedCompositionAttachment; moveAt: string }> {
+  const attachment = readStatedAttachment(options, REPARENT_SURFACE, part);
+  return { attachment, moveAt: readMoveInstant(options.at) };
+}
 
 /**
  * What one node create owes on the composition axis: the declared pair and
@@ -138,39 +284,39 @@ export type CompositionCreateWork = Readonly<{
 function resolveCompositionAttachment(
   registry: KindRegistry,
   partKind: string,
-  attachment: CompositionAttachment,
+  attachment: StatedCompositionAttachment,
 ): CompositionPair {
-  const declared = registry.compositionPairsBetween(partKind, attachment.kind);
+  const wholeKind = attachment.whole.kind;
+  const declared = registry.compositionPairsBetween(partKind, wholeKind);
   if (declared.length === 0) {
     throw new ConfigurationError(
-      `Node kind "${partKind}" declares no composition pair to whole kind "${attachment.kind}".`,
+      `Node kind "${partKind}" declares no composition pair to whole kind "${wholeKind}".`,
       {
         code: "COMPOSITION_WHOLE_NOT_DECLARED",
         partKind,
-        wholeKind: attachment.kind,
+        wholeKind,
       },
       {
         suggestion:
-          `Declare \`partOf(${partKind}, ${attachment.kind}, { via: ... })\` (or the mirrored \`hasPart\`) in the ontology, ` +
+          `Declare \`partOf(${partKind}, ${wholeKind}, { via: ... })\` (or the mirrored \`hasPart\`) in the ontology, ` +
           `or pass \`partOf\` naming a whole kind this part is actually declared under.`,
       },
     );
   }
 
   const viaEdgeKinds = declared.map((pair) => pair.viaEdgeKind);
-  const via = attachment.via;
-  const viaKind = via === undefined ? undefined : compositionViaKind(via);
+  const viaKind = attachment.viaKind;
   if (viaKind !== undefined) {
     const pair = declared.find(
       (candidate) => candidate.viaEdgeKind === viaKind,
     );
     if (pair === undefined) {
       throw new ConfigurationError(
-        `Edge kind "${viaKind}" realizes no declared composition pair between "${partKind}" and "${attachment.kind}".`,
+        `Edge kind "${viaKind}" realizes no declared composition pair between "${partKind}" and "${wholeKind}".`,
         {
           code: "COMPOSITION_VIA_NOT_DECLARED",
           partKind,
-          wholeKind: attachment.kind,
+          wholeKind,
           via: viaKind,
           declaredVia: viaEdgeKinds,
         },
@@ -184,15 +330,15 @@ function resolveCompositionAttachment(
 
   if (declared.length > 1) {
     throw new ConfigurationError(
-      `Attaching "${partKind}" to "${attachment.kind}" is ambiguous: ${declared.length} declared composition pairs realize it.`,
+      `Attaching "${partKind}" to "${wholeKind}" is ambiguous: ${declared.length} declared composition pairs realize it.`,
       {
         code: "COMPOSITION_VIA_AMBIGUOUS",
         partKind,
-        wholeKind: attachment.kind,
+        wholeKind,
         declaredVia: viaEdgeKinds,
       },
       {
-        suggestion: `Pass \`partOf: { kind, id, via }\` naming the realizing edge: ${viaEdgeKinds.join(", ")}.`,
+        suggestion: `Pass \`via\` naming the realizing edge: ${viaEdgeKinds.join(", ")}.`,
       },
     );
   }
@@ -219,15 +365,26 @@ export function resolveCompositionCreate(
   registry: KindRegistry,
   input: Pick<CreateNodeInput, "kind" | "id" | "partOf">,
 ): CompositionCreateWork | undefined {
-  const partKind = input.kind;
-  const partOf = input.partOf;
-  const existence = registry.compositionExistence(partKind);
+  return compositionCreateWork(
+    registry,
+    input,
+    input.partOf === undefined ?
+      undefined
+    : readCompositionAttachment(input.partOf, input),
+  );
+}
 
-  if (partOf === undefined) {
-    if (existence === "required") {
+function compositionCreateWork(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id?: string }>,
+  attachment: StatedCompositionAttachment | undefined,
+): CompositionCreateWork | undefined {
+  const partKind = part.kind;
+  if (attachment === undefined) {
+    if (registry.compositionExistence(partKind) === "required") {
       throw new CompositionExistenceError({
         partKind,
-        ...(input.id === undefined ? {} : { partId: input.id }),
+        ...(part.id === undefined ? {} : { partId: part.id }),
         situation: "create",
       });
     }
@@ -235,24 +392,11 @@ export function resolveCompositionCreate(
   }
 
   return {
-    pair: resolveCompositionAttachment(registry, partKind, partOf),
-    whole: { kind: partOf.kind, id: partOf.id },
+    pair: resolveCompositionAttachment(registry, partKind, attachment),
+    whole: attachment.whole,
     partKind,
-    props: partOf.props ?? {},
-    edgeWindow: compositionEdgeWindow(partOf),
-  };
-}
-
-function compositionEdgeWindow(
-  attachment: CompositionAttachment,
-): Readonly<{ validFrom?: string | null; validTo?: string }> {
-  return {
-    ...(attachment.validFrom === undefined ?
-      {}
-    : { validFrom: attachment.validFrom }),
-    ...(attachment.validTo === undefined ?
-      {}
-    : { validTo: attachment.validTo }),
+    props: attachment.props ?? {},
+    edgeWindow: attachment.edgeWindow,
   };
 }
 
@@ -535,7 +679,7 @@ type SatisfiedPartOfPropsVerdict =
  */
 function judgeSatisfiedPartOfProps(
   registry: KindRegistry,
-  attachment: CompositionAttachment,
+  attachment: StatedCompositionAttachment,
   pair: CompositionPair,
   currentEdge: Pick<EdgeRow, "props">,
 ): SatisfiedPartOfPropsVerdict {
@@ -576,7 +720,7 @@ function assertSatisfiedPartOfPropsHonored(
   registry: KindRegistry,
   partKind: string,
   partId: string,
-  attachment: CompositionAttachment,
+  attachment: StatedCompositionAttachment,
   pair: CompositionPair,
   currentEdge: Pick<EdgeRow, "id" | "kind" | "props">,
 ): void {
@@ -631,7 +775,7 @@ export type CompositionIncumbentDisposition = "replace" | "refuse";
  * configuration defect of the call refuses without locking anything.
  */
 export type CompositionAttachmentRequest = Readonly<{
-  attachment: CompositionAttachment;
+  attachment: StatedCompositionAttachment;
   work: CompositionCreateWork;
   onIncumbent: CompositionIncumbentDisposition;
 }>;
@@ -652,31 +796,27 @@ export type CompositionAttachmentRequest = Readonly<{
 export function resolveCompositionAttachmentRequest(
   registry: KindRegistry,
   part: Readonly<{ kind: string; id: string }>,
-  partOf: CompositionAttachment,
+  attachment: StatedCompositionAttachment,
   onIncumbent: CompositionIncumbentDisposition,
 ): CompositionAttachmentRequest;
 export function resolveCompositionAttachmentRequest(
   registry: KindRegistry,
   part: Readonly<{ kind: string; id: string }>,
-  partOf: CompositionAttachment | undefined,
+  attachment: StatedCompositionAttachment | undefined,
   onIncumbent: CompositionIncumbentDisposition,
 ): CompositionAttachmentRequest | undefined;
 export function resolveCompositionAttachmentRequest(
   registry: KindRegistry,
   part: Readonly<{ kind: string; id: string }>,
-  partOf: CompositionAttachment | undefined,
+  attachment: StatedCompositionAttachment | undefined,
   onIncumbent: CompositionIncumbentDisposition,
 ): CompositionAttachmentRequest | undefined {
-  const work = resolveCompositionCreate(registry, {
-    kind: part.kind,
-    id: part.id,
-    ...(partOf === undefined ? {} : { partOf }),
-  });
+  const work = compositionCreateWork(registry, part, attachment);
   if (work === undefined) return undefined;
   return {
     attachment: requireDefined(
-      partOf,
-      "resolveCompositionCreate returned composition work for a call that stated no partOf",
+      attachment,
+      "compositionCreateWork returned composition work for a call that stated no attachment",
     ),
     work,
     onIncumbent,
@@ -705,8 +845,8 @@ function incumbentHoldsRequestedAttachment(
 ): boolean {
   const { attachment, work } = request;
   return (
-    current.whole.kind === attachment.kind &&
-    current.whole.id === attachment.id &&
+    current.whole.kind === attachment.whole.kind &&
+    current.whole.id === attachment.whole.id &&
     current.edge.kind === work.pair.viaEdgeKind
   );
 }
@@ -804,15 +944,15 @@ function decideCompositionIncumbent(
   if (onIncumbent === "replace") return "replace";
 
   const wholeMatches =
-    current.whole.kind === attachment.kind &&
-    current.whole.id === attachment.id;
+    current.whole.kind === attachment.whole.kind &&
+    current.whole.id === attachment.whole.id;
   throw new CompositionExistenceError({
     partKind,
     partId,
     situation: "existing",
     currentWhole: current.whole,
     ...(wholeMatches ? { currentVia: current.edge.kind } : {}),
-    requestedWhole: { kind: attachment.kind, id: attachment.id },
+    requestedWhole: attachment.whole,
     requestedVia: work.pair.viaEdgeKind,
   });
 }
