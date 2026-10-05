@@ -85,14 +85,9 @@ function readsStating(
         stated,
       ),
     bulkFindEdgesTo: () =>
-      view.bulkFindEdgesTo(
-        { kinds: ["knows"], to: [bob] } as never,
-        stated,
-      ),
-    "edges.bulkFindFrom": () =>
-      view.edges.knows.bulkFindFrom([alice], stated),
-    "edges.bulkFindTo": () =>
-      view.edges.knows.bulkFindTo([bob], stated),
+      view.bulkFindEdgesTo({ kinds: ["knows"], to: [bob] } as never, stated),
+    "edges.bulkFindFrom": () => view.edges.knows.bulkFindFrom([alice], stated),
+    "edges.bulkFindTo": () => view.edges.knows.bulkFindTo([bob], stated),
   };
 }
 
