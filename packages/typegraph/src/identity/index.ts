@@ -2,6 +2,7 @@ export { rebuildIdentityClosure } from "./rebuild";
 export {
   IDENTITY_REPLAY_DEFAULT_LIMIT,
   IDENTITY_REPLAY_MAX_LIMIT,
+  type IdentityLineageIncompleteDiscovery,
   type IdentityReplay,
   type IdentityReplayOptions,
   type IdentityReplayStep,

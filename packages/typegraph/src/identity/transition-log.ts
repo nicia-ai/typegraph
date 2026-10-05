@@ -737,6 +737,24 @@ export async function hasNativeIdentityTransitions(
   return rows.length > 0;
 }
 
+type RawRestoredTransitionCountRow = Readonly<{ restored: unknown }>;
+
+/** How many of `graphId`'s retained transition rows an archival restore inserted. */
+export async function countRestoredIdentityTransitions(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<number> {
+  const rows = await target.execute<RawRestoredTransitionCountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS restored
+      FROM ${schema.identityTransitionsTable}
+      WHERE graph_id = ${graphId} AND restored_at IS NOT NULL
+    `),
+  );
+  return Number(requireDefined(rows[0]).restored);
+}
+
 /** Reads a graph's transition-retention watermark; `0` when nothing has been pruned. */
 async function readTransitionRetention(
   target: IdentityTarget,

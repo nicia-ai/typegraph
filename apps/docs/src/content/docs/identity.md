@@ -344,6 +344,35 @@ list before or after this graph's own rows regardless of when it happened;
 an audit timeline that mixes the two should order by `recorded` and
 `restored.at` rather than by list position.
 
+A lineage is discovered from the reference itself, not only from the class
+it belongs to now. A member that has left its class — deleted, retracted
+apart, or folded out — is a singleton in current state, and its departure is
+noted against the class that survives it, so `transitionsOf` and `replay`
+also follow the recorded evidence that once tied the reference to a class:
+every `same` assertion that ever named it and, on a folding graph, every node
+that ever shared its id. Asking for the history of a deleted node therefore
+returns the assertions, folds and the detach that explain it, and `replay`
+pairs them with the membership it had at each boundary.
+
+That evidence is this graph's own recorded history. An archival restore
+brings transitions in without the source graph's history behind them, so a
+restored transition that discovery reaches from neither side can be neither
+tied to the reference nor ruled out. When the graph holds such transitions,
+the result says so instead of returning a short page that looks complete:
+
+```typescript
+const { transitions, incompleteDiscovery } =
+  await store.identity.transitionsOf(ref);
+if (incompleteDiscovery !== undefined) {
+  // Restored transitions this lineage could not be checked against.
+  console.log(incompleteDiscovery.unattributedRestoredTransitions);
+}
+```
+
+`incompleteDiscovery` is absent whenever every restored transition in the
+graph belongs to the lineage that was read, and always absent on a graph that
+never restored an archive. `replay` carries the same member.
+
 A transition that an archival restore brought into this graph — rather than
 this graph's own history capture recording it — carries `restored`, whose
 `at` is the destination's wall clock at restore time. That is the marker

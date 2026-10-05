@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   createStoreWithSchema,
   defineGraph,
   defineNode,
@@ -25,6 +26,7 @@ import {
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
+import { exportGraph, importGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -43,6 +45,60 @@ async function provisionIdentityReplayStore(context: IntegrationTestContext) {
     history: true,
   });
   return store;
+}
+
+const DepartedPerson = defineNode("Person", { schema: z.object({}) });
+const DepartedOrg = defineNode("Org", { schema: z.object({}) });
+
+function departedLineageGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Person: { type: DepartedPerson }, Org: { type: DepartedOrg } },
+    edges: {},
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+}
+
+const departedLineageSourceGraph = departedLineageGraph(
+  "identity_departed_lineage",
+);
+const departedLineageRestoreGraph = departedLineageGraph(
+  "identity_departed_lineage_restore",
+);
+
+async function provisionDepartedLineageStore(
+  context: IntegrationTestContext,
+  graph: ReturnType<typeof departedLineageGraph>,
+) {
+  const [store] = await createStoreWithSchema(
+    graph,
+    context.getStore().backend,
+    { history: true },
+  );
+  return store;
+}
+
+type DepartedLineageStore = Awaited<
+  ReturnType<typeof provisionDepartedLineageStore>
+>;
+
+const DEPARTURES = [
+  {
+    name: "soft-deleted",
+    depart: (store: DepartedLineageStore, id: string) =>
+      store.nodes.Person.delete(asNodeId(id)),
+  },
+  {
+    name: "hard-deleted",
+    depart: (store: DepartedLineageStore, id: string) =>
+      store.nodes.Person.hardDelete(asNodeId(id)),
+  },
+] as const;
+
+function memberKeys(
+  members: readonly Readonly<{ kind: string; id: string }>[],
+): readonly string[] {
+  return members.map((member) => `${member.kind}:${member.id}`).toSorted();
 }
 
 async function provisionPagedLineage(context: IntegrationTestContext) {
@@ -120,6 +176,148 @@ export function registerIdentityReplayIntegrationTests(
       expect(fresh.steps.map((step) => step.transition.cause)).toEqual([
         "assert",
       ]);
+    });
+  });
+
+  describe("identity lineage of a departed member", () => {
+    it.each(DEPARTURES)(
+      "keeps the history of a $name non-canonical member discoverable from that member",
+      async ({ depart }) => {
+        const store = await provisionDepartedLineageStore(
+          context,
+          departedLineageSourceGraph,
+        );
+        const a = { kind: "Person" as const, id: "departed-a" };
+        const b = { kind: "Person" as const, id: "departed-b" };
+        const c = { kind: "Person" as const, id: "departed-c" };
+        for (const ref of [a, b, c]) {
+          await store.nodes.Person.create({}, { id: ref.id });
+        }
+        await store.identity.assertSame(a, b);
+        await store.identity.assertSame(b, c);
+        await depart(store, b.id);
+
+        // The departure is noted against the surviving canonical only, and
+        // `b` is a singleton in the current closure: nothing in current state
+        // leads from `b` to the class it left.
+        const history = await store.identity.transitionsOf(b);
+        expect(
+          history.transitions.map((transition) => transition.cause),
+        ).toEqual(["assert", "assert", "detach", "detach"]);
+        expect(history.incompleteDiscovery).toBeUndefined();
+        const survivorHistory = await store.identity.transitionsOf(a);
+        expect(
+          history.transitions.map((transition) => transition.transitionId),
+        ).toEqual(
+          survivorHistory.transitions.map(
+            (transition) => transition.transitionId,
+          ),
+        );
+
+        const replay = await store.identity.replay(b);
+        expect(
+          replay.steps.map((step) => [
+            step.transition.cause,
+            memberKeys(step.before),
+            memberKeys(step.after),
+          ]),
+        ).toEqual([
+          [
+            "assert",
+            ["Person:departed-b"],
+            ["Person:departed-a", "Person:departed-b"],
+          ],
+          [
+            "assert",
+            ["Person:departed-a", "Person:departed-b"],
+            ["Person:departed-a", "Person:departed-b", "Person:departed-c"],
+          ],
+          [
+            "detach",
+            ["Person:departed-a", "Person:departed-b", "Person:departed-c"],
+            [],
+          ],
+          [
+            "detach",
+            ["Person:departed-a", "Person:departed-b", "Person:departed-c"],
+            [],
+          ],
+        ]);
+        expect(replay.incompleteDiscovery).toBeUndefined();
+      },
+    );
+
+    it("keeps a departed same-id fold member's history discoverable when no assertion ever named it", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageSourceGraph,
+      );
+      const person = { kind: "Person" as const, id: "departed-fold" };
+      await store.nodes.Org.create({}, { id: person.id });
+      await store.nodes.Person.create({}, { id: person.id });
+      await store.nodes.Person.hardDelete(asNodeId(person.id));
+
+      const replay = await store.identity.replay(person);
+      expect(
+        replay.steps.map((step) => [
+          step.transition.cause,
+          memberKeys(step.before),
+          memberKeys(step.after),
+        ]),
+      ).toEqual([
+        ["fold", [], ["Org:departed-fold", "Person:departed-fold"]],
+        ["detach", ["Org:departed-fold", "Person:departed-fold"], []],
+      ]);
+    });
+
+    it("reports restored transitions it can neither attribute nor rule out, instead of a silent short page", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageSourceGraph,
+      );
+      const a = { kind: "Person" as const, id: "restored-a" };
+      const b = { kind: "Person" as const, id: "restored-b" };
+      await source.nodes.Person.create({}, { id: a.id });
+      await source.nodes.Person.create({}, { id: b.id });
+      await source.identity.assertSame(a, b);
+      await source.nodes.Person.hardDelete(asNodeId(b.id));
+      const sourceHistory = await source.identity.transitionsOf(b);
+      expect(
+        sourceHistory.transitions.map((transition) => transition.cause),
+      ).toEqual(["assert", "detach"]);
+      expect(sourceHistory.incompleteDiscovery).toBeUndefined();
+
+      const archive = await exportGraph(source, { identityMode: "archival" });
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageRestoreGraph,
+      );
+      const imported = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(imported.errors).toEqual([]);
+
+      // `b` was gone before the archive was taken, so the target holds no
+      // evidence tying it to the two restored rows that explain it.
+      const departed = await target.identity.transitionsOf(b);
+      expect(departed.transitions).toEqual([]);
+      expect(departed.incompleteDiscovery).toEqual({
+        unattributedRestoredTransitions: 2,
+      });
+      const departedReplay = await target.identity.replay(b);
+      expect(departedReplay.incompleteDiscovery).toEqual({
+        unattributedRestoredTransitions: 2,
+      });
+
+      // The surviving canonical is named by both rows, so nothing is left
+      // unattributed and no signal is raised.
+      const survivor = await target.identity.transitionsOf(a);
+      expect(
+        survivor.transitions.map((transition) => transition.transitionId),
+      ).toEqual(
+        sourceHistory.transitions.map((transition) => transition.transitionId),
+      );
+      expect(survivor.incompleteDiscovery).toBeUndefined();
     });
   });
 

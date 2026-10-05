@@ -80,21 +80,6 @@ const UNIVERSE: readonly Ref[] = KINDS.flatMap((kind) =>
   BARE_IDS.map((id) => ({ kind, id })),
 );
 
-// `UNIVERSE[0]` is the replay seed (created once, before any generated
-// intent runs — see the worked comment below) and this harness's own design
-// depends on it staying live for the ENTIRE observed revision range: once
-// the seed itself departs its class, `identityTransitionsOf`/`identityReplay`
-// seed their lineage walk from the seed's OWN (now-trivial, post-departure)
-// canonical, which a departing member's own detach record never names —
-// only a SURVIVING class-mate's record does (`diffClosureTransitions`'s
-// "absent from the new state" branch) — so the walk cannot discover rows
-// about a class the seed has already left. That is a real, separate gap in
-// how a departed member's OWN lineage is queried, not a #9 exhaustiveness
-// defect; `softDelete`/`hardDelete` intents are scoped to the OTHER five
-// universe members so this property stays focused on cause exhaustiveness
-// rather than tripping over it.
-const NON_SEED_REF_INDEX = fc.integer({ min: 1, max: UNIVERSE.length - 1 });
-
 type OpIntent =
   | Readonly<{ type: "create"; refIndex: number }>
   | Readonly<{ type: "assertSame"; aIndex: number; bIndex: number }>
@@ -125,11 +110,11 @@ const opIntentArbitrary: fc.Arbitrary<OpIntent> = fc.oneof(
   }),
   fc.record({
     type: fc.constant("softDelete" as const),
-    refIndex: NON_SEED_REF_INDEX,
+    refIndex: fc.nat({ max: UNIVERSE.length - 1 }),
   }),
   fc.record({
     type: fc.constant("hardDelete" as const),
-    refIndex: NON_SEED_REF_INDEX,
+    refIndex: fc.nat({ max: UNIVERSE.length - 1 }),
   }),
   fc.record({
     type: fc.constant("windowEnd" as const),
@@ -184,7 +169,7 @@ describe("identity replay exhaustiveness property", () => {
             recordedByRevision.set(recordedInstantRevision(now), now);
           }
 
-          // The replay seed exists for the ENTIRE observed revision range,
+          // The replay seed exists from the FIRST observed revision,
           // created before any fc-generated intent runs — matching the
           // scenario every one of these assertions is actually specified
           // against (§9.3's own worked example, and G1-01's probe, both
@@ -387,6 +372,28 @@ describe("identity replay exhaustiveness property", () => {
 
           const changedRevisionSet = new Set(changedRevisions);
 
+          // Revisions the seed sat out entirely: it existed neither just
+          // before nor at the revision (`membersOf` reports a node's own
+          // self-membership whenever it exists, so an empty answer on both
+          // sides means a deleted seed, read through a path the log never
+          // touches). A class the seed has left keeps a history of its own,
+          // and the seed's lineage keeps naming that class, so the log may
+          // carry a row there although the seed's own membership cannot
+          // change — the same fact about lineage scope the up-front seed
+          // creation above sidesteps for revisions BEFORE the seed existed.
+          // The revision at which the seed departs is NOT one of these: it
+          // existed just before, and that boundary is checked in full.
+          const seedAbsentRevisions = new Set(
+            revisions.filter((revision, index) => {
+              const previousRevision =
+                index === 0 ? 0 : requireDefined(revisions[index - 1]);
+              return (
+                requireDefined(bruteForce.get(previousRevision)).length === 0 &&
+                requireDefined(bruteForce.get(revision)).length === 0
+              );
+            }),
+          );
+
           // §9.3, assertion 1: membership changed at r IFF the transition log
           // (walked through `identityTransitionsOf` — the seed's own class
           // lineage, not a hand-rolled scan of the whole universe) carries a
@@ -428,10 +435,14 @@ describe("identity replay exhaustiveness property", () => {
             const touched = touchedRevisions.has(revision);
             // A changed revision must be touched; an untouched revision must
             // be unchanged; a touched-but-unchanged revision must be
-            // self-referential-only (window-end's documented exception).
+            // self-referential-only (window-end's documented exception) or
+            // one the seed sat out.
             expect(!changed || touched).toBe(true);
             expect(
-              changed || !touched || selfReferentialRevisions.has(revision),
+              changed ||
+                !touched ||
+                selfReferentialRevisions.has(revision) ||
+                seedAbsentRevisions.has(revision),
             ).toBe(true);
           }
 
@@ -462,7 +473,9 @@ describe("identity replay exhaustiveness property", () => {
           // self-referential `window-end` revisions above (each of which
           // legitimately produces a step whose `before` and `after` are
           // identical — see assertion 1's comment) — no missing boundary,
-          // and no phantom one beyond that documented exception.
+          // and no phantom one beyond that documented exception. Revisions
+          // the seed sat out are left out of BOTH sides: a changed revision
+          // is never one of them, so nothing the seed lived through escapes.
           const replayBoundaries = [
             ...new Set(
               replay.steps.map((step) =>
@@ -475,7 +488,15 @@ describe("identity replay exhaustiveness property", () => {
           const expectedBoundaries = [
             ...new Set([...changedRevisions, ...selfReferentialRevisions]),
           ].toSorted((left, right) => left - right);
-          expect(replayBoundaries).toEqual(expectedBoundaries);
+          expect(
+            replayBoundaries.filter(
+              (revision) => !seedAbsentRevisions.has(revision),
+            ),
+          ).toEqual(
+            expectedBoundaries.filter(
+              (revision) => !seedAbsentRevisions.has(revision),
+            ),
+          );
 
           // §9.3, assertion 3: every step's `after` equals brute-force
           // membership at that revision, and every step's `before` equals it
