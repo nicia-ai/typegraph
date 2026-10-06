@@ -1,8 +1,10 @@
 /**
  * The replay algorithm: pairs every identity transition with the class
  * membership before and after it, reconstructed through the SAME historical
- * reader `asOf` / `asOfRecorded` reads already use. Replay can therefore never
- * disagree with a live read — see `historicalIdentityReconstructionCtes`
+ * reader `asOfRecorded` reads use, at the SAME coordinate
+ * (`recordedDiagonalCoordinate`): a step's `after` is what
+ * `store.asOfRecorded(step.transition.recorded)` answers, under the graph's
+ * current schema. See `historicalIdentityReconstructionCtes`
  * (historical-sql.ts), which every membership answer below is produced by,
  * through `loadHistoricalClasses` (service-read.ts). The transition log
  * itself supplies boundaries and explanations ONLY; it is never consulted for
@@ -12,13 +14,13 @@ import { requireTypeGraphRecordedRevision } from "../backend/capabilities/record
 import { type GraphDef } from "../core/define-graph";
 import {
   createRecordedInstant,
+  RECORDED_FIRST_REVISION,
+  recordedDiagonalCoordinate,
   type RecordedInstant,
+  recordedInstantRevision,
   recordedInstantWallTime,
-  resolveReadCoordinate,
-  withRecordedCoordinate,
 } from "../core/temporal";
 import { IdentityReplayError, ValidationError } from "../errors";
-import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { readIdentityEvidenceNeighbours } from "./lineage-evidence";
 import { identityActiveKinds } from "./service-components";
@@ -494,53 +496,56 @@ async function walkClassLineage<G extends GraphDef>(
 }
 
 /**
- * The reconstruction coordinate's valid-time vantage: always "now".
+ * Reconstructs the visible class membership of `seed` at `recordedAsOf`, on
+ * the diagonal `store.asOfRecorded` reads: the anchor's revision, seen from
+ * the valid instant the anchor carries. That shared coordinate
+ * ({@link recordedDiagonalCoordinate}) is what makes a step's `after` and
+ * `store.asOfRecorded(step.transition.recorded).identity.membersOf` one read,
+ * and what keeps a step's answer fixed: a validity window that was still
+ * open when the step was recorded stays open in the step, however long after
+ * it lapses the replay is asked for.
  *
- * This is a deliberate coordinate choice, not a consequence of every
- * historical window happening to have already closed — identity DOES support
- * future-dated windows (`assertSame` / `assertDifferent` accept an explicit
- * `IdentityValidityWindow`, and a node's own `validTo` can be future-dated
- * too; the window-end note itself is taken against a future window in the
- * shipped tests). Replay answers "what did this class look like once
- * revision `r` had been recorded, read from TODAY's valid-time vantage" — the
- * same hybrid `(recorded = r, valid = now)` coordinate `asOfRecorded` reads
- * use — so that `after(r)` here and `store.asOfRecorded(r).identity.membersOf`
- * can never disagree (the equivalence the exhaustiveness property test
- * pins). A future-scheduled window simply has not closed yet at "now",
- * exactly as it has not closed for any other current-vantage read; replay
- * does not need it to have closed for this coordinate to be sound.
+ * The class is read under the graph's CURRENT identity profile and node
+ * kinds, exactly as a recorded view is. A step recorded before a
+ * `sameIdAcrossKinds` flip or a kind removal is therefore shown as the
+ * current schema reads that revision, not as the schema then in force did.
  */
-function reconstructionInstant(): string {
-  return nowIso();
-}
-
-/** Reconstructs the visible class membership of `seed` at recorded revision `revision`, or `[]` for revision 0 (nothing recorded yet). */
 async function reconstructAt<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
-  revision: number,
+  recordedAsOf: RecordedInstant,
 ): Promise<readonly IdentityNodeReference<G>[]> {
-  if (revision <= 0) return [];
-  const recordedInstant = createRecordedInstant(
-    revision,
-    reconstructionInstant(),
-  );
-  const validCoordinate = resolveReadCoordinate(
-    "asOf",
-    recordedInstantWallTime(recordedInstant),
-  );
-  const coordinate = withRecordedCoordinate(validCoordinate, recordedInstant);
   const classes = await loadHistoricalClasses(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
     [seed],
-    coordinate,
+    recordedDiagonalCoordinate(recordedAsOf),
     ctx.sameIdAcrossKinds,
     identityActiveKinds(ctx.registry),
   );
   const found = requireDefined(classes.get(refKey(seed)));
   return found.visible.map((ref) => publicNodeRef<G>(ref));
+}
+
+/**
+ * The membership immediately BEFORE the commit recorded at `boundary`: one
+ * revision earlier, seen from the same valid instant, so the only thing that
+ * differs between a step's `before` and `after` is that one commit. Nothing
+ * was recorded before revision 1.
+ */
+async function reconstructBefore<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  seed: PlainNodeRef,
+  boundary: RecordedInstant,
+): Promise<readonly IdentityNodeReference<G>[]> {
+  const priorRevision = recordedInstantRevision(boundary) - 1;
+  if (priorRevision < RECORDED_FIRST_REVISION) return [];
+  return reconstructAt(
+    ctx,
+    seed,
+    createRecordedInstant(priorRevision, recordedInstantWallTime(boundary)),
+  );
 }
 
 function invalidReplayLimitError(
@@ -768,11 +773,13 @@ export async function identityTransitionsOf<G extends GraphDef>(
 /**
  * The full replay algorithm: every transition touching `ref`'s class
  * lineage, each paired with the class membership immediately before and
- * after it. `before(b_i) := after(b_{i-1})` for every boundary but the first —
- * sound because the transition cause set is exhaustive (see
- * `IdentityTransitionCause`), so no membership-changing revision can fall
- * between two consecutive boundaries undetected. `store.identity.replay` is
- * a thin wrapper over this.
+ * after it. Both are reconstructed for every boundary — `after` at the
+ * boundary's own revision, `before` one revision earlier — and neither is
+ * carried over from the previous boundary. A class can change between two
+ * boundaries without a note under the schema then in force (a same-id node
+ * created while the graph ignored same ids, read back after it folds them),
+ * and carrying `after` forward would pin that change on the next transition.
+ * `store.identity.replay` is a thin wrapper over this.
  *
  * Paged by boundary exactly as `transitionsOf` is: `nextCursor` names the first
  * boundary this page stopped short of. Because the page is cut BEFORE
@@ -822,11 +829,8 @@ export async function identityReplay<G extends GraphDef>(
   // are therefore built ONLY from this graph's own (never restored) rows;
   // `transitionsOf` (no such filter) remains the complete answer for "what
   // changed and why". Filtering the boundary set itself — not merely the
-  // rows matched at each boundary — also means `previousAfter` is only ever
-  // set from a `reconstructAt` at a revision THIS graph allocated: a
-  // restored-only boundary is dropped from `boundaries` entirely, so it can
-  // never overwrite `previousAfter` with a reconstruction at a foreign
-  // revision, and the next NATIVE boundary's `before` stays sound.
+  // rows matched at each boundary — means no reconstruction is ever asked
+  // for at a revision this graph did not allocate.
   const nativeRows = rows.filter((row) => !isRestoredTransitionRow(row));
   // Grouped in ONE pass: a boundary's rows are read from the map rather than
   // re-scanning the whole lineage per boundary, which a wide page (up to
@@ -845,18 +849,17 @@ export async function identityReplay<G extends GraphDef>(
   );
 
   const steps: IdentityReplayStep<G>[] = [];
-  let previousAfter: readonly IdentityNodeReference<G>[] | undefined;
   for (const boundary of boundaries) {
-    const before =
-      previousAfter ?? (await reconstructAt(ctx, seed, boundary - 1));
-    const after = await reconstructAt(ctx, seed, boundary);
-    previousAfter = after;
-    for (const row of rowsByBoundary.get(boundary) ?? []) {
-      steps.push({
-        transition: publicTransition<G>(row),
-        before,
-        after,
-      });
+    const transitions = (rowsByBoundary.get(boundary) ?? []).map((row) =>
+      publicTransition<G>(row),
+    );
+    // Every row of one boundary was flushed by one commit and carries its
+    // recorded instant.
+    const recordedAsOf = requireDefined(transitions[0]).recorded;
+    const before = await reconstructBefore(ctx, seed, recordedAsOf);
+    const after = await reconstructAt(ctx, seed, recordedAsOf);
+    for (const transition of transitions) {
+      steps.push({ transition, before, after });
     }
   }
 

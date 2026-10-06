@@ -402,11 +402,29 @@ transition with no `decision` came from an ordinary API write.
 
 `store.identity.replay(ref, options?)` pairs every transition with the class
 membership immediately before and after it, reconstructed through the exact
-same historical reader `asOf` and `asOfRecorded` reads use
-(`historicalIdentityReconstructionCtes`) — **replay can never disagree with a
-live read**, because it is not a second copy of membership. The transition
-log carries no members of its own; it is an explanation layer over the one
-reconstruction path every historical read already goes through.
+same historical reader, at the same coordinate, as `store.asOfRecorded`
+(`historicalIdentityReconstructionCtes`). A step's `after` is what
+`store.asOfRecorded(step.transition.recorded).identity.membersOf(ref)`
+answers, and its `before` is the same read one revision earlier — replay is
+not a second copy of membership. The transition log carries no members of its
+own; it is an explanation layer over the one reconstruction path every
+historical read already goes through.
+
+Two consequences of sharing that coordinate:
+
+- **Each step is read from the valid instant its own commit was recorded
+  at.** A validity window that was still open then stays open in that step,
+  however long after it lapses you ask for the replay, so the same step
+  always returns the same `before` and `after`. A `window-end` transition
+  records that a window was given an end; the member leaves in valid time,
+  which `store.asOf(...)` shows, not in the step.
+- **Each step is read under the graph's current schema.** A step recorded
+  before a `sameIdAcrossKinds` flip or a kind removal shows that revision as
+  today's profile and kinds read it, so a `kind-drop` or `schema-transition`
+  step can show the same membership before and after.
+
+On a bulk write, each transition's `assertionIds` name only the `same`
+assertions with an endpoint in that transition's class.
 
 ```typescript
 const { steps, truncatedBefore } = await store.identity.replay(alice, {

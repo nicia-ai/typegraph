@@ -115,8 +115,8 @@ import {
   asRecordedInstant,
   createEngineRecordedInstant,
   type ReadCoordinate,
+  recordedDiagonalCoordinate,
   type RecordedInstant,
-  recordedInstantWallTime,
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../core/temporal";
@@ -3273,14 +3273,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * increments.
    */
   asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G> {
-    const validCoordinate = resolveReadCoordinate(
-      "asOf",
-      recordedInstantWallTime(recordedAsOf),
-      "Use await store.recordedNow() as the anchor, or asRecordedInstant(value) only for an instant previously read from recordedNow().",
-    );
     return new RecordedStoreView(
       this,
-      withRecordedCoordinate(validCoordinate, recordedAsOf),
+      recordedDiagonalCoordinate(
+        recordedAsOf,
+        "Use await store.recordedNow() as the anchor, or asRecordedInstant(value) only for an instant previously read from recordedNow().",
+      ),
     );
   }
 

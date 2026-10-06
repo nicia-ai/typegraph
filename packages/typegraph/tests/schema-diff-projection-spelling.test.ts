@@ -66,7 +66,6 @@ const Item = defineNode("Item", {
     nickname: z.string().nullable(),
     code: z.union([z.string(), z.number()]),
     point: z.tuple([z.number(), z.number()]),
-    head: z.tuple([z.string()]).rest(z.number()),
     tags: z.array(z.string().nullable()),
   }),
 });
@@ -285,13 +284,33 @@ describe("propertySchemasEqual over projection spellings", () => {
     ).toBe(true);
   });
 
-  it("folds a rest tuple whose minimum only restates its prefix", () => {
+  // The current projection writes `z.tuple([a.optional()], rest)` with no
+  // `minItems`, so a rest tuple that states none means zero required members.
+  it("keeps a rest tuple's minimum: an omitted one means no required member", () => {
     const prefixItems = [{ type: "string" }];
     const items = { type: "number" };
     expect(
       equal(
         { type: "array", prefixItems, items },
         { type: "array", prefixItems, items, minItems: 1 },
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a closed tuple's minimum beside an explicit `items: false`", () => {
+    const prefixItems = [{ type: "string" }, { type: "number" }];
+    const allOptional = {
+      type: "array",
+      prefixItems,
+      items: false,
+      maxItems: 2,
+    };
+    expect(equal(allOptional, { ...allOptional, minItems: 2 })).toBe(false);
+    // A closed tuple cannot exceed its prefix, so `maxItems` restates it.
+    expect(
+      equal(
+        { type: "array", prefixItems, items: false, minItems: 2 },
+        { type: "array", prefixItems, items: false, minItems: 2, maxItems: 2 },
       ),
     ).toBe(true);
   });
@@ -368,4 +387,112 @@ describe("isStructuralSubtype over projection spellings", () => {
       verdict: "subtype",
     });
   });
+});
+
+describe("a rest tuple stored without a minimum reads as written", () => {
+  // The earlier projection wrote `z.tuple([a], rest)` with no `minItems`,
+  // which is byte-for-byte what the current one writes for
+  // `z.tuple([a.optional()], rest)`. Nothing in the document says which was
+  // meant, so it is read as written and the required tuple is a change.
+  const Headed = defineNode("Headed", {
+    schema: z.object({ head: z.tuple([z.string()]).rest(z.number()) }),
+  });
+  const headedGraph = defineGraph({
+    id: "diff_rest_tuple_spelling",
+    nodes: { Headed: { type: Headed } },
+    edges: {},
+  });
+
+  it("reports the earlier spelling of a required rest tuple as a breaking change", () => {
+    const current = serializeSchema(headedGraph, 2);
+    const earlier = toEarlierSpelling(
+      serializeSchema(headedGraph, 1),
+    ) as SerializedSchema;
+
+    const diff = computeSchemaDiff(earlier, current);
+
+    expect(diff.hasBreakingChanges).toBe(true);
+    expect(diff.nodes.map((change) => change.details)).toEqual([
+      expect.stringContaining(
+        'Property schemas changed incompatibly in "Headed": head.',
+      ),
+    ]);
+  });
+});
+
+describe("a tuple whose members became required is a change", () => {
+  const graphOf = (pair: z.ZodType) =>
+    defineGraph({
+      id: "diff_tuple_required_members",
+      nodes: {
+        Thing: { type: defineNode("Thing", { schema: z.object({ pair }) }) },
+      },
+      edges: {},
+    });
+  const allOptional = z.tuple([z.string().optional(), z.number().optional()]);
+  const required = z.tuple([z.string(), z.number()]);
+
+  it("reports optional-to-required tuple members as a breaking property change", () => {
+    const diff = computeSchemaDiff(
+      serializeSchema(graphOf(allOptional), 1),
+      serializeSchema(graphOf(required), 2),
+    );
+
+    console.log("tuple tightening diff:", diff.summary, diff.nodes);
+    expect(diff.hasBreakingChanges).toBe(true);
+    expect(diff.nodes.map((change) => change.details)).toEqual([
+      expect.stringContaining(
+        'Property schemas changed incompatibly in "Thing": pair.',
+      ),
+    ]);
+  });
+
+  it("refuses to open the tightened graph over a row the old tuple admitted", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graphOf(allOptional), backend);
+    await store.nodes.Thing.create({ pair: [] });
+
+    const outcome = await createStoreWithSchema(
+      graphOf(required),
+      backend,
+    ).then(
+      ([, result]) => result.status,
+      (error: unknown) => (error as Error).name,
+    );
+
+    console.log("reopen with required tuple:", outcome);
+    expect(outcome).toBe("MigrationError");
+    const active = await backend.getActiveSchema("diff_tuple_required_members");
+    expect(active?.version).toBe(1);
+  });
+
+  it.each([
+    ["closed", allOptional, required],
+    [
+      "rest",
+      z.tuple([z.string().optional()], z.number()),
+      z.tuple([z.string()], z.number()),
+    ],
+  ] as const)(
+    "judges an all-optional %s tuple not a subtype of the required one",
+    (_label, child, parent) => {
+      const result = isStructuralSubtype(
+        z.toJSONSchema(child) as JsonSchema,
+        z.toJSONSchema(parent) as JsonSchema,
+      );
+      console.log("all-optional vs required:", JSON.stringify(result));
+      expect(child.safeParse([]).success).toBe(true);
+      expect(parent.safeParse([]).success).toBe(false);
+      expect(result).toMatchObject({
+        verdict: "not-subtype",
+        reason: "array-bounds-not-tighter",
+      });
+      expect(
+        isStructuralSubtype(
+          z.toJSONSchema(parent) as JsonSchema,
+          z.toJSONSchema(child) as JsonSchema,
+        ),
+      ).toEqual({ verdict: "subtype" });
+    },
+  );
 });

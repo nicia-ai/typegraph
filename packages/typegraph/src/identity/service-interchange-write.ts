@@ -455,7 +455,7 @@ export async function importIdentityAssertionsIntoTarget(
               noteTransition,
               {
                 cause,
-                assertionIds: [inserted.id],
+                assertions: [inserted],
                 validAt: operationInstant,
               },
             );

@@ -25,6 +25,7 @@ import {
   defineNode,
   MigrationError,
   partOf,
+  subClassOf,
 } from "../../../src";
 import { getActiveSchema, migrateSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
@@ -129,6 +130,36 @@ function buildGraph(id: string, composed: boolean) {
         ],
       }
     : {}),
+  });
+}
+
+// Fixture for a kind that INHERITS a required-existence part obligation by
+// becoming a subclass of the declared part kind.
+const CtDraft = defineNode("CtDraft", { schema: z.object({}) });
+
+function buildInheritedPartGraph(id: string, draftIsSegment: boolean) {
+  return defineGraph({
+    id,
+    nodes: {
+      CtSegment: { type: CtSegment },
+      CtEpisode: { type: CtEpisode },
+      CtDraft: { type: CtDraft },
+    },
+    edges: {
+      ctSegmentOf: {
+        type: ctSegmentOf,
+        from: [CtSegment],
+        to: [CtEpisode],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(CtSegment, CtEpisode, {
+        via: ctSegmentOf,
+        existence: "required",
+      }),
+      ...(draftIsSegment ? [subClassOf(CtDraft, CtSegment)] : []),
+    ],
   });
 }
 
@@ -425,5 +456,54 @@ export function registerCompositionTighteningIntegrationTests(
     // the probe's edge kinds, not only the required ones). The unattached
     // CtTag planted above then makes the migration refuse, and `migrateSchema`
     // throws instead of returning `2`.
+
+    it("refuses a subClassOf addition that makes live rows required parts with no whole", async () => {
+      const id = "composition_tightening_inherited_required";
+      const store = await context.createStore(
+        buildInheritedPartGraph(id, false),
+      );
+      const orphan = await store.nodes.CtDraft.create({});
+
+      const error = await createAdapterStoreWithSchema(
+        buildInheritedPartGraph(id, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      expect(details.violations).toEqual([
+        {
+          family: "compositionExistence",
+          partKind: "CtDraft",
+          parts: [{ kind: "CtDraft", id: orphan.id }],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: drop `"compositionExistence"` from the added
+    // `subClassOf`/`equivalentTo`/`sameAs` arm of
+    // `classifyKnownRelationSeverity` (src/schema/ontology-change.ts). The
+    // commit then migrates, and `createAdapterStoreWithSchema` resolves to a
+    // store instead of the `MigrationError` asserted above.
+
+    it("auto-migrates the same subClassOf addition when no row of the new part kind exists", async () => {
+      const id = "composition_tightening_inherited_required_clean";
+      await context.createStore(buildInheritedPartGraph(id, false));
+
+      const [upgradedStore, result] = await createAdapterStoreWithSchema(
+        buildInheritedPartGraph(id, true),
+        context.getBackend(),
+      );
+
+      expect(result.status).toBe("migrated");
+      await expect(upgradedStore.nodes.CtDraft.create({})).rejects.toThrow(
+        /required/i,
+      );
+    });
   });
 }

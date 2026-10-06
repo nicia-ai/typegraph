@@ -249,13 +249,12 @@ export type SchemaDiff = Readonly<{
  *   `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` /
  *   `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE`) when `after` declares a
  *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy whose child does not
- *   structurally extend its parent — including a hierarchy no relation in
- *   this diff touched: a migration that only edits a node kind's property
- *   schema can break an EXISTING hierarchy that kind already participates
- *   in, so this diff builds and enforces the AFTER registry whenever a
- *   changed node kind's name appears in `after.ontology.relations` under one
- *   of those three meta-edges, even when `classifyOntologyChanges` found no
- *   relation change to build one for.
+ *   structurally extend its parent — including a hierarchy this diff never
+ *   touched. A migration that only edits a node kind's property schema can
+ *   break an existing hierarchy, and an unchanged graph can carry one an
+ *   earlier release accepted, so this diff builds and enforces the AFTER
+ *   registry whenever `after` declares any of those three meta-edges, even
+ *   when nothing changed at all.
  */
 export function computeSchemaDiff(
   before: SerializedSchema,
@@ -264,14 +263,13 @@ export function computeSchemaDiff(
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = classifyOntologyChanges(before, after);
-  // classifyOntologyChanges only builds (and thereby structurally enforces
-  // subsumption) a registry when a RELATION changed. A migration that edits only a
-  // node kind's PROPERTY schema never touches a relation, so without this
-  // check it would sail through the dry run and fail only at commit —
-  // exactly the gap `computeSchemaDiff`'s docblock now documents.
-  if (nodePropertyChangeMayAffectExistingSubsumption(nodeChanges, after)) {
-    buildRegistryFromSerializedSchema(after);
-  }
+  // `classifyOntologyChanges` builds (and thereby structurally enforces
+  // subsumption on) the AFTER registry only when a relation changed. The
+  // contract has to hold for the proposed graph whatever this diff touched:
+  // a property-only edit can break an existing hierarchy, and an UNCHANGED
+  // graph can carry one an earlier release accepted — which is the case the
+  // pre-upgrade report exists for.
+  if (declaresSubsumption(after)) buildRegistryFromSerializedSchema(after);
   const identityChange = diffIdentity(before.identity, after.identity);
   const annotationsChange = diffGraphAnnotations(
     before.annotations,
@@ -438,36 +436,14 @@ function diffNodes(
 }
 
 /**
- * Whether an added or modified node kind's property schema could have
- * broken a `subClassOf`/`equivalentTo`/`sameAs` hierarchy this diff's
- * relation-level classification never looked at, because no RELATION
- * changed. A cheap name scan over `nodeChanges` and `after.ontology.relations`
- * — the caller builds a registry (which structurally enforces subsumption) only
- * when this returns `true`.
- *
- * A REMOVED node kind is excluded: it cannot violate a hierarchy going
- * forward, and it carries no property schema in `after` to compare.
+ * Whether a document declares any `subClassOf`/`equivalentTo`/`sameAs`
+ * relation — the cheap gate on building a registry just to enforce
+ * structural subsumption. A document declaring none has nothing to enforce.
  */
-function nodePropertyChangeMayAffectExistingSubsumption(
-  nodeChanges: readonly NodeChange[],
-  after: SerializedSchema,
-): boolean {
-  const changedKinds = new Set(
-    nodeChanges
-      .filter((change) => change.type !== "removed")
-      .map((change) => change.kind),
+function declaresSubsumption(schema: SerializedSchema): boolean {
+  return schema.ontology.relations.some((relation) =>
+    isSubsumptionMetaEdge(relation.metaEdge),
   );
-  if (changedKinds.size === 0) return false;
-
-  for (const relation of after.ontology.relations) {
-    if (
-      isSubsumptionMetaEdge(relation.metaEdge) &&
-      (changedKinds.has(relation.from) || changedKinds.has(relation.to))
-    ) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
@@ -596,18 +572,22 @@ function bareTypeTokens(member: unknown): readonly string[] | undefined {
  *    primitive `z.union()`, or `.nullable().nullable()`) is flattened into it
  *    and a repeated token collapses. A member carrying any other keyword keeps
  *    the union as written.
- *  - **A tuple's arity.** `prefixItems` alone and `prefixItems` with the
- *    arity restated — `items: false` closing a tuple that has no rest element
- *    ({@link closesTupleByOmission}), `minItems`, and a closed tuple's
- *    `maxItems` — are the same tuple. Folded to an explicit `items: false`
- *    with each bound dropped when it only restates the prefix length. A
- *    `minItems` below the prefix length (an optional trailing member) is
- *    kept: the bare spelling is read as the required-arity tuple, because an
- *    earlier projection wrote a required and an optional trailing member
- *    identically and the document cannot say which was meant. A stored
- *    optional-trailing tuple therefore still reads as changed, and the
- *    reading is the same in the other direction (see
- *    {@link closesTupleByOmission}).
+ *  - **A closed tuple's arity.** An earlier projection wrote a tuple with no
+ *    rest element as a bare `prefixItems`; the current one closes it with
+ *    `items: false` and states its arity as `minItems` / `maxItems`. The bare
+ *    spelling ({@link closesTupleByOmission}) is the only one that is
+ *    provably the earlier projection's — the current one always writes
+ *    `items` — so it alone is rewritten: closed explicitly, with both bounds
+ *    restated at the prefix length. That reads it as the required-arity
+ *    tuple, because the earlier projection wrote a required and an optional
+ *    trailing member identically and the document cannot say which was
+ *    meant; a stored optional-trailing tuple therefore still reads as
+ *    changed. Beside an explicit `items`, `minItems` is never touched: the
+ *    current projection OMITS it when every prefix member is optional, so
+ *    there an absent `minItems` means zero and a stated one is information.
+ *    A rest tuple stored by the earlier projection carries no `minItems`
+ *    either and so reads as the all-optional one. A closed tuple's absent
+ *    `maxItems` is restated, since a closed tuple cannot exceed its prefix.
  */
 function projectionSpellingNormalized(
   schema: Record<string, unknown>,
@@ -630,12 +610,12 @@ function projectionSpellingNormalized(
 
   const { prefixItems } = normalized;
   if (Array.isArray(prefixItems)) {
-    if (closesTupleByOmission(normalized)) normalized["items"] = false;
-    const restatesArity = (bound: "minItems" | "maxItems"): boolean =>
-      normalized[bound] === prefixItems.length;
-    if (restatesArity("minItems")) delete normalized["minItems"];
-    if (normalized["items"] === false && restatesArity("maxItems")) {
-      delete normalized["maxItems"];
+    if (closesTupleByOmission(normalized)) {
+      normalized["items"] = false;
+      normalized["minItems"] ??= prefixItems.length;
+    }
+    if (normalized["items"] === false) {
+      normalized["maxItems"] ??= prefixItems.length;
     }
   }
   return normalized;
@@ -1509,6 +1489,21 @@ function diffDeprecatedKinds(
 /**
  * Generates a human-readable summary of changes.
  */
+/**
+ * One summary clause for a list of typed changes, or `undefined` when the
+ * list is empty. Every change type is counted, so a list holding only
+ * `modified` entries can never summarize as nothing.
+ */
+function summarizeChangeCounts(
+  label: string,
+  changes: readonly Readonly<{ type: ChangeType }>[],
+): string | undefined {
+  if (changes.length === 0) return undefined;
+  const count = (type: ChangeType): number =>
+    changes.filter((change) => change.type === type).length;
+  return `${label}: ${count("added")} added, ${count("removed")} removed, ${count("modified")} modified`;
+}
+
 function generateSummary(
   nodeChanges: readonly NodeChange[],
   edgeChanges: readonly EdgeChange[],
@@ -1521,35 +1516,13 @@ function generateSummary(
 ): string {
   const parts: string[] = [];
 
-  const nodeAdded = nodeChanges.filter((c) => c.type === "added").length;
-  const nodeRemoved = nodeChanges.filter((c) => c.type === "removed").length;
-  const nodeModified = nodeChanges.filter((c) => c.type === "modified").length;
-
-  if (nodeAdded > 0 || nodeRemoved > 0 || nodeModified > 0) {
-    parts.push(
-      `Nodes: ${nodeAdded} added, ${nodeRemoved} removed, ${nodeModified} modified`,
-    );
-  }
-
-  const edgeAdded = edgeChanges.filter((c) => c.type === "added").length;
-  const edgeRemoved = edgeChanges.filter((c) => c.type === "removed").length;
-  const edgeModified = edgeChanges.filter((c) => c.type === "modified").length;
-
-  if (edgeAdded > 0 || edgeRemoved > 0 || edgeModified > 0) {
-    parts.push(
-      `Edges: ${edgeAdded} added, ${edgeRemoved} removed, ${edgeModified} modified`,
-    );
-  }
-
-  const ontologyAdded = ontologyChanges.filter(
-    (c) => c.type === "added",
-  ).length;
-  const ontologyRemoved = ontologyChanges.filter(
-    (c) => c.type === "removed",
-  ).length;
-
-  if (ontologyAdded > 0 || ontologyRemoved > 0) {
-    parts.push(`Ontology: ${ontologyAdded} added, ${ontologyRemoved} removed`);
+  for (const [label, changes] of [
+    ["Nodes", nodeChanges],
+    ["Edges", edgeChanges],
+    ["Ontology", ontologyChanges],
+  ] as const) {
+    const counts = summarizeChangeCounts(label, changes);
+    if (counts !== undefined) parts.push(counts);
   }
 
   if (identityChange !== undefined) {
@@ -1560,17 +1533,8 @@ function generateSummary(
     parts.push(`Graph annotations: ${annotationsChange.type}`);
   }
 
-  const indexAdded = indexChanges.filter((c) => c.type === "added").length;
-  const indexRemoved = indexChanges.filter((c) => c.type === "removed").length;
-  const indexModified = indexChanges.filter(
-    (c) => c.type === "modified",
-  ).length;
-
-  if (indexAdded > 0 || indexRemoved > 0 || indexModified > 0) {
-    parts.push(
-      `Indexes: ${indexAdded} added, ${indexRemoved} removed, ${indexModified} modified`,
-    );
-  }
+  const indexCounts = summarizeChangeCounts("Indexes", indexChanges);
+  if (indexCounts !== undefined) parts.push(indexCounts);
 
   if (extensionChange !== undefined) {
     parts.push(`Graph extension document: ${extensionChange.type}`);

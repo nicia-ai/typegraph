@@ -636,6 +636,80 @@ export function registerOntologyTighteningIntegrationTests(
     // `nodeUniquenessComponent` probe makes the commit succeed and this
     // test fail.
 
+    it("refuses a re-pairing that merges two duplicate-holding kinds while each loses its old neighbour", async () => {
+      const id = "ontology_tightening_uniqueness_repair";
+      const nodes = {
+        SiblingA: { type: SiblingA, unique: [SIBLING_EMAIL_UNIQUE] },
+        SiblingB: { type: SiblingB, unique: [SIBLING_EMAIL_UNIQUE] },
+        Bystander: { type: Bystander },
+        OtherBystander: { type: OtherBystander },
+      };
+      // Before: {SiblingA, Bystander} and {SiblingB, OtherBystander}. After:
+      // {SiblingA, SiblingB}. Neither sibling's component GREW as a set — each
+      // swapped one neighbour for another — yet the two now share an axis.
+      const before = defineGraph({
+        id,
+        nodes,
+        edges: {},
+        ontology: [
+          subClassOf(SiblingA, Bystander),
+          subClassOf(SiblingB, OtherBystander),
+        ],
+      });
+      const after = defineGraph({
+        id,
+        nodes,
+        edges: {},
+        ontology: [subClassOf(SiblingA, SiblingB)],
+      });
+
+      const store = await context.createStore(before);
+      const nodeA = await store.nodes.SiblingA.create({
+        email: "dup@example.com",
+      });
+      const nodeB = await store.nodes.SiblingB.create({
+        email: "dup@example.com",
+      });
+
+      const error = await createAdapterStoreWithSchema(
+        after,
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      expect(details.violations).toEqual([
+        {
+          family: "nodeUniqueness",
+          target: {
+            relation: "uniques",
+            graphId: id,
+            axis: "SiblingA",
+            constraintName: "sibling_email_unique",
+            key: computeUniqueKey(
+              { email: "dup@example.com" },
+              ["email"],
+              "binary",
+            ),
+          },
+          owners: [
+            { concreteKind: "SiblingA", nodeId: nodeA.id },
+            { concreteKind: "SiblingB", nodeId: nodeB.id },
+          ],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: restoring the proper-subset test in
+    // `nodeUniquenessComponentGroups` (a component must strictly GROW)
+    // yields no group for this diff, the commit migrates, and the store
+    // resolves instead of throwing.
+
     it("classifies an added inverseOf relation as breaking, blocking auto-migrate", async () => {
       const id = "ontology_tightening_inverse_breaking";
       const likes = defineEdge("likes", { schema: z.object({}) });

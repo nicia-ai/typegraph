@@ -798,6 +798,75 @@ describe("unions and nullability", () => {
     assertVerdict(verdict(child, parent), "subtype");
   });
 
+  // `oneOf` admits a value matching EXACTLY one member. Reading it as `anyOf`
+  // is sound only when no value can match two, which a discriminated union
+  // guarantees and `z.xor` does not.
+  it("an object satisfying two members of a z.xor parent is not judged a subtype", () => {
+    const parent = z.xor([
+      z.object({ a: z.string() }),
+      z.object({ b: z.string() }),
+    ]);
+    const child = z.object({ a: z.string(), b: z.string() });
+    const value = { a: "x", b: "y" };
+    console.log(
+      "xor parent projection:",
+      JSON.stringify(projected(parent)),
+      "child accepts:",
+      child.safeParse(value).success,
+      "parent accepts:",
+      parent.safeParse(value).success,
+    );
+    expect(child.safeParse(value).success).toBe(true);
+    expect(parent.safeParse(value).success).toBe(false);
+
+    expect(verdict(child, parent)).toEqual({
+      verdict: "incomparable",
+      reason: "unsupported-construct",
+      path: [],
+    });
+  });
+
+  it("a z.xor parent whose members differ by type token is read member-wise", () => {
+    const parent = z.xor([z.string(), z.number()]);
+    assertVerdict(verdict(z.string().min(2), parent), "subtype");
+    assertVerdict(verdict(z.boolean(), parent), {
+      reason: "no-matching-union-member",
+    });
+  });
+
+  it("a parent oneOf whose members overlap through integer and number is incomparable", () => {
+    const parent: JsonSchema = {
+      oneOf: [{ type: "integer" }, { type: "number" }],
+    };
+    expect(isStructuralSubtype({ type: "integer" }, parent)).toMatchObject({
+      verdict: "incomparable",
+      reason: "unsupported-construct",
+    });
+  });
+
+  it("a parent carrying both anyOf and oneOf is incomparable rather than read through one of them", () => {
+    const parent: JsonSchema = {
+      anyOf: [{ type: "string" }, { type: "number" }],
+      oneOf: [{ type: "string", minLength: 3 }, { type: "number" }],
+    };
+    expect(isStructuralSubtype({ type: "string" }, parent)).toMatchObject({
+      verdict: "incomparable",
+      reason: "unsupported-construct",
+    });
+  });
+
+  it("a z.xor child is read as the union of its members", () => {
+    const child = z.xor([
+      z.object({ a: z.string() }),
+      z.object({ b: z.string() }),
+    ]);
+    const parent = z.union([
+      z.object({ a: z.string() }),
+      z.object({ b: z.string() }),
+    ]);
+    assertVerdict(verdict(child, parent), "subtype");
+  });
+
   it("a union member that is itself incomparable propagates incomparable, not no-matching-union-member", () => {
     const result = verdict(z.union([z.string(), z.never()]), z.string());
     expect(result.verdict).toBe("incomparable");
@@ -1329,5 +1398,132 @@ describe("projection coverage", () => {
       );
       expect(isStructuralSubtype(child, parent).verdict).toBe("subtype");
     });
+  });
+});
+
+// ============================================================
+// References resolve against each side's own definitions
+// ============================================================
+
+/** A schema whose `nested` property reaches `inner` through `outer`. */
+function chainedReferenceSchema(minLength: number, extra: boolean): JsonSchema {
+  return {
+    type: "object",
+    properties: {
+      nested: { $ref: "#/$defs/outer" },
+      ...(extra ? { extra: { type: "string" } } : {}),
+    },
+    $defs: {
+      outer: {
+        type: "object",
+        properties: { inner: { $ref: "#/$defs/inner" } },
+      },
+      inner: { type: "string", minLength },
+    },
+  };
+}
+
+describe("a `$ref` is identical only when what it resolves to is", () => {
+  interface Tree {
+    readonly value: string;
+    readonly children: readonly Tree[];
+  }
+
+  function treeOf(value: z.ZodType<string>): z.ZodType<Tree> {
+    const tree: z.ZodType<Tree> = z.lazy(() =>
+      z.object({ value, children: z.array(tree) }),
+    );
+    return tree;
+  }
+
+  const looseTree = treeOf(z.string());
+  const tightTree = treeOf(z.string().min(3));
+
+  it("refuses two nested references that share a name but not a definition", () => {
+    const parentSchema = z.object({ tree: tightTree });
+    const childSchema = z.object({ tree: looseTree });
+    const parent = projected(parentSchema);
+    const child = projected(childSchema);
+    const value = { tree: { value: "a", children: [] } };
+    console.log(
+      "child tree:",
+      JSON.stringify(child.properties?.["tree"]),
+      "parent tree:",
+      JSON.stringify(parent.properties?.["tree"]),
+      "child $defs:",
+      JSON.stringify(child["$defs"]),
+      "parent $defs:",
+      JSON.stringify(parent["$defs"]),
+    );
+    // The trap: the property schemas are textually the same reference.
+    expect(child.properties?.["tree"]).toEqual(parent.properties?.["tree"]);
+    expect(child["$defs"]).not.toEqual(parent["$defs"]);
+    expect(childSchema.safeParse(value).success).toBe(true);
+    expect(parentSchema.safeParse(value).success).toBe(false);
+
+    expect(isStructuralSubtype(child, parent)).toEqual({
+      verdict: "incomparable",
+      reason: "schema-reference",
+      path: ["tree"],
+    });
+    expect(isStructuralSubtype(parent, child)).toMatchObject({
+      verdict: "incomparable",
+      reason: "schema-reference",
+    });
+  });
+
+  it("accepts a child copying the parent's recursive property verbatim beside an added field", () => {
+    const parent = projected(z.object({ tree: tightTree }));
+    const child = projected(z.object({ tree: tightTree, extra: z.string() }));
+    expect(isStructuralSubtype(child, parent)).toEqual({ verdict: "subtype" });
+  });
+
+  it("refuses a root self-reference shared by two different roots", () => {
+    const child: JsonSchema = {
+      type: "object",
+      properties: { next: { $ref: "#" }, label: { type: "string" } },
+    };
+    const parent: JsonSchema = {
+      type: "object",
+      properties: {
+        next: { $ref: "#" },
+        label: { type: "string", minLength: 3 },
+      },
+    };
+    expect(isStructuralSubtype(child, parent)).toMatchObject({
+      verdict: "incomparable",
+      reason: "schema-reference",
+      path: ["next"],
+    });
+  });
+
+  it("refuses a shared reference neither side can resolve", () => {
+    const schema: JsonSchema = {
+      type: "object",
+      properties: { tree: { $ref: "#/$defs/missing" } },
+    };
+    const widened: JsonSchema = {
+      ...schema,
+      properties: { ...schema.properties, extra: { type: "string" } },
+    };
+    expect(isStructuralSubtype(widened, schema)).toMatchObject({
+      verdict: "incomparable",
+      reason: "schema-reference",
+    });
+  });
+
+  it("follows a definition that references another definition", () => {
+    expect(
+      isStructuralSubtype(
+        chainedReferenceSchema(3, true),
+        chainedReferenceSchema(3, false),
+      ),
+    ).toEqual({ verdict: "subtype" });
+    expect(
+      isStructuralSubtype(
+        chainedReferenceSchema(1, true),
+        chainedReferenceSchema(3, false),
+      ),
+    ).toMatchObject({ verdict: "incomparable", reason: "schema-reference" });
   });
 });

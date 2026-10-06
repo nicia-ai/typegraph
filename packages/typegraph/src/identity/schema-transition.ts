@@ -48,6 +48,7 @@ import {
 } from "./service";
 import { noteClassTransitions } from "./service-mutation";
 import { type IdentityTarget } from "./sql-target";
+import { type IdentityAssertionStorageRow } from "./storage-types";
 import { diffClosureTransitions } from "./transition-log";
 
 /** The identity relations a schema transition reads, writes, and locks. */
@@ -735,7 +736,7 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     // live-endpoint interchange reads, yet still visible to raw ledger reads
     // and merge staging, where a later "no-op" merge would end them.
     const droppedNodeKinds = options.droppedNodeKinds ?? [];
-    const removedAssertionIds: readonly string[] =
+    const removedAssertions: readonly IdentityAssertionStorageRow[] =
       droppedNodeKinds.length > 0 ?
         await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
           deleteAssertionsTouchingKinds(
@@ -775,7 +776,7 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
           noteClassTransitions(ctx.graphId, noteTransition, transitions, {
             cause:
               droppedNodeKinds.length > 0 ? "kind-drop" : "schema-transition",
-            assertionIds: removedAssertionIds,
+            assertions: removedAssertions,
             validAt: nowIso(),
           });
           return Promise.resolve();

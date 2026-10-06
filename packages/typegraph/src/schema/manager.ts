@@ -2091,9 +2091,9 @@ export async function isSchemaInitialized(
  * @throws ConfigurationError when the current graph's
  *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy is not a structural
  *   subtype of its target — reported HERE, before an upgrade, rather than
- *   only at commit; see `computeSchemaDiff`'s own docblock for the exact
- *   trigger (a relation change, or a property change on a kind already
- *   party to one).
+ *   only at commit, and whether or not anything changed: the diff enforces
+ *   the contract whenever the graph declares such a relation (see
+ *   `computeSchemaDiff`'s own docblock).
  */
 export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,

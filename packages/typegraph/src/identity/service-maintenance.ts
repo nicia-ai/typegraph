@@ -478,7 +478,7 @@ export async function deleteAssertionsTouchingKinds(
   graphId: string,
   kinds: readonly string[],
   touch: (graphId: string, id: string) => void,
-): Promise<readonly string[]> {
+): Promise<readonly IdentityAssertionStorageRow[]> {
   const removedKinds = [...new Set(kinds)];
   if (removedKinds.length === 0) return [];
   const matched = new Map<string, IdentityAssertionStorageRow>();
@@ -525,8 +525,9 @@ export async function deleteAssertionsTouchingKinds(
       );
     }
   }
-  for (const row of matched.values()) touch(graphId, row.id);
-  return ids;
+  const removed = [...matched.values()];
+  for (const row of removed) touch(graphId, row.id);
+  return removed;
 }
 
 /**
@@ -719,7 +720,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
         ctx.schema,
         ctx.graphId,
       );
-      const removedAssertionIds = await deleteAssertionsTouchingKinds(
+      const removedAssertions = await deleteAssertionsTouchingKinds(
         target,
         ctx.schema,
         ctx.graphId,
@@ -757,7 +758,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       const transitions = diffClosureTransitions(affected, before, after);
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
         cause: "kind-drop",
-        assertionIds: removedAssertionIds,
+        assertions: removedAssertions,
         validAt: nowIso(),
       });
     },
@@ -880,7 +881,7 @@ export async function foldIdentityForCreatedNodes(
       );
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
         cause,
-        assertionIds: [],
+        assertions: [],
         validAt: nowIso(),
       });
     },
@@ -1156,10 +1157,10 @@ export async function detachIdentityForNode(
             ctx.graphId,
             ref,
           )) ?? now);
-      const endedAssertionIds: string[] = [];
+      const endedAssertions: IdentityAssertionStorageRow[] = [];
       for (const rawRow of rows) {
         const row = normalizeIdentityAssertionRow(rawRow);
-        endedAssertionIds.push(row.id);
+        endedAssertions.push(row);
         if (mode === "hard") {
           await executeIdentityStatement(
             rawTarget,
@@ -1207,7 +1208,7 @@ export async function detachIdentityForNode(
       );
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
         cause: "detach",
-        assertionIds: endedAssertionIds,
+        assertions: endedAssertions,
         validAt: now,
       });
     },

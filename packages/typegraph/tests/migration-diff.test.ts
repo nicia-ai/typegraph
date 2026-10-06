@@ -1408,6 +1408,33 @@ describe("computeSchemaDiff", () => {
       expect(diff.summary).toContain("1 added");
     });
 
+    // LOAD-BEARING CHECK: counting only `added`/`removed` ontology changes
+    // again makes this summary "No changes" beside `hasChanges: true`.
+    it("summarizes a diff whose only change is a modified ontology entry", () => {
+      const follows = {
+        kind: "follows",
+        fromKinds: ["Person"],
+        toKinds: ["Person"],
+        properties: { type: "object", properties: {} },
+        cardinality: "many",
+        targetCardinality: "many",
+        endpointExistence: "notDeleted",
+        description: undefined,
+      } as const;
+      const before = createSchema({ version: 1, edges: { follows } });
+      const after = createSchema({
+        version: 2,
+        edges: { follows: { ...follows, acyclic: true } },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      console.log("modified-only ontology diff:", diff.summary, diff.ontology);
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.ontology.map((change) => change.type)).toEqual(["modified"]);
+      expect(diff.summary).toBe("Ontology: 0 added, 0 removed, 1 modified");
+    });
+
     it("generates combined summary for multiple change types", () => {
       const before = createSchema({
         version: 1,

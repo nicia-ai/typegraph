@@ -45,6 +45,7 @@ import {
   MAX_REFERENCE_CHUNK_SIZE,
   type PlainNodeRef,
 } from "./sql-target";
+import { type IdentityAssertionStorageRow } from "./storage-types";
 
 /**
  * The nine exhaustive causes a materialized identity class can change under.
@@ -136,7 +137,63 @@ export type IdentityTransitionRow = Readonly<{
 export type ClosureTransitionRecord = Readonly<{
   classRef: PlainNodeRef;
   priorClassRef?: PlainNodeRef | undefined;
+  /**
+   * Every member the record's class held before OR after the change. Not
+   * persisted: it is what decides which assertions a note of this record
+   * names ({@link transitionAssertionIds}).
+   */
+  members: readonly PlainNodeRef[];
 }>;
+
+/** What a transition note needs of an assertion row a write created, ended or removed. */
+export type TransitionAssertionRow = Pick<
+  IdentityAssertionStorageRow,
+  "id" | "rel" | "a_kind" | "a_id" | "b_kind" | "b_id"
+>;
+
+/**
+ * THE attribution of assertions to class changes: for each record, the ids
+ * of the `same` assertions with an endpoint among that record's members, in
+ * the order the assertions were given.
+ *
+ * A write that changes many classes at once (a bulk assert, a bulk
+ * retraction, a kind drop) hands every assertion it touched; a record names
+ * only those that touched ITS class. Naming the whole batch on every record
+ * would make each one claim assertions about unrelated nodes, and would grow
+ * the log with the square of the batch. A `different` assertion shapes the
+ * separation relation, never a class, so no record names one.
+ *
+ * Indexed by endpoint once, so the cost is linear in members plus ids.
+ */
+export function transitionAssertionIds(
+  records: readonly ClosureTransitionRecord[],
+  assertions: readonly TransitionAssertionRow[],
+): readonly (readonly string[])[] {
+  const positionsByEndpoint = new Map<string, number[]>();
+  for (const [position, assertion] of assertions.entries()) {
+    if (assertion.rel !== "same") continue;
+    for (const endpoint of [
+      { kind: assertion.a_kind, id: assertion.a_id },
+      { kind: assertion.b_kind, id: assertion.b_id },
+    ]) {
+      const key = refKey(endpoint);
+      const positions = positionsByEndpoint.get(key) ?? [];
+      positions.push(position);
+      positionsByEndpoint.set(key, positions);
+    }
+  }
+  return records.map((record) => {
+    const positions = new Set<number>();
+    for (const member of record.members) {
+      for (const position of positionsByEndpoint.get(refKey(member)) ?? []) {
+        positions.add(position);
+      }
+    }
+    return [...positions]
+      .toSorted((left, right) => left - right)
+      .map((position) => requireDefined(assertions[position]).id);
+  });
+}
 
 function sameMemberSet(
   left: readonly PlainNodeRef[],
@@ -185,8 +242,14 @@ export function diffClosureTransitions(
   oldClassOf: ReadonlyMap<string, readonly PlainNodeRef[]>,
   newClassOf: ReadonlyMap<string, readonly PlainNodeRef[]>,
 ): readonly ClosureTransitionRecord[] {
-  const seen = new Set<string>();
-  const records: ClosureTransitionRecord[] = [];
+  const membersByRecord = new Map<
+    string,
+    Readonly<{
+      classRef: PlainNodeRef;
+      priorClassRef: PlainNodeRef | undefined;
+      members: Map<string, PlainNodeRef>;
+    }>
+  >();
   for (const member of affected) {
     const key = refKey(member);
     const oldClass = oldClassOf.get(key);
@@ -216,14 +279,24 @@ export function diffClosureTransitions(
     const dedupeKey = `${refKey(canonical)} ${
       emittedPriorClassRef === undefined ? "" : refKey(emittedPriorClassRef)
     }`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    records.push({
+    // Several members can report one record. Each brings its own old class:
+    // two singletons folding into one new class share a record whose members
+    // are both of them.
+    const record = membersByRecord.get(dedupeKey) ?? {
       classRef: canonical,
       priorClassRef: emittedPriorClassRef,
-    });
+      members: new Map<string, PlainNodeRef>(),
+    };
+    for (const classMember of [...oldClass, ...newClass]) {
+      record.members.set(refKey(classMember), classMember);
+    }
+    membersByRecord.set(dedupeKey, record);
   }
-  return records;
+  return [...membersByRecord.values()].map((record) => ({
+    classRef: record.classRef,
+    priorClassRef: record.priorClassRef,
+    members: [...record.members.values()],
+  }));
 }
 
 /** Column names, in storage/INSERT/projection order — the single source both the column-list `SqlFragment` and the flush chunk-size math derive from. */

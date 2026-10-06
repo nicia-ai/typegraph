@@ -10,6 +10,8 @@ const ENGINE_INSTANT_VERSION = "e1";
 const RECORDED_REVISION_WIDTH = 16;
 /** Open interval ceiling for numeric recorded-revision columns. */
 export const RECORDED_MAX_REVISION = Number.MAX_SAFE_INTEGER;
+/** The first revision a graph records; nothing is recorded before it. */
+export const RECORDED_FIRST_REVISION = 1;
 const RECORDED_INSTANT_PATTERN =
   /^r1:(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
 /**
@@ -110,7 +112,7 @@ export function parseRecordedInstant(
     const revision = Number(revisionText);
     if (
       !Number.isSafeInteger(revision) ||
-      revision < 1 ||
+      revision < RECORDED_FIRST_REVISION ||
       revision >= RECORDED_MAX_REVISION
     ) {
       throw invalidRecordedInstant(value, path);
@@ -156,7 +158,7 @@ export function createRecordedInstant(
 ): RecordedInstant {
   if (
     !Number.isSafeInteger(revision) ||
-    revision < 1 ||
+    revision < RECORDED_FIRST_REVISION ||
     revision >= RECORDED_MAX_REVISION
   ) {
     throw new ValidationError(
@@ -397,6 +399,27 @@ export function withRecordedCoordinate(
     ...coordinate,
     recorded: { asOf: recordedAsOf },
   };
+}
+
+/**
+ * THE diagonal recorded coordinate: the recorded-time relation at the
+ * anchor's logical revision, read from the valid instant the anchor itself
+ * was recorded at. One constructor for `store.asOfRecorded(T)` and for
+ * identity replay, so a replayed step and a recorded view pinned to that
+ * step's own anchor are the same read by construction.
+ *
+ * @param suggestion - Caller-specific remediation hint for an invalid anchor.
+ */
+export function recordedDiagonalCoordinate(
+  recordedAsOf: RecordedInstant,
+  suggestion?: string,
+): ReadCoordinate {
+  const validCoordinate = resolveReadCoordinate(
+    "asOf",
+    recordedInstantWallTime(recordedAsOf),
+    suggestion,
+  );
+  return withRecordedCoordinate(validCoordinate, recordedAsOf);
 }
 
 /**

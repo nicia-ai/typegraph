@@ -8,23 +8,15 @@
  * than this module adding a second, quieter answer to "can this ontology be
  * interpreted at all".
  *
- * That refusal is NOT already reached elsewhere for the BEFORE (stored)
- * side. `buildKindRegistry` already validates the AFTER side wherever a
- * commit path builds it from the code-level `GraphDef` (`ensureSchema`,
- * `migrateSchema`, `initializeSchema`), but nothing validated the STORED
- * document's registry before this module existed — `deserializeSchema`'s
- * `buildRegistry` accessor is a lazy thunk no `src` caller invoked. A schema
- * persisted under an older, laxer validator and never re-opened through a
- * relation-touching diff can therefore hold an ontology today's hardening
- * would reject, and this module is the first thing that tries to build a
- * `KindRegistry` from it. KNOWN LIMITATION: this can wedge the very
- * fix-forward migration meant to repair it — removing the offending
- * relation is a relation change, so `classifyOntologyChanges` still builds
- * the BEFORE registry and still throws before it ever gets to classify the
- * removal as the fix. There is no workaround inside this module; the
- * document must be repaired through a path that does not diff relations
- * (e.g. a direct schema-row edit) before a relation-touching commit reaches
- * this code again.
+ * Only the AFTER (proposed) side is held to that. The BEFORE (stored) side
+ * is a delta input: a document persisted under an earlier validator can hold
+ * a hierarchy the structural-subsumption contract refuses, or a
+ * `partOf`/`hasPart` relation with no `via`, and enforcing either here would
+ * wedge the very commit that repairs it — removing or correcting the
+ * relation is a relation change, so the diff must be able to read the stored
+ * side to classify the fix. See `StructuralSubsumptionMode`
+ * (`src/registry/build-validated.ts`) for exactly what the stored side is
+ * excused from; every other stored-side incoherence still throws.
  *
  * The severity table below is the ontology half of `computeSchemaDiff`.
  * Three meta-edges can change what data a commit invalidates:
@@ -32,8 +24,10 @@
  * - `disjointWith` ADDED can make two already-live nodes of the pair's kinds
  *   mutually exclusive.
  * - `subClassOf` / `equivalentTo` / `sameAs` ADDED can merge two previously
- *   independent `kindWithSubClasses` uniqueness components, or propagate an
- *   existing `disjointWith` down to a kind that was not disjoint before.
+ *   independent `kindWithSubClasses` uniqueness components, propagate an
+ *   existing `disjointWith` down to a kind that was not disjoint before, or
+ *   make a kind a required-existence composition part its live rows never
+ *   had to be (`newlyRequiredPartEdgeKinds`).
  * - `subClassOf` / `equivalentTo` / `sameAs` REMOVED can shrink an edge
  *   kind's admitted endpoint pairs out from under live edges that relied on
  *   the subsumption the relation provided.
@@ -64,6 +58,12 @@
  * read/write-semantics change (parts stop being deletable-with-their-whole,
  * `parts()`/`wholes()` stop resolving), not a row-level fact a data check
  * could falsify, so — like `inverseOf`/`implies` — it cannot auto-migrate.
+ * The exception is a stored relation with no `via`: it realizes no
+ * composition pair, so dropping it changes nothing a read or a write
+ * observes and is `safe`. That is what lets a document carrying the earlier
+ * three-part `partOf(part, whole)` move forward — to no relation, or to the
+ * same pair with a `via` (a `safe` removal plus the ordinary probed
+ * addition).
  *
  * A relation whose `from` or `to` names a kind THIS COMMIT REMOVES is itself
  * `safe` with no probe — see `classifyRelation`'s removed-kind rule.
@@ -106,9 +106,13 @@ import {
   META_EDGE_SUB_CLASS_OF,
   type MetaEdgeName,
 } from "../ontology/constants";
-import { ontologyRelationIdentityKey } from "../registry/composition-relation";
+import {
+  isCompositionMetaEdge,
+  ontologyRelationIdentityKey,
+} from "../registry/composition-relation";
 import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance";
 import { type KindRegistry } from "../registry/kind-registry";
+import { requiredCompositionPartKinds } from "../store/operations/composition-create";
 import { compareStrings, compareStringTuples } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -186,7 +190,9 @@ type OntologyDataProbeBody =
       kind: "compositionExistence";
       /**
        * The realizing (`via`) edge kinds of the `partOf`/`hasPart` pairs
-       * added this commit that ALSO declare `existence: "required"`.
+       * added this commit that ALSO declare `existence: "required"`, and of
+       * the pairs under which an added `subClassOf`/`equivalentTo`/`sameAs`
+       * makes a kind a required part.
        * `prepareSchemaTighteningPreflight` audits these edge kinds'
        * required part kinds for a live part with no live whole — the same
        * delta-scoping discipline as `compositionSingleWhole`.
@@ -358,19 +364,9 @@ function computeRemovedKindNames(
 // Diff-wide probe payloads
 // ============================================================
 
-/** Whether `candidate` is a proper subset of `superset` (fewer members, all present in `superset`). */
-function isProperSubset(
-  candidate: readonly string[],
-  superset: readonly string[],
-): boolean {
-  if (candidate.length >= superset.length) return false;
-  const supersetValues = new Set(superset);
-  return candidate.every((value) => supersetValues.has(value));
-}
-
 /**
  * Whether `after` no longer admits something `before` did. Deliberately NOT
- * `isProperSubset(after, before)`: a proper subset additionally requires
+ * a proper-subset test of `after` in `before`: a proper subset additionally requires
  * `after` to be strictly SHORTER than `before`, which a same-size swap (one
  * allowed pair removed, a different one added in the same commit — e.g.
  * `subClassOf(Company, Organization)` replaced by `subClassOf(Shop,
@@ -417,20 +413,24 @@ function nodeDisjointnessDelta(
 
 /**
  * Merged `kindWithSubClasses` uniqueness components: every node kind whose
- * `subClassOf` component GREW between the two registries, paired with every
- * `kindWithSubClasses` constraint name declared on any of its members.
+ * subsumption component GAINED a member between the two registries, paired
+ * with every `kindWithSubClasses` constraint name declared on any member of
+ * the component it now belongs to.
  *
- * `equivalentTo` / `sameAs` do not (yet) enter `getSubClassComponent`, so an
- * equivalence addition never grows a component here — see the module
- * docblock for why that is a known, documented no-op rather than a bug.
+ * `getSubClassComponent` folds `subClassOf` and `equivalentTo` / `sameAs`
+ * alike, so an equivalence addition merges components here exactly as a
+ * subclass addition does.
  *
- * Uses `isProperSubset`, not `lostAnyMember` (contrast
- * `edgeEndpointDeclarationsNarrowed`): this loop checks every AFTER node kind
- * against its OWN before/after component, not one diff-wide set. A merge
- * always grows the component of every kind newly folded into it — there is
- * no same-size "swap" case here the way there is for a single edge kind's
- * endpoint pairs, so a strict size increase is the correct and sufficient
- * test.
+ * The test is {@link lostAnyMember} read the other way — a member present
+ * AFTER that was absent BEFORE — not a strict size increase. A commit can
+ * re-pair kinds: with `subClassOf(A, P)` and `subClassOf(B, Q)` replaced by
+ * `subClassOf(A, B)`, the components of `A` and `B` stay the same size while
+ * the two kinds come to share one axis for the first time. Requiring growth
+ * would report no group for that diff and commit the merge unprobed.
+ *
+ * A component that only LOST members yields no group: a split cannot make two
+ * existing rows contend. It does move the claim axis of the kinds left
+ * behind, which this probe does not address.
  */
 function nodeUniquenessComponentGroups(
   before: OntologySnapshot,
@@ -442,7 +442,7 @@ function nodeUniquenessComponentGroups(
   for (const kind of Object.keys(after.nodes)) {
     const afterComponent = afterRegistry.getSubClassComponent(kind);
     const beforeComponent = beforeRegistry.getSubClassComponent(kind);
-    if (!isProperSubset(beforeComponent, afterComponent)) continue;
+    if (!lostAnyMember(afterComponent, beforeComponent)) continue;
     mergedComponents.set(afterComponent.join(" "), afterComponent);
   }
 
@@ -472,6 +472,46 @@ function nodeUniquenessComponentGroups(
       compareStrings(left.constraintName, right.constraintName) ||
       compareStrings(left.coveredKinds.join(" "), right.coveredKinds.join(" ")),
   );
+}
+
+/**
+ * The realizing (`via`) edge kinds under which some concrete node kind is a
+ * required-existence part in the AFTER registry and was not one BEFORE.
+ *
+ * A kind becomes a required part without any composition relation changing:
+ * `subClassOf(Draft, Chapter)` makes every `Draft` a `Chapter`, and with it a
+ * part that must have a whole. {@link requiredCompositionPartKinds} is the
+ * one reading of "which kinds must have a whole" on both sides, so this
+ * delta is exactly what the write path starts refusing after the commit.
+ *
+ * Reported as edge kinds because that is what the `compositionExistence`
+ * probe names; the preflight resolves them back to the required part kinds
+ * under each. Only existence is probed for an inherited part: a kind that was
+ * not assignable to the part kind before could hold no realizing edge, so it
+ * can bring neither a second whole nor a cycle into the relation.
+ */
+function newlyRequiredPartEdgeKinds(
+  beforeRegistry: KindRegistry,
+  afterRegistry: KindRegistry,
+): readonly string[] {
+  const requiredBefore = new Set(requiredCompositionPartKinds(beforeRegistry));
+  const newlyRequired = new Set(
+    requiredCompositionPartKinds(afterRegistry).filter(
+      (kind) => !requiredBefore.has(kind),
+    ),
+  );
+  if (newlyRequired.size === 0) return [];
+  const edgeKinds = new Set<string>();
+  for (const pair of afterRegistry.compositionRelation().pairs) {
+    if (
+      afterRegistry
+        .expandSubClasses(pair.partKind)
+        .some((kind) => newlyRequired.has(kind))
+    ) {
+      edgeKinds.add(pair.viaEdgeKind);
+    }
+  }
+  return [...edgeKinds].toSorted(compareStrings);
 }
 
 /** One edge kind's admission loss: the pairs it stopped admitting, and what the probe still allows. */
@@ -693,7 +733,11 @@ function classifyKnownRelationSeverity(
       return direction === "added" ?
           {
             severity: "warning",
-            probeKinds: ["nodeUniqueness", "nodeDisjointness"],
+            probeKinds: [
+              "nodeUniqueness",
+              "nodeDisjointness",
+              "compositionExistence",
+            ],
           }
         : { severity: "warning", probeKinds: ["edgeEndpointAssignability"] };
     }
@@ -704,7 +748,10 @@ function classifyKnownRelationSeverity(
     case META_EDGE_PART_OF:
     case META_EDGE_HAS_PART: {
       if (direction !== "added") {
-        return { severity: "breaking", probeKinds: [] };
+        return {
+          severity: relation.via === undefined ? "safe" : "breaking",
+          probeKinds: [],
+        };
       }
       // Composition tightening: this arm only ever sees a BRAND-NEW pair — flipping an
       // already-declared pair's `existence` is classified separately by
@@ -758,6 +805,7 @@ type RelationClassificationContext = Readonly<{
   disjointnessPairs: readonly (readonly [string, string])[];
   uniquenessGroups: readonly UniquenessComponentProbeGroup[];
   endpointAllowances: readonly EdgeEndpointAllowance[];
+  inheritedRequiredPartEdgeKinds: readonly string[];
 }>;
 
 function carriesEndpointAssignabilityProbe(change: OntologyChange): boolean {
@@ -817,9 +865,15 @@ function buildProbe(
     }
     case "composition":
     case "compositionExistence": {
+      // A composition relation names its own realizing edge. A subsumption
+      // relation names none: what it makes a required part is diff-wide.
+      const ownEdgeKinds = relation.via === undefined ? [] : [relation.via];
       return stampProbeFamilies({
         kind,
-        edgeKinds: relation.via === undefined ? [] : [relation.via],
+        edgeKinds:
+          isCompositionMetaEdge(relation.metaEdge) ? ownEdgeKinds : (
+            context.inheritedRequiredPartEdgeKinds
+          ),
       });
     }
   }
@@ -933,9 +987,8 @@ function classifyExistenceChange(
  *   interpret `before` or `after`. Only reached when the diff contains at
  *   least one relation change or narrows an edge kind's declared endpoints;
  *   a diff that does neither never needs a registry and so can never throw
- *   for this reason. See the module
- *   docblock for why the BEFORE side of this throw is new behavior, not an
- *   existing store-open refusal, and for the fix-forward wedge it implies.
+ *   for this reason. See the module docblock for what the BEFORE side is
+ *   excused from.
  */
 export function classifyOntologyChanges(
   before: OntologySnapshot,
@@ -1011,9 +1064,9 @@ export function classifyOntologyChanges(
   // nothing to do with it.
   // BEFORE is a delta input (disjointness, uniqueness groups, endpoint
   // allowances), never a registry a store reads or writes through —
-  // enforcing structural subsumption on it would wedge the fix-forward
-  // migration that repairs an already-incoherent persisted document (see
-  // `StructuralSubsumptionMode`'s docblock). AFTER stays enforced (the
+  // enforcing structural subsumption or the composition declaration rules on
+  // it would wedge the fix-forward migration that repairs a persisted
+  // document they refuse (see `StructuralSubsumptionMode`'s docblock). AFTER stays enforced (the
   // default): a proposal that INTRODUCES an incompatible hierarchy is
   // exactly what the preflight requires this diff to catch before an upgrade.
   const beforeRegistry = buildRegistryFromSerializedSchema(
@@ -1040,6 +1093,10 @@ export function classifyOntologyChanges(
       afterRegistry,
     ),
     endpointAllowances: endpointAdmissionLosses.map((loss) => loss.allowance),
+    inheritedRequiredPartEdgeKinds: newlyRequiredPartEdgeKinds(
+      beforeRegistry,
+      afterRegistry,
+    ),
   };
 
   for (const relation of removedRelations) {

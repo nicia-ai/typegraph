@@ -49,6 +49,7 @@ import {
 import {
   assertPair,
   buildAssertionRow,
+  type ClassTransitionNoteContext,
   createIdentityWindowValidator,
   currentAssertionForPair,
   currentClassKey,
@@ -313,9 +314,7 @@ async function bulkAssertPairs<G extends GraphDef>(
     );
     noteClassTransitions(ctx.graphId, noteTransition, transitions, {
       cause: "assert",
-      assertionIds: createdRows
-        .filter((row) => row.rel === "same")
-        .map((row) => row.id),
+      assertions: createdRows,
       validAt: timestamp,
     });
   } else {
@@ -1278,10 +1277,7 @@ function partitionRetractedEndpoints(
  * cause vocabulary stays owned by {@link noteClassTransitions}, never
  * re-spelled here (this module must not reach the transition log itself).
  */
-type RetractionAftermathNote = Omit<
-  Parameters<typeof noteClassTransitions>[3],
-  "assertionIds"
->;
+type RetractionAftermathNote = Omit<ClassTransitionNoteContext, "assertions">;
 
 /**
  * The AFTERMATH of a retraction, for every path that ends identity assertions:
@@ -1291,8 +1287,9 @@ type RetractionAftermathNote = Omit<
  *
  * One owner, so a new repair, a different `validAt` source, or a note on the
  * separation side cannot be added to some retraction paths and missed by the
- * rest. Every caller hands the rows it actually ended: `assertionIds` on the
- * notes are exactly those rows' ids.
+ * rest. Every caller hands the rows it actually ended, and each note names
+ * the ended `same` rows that held its own class together — never the whole
+ * batch, and never a `different` row, which splits nothing.
  */
 export async function applyRetractionAftermath<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -1313,7 +1310,7 @@ export async function applyRetractionAftermath<G extends GraphDef>(
     );
     noteClassTransitions(ctx.graphId, noteTransition, transitions, {
       cause: common.cause,
-      assertionIds: retracted.map((assertion) => assertion.id),
+      assertions: retracted,
       validAt: common.validAt,
     });
   }

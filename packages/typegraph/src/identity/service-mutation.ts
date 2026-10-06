@@ -79,6 +79,8 @@ import {
   type ClosureTransitionRecord,
   diffClosureTransitions,
   type IdentityTransitionCause,
+  transitionAssertionIds,
+  type TransitionAssertionRow,
 } from "./transition-log";
 import {
   type IdentityAssertionResult,
@@ -91,29 +93,39 @@ import {
   resolveIdentityValidityWindow,
 } from "./validity-window";
 
+/** What every note of one write shares; {@link noteClassTransitions} adds the per-class ids. */
+export type ClassTransitionNoteContext = Readonly<{
+  cause: IdentityTransitionCause;
+  /**
+   * Every assertion the write created, ended or removed. Each transition is
+   * noted with only those that touched its own class
+   * ({@link transitionAssertionIds}).
+   */
+  assertions: readonly TransitionAssertionRow[];
+  validAt: string;
+}>;
+
 /**
  * Notes every closure transition a structural mutation (`mergeCurrentClasses`,
- * `replaceAffectedClosure`) returned, under one shared cause/assertionIds/
- * validAt. The single call every note site in this file routes through,
- * rather than re-spelling the `noteTransition({...record, ...common})` object
- * literal at each of the nine call sites.
+ * `replaceAffectedClosure`) returned, under one shared cause and validAt. The
+ * single call every note site routes through, rather than re-spelling the
+ * `noteTransition({...})` object literal — and the one place a transition's
+ * `assertionIds` are decided, so no site can hand a class the ids of a whole
+ * batch.
  */
 export function noteClassTransitions(
   graphId: string,
   noteTransition: IdentityTransitionNoteFunction,
   transitions: readonly ClosureTransitionRecord[],
-  common: Readonly<{
-    cause: IdentityTransitionCause;
-    assertionIds: readonly string[];
-    validAt: string;
-  }>,
+  common: ClassTransitionNoteContext,
 ): void {
-  for (const transition of transitions) {
+  const assertionIds = transitionAssertionIds(transitions, common.assertions);
+  for (const [index, transition] of transitions.entries()) {
     noteTransition(graphId, {
       cause: common.cause,
       classRef: transition.classRef,
       priorClassRef: transition.priorClassRef,
-      assertionIds: common.assertionIds,
+      assertionIds: requireDefined(assertionIds[index]),
       validAt: common.validAt,
     });
   }
@@ -1252,6 +1264,7 @@ async function mergeCurrentClasses(
     {
       classRef: canonical,
       priorClassRef: survivorIsA ? priorBClass : priorAClass,
+      members: fusedMembers,
     },
   ];
 }
@@ -1270,11 +1283,7 @@ export async function applyPairRelationEffect(
   a: PlainNodeRef,
   b: PlainNodeRef,
   noteTransition: IdentityTransitionNoteFunction,
-  common: Readonly<{
-    cause: IdentityTransitionCause;
-    assertionIds: readonly string[];
-    validAt: string;
-  }>,
+  common: ClassTransitionNoteContext,
 ): Promise<void> {
   if (relation !== "same") {
     await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
@@ -1346,7 +1355,7 @@ export async function assertPair<G extends GraphDef>(
     windowValidator?.record(row);
     await applyPairRelationEffect(ctx, target, relation, a, b, noteTransition, {
       cause: "assert",
-      assertionIds: [row.id],
+      assertions: [row],
       validAt: operationInstant,
     });
     return assertionResult(publicAssertion(row), "created");
@@ -1423,7 +1432,7 @@ export async function assertPair<G extends GraphDef>(
   }
   await applyPairRelationEffect(ctx, target, relation, a, b, noteTransition, {
     cause: "assert",
-    assertionIds: [row.id],
+    assertions: [row],
     validAt: operationInstant,
   });
   return assertionResult(publicAssertion(row), "created");
