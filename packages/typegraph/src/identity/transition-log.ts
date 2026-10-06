@@ -138,9 +138,10 @@ export type ClosureTransitionRecord = Readonly<{
   classRef: PlainNodeRef;
   priorClassRef?: PlainNodeRef | undefined;
   /**
-   * Every member the record's class held before OR after the change. Not
-   * persisted: it is what decides which assertions a note of this record
-   * names ({@link transitionAssertionIds}).
+   * Every member the record's class holds AFTER the change — which is every
+   * member of a class it was fused from, and each piece of one it was split
+   * into. Not persisted: it is what decides which assertions a note of this
+   * record names ({@link transitionAssertionIds}).
    */
   members: readonly PlainNodeRef[];
 }>;
@@ -242,14 +243,7 @@ export function diffClosureTransitions(
   oldClassOf: ReadonlyMap<string, readonly PlainNodeRef[]>,
   newClassOf: ReadonlyMap<string, readonly PlainNodeRef[]>,
 ): readonly ClosureTransitionRecord[] {
-  const membersByRecord = new Map<
-    string,
-    Readonly<{
-      classRef: PlainNodeRef;
-      priorClassRef: PlainNodeRef | undefined;
-      members: Map<string, PlainNodeRef>;
-    }>
-  >();
+  const recordsByKey = new Map<string, ClosureTransitionRecord>();
   for (const member of affected) {
     const key = refKey(member);
     const oldClass = oldClassOf.get(key);
@@ -279,24 +273,17 @@ export function diffClosureTransitions(
     const dedupeKey = `${refKey(canonical)} ${
       emittedPriorClassRef === undefined ? "" : refKey(emittedPriorClassRef)
     }`;
-    // Several members can report one record. Each brings its own old class:
-    // two singletons folding into one new class share a record whose members
-    // are both of them.
-    const record = membersByRecord.get(dedupeKey) ?? {
+    // Several members can report one record, and every member of a class
+    // reports the same class: the record keeps that class once, rather than
+    // folding it in per member, which would cost the square of its size.
+    if (recordsByKey.has(dedupeKey)) continue;
+    recordsByKey.set(dedupeKey, {
       classRef: canonical,
       priorClassRef: emittedPriorClassRef,
-      members: new Map<string, PlainNodeRef>(),
-    };
-    for (const classMember of [...oldClass, ...newClass]) {
-      record.members.set(refKey(classMember), classMember);
-    }
-    membersByRecord.set(dedupeKey, record);
+      members: newClass,
+    });
   }
-  return [...membersByRecord.values()].map((record) => ({
-    classRef: record.classRef,
-    priorClassRef: record.priorClassRef,
-    members: [...record.members.values()],
-  }));
+  return [...recordsByKey.values()];
 }
 
 /** Column names, in storage/INSERT/projection order — the single source both the column-list `SqlFragment` and the flush chunk-size math derive from. */

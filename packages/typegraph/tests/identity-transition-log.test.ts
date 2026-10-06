@@ -30,13 +30,17 @@ import {
   type RecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
+import { identityReferenceKey } from "../src/identity/reference";
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import { type IdentityServiceContext } from "../src/identity/service-types";
+import { type PlainNodeRef } from "../src/identity/sql-target";
 import {
+  diffClosureTransitions,
   type IdentityTransitionRow,
   pruneIdentityTransitions,
   pruneIdentityTransitionsForContext,
   readIdentityTransitions,
+  transitionAssertionIds,
 } from "../src/identity/transition-log";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
@@ -865,5 +869,79 @@ describe("identity transition log", () => {
       branchId: "branch-a",
       mergePlanDigest: "digest-abc",
     });
+  });
+});
+
+describe("transition records over a large class", () => {
+  const MEMBER_COUNT = 400;
+  const members: readonly PlainNodeRef[] = Array.from(
+    { length: MEMBER_COUNT },
+    (_, index) => ({
+      kind: "Person",
+      id: `m${String(index).padStart(4, "0")}`,
+    }),
+  );
+  const chain = members.slice(1).map((member, index) => ({
+    id: `a${String(index)}`,
+    rel: "same" as const,
+    a_kind: "Person",
+    a_id: requireDefined(members[index]).id,
+    b_kind: "Person",
+    b_id: member.id,
+  }));
+
+  /** An array that counts how many elements iteration has handed out. */
+  function countingClass(
+    nodes: readonly PlainNodeRef[],
+    counter: { reads: number },
+  ): readonly PlainNodeRef[] {
+    return new Proxy([...nodes], {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) {
+          return function* iterate() {
+            for (const node of target) {
+              counter.reads += 1;
+              yield node;
+            }
+          };
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+  }
+
+  it("reads a class once however many of its members report it", () => {
+    const counter = { reads: 0 };
+    const merged = countingClass(members, counter);
+    const oldClassOf = new Map<string, readonly PlainNodeRef[]>();
+    const newClassOf = new Map<string, readonly PlainNodeRef[]>();
+    for (const member of members) {
+      oldClassOf.set(identityReferenceKey(member), [member]);
+      newClassOf.set(identityReferenceKey(member), merged);
+    }
+
+    const records = diffClosureTransitions(members, oldClassOf, newClassOf);
+
+    expect(records).toHaveLength(1);
+    expect(counter.reads).toBeLessThanOrEqual(MEMBER_COUNT);
+  });
+
+  it("names, for a class split into singletons, only the assertions at each singleton", () => {
+    const oldClassOf = new Map<string, readonly PlainNodeRef[]>();
+    const newClassOf = new Map<string, readonly PlainNodeRef[]>();
+    for (const member of members) {
+      oldClassOf.set(identityReferenceKey(member), members);
+      newClassOf.set(identityReferenceKey(member), [member]);
+    }
+
+    const records = diffClosureTransitions(members, oldClassOf, newClassOf);
+    const ids = transitionAssertionIds(records, chain);
+
+    expect(records).toHaveLength(MEMBER_COUNT);
+    // Every chain link has two endpoints, so each id is named by two records
+    // and the log is linear in the batch, not MEMBER_COUNT ids per record.
+    expect(ids.flat()).toHaveLength(2 * chain.length);
+    expect(ids[0]).toEqual(["a0"]);
+    expect(ids[1]).toEqual(["a0", "a1"]);
   });
 });

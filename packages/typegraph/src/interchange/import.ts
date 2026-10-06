@@ -949,6 +949,18 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity transitions without an identity header.",
             );
           }
+          // The restore floor was read at the header, before any chunk wrote.
+          // Transitions the header never announced have no floor to be
+          // restored against, and applying them without one would drop the
+          // retention watermark an announced stream sets.
+          if (
+            identityRestoreFloor === undefined &&
+            chunk.transitions.length > 0
+          ) {
+            throw new Error(
+              "Graph interchange stream emitted identity transitions its header did not announce (identity.hasTransitions).",
+            );
+          }
           receivedIdentityTransitions = true;
           mergeImportResult(
             result,
