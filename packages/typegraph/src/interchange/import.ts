@@ -341,16 +341,23 @@ type PendingRequiredPart = Readonly<{ kind: string; id: string }>;
  */
 type PendingRequiredParts = Map<string, PendingRequiredPart>;
 
+/** The result counters a committed row was counted under. */
+interface CommittedWriteCounts { created: number; updated: number }
+
 /**
  * What an import must remember to undo a required part it has to refuse: the
- * parts themselves, and the ids of the edges this import created, so the
- * edges a purge removes with the part come off `result.edges.created` and no
- * edge that predates the import is ever counted as one it wrote. Empty for a
- * graph that declares no required part, which never purges.
+ * parts themselves, and how each row this import wrote was counted, so a
+ * purge takes exactly those counts back — a part created and then updated by
+ * a later duplicate row, an edge the purge removes with it — and no edge that
+ * predates the import is ever counted as one it wrote. Empty for a graph that
+ * declares no required part, which never purges.
  */
 type RequiredPartLedger = Readonly<{
   pendingParts: PendingRequiredParts;
-  createdEdgeIds: Set<string>;
+  /** Update rows this import applied to a pending part, by `makeNodeKey`. */
+  partUpdates: Map<string, number>;
+  /** How each edge this import wrote was counted, by edge id. */
+  edgeWrites: Map<string, CommittedWriteCounts>;
 }>;
 
 type ImportWriteFrame = Readonly<{
@@ -459,14 +466,14 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
   // Every required-existence part THIS import creates, keyed by
-  // `makeNodeKey`, and every edge it creates. Frame-scoped, like
+  // `makeNodeKey`, and every edge it writes. Frame-scoped, like
   // `pendingMatchIdentityOwners`: nodes are written before any edge is even
   // seen (`processNodes` then `processEdges`), so whether a part ended up
   // attached can only be decided once the whole edge set is written.
-  const pendingRequiredParts: PendingRequiredParts = new Map();
   const requiredPartLedger: RequiredPartLedger = {
-    pendingParts: pendingRequiredParts,
-    createdEdgeIds: new Set(),
+    pendingParts: new Map(),
+    partUpdates: new Map(),
+    edgeWrites: new Map(),
   };
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
@@ -496,7 +503,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
-    pendingRequiredParts,
+    requiredPartLedger,
   );
   await inputs.runtime.foldImportedIdentityNodes(
     target,
@@ -1667,7 +1674,7 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: PendingRequiredParts,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
@@ -1683,7 +1690,7 @@ async function processNodes(
       result,
       errors,
       importedNodeIds,
-      pendingRequiredParts,
+      requiredPartLedger,
     );
   }
 }
@@ -1756,21 +1763,30 @@ async function processNodeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: PendingRequiredParts,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
     // A freshly created required-existence part owes a live whole before
     // this import commits — tracked here, judged by
     // `assertImportedRequiredPartsAttached` once every edge is written.
-    if (
-      outcome.status === "created" &&
-      registry.compositionExistence(node.kind) === "required"
-    ) {
-      pendingRequiredParts.set(makeNodeKey(node.kind, node.id), {
+    if (registry.compositionExistence(node.kind) !== "required") return;
+    const key = makeNodeKey(node.kind, node.id);
+    if (outcome.status === "created") {
+      requiredPartLedger.pendingParts.set(key, {
         kind: node.kind,
         id: node.id,
       });
+    } else if (
+      outcome.status === "updated" &&
+      requiredPartLedger.pendingParts.has(key)
+    ) {
+      // A later row for a part this import created: counted as an update,
+      // and taken back with the part if the part is refused.
+      requiredPartLedger.partUpdates.set(
+        key,
+        (requiredPartLedger.partUpdates.get(key) ?? 0) + 1,
+      );
     }
   };
 
@@ -2880,19 +2896,23 @@ async function processEdges(
  * step (the row was created THIS import, so `session.purgeNode`'s uniqueness
  * release and embedding cleanup are exactly what an ordinary `hardDelete`
  * would run). Its delete-behavior enforcement is explicitly turned OFF
- * (`enforceDeleteBehavior: false`): the part row was born this import, so
- * there is no pre-existing reference for `restrict` to protect —
- * `hardDeleteNode` (`src/backend/drizzle/operation-backend-core.ts`)
- * unconditionally deletes every edge connected to the node before deleting
- * the node row itself, so nothing is left dangling. Passing the default
- * policy here would let a part's ordinary edge throw `RestrictedDeleteError`
- * PAST this function, aborting the whole import instead of refusing this one
- * row.
+ * (`enforceDeleteBehavior: false`): `hardDeleteNode`
+ * (`src/backend/drizzle/operation-backend-core.ts`) unconditionally deletes
+ * every edge connected to the node before deleting the node row itself, so
+ * nothing is left dangling, and passing the default policy here would let a
+ * part's ordinary edge throw `RestrictedDeleteError` PAST this function,
+ * aborting the whole import instead of refusing this one row.
  *
- * The counts track what is committed: the purged node comes off
- * `result.nodes.created`, and each edge this import created that the purge
- * removed with it comes off `result.edges.created` and is reported as its own
- * per-row error.
+ * The part row is new, but an edge touching it need not be: an earlier load
+ * with `validateReferences: false` can have written an edge ahead of the
+ * endpoint it names. Such an edge is removed with the part like any other.
+ *
+ * The result describes what is committed. The purged node comes off
+ * `result.nodes.created`, and off `result.nodes.updated` once for each later
+ * row of this import that updated it. EVERY edge the purge removed is
+ * reported as its own per-row error, whether or not this import wrote it,
+ * and comes off `result.edges.created` / `result.edges.updated` exactly as
+ * often as this import counted it there.
  *
  * This runs AFTER `foldImportedIdentityNodes` already folded the batch's new
  * node references into identity — a purged part's identity membership is
@@ -2978,16 +2998,13 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
 ): Promise<boolean> {
   const registration = frame.graph.nodes[part.kind];
   if (registration === undefined) return false;
-  // Read BEFORE the purge, which removes them with the node: the edges this
-  // import created that are about to go.
-  const connectedEdges = await frame.target.findEdgesConnectedTo({
+  // Read BEFORE the purge, which removes them with the node: every edge
+  // touching the part, whichever import wrote it.
+  const removedEdges = await frame.target.findEdgesConnectedTo({
     graphId,
     nodeKind: part.kind,
     nodeId: part.id,
   });
-  const removedEdges = connectedEdges.filter((edge) =>
-    ledger.createdEdgeIds.has(edge.id),
-  );
   try {
     await frame.session.purgeNode(
       {
@@ -3014,9 +3031,12 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     });
     return false;
   }
+  const partKey = makeNodeKey(part.kind, part.id);
   result.nodes.created--;
-  importedNodeIds.delete(makeNodeKey(part.kind, part.id));
-  ledger.pendingParts.delete(makeNodeKey(part.kind, part.id));
+  result.nodes.updated -= ledger.partUpdates.get(partKey) ?? 0;
+  importedNodeIds.delete(partKey);
+  ledger.pendingParts.delete(partKey);
+  ledger.partUpdates.delete(partKey);
   errors.push({
     entityType: "node",
     kind: part.kind,
@@ -3028,13 +3048,22 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     }).message,
   });
   for (const edge of removedEdges) {
-    result.edges.created--;
-    ledger.createdEdgeIds.delete(edge.id);
+    const written = ledger.edgeWrites.get(edge.id);
+    result.edges.created -= written?.created ?? 0;
+    result.edges.updated -= written?.updated ?? 0;
+    ledger.edgeWrites.delete(edge.id);
+    // An edge this import never created was on the target before it ran —
+    // written ahead of its endpoint under `validateReferences: false`. It
+    // goes with the part all the same, so it is named all the same.
+    const origin =
+      (written?.created ?? 0) > 0 ?
+        ""
+      : " The edge was on the target before this import; re-import it together with the part and the part's composition edge.";
     errors.push({
       entityType: "edge",
       kind: edge.kind,
       id: edge.id,
-      error: `Edge "${edge.id}" was removed with its endpoint ${part.kind} "${part.id}", a required-existence part this import could not attach to a live whole.`,
+      error: `Edge "${edge.id}" was removed with its endpoint ${part.kind} "${part.id}", a required-existence part this import could not attach to a live whole.${origin}`,
     });
   }
   return true;
@@ -3301,13 +3330,22 @@ async function processEdgeSlice(
   pendingMatchIdentityOwners: Set<string>,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
-  // Only a graph that can purge a part ever reads the created-edge ids.
-  const tracksCreatedEdges = declaresRequiredCompositionParts(registry);
+  // Only a graph that can purge a part ever reads how its edges were counted.
+  const tracksEdgeWrites = declaresRequiredCompositionParts(registry);
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
-    if (tracksCreatedEdges && outcome.status === "created") {
-      requiredPartLedger.createdEdgeIds.add(edge.id);
+    if (
+      !tracksEdgeWrites ||
+      (outcome.status !== "created" && outcome.status !== "updated")
+    ) {
+      return;
     }
+    const counts = requiredPartLedger.edgeWrites.get(edge.id) ?? {
+      created: 0,
+      updated: 0,
+    };
+    counts[outcome.status] += 1;
+    requiredPartLedger.edgeWrites.set(edge.id, counts);
   };
 
   // The store's own in-batch cardinality accounting, constructed once per

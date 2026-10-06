@@ -57,6 +57,7 @@ export { registerIdentityImportIntegrationTests } from "./identity-import";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportDuplicateEdgeOrderIntegrationTests } from "./import-duplicate-edge-order";
+export { registerImportRequiredPartPurgeIntegrationTests } from "./import-required-part-purge";
 export { registerImportTargetCardinalityIntegrationTests } from "./import-target-cardinality";
 export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";

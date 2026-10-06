@@ -649,8 +649,15 @@ accepted when its composition edge arrives later in the SAME import (any
 batch), or when it is already attached on the target from before this import;
 otherwise it is reported as a per-row error on the node (`error` matches
 `/requires a whole/`) and its row is removed in the same transaction before
-the import commits — no orphan node row survives, and the rest of the import
-is unaffected.
+the import commits — no orphan node row survives.
+
+The refused part's row exists while the rest of the payload is processed, and
+that ordering is visible. A later row that collides with it — the same value
+under a unique constraint, an edge that takes a slot the part's edge holds —
+is refused against it and reported naming the part, and it stays refused after
+the part is removed: the import does not judge that row again. Every other row
+is unaffected. Re-running the import without the refused part (or with its
+composition edge added) accepts the rows it displaced.
 
 "Attached" is judged on the written rows, by the same reader
 `store.verifyConstraintFences()` uses, so a composition edge in the payload is
@@ -658,9 +665,13 @@ not enough on its own: an edge whose window does not attach the part (an
 ended `oneActive` window), or whose whole does not exist (possible with
 `validateReferences: false`), leaves the part refused. The check repeats until
 nothing changes, so a required part attached only to a part this import
-refuses is refused with it. Every edge removed with a refused part is
-reported as its own per-row error on the edge, and `result.nodes.created` /
-`result.edges.created` count only what was committed.
+refuses is refused with it. Removing a refused part removes every edge
+touching it, and each one is reported as its own per-row error on the edge.
+That includes an edge that was on the target before this import — one written
+ahead of the part under `validateReferences: false` — whose error says so. The
+`created` and `updated` counts of `result.nodes` and `result.edges` count only
+what was committed: a refused part, and each edge removed with it, comes off
+every count this import had added it to.
 
 With `onConflict: "update"`, a document whose `validTo` would end the open
 window of a live required part's composition edge is refused as a per-row

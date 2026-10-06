@@ -85,6 +85,7 @@ import {
   registerIdentityReplayIntegrationTests,
   registerIdentitySeparationIntegrationTests,
   registerImportDuplicateEdgeOrderIntegrationTests,
+  registerImportRequiredPartPurgeIntegrationTests,
   registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
@@ -394,6 +395,7 @@ export function createIntegrationTestSuite<
     registerGraphMergeReviewIntegrationTests(context);
     registerGraphMergeReviewV2IntegrationTests(context);
     registerImportDuplicateEdgeOrderIntegrationTests(context);
+    registerImportRequiredPartPurgeIntegrationTests(context);
     registerImportTargetCardinalityIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
