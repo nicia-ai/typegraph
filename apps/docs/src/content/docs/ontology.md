@@ -593,6 +593,36 @@ a refused property update (a unique conflict, a validation error) leaves the
 attachment and its history untouched — even for a caller that catches the
 error inside an enclosing `store.transaction(...)`.
 
+`bulkGetOrCreateByConstraint` applies the same rule to the batch as a whole.
+Before its first write it reaches, for **every** item whose constraint
+matched an existing node, each verdict a read can decide:
+
+- the attachment's own — satisfied, attach, or one of the refusals in the
+  table above, plus a dead or missing whole, a cardinality bound, and
+  acyclicity judged over all of the batch's attachments together;
+- with `ifExists: "update"` or on a resurrection, the property update's —
+  schema validation of the merged properties, and its unique keys, probed in
+  item order so a later item may take a key an earlier item of the same
+  batch gives up and is refused a key an earlier item takes;
+- for the items it will create, the refusals that need no read at all (a
+  required part with no `partOf`, an undeclared or ambiguous pair).
+
+A refusal from any of them therefore leaves no item attached, updated or
+resurrected, including when you catch it on `tx` inside
+`store.transaction(...)`. Two things remain outside that guarantee:
+
+- **A new row's own refusals.** The unmatched items are created after the
+  matched ones are written, and what only a new row's preparation can decide
+  — a second unique key it loses, or a bound on the whole's side that its
+  attachment exceeds — is raised then. Caught inside an enclosing
+  transaction, it leaves the matched items' writes in place.
+- **A concurrent writer the fence does not exclude.** A node kind whose
+  unique keys are enforced by the key itself takes no per-graph write fence,
+  so another transaction can claim a key, or remove a matched row, between
+  the batch's reads and its write. That surfaces as the same typed error
+  (`UniquenessError`, `NodeNotFoundError`) from the write, after earlier
+  items wrote.
+
 #### `existence`: a part that cannot exist without a whole
 
 `existence: "required"` on a `partOf`/`hasPart` pair says a part of that kind

@@ -158,12 +158,14 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
 import {
+  assertNodeClaimTransitionsAvailable,
   checkUniquenessConstraints,
   createUniquenessContext,
   groupNodeUniquenessProbes,
   isUniquenessClaimEntry,
   nodeClaimEntries,
   type NodeClaimItem,
+  type NodeClaimTransition,
   type NodeCreateClaimPlan,
   planNodeCreateClaims,
   probeUniqueKey,
@@ -216,6 +218,7 @@ import {
   type CreateNodeInput,
   type Edge,
   type GetOrCreateAction,
+  type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
@@ -285,6 +288,7 @@ import {
 } from "./edge-operations";
 import {
   judgeNodeDeleteBehavior,
+  nodeClaimTransition,
   type NodeDeleteMode,
   type NodeDeletePolicy,
   nodeDeletePolicyRequiresPortablePath,
@@ -3300,6 +3304,13 @@ type DecidedAttachmentMove = Readonly<{
   decided: FencedCompositionAttachment;
   /** The caller-stated move instant (`reparent`'s `at`), when there is one. */
   moveAt: string | undefined;
+  /**
+   * The part row is a tombstone that a later statement of the same frame
+   * restores (a get-or-create resurrection), so its endpoint read is skipped —
+   * the same fact the decision itself was reached under
+   * (`decideCompositionAttachmentUnderFence`'s `partRowRestoredByUpdate`).
+   */
+  partRowRestoredByUpdate: boolean;
 }>;
 
 /**
@@ -3365,7 +3376,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     );
 
   const prepared: PreparedAttachmentMove[] = [];
-  for (const { partId, decided, moveAt } of moves) {
+  for (const { partId, decided, moveAt, partRowRestoredByUpdate } of moves) {
     if (decided.disposition === "satisfied") {
       prepared.push({ partId, decided });
       continue;
@@ -3382,7 +3393,13 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
       work,
       partId,
       attachmentWindow(work, moveInstant),
-      { endpoints: { source: "read" }, validateAcyclicity: false },
+      {
+        endpoints:
+          partRowRestoredByUpdate ?
+            { source: "restoredByUpdate" }
+          : { source: "read" },
+        validateAcyclicity: false,
+      },
     );
     registerPendingEdgeForCardinality(
       replacement.insertParams,
@@ -3615,7 +3632,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
     target,
     lock,
     await prepareCompositionAttachmentMoves(ctx, target, lock, "nodes.attach", [
-      { partId, decided, moveAt },
+      { partId, decided, moveAt, partRowRestoredByUpdate: false },
     ]),
   );
   return requireDefined(
@@ -3670,16 +3687,14 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
   concreteId: string,
   request: CompositionAttachmentRequest,
 ): Promise<void> {
-  const current = await findLiveCompositionAttachment(
-    ctx.registry,
-    backend,
-    ctx.graphId,
-    concreteKind,
-    concreteId,
-  );
   if (
-    current !== undefined &&
-    incumbentSatisfiesRequestedAttachment(ctx.registry, request, current)
+    await existingPartOfPostconditionHeld(
+      ctx,
+      backend,
+      concreteKind,
+      concreteId,
+      request,
+    )
   ) {
     return;
   }
@@ -3690,6 +3705,34 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
     concreteId,
     request,
     backend,
+  );
+}
+
+/**
+ * The lock-free PRE-CHECK of {@link applyExistingPartOfPostcondition}: whether
+ * the part already holds exactly the stated attachment, read without the
+ * fence. It can only ever SKIP work — anything else escalates to the fence,
+ * which owns every refusal and every write. One spelling, read by the
+ * postcondition itself and by the batch that counts how many of its matched
+ * items still owe a write ({@link assertExistingGetOrCreateLegsApplicable}).
+ */
+async function existingPartOfPostconditionHeld<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  concreteKind: string,
+  concreteId: string,
+  request: CompositionAttachmentRequest,
+): Promise<boolean> {
+  const current = await findLiveCompositionAttachment(
+    ctx.registry,
+    backend,
+    ctx.graphId,
+    concreteKind,
+    concreteId,
+  );
+  return (
+    current !== undefined &&
+    incumbentSatisfiesRequestedAttachment(ctx.registry, request, current)
   );
 }
 
@@ -3735,6 +3778,267 @@ function createInputWithPartOf(
   partOf: CompositionAttachment | undefined,
 ): CreateNodeInput {
   return { kind, props, ...(partOf === undefined ? {} : { partOf }) };
+}
+
+/**
+ * What a `getOrCreateByConstraint` call owes a constraint match that resolved
+ * to an EXISTING row — the one decision the single-item entry, the bulk entry
+ * and the bulk entry's preflight all read, so none can classify a row
+ * differently from the write that follows:
+ *
+ * - `"found"` — the row is live and the caller did not ask to update it. It
+ *   is returned as it is; a stated `partOf` is discharged as a postcondition
+ *   ({@link applyExistingPartOfPostcondition}).
+ * - `"revise"` — the row is a tombstone (`restoresRow`), or `ifExists:
+ *   "update"` asked for the properties to be written. The attachment and the
+ *   property update land in ONE write plan ({@link executeNodeUpsertUpdate}),
+ *   so an update this row refuses leaves ownership untouched.
+ *
+ * `request` is resolved against the EXISTING row's own kind and id, never the
+ * requested kind — a subclass scope can match (and resurrect) under a
+ * sibling/parent kind — and unconditionally on a restoring leg, which brings
+ * the part back alone and owes the same required-existence refusal a fresh
+ * create owes. `undefined` means the leg owes no attachment.
+ */
+type ExistingGetOrCreateLeg =
+  | Readonly<{
+      leg: "found";
+      request: CompositionAttachmentRequest | undefined;
+    }>
+  | Readonly<{
+      leg: "revise";
+      restoresRow: boolean;
+      request: CompositionAttachmentRequest | undefined;
+    }>;
+
+function resolveExistingGetOrCreateLeg<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  existing: BackendNodeRow,
+  options: Readonly<{
+    ifExists: IfExistsMode;
+    partOf: CompositionAttachment | undefined;
+  }>,
+): ExistingGetOrCreateLeg {
+  const restoresRow = existing.deleted_at !== undefined;
+  const resolveRequest = (): CompositionAttachmentRequest | undefined =>
+    resolveGetOrCreateAttachmentRequest(
+      ctx,
+      existing.kind,
+      existing.id,
+      options.partOf,
+    );
+  if (restoresRow || options.ifExists === "update") {
+    return {
+      leg: "revise",
+      restoresRow,
+      request:
+        restoresRow || options.partOf !== undefined ?
+          resolveRequest()
+        : undefined,
+    };
+  }
+  return {
+    leg: "found",
+    request: options.partOf === undefined ? undefined : resolveRequest(),
+  };
+}
+
+/** One constraint match on an existing row, with the leg it resolved to. */
+type ExistingGetOrCreateMatch = Readonly<{
+  existing: BackendNodeRow;
+  validatedProps: Record<string, unknown>;
+  leg: ExistingGetOrCreateLeg;
+}>;
+
+/**
+ * The WRITE of one existing-row leg, in its own write plan — every refusal
+ * the leg can reach precedes its own first statement
+ * ({@link executeNodeUpsertUpdate}, {@link applyExistingPartOfPostcondition}).
+ */
+async function applyExistingGetOrCreateLeg<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  match: ExistingGetOrCreateMatch,
+): Promise<Readonly<{ node: Node; action: GetOrCreateAction }>> {
+  const { existing, validatedProps, leg } = match;
+  if (leg.leg === "found") {
+    if (leg.request !== undefined) {
+      await applyExistingPartOfPostcondition(
+        ctx,
+        backend,
+        existing.kind,
+        existing.id,
+        leg.request,
+      );
+    }
+    return { node: rowToNode(existing), action: "found" };
+  }
+  const node = await executeNodeUpsertUpdate(
+    ctx,
+    {
+      kind: existing.kind,
+      id: existing.id as UpdateNodeInput["id"],
+      props: validatedProps,
+    },
+    backend,
+    {
+      clearDeleted: leg.restoresRow,
+      ...(leg.request === undefined ?
+        {}
+      : { compositionAttachment: leg.request }),
+    },
+  );
+  return { node, action: leg.restoresRow ? "resurrected" : "updated" };
+}
+
+/**
+ * The READ half of a BATCH of existing-row legs: every refusal any of them
+ * can reach by reading, under the fence, before the batch's first statement.
+ *
+ * Each leg runs in its own write plan ({@link applyExistingGetOrCreateLeg})
+ * and orders its own reads before its own writes, which is enough for one
+ * leg and not for several: on a caller's enclosing `store.transaction(...)`
+ * there is no nested frame to roll back, so a leg refused after an earlier
+ * leg wrote would leave that earlier attachment, update or resurrection
+ * committed with a batch that threw. This frame is what makes the batch
+ * all-or-nothing there — it writes nothing, and the legs that follow it
+ * re-reach, on the same transaction and under the same fence, verdicts this
+ * frame already passed.
+ *
+ * The set is judged as the state the batch produces, by the owners each leg
+ * itself decides through:
+ *
+ * - every stated attachment is DECIDED
+ *   ({@link decideCompositionAttachmentUnderFence}: satisfied, attach, or the
+ *   refusal for a different whole, a different realizing edge, differing
+ *   `props` or window, a dead whole) and the attachments PREPARED together
+ *   ({@link prepareCompositionAttachmentMoves}: part liveness, cardinality
+ *   counting the batch's earlier edges, and one acyclicity probe over all of
+ *   them);
+ * - a restoring leg that states no attachment may only bring back a part
+ *   that still holds a live whole
+ *   ({@link assertRestoredRequiredPartsAttached});
+ * - every property update is validated against the row it will merge over
+ *   ({@link resolveNodeUpdateProps}) and its uniqueness claims probed in
+ *   order, a later row seeing the keys an earlier row gives up or takes
+ *   ({@link assertNodeClaimTransitionsAvailable}).
+ *
+ * What no read can decide stays with the write: a peer that is not excluded
+ * by the fence (a kind whose unique keys are enforced by the claim row's
+ * primary key alone takes none) can still claim a key, or remove a row,
+ * between this frame and a leg's statement.
+ *
+ * A batch in which at most one item owes a write needs none of this: that
+ * leg's own frame already reaches every verdict before its first statement,
+ * and the items that owe nothing stay read-only.
+ */
+async function assertExistingGetOrCreateLegsApplicable<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  matches: readonly ExistingGetOrCreateMatch[],
+): Promise<void> {
+  const owed: ExistingGetOrCreateMatch[] = [];
+  for (const match of matches) {
+    const { existing, leg } = match;
+    if (
+      leg.leg === "found" &&
+      (leg.request === undefined ||
+        (await existingPartOfPostconditionHeld(
+          ctx,
+          backend,
+          existing.kind,
+          existing.id,
+          leg.request,
+        )))
+    ) {
+      continue;
+    }
+    owed.push(match);
+  }
+  if (owed.length < 2) return;
+
+  const revisions = owed.flatMap((match) =>
+    match.leg.leg === "revise" ? [{ ...match, leg: match.leg }] : [],
+  );
+  await runWritePlan(
+    nodeWritePlanContext(ctx),
+    mixedBatchWritePlan(
+      [
+        ...revisions.map(({ existing }) =>
+          nodeFencesConstraintProbe(ctx, existing.kind, "update"),
+        ),
+        ...owed.map(({ leg }) =>
+          leg.request === undefined ?
+            undefined
+          : compositionEdgeConstraintFence(ctx, leg.request.work),
+        ),
+      ],
+      revisions.some(({ leg }) => leg.restoresRow) &&
+        nodeRequiresIdentityLock(ctx),
+    ),
+    backend,
+    async (_session, target, _overlaidSession, lock) => {
+      await assertRestoredRequiredPartsAttached(
+        { graphId: ctx.graphId, registry: ctx.registry, lock },
+        target,
+        revisions
+          .filter(({ leg }) => leg.restoresRow && leg.request === undefined)
+          .map(({ existing }) => ({ kind: existing.kind, id: existing.id })),
+      );
+
+      const moves: DecidedAttachmentMove[] = [];
+      const transitions: NodeClaimTransition[] = [];
+      for (const { existing, validatedProps, leg } of owed) {
+        const { kind, id } = existing;
+        // Re-read under the lock: the row the leg was resolved from was read
+        // lock-free.
+        const current = await target.getNode(ctx.graphId, kind, id);
+        const restoresRow = leg.leg === "revise" && leg.restoresRow;
+        if (current === undefined || (!restoresRow && !isLiveNodeRow(current)))
+          throw new NodeNotFoundError(kind, id);
+        if (leg.request !== undefined) {
+          moves.push({
+            partId: id,
+            moveAt: undefined,
+            partRowRestoredByUpdate: restoresRow,
+            decided: await decideCompositionAttachmentUnderFence(
+              ctx.registry,
+              target,
+              ctx.graphId,
+              id,
+              leg.request,
+              lock,
+              { partRowRestoredByUpdate: restoresRow },
+            ),
+          });
+        }
+        if (leg.leg === "revise") {
+          const { registration, validatedProps: nextProps } =
+            resolveNodeUpdateProps(ctx, current, validatedProps);
+          transitions.push(
+            nodeClaimTransition(current, nextProps, registration.unique ?? []),
+          );
+        }
+      }
+      await prepareCompositionAttachmentMoves(
+        ctx,
+        target,
+        lock,
+        "nodes.bulkGetOrCreateByConstraint",
+        moves,
+      );
+      await assertNodeClaimTransitionsAvailable(
+        createUniquenessContext(
+          ctx.graphId,
+          ctx.registry,
+          target,
+          ctx.uniqueSidecarBatch,
+        ),
+        transitions,
+      );
+    },
+    { didWrite: () => false },
+  );
 }
 
 // ============================================================
@@ -3914,6 +4218,7 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
         decisions.push({
           partId: item.id,
           moveAt: item.moveAt,
+          partRowRestoredByUpdate: false,
           decided: await decideCompositionAttachmentUnderFence(
             ctx.registry,
             target,
@@ -6364,65 +6669,14 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
       return { node, action: "created" };
     }
 
-    const isSoftDeleted = existingRow.deleted_at !== undefined;
-
-    if (isSoftDeleted || ifExists === "update") {
-      const concreteKind = existingUniqueRow.concrete_kind;
-      // ONE write plan for this leg: the attachment and the property update
-      // land in the SAME transaction, so an update this row refuses (a unique
-      // conflict, a validation error) leaves ownership and history untouched
-      // instead of committing a move whose reason never applied. Resolved
-      // against the EXISTING row's own kind/id, never against `kind` as
-      // requested — a subclass scope can match (and resurrect) under a
-      // sibling/parent kind — and resolved unconditionally on the
-      // resurrection leg, which restores the whole alone and owes the
-      // same required-existence refusal a fresh create owes.
-      const compositionAttachment =
-        isSoftDeleted || partOf !== undefined ?
-          resolveGetOrCreateAttachmentRequest(
-            ctx,
-            concreteKind,
-            existingRow.id,
-            partOf,
-          )
-        : undefined;
-      const node = await executeNodeUpsertUpdate(
-        ctx,
-        {
-          kind: concreteKind,
-          id: existingRow.id as UpdateNodeInput["id"],
-          props: validatedProps,
-        },
-        backend,
-        {
-          clearDeleted: isSoftDeleted,
-          ...(compositionAttachment === undefined ?
-            {}
-          : { compositionAttachment }),
-        },
-      );
-      return { node, action: isSoftDeleted ? "resurrected" : "updated" };
-    }
-
-    if (partOf !== undefined) {
-      const request = resolveGetOrCreateAttachmentRequest(
-        ctx,
-        existingUniqueRow.concrete_kind,
-        existingRow.id,
+    return applyExistingGetOrCreateLeg(ctx, backend, {
+      existing: existingRow,
+      validatedProps,
+      leg: resolveExistingGetOrCreateLeg(ctx, existingRow, {
+        ifExists,
         partOf,
-      );
-      if (request !== undefined) {
-        await applyExistingPartOfPostcondition(
-          ctx,
-          backend,
-          existingUniqueRow.concrete_kind,
-          existingRow.id,
-          request,
-        );
-      }
-    }
-
-    return { node: rowToNode(existingRow), action: "found" };
+      }),
+    });
   }
 
   try {
@@ -7043,7 +7297,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
   type Result = Readonly<{ node: Node; action: GetOrCreateAction }>;
 
-  // Steps 2-6 are one convergence attempt: the batch probe runs outside any
+  // Steps 2-7 are one convergence attempt: the batch probe runs outside any
   // transaction and each write leg opens its own, so a concurrent create can
   // reserve a key between them. The uniques primary key catches that and raises
   // `UniquenessError`; re-running the whole attempt converges on the winner's
@@ -7117,99 +7371,57 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
     const results: Result[] = Array.from({ length: items.length });
 
-    // Step 4: Handle existing nodes (fetch/update/resurrect)
-    for (const entry of toFetch) {
-      const { index, concreteKind, validatedProps, nodeId } = entry;
-
-      const existingRow = await backend.getNode(
-        ctx.graphId,
-        concreteKind,
-        nodeId,
-      );
-
-      if (existingRow === undefined) {
-        const node = await executeNodeCreate(
-          ctx,
-          createInputWithPartOf(kind, validatedProps, partOf),
-          backend,
-          { propsPreValidated: true },
-        );
-        results[index] = { node, action: "created" };
+    // Step 4: Resolve every matched row to the leg it owes, writing nothing.
+    //
+    // The leg is read from the NODE ROW fetched here, not from the uniques
+    // row the batch probe captured in step 2 — one decision, one owner
+    // (`resolveExistingGetOrCreateLeg`), shared with the single-item path.
+    // A match whose node row is gone joins the creates.
+    const matches: (ExistingGetOrCreateMatch & { index: number })[] = [];
+    for (const { index, concreteKind, validatedProps, nodeId } of toFetch) {
+      const existing = await backend.getNode(ctx.graphId, concreteKind, nodeId);
+      if (existing === undefined) {
+        toCreate.push({
+          index,
+          input: createInputWithPartOf(kind, validatedProps, partOf),
+        });
         continue;
       }
+      matches.push({
+        index,
+        existing,
+        validatedProps,
+        leg: resolveExistingGetOrCreateLeg(ctx, existing, { ifExists, partOf }),
+      });
+    }
+    const createInputs = toCreate.map((entry) => entry.input);
+    // The creates' read-free refusals (a required part with no `partOf`, an
+    // undeclared or ambiguous pair) are reached here, before any matched item
+    // writes, rather than when the create batch runs in step 6.
+    resolveBatchCompositionWorks(ctx, createInputs, backend);
 
-      // Read from the NODE ROW this loop just fetched, not from the uniques row
-      // the batch probe captured back in step 2 — the single-item path has
-      // always derived it here (see `executeNodeGetOrCreateByConstraint`), and
-      // one decision with two owners drifts. The uniques copy is also the
-      // staler of the two: the earlier items of this loop run between the probe
-      // and this read, and a peer can soft-delete or resurrect the node in
-      // that window.
-      // Whether this write RESURRECTS has to come from the row it will target.
-      const isSoftDeleted = existingRow.deleted_at !== undefined;
-
-      if (isSoftDeleted || ifExists === "update") {
-        // One write plan per item, attachment and property update together —
-        // see the single-item path's identical reasoning.
-        const compositionAttachment =
-          isSoftDeleted || partOf !== undefined ?
-            resolveGetOrCreateAttachmentRequest(
-              ctx,
-              concreteKind,
-              existingRow.id,
-              partOf,
-            )
-          : undefined;
-        const node = await executeNodeUpsertUpdate(
-          ctx,
-          {
-            kind: concreteKind,
-            id: existingRow.id as UpdateNodeInput["id"],
-            props: validatedProps,
-          },
-          backend,
-          {
-            clearDeleted: isSoftDeleted,
-            ...(compositionAttachment === undefined ?
-              {}
-            : { compositionAttachment }),
-          },
-        );
-        results[index] = {
-          node,
-          action: isSoftDeleted ? "resurrected" : "updated",
-        };
-      } else {
-        if (partOf !== undefined) {
-          const request = resolveGetOrCreateAttachmentRequest(
-            ctx,
-            concreteKind,
-            existingRow.id,
-            partOf,
-          );
-          if (request !== undefined) {
-            await applyExistingPartOfPostcondition(
-              ctx,
-              backend,
-              concreteKind,
-              existingRow.id,
-              request,
-            );
-          }
-        }
-        results[index] = { node: rowToNode(existingRow), action: "found" };
-      }
+    // Step 5: Reach every matched item's verdict, then write the matched
+    // items. See `assertExistingGetOrCreateLegsApplicable` for why the
+    // verdicts of the whole set precede the first write.
+    await assertExistingGetOrCreateLegsApplicable(ctx, backend, matches);
+    for (const match of matches) {
+      results[match.index] = await applyExistingGetOrCreateLeg(
+        ctx,
+        backend,
+        match,
+      );
     }
 
-    // Step 5: Execute creates
+    // Step 6: Execute creates
     //
-    // After the matched items on purpose: every refusal a matched item can
-    // reach (a held whole that differs from the stated one, a stated window or
-    // props the held attachment contradicts) must precede the first row this
-    // call writes, or a caller catching it inside an enclosing
-    // `store.transaction(...)` keeps the created parts of a batch that threw.
-    if (toCreate.length > 0) {
-      const createInputs = toCreate.map((entry) => entry.input);
+    // After the matched items on purpose: a matched item's refusal must
+    // precede the first row this call writes, or a caller catching it inside
+    // an enclosing `store.transaction(...)` keeps the created parts of a batch
+    // that threw. The converse does not hold — a NEW row's own refusal that
+    // only its preparation can reach (a second unique key it loses, a bound on
+    // the whole's side its edge exceeds) is raised here, after the matched
+    // items wrote.
+    if (createInputs.length > 0) {
       const createdNodes = await executeNodeCreateBatch(
         ctx,
         createInputs,
@@ -7224,11 +7436,11 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       }
     }
 
-    // Step 6: Resolve within-batch duplicates by copying the first occurrence's result.
+    // Step 7: Resolve within-batch duplicates by copying the first occurrence's result.
     //
     // No `partOf` postcondition call belongs here. A duplicate resolves to
     // the SAME node as its source, and the source already had the
-    // postcondition discharged: steps 4/5 either wrote the attachment with
+    // postcondition discharged: steps 5/6 either wrote the attachment with
     // the row (`"created"`, `resolveCompositionCreate`'s work), inside the
     // row's own write plan (`"resurrected"`/`"updated"`,
     // `resolveGetOrCreateAttachmentRequest`'s fenced request), or ran
