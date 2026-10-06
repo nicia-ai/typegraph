@@ -2097,7 +2097,7 @@ async function processNodeSlice(
             validatedProps: props,
             uniqueConstraints,
             windowFence: updateWindow.value,
-            applyNodeWindowEnd: frame.applyNodeWindowEnd,
+            windowEndFrame: frame,
           });
           if (updateError === undefined) {
             // The update mutated the real backend's uniqueness rows directly;
@@ -2434,6 +2434,69 @@ async function catchEdgeCreateRefusalWithSavepoint<T>(
 const NODE_UPDATE_TARGET_CHANGED_CODE =
   "INTERCHANGE_NODE_UPDATE_TARGET_CHANGED";
 
+/** The slice of an import write frame a node update that states `validTo` reads. */
+type NodeWindowEndFrame = Pick<
+  ImportWriteFrame,
+  | "target"
+  | "allocateEdgeSavepoint"
+  | "transactionMode"
+  | "statementExecution"
+  | "applyNodeWindowEnd"
+>;
+
+/**
+ * Runs one node update's row write under the identity half of the window end
+ * its document states, so the two stand or fall together.
+ *
+ * The identity half runs first, as every store update runs it: a `validTo` may
+ * not end a node's window under an identity assertion that would outlive it,
+ * and an end that does land is a membership boundary the transition log
+ * records. A store update that refuses aborts its transaction, taking that
+ * note with it. An import row that refuses is a per-row error and the
+ * transaction goes on, so a row that states an end and then fails (a
+ * uniqueness refusal the row's own claim raises, a target that changed) would
+ * otherwise leave a `window-end` transition for an end that never landed. The
+ * pair therefore runs behind a savepoint, which restores the recorded state it
+ * noted along with the SQL.
+ *
+ * A row that states no end has no identity half and takes no savepoint. Where
+ * the target takes none either (no transaction, or no raw statement member)
+ * the pair runs unguarded; no transaction means no recorded capture to leave a
+ * note in.
+ */
+async function updateNodeUnderWindowEnd(
+  frame: NodeWindowEndFrame,
+  node: InterchangeNode,
+  write: () => Promise<string | undefined>,
+): Promise<string | undefined> {
+  const applyWindowEnd = (): Promise<void> =>
+    frame.applyNodeWindowEnd({
+      kind: node.kind,
+      id: node.id,
+      ...(node.validTo !== undefined && { validTo: node.validTo }),
+    });
+  if (
+    node.validTo === undefined ||
+    frame.transactionMode === "none" ||
+    !frame.statementExecution.supported
+  ) {
+    await applyWindowEnd();
+    return write();
+  }
+  return runRecordedTransactionSavepoint<string | undefined>(
+    frame.target,
+    frame.statementExecution,
+    frame.allocateEdgeSavepoint(),
+    async () => {
+      await applyWindowEnd();
+      const rowError = await write();
+      return rowError === undefined ?
+          { action: "release", value: undefined }
+        : { action: "rollback", value: rowError, cause: new Error(rowError) };
+    },
+  );
+}
+
 /**
  * Updates an existing node under the effective validity lower bound this import
  * checked it carries, and reports a write that landed on nothing as a per-row
@@ -2470,20 +2533,10 @@ async function updateImportedNode(
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     windowFence: ValidityLowerBoundFence;
-    applyNodeWindowEnd: ImportWriteFrame["applyNodeWindowEnd"];
+    windowEndFrame: NodeWindowEndFrame;
   }>,
 ): Promise<string | undefined> {
   try {
-    // Before the row write, as every store update does it: a document's
-    // `validTo` may not end a node's window under an identity assertion that
-    // would outlive it, and an end that does land is a membership boundary
-    // the transition log records. Read-only up to its own note, so a refusal
-    // leaves the row and the transaction untouched.
-    await args.applyNodeWindowEnd({
-      kind: node.kind,
-      id: node.id,
-      ...(node.validTo !== undefined && { validTo: node.validTo }),
-    });
     // The widened guard wraps a WRITE here, not a probe, so what it recovers
     // from is worth stating: `reviseNode` raises neither a `DisjointError` nor a
     // `CardinalityError` — an in-place update cannot change a node's kind, so it
@@ -2491,23 +2544,29 @@ async function updateImportedNode(
     // path's claim set carries uniqueness entries only. Widening the guard
     // therefore changes nothing here today; it is listed because a changed
     // contract re-audits its consumers.
-    const result = await catchDeclaredConstraintRefusal(() =>
-      // The fence is an ARGUMENT the method requires, not a spread the call
-      // site may forget: the guard's verdict travels to the statement that
-      // honors it, and an empty fence (`{}`) is the stated decision to assert
-      // nothing rather than an omission.
-      session.reviseNode(
-        {
-          existing: args.existing,
-          schema: args.schema,
-          validatedProps: args.validatedProps,
-          uniqueConstraints: args.uniqueConstraints,
-          ...(node.validTo !== undefined && { validTo: node.validTo }),
-        },
-        { validityLowerBound: args.windowFence },
-      ),
+    return await updateNodeUnderWindowEnd(
+      args.windowEndFrame,
+      node,
+      async () => {
+        const result = await catchDeclaredConstraintRefusal(() =>
+          // The fence is an ARGUMENT the method requires, not a spread the call
+          // site may forget: the guard's verdict travels to the statement that
+          // honors it, and an empty fence (`{}`) is the stated decision to
+          // assert nothing rather than an omission.
+          session.reviseNode(
+            {
+              existing: args.existing,
+              schema: args.schema,
+              validatedProps: args.validatedProps,
+              uniqueConstraints: args.uniqueConstraints,
+              ...(node.validTo !== undefined && { validTo: node.validTo }),
+            },
+            { validityLowerBound: args.windowFence },
+          ),
+        );
+        return result.ok ? undefined : result.error;
+      },
     );
-    return result.ok ? undefined : result.error;
   } catch (error) {
     if (error instanceof IdentityEndpointValidityError) return error.message;
     if (
@@ -2969,7 +3028,7 @@ async function processNode(
           validatedProps: propsResult.data,
           uniqueConstraints,
           windowFence: updateWindow.value,
-          applyNodeWindowEnd: frame.applyNodeWindowEnd,
+          windowEndFrame: frame,
         });
         if (updateError !== undefined) {
           return { status: "error", error: updateError };

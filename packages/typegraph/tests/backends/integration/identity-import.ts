@@ -262,6 +262,78 @@ export function registerIdentityImportIntegrationTests(
         expect(await store.identity.assertionsOf(a)).toHaveLength(1);
       });
 
+      it("records no window-end transition for a row the import then refuses", async () => {
+        const UniquePerson = defineNode("Person", {
+          schema: z.object({ name: z.string() }),
+        });
+        const store = await context.createHistoryStore(
+          defineGraph({
+            id: "identity_import_window_end_refused_row",
+            nodes: {
+              Person: {
+                type: UniquePerson,
+                unique: [
+                  {
+                    name: "iwe_person_name",
+                    fields: ["name"],
+                    scope: "kind",
+                    collation: "binary",
+                  },
+                ],
+              },
+              Author: { type: InterchangeAuthor },
+            },
+            edges: {},
+            identity: { sameIdAcrossKinds: "fold" },
+          }),
+        );
+        await store.nodes.Person.create({ name: "S" }, { id: "shared" });
+        await store.nodes.Author.create({ penName: "S" }, { id: "shared" });
+
+        // The first row reserves "Dup", so the second row's update, which also
+        // states a window end for a fold-class member, is refused on its own
+        // claim after the end was decided.
+        const result = await importGraph(
+          store,
+          {
+            formatVersion: FORMAT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: { type: "external" as const },
+            nodes: [
+              { kind: "Person", id: "fresh", properties: { name: "Dup" } },
+              {
+                kind: "Person",
+                id: "shared",
+                properties: { name: "Dup" },
+                validTo: isoAt(24 * HOUR_MS),
+              },
+            ],
+            edges: [],
+          },
+          { onConflict: "update" },
+        );
+        const history = await store.identity.transitionsOf({
+          kind: "Author",
+          id: "shared",
+        });
+        const causes = history.transitions.map(
+          (transition) => transition.cause,
+        );
+        console.info("refused-row import", {
+          nodes: result.nodes,
+          errors: result.errors,
+          causes,
+        });
+
+        expect(result.nodes).toEqual({ created: 1, updated: 0, skipped: 0 });
+        expect(result.errors).toEqual([
+          matchingObject({ entityType: "node", kind: "Person", id: "shared" }),
+        ]);
+        expect(causes).not.toContain("window-end");
+        const stored = await store.nodes.Person.getById("shared" as never);
+        expect(stored?.meta.validTo).toBeUndefined();
+      });
+
       it("records the window-end transition the store update records", async () => {
         const viaStore = await windowEndTransitions(
           context,

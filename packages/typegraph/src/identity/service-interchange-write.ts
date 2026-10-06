@@ -519,6 +519,31 @@ function transitionShapeError(
 }
 
 /**
+ * Reads {@link IdentityRestoreBaseline} off `target`. THE one decision of
+ * whether a destination is fresh, taken once per import — at the start of
+ * `importGraph`'s transaction, and before the first chunk of
+ * `importGraphStream` — so both restore the same archive to the same
+ * watermark.
+ */
+export async function readIdentityRestoreBaseline(
+  ctx: IdentityTransitionImportContext,
+  target: IdentityTarget,
+): Promise<IdentityRestoreBaseline> {
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => ({
+    floorRevision: await readNextRecordedRevision(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    ),
+    hasOwnHistory: await hasNativeIdentityTransitions(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    ),
+  }));
+}
+
+/**
  * Restores archival transition-log rows verbatim — no closure repair, no
  * re-derived membership, no renumbering onto the destination graph's live
  * revision sequence, because a restore records history, it does not relive
@@ -546,8 +571,9 @@ function transitionShapeError(
  * ({@link readIdentityRestoreBaseline}): probing here instead would answer
  * about a graph the import itself has already written to, and a streamed
  * import — whose node and assertion chunks commit their own transitions
- * before this one runs — would never find its destination fresh. Advancing it unconditionally (the original design here) would, for a
- * graph that already has its own retained history, stamp a
+ * before this one runs — would never find its destination fresh. Advancing it
+ * unconditionally (the original design here) would, for a graph that already
+ * has its own retained history, stamp a
  * destination-clock-derived floor over transitions the restore never
  * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
  * for classes the restore had nothing to do with. A graph with no native
@@ -561,31 +587,6 @@ function transitionShapeError(
  * uses, so a graph that later restores again can only raise its own floor,
  * never lower it.
  */
-/**
- * Reads {@link IdentityRestoreBaseline} off `target`. THE one decision of
- * whether a destination is fresh, taken once per import — at the start of
- * `importGraph`'s transaction, and before the first chunk of
- * `importGraphStream` — so both restore the same archive to the same
- * watermark.
- */
-export async function readIdentityRestoreBaseline(
-  ctx: IdentityTransitionImportContext,
-  target: IdentityTarget,
-): Promise<IdentityRestoreBaseline> {
-  return withRecordedIdentityMutationTarget(target, async (rawTarget) => ({
-    floorRevision: await readNextRecordedRevision(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-    ),
-    hasOwnHistory: await hasNativeIdentityTransitions(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-    ),
-  }));
-}
-
 export async function importIdentityTransitionsIntoTarget(
   ctx: IdentityTransitionImportContext,
   target: IdentityTarget,

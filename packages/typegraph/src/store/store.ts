@@ -7473,14 +7473,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ) => this.#withBulkOperationHooks(ctx, fn);
   }
 
-  /**
-   * `receiptRecorders` is the CHAIN of receipts a write through the
-   * collections built from this context belongs to: the enclosing
-   * transaction's recorder, plus one per `tx.measure(...)` scope the
-   * collections were built for (see {@link #attachMeasure}). Empty outside a
-   * receipt-tracked transaction, which is what leaves `recordCascadedParts`
-   * absent there.
-   */
   /** The one binding of the node window-end identity hook to this graph. */
   readonly #requireValidityEndCompatible = (
     target: IdentityTarget,
@@ -7508,6 +7500,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         };
   }
 
+  /**
+   * `receiptRecorders` is the CHAIN of receipts a write through the
+   * collections built from this context belongs to: the enclosing
+   * transaction's recorder, plus one per `tx.measure(...)` scope the
+   * collections were built for (see {@link #attachMeasure}). Empty outside a
+   * receipt-tracked transaction, which is what leaves `recordCascadedParts`
+   * absent there.
+   */
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
