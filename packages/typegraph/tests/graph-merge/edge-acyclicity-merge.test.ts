@@ -12,13 +12,10 @@
  * repoint + dedupe, so a repointed id is already the survivor by the time
  * this reads it), resolved to their FINAL `(kind, id)` via
  * `finalEdgeEndpoint`. It calls `readProposedEdgeAcyclicityViolations`, the
- * lock-free preview built on the SAME `assertEdgeRelationsAcyclic` /
- * `buildEdgeAcyclicityProbe` SQL the write path uses. This is the ONE caller
- * that passes the `"planned"` seed form (the seed-hop through the
- * plan's own not-yet-committed rows, `src/store/recursive-cte.ts`) — every
- * real write path passes `"proposed"` instead, which has no seed-hop and
- * joins `typegraph_edges` directly — so a
- * plan-time verdict and an eventual write verdict can never disagree.
+ * lock-free preview built on the SAME `buildEdgeAcyclicityProbe` SQL and the
+ * same in-memory cycle search a batch write's own pre-write check uses, so a
+ * plan-time verdict and an eventual write verdict can never disagree. The
+ * edges the plan itself deletes are left out of the walk.
  *
  * `resolveMerge` is shared by every entry point (`merge`, `mergeAgainstBase`,
  * `planMerge`, `planMergeIncremental`, `mergeIncremental`), so the check
@@ -37,14 +34,13 @@
  * `tests/backends/integration/edge-acyclicity.ts` ("refuses an in-batch
  * cycle in bulkCreate with zero rows committed").
  *
- * Mutation check: changing
- * `readProposedEdgeAcyclicityViolations`'s probe call (src/store/acyclicity.ts)
- * from `kind: "planned"` back to `kind: "proposed"` — which has no seed-hop
- * — makes `planMerge()` resolve `ok` for the purely-proposed cycle in case
- * (a) below instead of refusing — the plan "passes" — and a subsequent
- * `applyMergePlan()`-equivalent write then refuses via the unchanged
- * apply-time path (`MergeConstraintConflictError` / `EdgeAcyclicityError`),
- * never committing the cycle.
+ * Mutation check: making `readProposedEdgeAcyclicityViolations`
+ * (src/store/acyclicity.ts) report only rows whose own `to` already reaches
+ * their own `from` over stored edges makes `planMerge()` resolve `ok` for the
+ * purely-proposed cycle in case (a) below instead of refusing — the plan
+ * "passes" — and a subsequent `applyMergePlan()`-equivalent write then
+ * refuses via the unchanged apply-time path (`MergeConstraintConflictError`
+ * / `EdgeAcyclicityError`), never committing the cycle.
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
@@ -279,6 +275,75 @@ describe.each(backendMatrix())(
       expect(remaining).toEqual([]);
       const remainingNodes = await target.nodes.Task.find({});
       expect(remainingNodes.map((node) => node.id)).toEqual(["hub"]);
+    });
+
+    // The plan removes an edge and adds its reverse. Apply deletes before it
+    // writes, so the result is a DAG; the preview must judge that result, not
+    // the new edge layered onto the row the same plan removes.
+    //
+    // MUTATION CHECK (both cases): not passing the plan's edge deletions to
+    // `readProposedEdgeAcyclicityViolations` in
+    // `assertResolvedPlanEdgesAcyclic` refuses each with
+    // AcyclicityMergeConflictError — verified and reverted.
+    it("(c) merges a branch that reverses an edge of an acyclic relation", async () => {
+      const target = await makeTarget();
+      await target.nodes.Task.create({ key: "a" }, { id: "a" });
+      await target.nodes.Task.create({ key: "b" }, { id: "b" });
+      const forward = await target.edges.dependsOn.create(
+        { kind: "Task", id: "a" },
+        { kind: "Task", id: "b" },
+        {},
+        { id: "ab" },
+      );
+
+      const reversal = await makeBranch(target, "reversal");
+      await reversal.store.edges.dependsOn.delete(forward.id);
+      await reversal.store.edges.dependsOn.create(
+        { kind: "Task", id: "b" },
+        { kind: "Task", id: "a" },
+        {},
+        { id: "ba" },
+      );
+
+      expect(isErr(await planMerge(target, [reversal]))).toBe(false);
+      expect(isErr(await merge(target, [reversal]))).toBe(false);
+
+      const stored = await target.edges.dependsOn.find({});
+      expect(stored.map((edge) => edge.id)).toEqual(["ba"]);
+      expect(await target.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("(c) merges a branch that re-roots a chain of an acyclic relation", async () => {
+      const target = await makeTarget();
+      for (const id of ["a", "b", "c"]) {
+        await target.nodes.Task.create({ key: id }, { id });
+      }
+      await target.edges.dependsOn.create(
+        { kind: "Task", id: "a" },
+        { kind: "Task", id: "b" },
+        {},
+        { id: "ab" },
+      );
+      const tail = await target.edges.dependsOn.create(
+        { kind: "Task", id: "b" },
+        { kind: "Task", id: "c" },
+        {},
+        { id: "bc" },
+      );
+
+      const reroot = await makeBranch(target, "reroot");
+      await reroot.store.edges.dependsOn.delete(tail.id);
+      await reroot.store.edges.dependsOn.create(
+        { kind: "Task", id: "c" },
+        { kind: "Task", id: "a" },
+        {},
+        { id: "ca" },
+      );
+
+      expect(isErr(await merge(target, [reroot]))).toBe(false);
+
+      const stored = await target.edges.dependsOn.find({});
+      expect(stored.map((edge) => edge.id).toSorted()).toEqual(["ab", "ca"]);
     });
   },
 );

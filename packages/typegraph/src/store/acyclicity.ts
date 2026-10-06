@@ -30,12 +30,14 @@ import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-tra
 import { assertFencedSnapshotIsFresh } from "../backend/command-contract";
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { EdgeAcyclicityError } from "../errors";
+import { ConfigurationError, EdgeAcyclicityError } from "../errors";
 import { EdgeAcyclicityIndeterminateError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { type DialectAdapter } from "../query/dialect/types";
+import { countSqlParameters, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
+import { chunk } from "../utils/array";
 import { compareStrings } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 import { isStatementCutShortError } from "../utils/sql-errors";
@@ -46,6 +48,8 @@ import {
 import { compositionCountsEndedRows } from "./claims/composition-claims";
 import { type GraphWriteLock } from "./recorded-capture/clock";
 import {
+  ACYCLICITY_SEED_ROW_PARAM_COUNT,
+  ACYCLICITY_TARGET_ROW_PARAM_COUNT,
   type AcyclicityProbeSeed,
   buildEdgeAcyclicityProbe,
 } from "./recursive-cte";
@@ -403,6 +407,165 @@ export type AcyclicityAuditContext = Omit<
   "lock" | "graph"
 >;
 
+function acyclicityProbeStatement(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  seed: AcyclicityProbeSeed,
+  excludedEdgeIds: readonly string[],
+): SqlFragment {
+  return buildEdgeAcyclicityProbe({
+    graphId: ctx.graphId,
+    members: relation.members,
+    seed,
+    dialect: ctx.dialect,
+    schema: ctx.schema,
+    recursiveTraversal: resolveRecursiveTraversal(ctx.target.capabilities),
+    operation: ctx.operation,
+    excludedEdgeIds,
+  });
+}
+
+/**
+ * How many caller-supplied rows one probe statement may carry: what the
+ * engine's bind budget leaves once the statement's own parameters (graph id,
+ * kind filters, the packed exclusion list) are paid for. Measured off a
+ * rendered one-row statement rather than counted by hand, so it cannot fall
+ * behind the builder.
+ *
+ * `undefined` when the backend declares no `maxBindParameters`: there is no
+ * limit to slice against.
+ *
+ * @throws ConfigurationError when the budget cannot fit a single row.
+ */
+function acyclicityProbeRowBudget(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  sample: ProposedRelationEdge,
+  excludedEdgeIds: readonly string[],
+): number | undefined {
+  const maxBindParameters = ctx.target.capabilities.maxBindParameters;
+  if (maxBindParameters === undefined) return undefined;
+  const oneRowStatement = acyclicityProbeStatement(
+    ctx,
+    relation,
+    { kind: "proposed", edges: [sample] },
+    excludedEdgeIds,
+  );
+  const available =
+    maxBindParameters -
+    (countSqlParameters(oneRowStatement) - ACYCLICITY_SEED_ROW_PARAM_COUNT);
+  if (
+    available <
+    ACYCLICITY_SEED_ROW_PARAM_COUNT + ACYCLICITY_TARGET_ROW_PARAM_COUNT
+  ) {
+    throw new ConfigurationError(
+      `The acyclicity check for the "${displayAcyclicRelationName(relation.name)}" relation does not fit this backend's limit of ${maxBindParameters} bound parameters.`,
+      {
+        capability: "maxBindParameters",
+        maxBindParameters,
+        relation: displayAcyclicRelationName(relation.name),
+        operation: ctx.operation,
+      },
+    );
+  }
+  return available;
+}
+
+/**
+ * The `"proposed"` form over any number of rows. Each origin is answered on
+ * its own (its `to` either reaches its own `from` or does not), so the rows
+ * are simply sent in slices that fit the bind budget.
+ */
+async function readProposedViolatingOriginKeys(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  edges: readonly ProposedRelationEdge[],
+): Promise<readonly string[]> {
+  // One row is one statement whatever the budget: the common single-edge
+  // write pays for no sizing.
+  const budget =
+    edges.length === 1 ?
+      undefined
+    : acyclicityProbeRowBudget(ctx, relation, requireDefined(edges[0]), []);
+  const slices =
+    budget === undefined ?
+      [edges]
+    : chunk(edges, Math.floor(budget / ACYCLICITY_SEED_ROW_PARAM_COUNT));
+  const originKeys: string[] = [];
+  for (const slice of slices) {
+    originKeys.push(
+      ...(await readViolatingOriginKeys(ctx, relation, {
+        kind: "proposed",
+        edges: slice,
+      })),
+    );
+  }
+  return originKeys;
+}
+
+/**
+ * Every reach among a set of UNWRITTEN edges: one row per pair where the
+ * first edge's `to` reaches the second's `from` over the relation's stored
+ * edges (less `excludedEdgeIds`).
+ *
+ * Origins and targets are sliced independently and every origin slice is
+ * probed against every target slice, so the answer is the complete pair set
+ * however the rows were divided. The split gives origins and targets the
+ * shares of the budget that minimize the number of statements; a set that
+ * fits one statement costs one.
+ */
+async function readUnwrittenEdgeReaches(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  edges: readonly ProposedRelationEdge[],
+  excludedEdgeIds: readonly string[],
+): Promise<readonly ProposedEdgeReach[]> {
+  const budget = acyclicityProbeRowBudget(
+    ctx,
+    relation,
+    requireDefined(edges[0]),
+    excludedEdgeIds,
+  );
+  const fitsOneStatement =
+    budget === undefined ||
+    edges.length *
+      (ACYCLICITY_SEED_ROW_PARAM_COUNT + ACYCLICITY_TARGET_ROW_PARAM_COUNT) <=
+      budget;
+  const [originSlices, targetSlices] =
+    fitsOneStatement ?
+      [[edges], [edges]]
+    : [
+        chunk(
+          edges,
+          Math.max(
+            1,
+            Math.floor(budget / (2 * ACYCLICITY_SEED_ROW_PARAM_COUNT)),
+          ),
+        ),
+        chunk(
+          edges,
+          Math.max(
+            1,
+            Math.floor(budget / (2 * ACYCLICITY_TARGET_ROW_PARAM_COUNT)),
+          ),
+        ),
+      ];
+  const reaches: ProposedEdgeReach[] = [];
+  for (const origins of originSlices) {
+    for (const targets of targetSlices) {
+      reaches.push(
+        ...(await runAcyclicityProbe<ProposedEdgeReach>(
+          ctx,
+          relation,
+          { kind: "unwritten", edges: origins, targets },
+          excludedEdgeIds,
+        )),
+      );
+    }
+  }
+  return reaches;
+}
+
 /**
  * Runs one acyclicity probe statement and returns its rows — one per origin
  * the database reports as reaching its own `from` (empty when the seed's rows
@@ -417,16 +580,14 @@ async function runAcyclicityProbe<Row extends Readonly<{ origin_key: string }>>(
   ctx: AcyclicityAuditContext,
   relation: AcyclicEdgeRelation,
   seed: AcyclicityProbeSeed,
+  excludedEdgeIds: readonly string[] = [],
 ): Promise<readonly Row[]> {
-  const fragment = buildEdgeAcyclicityProbe({
-    graphId: ctx.graphId,
-    members: relation.members,
+  const fragment = acyclicityProbeStatement(
+    ctx,
+    relation,
     seed,
-    dialect: ctx.dialect,
-    schema: ctx.schema,
-    recursiveTraversal: resolveRecursiveTraversal(ctx.target.capabilities),
-    operation: ctx.operation,
-  });
+    excludedEdgeIds,
+  );
   try {
     return await ctx.target.execute<Row>(asCompiledRowsSql(fragment));
   } catch (error) {
@@ -506,10 +667,11 @@ export async function assertEdgeRelationsAcyclic(
   assertFreshSnapshot(ctx);
 
   for (const { relation, edges } of probeable) {
-    const violatingOriginKeys = await readViolatingOriginKeys(ctx, relation, {
-      kind: "proposed",
+    const violatingOriginKeys = await readProposedViolatingOriginKeys(
+      ctx,
+      relation,
       edges,
-    });
+    );
     if (violatingOriginKeys.length === 0) continue;
     throw cycleRefusal(
       relation,
@@ -548,11 +710,8 @@ export async function assertUnwrittenEdgeRelationsAcyclic(
   assertFreshSnapshot(ctx);
 
   for (const { relation, edges } of probeable) {
-    const reaches = await runAcyclicityProbe<ProposedEdgeReach>(ctx, relation, {
-      kind: "unwritten",
-      edges,
-    });
-    const violatingEdge = proposedEdgeOnOverlayCycle(edges, reaches);
+    const reaches = await readUnwrittenEdgeReaches(ctx, relation, edges, []);
+    const [violatingEdge] = proposedEdgesOnOverlayCycle(edges, reaches, 1);
     if (violatingEdge === undefined) continue;
     throw cycleRefusal(relation, violatingEdge);
   }
@@ -562,23 +721,27 @@ export async function assertUnwrittenEdgeRelationsAcyclic(
 type ProposedEdgeReach = Readonly<{ origin_key: string; reached_key: string }>;
 
 /**
- * The first proposed edge, in the caller's order, that lies on a cycle of the
- * "reaches" digraph (an arc `i → j` per {@link ProposedEdgeReach}), or
- * `undefined` when that digraph is acyclic.
+ * The proposed edges, in the caller's order, that lie on a cycle of the
+ * "reaches" digraph (an arc `i → j` per {@link ProposedEdgeReach}) — at most
+ * `limit` of them, and none when that digraph is acyclic.
  *
  * Trims every edge no arc enters, repeatedly: whatever survives has an
  * entering arc from another survivor, so survivors exist exactly when a cycle
  * does. The common no-cycle batch therefore costs one linear pass; the
- * per-edge search below runs only to name the edge a refusal reports.
+ * per-edge search below runs only to name the edges a refusal reports, and
+ * stops at `limit` (the write path names one, the plan preview all).
  */
-function proposedEdgeOnOverlayCycle(
+function proposedEdgesOnOverlayCycle(
   edges: readonly ProposedRelationEdge[],
   reaches: readonly ProposedEdgeReach[],
-): ProposedRelationEdge | undefined {
+  limit = Number.POSITIVE_INFINITY,
+): readonly ProposedRelationEdge[] {
   const successors = new Map<string, string[]>();
   const enteringArcs = new Map(edges.map((edge) => [edge.edgeId, 0]));
   for (const { origin_key: origin, reached_key: reached } of reaches) {
-    successors.set(origin, [...(successors.get(origin) ?? []), reached]);
+    const known = successors.get(origin);
+    if (known === undefined) successors.set(origin, [reached]);
+    else known.push(reached);
     enteringArcs.set(reached, (enteringArcs.get(reached) ?? 0) + 1);
   }
   const trimmable = [...enteringArcs]
@@ -593,11 +756,17 @@ function proposedEdgeOnOverlayCycle(
       if (remaining === 0) trimmable.push(successor);
     }
   }
-  if (enteringArcs.size === 0) return undefined;
-  return edges.find(
-    (edge) =>
-      enteringArcs.has(edge.edgeId) && reachesItself(edge.edgeId, successors),
-  );
+  const onCycle: ProposedRelationEdge[] = [];
+  for (const edge of edges) {
+    if (onCycle.length >= limit) break;
+    if (
+      enteringArcs.has(edge.edgeId) &&
+      reachesItself(edge.edgeId, successors)
+    ) {
+      onCycle.push(edge);
+    }
+  }
+  return onCycle;
 }
 
 function reachesItself(
@@ -699,23 +868,23 @@ export async function readEdgeAcyclicityViolations(
  * ({@link assertEdgeRelationsAcyclic}) re-verifies under the per-graph write
  * lock at commit/apply time regardless, and remains the sole authority.
  *
- * Shares `readViolatingOriginKeys` (and so `buildEdgeAcyclicityProbe`) with the
- * write path and the audit reader, so a write-path refusal, a live-graph
- * audit, and a plan-time preview can never disagree about what counts as a
- * cycle. This is the ONE caller that probes rows not yet written anywhere,
- * so it is the ONE caller that passes the `"planned"` seed form: the write
- * path either probes rows already inserted or a single row (`"proposed"`),
- * or composes a batch's unwritten rows in memory (`"unwritten"`), and so
- * never needs the walk itself to hop through a row that isn't live yet — see `AcyclicityProbeSeed`'s docblock in
- * `src/store/recursive-cte.ts` for the full contract. A self-loop among
- * `proposed` is reported directly, mirroring
- * {@link assertEdgeRelationsAcyclic}'s immediate refusal, without a round
- * trip.
+ * Shares the unwritten-rows probe and its in-memory cycle search with a
+ * batch's own pre-write check ({@link assertUnwrittenEdgeRelationsAcyclic}),
+ * so a write-path refusal and a plan-time preview cannot disagree about what
+ * counts as a cycle; this reader differs only in reporting EVERY proposed
+ * edge on a cycle rather than refusing at the first. A self-loop among
+ * `proposed` is reported directly, without a round trip.
+ *
+ * `excludedEdgeIds` names stored edges the same plan removes. They are left
+ * out of the walk, so the preview judges the state the plan produces — a
+ * reversal (`a → b` deleted, `b → a` added) is acyclic — rather than the
+ * proposed edges layered onto rows that will be gone.
  */
 export async function readProposedEdgeAcyclicityViolations(
   ctx: AcyclicityAuditContext,
   graph: GraphDef,
   proposed: readonly ProposedRelationEdge[],
+  excludedEdgeIds: readonly string[] = [],
 ): Promise<readonly EdgeAcyclicityViolation[]> {
   const { groups } = groupProposedByAcyclicRelation(
     graph,
@@ -727,10 +896,10 @@ export async function readProposedEdgeAcyclicityViolations(
     const probedIds =
       edges.length === 0 ?
         []
-      : await readViolatingOriginKeys(ctx, relation, {
-          kind: "planned",
+      : proposedEdgesOnOverlayCycle(
           edges,
-        });
+          await readUnwrittenEdgeReaches(ctx, relation, edges, excludedEdgeIds),
+        ).map((edge) => edge.edgeId);
     const edgeIds = [...new Set([...selfLoopEdgeIds, ...probedIds])].toSorted(
       compareStrings,
     );

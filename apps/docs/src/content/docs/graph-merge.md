@@ -616,7 +616,10 @@ every branch. Every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`,
 `planMergeIncremental()`, `mergeIncremental()`) checks the resolved plan's
 projected edge writes for such a cycle at PLAN time, before anything is
 written — including a cycle formed entirely from edges the plan itself
-proposes, with nothing live on the target yet. A violation surfaces as the
+proposes, with nothing live on the target yet. Edges the same plan deletes
+are left out, so a branch that reverses an edge (`a → b` removed, `b → a`
+added) or re-roots a chain is judged by the DAG it produces and merges. A
+violation surfaces as the
 typed `AcyclicityMergeConflictError` (`code: "GRAPH_MERGE_ACYCLICITY_CONFLICT"`),
 naming the relation and every offending edge in `details`, so a `planMerge()`
 review sees it before deciding whether to apply. Only a cycle that arises from

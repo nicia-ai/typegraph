@@ -610,41 +610,36 @@ function buildDirectedGroupsBranch(
  *   step. **Contract:** a caller passing more than one `"proposed"` row
  *   thereby asserts those rows are already inserted in the probing
  *   transaction (import and resurrection satisfy this; single create
- *   proposes exactly one row). `ancestry` joins `typegraph_edges` DIRECTLY
- *   for this form, no compound `candidates` CTE in between: a compound CTE
- *   whose outer query is a join cannot be flattened by SQLite's query
- *   flattener (rule 17d), which forces `MATERIALIZE candidates` — the entire
- *   relation copied into an ephemeral table on EVERY probe, turning every
- *   acyclic insert into an O(|relation|) operation instead of an index seek.
- * - `"planned"` — edges NOT YET written anywhere that the walk must hop
- *   through to see a cycle closed entirely by rows sharing no live edge.
- *   Used by exactly one caller: the graph-merge plan-time preview
- *   (`readProposedEdgeAcyclicityViolations` / `assertResolvedPlanEdgesAcyclic`
- *   in `src/graph-merge/merge.ts`), which asks "would this resolved plan's
- *   edges close a cycle" before any of them exist and so has nothing live to
- *   probe against. `ancestry` hops through a compound `candidates` CTE (live
- *   edges `UNION ALL` the `seed` rows) for this form — see
- *   {@link buildPlannedAcyclicityCandidates}'s docblock for why that pays
- *   SQLite's full-relation materialization, and why that cost is acceptable
- *   once per merge plan (never per write).
- * - `"unwritten"` — a batch's rows, NOT YET written, probed before the
- *   batch's first write (`assertUnwrittenEdgeRelationsAcyclic`,
- *   `src/store/acyclicity.ts`). The walk is the `"proposed"` one — live edges
- *   only, joined directly, so it stays an index seek — but the closing select
- *   differs: it returns one `(origin_key, reached_key)` row for every seed
- *   row whose `from` the origin's `to` reaches, not only the origin's own.
- *   The caller composes those reaches with the batch's own edges in memory,
- *   which is what finds a cycle two unwritten rows close through each other
- *   without the `"planned"` form's whole-relation materialization.
+ *   proposes exactly one row).
+ * - `"unwritten"` — rows NOT YET written anywhere: a batch probed before its
+ *   first write (`assertUnwrittenEdgeRelationsAcyclic`,
+ *   `src/store/acyclicity.ts`) and the graph-merge plan-time preview
+ *   (`readProposedEdgeAcyclicityViolations`). The walk is the `"proposed"`
+ *   one — live edges only, joined directly, so it stays an index seek — but
+ *   the closing select differs: it returns one `(origin_key, reached_key)`
+ *   row for every `targets` row whose `from` an origin's `to` reaches. The
+ *   caller composes those reaches with the unwritten edges in memory, which
+ *   is what finds a cycle unwritten rows close through each other without the
+ *   walk hopping through rows that do not exist. Origins (`edges`) and
+ *   `targets` are separate row lists so a caller can send them in slices that
+ *   fit the engine's bind budget and still collect every origin/target pair.
  * - `"relation"` — every live edge of the relation (the audit and
  *   schema-tightening forms). `ancestry` joins `typegraph_edges` directly,
  *   same as `"proposed"`.
  */
 export type AcyclicityProbeSeed =
   | Readonly<{ kind: "proposed"; edges: readonly ProposedRelationEdge[] }>
-  | Readonly<{ kind: "planned"; edges: readonly ProposedRelationEdge[] }>
-  | Readonly<{ kind: "unwritten"; edges: readonly ProposedRelationEdge[] }>
+  | Readonly<{
+      kind: "unwritten";
+      edges: readonly ProposedRelationEdge[];
+      targets: readonly ProposedRelationEdge[];
+    }>
   | Readonly<{ kind: "relation" }>;
+
+/** Bound parameters one `seed` row of a row-list form renders. */
+export const ACYCLICITY_SEED_ROW_PARAM_COUNT = 5;
+/** Bound parameters one `targets` row of the `"unwritten"` form renders. */
+export const ACYCLICITY_TARGET_ROW_PARAM_COUNT = 3;
 
 function kindKeys(members: readonly AcyclicRelationMember[]): {
   forward: readonly string[];
@@ -664,8 +659,8 @@ function kindKeys(members: readonly AcyclicRelationMember[]): {
  * The window predicate a relation's stored rows must also satisfy to be in
  * it: empty when every non-deleted row counts — every standalone relation,
  * so those statements stay byte-identical. The one spelling every reader of
- * stored rows below appends, so the seed, the walk and the planned candidates
- * cannot disagree about which rows are in the relation.
+ * stored rows below appends, so the seed and the walk cannot disagree about
+ * which rows are in the relation.
  */
 function relationWindowFilters(
   members: readonly AcyclicRelationMember[],
@@ -767,8 +762,7 @@ function proposedSeedRow(
 
 /**
  * The `seed` CTE body, oriented endpoints throughout: a `VALUES` row list
- * for the row-list forms (`"proposed"`, `"planned"` and `"unwritten"` —
- * identical shape, since each names rows the caller supplies rather than
+ * for the row-list forms (`"proposed"` and `"unwritten"` — identical shape, since each names rows the caller supplies rather than
  * reading the table), or the relation's own live edges for the `"relation"` (audit)
  * form.
  */
@@ -802,109 +796,43 @@ function buildAcyclicitySeed(
 }
 
 /**
- * The relation's live edges, reoriented so every row reads part->whole
- * regardless of which member direction produced it: `(from_kind, from_id,
- * to_kind, to_id)`. Used only to build the `"planned"` seed form's compound
- * `candidates` source — see {@link buildPlannedAcyclicityCandidates}. The
- * `"proposed"` and `"relation"` forms join `typegraph_edges` directly
- * instead (see {@link buildAcyclicityAncestryStepDirect}) and never call
- * this function.
+ * The `"unwritten"` form's `targets` CTE: one row per unwritten edge whose
+ * oriented `from` the closing select tests each origin's ancestry against.
  */
-function buildLiveEdgeCandidates(
+function buildAcyclicityTargets(
+  targets: readonly ProposedRelationEdge[],
   members: readonly AcyclicRelationMember[],
-  graphId: string,
-  schema: SqlSchema,
 ): SqlFragment {
-  const { all } = kindKeys(members);
-  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
-  const commonWhere = [
-    sql`e.graph_id = ${graphId}`,
-    edgeKindFilter,
-    sql`e.deleted_at IS NULL`,
-    ...relationWindowFilters(members, "e"),
-  ];
-
-  // `orientedEndpointColumns` returns plain columns (no CASE, no OR) when
-  // every member is forward — the common case, and the only one a standalone
-  // `acyclic: true` relation produces — so this stays byte-identical to what
-  // the benchmark's index-only scan assumption requires. A relation composed
-  // of both part->whole and whole->part realizing edges instead gets a
-  // CASE picking which pair of columns is the "part" and which is the
-  // "whole" per row; each member still seeks its OWN natural endpoint
-  // column.
-  const { matchKind, matchId, nextKind, nextId } = orientedEndpointColumns(
-    members,
-    "e",
-  );
-  return sql`SELECT ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
+  const rows = targets.map((edge) => {
+    const reversed = reversedForEdgeKind(members, edge.edgeKind);
+    const fromKind = reversed ? edge.toKind : edge.fromKind;
+    const fromId = reversed ? edge.toId : edge.fromId;
+    return sql`(CAST(${edge.edgeId} AS TEXT), CAST(${fromKind} AS TEXT), CAST(${fromId} AS TEXT))`;
+  });
+  return sql`targets(reached_key, from_kind, from_id) AS (VALUES ${sql.join(rows, sql`, `)})`;
 }
 
-/**
- * The `"planned"` seed form's `candidates` source: the relation's live
- * edges, `UNION ALL` the writer's own not-yet-written rows via `seed`.
- *
- * A cycle formed ENTIRELY from rows in one planned set (three branch edges
- * a->b, b->c, c->a with nothing live) has no live edge to walk, so
- * `ancestry` must also be able to reach through `seed` directly. That
- * cannot be a second `UNION`-ed recursive term next to the live-edge hop:
- * both PostgreSQL and SQLite refuse a recursive term that references the
- * recursive relation (`ancestry`) more than once (verified empirically —
- * PostgreSQL: `recursive reference to query "ancestry" must not appear more
- * than once`), so the two hops cannot be two arms of a `UNION` each
- * self-joining `ancestry`. They must instead be two arms of the table
- * `ancestry` joins against ONCE — the same device `buildBidirectionalBranch`
- * uses for two traversal directions in one recursive term. This also lets a
- * single path interleave live and planned edges (an existing edge, then a
- * planned one, then another existing edge), which two separate recursive
- * terms could not express without an explicit second round of interleaving.
- *
- * `UNION ALL`, not `UNION`: `candidates` is a source `ancestry` joins
- * against, not itself part of the `(origin_key, node_kind, node_id)`
- * accumulator that needs deduplicating — a duplicate candidate row costs an
- * extra join, never a wrong answer.
- *
- * This is a compound CTE whose outer query (`ancestry`'s recursive term) is
- * a join — SQLite's query flattener cannot flatten that (rule 17d), so this
- * form materializes the ENTIRE relation into an ephemeral table on every
- * call. Acceptable ONLY because this seed form runs once per merge plan,
- * never per write — see {@link AcyclicityProbeSeed}'s docblock. The
- * `"proposed"` and `"relation"` forms never pay this cost: their `ancestry`
- * step joins `typegraph_edges` directly (see
- * {@link buildAcyclicityAncestryStepDirect}) and calls neither this function
- * nor {@link buildLiveEdgeCandidates}.
- */
-function buildPlannedAcyclicityCandidates(
-  members: readonly AcyclicRelationMember[],
-  graphId: string,
-  schema: SqlSchema,
-): SqlFragment {
-  const liveEdges = buildLiveEdgeCandidates(members, graphId, schema);
-  return sql`${liveEdges} UNION ALL SELECT from_kind, from_id, to_kind, to_id FROM seed`;
-}
+/** What the `ancestry` step needs beyond the seed it starts from. */
+type AcyclicityProbeBodyOptions = Readonly<{
+  members: readonly AcyclicRelationMember[];
+  graphId: string;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
+  forceWorktableOuterJoinOrder: boolean;
+  excludedEdgeIds: readonly string[];
+}>;
 
 /**
- * The `ancestry` recursive term for the `"planned"` seed form: one hop
- * through the compound `candidates` CTE, the ONLY reference to the
- * recursive relation this term may make (see
- * {@link buildPlannedAcyclicityCandidates}'s docblock for why the live-edge
- * and seed hops are folded into one join rather than two recursive terms).
- */
-function buildAcyclicityAncestryStepViaCandidates(
-  forceWorktableOuterJoinOrder: boolean,
-): SqlFragment {
-  const joinPredicate = sql`c.from_kind = a.node_kind AND c.from_id = a.node_id`;
-  if (forceWorktableOuterJoinOrder) {
-    return sql`SELECT a.origin_key, c.to_kind, c.to_id FROM ancestry a CROSS JOIN candidates c WHERE ${joinPredicate}`;
-  }
-  return sql`SELECT a.origin_key, c.to_kind, c.to_id FROM ancestry a JOIN candidates c ON ${joinPredicate}`;
-}
-
-/**
- * The `ancestry` recursive term for the `"proposed"` and `"relation"` seed
- * forms: one hop DIRECTLY against `typegraph_edges`, with no `candidates`
- * CTE in between. This is what keeps every real write's probe an index
- * seek — see {@link AcyclicityProbeSeed}'s docblock for the flattener
- * defect this shape avoids.
+ * The `ancestry` recursive term, the same for every seed form: one hop
+ * DIRECTLY against `typegraph_edges`. A compound CTE between `ancestry` and
+ * the edges table could not be flattened by SQLite's query flattener (rule
+ * 17d) and would be materialized — the entire relation copied into an
+ * ephemeral table on every probe — where this shape is an index seek.
+ *
+ * `excludedEdgeIds` drops stored rows a caller knows will be gone when its
+ * own rows land (a merge plan's edge deletions). They travel as ONE packed
+ * bound value through the dialect's `inListParameter` seam, so their number
+ * never counts against the engine's bind budget.
  *
  * The common case (no `reversed` member — the only shape a standalone
  * `acyclic: true` relation ever produces) is a plain equality join on `from_kind`/`from_id`, seekable by
@@ -926,16 +854,23 @@ function buildAcyclicityAncestryStepViaCandidates(
  * `buildBidirectionalBranch`'s two-direction device above.
  */
 function buildAcyclicityAncestryStepDirect(
-  members: readonly AcyclicRelationMember[],
-  graphId: string,
-  schema: SqlSchema,
-  forceWorktableOuterJoinOrder: boolean,
+  options: AcyclicityProbeBodyOptions,
 ): SqlFragment {
+  const { members, graphId, schema, forceWorktableOuterJoinOrder } = options;
   const { forward, reversed, all } = kindKeys(members);
   const commonWhere = [
     sql`e.graph_id = ${graphId}`,
     sql`e.deleted_at IS NULL`,
     ...relationWindowFilters(members, "e"),
+    ...(options.excludedEdgeIds.length === 0 ?
+      []
+    : [
+        options.dialect.inListParameter(
+          sql.raw("e.id"),
+          sql`${options.dialect.packListValue(options.excludedEdgeIds)}`,
+          { negated: true, elementType: undefined },
+        ),
+      ]),
   ];
   // The "next node" projection is shared via `orientedEndpointColumns`. The
   // JOIN predicate below is NOT: see that function's docblock for why a
@@ -971,79 +906,25 @@ function buildAcyclicityAncestryStepDirect(
   return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(commonWhere, sql` AND `)}`;
 }
 
-/** Everything {@link buildProbeBodyPlanned} and {@link buildProbeBodyDirect} need beyond their own seed form. */
-type AcyclicityProbeBodyOptions = Readonly<{
-  members: readonly AcyclicRelationMember[];
-  graphId: string;
-  schema: SqlSchema;
-  forceWorktableOuterJoinOrder: boolean;
-  seedCte: SqlFragment;
-  anchor: SqlFragment;
-  closingSelect: SqlFragment;
-}>;
-
-/** The `"planned"` form's probe body: `seed`, a compound `candidates`, `ancestry` hopping through it. */
-function buildProbeBodyPlanned(
-  options: AcyclicityProbeBodyOptions,
-): SqlFragment {
-  const candidatesCte = buildPlannedAcyclicityCandidates(
-    options.members,
-    options.graphId,
-    options.schema,
-  );
-  const ancestryStep = buildAcyclicityAncestryStepViaCandidates(
-    options.forceWorktableOuterJoinOrder,
-  );
-  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${options.anchor} UNION ${ancestryStep})`;
-  return sql`${options.seedCte}, candidates(from_kind, from_id, to_kind, to_id) AS (${candidatesCte}), ${ancestry} ${options.closingSelect}`;
-}
-
-/** The `"proposed"`/`"relation"` forms' probe body: `seed`, `ancestry` joining `typegraph_edges` directly. */
-function buildProbeBodyDirect(
-  options: AcyclicityProbeBodyOptions,
-): SqlFragment {
-  const ancestryStep = buildAcyclicityAncestryStepDirect(
-    options.members,
-    options.graphId,
-    options.schema,
-    options.forceWorktableOuterJoinOrder,
-  );
-  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${options.anchor} UNION ${ancestryStep})`;
-  return sql`${options.seedCte}, ${ancestry} ${options.closingSelect}`;
-}
-
 /**
  * Builds the exhaustive, set-semantics reachability probe the acyclicity
  * check runs: "does `from` lie in the reflexive-transitive
  * closure of `to`" over one acyclic relation's live edges.
  *
  * Deliberately a sibling export in this file rather than a new emitter: the
- * three seed forms are the ONLY difference between the write-path probe,
- * the audit reader, and the merge plan-time preview, so all three are built
- * by this one function and cannot answer the question differently.
+ * seed forms are the ONLY difference between the write-path probe, the audit
+ * reader, and the merge plan-time preview, so all are built by this one
+ * function and cannot answer the question differently.
  *
  * `UNION`, never `UNION ALL`, on the `ancestry` term: set semantics on
  * `(origin_key, node_kind, node_id)` is what makes an unbounded recursion
  * terminate on a finite graph with no path tracking and no depth bound —
  * `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply to this probe.
  *
- * Exactly ONE literal `WITH RECURSIVE` occurs in this function (the
- * `WITH RECURSIVE ${body}` return below) regardless of which seed form
- * runs: `body` is assembled by {@link buildPlannedAcyclicityCandidates} /
- * {@link buildAcyclicityAncestryStepDirect} beforehand, both of which are
- * plain fragments with no `WITH RECURSIVE` of their own, so
+ * Exactly ONE literal `WITH RECURSIVE` occurs in this function (the return
+ * below) regardless of which seed form runs, so
  * `tests/recursive-traversal-inventory.test.ts`'s emission-site inventory
  * still counts exactly one site here.
- *
- * For the `"planned"` seed form, `ancestry` hops through TWO sources folded
- * into one `candidates` CTE — the relation's live edges AND the writer's
- * not-yet-written rows — so a cycle closed entirely by rows in that
- * set is found even though none of them exist yet. See
- * {@link buildPlannedAcyclicityCandidates}'s docblock for why this is one
- * joined source rather than a second recursive term, and why it is the only
- * form that pays for it. The `"proposed"` and `"relation"` forms join
- * `typegraph_edges` directly instead — see
- * {@link buildAcyclicityAncestryStepDirect}.
  *
  * Every literal seed column is `CAST(... AS TEXT)`: PostgreSQL cannot infer
  * the type of a bare bound parameter in a `SELECT` list with no surrounding
@@ -1058,48 +939,54 @@ export function buildEdgeAcyclicityProbe(
     schema: SqlSchema;
     recursiveTraversal: RecursiveTraversalVerdict;
     operation: string;
+    /** Stored edges to leave out of the walk; see {@link buildAcyclicityAncestryStepDirect}. */
+    excludedEdgeIds?: readonly string[];
   }>,
 ): SqlFragment {
   assertRecursiveTraversal(options.recursiveTraversal, options.operation);
 
+  const { seed, members } = options;
   const seedCte = buildAcyclicitySeed(
-    options.seed,
-    options.members,
+    seed,
+    members,
     options.graphId,
     options.schema,
   );
-  const forceWorktableOuterJoinOrder =
-    options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
   const anchor = sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
-
-  const closingSelect =
-    options.seed.kind === "unwritten" ?
-      sql`SELECT DISTINCT a.origin_key, s.origin_key AS reached_key FROM ancestry a JOIN seed s ON s.from_kind = a.node_kind AND s.from_id = a.node_id`
-    : sql`SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
-  // A single-edge row-list seed (any of the row-list forms — a single row
-  // has only one possible `origin_key`) stops at the first witness: both
-  // engines pipeline a recursive CTE, so a `LIMIT 1` short-circuits the walk
-  // instead of running to fixpoint. Several origins must return every
-  // offending one so a refusal can name the edge, so no LIMIT is added
-  // there. `"relation"` has no `edges` to count and always runs unlimited.
-  const limited =
-    options.seed.kind !== "relation" && options.seed.edges.length === 1 ?
-      sql`${closingSelect} LIMIT 1`
-    : closingSelect;
-
-  const bodyOptions: AcyclicityProbeBodyOptions = {
-    members: options.members,
+  const ancestryStep = buildAcyclicityAncestryStepDirect({
+    members,
     graphId: options.graphId,
     schema: options.schema,
-    forceWorktableOuterJoinOrder,
-    seedCte,
-    anchor,
-    closingSelect: limited,
-  };
-  const body =
-    options.seed.kind === "planned" ?
-      buildProbeBodyPlanned(bodyOptions)
-    : buildProbeBodyDirect(bodyOptions);
+    dialect: options.dialect,
+    forceWorktableOuterJoinOrder:
+      options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+    excludedEdgeIds: options.excludedEdgeIds ?? [],
+  });
+  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${anchor} UNION ${ancestryStep})`;
 
+  const body = sql`${seedCte}, ${ancestry}${acyclicityProbeClosing(seed, members)}`;
   return sql`WITH RECURSIVE ${body}`;
+}
+
+/**
+ * What a probe reads off its finished walk: for the `"unwritten"` form the
+ * `targets` CTE and every origin/target reach; otherwise the origins whose
+ * own `from` their `to` reaches.
+ */
+function acyclicityProbeClosing(
+  seed: AcyclicityProbeSeed,
+  members: readonly AcyclicRelationMember[],
+): SqlFragment {
+  if (seed.kind === "unwritten") {
+    const targets = buildAcyclicityTargets(seed.targets, members);
+    return sql`, ${targets} SELECT DISTINCT a.origin_key, t.reached_key FROM ancestry a JOIN targets t ON t.from_kind = a.node_kind AND t.from_id = a.node_id`;
+  }
+  const closingSelect = sql` SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
+  // A single-row `"proposed"` seed has only one possible `origin_key`, so it
+  // stops at the first witness: both engines pipeline a recursive CTE, and a
+  // `LIMIT 1` short-circuits the walk instead of running to fixpoint. Several
+  // origins must return every offending one so a refusal can name the edge.
+  return seed.kind === "proposed" && seed.edges.length === 1 ?
+      sql`${closingSelect} LIMIT 1`
+    : closingSelect;
 }
