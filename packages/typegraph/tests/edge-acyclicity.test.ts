@@ -1064,6 +1064,39 @@ describe("the batch acyclicity probe fits the engine's bind budget", () => {
     expect(Math.max(...statementBinds)).toBeLessThanOrEqual(BIND_BUDGET);
   });
 
+  // MUTATION CHECK: sending every `"proposed"` row in one statement again
+  // (`readProposedViolatingOriginKeys` never slicing) binds 125 parameters for
+  // these 25 rows and fails the budget assertion — verified and reverted.
+  it("probes already-inserted rows in statements that fit, and still names the cycle", async () => {
+    const raw = createTestBackend();
+    const store = createStore(graph, raw);
+    const tasks = await store.nodes.Task.bulkCreate(
+      Array.from({ length: RING_SIZE }, (_unused, index) => ({
+        props: { name: `t${String(index)}` },
+      })),
+    );
+    const ring = ringEdges(tasks.map((task) => task.id));
+    await insertEdgesDirectly(raw, ring);
+    const statementBinds: number[] = [];
+    const backend = deriveBackend(raw, {
+      capabilities: { ...raw.capabilities, maxBindParameters: BIND_BUDGET },
+      execute: (statement) => {
+        statementBinds.push(countSqlParameters(statement));
+        return raw.execute(statement);
+      },
+    });
+
+    await expect(
+      assertEdgeRelationsAcyclic(probeContext(backend), ring),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        name: "EdgeAcyclicityError",
+        details: matchingObject({ edgeId: "ring-0" }),
+      }),
+    );
+    expect(Math.max(...statementBinds)).toBeLessThanOrEqual(BIND_BUDGET);
+  });
+
   it("stores a batch too large for one statement on the default budget", async () => {
     const store = createStore(graph, createTestBackend());
     const leafCount = 7000;
