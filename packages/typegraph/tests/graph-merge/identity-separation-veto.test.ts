@@ -513,89 +513,197 @@ describe.each(backendMatrix())("identity separation veto [$name]", (entry) => {
 
   /**
    * The veto reads the ledger as it stands at plan time, not a fact an
-   * earlier identity call on the same Store handle settled. `assertSame` on a
-   * graph holding no `different` assertion proves the separation relation's
-   * readiness for the handle; the `assertDifferent` that follows makes "this
-   * graph separates nothing" false, and the merge after it must still drop
-   * and report the scored pair.
+   * earlier identity call on the same Store handle settled. An `assertSame`
+   * or an `areDifferent` read on a graph holding no `different` assertion
+   * proves the separation relation's readiness for the handle; the
+   * `assertDifferent` that follows makes "this graph separates nothing"
+   * false, and a merge after it must still drop and report a scored pair
+   * that assertion holds apart.
    *
-   * Without the ledger read the capture is skipped, the scored match is
-   * accepted, and the merge dies at commit with `GRAPH_MERGE_IDENTITY_CONFLICT`.
+   * The assertion is INHERITED here — the fork point already holds it — so
+   * the merge stages no copy of it and the target's ledger is the only place
+   * it can be read. `alpha` and `beta` are new on the target, each asserted
+   * the same as one side of the separated pair, so the class-lifted
+   * separation is what forbids fusing them.
    */
-  it("honors a different assertion made after an earlier assertSame on the same handle", async () => {
-    const forkPoint = await makeSimilarityStore();
-    const target = unwrap(
-      await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
-    ).store;
-    for (const id of ["alpha", "beta", "p", "q"]) {
-      await target.nodes.Person.create(
-        { name: id, email: `${id}@example.test` },
-        { id },
+  it.each([
+    {
+      primer: "assertSame",
+      prime: (target: Store<SimilarityGraph>) =>
+        target.identity.assertSame(
+          { kind: "Person", id: "p" },
+          { kind: "Person", id: "q" },
+        ),
+    },
+    {
+      primer: "areDifferent",
+      prime: (target: Store<SimilarityGraph>) =>
+        target.identity.areDifferent(
+          { kind: "Person", id: "p" },
+          { kind: "Person", id: "q" },
+        ),
+    },
+  ])(
+    "honors an inherited different assertion made after an earlier $primer on the same handle",
+    async ({ prime }) => {
+      const target = await makeSimilarityStore();
+      const createPerson = (id: string) =>
+        target.nodes.Person.create(
+          { name: id, email: `${id}@example.test` },
+          { id },
+        );
+      for (const id of ["x", "y", "p", "q"]) await createPerson(id);
+      await prime(target);
+      await target.identity.assertDifferent(
+        { kind: "Person", id: "x" },
+        { kind: "Person", id: "y" },
       );
-    }
-    await target.identity.assertSame(
-      { kind: "Person", id: "p" },
-      { kind: "Person", id: "q" },
-    );
-    await target.identity.assertDifferent(
-      { kind: "Person", id: "alpha" },
-      { kind: "Person", id: "beta" },
-    );
-    const source = unwrap(
-      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
-    );
-    await source.store.nodes.Person.create(
-      { name: "delta", email: "delta@example.test" },
-      { id: "delta" },
-    );
+      const forkPoint = unwrap(
+        await branch(target, () => makeBackend(), { id: TARGET_CLONE }),
+      ).store;
+      for (const [id, peer] of [
+        ["alpha", "x"],
+        ["beta", "y"],
+      ] as const) {
+        await createPerson(id);
+        await target.identity.assertSame(
+          { kind: "Person", id },
+          { kind: "Person", id: peer },
+        );
+      }
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create(
+        { name: "delta", email: "delta@example.test" },
+        { id: "delta" },
+      );
 
-    const result = await mergeIncremental({
-      forkPoint,
-      target,
-      branches: [source],
-      options: {
-        branchOrder: [BRANCH_A],
-        resolve: {
-          Person: {
-            ...ONE_BUCKET,
-            threshold: 0.5,
-            similarity: {
-              kind: "custom",
-              score: (left, right) => {
-                const ids = [left.id as string, right.id as string].toSorted();
-                return ids[0] === "alpha" && ids[1] === "beta" ? 1 : 0;
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+        options: {
+          branchOrder: [BRANCH_A],
+          resolve: {
+            Person: {
+              ...ONE_BUCKET,
+              threshold: 0.5,
+              similarity: {
+                kind: "custom",
+                score: (left, right) => {
+                  const ids = [
+                    left.id as string,
+                    right.id as string,
+                  ].toSorted();
+                  return ids[0] === "alpha" && ids[1] === "beta" ? 1 : 0;
+                },
               },
             },
           },
         },
-      },
-    });
-
-    if (isErr(result)) {
-      console.info("separation veto skipped", {
-        code: result.error.code,
-        message: result.error.message,
       });
-      throw result.error;
-    }
-    expect(result.data.identityConflicts).toHaveLength(1);
-    expect(result.data.identityConflicts[0]).toMatchObject({
-      kind: "separation",
-      a: { kind: "Person", id: "alpha" },
-      b: { kind: "Person", id: "beta" },
-    });
-    expect(await livePersonIds(target)).toEqual([
-      "alpha",
-      "beta",
-      "delta",
-      "p",
-      "q",
-    ]);
-    expect(
-      await target.identity.areDifferent(
+
+      if (isErr(result)) {
+        console.info("separation veto skipped", {
+          code: result.error.code,
+          message: result.error.message,
+        });
+        throw result.error;
+      }
+      expect(result.data.identityConflicts).toHaveLength(1);
+      expect(result.data.identityConflicts[0]).toMatchObject({
+        kind: "separation",
+        a: { kind: "Person", id: "alpha" },
+        b: { kind: "Person", id: "beta" },
+      });
+      expect(result.data.identityConflicts[0]?.assertionIds).toHaveLength(1);
+      expect(await livePersonIds(target)).toEqual([
+        "alpha",
+        "beta",
+        "delta",
+        "p",
+        "q",
+        "x",
+        "y",
+      ]);
+    },
+  );
+
+  /**
+   * A `different` assertion a merged branch CARRIES holds its pair apart for
+   * the merge that lands it, exactly as one already on the target does: the
+   * scored match is dropped and reported, both rows land, and the assertion
+   * lands with them. Read from the target's ledger alone the pair fuses, and
+   * the plan dies collapsing the assertion onto one survivor.
+   */
+  it.each(["merge", "mergeIncremental"] as const)(
+    "drops and reports a scored match a merged branch's own different assertion holds apart (%s)",
+    async (entryPoint) => {
+      const forkPoint = await makeSimilarityStore();
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      for (const id of ["alpha", "beta"]) {
+        await source.store.nodes.Person.create(
+          { name: id, email: `${id}@example.test` },
+          { id },
+        );
+      }
+      await source.store.identity.assertDifferent(
         { kind: "Person", id: "alpha" },
         { kind: "Person", id: "beta" },
-      ),
-    ).toBe(true);
-  });
+      );
+      const [staged] = await source.store.identity.assertionsOf({
+        kind: "Person",
+        id: "alpha",
+      });
+      const resolve = {
+        Person: {
+          ...ONE_BUCKET,
+          threshold: 0.5,
+          similarity: { kind: "custom", score: () => 1 },
+        },
+      } as const;
+
+      const target =
+        entryPoint === "merge" ? forkPoint : (
+          unwrap(
+            await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
+          ).store
+        );
+      const result =
+        entryPoint === "merge" ?
+          await merge(forkPoint, [source], { resolve })
+        : await mergeIncremental({
+            forkPoint,
+            target,
+            branches: [source],
+            options: { branchOrder: [BRANCH_A], resolve },
+          });
+
+      if (isErr(result)) throw result.error;
+      expect(staged).toBeDefined();
+      expect(result.data.identityConflicts).toEqual([
+        expect.objectContaining({
+          kind: "separation",
+          a: { kind: "Person", id: "alpha" },
+          b: { kind: "Person", id: "beta" },
+          assertionIds: [staged?.id],
+        }),
+      ]);
+      expect(await livePersonIds(target)).toEqual(["alpha", "beta"]);
+      const landed = await target.identity.assertionsOf({
+        kind: "Person",
+        id: "alpha",
+      });
+      expect(landed.map((assertion) => assertion.id)).toEqual([staged?.id]);
+      expect(
+        await target.identity.areDifferent(
+          { kind: "Person", id: "alpha" },
+          { kind: "Person", id: "beta" },
+        ),
+      ).toBe(true);
+    },
+  );
 });

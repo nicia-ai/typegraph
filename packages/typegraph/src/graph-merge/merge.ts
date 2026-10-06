@@ -4231,7 +4231,8 @@ async function resolveMerge<G extends GraphDef, Output>(
     const baseMembers = candidates.data.baseMembers;
 
     // The separation veto is ON for every identity-enabled merge: a
-    // `different` assertion is an integrity fact, not a recall heuristic. The
+    // `different` assertion is an integrity fact, not a recall heuristic —
+    // whether the target already holds it or a merged branch carries it. The
     // facts are captured ONCE here, before planning, so the candidate-edge
     // veto below and the post-cluster transitive assertion inside
     // `buildInternalMergePlan` read one fact set and cannot disagree — and so
@@ -4253,6 +4254,7 @@ async function resolveMerge<G extends GraphDef, Output>(
             ],
             options.reconcileTypes === "ontology",
           ),
+          staging.newIdentityAssertions.map((staged) => staged.assertion),
         );
 
     // Same-id folding joins nodes no assertion names, so the plan-time

@@ -952,7 +952,10 @@ A `vector`/`hybrid` strategy with no embedder configured fails with a typed
 On a graph with `identity` enabled, a current `different` assertion between
 two nodes' identity classes vetoes a match **at plan time**, whichever source
 proposed it. There is no option to state: a `different` assertion is an
-integrity fact, so the veto runs for every identity-enabled merge.
+integrity fact, so the veto runs for every identity-enabled merge. It honors
+an assertion the target already holds and one a branch being merged adds
+alike: a branch can record `assertDifferent(a, b)` to keep entity resolution
+from fusing two entities it stages.
 
 | Proposed match | Outcome |
 | --- | --- |
