@@ -2981,6 +2981,12 @@ const sg = await store.subgraph(episode.id, {
 // no need to name segmentOf/episodeOf/... by hand.
 ```
 
+The unit is the closure at the read's temporal coordinate: a part attached
+through a `population: "one"` edge whose validity window has ended is not in a
+current read, although deleting its whole still cascades to it. See
+[Composition Cascade](/limitations#composition-cascade) before relying on the
+export as a pre-delete inventory.
+
 This is set-level, not per-root-kind-required: a root whose kind declares
 no composition parts contributes nothing extra and the read still runs
 normally. A graph that declares no composition relation at all cannot

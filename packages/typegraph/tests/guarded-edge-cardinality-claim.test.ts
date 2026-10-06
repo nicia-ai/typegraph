@@ -29,6 +29,11 @@ import {
   edgeCardinalityClaims,
 } from "../src/store/claims/edge-claims";
 import { requireDefined } from "../src/utils/presence";
+import {
+  type EdgeClaimRow,
+  expectOnlyClaimsOf,
+  readEdgeClaimRows,
+} from "./edge-claim-rows";
 import { createRecordedPostgresStore } from "./statement-recorder";
 import { createInitializedStore } from "./test-utils";
 
@@ -79,19 +84,11 @@ function ordinaryEdgeCreatePlan(
   };
 }
 
-async function readClaimRows(
+function readClaimRows(
   backend: GraphBackend,
   graphId: string = graph.id,
-): Promise<readonly { axis: string; key: string; edge_id: string }[]> {
-  const schema = createSqlSchema(backend.tableNames);
-  return backend.execute<{ axis: string; key: string; edge_id: string }>(
-    asCompiledRowsSql(sql`
-      SELECT axis, key, edge_id
-      FROM ${sql.identifier(schema.tables.edgeClaims)}
-      WHERE graph_id = ${graphId}
-      ORDER BY axis, key
-    `),
-  );
+): Promise<readonly EdgeClaimRow[]> {
+  return readEdgeClaimRows(backend, graphId);
 }
 
 const bothAxesGraph = defineGraph({
@@ -910,12 +907,26 @@ describe("guarded edge cardinality claim", () => {
       ).rejects.toBeInstanceOf(CardinalityError);
       expect(await fixture.store.edges.both.findTo(bob)).toHaveLength(1);
 
-      // carol's source axis was not left "occupied" by the refused attempt:
-      // a fresh, otherwise-valid write for carol still succeeds.
+      // The refused attempt left nothing behind: the claim relation holds
+      // exactly alice's edge's two axis rows, none for carol's source.
+      const [incumbent] = await fixture.store.edges.both.findTo(bob);
+      expectOnlyClaimsOf(
+        await readClaimRows(fixture.backend, bothAxesGraph.id),
+        bothAxesGraph.id,
+        { cardinality: "one", targetCardinality: "one" },
+        [requireDefined(incumbent)],
+      );
+
+      // And a fresh, otherwise-valid write for carol still succeeds.
       await expect(
         fixture.store.edges.both.create(carol, dana, {}),
       ).resolves.toBeDefined();
     });
+    // MUTATION CHECK (verified): planting a claim for a never-inserted edge
+    // on carol's source axis (via `backend.claimEdgeCardinality`) before the
+    // `expectOnlyClaimsOf` call fails it with a third claim row, while the
+    // later `create(carol, dana)` still passes because a stale claim is taken
+    // over by design.
 
     it("refuses before writing (typed ConfigurationError) when the claim relation is missing, for a two-axis kind", async () => {
       const { backend } = createLocalSqliteBackend();

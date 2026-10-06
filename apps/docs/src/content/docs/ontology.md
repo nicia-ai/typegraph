@@ -34,8 +34,10 @@ subClassOf(Employee, Person);
 When you define an ontology, TypeGraph:
 
 1. **Precomputes closures** at store initialization (not query time)
-2. **Expands only the query operations that explicitly opt in** (except inverse
-   traversal, whose store default is `"inverse"` and can be changed)
+2. **Expands query operations by default where the relation guarantees it**:
+   `from()` and `to()` follow `subClassOf`, and traversal follows `inverseOf`
+   (the store default is `"inverse"`); `implying` and `narrower` expansion opt
+   in, and collection reads and search default to exact kinds
 3. **Enforces the documented constraints** when building a registry or writing data
 
 It does not run a general reasoner, materialize implied edges, substitute
@@ -51,7 +53,7 @@ properties between types, or automatically expand every query.
 | `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
 | `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses` / the `expansion` option, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`) |
 | `broader` / `narrower` | Transitive registry introspection, plus kind-taxonomy query expansion with `expansion: "narrower"` (untyped alias — no schema relationship is claimed) |
-| `partOf` / `hasPart` | Transitive registry introspection only |
+| `partOf` / `hasPart` | Enforced composition (see [Composition](#composition)): one whole per part across every declared pair, acyclicity over the composition union, a leaf-first delete cascade, optional `existence: "required"`, `parts()` / `wholes()` navigation, and `subgraph({ composition: true })` export. Also a transitive registry closure |
 | `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
 
 `sameAs`, `differentFrom`, and the custom `metaEdge()` factory were removed
@@ -310,7 +312,7 @@ for what a document that still persists one of these relations does on load.
 
 **Changing this on a populated graph**: `equivalentTo` is classified exactly
 like `subClassOf` — an addition is checked against existing data (it can
-propagate a `disjointWith`, and will also merge uniqueness components once
+propagate a `disjointWith`, and merges uniqueness components, since
 equivalence folds into subsumption), and a removal is checked for live edges
 relying on it. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
@@ -694,8 +696,12 @@ Tier 1 is enforced, in full, at write time:
   never exist without a live whole (see below).
 - **Navigation and export.** `parts()`/`wholes()` cross heterogeneous,
   mixed-orientation edge kinds, and `subgraph({ composition: true })` returns
-  the complete owned unit — a root plus its entire parts closure, at whatever
-  depth the part tree happens to be rather than at the caller's `maxDepth`.
+  the owned unit at the read's temporal coordinate — a root plus its entire
+  parts closure, at whatever depth the part tree happens to be rather than at
+  the caller's `maxDepth`. A part attached through a `population: "one"` edge
+  whose validity window has ended is outside a current read, though the
+  delete cascade still takes it (see
+  [Composition Cascade](/limitations#composition-cascade)).
   There is no depth ceiling on that closure and no partial answer: it is a
   set-semantics recursion bounded by its own visited set, the same way the
   acyclicity probe is exhaustive, so a part chain of any length comes back
@@ -821,7 +827,7 @@ into a store or committed as a schema version (`createStore`,
 authored through a graph extension, not just `implies()` calls in code.
 
 **Changing this on a populated graph**: adding or removing `implies` changes
-what a default `expand: "implying"` traversal returns for existing edges —
+what an `expand: "implying"` traversal returns for existing edges —
 the same read-semantics reasoning as `inverseOf` — so it is also `breaking`
 and requires an explicit `migrateSchema()`. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
@@ -1020,7 +1026,15 @@ const graph = defineGraph({
 });
 
 // A concept can never (transitively) be broader than itself.
-await store.query(Concept).from(root).recursive("broader", { maxHops: 20 });
+const ancestors = await store
+  .query()
+  .from("Concept", "c")
+  .whereNode("c", (c) => c.id.eq(root.id))
+  .traverse("broader", "e")
+  .recursive({ maxHops: 20 })
+  .to("Concept", "ancestor")
+  .select((ctx) => ctx.ancestor)
+  .execute();
 ```
 
 This is not expressible as an OWL 2 DL axiom — OWL has no acyclicity

@@ -72,6 +72,7 @@ import {
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
+import { TRUNCATE_RESETTABLE_TABLES_SQL } from "./managed-tables";
 
 // ============================================================
 // Test Configuration
@@ -211,25 +212,7 @@ async function clearTestData(): Promise<void> {
   // per-test createStoreWithSchema re-materializes every per-field vector
   // table + marker in lockstep. Otherwise a marker could outlive a dropped
   // table and a later boot in this database would skip the CREATE.
-  await sharedPool.query(
-    `TRUNCATE typegraph_index_materializations,
-              typegraph_contribution_materializations,
-              typegraph_kind_removals,
-              typegraph_reconciliation_markers,
-              typegraph_node_fulltext,
-              typegraph_revision_origins,
-              typegraph_recorded_clock,
-              typegraph_recorded_nodes,
-              typegraph_recorded_edges,
-              typegraph_recorded_identity_assertions,
-              typegraph_identity_closure,
-              typegraph_identity_assertions,
-              typegraph_nodes,
-              typegraph_edges,
-              typegraph_node_uniques,
-              typegraph_contribution_materializations,
-              typegraph_schema_versions CASCADE`,
-  );
+  await sharedPool.query(TRUNCATE_RESETTABLE_TABLES_SQL);
 
   // Per-(kind, field) vector tables are materialized per field, so enumerate
   // and truncate any that exist to keep embedding rows from leaking across

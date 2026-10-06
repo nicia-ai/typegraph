@@ -323,11 +323,13 @@ const proposal = defineGraphExtension({
 });
 ```
 
-It may **not** declare `cardinality` or `targetCardinality` — those stay
-compile-time-only, so a runtime-authored edge is always `many` on that axis.
-This is a deliberate asymmetry: `acyclic` needs no ownership slot and no
-sidecar to maintain, while cardinality's claim relation is not (yet) part of
-the runtime-authored surface.
+It may also declare `cardinality` and `targetCardinality`, bounding the edges
+leaving one source and the edges pointing at one target exactly as a
+compile-time registration does. The same atomic claims enforce them on every
+write path, so a second edge at a `targetCardinality: "one"` target is refused
+with `CardinalityError` (`details.direction: "target"`). A platform that accepts
+extension documents from untrusted authors should therefore expect an extension
+to introduce edge-count constraints, not only additive kinds.
 
 ### Ontology
 
