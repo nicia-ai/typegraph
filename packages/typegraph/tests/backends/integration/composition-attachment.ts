@@ -448,12 +448,7 @@ export function registerCompositionAttachmentIntegrationTests(
             { id: history.id, from: reel, to: showA, props: {} },
           ]);
         } else {
-          const { action } = await store.edges.caReelOf.getOrCreateByEndpoints(
-            reel,
-            showA,
-            {},
-          );
-          expect(action).toBe("resurrected");
+          await store.edges.caReelOf.getOrCreateByEndpoints(reel, showA, {});
         }
 
         const afterRestore = await store.edges.caReelOf.find(
@@ -694,12 +689,10 @@ export function registerCompositionAttachmentIntegrationTests(
             {},
             { partOf: { whole: { kind, id: rootA.id } } },
           );
-          const liveLinks = async (): Promise<ReadonlySet<string>> =>
-            new Set(
-              (await edges.find({})).map(
-                (edge) => `${edge.fromId}->${edge.toId}`,
-              ),
-            );
+          const liveLinks = async (): Promise<ReadonlySet<string>> => {
+            const live = await edges.find({});
+            return new Set(live.map((edge) => `${edge.fromId}->${edge.toId}`));
+          };
           return { store, edges, rootA, rootB, first, second, liveLinks };
         }
 

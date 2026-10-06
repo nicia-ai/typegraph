@@ -3599,13 +3599,9 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
     session,
     target,
     lock,
-    await prepareCompositionAttachmentMoves(
-      ctx,
-      target,
-      lock,
-      "nodes.attach",
-      [{ partId, decided, moveAt }],
-    ),
+    await prepareCompositionAttachmentMoves(ctx, target, lock, "nodes.attach", [
+      { partId, decided, moveAt },
+    ]),
   );
   return requireDefined(
     result,
@@ -3859,7 +3855,13 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
     if (seenIds.has(item.id)) {
       throw new ValidationError(
         `bulkReparent requires distinct part ids; received "${item.id}" more than once.`,
-        { entityType: "node", kind, operation: "update", id: item.id, issues: [] },
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          id: item.id,
+          issues: [],
+        },
         {
           suggestion:
             "List each part once, with the whole it should end up under.",
