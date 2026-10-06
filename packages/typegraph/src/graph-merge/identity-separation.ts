@@ -136,14 +136,14 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   const ctx = storeRuntime(target).identityContext();
   // A graph holding no `different` assertion can separate nothing, so the whole
   // capture — the class resolution AND the within-component pair enumeration,
-  // which is quadratic in component size — is skipped for one memoized
-  // existence probe. That is the STEADY state of every graph that uses only
-  // `assertSame`, and the state where the veto's cost would otherwise be pure
-  // waste. The decision is the identity module's own `separationFactsEmpty`,
-  // the same owner `bulkIsSeparated` consults to decide that an EMPTY
-  // separation relation is correct rather than unfilled, so a graph an earlier
-  // `assertSame`/`assertDifferent` on this Store handle already proved
-  // separates-nothing pays nothing here.
+  // which is quadratic in component size — is skipped for one existence probe.
+  // That is the STEADY state of every graph that uses only `assertSame`, and
+  // the state where the veto's cost would otherwise be pure waste.
+  //
+  // The probe is the ledger's answer NOW (`separationFactsEmpty`), paid on
+  // every plan. A fact an earlier call on this Store handle settled cannot
+  // stand in for it: a `different` asserted since — by this handle or any
+  // other — is exactly what the veto exists to honor.
   //
   // Consequence, deliberately: a legacy store whose separation relation was
   // never provisioned is not refused when it holds no `different` assertion
