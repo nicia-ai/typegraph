@@ -190,14 +190,22 @@ a `differentFrom` relation exactly like the always-safe row.
 - **Adding `disjointWith`** is checked against every live node: if two nodes
   already share an id under kinds the new relation makes mutually exclusive
   (directly, or via `subClassOf` propagation), the commit refuses.
-- **Adding `subClassOf` or `equivalentTo`** is checked two ways: it
+- **Adding `subClassOf` or `equivalentTo`** is checked three ways: it
   can propagate an existing `disjointWith` down to a kind that was not
-  disjoint before (same check as above), and it can merge two previously
+  disjoint before (same check as above); it can merge two previously
   independent `kindWithSubClasses` uniqueness components — if both already
-  hold a live row under the same key, the commit refuses.
+  hold a live row under the same key, the commit refuses; and it can make a
+  kind a required-existence composition part by making it a subclass of
+  one — if a live row of that kind has no live whole, the commit refuses
+  (`compositionExistence`).
 - **Removing `subClassOf` or `equivalentTo`** can shrink an edge
   kind's admitted endpoint pairs. If a live edge's endpoints rely on the
-  subsumption the relation provided, the commit refuses.
+  subsumption the relation provided, the commit refuses. It can also move a
+  `kindWithSubClasses` uniqueness axis: this is **not** checked, and claims
+  written under the wider hierarchy stop fencing new writes of a kind whose
+  axis moved. Run `store.verifyConstraintFences()` after removing a relation
+  from a populated hierarchy that declares such a constraint; it reports any
+  duplicate that results.
 - **Removing `disjointWith`** never invalidates anything — loosening a
   constraint cannot make an existing row wrong — so it stays safe and
   auto-migrates unconditionally.
@@ -217,6 +225,8 @@ a `differentFrom` relation exactly like the always-safe row.
   resolve to and stops parts from being deleted with their whole — a
   read/write-semantics change, not a data-validity one — so it is `breaking`
   and requires an explicit `migrateSchema()`, like `inverseOf` and `implies`.
+  A stored relation with no `via` realized none of that and is safe to
+  remove.
 - A relation whose `from` or `to` names a kind **this same commit removes**
   is itself safe with no check, and rows of the removed kind never hold the
   commit back. They stay in storage until `materializeRemovals()` (or
@@ -333,10 +343,12 @@ hierarchy is checked for a **schema-shape** violation — the child's schema
 no longer structurally extends the parent's — and this check happens before
 the data check, before any commit: `getSchemaChanges(backend, graph)` throws
 a `ConfigurationError` naming the child, the parent, and the offending
-property path if the graph you're about to commit would introduce one. This
-runs even when a migration only edits a node kind's **property** schema and
-touches no relation at all — a property change on a kind already party to an
-existing hierarchy can break it just as surely as a relation change can.
+property path if the graph you're about to commit declares one. This runs
+whenever the graph declares a `subClassOf`/`equivalentTo` relation, whatever
+the diff touches: a property change on a kind already party to an existing
+hierarchy can break it just as surely as a relation change can, and an
+unchanged graph can carry a hierarchy an earlier release accepted — which is
+exactly what running it before an upgrade is for.
 
 **`requiresMigration` does not surface this refusal.** By design, it
 collapses any `ConfigurationError` from `getSchemaChanges` — this one
@@ -361,9 +373,24 @@ No data migration is required for this class of refusal — it's a
 schema-authoring fix (loosen the parent, tighten the child, or replace
 `subClassOf` with `broader` if the relation was really a taxonomy). Only the
 **AFTER** side of a diff is enforced this way; the BEFORE (stored) side is a
-delta input the diff never writes through, so an already-incoherent
-persisted document can still be repaired by a fix-forward migration that
-removes the offending relation.
+delta input the diff never writes through, so a persisted document holding
+such a hierarchy can still be repaired by a fix-forward migration that
+removes or corrects the offending relation.
+
+The stored side is excused from the `partOf`/`hasPart` declaration rules the
+same way. A document stored with the earlier three-part
+`partOf(part, whole)` relation (no `via`) upgrades in this order:
+
+1. Upgrade the library.
+2. In the graph, give the relation its realizing edge —
+   `partOf(Part, Whole, { via: edge })` — or delete it. A graph that still
+   declares the three-part relation is refused at registry build.
+3. Run `getSchemaChanges(backend, graph)`. It reports the stored relation
+   removed (`safe`: with no `via` it realized nothing) and, when you declared
+   a `via`, the new pair added (`warning`).
+4. Open the graph with `createStoreWithSchema()` or commit it with
+   `migrateSchema()`. The new pair is checked against live data like any
+   added composition pair.
 
 ## Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs
 

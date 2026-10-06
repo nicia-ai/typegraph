@@ -202,7 +202,11 @@ const MATRIX: readonly MatrixRow[] = [
     from: "A",
     to: "B",
     expectedSeverity: "warning",
-    expectedProbeKinds: ["nodeUniqueness", "nodeDisjointness"],
+    expectedProbeKinds: [
+      "nodeUniqueness",
+      "nodeDisjointness",
+      "compositionExistence",
+    ],
   },
   {
     metaEdge: "subClassOf",
@@ -218,7 +222,11 @@ const MATRIX: readonly MatrixRow[] = [
     from: "A",
     to: "B",
     expectedSeverity: "warning",
-    expectedProbeKinds: ["nodeUniqueness", "nodeDisjointness"],
+    expectedProbeKinds: [
+      "nodeUniqueness",
+      "nodeDisjointness",
+      "compositionExistence",
+    ],
   },
   {
     metaEdge: "equivalentTo",
@@ -234,7 +242,11 @@ const MATRIX: readonly MatrixRow[] = [
     from: "A",
     to: "B",
     expectedSeverity: "warning",
-    expectedProbeKinds: ["nodeUniqueness", "nodeDisjointness"],
+    expectedProbeKinds: [
+      "nodeUniqueness",
+      "nodeDisjointness",
+      "compositionExistence",
+    ],
   },
   {
     metaEdge: "sameAs",
@@ -562,8 +574,8 @@ describe("classifyOntologyChanges", () => {
       // Organization)` in one commit: the allowed-pair COUNT for `worksFor`
       // is unchanged (one subclass pair either way), but `(Person, Company)`
       // is no longer admitted. A count-based "did this shrink?" predicate
-      // (`isProperSubset`, which additionally requires the after list to be
-      // strictly SHORTER) misses this entirely.
+      // (a proper-subset test, which additionally requires the after list to
+      // be strictly SHORTER) misses this entirely.
       const worksFor = edgeDef("worksFor", ["Person"], ["Organization"]);
       const before = snapshot({}, { worksFor }, [
         relation("subClassOf", "Company", "Organization"),

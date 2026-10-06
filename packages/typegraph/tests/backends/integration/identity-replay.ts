@@ -26,7 +26,14 @@ import {
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
-import { exportGraph, importGraph } from "../../../src/interchange";
+import {
+  exportGraph,
+  exportGraphStream,
+  type GraphInterchangeChunk,
+  importGraph,
+  importGraphStream,
+} from "../../../src/interchange";
+import { getActiveSchema, migrateSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -82,8 +89,33 @@ type DepartedLineageStore = Awaited<
   ReturnType<typeof provisionDepartedLineageStore>
 >;
 
+const FlipPerson = defineNode("Person", { schema: z.object({}) });
+const FlipRobot = defineNode("Robot", { schema: z.object({}) });
+
+function profileFlipGraph(sameIdAcrossKinds: "fold" | "ignore") {
+  return defineGraph({
+    id: "identity_replay_profile_flip",
+    nodes: { Person: { type: FlipPerson }, Robot: { type: FlipRobot } },
+    edges: {},
+    identity: { sameIdAcrossKinds },
+  });
+}
+
+/** How long a test waits for a future-dated validity window to lapse. */
+const WINDOW_LAPSE_MS = 250;
+const WINDOW_LAPSE_MARGIN_MS = 150;
+
 function personRef(id: string) {
   return { kind: "Person" as const, id };
+}
+
+const DISJOINT_PAIR_COUNT = 6;
+
+function disjointPair(index: number) {
+  return [
+    personRef(`attribution-${String(index)}-a`),
+    personRef(`attribution-${String(index)}-b`),
+  ] as const;
 }
 
 const DEPARTURES = [
@@ -103,6 +135,21 @@ function memberKeys(
   members: readonly Readonly<{ kind: string; id: string }>[],
 ): readonly string[] {
   return members.map((member) => `${member.kind}:${member.id}`).toSorted();
+}
+
+async function provisionDisjointPairs(context: IntegrationTestContext) {
+  const store = await provisionIdentityReplayStore(context);
+  const pairs = Array.from({ length: DISJOINT_PAIR_COUNT }, (_, index) =>
+    disjointPair(index),
+  );
+  for (const [a, b] of pairs) {
+    await store.nodes.Person.create({}, { id: a.id });
+    await store.nodes.Person.create({}, { id: b.id });
+  }
+  const asserted = await store.identity.bulkAssertSame(
+    pairs.map(([a, b]) => ({ a, b })),
+  );
+  return { store, pairs, asserted };
 }
 
 async function provisionPagedLineage(context: IntegrationTestContext) {
@@ -262,6 +309,115 @@ export function registerIdentityReplayIntegrationTests(
     });
   });
 
+  describe("archival restore sets one watermark on either entry point", () => {
+    for (const variant of ["unpruned", "pruned"] as const) {
+      it(`importGraph and importGraphStream agree on truncatedBefore for an ${variant} source`, async () => {
+        const source = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_restore_parity_source_${variant}`),
+        );
+        const alice = personRef("rp-alice");
+        const bob = personRef("rp-bob");
+        await source.nodes.Person.create({}, { id: alice.id });
+        await source.nodes.Person.create({}, { id: bob.id });
+        const first = await source.identity.assertSame(alice, bob);
+        await source.identity.retractAssertion(first.assertion.id);
+        await source.identity.assertSame(alice, bob);
+        if (variant === "pruned") {
+          const history = await source.identity.transitionsOf(alice);
+          await pruneIdentityTransitions(source, {
+            beforeRecorded: requireDefined(history.transitions.at(-1)).recorded,
+          });
+        }
+        const archive = await exportGraph(source, {
+          identityMode: "archival",
+        });
+        // Collected before any import: one backend serves source and targets.
+        const chunks: GraphInterchangeChunk[] = [];
+        for await (const chunk of exportGraphStream(source, {
+          identityMode: "archival",
+        })) {
+          chunks.push(chunk);
+        }
+        expect(chunks.map((chunk) => chunk.type)).toContain("identity");
+        expect(chunks.at(-1)?.type).toBe("identity-transitions");
+
+        const documentTarget = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_restore_parity_document_${variant}`),
+        );
+        const streamTarget = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_restore_parity_stream_${variant}`),
+        );
+        const documentResult = await importGraph(documentTarget, archive, {
+          onConflict: "skip",
+        });
+        const streamResult = await importGraphStream(
+          streamTarget,
+          (async function* replayChunks() {
+            await Promise.resolve();
+            yield* chunks;
+          })(),
+          { onConflict: "skip" },
+        );
+        expect(documentResult.errors).toEqual([]);
+        expect(streamResult.errors).toEqual([]);
+
+        const documentReplay = await documentTarget.identity.replay(alice);
+        const documentFloor = requireDefined(documentReplay.truncatedBefore);
+        const streamReplay = await streamTarget.identity.replay(alice);
+        expect(
+          recordedInstantRevision(requireDefined(streamReplay.truncatedBefore)),
+        ).toBe(recordedInstantRevision(documentFloor));
+        // The floor sits at the restore's first commit, so the union the
+        // restore itself recorded is still a replayable step.
+        expect(streamReplay.steps.map((step) => step.transition.cause)).toEqual(
+          ["assert"],
+        );
+      });
+    }
+
+    it("leaves a destination's own earlier history unfloored on a streamed restore", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_restore_native_source"),
+      );
+      await source.nodes.Person.create({}, { id: "rn-a" });
+      await source.nodes.Person.create({}, { id: "rn-b" });
+      await source.identity.assertSame(personRef("rn-a"), personRef("rn-b"));
+      const chunks: GraphInterchangeChunk[] = [];
+      for await (const chunk of exportGraphStream(source, {
+        identityMode: "archival",
+      })) {
+        chunks.push(chunk);
+      }
+
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_restore_native_target"),
+      );
+      await target.nodes.Person.create({}, { id: "rn-own-a" });
+      await target.nodes.Person.create({}, { id: "rn-own-b" });
+      await target.identity.assertSame(
+        personRef("rn-own-a"),
+        personRef("rn-own-b"),
+      );
+      const streamResult = await importGraphStream(
+        target,
+        (async function* replayChunks() {
+          await Promise.resolve();
+          yield* chunks;
+        })(),
+        { onConflict: "skip" },
+      );
+      expect(streamResult.errors).toEqual([]);
+
+      const own = await target.identity.replay(personRef("rn-own-a"));
+      expect(own.truncatedBefore).toBeUndefined();
+    });
+  });
+
   describe("identity lineage of a departed member", () => {
     it.each(DEPARTURES)(
       "keeps the history of a $name non-canonical member discoverable from that member",
@@ -402,6 +558,155 @@ export function registerIdentityReplayIntegrationTests(
       );
       expect(survivor.incompleteDiscovery).toBeUndefined();
     });
+  });
+
+  describe("identity transition attribution", () => {
+    it("gives each class a bulk assert changed only the assertion that changed it", async () => {
+      const { store, pairs, asserted } = await provisionDisjointPairs(context);
+
+      const idsPerPair = await Promise.all(
+        pairs.map(async ([a]) => {
+          const history = await store.identity.transitionsOf(a);
+          return history.transitions.map(
+            (transition) => transition.assertionIds,
+          );
+        }),
+      );
+
+      console.log("bulk assert transition ids per pair:", idsPerPair);
+      expect(idsPerPair).toEqual(
+        asserted.map((result) => [[result.assertion.id]]),
+      );
+    });
+
+    it("gives each class a bulk retraction split only the assertion that held it, and never an unrelated different assertion", async () => {
+      const { store, pairs, asserted } = await provisionDisjointPairs(context);
+      const [firstA] = requireDefined(pairs[0]);
+      const [secondA] = requireDefined(pairs[1]);
+      const different = await store.identity.assertDifferent(firstA, secondA);
+
+      await store.identity.bulkRetractAssertions([
+        ...asserted.map((result) => result.assertion.id),
+        different.assertion.id,
+      ]);
+
+      const retractIdsPerPair = await Promise.all(
+        pairs.map(async ([a]) => {
+          const history = await store.identity.transitionsOf(a);
+          return history.transitions
+            .filter((transition) => transition.cause === "retract")
+            .map((transition) => transition.assertionIds);
+        }),
+      );
+
+      console.log("bulk retract transition ids per pair:", retractIdsPerPair);
+      for (const [index, result] of asserted.entries()) {
+        const idsPerTransition = requireDefined(retractIdsPerPair[index]);
+        expect(idsPerTransition.length).toBeGreaterThan(0);
+        for (const ids of idsPerTransition) {
+          expect(ids).toEqual([result.assertion.id]);
+        }
+      }
+    });
+  });
+
+  describe("identity replay reads each step at its own coordinate", () => {
+    it("reconstructs `before` at the revision before each step, even where an unnoted write changed the class", async () => {
+      const backend = context.getStore().backend;
+      const ignoreGraph = profileFlipGraph("ignore");
+      const foldGraph = profileFlipGraph("fold");
+      const [ignoreStore] = await createStoreWithSchema(ignoreGraph, backend, {
+        history: true,
+      });
+      const x = personRef("flip-x");
+      const y = personRef("flip-y");
+      await ignoreStore.nodes.Person.create({}, { id: x.id });
+      await ignoreStore.nodes.Person.create({}, { id: y.id });
+      const same = await ignoreStore.identity.assertSame(x, y);
+      // Under `ignore` a same-id node of another kind joins no class, so
+      // nothing is noted; under `fold` it is a member from this revision on.
+      await ignoreStore.nodes.Robot.create({}, { id: x.id });
+      await ignoreStore.identity.retractAssertion(same.assertion.id);
+
+      const active = requireDefined(
+        await getActiveSchema(backend, ignoreGraph.id),
+      );
+      await migrateSchema(backend, foldGraph, active.version);
+      const [store] = await createStoreWithSchema(foldGraph, backend, {
+        history: true,
+      });
+
+      const replay = await store.identity.replay(x);
+      const retract = requireDefined(
+        replay.steps.find((step) => step.transition.cause === "retract"),
+      );
+      const retractRevision = recordedInstantRevision(
+        retract.transition.recorded,
+      );
+      const retractWallTime = recordedInstantWallTime(
+        retract.transition.recorded,
+      );
+
+      // What the store itself answers one revision earlier and at the
+      // step's own revision, from the valid instant the step was recorded at.
+      const membersBefore = await store
+        .asOfRecorded(
+          createRecordedInstant(retractRevision - 1, retractWallTime),
+        )
+        .identity.membersOf(x);
+      const membersAfter = await store
+        .asOfRecorded(retract.transition.recorded)
+        .identity.membersOf(x);
+
+      expect(memberKeys(retract.before)).toEqual(memberKeys(membersBefore));
+      expect(memberKeys(retract.before)).toEqual([
+        "Person:flip-x",
+        "Person:flip-y",
+        "Robot:flip-x",
+      ]);
+      expect(memberKeys(retract.after)).toEqual(memberKeys(membersAfter));
+    });
+    // MUTATION CHECK: reusing the previous step's `after` as this step's
+    // `before` reports [Person:flip-x, Person:flip-y] for the retraction, so
+    // the Robot appears to join BECAUSE of it.
+
+    it("answers the same step identically after a future-dated window lapses", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_replay_window_lapse"),
+      );
+      const person = personRef("lapse-x");
+      await store.nodes.Person.create({}, { id: person.id });
+      await store.nodes.Org.create({}, { id: person.id });
+      const lapsesAt = new Date(Date.now() + WINDOW_LAPSE_MS).toISOString();
+      await store.nodes.Org.update(
+        asNodeId(person.id),
+        {},
+        {
+          validTo: lapsesAt,
+        },
+      );
+
+      const earlyReplay = await store.identity.replay(person);
+      const early = requireDefined(earlyReplay.steps.at(-1));
+      await new Promise((resolve) =>
+        setTimeout(resolve, WINDOW_LAPSE_MS + WINDOW_LAPSE_MARGIN_MS),
+      );
+      expect(Date.now()).toBeGreaterThan(Date.parse(lapsesAt));
+      const lateReplay = await store.identity.replay(person);
+      const late = requireDefined(lateReplay.steps.at(-1));
+      const live = await store
+        .asOfRecorded(late.transition.recorded)
+        .identity.membersOf(person);
+
+      expect(late.transition.transitionId).toBe(early.transition.transitionId);
+      expect(memberKeys(late.after)).toEqual(memberKeys(early.after));
+      expect(memberKeys(late.before)).toEqual(memberKeys(early.before));
+      expect(memberKeys(late.after)).toEqual(memberKeys(live));
+      expect(memberKeys(live)).toEqual(["Org:lapse-x", "Person:lapse-x"]);
+    });
+    // MUTATION CHECK: pairing each revision with the wall clock's "now" as
+    // its valid instant drops Org:lapse-x from the late read's `after`.
   });
 
   describe("identity replay equivalence", () => {

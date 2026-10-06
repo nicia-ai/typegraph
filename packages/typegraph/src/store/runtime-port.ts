@@ -474,10 +474,20 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     target: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>>;
   /**
+   * @internal The floor of an archival restore about to begin: the revision
+   * its first commit takes. A streamed restore reads it once, before its
+   * first chunk, and hands it to every `importIdentityTransitionsAtTarget`.
+   */
+  identityTransitionRestoreFloorAtTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<number>;
+  /**
    * @internal Restores archival identity transitions inside an import
    * transaction. `carriedWatermark` is the source graph's own retention
    * watermark from the archival payload, used only when `transitions` is
-   * empty (see `importIdentityTransitionsIntoTarget`).
+   * empty. `restoreFloor` is the floor a multi-transaction restore read
+   * before it began; `undefined` when this transaction is the whole restore
+   * (see `importIdentityTransitionsIntoTarget`).
    */
   importIdentityTransitionsAtTarget: (
     target: Readonly<
@@ -491,6 +501,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
     transitions: readonly IdentityTransitionTransfer[],
     carriedWatermark: number | undefined,
+    restoreFloor: number | undefined,
   ) => Promise<Readonly<{ created: number; watermark: number | undefined }>>;
   /**
    * `decision` is the governing merge decision, when the apply runs under one:

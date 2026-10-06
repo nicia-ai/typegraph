@@ -126,11 +126,9 @@ describe("identity replay", () => {
   });
 
   it("replays merge / split / re-merge: every step's before/after matches an independent asOfRecorded read", async () => {
-    // `identityReplay` assigns `before = previousAfter` for every
-    // non-first boundary (replay.ts), so a loop comparing `current.before`
-    // against `previous.after` compares a value against the variable it was
-    // copied from — it cannot fail for any implementation of the walk. Every
-    // assertion below instead checks against `store.asOfRecorded(...)`, a
+    // Comparing `current.before` against `previous.after` only compares two
+    // of replay's own reconstructions with each other. Every assertion below
+    // instead checks against `store.asOfRecorded(...)`, a
     // read path replay's OWN reconstruction never touches, matching the
     // cross-backend twin (tests/backends/integration/identity-replay.ts).
     const store = await buildAbcStore();

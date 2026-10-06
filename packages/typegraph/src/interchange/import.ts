@@ -424,6 +424,11 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+  /**
+   * The floor a streamed archival restore read before its first chunk; absent
+   * when this write plan is the whole restore, which reads its own.
+   */
+  identityRestoreFloor?: number;
 }>;
 
 /**
@@ -529,6 +534,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
       inputs.data.identity,
       result,
       errors,
+      inputs.identityRestoreFloor,
     );
   }
   return { result, errors, importedNodeIds };
@@ -538,6 +544,7 @@ async function importGraphData<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
   options: ResolvedImportOptions,
+  identityRestoreFloor?: number,
 ): Promise<ImportResult> {
   // Reject an identity payload aimed at an identity-disabled graph, and
   // runtime-validate the (bounded) identity section, BEFORE any entity write —
@@ -622,6 +629,7 @@ async function importGraphData<G extends GraphDef>(
     batchPointRead,
     uniqueSidecarBatch,
     statementExecution,
+    ...(identityRestoreFloor === undefined ? {} : { identityRestoreFloor }),
   };
 
   // One transaction on a transactional backend; runs directly otherwise, with
@@ -768,6 +776,7 @@ export async function importGraphStream<G extends GraphDef>(
   let receivedEdges = false;
   let receivedIdentity = false;
   let receivedIdentityTransitions = false;
+  let identityRestoreFloor: number | undefined;
   let releaseImportLease: (() => void) | undefined;
 
   try {
@@ -831,6 +840,12 @@ export async function importGraphStream<G extends GraphDef>(
             chunk.header.identity?.retention,
           );
           header = chunk.header;
+          if (announcesIdentityTransitionRestore(header)) {
+            identityRestoreFloor =
+              await storeRuntime(store).identityTransitionRestoreFloorAtTarget(
+                targetBackend,
+              );
+          }
           break;
         }
         case "nodes": {
@@ -934,6 +949,18 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity transitions without an identity header.",
             );
           }
+          // The restore floor was read at the header, before any chunk wrote.
+          // Transitions the header never announced have no floor to be
+          // restored against, and applying them without one would drop the
+          // retention watermark an announced stream sets.
+          if (
+            identityRestoreFloor === undefined &&
+            chunk.transitions.length > 0
+          ) {
+            throw new Error(
+              "Graph interchange stream emitted identity transitions its header did not announce (identity.hasTransitions).",
+            );
+          }
           receivedIdentityTransitions = true;
           mergeImportResult(
             result,
@@ -941,6 +968,7 @@ export async function importGraphStream<G extends GraphDef>(
               store,
               graphDataForChunk(header, [], [], [], chunk.transitions),
               { ...options, refreshStatistics: false },
+              identityRestoreFloor,
             ),
           );
           throwIfStreamChunkFailed(result, options);
@@ -1171,13 +1199,31 @@ function assertIdentityImportSupported<G extends GraphDef>(
  * so the header's `hasTransitions` announcement is the only pre-write
  * signal available).
  */
+/**
+ * Whether a payload restores retained identity explanation: transition rows,
+ * or the watermark of a source whose rows were all pruned.
+ */
+function restoresIdentityTransitions(
+  hasTransitions: boolean,
+  retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
+): boolean {
+  return hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0;
+}
+
+function announcesIdentityTransitionRestore(header: GraphDataHeader): boolean {
+  return restoresIdentityTransitions(
+    header.identity?.hasTransitions === true,
+    header.identity?.retention,
+  );
+}
+
 function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
   store: Store<G>,
   hasTransitions: boolean,
   retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
 ): void {
   if (
-    (hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0) &&
+    restoresIdentityTransitions(hasTransitions, retention) &&
     !storeCaptureEnabled(store)
   ) {
     throw identityTransitionLogUnavailableError(
@@ -1374,6 +1420,7 @@ async function importIdentitySection<G extends GraphDef>(
   identity: NonNullable<GraphData["identity"]>,
   result: ImportResult,
   errors: ImportError[],
+  identityRestoreFloor: number | undefined,
 ): Promise<void> {
   try {
     const summary = await runtime.importIdentityAssertionsAtTarget(
@@ -1391,7 +1438,12 @@ async function importIdentitySection<G extends GraphDef>(
     result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
-  await importIdentityTransitionsSection(runtime, target, identity);
+  await importIdentityTransitionsSection(
+    runtime,
+    target,
+    identity,
+    identityRestoreFloor,
+  );
 }
 
 /**
@@ -1409,6 +1461,7 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
   target: IdentityTarget,
   identity: NonNullable<GraphData["identity"]>,
+  identityRestoreFloor: number | undefined,
 ): Promise<void> {
   const transitions = identity.transitions ?? [];
   if (identity.mode === "state") {
@@ -1431,6 +1484,7 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
     target,
     transitions,
     identity.retention?.prunedBeforeRevision,
+    identityRestoreFloor,
   );
 }
 

@@ -33,20 +33,24 @@ import {
 } from "./validate-structural-subsumption";
 
 /**
- * How `buildValidatedKindRegistry` enforces the structural-subsumption
- * contract for the registry it is about to build:
+ * How `buildValidatedKindRegistry` treats the registry it is about to build:
  *
  * - `"enforce"` — the default, and the only mode a store actually reads or
- *   writes through. An incompatible `subClassOf`/`equivalentTo` pair throws.
+ *   writes through. An incompatible `subClassOf`/`equivalentTo` pair throws,
+ *   and so does every composition (`partOf`/`hasPart`) declaration defect.
  * - `"unenforced-baseline"` — for a registry built ONLY to diff against a
  *   proposal (the BEFORE side of `classifyOntologyChanges`,
  *   `src/schema/ontology-change.ts`). Enforcing the before-side would wedge
- *   the fix-forward migration that repairs an already-incoherent persisted
- *   document — removing the offending relation is itself a relation change,
- *   so the diff would rebuild the (still-incoherent) BEFORE registry and
- *   throw before it could ever classify the removal as the fix. The refuse-on-load guarantee is
- *   satisfied by the live registry every commit path already
- *   builds from the code graph declaring the same relations, and by
+ *   the fix-forward migration that repairs a persisted document today's
+ *   validation refuses — removing or correcting the offending relation is
+ *   itself a relation change, so the diff would rebuild the (still-refused)
+ *   BEFORE registry and throw before it could ever classify the fix. Two
+ *   contracts are relaxed, because both postdate documents already stored:
+ *   structural subsumption, and the composition declaration rules (a
+ *   `partOf`/`hasPart` relation with no `via`, which realizes nothing and so
+ *   contributes no composition pair, and a realizing edge the composition
+ *   rules refuse). The refuse-on-load guarantee is satisfied by the live
+ *   registry every commit path already builds from the code graph, and by
  *   `getSchemaChanges` reporting it via the AFTER-side build — a diff is not
  *   a load.
  *
@@ -196,7 +200,14 @@ export function buildValidatedKindRegistry(
     return registry;
   }
 
-  const issues = validateOntologyRelations(input.ontology, kindClassification);
+  const issues = validateOntologyRelations(
+    input.ontology,
+    kindClassification,
+  ).filter(
+    (issue) =>
+      input.structuralSubsumption === "enforce" ||
+      issue.code !== "ONTOLOGY_COMPOSITION_VIA_REQUIRED",
+  );
   if (issues.length > 0) {
     const firstIssue = requireDefined(issues[0]);
     throw new ConfigurationError(
@@ -247,7 +258,10 @@ function buildRegistryWithComposition(
       input.edgeFacts,
       registryForValidation,
     );
-  if (compositionIssues.length > 0) {
+  if (
+    compositionIssues.length > 0 &&
+    input.structuralSubsumption === "enforce"
+  ) {
     const firstIssue = requireDefined(compositionIssues[0]);
     throw new ConfigurationError(
       `Composition ontology is incoherent: ${firstIssue.message}`,

@@ -1,6 +1,7 @@
 /**
- * The exhaustiveness property: the identity transition log's cause set
- * is exhaustive, so `replay`'s `before(b_i) := after(b_{i-1})` reuse is sound.
+ * The exhaustiveness property: under one schema the identity transition
+ * log's cause set is exhaustive, so no membership change falls between two
+ * consecutive `replay` boundaries.
  *
  * For a randomized sequence of identity-affecting operations, this asserts,
  * for EVERY recorded revision the run produced:

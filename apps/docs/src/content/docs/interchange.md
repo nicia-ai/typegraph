@@ -167,10 +167,11 @@ destination's), so `transitionsOf` answers fully while `replay` never pairs
 a restored transition with a fabricated before/after.
 
 The restore also sets the destination's own retention watermark to the
-destination's own current recorded revision + 1 at restore time — but only
-when the destination has no identity transitions of its own yet. A graph
-that already retains its own history keeps its existing watermark
-untouched, so an unrelated restore can never misreport that graph's own,
+revision the restore's first commit takes on the destination — but only
+when the destination recorded no identity transitions of its own before the
+restore began. `importGraph` and `importGraphStream` set the same watermark
+for the same archive. A graph that already retains its own history keeps its
+existing watermark untouched, so an unrelated restore can never misreport that graph's own,
 fully-retained classes as truncated. `replay` reports the watermark, when
 set, as `truncatedBefore`.
 

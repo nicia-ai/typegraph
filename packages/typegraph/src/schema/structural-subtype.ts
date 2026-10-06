@@ -39,8 +39,13 @@
  *    parent still compare as a subtype for that property, even though rules
  *    3–4 can never judge `$ref`/`allOf` on their own. Two DIFFERENT `$ref`
  *    targets, or a child that merely narrows an `allOf` member, still fall
- *    through to rule 3/4 and are refused — this rule only ever fires on
- *    exact equality, so it cannot mask a genuine incompatibility.
+ *    through to rule 3/4 and are refused. Equal `$ref` STRINGS are not equal
+ *    schemas, though: a reference is resolved against its own side's root
+ *    (`#`, or `#/$defs/<name>`), and the rule fires only when every reference
+ *    the pair reaches, transitively, resolves to an equal definition on both
+ *    sides. The projection names a recursive definition by encounter order,
+ *    so two unrelated recursive types share a name; an unresolvable
+ *    reference is refused the same way. Rule 6 decides through the same test.
  * 3. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
  *    which is why recursion here cannot diverge.
@@ -69,10 +74,16 @@
  *    (it tolerates schemas that differ only in an annotation/unrecognized
  *    key), reachable only once rules 3–4 have already cleared both sides of
  *    `$ref` and any unmodeled constraining keyword.
- * 7. If either side is a union (`anyOf`, or `oneOf` — read as `anyOf`; the
- *    projection emits `oneOf` only for `z.discriminatedUnion`, whose members
- *    are mutually exclusive by construction, so the two readings coincide
- *    over this fragment, with no overlap detection performed — or a `type`
+ * 7. If either side is a union (`anyOf`, or `oneOf` — read as `anyOf`. For a
+ *    PARENT that reading is sound only when no value can match two members,
+ *    so a parent `oneOf` must have pairwise provably disjoint members:
+ *    different `type` tokens, or one required property pinned to disjoint
+ *    `const`/`enum` sets. `z.discriminatedUnion` always qualifies; `z.xor`,
+ *    which projects `oneOf` too, qualifies only when its members happen to
+ *    be exclusive, and is otherwise `incomparable`
+ *    ("unsupported-construct"), as is a parent carrying both `anyOf` and
+ *    `oneOf`. A CHILD `oneOf` needs no proof: it admits a subset of what its
+ *    members admit together — or a `type`
  *    token array, which the projection emits for a union of bare primitives
  *    such as `z.string().nullable()` and which is read as one member per
  *    token, each carrying every sibling keyword), every child
@@ -183,7 +194,10 @@ export function isStructuralSubtype(
   child: JsonSchema,
   parent: JsonSchema,
 ): StructuralSubtypeResult {
-  return compareSchemas(child, parent, [], 0);
+  return compareSchemas(child, parent, [], {
+    depth: 0,
+    roots: { child, parent },
+  });
 }
 
 // ============================================================
@@ -482,13 +496,152 @@ function hasKeywordOutsideValueSet(keywords: Record<string, unknown>): boolean {
 // Entry point
 // ============================================================
 
+/**
+ * Where a comparison stands: how deep it has recursed, and the two documents
+ * it started from. The roots are what a `$ref` resolves against — a nested
+ * schema does not carry its own definitions.
+ */
+type Walk = Readonly<{
+  depth: number;
+  roots: Readonly<{ child: JsonSchema; parent: JsonSchema }>;
+}>;
+
+function descend(walk: Walk): Walk {
+  return { depth: walk.depth + 1, roots: walk.roots };
+}
+
+// ============================================================
+// References
+// ============================================================
+
+const REFERENCE_KEYWORD = "$ref";
+const DEFINITIONS_KEYWORD = "$defs";
+const ROOT_REFERENCE = "#";
+const LOCAL_DEFINITION_PREFIX = `${ROOT_REFERENCE}/${DEFINITIONS_KEYWORD}/`;
+
+/** Every `$ref` target named anywhere inside `value`, added to `into`. */
+function collectReferences(value: unknown, into: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectReferences(entry, into);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === REFERENCE_KEYWORD && typeof entry === "string") {
+      into.add(entry);
+    } else {
+      collectReferences(entry, into);
+    }
+  }
+}
+
+/** A JSON Pointer reference token, unescaped (RFC 6901: `~1` then `~0`). */
+function unescapePointerToken(token: string): string {
+  return token.replaceAll("~1", "/").replaceAll("~0", "~");
+}
+
+/**
+ * What `reference` names in `root`: the document itself, or one of its
+ * `$defs` — the two forms the projection emits. `undefined` for a reference
+ * this predicate cannot follow (a remote document, a deeper pointer) or
+ * whose definition is absent.
+ */
+function resolveReference(
+  reference: string,
+  root: JsonSchema,
+): JsonSchema | undefined {
+  if (reference === ROOT_REFERENCE) return root;
+  if (!reference.startsWith(LOCAL_DEFINITION_PREFIX)) return undefined;
+  const definitions = root[DEFINITIONS_KEYWORD];
+  if (definitions === null || typeof definitions !== "object") return undefined;
+  const byName = definitions as Record<string, JsonSchema>;
+  const name = unescapePointerToken(
+    reference.slice(LOCAL_DEFINITION_PREFIX.length),
+  );
+  return hasOwnKey(byName, name) ? byName[name] : undefined;
+}
+
+/**
+ * Every reference reachable from `schema` — its own, and those of each
+ * definition they lead to — with what each resolves to in `root`.
+ */
+function reachableDefinitions(
+  schema: unknown,
+  root: JsonSchema,
+): ReadonlyMap<string, JsonSchema | undefined> {
+  const resolved = new Map<string, JsonSchema | undefined>();
+  const pending = new Set<string>();
+  collectReferences(schema, pending);
+  for (const reference of pending) {
+    if (resolved.has(reference)) continue;
+    const target = resolveReference(reference, root);
+    resolved.set(reference, target);
+    // Appending while iterating is what walks the closure: a `Set` visits
+    // entries added during iteration, and never one it already holds.
+    if (target !== undefined) collectReferences(target, pending);
+  }
+  return resolved;
+}
+
+/**
+ * Whether two schemas already known to be EQUAL also mean the same thing:
+ * every reference either one reaches must resolve, on its own side, to an
+ * equal definition.
+ *
+ * A `$ref` is a name, and the name says nothing about the definition. The
+ * projection numbers a recursive schema's definition by encounter order, so
+ * two unrelated recursive types in a child and a parent both land on the same
+ * name; equal reference strings over different `$defs` are different schemas.
+ * A reference neither side can resolve is not evidence of anything and is
+ * refused the same way.
+ */
+function referencesResolveIdentically(
+  child: unknown,
+  parent: unknown,
+  roots: Walk["roots"],
+): boolean {
+  const childDefinitions = reachableDefinitions(child, roots.child);
+  if (childDefinitions.size === 0) return true;
+  // One document compared with itself resolves every reference identically,
+  // whether or not this predicate can follow it.
+  if (roots.child === roots.parent) return true;
+  const parentDefinitions = reachableDefinitions(parent, roots.parent);
+  if (parentDefinitions.size !== childDefinitions.size) return false;
+  for (const [reference, childTarget] of childDefinitions) {
+    const parentTarget = parentDefinitions.get(reference);
+    if (childTarget === undefined || parentTarget === undefined) return false;
+    if (
+      !propertySchemasEqual(
+        stripSchemaMetadata(childTarget),
+        stripSchemaMetadata(parentTarget),
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * THE identity test of this module: the two schemas are equal as written AND
+ * every reference they reach resolves to an equal definition. Both identity
+ * rules (2 and 6) decide through it, so neither can accept a shared reference
+ * name the other would look behind.
+ */
+function sameSchema(child: unknown, parent: unknown, walk: Walk): boolean {
+  return (
+    propertySchemasEqual(child, parent) &&
+    referencesResolveIdentically(child, parent, walk.roots)
+  );
+}
+
 function compareSchemas(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
-  depth: number,
+  walk: Walk,
 ): StructuralSubtypeResult {
-  if (depth > MAX_STRUCTURAL_SUBTYPE_DEPTH) {
+  if (walk.depth > MAX_STRUCTURAL_SUBTYPE_DEPTH) {
     return incomparable("max-depth-exceeded", path);
   }
 
@@ -501,10 +654,7 @@ function compareSchemas(
   // SCHEMA_INCOMPARABLE instead of accepted as an identical, and therefore
   // trivially compatible, property.
   if (
-    propertySchemasEqual(
-      stripSchemaMetadata(child),
-      stripSchemaMetadata(parent),
-    )
+    sameSchema(stripSchemaMetadata(child), stripSchemaMetadata(parent), walk)
   ) {
     return SUBTYPE;
   }
@@ -518,19 +668,21 @@ function compareSchemas(
   const parentUnmodeled = unmodeledConstruct(parent, path);
   if (parentUnmodeled !== undefined) return parentUnmodeled;
 
-  if (
-    propertySchemasEqual(comparableKeywords(child), comparableKeywords(parent))
-  ) {
+  if (sameSchema(comparableKeywords(child), comparableKeywords(parent), walk)) {
     return SUBTYPE;
   }
 
-  if (isUnionSchema(child) || isUnionSchema(parent)) {
-    const unionResult = compareUnion(child, parent, path, depth);
-    if (unionResult.verdict !== "subtype") return unionResult;
-    return compareUnionSiblingConstraints(child, parent, path, depth);
+  if (!exclusiveUnionReadsAsUnion(parent)) {
+    return incomparable("unsupported-construct", path);
   }
 
-  return compareLeaf(child, parent, path, depth);
+  if (isUnionSchema(child) || isUnionSchema(parent)) {
+    const unionResult = compareUnion(child, parent, path, walk);
+    if (unionResult.verdict !== "subtype") return unionResult;
+    return compareUnionSiblingConstraints(child, parent, path, walk);
+  }
+
+  return compareLeaf(child, parent, path, walk);
 }
 
 /**
@@ -559,6 +711,79 @@ function isUnionSchema(schema: JsonSchema): boolean {
 // ============================================================
 // Unions
 // ============================================================
+
+/**
+ * Whether two schemas provably admit no common value because their `type`
+ * tokens differ. `integer` is a `number`, so that pair overlaps; a schema
+ * stating no single token proves nothing.
+ */
+function disjointByTypeToken(left: JsonSchema, right: JsonSchema): boolean {
+  const leftType = left.type;
+  const rightType = right.type;
+  if (typeof leftType !== "string" || typeof rightType !== "string") {
+    return false;
+  }
+  if (leftType === rightType) return false;
+  const numeric = new Set([NUMBER_TYPE_TOKEN, INTEGER_TYPE_TOKEN]);
+  return !(numeric.has(leftType) && numeric.has(rightType));
+}
+
+/** The value set a schema pins one REQUIRED property to, if it does. */
+function requiredPropertyValues(
+  schema: JsonSchema,
+  propertyName: string,
+): ReadonlySet<string> | undefined {
+  if (!(schema.required ?? []).includes(propertyName)) return undefined;
+  const properties = schema.properties;
+  if (properties === undefined || !hasOwnKey(properties, propertyName)) {
+    return undefined;
+  }
+  return allowedValues(requireDefined(properties[propertyName]));
+}
+
+/**
+ * Whether two object schemas provably admit no common value because some
+ * property both REQUIRE is pinned to value sets that share nothing — the
+ * shape `z.discriminatedUnion` projects.
+ */
+function disjointByDiscriminator(left: JsonSchema, right: JsonSchema): boolean {
+  for (const propertyName of Object.keys(left.properties ?? {})) {
+    const leftValues = requiredPropertyValues(left, propertyName);
+    const rightValues = requiredPropertyValues(right, propertyName);
+    if (leftValues === undefined || rightValues === undefined) continue;
+    if ([...leftValues].every((value) => !rightValues.has(value))) return true;
+  }
+  return false;
+}
+
+function provablyDisjoint(left: JsonSchema, right: JsonSchema): boolean {
+  return (
+    disjointByTypeToken(left, right) || disjointByDiscriminator(left, right)
+  );
+}
+
+/**
+ * Whether a PARENT's `oneOf` may be read as `anyOf` ({@link unionMembers}).
+ *
+ * `oneOf` admits a value matching EXACTLY one member, so a child value that
+ * matches two is rejected by the parent while a member-wise reading accepts
+ * it. The two readings coincide only when no value can match two members,
+ * which this proves pairwise or not at all: `z.discriminatedUnion` always
+ * passes, `z.xor` passes only when its members happen to be exclusive. A
+ * schema carrying both `anyOf` and `oneOf` is the conjunction of the two and
+ * is not read through either one.
+ *
+ * Only the parent is asked. A child's `oneOf` admits a SUBSET of what its
+ * members admit together, so reading it as `anyOf` can only cost a refusal.
+ */
+function exclusiveUnionReadsAsUnion(parent: JsonSchema): boolean {
+  const members = parent.oneOf;
+  if (members === undefined) return true;
+  if (parent.anyOf !== undefined) return false;
+  return members.every((left, index) =>
+    members.slice(index + 1).every((right) => provablyDisjoint(left, right)),
+  );
+}
 
 type UnionMember = Readonly<{
   schema: JsonSchema;
@@ -625,7 +850,7 @@ function compareUnionSiblingConstraints(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
-  depth: number,
+  walk: Walk,
 ): StructuralSubtypeResult {
   // A token array's members already carry every sibling keyword.
   if (!declaresUnionMembers(parent)) return SUBTYPE;
@@ -633,14 +858,14 @@ function compareUnionSiblingConstraints(
   if (Object.keys(stripSchemaMetadata(parentSiblings)).length === 0) {
     return SUBTYPE;
   }
-  return compareSchemas(child, parentSiblings, path, depth);
+  return compareSchemas(child, parentSiblings, path, walk);
 }
 
 function compareUnion(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
-  depth: number,
+  walk: Walk,
 ): StructuralSubtypeResult {
   const parentMembers = unionMembers(parent);
 
@@ -659,7 +884,7 @@ function compareUnion(
         childMember.schema,
         parentMember.schema,
         memberPath,
-        depth + 1,
+        descend(walk),
       );
       if (probeResult.verdict === "subtype") {
         matchedParentMember = true;
@@ -690,7 +915,7 @@ function compareLeaf(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
-  depth: number,
+  walk: Walk,
 ): StructuralSubtypeResult {
   const valueSetResult = compareValueSets(child, parent, path);
   if (valueSetResult.verdict !== "subtype") return valueSetResult;
@@ -715,12 +940,12 @@ function compareLeaf(
   }
 
   if (isObjectSchema(child) && isObjectSchema(parent)) {
-    return compareObject(child, parent, path, depth);
+    return compareObject(child, parent, path, walk);
   }
 
   switch (childType ?? parentType) {
     case ARRAY_TYPE_TOKEN: {
-      return compareArray(child, parent, path, depth);
+      return compareArray(child, parent, path, walk);
     }
     case STRING_TYPE_TOKEN: {
       return compareStringConstraints(child, parent, path);
@@ -734,7 +959,7 @@ function compareLeaf(
       return SUBTYPE;
     }
     case OBJECT_TYPE_TOKEN: {
-      return compareObject(child, parent, path, depth);
+      return compareObject(child, parent, path, walk);
     }
     // `undefined` here means neither side carries a `type` token at all —
     // both are `{}`, or both carry only `const`/`enum` (already checked
@@ -816,7 +1041,7 @@ function compareObject(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
-  depth: number,
+  walk: Walk,
 ): StructuralSubtypeResult {
   const childProps = child.properties ?? {};
   const parentProps = parent.properties ?? {};
@@ -843,7 +1068,7 @@ function compareObject(
         requireDefined(childProps[name]),
         parentProperty,
         [...path, name],
-        depth + 1,
+        descend(walk),
       );
       if (propertyResult.verdict !== "subtype") return propertyResult;
       continue;
@@ -860,7 +1085,7 @@ function compareObject(
       childExtrasSchema,
       parentProperty,
       [...path, name],
-      depth + 1,
+      descend(walk),
     );
     if (extraResult.verdict !== "subtype") return extraResult;
   }
@@ -878,7 +1103,7 @@ function compareObject(
         childProperty,
         parentExtrasSchema,
         [...path, name],
-        depth + 1,
+        descend(walk),
       );
       if (extraResult.verdict !== "subtype") return extraResult;
     }
@@ -888,7 +1113,7 @@ function compareObject(
         childExtrasSchema,
         parentExtrasSchema,
         [...path, ADDITIONAL_PROPERTIES_SEGMENT],
-        depth + 1,
+        descend(walk),
       );
       if (additionalResult.verdict !== "subtype") return additionalResult;
     }
@@ -901,7 +1126,7 @@ function compareObject(
   const childPropertyNames = child.propertyNames ?? { type: STRING_TYPE_TOKEN };
   if (
     parent.propertyNames !== undefined &&
-    !propertySchemasEqual(childPropertyNames, parent.propertyNames)
+    !sameSchema(childPropertyNames, parent.propertyNames, walk)
   ) {
     return notSubtype("property-names-mismatch", [
       ...path,
@@ -952,7 +1177,7 @@ function compareArray(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
-  depth: number,
+  walk: Walk,
 ): StructuralSubtypeResult {
   const childTail = arrayTail(child);
   const parentTail = arrayTail(parent);
@@ -971,7 +1196,7 @@ function compareArray(
         requireDefined(childPrefix[index]),
         parentMember,
         [...path, tupleIndexSegment(index)],
-        depth + 1,
+        descend(walk),
       );
       if (memberResult.verdict !== "subtype") return memberResult;
     }
@@ -990,7 +1215,7 @@ function compareArray(
         childMember,
         parentTail,
         [...path, tupleIndexSegment(index)],
-        depth + 1,
+        descend(walk),
       );
       if (memberResult.verdict !== "subtype") return memberResult;
     }
@@ -1021,7 +1246,7 @@ function compareArray(
     childTail,
     parentTail,
     [...path, ARRAY_ITEM_SEGMENT],
-    depth + 1,
+    descend(walk),
   );
 }
 

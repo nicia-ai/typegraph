@@ -1174,6 +1174,52 @@ describe("archival identity import window bounds", () => {
       expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
     }
   });
+
+  it("refuses an identity-transitions chunk its header never announced", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(
+        chunk.type === "header" && chunk.header.identity !== undefined ?
+          {
+            ...chunk,
+            header: {
+              ...chunk.header,
+              identity: { ...chunk.header.identity, hasTransitions: false },
+            },
+          }
+        : chunk,
+      );
+    }
+    expect(chunks.some((chunk) => chunk.type === "identity-transitions")).toBe(
+      true,
+    );
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await expect(
+      importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
+    ).rejects.toThrow(/did not announce/);
+  });
 });
 
 // ============================================================

@@ -226,9 +226,19 @@ function uniquenessAxisGroups(
 /**
  * WHICH axis a live `uniques` row is read at.
  *
- * A row whose `node_kind` no declared group covers is left at its own
- * `node_kind`: the relation's primary key already makes it the only row there,
- * so it can contend with nothing and is reported by no group.
+ * Decided by the row's OWNER (`concrete_kind`), not by where the row sits
+ * (`node_kind`): the constraint a claim answers to is the one its owner's
+ * kind is covered by today. The two agree for every row written under the
+ * hierarchy the groups describe — a claim sits at its component's axis or,
+ * from before the axis moved, at its owner's own kind, and both are members
+ * of that component. They part ways exactly when a schema change re-pairs
+ * kinds: a claim written at `min({A, P})` belongs to no group once `A`'s
+ * component is `{A, B}` and `P` is outside it, while its owner still does.
+ * Reading the row at its stored axis would leave two contending owners in
+ * two groups of one. A row whose owner no group covers falls back to the
+ * stored axis, and one neither covers is left at its own `node_kind`: the
+ * relation's primary key already makes it the only row there, so it can
+ * contend with nothing and is reported by no group.
  *
  * A row covered by more than one group — possible only when one constraint name
  * is declared at two different scopes over one hierarchy — folds onto the
@@ -240,17 +250,20 @@ function uniquenessAxisFor(
   row: ContendedUniqueRow,
   groups: readonly UniquenessAxisGroup[],
 ): string {
-  const covering = groups
-    .filter(
-      (group) =>
-        group.constraintName === row.constraintName &&
-        group.coveredKinds.includes(row.nodeKind),
-    )
-    .toSorted(
-      (left, right) =>
-        right.coveredKinds.length - left.coveredKinds.length ||
-        compareStrings(left.axis, right.axis),
-    );
+  const named = groups.filter(
+    (group) => group.constraintName === row.constraintName,
+  );
+  const coveringKind = (kind: string): readonly UniquenessAxisGroup[] =>
+    named.filter((group) => group.coveredKinds.includes(kind));
+  const byOwner = coveringKind(row.concreteKind);
+  const covering = (
+    byOwner.length > 0 ?
+      byOwner
+    : coveringKind(row.nodeKind)).toSorted(
+    (left, right) =>
+      right.coveredKinds.length - left.coveredKinds.length ||
+      compareStrings(left.axis, right.axis),
+  );
   return covering[0]?.axis ?? row.nodeKind;
 }
 

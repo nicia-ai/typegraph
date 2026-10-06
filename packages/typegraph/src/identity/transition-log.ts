@@ -45,6 +45,7 @@ import {
   MAX_REFERENCE_CHUNK_SIZE,
   type PlainNodeRef,
 } from "./sql-target";
+import { type IdentityAssertionStorageRow } from "./storage-types";
 
 /**
  * The nine exhaustive causes a materialized identity class can change under.
@@ -136,7 +137,64 @@ export type IdentityTransitionRow = Readonly<{
 export type ClosureTransitionRecord = Readonly<{
   classRef: PlainNodeRef;
   priorClassRef?: PlainNodeRef | undefined;
+  /**
+   * Every member the record's class holds AFTER the change — which is every
+   * member of a class it was fused from, and each piece of one it was split
+   * into. Not persisted: it is what decides which assertions a note of this
+   * record names ({@link transitionAssertionIds}).
+   */
+  members: readonly PlainNodeRef[];
 }>;
+
+/** What a transition note needs of an assertion row a write created, ended or removed. */
+export type TransitionAssertionRow = Pick<
+  IdentityAssertionStorageRow,
+  "id" | "rel" | "a_kind" | "a_id" | "b_kind" | "b_id"
+>;
+
+/**
+ * THE attribution of assertions to class changes: for each record, the ids
+ * of the `same` assertions with an endpoint among that record's members, in
+ * the order the assertions were given.
+ *
+ * A write that changes many classes at once (a bulk assert, a bulk
+ * retraction, a kind drop) hands every assertion it touched; a record names
+ * only those that touched ITS class. Naming the whole batch on every record
+ * would make each one claim assertions about unrelated nodes, and would grow
+ * the log with the square of the batch. A `different` assertion shapes the
+ * separation relation, never a class, so no record names one.
+ *
+ * Indexed by endpoint once, so the cost is linear in members plus ids.
+ */
+export function transitionAssertionIds(
+  records: readonly ClosureTransitionRecord[],
+  assertions: readonly TransitionAssertionRow[],
+): readonly (readonly string[])[] {
+  const positionsByEndpoint = new Map<string, number[]>();
+  for (const [position, assertion] of assertions.entries()) {
+    if (assertion.rel !== "same") continue;
+    for (const endpoint of [
+      { kind: assertion.a_kind, id: assertion.a_id },
+      { kind: assertion.b_kind, id: assertion.b_id },
+    ]) {
+      const key = refKey(endpoint);
+      const positions = positionsByEndpoint.get(key) ?? [];
+      positions.push(position);
+      positionsByEndpoint.set(key, positions);
+    }
+  }
+  return records.map((record) => {
+    const positions = new Set<number>();
+    for (const member of record.members) {
+      for (const position of positionsByEndpoint.get(refKey(member)) ?? []) {
+        positions.add(position);
+      }
+    }
+    return [...positions]
+      .toSorted((left, right) => left - right)
+      .map((position) => requireDefined(assertions[position]).id);
+  });
+}
 
 function sameMemberSet(
   left: readonly PlainNodeRef[],
@@ -185,8 +243,7 @@ export function diffClosureTransitions(
   oldClassOf: ReadonlyMap<string, readonly PlainNodeRef[]>,
   newClassOf: ReadonlyMap<string, readonly PlainNodeRef[]>,
 ): readonly ClosureTransitionRecord[] {
-  const seen = new Set<string>();
-  const records: ClosureTransitionRecord[] = [];
+  const recordsByKey = new Map<string, ClosureTransitionRecord>();
   for (const member of affected) {
     const key = refKey(member);
     const oldClass = oldClassOf.get(key);
@@ -216,14 +273,17 @@ export function diffClosureTransitions(
     const dedupeKey = `${refKey(canonical)} ${
       emittedPriorClassRef === undefined ? "" : refKey(emittedPriorClassRef)
     }`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    records.push({
+    // Several members can report one record, and every member of a class
+    // reports the same class: the record keeps that class once, rather than
+    // folding it in per member, which would cost the square of its size.
+    if (recordsByKey.has(dedupeKey)) continue;
+    recordsByKey.set(dedupeKey, {
       classRef: canonical,
       priorClassRef: emittedPriorClassRef,
+      members: newClass,
     });
   }
-  return records;
+  return [...recordsByKey.values()];
 }
 
 /** Column names, in storage/INSERT/projection order — the single source both the column-list `SqlFragment` and the flush chunk-size math derive from. */
@@ -707,30 +767,37 @@ export async function readIdentityTransitionPageForInterchange(
 type RawNativeTransitionExistsRow = Readonly<{ transition_id: unknown }>;
 
 /**
- * Whether `graphId` already has at least one NATIVE (non-restored) identity
- * transition row — one this graph itself recorded through the live capture
- * flush, as opposed to one an archival restore inserted verbatim.
+ * Whether `graphId` holds a NATIVE (non-restored) identity transition row
+ * recorded below `revision` — history this graph recorded itself, through
+ * the live capture flush, before the restore that is asking began.
  *
  * Archival restore (`importIdentityTransitionsIntoTarget`,
  * `service-interchange-write.ts`) consults this BEFORE deciding whether to
- * advance the retention watermark: a graph that already has its own retained
- * history has honest boundaries the restore never touched, and stamping a
- * restore-derived floor over them would misreport `truncatedBefore` (or the
- * `IDENTITY_REPLAY_HISTORY_TRUNCATED` refusal) for classes the restore had
- * nothing to do with. A graph with no native rows yet — fresh, or one whose
- * only transitions so far are themselves restored — has nothing of its own
- * for a floor to misclassify, so the restore is free to set one.
+ * set the retention watermark, passing the revision its own first commit
+ * takes: a graph with earlier history of its own has honest boundaries the
+ * restore never touched, and a restore-derived floor over them would
+ * misreport `truncatedBefore` (or the `IDENTITY_REPLAY_HISTORY_TRUNCATED`
+ * refusal) for classes the restore had nothing to do with.
+ *
+ * The bound is what keeps the restore's OWN notes out of the answer. Importing
+ * an archive's nodes and assertions notes ordinary native transitions (a
+ * fold, the union an assertion makes); a streamed restore has committed them
+ * by the time its transitions arrive, and counting them as "history of its
+ * own" would leave every streamed restore without a watermark.
  */
-export async function hasNativeIdentityTransitions(
+export async function hasNativeIdentityTransitionsBefore(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,
+  revision: number,
 ): Promise<boolean> {
   const rows = await target.execute<RawNativeTransitionExistsRow>(
     asCompiledRowsSql(sql`
       SELECT transition_id
       FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId} AND restored_at IS NULL
+      WHERE graph_id = ${graphId}
+        AND restored_at IS NULL
+        AND recorded_revision < ${revision}
       LIMIT 1
     `),
   );
@@ -856,8 +923,8 @@ export function requireIdentityTransitionLog(
  * INSERT ... ON CONFLICT, shared by `pruneIdentityTransitionsForContext`
  * (which pairs it with deleting the rows it now covers) and archival restore
  * (`importIdentityTransitionsIntoTarget`, `service-interchange-write.ts`,
- * which sets it to the highest restored revision + 1 without deleting
- * anything — a restore into a fresh graph has nothing there to delete). The
+ * which sets it to the revision the restore's first commit takes, without
+ * deleting anything — a restore into a fresh graph has nothing there to delete). The
  * `WHERE` guard makes the write itself monotonic: a `resolvedWatermark` at or
  * below what is already stored is a no-op, so neither caller needs its own
  * read-compare-write race guard beyond the one each already has for its own

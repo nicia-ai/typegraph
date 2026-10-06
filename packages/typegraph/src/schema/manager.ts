@@ -2109,9 +2109,9 @@ export async function isSchemaInitialized(
  * @throws ConfigurationError when the current graph's
  *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy is not a structural
  *   subtype of its target — reported HERE, before an upgrade, rather than
- *   only at commit; see `computeSchemaDiff`'s own docblock for the exact
- *   trigger (a relation change, or a property change on a kind already
- *   party to one).
+ *   only at commit, and whether or not anything changed: the diff enforces
+ *   the contract whenever the graph declares such a relation (see
+ *   `computeSchemaDiff`'s own docblock).
  */
 export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,
@@ -2147,8 +2147,10 @@ export async function getSchemaChanges<G extends GraphDef>(
  * when the stored or the current ontology adds or removes a relation whose
  * coherence `getSchemaChanges` could not determine (`ConfigurationError` from
  * `classifyOntologyChanges` — a schema document written under an older,
- * laxer validator can hold an ontology today's hardening rejects). A document
- * this predicate cannot interpret is, by construction, one the privileged
+ * laxer validator can hold an ontology today's hardening rejects), or when
+ * the current graph declares a `subClassOf`/`equivalentTo`/`sameAs` hierarchy
+ * the structural-subsumption check refuses, whether or not anything changed.
+ * A document this predicate cannot interpret is, by construction, one the privileged
  * path must look at, so this function never throws for that reason: it is
  * the routing check a least-privilege runtime relies on to decide *before* a
  * write discovers the migration wall mid-request, and a throw here would
