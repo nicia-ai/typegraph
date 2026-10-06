@@ -2352,35 +2352,55 @@ Three properties of that mechanism are worth knowing before you rely on it:
 
 ```typescript
 for (const violation of await store.verifyConstraintFences()) {
-  // violation.target names the claim row two claimants contend for
-  console.warn(violation.family, violation.target.axis, violation.target.key);
+  switch (violation.family) {
+    case "nodeUniqueness":
+    case "nodeDisjointness":
+    case "edgeCardinality":
+    case "composition": {
+      // violation.target names the claim row two claimants contend for
+      console.warn(violation.family, violation.target.axis, violation.target.key);
+      break;
+    }
+    default: {
+      // These families have no claim row, so no `target` to read.
+      console.warn(violation.family);
+    }
+  }
 }
 ```
 
-It reports one entry per contended axis — `nodeUniqueness` and
-`nodeDisjointness` carry the conflicting `owners` (each a `concrete_kind` /
-`node_id` pair, because ids are unique only per kind), `edgeCardinality` carries
-the conflicting `edgeIds`. A fourth family, `edgeEndpointAssignability`,
-reports edge kinds whose live rows sit outside every endpoint pair the current
-ontology admits (`edgeKind`, the `allowedPairs` still admitted, and the
-offending `edges`) — the same shrink an [ontology tightening](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
-checks against, but reported for a whole graph rather than just the delta one
-schema commit proposes. It reads the nodes, edges and `uniques` relations, so
-it finds violations that predate the claim tables; it writes nothing, and it
-repairs nothing — choosing which claimant keeps the axis is a data-loss decision
-that stays with you.
+`target` exists only on the families that are a contended claim row. Narrow on
+`violation.family` before reading it: three of the seven members carry none.
+The audit reports these families:
 
-A fifth family, `compositionExistence`, reports every LIVE node of an
-`existence: "required"` composition part kind with no live whole
-(`partKind`, and the offending `parts`). No live whole means either of two
+| `family` | Reports | Carries |
+| --- | --- | --- |
+| `nodeUniqueness` | a uniqueness axis held by more than one live node | `target`, `owners` (each a `concrete_kind` / `node_id` pair, because ids are unique only per kind) |
+| `nodeDisjointness` | a `disjointWith` axis held by more than one live node | `target`, `owners` |
+| `edgeCardinality` | a source- or target-side cardinality axis held by more than one live edge | `target`, `edgeIds` |
+| `composition` | a part holding more than one live whole across every declared composition relation | `target`, `edgeIds` |
+| `compositionExistence` | live nodes of an `existence: "required"` part kind with no live whole | `partKind`, `parts` (no `target`) |
+| `edgeEndpointAssignability` | edge kinds whose live rows sit outside every endpoint pair the current ontology admits | `edgeKind`, `allowedPairs`, `edges` (no `target`) |
+| `edgeAcyclicity` | live edges of an `acyclic: true` relation whose `to` reaches their `from` | `relation`, `edgeIds` (no `target`) |
+
+The audit reads the nodes, edges and `uniques` relations, so it finds
+violations that predate the claim tables; it writes nothing, and it repairs
+nothing — choosing which claimant keeps the axis is a data-loss decision that
+stays with you. `edgeEndpointAssignability` is the same shrink an
+[ontology tightening](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+checks against, but reported for a whole graph rather than just the delta one
+schema commit proposes.
+
+`compositionExistence` reports every LIVE node of an `existence: "required"`
+composition part kind with no live whole. No live whole means either of two
 states: the part has no current composition edge at all, or the whole its edge
 names is not a live row. The second is why a part left hanging from a
 TOMBSTONED whole is reported — a state the delete cascade cannot produce, but a
 direct backend write, a custom port, or a bypassed import can. The write path's
 own incumbent decision is deliberately narrower: a tombstoned whole still holds
 its part's attachment there, so a second whole cannot quietly take it. Unlike
-the other four, this family is a portable scan (`findNodesByKind` paged, each
-page's attachments resolved through the same owner the write-path detach
+the claim-backed families, this one is a portable scan (`findNodesByKind` paged,
+each page's attachments resolved through the same owner the write-path detach
 refusal reads, and each page's wholes read once per kind through the batch
 point read) rather than a `readConstraintFenceViolations` backend member — this runs only at an
 explicit diagnostic call and at schema-tightening-commit time, never on a

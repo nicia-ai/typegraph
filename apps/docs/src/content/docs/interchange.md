@@ -110,7 +110,6 @@ interface GraphData {
       priorClass?: { kind: string; id: string };
       assertionIds: string[];
       decision?: {
-        policy?: string;
         branchId?: string;
         branchAncestry?: string[];
         mergePlanDigest?: string;

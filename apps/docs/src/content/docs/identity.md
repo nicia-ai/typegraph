@@ -386,7 +386,7 @@ watermark](#archival-transitions-and-the-retention-watermark)).
 | `assert` | An explicit `same` assertion (or a merge's own union) fused two classes |
 | `retract` | A retraction split a class back apart — one row per resulting class whose new canonical the lineage touches, so one `retract` call on a class of three or more members can record more than one transition |
 | `fold` | A same-ID fold conducted a newly created or resurrected node into a class |
-| `detach` | A same-ID fold stopped conducting (the node changed kind, or the peer was removed) |
+| `detach` | A class member was deleted (soft or hard), whether it was held by a same-ID fold or by explicit `same` assertions. It therefore also appears on a graph with `sameIdAcrossKinds: "ignore"`, where nothing folds |
 | `restore` | A soft-deleted node's undelete brought it back into visibility |
 | `window-end` | A node's or assertion's validity window closed, ending its contribution |
 | `kind-drop` | A schema change removed a kind, hard-deleting the identity assertions it touched |

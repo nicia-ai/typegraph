@@ -32,6 +32,7 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { expectOnlyClaimsOf, readEdgeClaimRows } from "../../edge-claim-rows";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -225,7 +226,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setupBackend = createPostgresBackend(live.first);
+        const setup = createStore(graph, setupBackend);
         const alice = await setup.nodes.CtcPerson.create(
           { name: "Alice" },
           { id: "alice-both" },
@@ -265,6 +267,14 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(winner).toBeDefined();
         if (winner === undefined) throw new Error("Expected a surviving edge");
         expect([alice.id, bob.id]).toContain(winner.fromId);
+        // The claim relation holds exactly the winner's two axis rows: the
+        // loser's source axis is not left claimed.
+        expectOnlyClaimsOf(
+          await readEdgeClaimRows(setupBackend, graph.id),
+          graph.id,
+          { cardinality: "one", targetCardinality: "one" },
+          [winner],
+        );
         // The loser's own source axis is free again: a fresh, otherwise-valid
         // create from the SAME loser source still succeeds.
         const loserSourceId = winner.fromId === alice.id ? bob.id : alice.id;

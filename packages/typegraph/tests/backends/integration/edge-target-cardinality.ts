@@ -19,6 +19,8 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
+import { expectOnlyClaimsOf, readEdgeClaimRows } from "../../edge-claim-rows";
 import { type IntegrationTestContext } from "./test-context";
 
 const Person = defineNode("TgcPerson", { schema: z.object({}) });
@@ -192,9 +194,18 @@ export function registerEdgeTargetCardinalityIntegrationTests(
         .catch((error_: unknown) => error_);
       expect(targetRefusal).toBeInstanceOf(CardinalityError);
 
-      // dave's source axis must not have been left "occupied" by the
-      // refused two-axis attempt above: a fresh, otherwise-valid write on
-      // dave's source axis still succeeds.
+      // The refused attempts left nothing behind: the claim relation holds
+      // exactly alice's edge's two axis rows — none for dave's source.
+      const [owned] = await store.edges.tgcOwnsAsset.findFrom(alice);
+      expectOnlyClaimsOf(
+        await readEdgeClaimRows(store.backend, store.graphId),
+        store.graphId,
+        { cardinality: "one", targetCardinality: "one" },
+        [requireDefined(owned)],
+      );
+
+      // dave's source axis is free: a fresh, otherwise-valid write on it
+      // still succeeds.
       await expect(
         store.edges.tgcOwnsAsset.create(dave, assetC, {}),
       ).resolves.toBeDefined();
@@ -205,7 +216,11 @@ export function registerEdgeTargetCardinalityIntegrationTests(
     // MUTATION CHECK (verified): declaring `tgcOwnsAsset` with only
     // `cardinality: "one"` (drop `targetCardinality`) makes `dave`'s create
     // against the already-owned `assetA` succeed, and the fourth `expect`
-    // above (`findTo(assetA)` has length 1) fails.
+    // above (`findTo(assetA)` has length 1) fails. Separately, planting a
+    // claim for a never-inserted edge on dave's source axis (via
+    // `backend.claimEdgeCardinality`) before the `expectOnlyClaimsOf` call
+    // fails it with a third claim row, while the later `create(dave, assetC)`
+    // still passes (a stale claim is taken over by design).
 
     it("reopens a target-oneActive window on the SAME edge without refusing against itself, but re-probes for real", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
