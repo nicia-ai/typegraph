@@ -119,7 +119,10 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
-import { refKey } from "../../identity/service";
+import {
+  type IdentityWindowEndConfirmation,
+  refKey,
+} from "../../identity/service";
 import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
@@ -402,15 +405,17 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ) => Promise<void>;
     /**
      * Moves `ref`'s identity view along with its own window end: refuses a
-     * `validTo` that would strand identity assertion history and notes the
-     * membership boundary the move creates. `undefined` is a CLEARED end
-     * (`clearValidTo`), which strands nothing but still moves the boundary.
+     * `validTo` that would strand identity assertion history, and returns the
+     * confirmation that notes the membership boundary the move creates. The
+     * caller invokes it once the row write has succeeded. `undefined` is a
+     * CLEARED end (`clearValidTo`), which strands nothing but still moves the
+     * boundary.
      */
     requireValidityEndCompatible: (
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       validTo: string | undefined,
-    ) => Promise<void>;
+    ) => Promise<IdentityWindowEndConfirmation>;
   }>;
 }>;
 
@@ -4606,6 +4611,10 @@ function nodeWriteMovesWindowEnd(
  * write frame and before the row write: every update path that can carry
  * `validTo` or `clearValidTo` runs this one owner, so a narrowed, widened or
  * cleared end is refused or noted the same way whichever path writes it.
+ *
+ * The refusal happens here, before the row write. The note does not: this
+ * returns its confirmation, which the caller invokes only after the row write
+ * it describes has succeeded.
  */
 async function applyIdentityWindowEnd<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -4616,11 +4625,11 @@ async function applyIdentityWindowEnd<G extends GraphDef>(
     validTo?: string;
     clearValidTo?: true;
   }>,
-): Promise<void> {
+): Promise<IdentityWindowEndConfirmation | undefined> {
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   const identity = ctx.identity;
   if (identity === undefined || !nodeWriteMovesWindowEnd(input)) return;
-  await identity.requireValidityEndCompatible(
+  return identity.requireValidityEndCompatible(
     target,
     { kind: input.kind, id: input.id },
     validTo,
@@ -4725,7 +4734,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
           [{ kind: input.kind, id: input.id }],
         );
       }
-      await applyIdentityWindowEnd(ctx, target, input);
+      const confirmWindowEnd = await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
@@ -4734,6 +4743,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
         target,
         options,
       );
+      confirmWindowEnd?.();
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(
           target,
@@ -5113,7 +5123,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           [{ kind: input.kind, id: input.id }],
         );
       }
-      await applyIdentityWindowEnd(ctx, target, input);
+      const confirmWindowEnd = await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
       const restoresPartRow = options?.clearDeleted === true;
       // Reads first, then writes — `prepareCompositionAttachmentDecision`
@@ -5148,6 +5158,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
         target,
         options,
       );
+      confirmWindowEnd?.();
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(
           target,
@@ -5419,7 +5430,11 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       const fallbackRows = batchMissed ? undefined : resolvedRows;
       const nodes: Node[] = [];
       for (const entry of entries) {
-        await applyIdentityWindowEnd(ctx, target, entry.input);
+        const confirmWindowEnd = await applyIdentityWindowEnd(
+          ctx,
+          target,
+          entry.input,
+        );
         nodes.push(
           await performNodeUpdateWithResurrectionRecovery(
             ctx,
@@ -5437,6 +5452,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
             fallbackRows?.get(entry.input.id),
           ),
         );
+        confirmWindowEnd?.();
         if (entry.clearDeleted && ctx.identity !== undefined) {
           await ctx.identity.foldCreated(
             target,

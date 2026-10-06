@@ -673,6 +673,63 @@ describe("identity transition log", () => {
     expect(await windowEndCount()).toBe(4);
   });
 
+  // Load-bearing: the note describes a row write, so it is taken only once
+  // that write has succeeded. Revert check: note the transition inside
+  // `requireNodeValidityEndCompatible` again (before the row write) and each
+  // refused update below leaves a `window-end` transition and a receipt with
+  // `identity.transitions: 1` for a transaction that wrote nothing.
+  it("leaves no window-end transition for an update refused and caught inside a transaction", async () => {
+    const Org = defineNode("Org", { schema: z.object({ name: z.string() }) });
+    const foldGraph = defineGraph({
+      id: "identity_transition_log_window_refused",
+      nodes: { Person: { type: Person }, Org: { type: Org } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      foldGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "shared" });
+    await store.nodes.Org.create({ name: "A Org" }, { id: "shared" });
+    const invertedEnd = new Date(Date.now() - 3_600_000).toISOString();
+    const recordedBefore = await store.recordedNow();
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      const refusals = [
+        () =>
+          tx.nodes.Org.update(asNodeId("shared"), {}, { validTo: invertedEnd }),
+        () =>
+          tx.nodes.Org.upsertById(
+            "shared",
+            { name: "A Org" },
+            { validTo: invertedEnd },
+          ),
+        () =>
+          tx.nodes.Org.bulkUpsertById([
+            { id: "shared", props: { name: "A Org" }, validTo: invertedEnd },
+          ]),
+      ];
+      for (const refused of refusals) {
+        await expect(refused()).rejects.toThrow(/validity window/i);
+      }
+    });
+
+    expect(outcome.receipt.writes.total).toBe(0);
+    expect(outcome.receipt.writes.identity.transitions).toBe(0);
+    const history = await store.identity.transitionsOf({
+      kind: "Person",
+      id: "shared",
+    });
+    expect(
+      history.transitions.filter(
+        (transition) => transition.cause === "window-end",
+      ),
+    ).toEqual([]);
+    expect(await store.recordedNow()).toEqual(recordedBefore);
+  });
+
   // Load-bearing: `store.evolve()` runs the identity schema-commit preflight
   // on the raw commit transaction, which no capture session is bound to, so a
   // history store must bind one itself or every note the preflight takes is
