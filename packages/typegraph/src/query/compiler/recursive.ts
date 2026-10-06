@@ -546,10 +546,17 @@ function compileRecursiveCte(
   // - explicit maxDepth traversals must not exceed MAX_EXPLICIT_RECURSIVE_DEPTH
   // - exhaustive traversals carry no ceiling, so only the per-path cycle check
   //   ends them
-  if (vl.exhaustive === true && !shouldEnforceCycleCheck) {
-    throw new UnsupportedPredicateError(
-      'An exhaustive recursive traversal requires cyclePolicy "prevent": without a hop ceiling, cycle prevention is its only termination guarantee',
-    );
+  if (vl.exhaustive === true) {
+    if (!shouldEnforceCycleCheck) {
+      throw new UnsupportedPredicateError(
+        'An exhaustive recursive traversal requires cyclePolicy "prevent": without a hop ceiling, cycle prevention is its only termination guarantee',
+      );
+    }
+    if (vl.maxDepth > 0) {
+      throw new UnsupportedPredicateError(
+        `An exhaustive recursive traversal cannot also state maxDepth(${vl.maxDepth}); state one or the other`,
+      );
+    }
   }
   if (vl.maxDepth > MAX_EXPLICIT_RECURSIVE_DEPTH) {
     throw new UnsupportedPredicateError(

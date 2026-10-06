@@ -443,9 +443,9 @@ export type VariableLengthSpec = Readonly<{
   /** Maximum number of hops (-1 = unlimited, default: -1) */
   maxDepth: number;
   /**
-   * Walk to the end of every path instead of stopping at `maxDepth`: no hop
-   * ceiling is applied and termination rests on cycle prevention, so it
-   * requires `cyclePolicy: "prevent"`. `maxDepth` is ignored when set.
+   * Walk to the end of every path with no hop ceiling: termination rests on
+   * cycle prevention, so it requires `cyclePolicy: "prevent"`, and it is
+   * mutually exclusive with a stated `maxDepth` (leave it at -1).
    */
   exhaustive?: boolean;
   /**

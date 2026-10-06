@@ -1298,10 +1298,8 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       false,
-      // No stated bound: walk the closure to its end, however deep.
-      options?.maxHops === undefined ?
-        EXHAUSTIVE_VARIABLE_LENGTH_STATE
-      : undefined,
+      // Exhaustive until `recursive()` is given a bound to apply.
+      EXHAUSTIVE_VARIABLE_LENGTH_STATE,
       undefined, // pendingEdgePredicates — default
       false,
     );

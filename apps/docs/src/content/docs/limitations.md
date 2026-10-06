@@ -189,7 +189,9 @@ await store.transaction(async (tx) => {
 
 Variable-length traversals use two depth caps and an explicit cycle policy:
 
-1. Unbounded traversals (no `maxHops` option) are capped at 10 hops.
+1. Unbounded traversals (no `maxHops` option) are capped at 10 hops. The one
+   exception is composition navigation: `parts()` / `wholes()` without
+   `maxHops` apply no hop ceiling and return the complete closure.
 2. Explicit `maxHops` values are validated up to 1000 hops (`maxHops: >1000` throws).
 3. Cycle prevention is on by default. To skip cycle checks for speed, opt into
    `cyclePolicy: "allow"` (which may revisit nodes across hops).

@@ -131,9 +131,10 @@ const DEFAULT_VARIABLE_LENGTH_STATE: VariableLengthState = {
 };
 
 /**
- * Variable-length state for a recursion that states no hop bound and must
- * still reach the end of every path (`parts()` / `wholes()` without
- * `maxHops`). Passing `maxHops` to `recursive()` replaces it with that bound.
+ * Variable-length state for a recursion that must reach the end of every path
+ * unless the caller bounds it (`parts()` / `wholes()`). `recursive()` is the
+ * only place that decides: a stated `maxHops` turns `exhaustive` off and applies
+ * that bound exactly.
  */
 export const EXHAUSTIVE_VARIABLE_LENGTH_STATE: VariableLengthState = {
   ...DEFAULT_VARIABLE_LENGTH_STATE,
