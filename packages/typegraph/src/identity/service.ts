@@ -32,7 +32,6 @@ export {
   fillLiveSingletons,
   foldIdentityForCreatedNodes,
   hasAssertionsTouchingKinds,
-  type IdentityWindowEndConfirmation,
   liveNodeKindsSharingIds,
   purgeAssertionsWithUnregisteredKinds,
   rebuildIdentityClosureForContext,

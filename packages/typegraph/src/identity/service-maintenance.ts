@@ -1013,16 +1013,6 @@ async function refuseStrandedAssertionHistory(
 }
 
 /**
- * Records the `window-end` transition a confirmed move of a node's validity
- * end owes. A no-op when the move changes no class's visible membership.
- */
-export type IdentityWindowEndConfirmation = () => void;
-
-function nothingToConfirm(): void {
-  // The move changes no identity class's coordinate-visible membership.
-}
-
-/**
  * Refuses a finite node window that would strand identity assertion history,
  * then — once the move is confirmed safe AND confirmed to actually MOVE the
  * window — notes the `window-end` transition when `ref` currently belongs to
@@ -1043,20 +1033,14 @@ function nothingToConfirm(): void {
  * when they already agree. `validAt` is the canonical operation instant,
  * never `validTo` itself, which can be a future-scheduled window
  * boundary rather than "when this happened".
- *
- * The note is RETURNED, not recorded: it describes a change the caller has
- * yet to write. The caller invokes the confirmation once its row write has
- * succeeded, so an update that is then refused — and caught inside an
- * enclosing transaction that goes on to commit — leaves no transition and
- * allocates no recorded revision for a change that never happened.
  */
 export async function requireNodeValidityEndCompatible(
   ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
   target: Backend,
   ref: PlainNodeRef,
   validTo: string | undefined,
-): Promise<IdentityWindowEndConfirmation> {
-  return withRecordedIdentityMutationTarget(
+): Promise<void> {
+  await withRecordedIdentityMutationTarget(
     target,
     async (rawTarget, _touch, noteTransition) => {
       if (validTo !== undefined) {
@@ -1076,7 +1060,7 @@ export async function requireNodeValidityEndCompatible(
           ref,
         ))
       ) {
-        return nothingToConfirm;
+        return;
       }
       const currentValidTo = await readNodeValidTo(
         rawTarget,
@@ -1084,7 +1068,7 @@ export async function requireNodeValidityEndCompatible(
         ctx.graphId,
         ref,
       );
-      if (currentValidTo === validTo) return nothingToConfirm;
+      if (currentValidTo === validTo) return;
       const classes = await loadCurrentStructuralClasses(
         rawTarget,
         ctx.schema,
@@ -1092,18 +1076,15 @@ export async function requireNodeValidityEndCompatible(
         [ref],
       );
       const currentClass = requireDefined(classes.get(refKey(ref)));
-      if (currentClass.length < 2) return nothingToConfirm;
+      if (currentClass.length < 2) return;
       const canonical = requireDefined(currentClass[0]);
-      const validAt = nowIso();
-      return () => {
-        noteTransition(ctx.graphId, {
-          cause: "window-end",
-          classRef: canonical,
-          priorClassRef: canonical,
-          assertionIds: [],
-          validAt,
-        });
-      };
+      noteTransition(ctx.graphId, {
+        cause: "window-end",
+        classRef: canonical,
+        priorClassRef: canonical,
+        assertionIds: [],
+        validAt: nowIso(),
+      });
     },
   );
 }

@@ -119,10 +119,7 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
-import {
-  type IdentityWindowEndConfirmation,
-  refKey,
-} from "../../identity/service";
+import { refKey } from "../../identity/service";
 import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
@@ -202,6 +199,7 @@ import {
   resolveNodeFulltextProjection,
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
+import { collectRecordedIdentityTransitionNotes } from "../recorded-capture";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   appliedResolvedMutationSet,
@@ -405,17 +403,15 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ) => Promise<void>;
     /**
      * Moves `ref`'s identity view along with its own window end: refuses a
-     * `validTo` that would strand identity assertion history, and returns the
-     * confirmation that notes the membership boundary the move creates. The
-     * caller invokes it once the row write has succeeded. `undefined` is a
-     * CLEARED end (`clearValidTo`), which strands nothing but still moves the
-     * boundary.
+     * `validTo` that would strand identity assertion history and notes the
+     * membership boundary the move creates. `undefined` is a CLEARED end
+     * (`clearValidTo`), which strands nothing but still moves the boundary.
      */
     requireValidityEndCompatible: (
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       validTo: string | undefined,
-    ) => Promise<IdentityWindowEndConfirmation>;
+    ) => Promise<void>;
   }>;
 }>;
 
@@ -4612,10 +4608,6 @@ function nodeWriteMovesWindowEnd(
  * write frame and before the row write: every update path that can carry
  * `validTo` or `clearValidTo` runs this one owner, so a narrowed, widened or
  * cleared end is refused or noted the same way whichever path writes it.
- *
- * The refusal happens here, before the row write. The note does not: this
- * returns its confirmation, which the caller invokes only after the row write
- * it describes has succeeded.
  */
 async function applyIdentityWindowEnd<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -4626,15 +4618,45 @@ async function applyIdentityWindowEnd<G extends GraphDef>(
     validTo?: string;
     clearValidTo?: true;
   }>,
-): Promise<IdentityWindowEndConfirmation | undefined> {
+): Promise<void> {
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   const identity = ctx.identity;
   if (identity === undefined || !nodeWriteMovesWindowEnd(input)) return;
-  return identity.requireValidityEndCompatible(
+  await identity.requireValidityEndCompatible(
     target,
     { kind: input.kind, id: input.id },
     validTo,
   );
+}
+
+/**
+ * A node row write that moves its window end, with its identity half, as one
+ * unit: {@link applyIdentityWindowEnd} refuses or notes, then `writeRow` runs.
+ * The note describes that write, so it stands only if the write does: when
+ * `writeRow` is refused the note is withdrawn before the refusal propagates.
+ * A caller that catches the refusal inside `store.transaction(...)` and
+ * commits therefore records no `window-end` transition, and allocates no
+ * recorded revision, for an update that never happened.
+ *
+ * `writeRow` covers every statement up to and including the row write, so a
+ * refusal any of them raises withdraws the note too.
+ */
+async function writeNodeRowMovingWindowEnd<G extends GraphDef, T>(
+  ctx: NodeOperationContext<G>,
+  target: IdentityTarget,
+  input: Parameters<typeof applyIdentityWindowEnd>[2],
+  writeRow: () => Promise<T>,
+): Promise<T> {
+  const withdrawWindowEndNote = await collectRecordedIdentityTransitionNotes(
+    target,
+    () => applyIdentityWindowEnd(ctx, target, input),
+  );
+  try {
+    return await writeRow();
+  } catch (error) {
+    withdrawWindowEndNote();
+    throw error;
+  }
 }
 
 function resolveAtomicNodeUpdateExecutor<G extends GraphDef>(
@@ -4735,16 +4757,16 @@ export async function executeNodeUpdate<G extends GraphDef>(
           [{ kind: input.kind, id: input.id }],
         );
       }
-      const confirmWindowEnd = await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
-      const node = await performNodeUpdateWithResurrectionRecovery(
-        ctx,
-        input,
-        session,
-        target,
-        options,
+      const node = await writeNodeRowMovingWindowEnd(ctx, target, input, () =>
+        performNodeUpdateWithResurrectionRecovery(
+          ctx,
+          input,
+          session,
+          target,
+          options,
+        ),
       );
-      confirmWindowEnd?.();
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(
           target,
@@ -5124,42 +5146,50 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           [{ kind: input.kind, id: input.id }],
         );
       }
-      const confirmWindowEnd = await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
       const restoresPartRow = options?.clearDeleted === true;
-      // Reads first, then writes — `prepareCompositionAttachmentDecision`
-      // owns the reason.
-      const decided =
-        compositionAttachment === undefined ? undefined : (
-          await decideCompositionAttachmentUnderFence(
-            ctx.registry,
-            target,
-            ctx.graphId,
-            input.id,
-            compositionAttachment,
-            lock,
-            { partRowRestoredByUpdate: restoresPartRow },
-          )
-        );
-      const preparedAttachment =
-        decided === undefined ? undefined : (
-          await prepareCompositionAttachmentDecision(
-            ctx,
-            target,
-            lock,
-            input.id,
-            decided,
-            { partRowRestoredByUpdate: restoresPartRow },
-          )
-        );
-      const node = await performNodeUpdateWithResurrectionRecovery(
+      const { node, preparedAttachment } = await writeNodeRowMovingWindowEnd(
         ctx,
-        input,
-        session,
         target,
-        options,
+        input,
+        async () => {
+          // Reads first, then writes — `prepareCompositionAttachmentDecision`
+          // owns the reason.
+          const decided =
+            compositionAttachment === undefined ? undefined : (
+              await decideCompositionAttachmentUnderFence(
+                ctx.registry,
+                target,
+                ctx.graphId,
+                input.id,
+                compositionAttachment,
+                lock,
+                { partRowRestoredByUpdate: restoresPartRow },
+              )
+            );
+          const prepared =
+            decided === undefined ? undefined : (
+              await prepareCompositionAttachmentDecision(
+                ctx,
+                target,
+                lock,
+                input.id,
+                decided,
+                { partRowRestoredByUpdate: restoresPartRow },
+              )
+            );
+          return {
+            preparedAttachment: prepared,
+            node: await performNodeUpdateWithResurrectionRecovery(
+              ctx,
+              input,
+              session,
+              target,
+              options,
+            ),
+          };
+        },
       );
-      confirmWindowEnd?.();
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(
           target,
@@ -5431,29 +5461,25 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       const fallbackRows = batchMissed ? undefined : resolvedRows;
       const nodes: Node[] = [];
       for (const entry of entries) {
-        const confirmWindowEnd = await applyIdentityWindowEnd(
-          ctx,
-          target,
-          entry.input,
-        );
         nodes.push(
-          await performNodeUpdateWithResurrectionRecovery(
-            ctx,
-            entry.input,
-            session,
-            target,
-            entry.clearDeleted || entry.replacementProps !== undefined ?
-              {
-                ...(entry.clearDeleted ? { clearDeleted: true } : {}),
-                ...(entry.replacementProps === undefined ?
-                  {}
-                : { replacementProps: entry.replacementProps }),
-              }
-            : undefined,
-            fallbackRows?.get(entry.input.id),
+          await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
+            performNodeUpdateWithResurrectionRecovery(
+              ctx,
+              entry.input,
+              session,
+              target,
+              entry.clearDeleted || entry.replacementProps !== undefined ?
+                {
+                  ...(entry.clearDeleted ? { clearDeleted: true } : {}),
+                  ...(entry.replacementProps === undefined ?
+                    {}
+                  : { replacementProps: entry.replacementProps }),
+                }
+              : undefined,
+              fallbackRows?.get(entry.input.id),
+            ),
           ),
         );
-        confirmWindowEnd?.();
         if (entry.clearDeleted && ctx.identity !== undefined) {
           await ctx.identity.foldCreated(
             target,
