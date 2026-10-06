@@ -255,6 +255,52 @@ const employeesPage = await store
   .paginate({ first: 50 });
 ```
 
+### Recursive traversals are not paginated
+
+`paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
+`parts()` or `wholes()`) with a `ConfigurationError` whose `details.code` is
+`RECURSIVE_PAGINATION_UNSUPPORTED`. The refusal is the same on every backend and happens before
+any statement runs, including for a traversal bounded to a single hop.
+
+A recursive traversal fans one start node out into rows that have no single edge to extend the
+start node's keys with, so a cursor can only name the start node. The next page would resume after
+that node and lose the rows of it not yet returned. Paging one start node at a time does not avoid
+this, because a single start node's rows are exactly the ones that straddle a page boundary.
+
+To read a recursive walk in bounded pieces, either:
+
+- Read it with `execute()` and a bound you choose: `.limit(n)` on the query, or
+  `recursive({ maxHops })` to bound the walk itself.
+- Page the start nodes in a query without the recursive traversal, then run the recursive walk for
+  each page of start nodes:
+
+```typescript
+const startNodes = store
+  .query()
+  .from("Person", "p")
+  .orderBy("p", "name", "asc")
+  .select((ctx) => ctx.p.id);
+
+let after: string | undefined;
+do {
+  const page = await startNodes.paginate({
+    first: 50,
+    ...(after === undefined ? {} : { after }),
+  });
+  const reachable = await store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (p) => p.id.in(page.data))
+    .traverse("knows", "e")
+    .recursive({ maxHops: 3 })
+    .to("Person", "friend")
+    .select((ctx) => ({ from: ctx.p.id, friend: ctx.friend.name }))
+    .execute();
+  // handle `reachable`
+  after = page.nextCursor;
+} while (after !== undefined);
+```
+
 ## Streaming
 
 For very large datasets, use streaming to process results without loading everything into memory.
@@ -667,10 +713,6 @@ an edge. Offset pagination needs an explicit total ordering.
 
 A cursor encodes the full key list, so a cursor saved from a traversal query before these edge keys
 were appended is refused; restart that pagination from the first page.
-
-A query with a recursive traversal (`recursive()`) has no single edge per row and keeps the
-start-node keys alone. Its pages are exact only while no start node's rows straddle a page
-boundary, so page such a query by a single start node at a time or read it with `execute()`.
 
 For deterministic offset pagination of one kind, include `id` in your ordering:
 
