@@ -134,6 +134,7 @@ import {
   NO_IDENTITY_SEPARATION_FACTS,
   separatingAssertionIds,
 } from "./identity-separation";
+import { reduceIdentityRetraction } from "./identity-three-way";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
   assertIdentityEndpointsNotDeleted,
@@ -1515,29 +1516,31 @@ function buildInternalMergePlan<G extends GraphDef>(
     stagedRetractionsById.set(staged.assertion.id, contributions);
   }
   const overruledRetractionDrops: DroppedItem[] = [];
+  const contributionOverruled = (staged: StagedRetraction): boolean =>
+    staged.cause.kind === "cascade" &&
+    !nodeDeletions.has(
+      mergeKey(staged.cause.deletedNode.kind, staged.cause.deletedNode.id),
+    );
   const survivingRetractions =
     anyDeletionOverruled ?
-      identity.retractions.filter((retraction) => {
+      identity.retractions.flatMap((retraction) => {
         const contributions = stagedRetractionsById.get(retraction.id) ?? [];
-        const everyContributionOverruled =
-          contributions.length > 0 &&
-          contributions.every(
-            (staged) =>
-              staged.cause.kind === "cascade" &&
-              !nodeDeletions.has(
-                mergeKey(
-                  staged.cause.deletedNode.kind,
-                  staged.cause.deletedNode.id,
-                ),
-              ),
-          );
-        if (!everyContributionOverruled) return true;
-        overruledRetractionDrops.push({
-          kind: "identity",
-          id: retraction.id,
-          reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
-        });
-        return false;
+        const standing = contributions.filter(
+          (staged) => !contributionOverruled(staged),
+        );
+        if (standing.length === contributions.length) return [retraction];
+        if (standing.length === 0) {
+          overruledRetractionDrops.push({
+            kind: "identity",
+            id: retraction.id,
+            reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
+          });
+          return [];
+        }
+        // The ending survives on the contributions that still stand, so its
+        // instant and cause are theirs: an overruled deletion's cascade may
+        // not decide when the pair stopped being asserted.
+        return [reduceIdentityRetraction(standing).assertion];
       })
     : identity.retractions;
   for (const modification of deleteModify.survivingModifications) {

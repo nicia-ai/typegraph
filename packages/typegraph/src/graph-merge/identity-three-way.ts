@@ -284,7 +284,7 @@ function assertedOutcome(
  * staged `validTo` wins, so two branches ending the same base assertion at
  * different instants settle deterministically rather than on staging order.
  */
-function reduceIdentityRetraction(
+export function reduceIdentityRetraction(
   candidates: readonly StagedRetraction[],
 ): StagedRetraction {
   return candidates.reduce((earliest, candidate) =>
