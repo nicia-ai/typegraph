@@ -149,3 +149,49 @@ describe("a composition PART declared onDelete: 'restrict' is statically ineligi
     }
   });
 });
+
+// ============================================================
+// The cascade's parts closure is a lock-only read, like the acyclicity probe:
+// a session that cannot see what committed while it waited for the fence
+// would plan from a stale snapshot and leave a just-attached part behind.
+// ============================================================
+
+describe("a composition whole delete requires a snapshot taken after the fence", () => {
+  it("refuses under a repeatable-read server default, and deletes nothing", async () => {
+    const local = await createLocalPgliteBackend({ vector: false });
+    const backend = createPostgresBackend(local.db, { vector: false });
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const podcast = await store.nodes.Podcast.create({});
+      const episode = await store.nodes.Episode.create({});
+      await store.edges.episodeOf.create(episode, podcast, {});
+      await local.client.exec(
+        "SET default_transaction_isolation = 'repeatable read'",
+      );
+
+      // MUTATION CHECK: removing `assertFencedSnapshotIsFresh` from
+      // `planCompositionCascade` lets this delete resolve — verified and
+      // reverted.
+      await expect(
+        store.nodes.Podcast.delete(podcast.id),
+      ).rejects.toMatchObject({
+        details: {
+          code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+
+      await local.client.exec(
+        "SET default_transaction_isolation = 'read committed'",
+      );
+      await expect(
+        store.nodes.Podcast.getById(podcast.id),
+      ).resolves.toBeDefined();
+      await expect(
+        store.nodes.Episode.getById(episode.id),
+      ).resolves.toBeDefined();
+    } finally {
+      await local.backend.close();
+    }
+  });
+});

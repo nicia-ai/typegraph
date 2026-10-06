@@ -109,12 +109,11 @@ describe("reparent's move instant", () => {
       );
 
       // MUTATION: give the two halves of the move their own clock reads —
-      // in `applyCompositionAttachmentUnderFence`
-      // (src/store/operations/node-operations.ts), pass `nowIso()` inline to
-      // `endCompositionEdgeWindow` and drop the `{ validFrom: moveInstant }`
-      // argument to `attachCompositionCreateEdge`. The attach then stamps
-      // `CLOCK_START + n * ADVANCE_MS`, a full minute after the window it
-      // replaced ended, and both assertions below fail.
+      // in `prepareCompositionAttachmentMoves`
+      // (src/store/operations/node-operations.ts), record `nowIso()` as the
+      // retire's `moveInstant` instead of the instant the replacement was
+      // prepared with. The two rows then carry instants a clock advance
+      // apart, and both assertions below fail.
       await store.nodes.RiClip.reparent(clip.id, {
         whole: { kind: "RiShow", id: showB.id },
       });

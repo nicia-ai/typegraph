@@ -1192,24 +1192,12 @@ export class QueryBuilder<
       );
     }
 
-    // The registry's `*KindsUnder`/`*KindsOver` readers return only the
-    // literal kinds a `partOf`/`hasPart` declaration named: the
-    // subclass-assignable rule decides which PAIR matches, not which concrete
-    // kinds the pair's declared endpoint admits at read time. Edge-endpoint
-    // validation accepts any subclass of a declared endpoint
-    // (`isAssignableToAny`), so a live row's actual kind can be an
-    // undeclared subclass of a declared target kind — expand through the
-    // same subclass closure `to(kind, alias, { expansion: "subclasses" })`
-    // applies, or a real row is silently dropped from the result instead of
-    // refused or returned.
-    const targetKinds = new Set<string>();
-    for (const kind of sourceKinds) {
-      for (const targetKind of targetKindsUnder(kind)) {
-        for (const concreteKind of registry.expandSubClasses(targetKind)) {
-          targetKinds.add(concreteKind);
-        }
-      }
-    }
+    // The registry readers answer in concrete kinds, subclasses of every
+    // declared endpoint included, so a live row whose kind is an undeclared
+    // subclass of a declared target is returned rather than silently dropped.
+    const targetKinds = new Set<string>(
+      sourceKinds.flatMap((kind) => [...targetKindsUnder(kind)]),
+    );
 
     // The orientation table, derived through the one shared partition
     // (`partitionCompositionEdgeKindsByDirection`) `subgraph({ composition:

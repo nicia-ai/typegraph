@@ -158,6 +158,14 @@ type RecordedCaptureSession = Readonly<{
     note: IdentityTransitionDraft,
   ) => void;
   /**
+   * Runs `fn` and returns the withdrawal of the notes it buffered: calling it
+   * removes exactly those notes, so a note describing a row write that is
+   * then refused never reaches the flush.
+   */
+  collectIdentityTransitionNotes: (
+    fn: () => Promise<void>,
+  ) => Promise<IdentityTransitionNoteWithdrawal>;
+  /**
    * Sets the ambient decision provenance every `noteIdentityTransition` call
    * takes for the duration of `fn`, then restores the PREVIOUS ambient value —
    * a plain save/restore, not a push/pop stack, so an exception inside `fn`
@@ -439,6 +447,23 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         graphId,
         decision: currentDecision,
       });
+    },
+
+    async collectIdentityTransitionNotes(
+      fn: () => Promise<void>,
+    ): Promise<IdentityTransitionNoteWithdrawal> {
+      const firstCollected = identityTransitionNotes.length;
+      await fn();
+      const collected = identityTransitionNotes.slice(firstCollected);
+      return () => {
+        if (sealed) {
+          throw recordedCaptureSealedError({ entity: "identity-transition" });
+        }
+        for (const note of collected) {
+          const index = identityTransitionNotes.lastIndexOf(note);
+          if (index !== -1) identityTransitionNotes.splice(index, 1);
+        }
+      };
     },
 
     async withIdentityDecision<T>(
@@ -814,6 +839,37 @@ export async function withRecordedIdentityMutationTarget<T>(
       binding.capture?.session.noteIdentityTransition(graphId, note);
     },
   );
+}
+
+/** Removes the identity-transition notes one collection gathered. */
+export type IdentityTransitionNoteWithdrawal = () => void;
+
+function nothingToWithdraw(): void {
+  // No capture session buffered anything for this target.
+}
+
+/**
+ * Runs `fn` — the identity half of a row write, which notes the transition
+ * that write will cause — and returns the withdrawal of whatever it noted.
+ * The caller invokes the withdrawal when the row write is then refused, so a
+ * refusal caught inside an enclosing transaction that goes on to commit
+ * leaves no transition, and allocates no recorded revision, for a change that
+ * never happened.
+ *
+ * The collection spans `fn` alone, which issues only the identity half's own
+ * reads. A target with no capture session buffers nothing and withdraws
+ * nothing.
+ */
+export async function collectRecordedIdentityTransitionNotes(
+  target: IdentityTarget,
+  fn: () => Promise<void>,
+): Promise<IdentityTransitionNoteWithdrawal> {
+  const session = recordedTransactionBindings.get(target)?.capture?.session;
+  if (session === undefined) {
+    await fn();
+    return nothingToWithdraw;
+  }
+  return session.collectIdentityTransitionNotes(fn);
 }
 
 /**

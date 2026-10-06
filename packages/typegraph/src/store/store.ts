@@ -154,7 +154,6 @@ import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
 import { refuseEngineNativeRecordedIdentityRead } from "../identity/historical-sql";
 import {
-  ensureIdentitySchemaStorage,
   identityKindCascadeNeeded,
   identitySchemaCommitPreflight,
   inspectAdoptedIdentityStorage,
@@ -251,12 +250,12 @@ import {
   prepareEvolutionPlan,
 } from "../schema/evolution-plan";
 import {
-  adoptBaseSchemaStorage,
   applyDeprecatedKinds,
   commitNewSchemaVersion,
   commitNewSchemaVersionIfKindsEmpty,
   commitNewSchemaVersionWithPreflight,
   composeSchemaCommitPreflight,
+  ensureIdentityStorageOnAdoptedBaseSchema,
   ensureSchemaInternal as ensureSchemaImpl,
   getSchemaChanges,
   loadActiveSchemaWithBootstrap,
@@ -6194,7 +6193,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // below, so an evolution that fails or is refused leaves nothing behind.
     const identityProvisioning =
       identityCandidate === undefined ? undefined : (
-        await ensureIdentitySchemaStorage(
+        await ensureIdentityStorageOnAdoptedBaseSchema(
           this.#baseBackend,
           this.#sqlSchema(),
           {
@@ -8757,14 +8756,6 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // exist.
   const identityProfile = merged.identity;
   if (identityProfile !== undefined) {
-    // Deployment-wide physical storage (e.g. the identity transition log,
-    // base-schema release 3) must be current BEFORE the identity-storage
-    // check below runs: that check treats a missing identity relation on an
-    // already-enabled graph as ledger data loss, and a relation this library
-    // version added since the database's last open is an upgrade, not data
-    // loss. `ensureSchema` also calls this, later — idempotent by the same
-    // durable version marker, so the repeat costs one read, not new DDL.
-    await adoptBaseSchemaStorage(backend);
     // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
     // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
     // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
@@ -8788,52 +8779,56 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     // provisioning for one shape and filling for another. The call is still
     // load-bearing for its EFFECT: it runs the idempotent identity DDL before
     // the commit takes the per-graph write lock.
-    await ensureIdentitySchemaStorage(backend, resolvedIdentitySchema, {
-      graphId: merged.id,
-      enablement: identityEnablement,
-      registry: identityRegistry,
-      // A derived relation this library version added, absent from (or left
-      // empty in) a database that predates it, is created and FILLED as one
-      // unit here — never created now and filled at the end of boot. Between
-      // those two points sit the schema commit, the history assertion, three
-      // materialization steps and an index build, and for that whole window an
-      // empty separation relation would answer "not separated" to every
-      // concurrent `assertSame`. See `ensureIdentitySchemaStorage`.
-      //
-      // Withheld when a schema commit is gated on an identity SEMANTICS
-      // change: that commit's own preflight creates AND rebuilds inside the
-      // commit transaction, under the semantics being committed. Filling here
-      // would instead derive classes from semantics this database has not
-      // accepted yet — and would keep them if the commit were then refused.
-      // Nothing is provisioned on that path either, so a refused commit leaves
-      // the relation absent rather than readable-empty, and the next open of a
-      // graph whose semantics ARE committed heals it here.
-      ...(identityGate === undefined ?
-        {
-          // The registry was resolved before this transaction. Pin its schema
-          // version before taking the identity lock: a concurrent migration
-          // may already have rebuilt under different semantics, and a stale
-          // startup must not overwrite that closure even if boot later fails.
-          recomputeDerivedRelations: (target) =>
-            rebuildIdentityClosureWithSchemaFence(
-              {
-                backend: target,
-                graphId: merged.id,
-                registry: identityRegistry,
-                schema: resolvedIdentitySchema,
-                sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
-              },
-              {
-                graphId: merged.id,
-                schemaVersion: activeRow?.version,
-                historyEnabled: false,
-                revisionTrackingEnabled: false,
-                revisionSchema: resolvedIdentitySchema,
-              },
-            ),
-        }
-      : {}),
-    });
+    await ensureIdentityStorageOnAdoptedBaseSchema(
+      backend,
+      resolvedIdentitySchema,
+      {
+        graphId: merged.id,
+        enablement: identityEnablement,
+        registry: identityRegistry,
+        // A derived relation this library version added, absent from (or left
+        // empty in) a database that predates it, is created and FILLED as one
+        // unit here — never created now and filled at the end of boot. Between
+        // those two points sit the schema commit, the history assertion, three
+        // materialization steps and an index build, and for that whole window an
+        // empty separation relation would answer "not separated" to every
+        // concurrent `assertSame`. See `ensureIdentitySchemaStorage`.
+        //
+        // Withheld when a schema commit is gated on an identity SEMANTICS
+        // change: that commit's own preflight creates AND rebuilds inside the
+        // commit transaction, under the semantics being committed. Filling here
+        // would instead derive classes from semantics this database has not
+        // accepted yet — and would keep them if the commit were then refused.
+        // Nothing is provisioned on that path either, so a refused commit leaves
+        // the relation absent rather than readable-empty, and the next open of a
+        // graph whose semantics ARE committed heals it here.
+        ...(identityGate === undefined ?
+          {
+            // The registry was resolved before this transaction. Pin its schema
+            // version before taking the identity lock: a concurrent migration
+            // may already have rebuilt under different semantics, and a stale
+            // startup must not overwrite that closure even if boot later fails.
+            recomputeDerivedRelations: (target) =>
+              rebuildIdentityClosureWithSchemaFence(
+                {
+                  backend: target,
+                  graphId: merged.id,
+                  registry: identityRegistry,
+                  schema: resolvedIdentitySchema,
+                  sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
+                },
+                {
+                  graphId: merged.id,
+                  schemaVersion: activeRow?.version,
+                  historyEnabled: false,
+                  revisionTrackingEnabled: false,
+                  revisionSchema: resolvedIdentitySchema,
+                },
+              ),
+          }
+        : {}),
+      },
+    );
   }
 
   // No identity preflight is passed here — the schema manager derives the

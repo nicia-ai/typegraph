@@ -1378,13 +1378,9 @@ export async function migrateSchema<G extends GraphDef>(
  * one read and no base-adoption DDL. Runtime-only construction remains
  * DDL-free.
  *
- * Exported so `prepareStoreWithSchema` (store.ts) can call it before ITS OWN
- * `ensureIdentitySchemaStorage` call — which runs deliberately earlier than
- * `ensureSchema`'s own `adoptBaseSchemaStorage`, to issue identity DDL before
- * the schema-commit write lock. A base-schema relation an already-enabled
- * graph now depends on (the identity transition log, base-schema release 3)
- * must exist by THAT earlier point too, or an upgrade reads as the ledger
- * data loss `assertIdentityStoragePresent` refuses.
+ * A caller that checks identity storage before `ensureSchema` reaches this
+ * adoption runs both through
+ * {@link ensureIdentityStorageOnAdoptedBaseSchema}.
  */
 export async function adoptBaseSchemaStorage(
   backend: GraphBackend,
@@ -1394,6 +1390,28 @@ export async function adoptBaseSchemaStorage(
     return;
   }
   await backend.ensureEdgeMatchIdentityStorage?.();
+}
+
+/**
+ * THE identity-storage check a Store runs ahead of a schema commit: base
+ * storage adopted first, then {@link ensureIdentitySchemaStorage}.
+ *
+ * The order is the point. That check treats an identity relation missing from
+ * an already-enabled graph as ledger data loss, and a relation this library
+ * version added since the database was last opened by a privileged entry
+ * point is an upgrade, not data loss. Every caller that runs the check before
+ * `ensureSchema`'s own adoption — opening a store with its schema, and
+ * `Store.evolve` — reaches it through here, so neither can run the check
+ * against storage the upgrade has not caught up to. Adoption is idempotent by
+ * its durable version marker: one read when there is nothing to adopt.
+ */
+export async function ensureIdentityStorageOnAdoptedBaseSchema(
+  backend: GraphBackend,
+  schema: SqlSchema,
+  options: Parameters<typeof ensureIdentitySchemaStorage>[2],
+): ReturnType<typeof ensureIdentitySchemaStorage> {
+  await adoptBaseSchemaStorage(backend);
+  return ensureIdentitySchemaStorage(backend, schema, options);
 }
 
 function assertGraphEdgeMatchIdentitySupport(

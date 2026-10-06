@@ -22,6 +22,7 @@ import { type CompositionPartSide } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import {
+  axisCountsRow,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
@@ -61,17 +62,37 @@ function compositionHolders(
  * `holderLiveness` with no new table: `edgeCardinalitySpec` already answers
  * both for every `(direction, cardinality)` pair, composition or not.
  *
- * Exported as the one owner of that mapping: the cascade's membership
- * population predicate (`src/store/operations/composition-cascade.ts`) reads
- * its spec through this function rather than re-spelling the orientation fold.
+ * The one owner of that mapping: {@link compositionCountsEndedRows} reads its
+ * spec through this function rather than re-spelling the orientation fold.
  */
-export function compositionAxisRef(
+function compositionAxisRef(
   partSide: CompositionPartSide,
   population: "one" | "oneActive",
 ): EdgeCardinalityAxisRef {
   return partSide === "from" ?
       { direction: "source", cardinality: population }
     : { direction: "target", cardinality: population };
+}
+
+/**
+ * Whether a composition row whose validity window has ENDED is still a
+ * membership under this orientation and population.
+ *
+ * `population: "one"` binds part and whole for the row's whole life, ended or
+ * not. `population: "oneActive"` holds only while the window is open: an
+ * ended row is the history a reparent leaves behind and attaches nothing.
+ * Read off {@link edgeCardinalitySpec}'s `holderLiveness` rather than
+ * re-spelled, so the claim, the cascade's closure and the acyclicity relation
+ * agree on which rows are in the composition relation.
+ */
+export function compositionCountsEndedRows(
+  partSide: CompositionPartSide,
+  population: "one" | "oneActive",
+): boolean {
+  return (
+    edgeCardinalitySpec(compositionAxisRef(partSide, population))
+      .holderLiveness !== "liveAndActive"
+  );
 }
 
 /**
@@ -128,15 +149,8 @@ export function edgeInsertClaims(
     subject,
   );
   const composition = compositionClaim(registry, subject);
-  // The same "does a row born already ended still claim?" exemption
-  // {@link edgeCardinalityClaims} applies to every ordinary axis, applied to
-  // composition's own axis: an edge born ended never joins a
-  // `claimsWhenBornEnded: false` (`oneActive`) population, composition
-  // included.
   const owesComposition =
-    composition !== undefined &&
-    (edgeCardinalitySpec(composition).claimsWhenBornEnded ||
-      subject.validTo === undefined);
+    composition !== undefined && axisCountsRow(composition, subject);
   return sortedByClaimTarget(
     owesComposition ? [...ordinary, composition] : ordinary,
   );
@@ -169,6 +183,11 @@ export function edgeKindOwesAnyClaim(
  * true` (`one`) axis in the first place and must not re-probe it, so it
  * re-takes composition only when composition's OWN population is
  * `oneActive`.
+ *
+ * Either way the row must be one composition counts ({@link axisCountsRow}):
+ * resurrecting an ENDED `oneActive` history row attaches nothing, so it owes
+ * no claim and is not refused because the part holds another whole — the
+ * same exemption {@link edgeInsertClaims} gives the identical row born ended.
  */
 export function compositionReentryClaim(
   registry: KindRegistry,
@@ -176,7 +195,7 @@ export function compositionReentryClaim(
   reentersLivePopulation: boolean,
 ): ClaimEdgeCardinalityParams | undefined {
   const claim = compositionClaim(registry, subject);
-  if (claim === undefined) return undefined;
+  if (claim === undefined || !axisCountsRow(claim, subject)) return undefined;
   if (reentersLivePopulation) return claim;
   return edgeCardinalitySpec(claim).claimsWhenBornEnded ? undefined : claim;
 }

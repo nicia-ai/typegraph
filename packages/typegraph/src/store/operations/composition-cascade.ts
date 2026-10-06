@@ -9,11 +9,12 @@
  * and apply-time orphan checks — reads the closure through this module, never
  * by re-walking composition edges itself.
  */
+import { assertFencedSnapshotIsFresh } from "../../backend/command-contract";
 import {
   type EdgeRow,
+  type GraphBackend,
   type GraphReadBackend,
   isLiveNodeRow,
-  type LiveNodeRow,
 } from "../../backend/types";
 import { CompilerInvariantError, CompositionCycleError } from "../../errors";
 import {
@@ -23,20 +24,24 @@ import {
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStringTuples } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { compositionAxisRef } from "../claims/composition-claims";
-import { edgeCardinalitySpec } from "../claims/edge-claims";
+import { compositionCountsEndedRows } from "../claims/composition-claims";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type CompositionNodeRef } from "../types";
 
 /**
- * One node the walk discovered, with the composition edge that binds it —
- * before its own row has been read. {@link liveDiscoveredMembers} turns it
- * into a {@link CompositionCascadeMember} by attaching that row (and drops it
- * when the row is not live).
+ * One node the walk discovered, with the composition edge that binds it.
+ * {@link liveDiscoveredMembers} keeps it in `CompositionCascadePlan.members`
+ * only while its node row is live.
+ *
+ * The plan carries no node row: the liveness read proves the member was there
+ * when the plan was made, and each member's own delete reads its pre-image
+ * again at the moment it writes. A writer that takes no per-graph lock (an
+ * ordinary property update) can commit between the two, and a delete written
+ * against the planned row would release the uniqueness entries of props the
+ * node no longer has.
  *
  * Not exported beyond this module: every consumer reaches a member only
- * through `CompositionCascadePlan.members`, structurally — exporting either
- * shape separately would be a public name nothing outside this file names.
+ * through `CompositionCascadePlan.members`, structurally.
  */
 type DiscoveredCascadeMember = Readonly<{
   kind: string;
@@ -58,21 +63,6 @@ type DiscoveredCascadeMember = Readonly<{
   whole: CascadeNode;
 }>;
 
-/**
- * One node the cascade will delete: a discovered member plus the LIVE row
- * proving it is still there.
- *
- * The row is the one {@link liveDiscoveredMembers} read under the cascade's
- * own per-graph write lock — the fenced pre-image the runtime cascade's soft
- * delete writes against (`deleteNodeRowInFrame`'s `existing`,
- * `node-operations.ts`), so no member is read twice for one delete. Carried on
- * the member rather than returned beside it because the row and the
- * membership are established by the same read: a member present in `members`
- * IS a row this plan proved live.
- */
-type CompositionCascadeMember = DiscoveredCascadeMember &
-  Readonly<{ row: LiveNodeRow }>;
-
 export type CompositionCascadePlan = Readonly<{
   /**
    * LIVE parts in the cascade's delete order: LEAF-FIRST, then a
@@ -82,7 +72,7 @@ export type CompositionCascadePlan = Readonly<{
    * is excluded — it is not something for a caller to retire/purge, nor a
    * composition orphan for merge to report.
    */
-  members: readonly CompositionCascadeMember[];
+  members: readonly DiscoveredCascadeMember[];
   /** Every composition edge id the cascade consumes, including the roots'. */
   consumedEdgeIds: ReadonlySet<string>;
 }>;
@@ -113,11 +103,9 @@ export function cascadedPartReferences(
  * Whether one composition edge row still counts as a live membership under
  * its pair's declared whole-side population.
  *
- * Restated from {@link edgeCardinalitySpec}'s `holderLiveness` for a row
- * already known non-deleted (every reader of this predicate excludes
- * deleted rows before calling it) — imported rather than re-spelled, so a
- * `holderLiveness` value can never disagree with the population this
- * predicate treats as counting.
+ * {@link compositionCountsEndedRows} owns the population rule; this applies
+ * it to a row already known non-deleted (every reader of this predicate
+ * excludes deleted rows before calling it).
  *
  * `population: "one"` (`holderLiveness: "live"`) counts unconditionally: the
  * part/whole binding persists for the row's entire life, ended or not.
@@ -131,8 +119,8 @@ export function compositionEdgeCounts(
   row: Pick<EdgeRow, "valid_to">,
 ): boolean {
   return (
-    edgeCardinalitySpec(compositionAxisRef(pair.partSide, pair.population))
-      .holderLiveness !== "liveAndActive" || row.valid_to === undefined
+    compositionCountsEndedRows(pair.partSide, pair.population) ||
+    row.valid_to === undefined
   );
 }
 
@@ -347,8 +335,7 @@ function requirePartSide(
 }
 
 /**
- * Drops discovered members whose node row is no longer live, and attaches the
- * live row to every member it keeps.
+ * Drops discovered members whose node row is no longer live.
  *
  * A composition edge row and its endpoint's node row can go stale relative
  * to each other: a direct part delete cleans up its OWN composition edges
@@ -360,10 +347,7 @@ function requirePartSide(
  * before a member is reported: both the runtime cascade (which retires/
  * purges each `members` entry) and merge's plan/apply-time orphan reports
  * read the SAME filtered closure, rather than each re-deriving "is this
- * member actually still there" on its own. The rows this read produces travel
- * ON the members it keeps, so the runtime cascade's soft delete writes against
- * them rather than reading each member again — both reads are taken under the
- * same per-graph write lock, so the second could only return the first.
+ * member actually still there" on its own.
  *
  * One batched read: `discoveryOrder` is already the complete, deduplicated
  * closure, so a single parallel round of `getNode` calls suffices — no need
@@ -376,16 +360,15 @@ async function liveDiscoveredMembers(
   ctx: Readonly<{ graphId: string }>,
   backend: GraphReadBackend,
   discoveryOrder: readonly DiscoveredCascadeMember[],
-): Promise<readonly CompositionCascadeMember[]> {
+): Promise<readonly DiscoveredCascadeMember[]> {
   const nodeRows = await Promise.all(
     discoveryOrder.map((member) =>
       backend.getNode(ctx.graphId, member.kind, member.id),
     ),
   );
-  return discoveryOrder.flatMap((member, index) => {
+  return discoveryOrder.filter((_member, index) => {
     const row = nodeRows[index];
-    if (row === undefined || !isLiveNodeRow(row)) return [];
-    return [{ ...member, row }];
+    return row !== undefined && isLiveNodeRow(row);
   });
 }
 
@@ -468,10 +451,23 @@ export async function planCompositionCascade(
   }>,
   wholeKind: string,
   wholeId: string,
-  backend: GraphReadBackend,
+  backend: GraphReadBackend & Pick<GraphBackend, "commands">,
 ): Promise<CompositionCascadePlan> {
   const edgeKinds = ctx.registry.compositionEdgeKindsUnder(wholeKind);
   if (edgeKinds.length === 0) return EMPTY_COMPOSITION_CASCADE_PLAN;
+
+  // The closure below is a lock-only read: no claim row records "this whole
+  // has these parts", so a part attached while this session waited for the
+  // fence is found only by a snapshot taken after the wait.
+  assertFencedSnapshotIsFresh(
+    backend.commands,
+    ctx.graphId,
+    ctx.lock.coordination,
+    {
+      code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
+      subject: "Deleting a composition whole",
+    },
+  );
 
   const root: CascadeNode = { kind: wholeKind, id: wholeId };
   const visited = new Set<string>([memberKey(root)]);

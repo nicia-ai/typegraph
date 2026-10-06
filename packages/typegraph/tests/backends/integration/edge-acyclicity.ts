@@ -10,12 +10,14 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { EdgeAcyclicityError } from "../../../src";
+import { createStore, EdgeAcyclicityError } from "../../../src";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../../src/query/compiler/recursive";
 import { edgeWriteNeedsConstraintFence } from "../../../src/store/constraints";
 import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
+import { withBindBudget } from "./bind-budget";
+import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
 type AcyclicIntegrationStore = ReturnType<IntegrationTestContext["getStore"]>;
@@ -249,6 +251,41 @@ export function registerEdgeAcyclicityIntegrationTests(
       await expect(store.edges.dependsOn.create(b, a)).rejects.toThrow(
         EdgeAcyclicityError,
       );
+    });
+
+    it("probes a batch larger than the bind budget in statements that fit, and still finds a cycle across them", async () => {
+      const store = context.getStore();
+      const bindBudget = 100;
+      const rowCount = 30;
+      const budgeted = createStore(
+        integrationTestGraph,
+        withBindBudget(store.backend, bindBudget),
+      );
+      const tasks = await store.nodes.Task.bulkCreate(
+        Array.from({ length: rowCount + 1 }, (_unused, index) => ({
+          props: { name: `budget-${String(index)}` },
+        })),
+      );
+      const chain = tasks.slice(0, -1).map((task, index) => ({
+        from: task,
+        to: requireDefined(tasks[index + 1]),
+      }));
+
+      // MUTATION CHECK: sending every proposed row in one statement
+      // (`readUnwrittenEdgeReaches` never slicing) binds more than the budget
+      // for these 30 rows, and the budgeted backend refuses the statement —
+      // verified and reverted.
+      await budgeted.edges.dependsOn.bulkCreate(chain);
+      expect(await storedEndpoints(store)).toHaveLength(rowCount);
+
+      // The same chain reversed closes a cycle with every stored row, and
+      // its rows are spread over several statements.
+      await expect(
+        budgeted.edges.dependsOn.bulkCreate(
+          chain.map(({ from, to }) => ({ from: to, to: from })),
+        ),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      expect(await storedEndpoints(store)).toHaveLength(rowCount);
     });
 
     it("refuses an in-batch cycle in bulkCreate with zero rows committed", async () => {

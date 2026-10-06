@@ -37,6 +37,12 @@ import { type EdgeKindFacts } from "./edge-kind-facts";
 /** Which end of a composition pair a traversal moves toward. */
 type CompositionSide = "part" | "whole";
 
+/** What one composition walk reaches: node kinds and the edge kinds crossed. */
+type CompositionClosure = Readonly<{
+  kinds: readonly string[];
+  edgeKinds: readonly string[];
+}>;
+
 const DISJOINT_PAIR_SEPARATOR = "|";
 const ENCODED_DISJOINT_PAIR_PREFIX = "\u001Epair\u001E";
 
@@ -214,18 +220,11 @@ export class KindRegistry {
 
   /**
    * Pure caches over {@link #composition}, which is immutable for the life of
-   * the registry: every literal kind name a declared pair names (either
-   * endpoint), and per concrete kind the derived answers the composition
+   * the registry: per concrete kind, the derived answers the composition
    * readers below would otherwise recompute on every call. The readers stay
    * the single owners of their decisions — only the repetition is removed.
    */
-  readonly #compositionDeclaredKinds: readonly string[];
-  readonly #compositionDeclaredKindsByKind = new Map<
-    string,
-    readonly string[]
-  >();
-  readonly #compositionKindsCache = new Map<string, readonly string[]>();
-  readonly #compositionEdgeKindsCache = new Map<string, readonly string[]>();
+  readonly #compositionClosureCache = new Map<string, CompositionClosure>();
   readonly #compositionFirstPairByPartKind = new Map<
     string,
     CompositionPair | undefined
@@ -256,11 +255,6 @@ export class KindRegistry {
     this.edgeKinds = edgeKinds;
     this.identity = identity;
     this.#composition = composition;
-    this.#compositionDeclaredKinds = [
-      ...new Set(
-        composition.pairs.flatMap((pair) => [pair.partKind, pair.wholeKind]),
-      ),
-    ];
     this.subClassAncestors = closures.subClassAncestors;
     this.subClassDescendants = closures.subClassDescendants;
     this.#subClassComponents = computeSubClassComponents(
@@ -462,10 +456,9 @@ export class KindRegistry {
   // === Composition Relation ===
   //
   // `getParts`/`getWholes` above keep their declaration-level closure
-  // semantics unchanged; they are
-  // meaningful here because `via` is now required on every `partOf`/
-  // `hasPart` relation, so every declared pair they close over is itself a
-  // validated composition pair. The readers below are the ONLY way any
+  // semantics unchanged: they follow literally declared kind names only. The
+  // readers below answer for concrete node kinds, resolving every kind a walk
+  // reaches through subsumption, and are the ONLY way any
   // other lane reaches `pairs` — nothing outside this class indexes into
   // the relation directly, which is what keeps "is this edge kind a
   // composition edge" and "which side is the part" answered once.
@@ -486,14 +479,22 @@ export class KindRegistry {
   }
 
   /**
+   * The whole-side population of `edgeKind`'s rows, or `undefined` if it is
+   * not a composition edge. A property of the realizing edge kind's own
+   * declaration, so every pair sharing one `via` agrees on it
+   * (`ONTOLOGY_COMPOSITION_VIA_MIXED` refuses a graph where they would not).
+   */
+  compositionEdgePopulation(edgeKind: string): "one" | "oneActive" | undefined {
+    return this.#composition.pairs.find((pair) => pair.viaEdgeKind === edgeKind)
+      ?.population;
+  }
+
+  /**
    * Whether `kind` (or a superclass it is assignable to) is a composition
    * WHOLE — declares parts under {@link compositionEdgeKindsUnder}. The one
-   * owner of this classification: a node-delete's constraint fence, the
-   * fused-delete-command eligibility guard, and merge's orphan scan each
-   * used to spell `compositionEdgeKindsUnder(kind).length > 0` inline, which
-   * is exactly the kind of second copy that lets a future refinement (e.g. a
-   * subclass whole `compositionEdgeKindsUnder` currently misses) teach one
-   * call site about itself and not the others.
+   * owner of this classification, read by a node-delete's constraint fence,
+   * the fused-delete-command eligibility guard, and merge's orphan scan, so
+   * none of them spells `compositionEdgeKindsUnder(kind).length > 0` inline.
    */
   isCompositionWhole(kind: string): boolean {
     return this.compositionEdgeKindsUnder(kind).length > 0;
@@ -505,87 +506,58 @@ export class KindRegistry {
   }
 
   /**
-   * Every literal kind name a declared composition pair names as either
-   * endpoint, restricted to the ones `concreteKind` is assignable to. This is
-   * the one place a concrete node kind — which may be an undeclared subclass
-   * of the kind a `partOf`/`hasPart` was written against — is resolved onto
-   * the composition relation's declared vocabulary; every reader below routes
-   * through it so a subclass is never visible to one reader and invisible to
-   * another. Edge-endpoint validation already accepts such a
-   * subclass through `isAssignableToAny`, so these rows really do exist.
+   * THE composition closure of one concrete node kind along one direction:
+   * `"part"` descends from a whole to everything under it, `"whole"` climbs
+   * from a part to everything over it. One traversal yields both the node
+   * kinds reached and the realizing edge kinds crossed, so the readers below
+   * are projections of a single walk and cannot drift.
+   *
+   * The walk is over CONCRETE kinds, because that is what a stored row
+   * carries. A node of kind `K` sits at a pair's anchor end whenever `K` is
+   * assignable to the kind the pair was declared against, and the opposite
+   * end admits that declared kind and every subclass of it (edge-endpoint
+   * validation accepts any of them). Every kind reached is therefore
+   * re-resolved through subsumption before the next step: a pair declared on
+   * a subclass of a reached kind, and a pair declared on a superclass of one,
+   * are both crossed.
    */
-  private compositionDeclaredKindsAssignableFrom(
-    concreteKind: string,
-  ): readonly string[] {
-    const cached = this.#compositionDeclaredKindsByKind.get(concreteKind);
-    if (cached !== undefined) return cached;
-    const assignable = this.#compositionDeclaredKinds.filter((declaredKind) =>
-      this.isAssignableTo(concreteKind, declaredKind),
-    );
-    this.#compositionDeclaredKindsByKind.set(concreteKind, assignable);
-    return assignable;
-  }
-
-  /**
-   * The kinds transitively reachable from `kind`'s declared composition kinds
-   * along one direction: `"part"` descends the `hasPart` closure, `"whole"`
-   * climbs the `partOf` one. The single traversal
-   * {@link compositionPartKindsUnder} and {@link compositionWholeKindsOver}
-   * are projections of, so the two mirrors cannot drift.
-   */
-  #compositionKindsAlong(
+  #compositionClosureAlong(
     kind: string,
     side: CompositionSide,
-  ): readonly string[] {
+  ): CompositionClosure {
     const cacheKey = encodeTupleKey([side, kind]);
-    const cached = this.#compositionKindsCache.get(cacheKey);
+    const cached = this.#compositionClosureCache.get(cacheKey);
     if (cached !== undefined) return cached;
-    const reachable = new Set<string>();
-    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
-      kind,
-    )) {
-      const step =
-        side === "part" ?
-          this.getParts(declaredKind)
-        : this.getWholes(declaredKind);
-      for (const reachedKind of step) reachable.add(reachedKind);
-    }
-    const ordered = [...reachable].toSorted((left, right) =>
-      compareCodePoints(left, right),
-    );
-    this.#compositionKindsCache.set(cacheKey, ordered);
-    return ordered;
-  }
-
-  /**
-   * The realizing edge kinds reachable from `kind` along one direction: the
-   * pairs whose opposite endpoint is `kind` itself, a declared kind `kind` is
-   * assignable to, or any kind transitively reachable from one of those. The
-   * single traversal {@link compositionEdgeKindsUnder} and
-   * {@link compositionEdgeKindsOver} are projections of.
-   */
-  #compositionEdgeKindsAlong(
-    kind: string,
-    side: CompositionSide,
-  ): readonly string[] {
-    const cacheKey = encodeTupleKey([side, kind]);
-    const cached = this.#compositionEdgeKindsCache.get(cacheKey);
-    if (cached !== undefined) return cached;
-    const reachableKinds = new Set<string>([
-      kind,
-      ...this.compositionDeclaredKindsAssignableFrom(kind),
-      ...this.#compositionKindsAlong(kind, side),
-    ]);
+    const reachedKinds = new Set<string>();
     const edgeKinds = new Set<string>();
-    for (const pair of this.#composition.pairs) {
-      const anchor = side === "part" ? pair.wholeKind : pair.partKind;
-      if (reachableKinds.has(anchor)) edgeKinds.add(pair.viaEdgeKind);
+    const expanded = new Set<string>([kind]);
+    const frontier = [kind];
+    for (const concreteKind of frontier) {
+      for (const pair of this.#composition.pairs) {
+        const [anchorKind, oppositeKind] =
+          side === "part" ?
+            [pair.wholeKind, pair.partKind]
+          : [pair.partKind, pair.wholeKind];
+        if (!this.isAssignableTo(concreteKind, anchorKind)) continue;
+        edgeKinds.add(pair.viaEdgeKind);
+        for (const reachedKind of this.expandSubClasses(oppositeKind)) {
+          reachedKinds.add(reachedKind);
+          if (expanded.has(reachedKind)) continue;
+          expanded.add(reachedKind);
+          frontier.push(reachedKind);
+        }
+      }
     }
-    const ordered = [...edgeKinds].toSorted((left, right) =>
-      compareCodePoints(left, right),
-    );
-    this.#compositionEdgeKindsCache.set(cacheKey, ordered);
-    return ordered;
+    const closure: CompositionClosure = {
+      kinds: [...reachedKinds].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      ),
+      edgeKinds: [...edgeKinds].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      ),
+    };
+    this.#compositionClosureCache.set(cacheKey, closure);
+    return closure;
   }
 
   /**
@@ -659,29 +631,28 @@ export class KindRegistry {
   }
 
   /**
-   * The realizing edge kinds reachable under `wholeKind`: pairs whose whole
-   * is `wholeKind` (or a kind `wholeKind` is a subclass of) itself, or any
-   * kind transitively part of one of those. This is what lets cascade and
-   * `parts()` cross heterogeneous edge kinds without the caller spelling the
-   * path.
+   * The realizing edge kinds reachable under `wholeKind`: every pair that can
+   * hold a node of `wholeKind`, or of any kind transitively under it, as its
+   * whole. This is what lets cascade and `parts()` cross heterogeneous edge
+   * kinds without the caller spelling the path.
    */
   compositionEdgeKindsUnder(wholeKind: string): readonly string[] {
-    return this.#compositionEdgeKindsAlong(wholeKind, "part");
+    return this.#compositionClosureAlong(wholeKind, "part").edgeKinds;
   }
 
   /** The wholes mirror of {@link compositionEdgeKindsUnder}. */
   compositionEdgeKindsOver(partKind: string): readonly string[] {
-    return this.#compositionEdgeKindsAlong(partKind, "whole");
+    return this.#compositionClosureAlong(partKind, "whole").edgeKinds;
   }
 
-  /** Every part kind transitively under `wholeKind`, across every composition relation. */
+  /** Every concrete part kind transitively under `wholeKind`, subclasses included, across every composition relation. */
   compositionPartKindsUnder(wholeKind: string): readonly string[] {
-    return this.#compositionKindsAlong(wholeKind, "part");
+    return this.#compositionClosureAlong(wholeKind, "part").kinds;
   }
 
-  /** Every whole kind transitively over `partKind`, across every composition relation. */
+  /** Every concrete whole kind transitively over `partKind`, subclasses included, across every composition relation. */
   compositionWholeKindsOver(partKind: string): readonly string[] {
-    return this.#compositionKindsAlong(partKind, "whole");
+    return this.#compositionClosureAlong(partKind, "whole").kinds;
   }
 
   /**

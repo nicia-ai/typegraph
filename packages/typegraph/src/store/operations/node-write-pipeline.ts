@@ -706,10 +706,38 @@ export async function applyResolvedNodeUpdateBatch(
 }
 
 /**
+ * The props a soft delete releases uniqueness entries for: the ones the row
+ * holds once its tombstone is written, not the pre-image's.
+ *
+ * An ordinary property update takes no per-graph lock, so it can commit
+ * between the pre-image read and the tombstone. The tombstone statement is
+ * what locks the row: read after it, the stored props are final for this
+ * transaction, and a release computed from them cannot leave the key that
+ * update moved the node to claimed by a tombstone. A kind with no unique
+ * constraint keys nothing off its props and is not read again.
+ */
+async function readTombstonedNodeProps(
+  ctx: NodeWriteContext,
+  existing: LiveNodeRow,
+  uniqueConstraints: readonly UniqueConstraint[],
+  backend: Backend,
+): Promise<Record<string, unknown>> {
+  if (uniqueConstraints.length === 0) return parseRowProps(existing);
+  const tombstoned = await backend.getNode(
+    ctx.graphId,
+    existing.kind,
+    existing.id,
+  );
+  return parseRowProps(tombstoned ?? existing);
+}
+
+/**
  * Applies a node soft delete: delete-behavior enforcement, the tombstone
  * write, then removal of uniqueness entries, embeddings, and fulltext.
  * Requires a {@link LiveNodeRow}: deleting an already-tombstoned row would
  * re-run sidecar cleanup against entries the first delete already removed.
+ * The uniqueness release reads the row again after the tombstone
+ * ({@link readTombstonedNodeProps}).
  */
 export async function applyNodeSoftDelete(
   ctx: NodeWriteContext,
@@ -738,7 +766,12 @@ export async function applyNodeSoftDelete(
     uniquenessContext(ctx, backend),
     kind,
     id,
-    parseRowProps(args.existing),
+    await readTombstonedNodeProps(
+      ctx,
+      args.existing,
+      args.uniqueConstraints,
+      backend,
+    ),
     args.uniqueConstraints,
   );
   await deleteNodeEmbeddings(

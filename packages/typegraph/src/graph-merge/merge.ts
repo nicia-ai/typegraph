@@ -3851,8 +3851,10 @@ function acyclicityMergeConflict(
 
 /**
  * Plan time: does the resolved plan's projected edge writes — layered
- * onto the target's CURRENT live edges — close a cycle in a declared-acyclic
- * relation. Runs for every commit mode (`merge()`'s direct commit and
+ * onto the target's CURRENT live edges, less the edges the same plan deletes
+ * — close a cycle in a declared-acyclic relation. Apply removes those edges
+ * before it writes, so a reversal or re-rooting inside the relation is judged
+ * by the DAG it produces, not by rows that will be gone. Runs for every commit mode (`merge()`'s direct commit and
  * `planMerge()`'s reviewable artifact both flow through `resolveMerge`,
  * before either branches to its own `complete` callback), so a reviewer of
  * either surface sees the SAME typed conflict instead of only discovering
@@ -3891,6 +3893,7 @@ async function assertResolvedPlanEdgesAcyclic<G extends GraphDef>(
     },
     target.graph,
     proposed,
+    [...plan.edgeDeletions.keys()].map((identity) => idOf(identity)),
   );
   if (violations.length === 0) return;
 

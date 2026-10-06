@@ -325,6 +325,26 @@ export function sortedByClaimTarget(
 }
 
 /**
+ * Whether a row with this validity window joins the population `ref` counts.
+ *
+ * A row born already ended joins no ACTIVE population, so an active-only axis
+ * (`oneActive`, `claimsWhenBornEnded: false`) neither probes nor claims it;
+ * every other axis counts a row for its whole life. THE exemption every
+ * claim-issuing path reads — ordinary axes, the composition axis, a create
+ * and a re-entry alike — so "probed but unclaimed" (a silent hole) and
+ * "claimed but unprobed" (a refusal with no matching state) cannot arise from
+ * two paths spelling it differently.
+ */
+export function axisCountsRow(
+  ref: EdgeCardinalityAxisRef,
+  row: Readonly<{ validTo?: string | undefined }>,
+): boolean {
+  return (
+    edgeCardinalitySpec(ref).claimsWhenBornEnded || row.validTo === undefined
+  );
+}
+
+/**
  * THE claims an edge write owes, in CLAIM order.
  *
  * Takes the AXIS LIST rather than the raw {@link EdgeCardinalityDeclarations} — a caller
@@ -342,21 +362,15 @@ export function sortedByClaimTarget(
  * that difference is the reason both are named.
  *
  * `many` declares no constraint, and an `oneActive` edge born already ended
- * joins no active population — `claimsWhenBornEnded` is the one place that
- * second exemption is written down, per AXIS, and the probe reads the same
- * field, so the two cannot drift into "probed but unclaimed" (a silent hole)
- * or "claimed but unprobed" (a refusal with no matching error).
+ * joins no active population — {@link axisCountsRow} owns that second
+ * exemption, per AXIS.
  */
 export function edgeCardinalityClaims(
   axisReferences: readonly EdgeCardinalityAxisRef[],
   subject: EdgeClaimSubject,
 ): readonly ClaimEdgeCardinalityParams[] {
   const claims = axisReferences
-    .filter(
-      (ref) =>
-        edgeCardinalitySpec(ref).claimsWhenBornEnded ||
-        subject.validTo === undefined,
-    )
+    .filter((ref) => axisCountsRow(ref, subject))
     .map((ref): ClaimEdgeCardinalityParams => ({
       ...ref,
       graphId: subject.graphId,

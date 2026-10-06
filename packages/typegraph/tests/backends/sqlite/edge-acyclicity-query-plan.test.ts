@@ -13,17 +13,13 @@
  * cannot flatten a compound subquery whose outer query is a join
  * (query-flattener rule 17d), so the plan was `MATERIALIZE candidates` — the
  * ENTIRE relation copied into an ephemeral table on EVERY probe, making
- * every acyclic insert O(|relation|) instead of an index seek. The `"proposed"`
- * (write-path) and `"relation"` (audit) seed forms now join `typegraph_edges`
- * directly; only the `"planned"` form (the graph-merge plan-time preview,
- * which has genuinely unwritten rows to hop through) still pays for the
- * compound shape — see `AcyclicityProbeSeed`'s docblock.
+ * every acyclic insert O(|relation|) instead of an index seek. Every seed form
+ * now joins `typegraph_edges` directly — see `AcyclicityProbeSeed`'s
+ * docblock.
  *
- * Mutation check: temporarily routing the
- * `"proposed"`/`"relation"` forms back through the old compound `candidates`
- * CTE (`buildProbeBodyDirect` calling `buildProbeBodyPlanned`'s helpers
- * instead of its own) makes every test below fail — `MATERIALIZE` reappears
- * in the plan and the from/to-index seek disappears.
+ * Mutation check: temporarily routing the walk back through a compound
+ * `candidates` CTE makes every test below fail — `MATERIALIZE` reappears in
+ * the plan and the from/to-index seek disappears.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

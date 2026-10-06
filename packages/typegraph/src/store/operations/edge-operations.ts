@@ -2076,12 +2076,14 @@ export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
   lock: GraphWriteLock,
   operation: string,
   prepared: readonly EdgeCreatePrepared[],
+  retiringEdgeIds: readonly string[] = [],
 ): Promise<void> {
   await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, operation),
     prepared.map((create) =>
       proposedRelationEdgeFromInsertParams(create.insertParams),
     ),
+    retiringEdgeIds,
   );
 }
 
@@ -2242,21 +2244,36 @@ export function edgeUpsertDirtyCheck<G extends GraphDef>(
  * and validates props, and writes. A plain update requires a live edge; a
  * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
  */
-async function performEdgeUpdate<G extends GraphDef>(
+type EdgeUpdateOptions = Readonly<{
+  clearDeleted?: boolean;
+  matchOn?: readonly string[];
+  matchProps?: Record<string, unknown>;
+  /** See {@link assertCompositionExistencePreserved}'s `reattachedPart`. */
+  reattachedPart?: CompositionNodeRef;
+}>;
+
+/** One edge update with every verdict reached and no statement issued. */
+type EdgeUpdatePrepared = Readonly<{
+  work: EdgeUpdateWork;
+  fences: EdgeUpdateFences;
+}>;
+
+/**
+ * The READ half of {@link performEdgeUpdate}: every refusal the update can
+ * reach before its statement — the row's presence and identity, the merged
+ * props, the validity window, re-entry cardinality and acyclicity, and the
+ * composition-existence rule. Callable on its own by a frame that must reach
+ * an update's verdict before OTHER statements of its own
+ * ({@link assertCompositionEdgeWindowEndable}).
+ */
+async function prepareEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
-  session: EdgeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{
-    clearDeleted?: boolean;
-    matchOn?: readonly string[];
-    matchProps?: Record<string, unknown>;
-    /** See {@link assertCompositionExistencePreserved}'s `reattachedPart`. */
-    reattachedPart?: CompositionNodeRef;
-  }>,
+  options?: EdgeUpdateOptions,
   resolvedExisting?: BackendEdgeRow,
   lock?: GraphWriteLock,
-): Promise<Edge> {
+): Promise<EdgeUpdatePrepared> {
   const id = input.id;
 
   assertValidityEndMutation(input, {
@@ -2506,10 +2523,30 @@ async function performEdgeUpdate<G extends GraphDef>(
     );
   }
 
+  return { work, fences };
+}
+
+async function performEdgeUpdate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: UpsertUpdateEdgeInput,
+  session: EdgeWriteSession,
+  target: WriteTarget,
+  options?: EdgeUpdateOptions,
+  resolvedExisting?: BackendEdgeRow,
+  lock?: GraphWriteLock,
+): Promise<Edge> {
+  const { work, fences } = await prepareEdgeUpdate(
+    ctx,
+    input,
+    target,
+    options,
+    resolvedExisting,
+    lock,
+  );
   const row = await withUnmatchedEdgeUpdateRefusal(
     ctx.graphId,
     target,
-    id,
+    input.id,
     input.identity,
     // "Did this write assert any window state?" is one predicate with one
     // owner, consulted here and by the fence appliers that carry it, rather
@@ -2550,12 +2587,7 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
   input: UpsertUpdateEdgeInput,
   session: EdgeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{
-    clearDeleted?: boolean;
-    matchOn?: readonly string[];
-    matchProps?: Record<string, unknown>;
-    reattachedPart?: CompositionNodeRef;
-  }>,
+  options?: EdgeUpdateOptions,
   resolvedExisting?: BackendEdgeRow,
   lock?: GraphWriteLock,
 ): Promise<Edge> {
@@ -2610,8 +2642,42 @@ export async function endCompositionEdgeWindow<G extends GraphDef>(
 ): Promise<void> {
   await performEdgeUpdateConverging(
     ctx,
-    { id: edge.id, identity: { kind: edge.kind }, props: {}, validTo },
+    compositionEdgeWindowEndInput(edge, validTo),
     session,
+    target,
+    { reattachedPart },
+    edge,
+    lock,
+  );
+}
+
+/** The update {@link endCompositionEdgeWindow} issues, spelled once. */
+function compositionEdgeWindowEndInput(
+  edge: BackendEdgeRow,
+  validTo: string,
+): UpsertUpdateEdgeInput {
+  return { id: edge.id, identity: { kind: edge.kind }, props: {}, validTo };
+}
+
+/**
+ * The READ half of {@link endCompositionEdgeWindow}: every refusal that
+ * window end can reach (the stored props against the edge schema, a move
+ * instant that precedes the window it ends, the required-existence rule),
+ * with no statement issued. A frame retiring SEVERAL incumbents calls this
+ * for each before its first write, so a refusal on a later one leaves the
+ * earlier ones where they were.
+ */
+export async function assertCompositionEdgeWindowEndable<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  edge: BackendEdgeRow,
+  reattachedPart: CompositionNodeRef,
+  validTo: string,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+): Promise<void> {
+  await prepareEdgeUpdate(
+    ctx,
+    compositionEdgeWindowEndInput(edge, validTo),
     target,
     { reattachedPart },
     edge,

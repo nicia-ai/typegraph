@@ -17,6 +17,7 @@
  *   CaFolder  --(caParentFolder,   partOf, part->whole, reflexive)-- CaFolder
  *   CaRelic   --(caRelicOf,        partOf, part->whole, oneActive)-- CaVault
  *   CaReel    --(caReelOf,         partOf, part->whole, oneActive)-- CaShow
+ *   CaCell    --(caCellUnder,      partOf, part->whole, oneActive, acyclic)-- CaCell
  *
  * CaVault's OWN schema declares properties named `via`, `props`, `validFrom`
  * and `validTo` — the attachment's option names — so a whole passed as a
@@ -32,6 +33,7 @@ import {
   asNodeId,
   CompositionExistenceError,
   ConfigurationError,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -43,6 +45,7 @@ import {
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
+import { withBindBudget } from "./bind-budget";
 import { type IntegrationTestContext } from "./test-context";
 
 const CaBook = defineNode("CaBook", { schema: z.object({}) });
@@ -63,6 +66,10 @@ const CaAlbum = defineNode("CaAlbum", { schema: z.object({}) });
 const CaTrack = defineNode("CaTrack", { schema: z.object({}) });
 /** A reflexive composition pair — the acyclicity coverage below. */
 const CaFolder = defineNode("CaFolder", { schema: z.object({}) });
+/** A reflexive part whose moves leave ended history rows (`oneActive`). */
+const CaUnit = defineNode("CaUnit", { schema: z.object({}) });
+/** A reflexive `oneActive` part whose realizing edge is also `acyclic: true`. */
+const CaCell = defineNode("CaCell", { schema: z.object({}) });
 /** Declares no composition pair at all — `reparent`'s not-a-part refusal. */
 const CaReader = defineNode("CaReader", { schema: z.object({}) });
 
@@ -105,6 +112,8 @@ const caPageOf = defineEdge("caPageOf", { schema: z.object({}) });
 const caClipOf = defineEdge("caClipOf", { schema: z.object({}) });
 const caHasTrack = defineEdge("caHasTrack", { schema: z.object({}) });
 const caParentFolder = defineEdge("caParentFolder", { schema: z.object({}) });
+const caUnitUnder = defineEdge("caUnitUnder", { schema: z.object({}) });
+const caCellUnder = defineEdge("caCellUnder", { schema: z.object({}) });
 const caRelicOf = defineEdge("caRelicOf", {
   schema: z.object({ order: z.number().optional() }),
 });
@@ -124,6 +133,8 @@ function buildGraph(id: string) {
       CaAlbum: { type: CaAlbum },
       CaTrack: { type: CaTrack },
       CaFolder: { type: CaFolder, onDelete: "cascade" },
+      CaUnit: { type: CaUnit },
+      CaCell: { type: CaCell },
       CaReader: { type: CaReader },
       CaVault: { type: CaVault },
       CaRelic: { type: CaRelic },
@@ -172,6 +183,19 @@ function buildGraph(id: string) {
         to: [CaFolder],
         cardinality: "one",
       },
+      caUnitUnder: {
+        type: caUnitUnder,
+        from: [CaUnit],
+        to: [CaUnit],
+        cardinality: "oneActive",
+      },
+      caCellUnder: {
+        type: caCellUnder,
+        from: [CaCell],
+        to: [CaCell],
+        cardinality: "oneActive",
+        acyclic: true,
+      },
       caRelicOf: {
         type: caRelicOf,
         from: [CaRelic],
@@ -196,6 +220,8 @@ function buildGraph(id: string) {
         via: caParentFolder,
         partSide: "from",
       }),
+      partOf(CaUnit, CaUnit, { via: caUnitUnder, partSide: "from" }),
+      partOf(CaCell, CaCell, { via: caCellUnder, partSide: "from" }),
       partOf(CaRelic, CaVault, { via: caRelicOf }),
       partOf(CaReel, CaShow, { via: caReelOf }),
     ],
@@ -344,8 +370,8 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { whole: { kind: "CaChapter", id: chapter.id } } },
       );
 
-      // MUTATION CHECK: skip the retire (drop the `if (disposition ===
-      // "replace")` block in `applyCompositionAttachmentDecision`,
+      // MUTATION CHECK: skip the retire (drop the retire loop in
+      // `writeCompositionAttachmentMoves`,
       // src/store/operations/node-operations.ts)
       // — the attach then loses the composition claim and this rejects with
       // COMPOSITION_WHOLE_OCCUPIED instead of moving the chapter.
@@ -402,6 +428,55 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(open).toHaveLength(1);
       expect(requireDefined(open[0]).meta.validTo).toBeUndefined();
     });
+
+    it.each(["bulkUpsertById", "getOrCreateByEndpoints"] as const)(
+      "resurrecting an ended `oneActive` history row through %s attaches nothing and is not refused",
+      async (entry) => {
+        const store = await context.createStore(buildGraph(nextGraphId()));
+        const showA = await store.nodes.CaShow.create({});
+        const showB = await store.nodes.CaShow.create({});
+        const reel = await store.nodes.CaReel.create(
+          { slug: "reel-1" },
+          { partOf: { whole: { kind: "CaShow", id: showA.id } } },
+        );
+        await store.nodes.CaReel.reparent(reel.id, {
+          whole: { kind: "CaShow", id: showB.id },
+        });
+        const afterMove = await store.edges.caReelOf.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        const history = requireDefined(
+          afterMove.find((edge) => edge.toId === showA.id),
+        );
+        expect(history.meta.validTo).toBeDefined();
+        await store.edges.caReelOf.delete(history.id);
+
+        // MUTATION CHECK: returning the composition claim unconditionally for a
+        // resurrection in `compositionReentryClaim` refuses this with
+        // CompositionError COMPOSITION_WHOLE_OCCUPIED, although the row would
+        // stay ended — verified and reverted.
+        if (entry === "bulkUpsertById") {
+          await store.edges.caReelOf.bulkUpsertById([
+            { id: history.id, from: reel, to: showA, props: {} },
+          ]);
+        } else {
+          await store.edges.caReelOf.getOrCreateByEndpoints(reel, showA, {});
+        }
+
+        const afterRestore = await store.edges.caReelOf.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        const restored = requireDefined(
+          afterRestore.find((edge) => edge.id === history.id),
+        );
+        expect(restored.meta.validTo).toBe(history.meta.validTo);
+        const live = await store.edges.caReelOf.find({});
+        expect(live.map((edge) => edge.toId)).toEqual([showB.id]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      },
+    );
 
     it("reparent is ONE move instant: the ended window and the new one abut", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
@@ -540,9 +615,9 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { whole: { kind: "CaFolder", id: child.id } } },
       );
 
-      // MUTATION CHECK: pass `validateAcyclicity: false` in
-      // `attachCompositionCreateEdge` (src/store/operations/node-operations.ts)
-      // — the move then succeeds and leaves a three-node composition ring
+      // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call in
+      // `prepareCompositionAttachmentMoves`
+      // (src/store/operations/node-operations.ts) — the move then succeeds and leaves a three-node composition ring
       // that no ordinary delete can unwind (`CompositionCycleError`).
       await expect(
         store.nodes.CaFolder.reparent(root.id, {
@@ -560,6 +635,223 @@ export function registerCompositionAttachmentIntegrationTests(
       ).toEqual(
         new Set([`${child.id}->${root.id}`, `${grandchild.id}->${child.id}`]),
       );
+    });
+
+    it("a `oneActive` move's ended history row does not constrain later moves", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaUnit.create({});
+      const former = await store.nodes.CaUnit.create(
+        {},
+        { partOf: { whole: { kind: "CaUnit", id: root.id } } },
+      );
+      const report = await store.nodes.CaUnit.create(
+        {},
+        { partOf: { whole: { kind: "CaUnit", id: former.id } } },
+      );
+      // `report` leaves `former`: the edge between them is ended, not deleted.
+      await store.nodes.CaUnit.reparent(report.id, {
+        whole: { kind: "CaUnit", id: root.id },
+      });
+
+      // MUTATION CHECK: counting every non-deleted row of a `oneActive`
+      // realizing edge in `compositionAcyclicRelation` (dropping
+      // `openEndedOnly`) refuses this swap with EdgeAcyclicityError "already
+      // reaches", through the ended row — verified and reverted.
+      await store.nodes.CaUnit.reparent(former.id, {
+        whole: { kind: "CaUnit", id: report.id },
+      });
+
+      const live = await store.edges.caUnitUnder.find({});
+      expect(
+        new Set(live.map((edge) => `${edge.fromId}->${edge.toId}`)),
+      ).toEqual(
+        new Set([`${report.id}->${root.id}`, `${former.id}->${report.id}`]),
+      );
+      expect(await store.verifyConstraintFences()).toEqual([]);
+
+      // A cycle among the LIVE rows is still refused.
+      await expect(
+        store.nodes.CaUnit.reparent(report.id, {
+          whole: { kind: "CaUnit", id: former.id },
+        }),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+    });
+
+    it("an `acyclic: true` declaration on a `oneActive` realizing edge keeps counting its ended rows", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaCell.create({});
+      const former = await store.nodes.CaCell.create(
+        {},
+        { partOf: { whole: { kind: "CaCell", id: root.id } } },
+      );
+      const report = await store.nodes.CaCell.create(
+        {},
+        { partOf: { whole: { kind: "CaCell", id: former.id } } },
+      );
+      await store.nodes.CaCell.reparent(report.id, {
+        whole: { kind: "CaCell", id: root.id },
+      });
+
+      // MUTATION CHECK: dropping the `standaloneAcyclicEdgeKinds` exemption in
+      // `compositionAcyclicRelation` accepts this move, and the audit then
+      // reports the cycle the kind's own `acyclic: true` forbids — verified
+      // and reverted.
+      await expect(
+        store.nodes.CaCell.reparent(former.id, {
+          whole: { kind: "CaCell", id: report.id },
+        }),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    // `population: "oneActive"` retires by ending the incumbent's window,
+    // `population: "one"` by deleting it; both reflexive, so one batch can
+    // carry a cycle.
+    const reflexivePairs = [
+      { population: "oneActive", kind: "CaUnit", via: "caUnitUnder" },
+      { population: "one", kind: "CaFolder", via: "caParentFolder" },
+    ] as const;
+
+    describe.each(reflexivePairs)(
+      "bulkReparent on a `population: $population` pair",
+      ({ population, kind, via }) => {
+        async function seed() {
+          const store = await context.createStore(buildGraph(nextGraphId()));
+          const nodes = requireDefined(store.getNodeCollection(kind));
+          const edges = requireDefined(store.getEdgeCollection(via));
+          const rootA = await nodes.create({});
+          const rootB = await nodes.create({});
+          const first = await nodes.create(
+            {},
+            { partOf: { whole: { kind, id: rootA.id } } },
+          );
+          const second = await nodes.create(
+            {},
+            { partOf: { whole: { kind, id: rootA.id } } },
+          );
+          const liveLinks = async (): Promise<ReadonlySet<string>> => {
+            const live = await edges.find({});
+            return new Set(live.map((edge) => `${edge.fromId}->${edge.toId}`));
+          };
+          return { store, edges, rootA, rootB, first, second, liveLinks };
+        }
+
+        it("leaves no earlier move behind when a later item is refused and the caller catches it in a transaction", async () => {
+          const { store, edges, rootA, rootB, first, second, liveLinks } =
+            await seed();
+          const before = await liveLinks();
+          const refusedBatches = [
+            // A destination that does not exist.
+            [
+              { id: first.id, options: { whole: { kind, id: rootB.id } } },
+              { id: second.id, options: { whole: { kind, id: "missing" } } },
+            ],
+            // A cycle the batch's own moves close between them.
+            [
+              { id: first.id, options: { whole: { kind, id: rootB.id } } },
+              { id: rootB.id, options: { whole: { kind, id: first.id } } },
+            ],
+            // A move instant that precedes the window it would end. Only a
+            // `oneActive` retire ends a window; a `one` retire deletes.
+            ...(population === "oneActive" ?
+              [
+                [
+                  { id: first.id, options: { whole: { kind, id: rootB.id } } },
+                  {
+                    id: second.id,
+                    options: {
+                      whole: { kind, id: rootB.id },
+                      at: "1999-01-01T00:00:00.000Z",
+                    },
+                  },
+                ],
+              ]
+            : []),
+          ];
+
+          // MUTATION CHECK: deciding and writing one item at a time in
+          // `executeNodeReparentBatch` leaves `first` under `rootB` after
+          // each of these — verified and reverted.
+          for (const items of refusedBatches) {
+            await store.transaction(async (tx) => {
+              const parts = requireDefined(tx.getNodeCollection(kind));
+              await expect(parts.bulkReparent(items)).rejects.toThrow();
+            });
+            expect(await liveLinks()).toEqual(before);
+          }
+          expect(before).toEqual(
+            new Set([`${first.id}->${rootA.id}`, `${second.id}->${rootA.id}`]),
+          );
+          expect(
+            await edges.find({}, { temporalMode: "includeEnded" }),
+          ).toHaveLength(2);
+          expect(await store.verifyConstraintFences()).toEqual([]);
+        });
+
+        it("judges acyclicity on the state the whole batch produces, in either item order", async () => {
+          const { store, rootA, first, liveLinks } = await seed();
+          const nodes = requireDefined(store.getNodeCollection(kind));
+          const leaf = await nodes.create(
+            {},
+            { partOf: { whole: { kind, id: first.id } } },
+          );
+
+          // `first` moves under its own child while that child moves out from
+          // under it: a cycle only if the first item is judged alone.
+          const results = await nodes.bulkReparent([
+            { id: first.id, options: { whole: { kind, id: leaf.id } } },
+            { id: leaf.id, options: { whole: { kind, id: rootA.id } } },
+          ]);
+
+          expect(results.map((result) => result.moved)).toEqual([true, true]);
+          const links = await liveLinks();
+          expect(links.has(`${first.id}->${leaf.id}`)).toBe(true);
+          expect(links.has(`${leaf.id}->${rootA.id}`)).toBe(true);
+          expect(links.has(`${leaf.id}->${first.id}`)).toBe(false);
+          expect(await store.verifyConstraintFences()).toEqual([]);
+        });
+
+        it("refuses a batch that names one part twice, moving nothing", async () => {
+          const { store, rootA, rootB, first, liveLinks } = await seed();
+          const nodes = requireDefined(store.getNodeCollection(kind));
+          const before = await liveLinks();
+
+          await expect(
+            nodes.bulkReparent([
+              { id: first.id, options: { whole: { kind, id: rootB.id } } },
+              { id: first.id, options: { whole: { kind, id: rootA.id } } },
+            ]),
+          ).rejects.toBeInstanceOf(ValidationError);
+
+          expect(await liveLinks()).toEqual(before);
+        });
+      },
+    );
+
+    it("bulkCreate attaches more parts than one acyclicity statement can carry", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      const bindBudget = 100;
+      const partCount = 30;
+      const budgeted = createStore(
+        graph,
+        withBindBudget(store.backend, bindBudget),
+      );
+      const show = await store.nodes.CaShow.create({});
+
+      // MUTATION CHECK: sending every prepared composition edge in one probe
+      // statement (`readUnwrittenEdgeReaches` never slicing) binds more than
+      // the budget for these 30 parts, and the budgeted backend refuses the
+      // statement — verified and reverted.
+      await budgeted.nodes.CaClip.bulkCreate(
+        Array.from({ length: partCount }, () => ({
+          props: {},
+          partOf: { whole: { kind: "CaShow", id: show.id } },
+        })),
+      );
+
+      expect(await store.edges.caClipOf.find({})).toHaveLength(partCount);
+      expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
     it("reparent inside a transaction counts as ONE node write intent", async () => {

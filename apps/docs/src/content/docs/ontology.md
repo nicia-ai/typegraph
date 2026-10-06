@@ -496,7 +496,12 @@ await store.nodes.Chapter.reparent(chapter.id, {
 `via` and `props` as `create`'s `partOf`: a realizing edge whose schema has
 required fields needs them restated on every move. It returns
 `{ edge, moved }`. `bulkReparent` runs the same move for many parts in one
-transaction.
+transaction. Every item's verdict is reached before the first write, so a
+refused batch moves nothing, including when you catch the refusal on `tx`
+inside `store.transaction(...)`. The batch is judged on the state it produces
+as a whole: two moves that close a cycle between them are refused, and a part
+may move under one that the same batch moves out from under it, whichever
+order the items are listed in. Listing one part twice is a `ValidationError`.
 
 `at` is the move instant, and its only spelling: the same timestamp ends the
 old window and opens the new one. Omit it to read the clock once. `reparent`
@@ -660,7 +665,13 @@ Tier 1 is enforced, in full, at write time:
   ONE oriented (part → whole) relation, probed on each composition edge
   write, so a cycle spanning two different realizing edge kinds is caught
   even though neither kind is `acyclic` alone
-  ([`EdgeAcyclicityError`](/errors#edgeacyclicityerror)).
+  ([`EdgeAcyclicityError`](/errors#edgeacyclicityerror)). The union holds the
+  rows composition itself counts as memberships: an ended row of a
+  `oneActive` realizing edge is the history a `reparent` leaves behind, not a
+  membership, so earlier moves never stop a part from later moving under one
+  of its former descendants. A realizing edge kind that is also declared
+  `acyclic: true` keeps that declaration's rule: every non-deleted row of the
+  kind counts, ended or not.
 - **Leaf-first cascade.** Deleting a whole deletes its live parts closure
   leaf-first, in the same transaction, each part through its own node-delete
   pipeline. See

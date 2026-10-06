@@ -30,7 +30,7 @@ import {
   DEFAULT_SQL_SCHEMA,
 } from "../src/query/compiler/schema";
 import { getDialect, sqliteDialect } from "../src/query/dialect";
-import { renderSqlite } from "../src/query/sql-fragment";
+import { countSqlParameters, renderSqlite } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import * as acyclicityModule from "../src/store/acyclicity";
 import {
@@ -47,6 +47,7 @@ import {
   type AcyclicityProbeSeed,
   buildEdgeAcyclicityProbe,
 } from "../src/store/recursive-cte";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, matchingObject } from "./test-utils";
 
 const Task = defineNode("Task", { schema: z.object({ name: z.string() }) });
@@ -83,6 +84,23 @@ const graph = defineGraph({
   },
 });
 const registry = buildKindRegistry(graph);
+
+/** `ownedBy` takes the per-graph fence (a cardinality claim) without being acyclic. */
+const ownedBy = defineEdge("ownedBy", { schema: z.object({}) });
+const fencedSiblingGraph = defineGraph({
+  id: "unit_acyclicity_fenced_sibling",
+  nodes: { Task: { type: Task } },
+  edges: {
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+    ownedBy: { type: ownedBy, from: [Task], to: [Task], cardinality: "one" },
+  },
+});
 
 describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
   it("collects every acyclic edge kind as its own singleton, forward relation", () => {
@@ -211,9 +229,8 @@ describe("buildEdgeAcyclicityProbe: compiled-SQL pin", () => {
     // what makes an unbounded recursion terminate with no depth bound. This
     // pin's seed is `"proposed"`, so `ancestry` joins `typegraph_edges`
     // directly (see `buildAcyclicityAncestryStepDirect`) — there is no
-    // compound `candidates` CTE here at all, so `UNION ALL` never appears
-    // anywhere in this rendered SQL (that shape is exclusive to the
-    // `"planned"` seed form's `buildPlannedAcyclicityCandidates`).
+    // compound `candidates` CTE in any seed form, so `UNION ALL` never
+    // appears anywhere in this rendered SQL.
     expect(rendered).not.toContain("candidates(");
     const ancestryTerm = rendered.slice(
       rendered.indexOf("ancestry(origin_key"),
@@ -430,6 +447,26 @@ describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a prop
   });
 });
 
+async function withRepeatableReadStore(
+  run: (
+    store: ReturnType<typeof createStore<typeof fencedSiblingGraph>>,
+    setIsolation: (level: string) => Promise<void>,
+  ) => Promise<void>,
+): Promise<void> {
+  const client = await PGlite.create();
+  try {
+    await client.exec(generateVectorlessPostgresMigrationSQL());
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    await run(createStore(fencedSiblingGraph, backend), async (level) => {
+      await client.exec(`SET default_transaction_isolation = '${level}'`);
+    });
+  } finally {
+    await client.close();
+  }
+}
+
 describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal branch", () => {
   it("refuses an acyclic edge create under a repeatable-read server default (PGlite, real PostgreSQL dialect)", async () => {
     const client = await PGlite.create();
@@ -456,6 +493,57 @@ describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal
     } finally {
       await client.close();
     }
+  });
+
+  // The guard reads the isolation off the lock token, and a frame that does
+  // not acquire the per-graph lock itself — a nested managed write, or a
+  // sibling started while a peer's acquisition is in flight — must carry the
+  // acquiring frame's token rather than an evidence-free one.
+  //
+  // MUTATION CHECK (both cases): handing a non-acquiring frame
+  // `uncapturedGraphWriteLock()` again in `runInWriteTransactionAttempt` lets
+  // each write resolve — verified and reverted.
+  it("refuses a bulkGetOrCreateByEndpoints batch that only resurrects", async () => {
+    await withRepeatableReadStore(async (store, setIsolation) => {
+      const a = await store.nodes.Task.create({ name: "a" });
+      const b = await store.nodes.Task.create({ name: "b" });
+      const retired = await store.edges.dependsOn.create(b, a);
+      await store.edges.dependsOn.delete(retired.id);
+      await setIsolation("repeatable read");
+
+      await expect(
+        store.edges.dependsOn.bulkGetOrCreateByEndpoints([
+          { from: b, to: a, props: {} },
+        ]),
+      ).rejects.toMatchObject({
+        details: {
+          code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+    });
+  });
+
+  it("refuses an acyclic create racing a sibling write that takes the fence first", async () => {
+    await withRepeatableReadStore(async (store, setIsolation) => {
+      const a = await store.nodes.Task.create({ name: "a" });
+      const b = await store.nodes.Task.create({ name: "b" });
+      await setIsolation("repeatable read");
+
+      await expect(
+        store.transaction((tx) =>
+          Promise.all([
+            tx.edges.ownedBy.create(a, b),
+            tx.edges.dependsOn.create(a, b),
+          ]),
+        ),
+      ).rejects.toMatchObject({
+        details: {
+          code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+    });
   });
 });
 
@@ -603,34 +691,26 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
 });
 
 // ============================================================
-// Plan-time cycle detection, audited for the `"proposed"`/`"planned"`
-// seed split: a cycle formed ENTIRELY from rows
-// with nothing live yet is only found by hopping through a `seed` source
-// that is NOT yet in the table — the `"planned"` form. `assertEdgeRelationsAcyclic`
-// (the write-path predicate) now passes `"proposed"`, which asserts its
-// rows are ALREADY inserted whenever it proposes more than one (see
+// Plan-time cycle detection. A cycle formed ENTIRELY from rows with nothing
+// live yet has no stored edge to walk. `assertEdgeRelationsAcyclic` (the
+// write-path predicate) passes `"proposed"`, which asserts its rows are
+// ALREADY inserted whenever it proposes more than one (see
 // `AcyclicityProbeSeed`'s docblock, `src/store/recursive-cte.ts`), so the two
 // tests below insert the edges directly through the backend first.
 // `readProposedEdgeAcyclicityViolations` probes genuinely unwritten rows for
-// the graph-merge plan-time preview (`src/graph-merge/merge.ts`) via the
-// `"planned"` form, unaffected by this split; a batch create probes its own
-// unwritten rows through `assertUnwrittenEdgeRelationsAcyclic`, covered by
-// the describe block after this one.
+// the graph-merge plan-time preview (`src/graph-merge/merge.ts`): it reads
+// the reaches among them with the `"unwritten"` form and finds the cycle in
+// memory, exactly as a batch create does through
+// `assertUnwrittenEdgeRelationsAcyclic`, covered by the describe block after
+// this one.
 //
-// Mutation check: reverting
-// `buildAcyclicityAncestryStepDirect` back to joining the old compound
-// `candidates` CTE for the `"proposed"` form makes no test here fail (the
-// direct-join and compound shapes agree on already-live rows), which is
-// exactly the point — the mutation that would be caught is the PERFORMANCE
-// one (`MATERIALIZE candidates` reappearing), pinned by the plan-shape tests
-// in `tests/backends/{sqlite,postgres}/edge-acyclicity-query-plan.test.ts`,
-// not by an outcome assertion here. The outcome-level mutation this describe
-// block DOES catch: reverting `readProposedEdgeAcyclicityViolations` (in
-// `src/store/acyclicity.ts`) to pass `kind: "proposed"` instead of
-// `kind: "planned"` makes the "readProposedEdgeAcyclicityViolations reports
-// the same cycle" test below fail — a genuinely unwritten three-edge cycle
-// then resolves with `[]` instead of reporting the violation, because the
-// `"proposed"` form no longer hops through unwritten rows.
+// Mutation check: making `readProposedEdgeAcyclicityViolations` (in
+// `src/store/acyclicity.ts`) read `"proposed"` violations instead of
+// composing the unwritten reaches makes the
+// "readProposedEdgeAcyclicityViolations reports the same cycle" test below
+// fail — a genuinely unwritten three-edge cycle then resolves with `[]`,
+// because no single unwritten row's `to` reaches its own `from` over stored
+// edges.
 // ============================================================
 
 async function seedThreeNodes(
@@ -900,5 +980,140 @@ describe("assertUnwrittenEdgeRelationsAcyclic: a batch probed before its insert"
         [ab, bc, ac],
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ============================================================
+// A batch larger than one statement's bind budget. Every other batch
+// statement is sliced against `capabilities.maxBindParameters`; the probe
+// must be too, and still see a cycle whose rows land in different slices.
+// ============================================================
+
+function ringEdges(nodeIds: readonly string[]): ProposedRelationEdge[] {
+  return nodeIds.map((fromId, index) => ({
+    edgeId: `ring-${String(index)}`,
+    edgeKind: "dependsOn",
+    fromKind: "Task",
+    fromId,
+    toKind: "Task",
+    toId: requireDefined(nodeIds[(index + 1) % nodeIds.length]),
+  }));
+}
+
+describe("the batch acyclicity probe fits the engine's bind budget", () => {
+  const BIND_BUDGET = 100;
+  const RING_SIZE = 25;
+
+  async function budgetedBackend(): Promise<
+    Readonly<{
+      backend: GraphBackend;
+      nodeIds: readonly string[];
+      statementBinds: number[];
+    }>
+  > {
+    const raw = createTestBackend();
+    const store = createStore(graph, raw);
+    const tasks = await store.nodes.Task.bulkCreate(
+      Array.from({ length: RING_SIZE }, (_unused, index) => ({
+        props: { name: `t${String(index)}` },
+      })),
+    );
+    const statementBinds: number[] = [];
+    const backend = deriveBackend(raw, {
+      capabilities: { ...raw.capabilities, maxBindParameters: BIND_BUDGET },
+      execute: (statement) => {
+        statementBinds.push(countSqlParameters(statement));
+        return raw.execute(statement);
+      },
+    });
+    return { backend, nodeIds: tasks.map((task) => task.id), statementBinds };
+  }
+
+  // MUTATION CHECK (both cases): sending every row in one statement again
+  // (`readUnwrittenEdgeReaches` never slicing) binds 202 parameters for these
+  // 25 rows and fails the budget assertion — verified and reverted.
+  it("accepts a 25-row chain without exceeding a 100-parameter budget", async () => {
+    const { backend, nodeIds, statementBinds } = await budgetedBackend();
+    const chain = ringEdges(nodeIds).slice(0, -1);
+
+    await expect(
+      acyclicityModule.assertUnwrittenEdgeRelationsAcyclic(
+        probeContext(backend),
+        chain,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(statementBinds.length).toBeGreaterThan(1);
+    expect(Math.max(...statementBinds)).toBeLessThanOrEqual(BIND_BUDGET);
+  });
+
+  it("still refuses a cycle whose rows fall in different statements", async () => {
+    const { backend, nodeIds, statementBinds } = await budgetedBackend();
+
+    await expect(
+      acyclicityModule.assertUnwrittenEdgeRelationsAcyclic(
+        probeContext(backend),
+        ringEdges(nodeIds),
+      ),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        name: "EdgeAcyclicityError",
+        details: matchingObject({ edgeId: "ring-0" }),
+      }),
+    );
+    expect(Math.max(...statementBinds)).toBeLessThanOrEqual(BIND_BUDGET);
+  });
+
+  // MUTATION CHECK: sending every `"proposed"` row in one statement again
+  // (`readProposedViolatingOriginKeys` never slicing) binds 125 parameters for
+  // these 25 rows and fails the budget assertion — verified and reverted.
+  it("probes already-inserted rows in statements that fit, and still names the cycle", async () => {
+    const raw = createTestBackend();
+    const store = createStore(graph, raw);
+    const tasks = await store.nodes.Task.bulkCreate(
+      Array.from({ length: RING_SIZE }, (_unused, index) => ({
+        props: { name: `t${String(index)}` },
+      })),
+    );
+    const ring = ringEdges(tasks.map((task) => task.id));
+    await insertEdgesDirectly(raw, ring);
+    const statementBinds: number[] = [];
+    const backend = deriveBackend(raw, {
+      capabilities: { ...raw.capabilities, maxBindParameters: BIND_BUDGET },
+      execute: (statement) => {
+        statementBinds.push(countSqlParameters(statement));
+        return raw.execute(statement);
+      },
+    });
+
+    await expect(
+      assertEdgeRelationsAcyclic(probeContext(backend), ring),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        name: "EdgeAcyclicityError",
+        details: matchingObject({ edgeId: "ring-0" }),
+      }),
+    );
+    expect(Math.max(...statementBinds)).toBeLessThanOrEqual(BIND_BUDGET);
+  });
+
+  it("stores a batch too large for one statement on the default budget", async () => {
+    const store = createStore(graph, createTestBackend());
+    const leafCount = 7000;
+    const hub = await store.nodes.Task.create({ name: "hub" });
+    const leaves = await store.nodes.Task.bulkCreate(
+      Array.from({ length: leafCount }, (_unused, index) => ({
+        props: { name: `leaf${String(index)}` },
+      })),
+    );
+
+    // MUTATION CHECK: unsliced, these rows bind more parameters than SQLite
+    // accepts and the call fails with "too many SQL variables" — verified
+    // and reverted.
+    await store.edges.dependsOn.bulkCreate(
+      leaves.map((leaf) => ({ from: leaf, to: hub })),
+    );
+
+    expect(await store.edges.dependsOn.count()).toBe(leafCount);
   });
 });

@@ -572,6 +572,44 @@ describe("provenance composition existence", () => {
   // `readLiveCompositionWholes` (treat every read row as live). The exhibit is
   // still held after its whole is tombstoned, and the audit reports nothing.
 
+  it("a whole's delete removes the composition edge of a part a retraction already closed", async () => {
+    const { store } = await createCompositionStore(
+      "provenance_composition_retracted_part_edge",
+    );
+    const source = await store.nodes.PcSource.create(
+      { label: "exhibits", retracted: false },
+      { id: "exhibit-source" },
+    );
+    const dossier = await store.nodes.PcDossier.create({}, { id: "dossier-1" });
+    const exhibit = await store.nodes.PcExhibit.create(
+      {},
+      {
+        id: "exhibit-1",
+        partOf: { whole: { kind: "PcDossier", id: dossier.id } },
+      },
+    );
+    const justification = await store.nodes.PcJustification.create(
+      { label: "exhibits" },
+      { id: "exhibit-justification" },
+    );
+    await store.edges.pcPremiseOf.create(source, justification);
+    await store.edges.pcDerives.create(justification, exhibit);
+    const provenance = createRetractionCapability(store, config);
+
+    // The retraction closes the exhibit and leaves its composition edge.
+    await provenance.retract(source);
+    expect(await store.nodes.PcExhibit.getById(exhibit.id)).toBeUndefined();
+    expect(await store.edges.pcExhibitOf.find({})).toHaveLength(1);
+
+    // MUTATION CHECK: returning from `applyCompositionCascade` when the plan
+    // has no live member skips the consumed-edge cleanup, and the edge
+    // between the two tombstones stays live — verified and reverted.
+    await store.nodes.PcDossier.delete(dossier.id);
+
+    expect(await store.nodes.PcDossier.getById(dossier.id)).toBeUndefined();
+    expect(await store.edges.pcExhibitOf.find({})).toHaveLength(0);
+  });
+
   it("names a part it closes whose whole was already tombstoned before the transition", async () => {
     const { store, backend } = await createCompositionStore(
       "provenance_composition_already_dead_whole",

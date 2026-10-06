@@ -536,6 +536,17 @@ per-graph write fence edge cardinality uses, so two concurrent writers of
 transactions refuses the write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`) rather
 than enforcing the rule only when nothing races.
 
+On PostgreSQL the check reads the relation after taking the fence, so the
+session must see what committed while it waited. A `REPEATABLE READ` session
+cannot, and its write is refused with `ConfigurationError`
+(`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`) in every frame of the transaction,
+batches and concurrent sibling writes included. A `SERIALIZABLE` session is
+accepted, but PostgreSQL only arbitrates it against other `SERIALIZABLE`
+transactions: a `SERIALIZABLE` writer and a `READ COMMITTED` writer of one
+acyclic relation can both commit and close a cycle between them. Write an
+acyclic relation at one isolation level; `READ COMMITTED`, the default, is the
+one the guarantee above describes.
+
 Use `store.verifyConstraintFences()` to find edges already on a cycle (the
 `edgeAcyclicity` family), and see [Errors](/errors) for
 `EdgeAcyclicityError` / `EdgeAcyclicityIndeterminateError` and
