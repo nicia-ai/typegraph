@@ -11,6 +11,8 @@ import {
   defineGraphExtension,
   defineNode,
   embedding,
+  hasPart,
+  partOf,
   searchable,
   StaleVersionError,
   TrustedImportError,
@@ -807,6 +809,77 @@ describe("trusted import", () => {
       );
     },
   );
+
+  it.each([
+    {
+      name: "partOf with cardinality one",
+      cardinality: "one" as const,
+      existence: "optional" as const,
+    },
+    {
+      name: "required partOf with cardinality oneActive",
+      cardinality: "oneActive" as const,
+      existence: "required" as const,
+    },
+  ])(
+    "rejects a composition pair ($name) as composition, not as the cardinality it must declare",
+    async ({ cardinality, existence }) => {
+      // A composition edge has to declare a part-side cardinality, so the
+      // cardinality refusal would always fire first and name advice — make
+      // the kind unconstrained — the ontology itself refuses.
+      const part = defineNode("CompositionPart", { schema: z.object({}) });
+      const whole = defineNode("CompositionWhole", { schema: z.object({}) });
+      const holds = defineEdge("compositionHolds", { schema: z.object({}) });
+      const graph = defineGraph({
+        id: "trusted_import_reject_composition",
+        nodes: {
+          CompositionPart: { type: part },
+          CompositionWhole: { type: whole },
+        },
+        edges: {
+          compositionHolds: {
+            type: holds,
+            from: [part],
+            to: [whole],
+            cardinality,
+          },
+        },
+        ontology: [partOf(part, whole, { via: holds, existence })],
+      });
+      const store = createStore(graph, createTestBackend());
+      const refusal = await trustedImportGraph(store, graphData([])).catch(
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(TrustedImportError);
+      const error = refusal as TrustedImportError;
+      console.info("trusted composition refusal", error.details);
+      expect(error.details["reason"]).toBe("composition_unsupported");
+      expect(error.details["edgeKinds"]).toEqual(["compositionHolds"]);
+    },
+  );
+
+  it("rejects a hasPart pair with a target cardinality as composition", async () => {
+    const part = defineNode("HasPartPart", { schema: z.object({}) });
+    const whole = defineNode("HasPartWhole", { schema: z.object({}) });
+    const contains = defineEdge("hasPartContains", { schema: z.object({}) });
+    const graph = defineGraph({
+      id: "trusted_import_reject_has_part",
+      nodes: { HasPartPart: { type: part }, HasPartWhole: { type: whole } },
+      edges: {
+        hasPartContains: {
+          type: contains,
+          from: [whole],
+          to: [part],
+          targetCardinality: "one",
+        },
+      },
+      ontology: [hasPart(whole, part, { via: contains })],
+    });
+    const store = createStore(graph, createTestBackend());
+    await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+      expectReason("composition_unsupported"),
+    );
+  });
 
   it.each([
     {
