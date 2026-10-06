@@ -414,7 +414,6 @@ import {
   forceRecordedGraphRevision,
   lockRecordedGraphWrite,
   mintsOriginNamespacedAnchor,
-  readNextRecordedRevision,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,

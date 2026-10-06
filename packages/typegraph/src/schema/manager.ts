@@ -1382,9 +1382,7 @@ export async function migrateSchema<G extends GraphDef>(
  * adoption runs both through
  * {@link ensureIdentityStorageOnAdoptedBaseSchema}.
  */
-export async function adoptBaseSchemaStorage(
-  backend: GraphBackend,
-): Promise<void> {
+async function adoptBaseSchemaStorage(backend: GraphBackend): Promise<void> {
   if (backend.adoptBaseSchema !== undefined) {
     await backend.adoptBaseSchema();
     return;

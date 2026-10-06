@@ -3575,6 +3575,12 @@ type IdentityReplayStep<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+type IdentityRestoreBaseline = Readonly<{
+    hasOwnHistory: boolean;
+    floorRevision: number;
+}>;
+
+// @public
 type IdentitySamePathStep<G extends GraphDef> = Readonly<{
     from: IdentityNodeReference<G>;
     to: IdentityNodeReference<G>;
@@ -4010,14 +4016,17 @@ class KindRegistry {
     compositionEdgeKinds(): readonly string[];
     compositionEdgeKindsOver(partKind: string): readonly string[];
     compositionEdgeKindsUnder(wholeKind: string): readonly string[];
+    compositionEdgePopulation(edgeKind: string): "one" | "oneActive" | undefined;
     compositionExistence(concretePartKind: string): CompositionExistence;
     compositionPairsBetween(partKind: string, wholeKind: string): readonly CompositionPair[];
     compositionPairVia(partKind: string, wholeKind: string, viaEdgeKind: string): CompositionPair | undefined;
     compositionPartKindsUnder(wholeKind: string): readonly string[];
+    compositionPartKindsUnderVia(wholeKind: string, viaEdgeKind: string): readonly string[];
     compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
     compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
     compositionRelation(): CompositionRelation;
     compositionWholeKindsOver(partKind: string): readonly string[];
+    compositionWholeKindsOverVia(partKind: string, viaEdgeKind: string): readonly string[];
     disjointKindPairs(): readonly (readonly [string, string])[];
     disjointPairLabel(a: string, b: string): string;
     // (undocumented)
@@ -5944,7 +5953,7 @@ type SchemaIntrospector = Readonly<{
     getSharedEdgeFieldTypeInfo: (edgeKindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
     hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
-    hasSearchableField: (kindNames: readonly string[]) => boolean;
+    kindsWithoutSearchableField: (kindNames: readonly string[]) => readonly string[];
 }>;
 
 // @public (undocumented)
@@ -6672,6 +6681,11 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
+    applyImportedNodeWindowEnd: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, input: Readonly<{
+        kind: string;
+        id: string;
+        validTo?: string;
+    }>) => Promise<void>;
     detachDeletedImportedIdentityNode: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, reference: Readonly<{
         kind: string;
         id: string;
@@ -6709,7 +6723,8 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         prunedBeforeRevision: number;
         prunedAt: string;
     }>>;
-    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedWatermark: number | undefined) => Promise<Readonly<{
+    readIdentityRestoreBaselineAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>) => Promise<IdentityRestoreBaseline>;
+    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedWatermark: number | undefined, baseline: IdentityRestoreBaseline) => Promise<Readonly<{
         created: number;
         watermark: number | undefined;
     }>>;
