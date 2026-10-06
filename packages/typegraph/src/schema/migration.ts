@@ -42,8 +42,11 @@ export type ChangeType = "added" | "removed" | "modified" | "renamed";
  * still routes through `ensureSchema`'s auto-migrate branch, but the commit
  * transaction runs a data probe first (`prepareSchemaTighteningPreflight`)
  * and refuses with `MigrationError` `reason: "ontology-tightening-violated"`
- * when existing rows would violate the tightened ontology. `isBackwardsCompatible`
- * keeps meaning exactly "no `breaking` change" — it does not mean "safe to
+ * when existing rows would violate the tightened ontology. A unique-constraint
+ * change is `warning`-severity on the same terms: the same preflight refuses
+ * an added or reshaped constraint with `reason:
+ * "unique-constraint-requires-empty-kind"` while the kind holds rows.
+ * `isBackwardsCompatible` keeps meaning exactly "no `breaking` change" — it does not mean "safe to
  * auto-migrate unconditionally".
  */
 export type ChangeSeverity =
@@ -1568,7 +1571,9 @@ function generateSummary(
  * "Backwards compatible" does NOT mean "will commit unconditionally": a
  * `warning`-severity ontology change (see `ChangeSeverity`'s docblock)
  * passes this check and then owes a commit-time data probe that can still
- * refuse it with `MigrationError` `reason: "ontology-tightening-violated"`.
+ * refuse it with `MigrationError` `reason: "ontology-tightening-violated"`,
+ * and a `warning`-severity unique-constraint change one that can refuse it
+ * with `reason: "unique-constraint-requires-empty-kind"`.
  * See docs/schema-evolution.md's "Ontology tightenings are checked against
  * your data" section.
  */

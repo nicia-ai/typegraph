@@ -270,11 +270,35 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     ),
     schemaTightening,
   });
+  // A uniqueness claim gate is an emptiness requirement on its kind, so it is
+  // listed as one; a kind the extension classifier already requires empty is
+  // not listed twice.
+  const classifiedEmptyNodeKinds = new Set(
+    groupedRequirements.requireEmpty
+      .filter((requirement) => requirement.entity === "node")
+      .map((requirement) => requirement.kindName),
+  );
+  const uniquenessGatedKinds = [
+    ...new Set(
+      (schemaTightening?.uniquenessClaimGates ?? []).map((gate) => gate.kind),
+    ),
+  ].filter((kindName) => !classifiedEmptyNodeKinds.has(kindName));
+  const tightensOntologyOrCardinality =
+    schemaTightening !== undefined &&
+    (schemaTightening.probedChanges.length > 0 ||
+      schemaTightening.newlyConstrainedAxes.length > 0);
   const requirements: EvolutionRequirements = Object.freeze([
     ...groupedRequirements.requireEmpty,
+    ...uniquenessGatedKinds.map((kindName) =>
+      Object.freeze({
+        kind: "require-empty" as const,
+        entity: "node" as const,
+        kindName,
+      }),
+    ),
     ...groupedRequirements.addedKinds,
     ...groupedRequirements.vectorSlots,
-    ...(schemaTightening === undefined ?
+    ...(schemaTightening === undefined || !tightensOntologyOrCardinality ?
       []
     : [
         freezeDeep({

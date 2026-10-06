@@ -99,6 +99,7 @@ export type { IntegrationTestContext } from "./test-context";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
+export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";
 export { registerWeightedShortestPathExtractionIntegrationTests } from "./weighted-shortest-path-extraction";

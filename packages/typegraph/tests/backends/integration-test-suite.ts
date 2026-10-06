@@ -126,6 +126,7 @@ import {
   registerTransactionReceiptIntegrationTests,
   registerTraversalIntegrationTests,
   registerTrustedImportIntegrationTests,
+  registerUniquenessClaimGateIntegrationTests,
   registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
   registerWeightedShortestPathExtractionIntegrationTests,
@@ -366,6 +367,7 @@ export function createIntegrationTestSuite<
     registerConstraintFenceTransactionHealthTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);
     registerOntologyTighteningIntegrationTests(context);
+    registerUniquenessClaimGateIntegrationTests(context);
     registerEdgeCardinalityTighteningIntegrationTests(context);
     registerCompositionTighteningIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);

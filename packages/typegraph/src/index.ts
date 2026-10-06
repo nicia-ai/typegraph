@@ -716,6 +716,11 @@ export type {
   UniquenessComponentProbeGroup,
 } from "./schema";
 export { PROBE_VIOLATION_FAMILIES, probeCoversViolationFamily } from "./schema";
+// The constraints a schema commit refuses to strand, for a consumer
+// narrowing `MigrationErrorDetails` on
+// `reason: "unique-constraint-requires-empty-kind"`. Also available from the
+// "./schema" subpath.
+export type { UniquenessClaimGate } from "./schema";
 // The axes a schema commit's edge-cardinality tightening owes, for a
 // consumer narrowing `MigrationErrorDetails` on
 // `reason: "edge-cardinality-tightening-violated"` — same reasoning as the

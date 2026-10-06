@@ -99,6 +99,7 @@ export {
   type SchemaChangeClassification,
   type SchemaDiff,
 } from "./migration";
+export type { UniquenessClaimGate } from "./uniqueness-claim-gate";
 
 // ============================================================
 // Structural Subtyping

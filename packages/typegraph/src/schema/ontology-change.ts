@@ -429,8 +429,9 @@ function nodeDisjointnessDelta(
  * would report no group for that diff and commit the merge unprobed.
  *
  * A component that only LOST members yields no group: a split cannot make two
- * existing rows contend. It does move the claim axis of the kinds left
- * behind, which this probe does not address.
+ * existing rows contend. It can move the claim axis of the kinds left behind
+ * away from their existing claims, which `uniquenessClaimGates`
+ * (`./uniqueness-claim-gate`) refuses while such a kind holds rows.
  */
 function nodeUniquenessComponentGroups(
   before: OntologySnapshot,

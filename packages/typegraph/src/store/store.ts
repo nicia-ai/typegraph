@@ -7032,6 +7032,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {MigrationError} (`reason: "ontology-tightening-violated"`)
    *   when a surviving kind was assignable to an edge endpoint only through
    *   a removed kind and a live edge still relies on it.
+   * @throws {MigrationError} (`reason: "unique-constraint-requires-empty-kind"`)
+   *   when a removed kind is where a surviving, populated kind's
+   *   `kindWithSubClasses` uniqueness claims sit.
    * @throws {StaleVersionError} on a CAS race with another writer.
    * @throws {SchemaContentConflictError} on a same-version content
    *   conflict.

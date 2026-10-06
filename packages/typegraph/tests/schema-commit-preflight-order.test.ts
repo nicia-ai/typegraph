@@ -35,6 +35,7 @@ function recordingTightening(
     run: recordingStep(calls, name),
     probedChanges: [],
     newlyConstrainedAxes: [],
+    uniquenessClaimGates: [],
     capabilityError: { code: "TEST", message: "test" },
   };
 }
