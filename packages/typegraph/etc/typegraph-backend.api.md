@@ -1510,6 +1510,13 @@ type CompositionExistence = "optional" | "required";
 type CompositionPartSide = "from" | "to";
 
 // @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
 class ConfigurationError extends TypeGraphError {
     constructor(message: string, details?: Record<string, unknown>, options?: {
         cause?: unknown;
@@ -2383,10 +2390,7 @@ export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 export type ExtensionPropertyModifiers = Readonly<{
@@ -3973,10 +3977,7 @@ export type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 export type SerializedSchema = Readonly<{

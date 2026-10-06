@@ -38,7 +38,7 @@ import { compositionEdgeHasRequiredExistencePart } from "./composition-create";
 import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
 
 /**
- * Item E.2: whether every live node of `kind` owes a composition edge — a
+ * Whether every live node of `kind` owes a composition edge — a
  * required-existence part kind. A node write that has no shape for that
  * edge (a fused program, a node-only upsert batch) must refuse or fall back
  * for such a kind, even when no `partOf` is stated: `resolveCompositionCreate`
@@ -52,7 +52,7 @@ export function nodeKindOwesCompositionEdge(
 }
 
 /**
- * Item E.2: whether `item` owes a composition edge a fused node-create
+ * Whether `item` owes a composition edge a fused node-create
  * program has no shape for — a stated `partOf`, or a kind for which
  * {@link nodeKindOwesCompositionEdge} holds. The one predicate both
  * node-create fused-eligibility checks below share, so neither re-spells it.
@@ -131,7 +131,7 @@ export function resolveAtomicNodeBatchExecutor(
   input: AtomicNodeBatchEligibilityInput,
 ): BackendAtomicNodeBatchExecutor | undefined {
   if (input.inputs.length === 0 || input.identityEnabled) return;
-  // Item E.2: a fused node-batch program writes node rows only — it has no
+  // A fused node-batch program writes node rows only — it has no
   // shape for the composition edge a required-existence kind or a stated
   // `partOf` also owes. Declined by declaration, before any row is read: a
   // fused command is an optimization attempt, not evidence that its
@@ -205,7 +205,7 @@ export function resolveAtomicNodeReplacementBatchProgram(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
-  // Item E.2: a replacement that lands on no existing row CREATES the node,
+  // A replacement that lands on no existing row CREATES the node,
   // and this fused program has no `partOf` parameter and no composition-edge
   // shape — a required-existence kind must take the portable path so
   // `resolveCompositionCreate` gets to refuse the bare create rather than
@@ -344,7 +344,7 @@ export function resolveAtomicEdgeBatchExecutor(
         // This ALREADY excludes every composition edge kind, with no
         // separate check needed: `compositionAcyclicRelation`
         // (`src/store/acyclicity.ts`) folds every composition-realizing edge
-        // kind into D-10's union the moment the graph declares ANY
+        // kind into the acyclicity relation's union (`src/store/acyclicity.ts`) the moment the graph declares ANY
         // `partOf`/`hasPart` pair, so `edgeKindIsInAcyclicRelation` answers
         // `true` for such a kind regardless of whether ITS OWN write would
         // close a cycle. That is load-bearing here for an unrelated reason:
@@ -394,7 +394,7 @@ export function resolveAtomicEdgeDeleteBatchExecutor(
 ): AtomicEdgeDeleteBatchExecutor | undefined {
   if (input.ids.length === 0) return;
   if (!hasOwnKey(input.graph.edges, input.expectedKind)) return;
-  // Item E.2: `assertCompositionExistencePreserved` reads the part row under
+  // `assertCompositionExistencePreserved` reads the part row under
   // the held write lock — a decision this read-free fused command cannot
   // express. A composition edge kind realizing a required-existence part
   // must take the portable path for its delete, exactly as its create-side
@@ -435,7 +435,7 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   // A kind that is itself a composition PART (`registry.isCompositionPart`)
   // is equally ineligible, for a second, independent reason: composition edges
   // never count against `restrict`, on either end
-  // (composition-contract-design.md's binding ruling), and only the portable
+  // (a composition edge is never a restrict obstacle), and only the portable
   // path's `enforceNodeDeleteBehavior` (`node-write-pipeline.ts`) knows how
   // to exclude them from its restrict count — the fused command's read-free
   // refusal diagnosis has no such filter and would misreport a composition
@@ -603,7 +603,7 @@ export function resolveAtomicNodeResolvedMutationSetExecutor(
   ) {
     return;
   }
-  // Item E.2: same reasoning as the other two node-create fused resolvers —
+  // Same reasoning as the other two node-create fused resolvers —
   // no shape here for the composition edge a `partOf` or a required-existence
   // kind also owes.
   if (

@@ -496,8 +496,7 @@ describe("Operational Identity", () => {
     // Person:"alice" and Author:"alice" already violate the newly-added
     // `disjointWith(Person, Author)` directly — a plain node-disjointness
     // fact, true whether or not identity is involved. The ontology-tightening
-    // preflight runs BEFORE the identity closure rebuild (item A's
-    // ordering), so it refuses here and the identity contradiction check
+    // preflight runs BEFORE the identity closure rebuild, so it refuses here and the identity contradiction check
     // underneath is never reached.
     await expect(
       createStoreWithSchema(contradictory, backend),
@@ -637,7 +636,7 @@ describe("Operational Identity", () => {
     const activeSchema = await backend.getActiveSchema(graph.id);
     expect(activeSchema?.version).toBe(1);
   });
-  // MUTATION CHECK (lane-A-load-bearing.md): swapping `ontologyPreflight`
+  // MUTATION CHECK: swapping `ontologyPreflight`
   // and `identityPreflight` in `migrateSchema`'s composed preflight array
   // (`src/schema/manager.ts`) makes this test fail — the identity closure
   // rebuild runs first, throws `IDENTITY_SCHEMA_CONTRADICTION` (or succeeds
@@ -652,7 +651,7 @@ describe("Operational Identity", () => {
     // `graph` already runs `sameIdAcrossKinds: "fold"`, so the two `alice`
     // rows above are already one identity class before this evolve. Adding
     // `disjointWith(Person, Author)` is simultaneously a live-data
-    // `nodeDisjointness` violation (item A's probe) and something the
+    // `nodeDisjointness` violation (the tightening probe) and something the
     // identity closure rebuild would also refuse — proving `Store.evolve`'s
     // OWN composed callback (`src/store/store.ts`), not just `ensureSchema`'s,
     // orders the ontology probe before the identity rebuild.
@@ -671,7 +670,7 @@ describe("Operational Identity", () => {
     const activeSchema = await backend.getActiveSchema(graph.id);
     expect(activeSchema?.version).toBe(1);
   });
-  // MUTATION CHECK (lane-A-load-bearing.md): swapping `ontologyPreflight`
+  // MUTATION CHECK: swapping `ontologyPreflight`
   // and `identityCandidate`'s step in `Store.evolve`'s composed preflight
   // array (`src/store/store.ts`) makes this test fail the same way.
 

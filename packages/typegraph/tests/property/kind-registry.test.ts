@@ -269,7 +269,7 @@ describe("KindRegistry Subsumption Properties", () => {
           const expanded = registry.expandSubClasses(kind);
           expect(new Set(expanded).size).toBe(expanded.length);
           // The forced consequence: C sits strictly between two equivalents,
-          // so it collapses into the same class as A and B (ruling 11).
+          // so it collapses into the same class as A and B.
           expect(registry.isAssignableTo("A", "C")).toBe(true);
           expect(registry.isAssignableTo("C", "A")).toBe(true);
           expect(registry.isAssignableTo("B", "C")).toBe(true);
@@ -331,7 +331,7 @@ describe("KindRegistry Subsumption Properties", () => {
       expect(registry.getDescendants("Animal").has("Dog")).toBe(true);
     });
 
-    // Regression coverage for a defect found reviewing D1: an `equivalentTo`
+    // Regression coverage for a defect found reviewing the equivalence fold: an `equivalentTo`
     // class routed through an external IRI that is ALSO a `subClassOf`
     // endpoint made `subClassAncestors`/`subClassDescendants` stop being
     // inverses of each other, so `isSubClassOf`/`isAssignableTo` disagreed

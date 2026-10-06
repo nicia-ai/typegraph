@@ -244,7 +244,7 @@ export type SchemaDiff = Readonly<{
  *   inherits the throw: `loadAndVerifyGraph` / `createVerifiedStore`,
  *   `getSchemaChanges`, and (through it) `requiresMigration` are audited at
  *   their own declarations.
- * @throws ConfigurationError (C.2, `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE`
+ * @throws ConfigurationError (structural-subsumption check, `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE`
  *   / `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` /
  *   `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` /
  *   `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE`) when `after` declares a
@@ -264,8 +264,8 @@ export function computeSchemaDiff(
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = classifyOntologyChanges(before, after);
-  // classifyOntologyChanges only builds (and thereby structurally enforces,
-  // C.2) a registry when a RELATION changed. A migration that edits only a
+  // classifyOntologyChanges only builds (and thereby structurally enforces
+  // subsumption) a registry when a RELATION changed. A migration that edits only a
   // node kind's PROPERTY schema never touches a relation, so without this
   // check it would sail through the dry run and fail only at commit —
   // exactly the gap `computeSchemaDiff`'s docblock now documents.
@@ -442,7 +442,7 @@ function diffNodes(
  * broken a `subClassOf`/`equivalentTo`/`sameAs` hierarchy this diff's
  * relation-level classification never looked at, because no RELATION
  * changed. A cheap name scan over `nodeChanges` and `after.ontology.relations`
- * — the caller builds a registry (which structurally enforces, C.2) only
+ * — the caller builds a registry (which structurally enforces subsumption) only
  * when this returns `true`.
  *
  * A REMOVED node kind is excluded: it cannot violate a hierarchy going

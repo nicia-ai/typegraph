@@ -1,5 +1,5 @@
 /**
- * Roadmap F — removal of the public custom `metaEdge()` factory, the public
+ * Removal of the public custom `metaEdge()` factory, the public
  * `InferenceType` union, `MetaEdgeProperties.{transitive,symmetric,reflexive,
  * inverse,inference}`, and the deprecated `sameAs`/`differentFrom` factories.
  *
@@ -86,7 +86,7 @@ function createSchema(ontology: SerializedOntology): SerializedSchema {
   };
 }
 
-describe("roadmap F: a pre-removal persisted document still loads", () => {
+describe("a pre-removal persisted document still loads", () => {
   it("parses a `sameAs` relation and an old-shape metaEdges catalog entry, and builds a registry that folds sameAs like equivalentTo", () => {
     // Exactly the shape pre-removal code would have serialized: the
     // `metaEdges` catalog entry still carries `transitive`/`symmetric`/
@@ -132,7 +132,7 @@ describe("roadmap F: a pre-removal persisted document still loads", () => {
   });
 });
 
-describe("roadmap F: migrating sameAs(A, B) to equivalentTo(A, B) auto-migrates", () => {
+describe("migrating sameAs(A, B) to equivalentTo(A, B) auto-migrates", () => {
   it("classifies the change as warning-only, never breaking", () => {
     // `metaEdges` populated the way the real serializer derives it (1:1
     // from `relations`) — a synthetic catalog-only fixture would not
@@ -179,7 +179,7 @@ describe("roadmap F: migrating sameAs(A, B) to equivalentTo(A, B) auto-migrates"
   });
 });
 
-describe("roadmap F: dropping a differentFrom(A, B) declaration auto-migrates", () => {
+describe("dropping a differentFrom(A, B) declaration auto-migrates", () => {
   it("classifies the removal as safe", () => {
     const before = createSchema({
       metaEdges: {
@@ -207,7 +207,7 @@ describe("roadmap F: dropping a differentFrom(A, B) declaration auto-migrates", 
   });
 });
 
-describe("roadmap F: ensureSchema auto-migrates a persisted pre-removal document", () => {
+describe("ensureSchema auto-migrates a persisted pre-removal document", () => {
   const A = defineNode("A", { schema: z.object({}) });
   const B = defineNode("B", { schema: z.object({}) });
 

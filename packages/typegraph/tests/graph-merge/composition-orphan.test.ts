@@ -1,5 +1,5 @@
 /**
- * The composition orphan conflict (E-c §4.5): a part attached on the target
+ * The composition orphan conflict: a part attached on the target
  * AFTER the branch point, whose whole the branch deletes, is a typed
  * conflict — reported on the plan's review payload at plan time, and refused
  * at apply time under the write lock.
@@ -206,8 +206,8 @@ describe.each(backendMatrix())(
 
       // The target: independently at the same fork-point state, but with a
       // SECOND part whose node row is already dead while its `holds` edge
-      // is still live — the state EC-R2-1 fixed a direct `restrict` delete
-      // from ever leaving behind, reachable today only from a legacy row or
+      // is still live — the state a direct `restrict` delete can no longer
+      // leave behind, reachable today only from a legacy row or
       // a write that bypasses the ordinary delete pipeline. Written directly
       // through the backend seam (never through `store.nodes.Part.delete`,
       // which cleans up its own composition edges) to construct that state

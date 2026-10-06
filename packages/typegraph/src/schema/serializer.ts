@@ -724,7 +724,7 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
     // projection, so two structurally unrelated schemas that both fail
     // conversion become indistinguishable to any caller comparing
     // projections — including src/registry/validate-structural-subsumption.ts
-    // (C13-R1-09), which otherwise treats identical projections as proof of
+    // which otherwise treats identical projections as proof of
     // structural subtyping. Fine for a best-effort introspection view; NOT
     // sound as an equality oracle. A caller that needs to tell "genuinely
     // identical" from "both unprojectable" apart cannot do so from this

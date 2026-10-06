@@ -1,5 +1,5 @@
 /**
- * Cross-backend replay equivalence (L1, §9.2): assert / assert / retract /
+ * Cross-backend replay equivalence: assert / assert / retract /
  * re-assert must replay into steps whose `after` matches the live closure at
  * each revision, on every backend `createIntegrationTestSuite` runs against —
  * the backend-parity rule (AGENTS.md) applied to the replay contract.
@@ -421,10 +421,10 @@ export function registerIdentityReplayIntegrationTests(
 
       const replay = await store.identity.replay(a);
 
-      // §9.2 L1's contract, at BOUNDARY granularity: four boundaries, causes
+      // The replay contract, at BOUNDARY granularity: four boundaries, causes
       // assert/assert/retract/assert. The retract boundary itself carries TWO
       // transition rows — one per resulting component (a's own departure,
-      // and b+c's continuation) — exactly as §3.2 point 6 documents ("several
+      // and b+c's continuation) — exactly as the replay contract documents ("several
       // transitions at one revision... emitted as several steps with
       // identical before/after"), so this groups by revision first rather
       // than asserting step count and cause sequence directly against the

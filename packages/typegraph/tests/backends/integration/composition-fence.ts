@@ -1,11 +1,11 @@
 /**
- * The composition claim (item E), on every backend.
+ * The composition claim, on every backend.
  *
- * R4: a part holds exactly one whole across every declared `partOf`/
+ * One whole per part: a part holds exactly one whole across every declared `partOf`/
  * `hasPart` pair, enforced by one claim row on the reserved, relation-wide
  * axis in `typegraph_edge_claims` — never one row per realizing edge kind.
- * D-10: the union of every composition-realizing edge kind, oriented part ->
- * whole, is ONE acyclic relation, checked by D.2's exhaustive reachability
+ * Union acyclicity: the union of every composition-realizing edge kind, oriented part ->
+ * whole, is ONE acyclic relation, checked by the exhaustive reachability
  * probe with no code of its own.
  *
  * Each case states, in a comment, the mutation that must make it fail (the
@@ -209,7 +209,7 @@ function expectWholeOccupied(error: unknown, partId: string): void {
 export function registerCompositionFenceIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe("composition claim (R4: one whole per part, relation-wide)", () => {
+  describe("composition claim (one whole per part, relation-wide)", () => {
     it("refuses a second whole realized by a DIFFERENT edge kind (two-relation single-whole violation)", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const chapter = await store.nodes.CfChapter.create({});
@@ -278,15 +278,15 @@ export function registerCompositionFenceIntegrationTests(
       // folderB partOf folderA via cfContainsB (a DIFFERENT realizing edge
       // kind, so this is not merely one relation contending with itself)
       // closes folderA -> folderB -> folderA in the union relation. The two
-      // parts (folderA, folderB) are distinct, so R4's claim is untouched —
-      // this is purely D-10's acyclicity.
+      // parts (folderA, folderB) are distinct, so the one-whole-per-part claim is untouched —
+      // this is purely the union's acyclicity.
       const error = await store.edges.cfContainsB
         .create(folderB, folderA, {})
         .catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(EdgeAcyclicityError);
       // The relation name reaching the public error is the printable
       // "composition", never the reserved U+001E-prefixed claim axis it is
-      // stored as internally (R1).
+      // stored as internally.
       expect((error as EdgeAcyclicityError).details.relation).toBe(
         "composition",
       );
@@ -297,7 +297,7 @@ export function registerCompositionFenceIntegrationTests(
     // written). The second create then passes: cfContainsB alone has no
     // cycle.
 
-    it("refuses a cycle formed with a REVERSED (has_*-shaped) member, proving D-10's orientation flag", async () => {
+    it("refuses a cycle formed with a REVERSED (has_*-shaped) member, proving the union's orientation flag", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const folderA = await store.nodes.CfFolder.create({});
       const folderB = await store.nodes.CfFolder.create({});
@@ -614,7 +614,7 @@ export function registerCompositionFenceIntegrationTests(
       // Two DIFFERENT parts attached to the SAME whole: a genuine
       // `targetCardinality: "one"` violation on `cfDualOf`'s own ordinary
       // target axis. Neither part holds more than one whole, so this is NOT
-      // a composition (R4) violation — planted directly, bypassing the
+      // a composition violation — planted directly, bypassing the
       // store's claims entirely, the shape a trusted import or a
       // pre-upgrade database leaves behind.
       await backend.insertEdge({
@@ -649,7 +649,7 @@ export function registerCompositionFenceIntegrationTests(
       expect([...cardinalityViolation.edgeIds].toSorted()).toEqual(
         ["cf-dual-row-a", "cf-dual-row-b"].toSorted(),
       );
-      // No composition (R4) violation: each part still holds exactly one
+      // No composition violation: each part still holds exactly one
       // whole, and no `edgeIds` entry repeats (E3's double-count).
       expect(
         violations.some((violation) => violation.family === "composition"),

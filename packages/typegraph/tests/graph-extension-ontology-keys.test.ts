@@ -1,12 +1,11 @@
 /**
- * Canonical-key injectivity for `src/graph-extension/ontology-keys.ts`
- * (item E, lane E-a §2.3).
+ * Canonical-key injectivity for `src/graph-extension/ontology-keys.ts`.
  *
  * Both keys used to be a delimiter join (`${metaEdge}|${from}|${to}`), which
  * collides for any kind name containing the delimiter and is blind to a
  * `via`/`partSide` change. Both are now `encodeTupleKey([...])`.
  *
- * MUTATION CHECK (recorded in the lane's load-bearing note): reverted both
+ * MUTATION CHECK: reverted both
  * functions to the delimiter-join form — "does not collide two distinct
  * relations..." and "folds via/partSide into the key..." both flipped to
  * failing; "agree for the same relation" kept passing (a false negative on

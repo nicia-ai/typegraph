@@ -205,6 +205,10 @@ const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
 const ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT = 4;
 const ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY = 6;
 
+function claimTargetKey(axis: string, key: string): string {
+  return encodeTupleKey([axis, key]);
+}
+
 function chunkAtomicNodeEntriesByIdSource(
   entries: readonly AtomicNodeBatchEntry[],
   chunkSize: number,
@@ -296,7 +300,7 @@ export function atomicNodeReplacementSubmissionMaxEntries(
  * The belt behind the composition-eligibility gates (`resolveAtomicEdgeBatchExecutor`
  * et al., `src/store/operations/atomic-mutation-program.ts`): a fused command
  * is an optimization attempt, not evidence that its dimensions ran, and a
- * composition claim (item E, `scope.kind === "composition"`) must NEVER
+ * composition claim (`scope.kind === "composition"`) must NEVER
  * reach a fused write — the fused single-claim path (`createEdgeWithPlan`)
  * carries exactly one claim by construction, and even the batch path's
  * generic multi-claim support is a policy choice this assertion enforces
@@ -1914,7 +1918,7 @@ export function createCommonOperationBackend(
 
     const targetKey = (entry: ClaimEdgeCardinalityParams): string => {
       const target = edgeCardinalityClaimTarget(entry);
-      return `${target.axis}\u0000${target.key}`;
+      return claimTargetKey(target.axis, target.key);
     };
     const seen = new Set<string>();
     for (const entry of entries) {
@@ -1943,7 +1947,7 @@ export function createCommonOperationBackend(
         holder_edge_id: string;
       }>(lockQuery);
       const holderByTarget = new Map(
-        rows.map((row) => [`${row.axis}\u0000${row.key}`, row.holder_edge_id]),
+        rows.map((row) => [claimTargetKey(row.axis, row.key), row.holder_edge_id]),
       );
       const incumbentByTarget = await readClaimlessIncumbents(chunk);
       for (const entry of chunk) {
@@ -1999,7 +2003,7 @@ export function createCommonOperationBackend(
         incumbent_edge_id: string;
       }>(query);
       for (const row of rows) {
-        const key = `${row.axis}\u0000${row.key}`;
+        const key = claimTargetKey(row.axis, row.key);
         if (!incumbents.has(key)) incumbents.set(key, row.incumbent_edge_id);
       }
     }

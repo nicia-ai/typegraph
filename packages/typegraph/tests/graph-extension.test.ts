@@ -662,7 +662,7 @@ describe("edge compilation", () => {
   });
 
   it("compiles a declarative sameAs relation to the internal sameAs meta-edge", () => {
-    // `sameAs` has no public factory (roadmap F removed it), but a
+    // `sameAs` has no public factory (it was removed), but a
     // declarative graph extension can still name it — `ALL_META_EDGE_NAMES`
     // stays closed, not narrowed. `compileOntologyRelation` resolves the
     // string via the internal `metaEdgesByName` record; this pins that the

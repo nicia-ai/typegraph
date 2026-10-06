@@ -258,7 +258,7 @@ export function translateMergeCommitError(error: unknown): unknown {
  * introduce between the dry-run report and the apply-time refusal.
  *
  * `details.cause` picks the message: `"deleted"` names the whole this plan
- * would delete; `"unattached"` (item E.2) has no whole to name at all — the
+ * would delete; `"unattached"` has no whole to name at all — the
  * part's composition edge was dropped or collapsed by canonicalization while
  * the part itself survives.
  */
@@ -346,7 +346,7 @@ export type AcyclicityMergeConflictDetails = Readonly<{
 }>;
 
 /**
- * Raised at PLAN time (ruling D-4) when the resolved merge plan's projected
+ * Raised at plan time when the resolved merge plan's projected
  * edge writes — after canonicalization and repointing, layered onto the
  * target's current live edges — would close a cycle in a declared-acyclic
  * relation. Reviewable, like {@link IdentityMergeConflictError}: the plan is

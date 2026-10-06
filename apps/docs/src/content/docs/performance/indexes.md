@@ -510,7 +510,7 @@ compiled query relies on. They are declared once (`SYSTEM_INDEX_DECLARATIONS`, e
 inspection), and both dialects' schemas derive from that single list, so SQLite and PostgreSQL
 always carry the same set.
 
-The `acyclic: true` reachability probe (item D.2) is one of the paths these
+The `acyclic: true` reachability probe is one of the paths these
 system indexes cover: its recursive term seeks `(graph_id, from_kind,
 from_id, kind)`, filters `deleted_at IS NULL`, and projects `to_kind,
 to_id` — every one of those columns is in `typegraph_edges_from_idx`, in

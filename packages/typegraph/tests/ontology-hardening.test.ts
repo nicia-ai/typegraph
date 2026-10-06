@@ -271,7 +271,7 @@ describe("ontology truth and hardening", () => {
   });
 
   it("continues subclass descent through an external IRI that is also a subClassOf endpoint", () => {
-    // Regression for a defect found reviewing D1: `subClassOf(Gamma, IRI)`
+    // Regression for a defect found reviewing the equivalence fold: `subClassOf(Gamma, IRI)`
     // reaches Alpha's representative through the IRI's equivalence class
     // (`equivalentTo(Alpha, IRI)`) on the ANCESTOR side by construction —
     // `isSubClassOf("Gamma", "Alpha")` was already true before this fix, via
@@ -306,9 +306,9 @@ describe("ontology truth and hardening", () => {
   });
 
   it("propagates disjointness through an IRI-routed equivalence chain (fold parity)", () => {
-    // D1 folds equivalentTo into mutual subsumption BEFORE the disjoint-side
+    // The fold of equivalentTo into mutual subsumption runs BEFORE the disjoint-side
     // expansion runs, so `expandDisjointSide` no longer walks `equivalenceSets`
-    // separately (§3.1e) — it reaches Beta through `subClassDescendants` alone,
+    // separately — it reaches Beta through `subClassDescendants` alone,
     // exactly as it reached a subclass before this change. This case is the
     // one that would break if that fold were undone.
     const externalIri = "http://example.org/equivalence-route";
@@ -384,8 +384,8 @@ describe("ontology truth and hardening", () => {
   });
 
   it("pins the literal disjointPairs set for the equivalentTo-is-subsumption probe graph", () => {
-    // The exact literal member list `computeDisjointPairs` produced before D1
-    // folded equivalence into subsumption. Company gains Corporation as a
+    // The exact literal member list `computeDisjointPairs` produced before the
+    // fold of equivalence into subsumption. Company gains Corporation as a
     // subclass descendant (mutual subsumption), so Corporation inherits
     // Person's disjointness with Company byte-identically to how the
     // pre-fold code reached it through a separate equivalence walk.
@@ -933,7 +933,7 @@ describe("ontology truth and hardening", () => {
       // The live registry build already refuses this graph, so persist the
       // RELATIONS only (bypassing `buildKindRegistry`) to exercise the
       // deserializer's own classifier, built from `schema.nodes`/`schema.edges`
-      // rather than delegated to a caller — the thing §3.4 threads.
+      // rather than delegated to a caller — the thing the schema threads.
       const schema = serializeSchema(graph, 1);
 
       expect(() => deserializeSchema(schema).buildRegistry()).toThrow(

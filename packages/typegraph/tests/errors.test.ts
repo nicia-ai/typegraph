@@ -832,7 +832,7 @@ describe("CardinalityError", () => {
     expectTypeOf(error.details.existingCount).toBeNumber();
   });
 
-  // Review finding D1-R2-09: the suggestion must name the option the caller
+  // The suggestion must name the option the caller
   // actually set. A `direction: "target"` violation is never fixed by
   // `cardinality` (already its default, "many"), so the suggestion has to
   // name `targetCardinality` instead.

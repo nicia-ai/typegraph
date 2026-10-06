@@ -571,6 +571,13 @@ type CompositionExistence = "optional" | "required";
 type CompositionPartSide = "from" | "to";
 
 // @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
 type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
 // @public
@@ -8471,10 +8478,7 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type ExtensionPropertyModifiers = Readonly<{
@@ -9885,10 +9889,7 @@ type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type SerializedResourceDeclaration = Readonly<{

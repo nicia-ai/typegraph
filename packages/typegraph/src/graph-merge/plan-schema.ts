@@ -220,12 +220,12 @@ export type MergePlanTypeReconciliation = Readonly<{
  * the SAME `MergeCompositionOrphanError` — a caller distinguishes them only
  * by `cause`, never by a second error class:
  *
- * - `"deleted"` (E-c's original arm): a whole the plan deletes has a live
+ * - `"deleted"`: a whole the plan deletes has a live
  *   part the plan does NOT itself delete — attached on the target after the
  *   branch point, or independently of it — found by re-reading the parts
  *   closure (`planCompositionCascade`) against every planned node deletion.
  *   `whole` is that about-to-be-deleted whole.
- * - `"unattached"` (item E.2): a required-existence part THIS
+ * - `"unattached"`: a required-existence part THIS
  *   MERGE WRITES resolves, after canonicalization, to no live whole at
  *   all — its composition edge was dropped or collapsed while both
  *   endpoints survive. There is no whole to name, so `whole` is absent.

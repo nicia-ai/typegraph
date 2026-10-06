@@ -112,9 +112,9 @@ export type OntologyIntrospection = Readonly<{
   to: string;
   /** The realizing edge kind name. Present only for `partOf`/`hasPart`. */
   via?: string;
-  /** R5's orientation. Meaningful only alongside `via`. */
+  /** Which end of the edge is the part. Meaningful only alongside `via`. */
   partSide?: CompositionPartSide;
-  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  /** Whether the part must have a live whole. Meaningful only alongside `via`. */
   existence?: CompositionExistence;
   origin: "compile-time" | "runtime";
 }>;

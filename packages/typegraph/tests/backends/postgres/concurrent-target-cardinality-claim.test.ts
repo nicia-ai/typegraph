@@ -1,5 +1,5 @@
 /**
- * Issue #610, acceptance criterion 4: target-side edge cardinality under
+ * Issue #610: target-side edge cardinality under
  * GENUINE contention on a real PostgreSQL server.
  *
  * `tests/backends/postgres/concurrent-constraint-fence.test.ts` already pins
@@ -210,7 +210,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(await setup.edges.ctcAssignedTo.findTo(target)).toHaveLength(1);
       },
     );
-    // REVERT CHECK (write-only — not runnable in this sandbox; the lead runs
+    // REVERT CHECK (write-only — needs a real PostgreSQL server, so run
     // `pnpm test:postgres`): drop the `"target"` arm from
     // `edgeCardinalityAxisReferences` (`src/store/claims/edge-claims.ts`).
     // Both concurrent creates should then commit and `fulfilled` should read

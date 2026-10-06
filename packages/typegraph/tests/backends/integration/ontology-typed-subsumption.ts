@@ -1,8 +1,8 @@
 /**
- * Cross-backend query semantics for C.1/C.2/Q3/C.3 (typed subsumption).
+ * Cross-backend query semantics for typed subsumption.
  *
  * Query-feature tests live in the shared cross-backend suite (AGENTS.md
- * "Backend parity" §2) — a per-dialect test would happily certify a
+ * "Backend parity") — a per-dialect test would happily certify a
  * divergence between SQLite and PostgreSQL; only the same case run on both
  * engines verifies equivalence.
  */
@@ -131,7 +131,7 @@ const searchGraph = defineGraph({
 export function registerOntologyTypedSubsumptionIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe("Typed subsumption — polymorphic default (Q3)", () => {
+  describe("Typed subsumption — polymorphic default", () => {
     it("returns subtype rows by default and only exact rows when narrowed", async () => {
       const store = await context.createStore(subsumptionGraph);
       await store.nodes.TsMedia.create({ title: "plain" });
@@ -191,7 +191,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
     // `{ expansion: "exact" }` pin leaves that assertion green on
     // BOTH engines — same defense-in-depth shape the SQLite-only pin in
     // tests/polymorphic-default.test.ts documents. This is cross-backend
-    // PARITY coverage (AGENTS.md "Backend parity" §2: the candidate
+    // PARITY coverage (AGENTS.md "Backend parity": the candidate
     // subquery composes with FTS5 on SQLite and tsvector on PostgreSQL, so
     // only running the case on both engines can prove they agree), not an
     // independent load-bearing guard.
@@ -341,7 +341,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
     });
   });
 
-  describe("C.3 — narrower expansion over a kind taxonomy", () => {
+  describe("narrower expansion over a kind taxonomy", () => {
     it("from() expands through a three-level broader/narrower chain", async () => {
       const store = await context.createStore(narrowerGraph);
       await store.nodes.TsRootConcept.create({ name: "root" });

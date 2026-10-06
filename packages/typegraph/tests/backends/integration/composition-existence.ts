@@ -1,5 +1,5 @@
 /**
- * Item E.2 — `existence: "required"`: a composition part that cannot exist
+ * `existence: "required"`: a composition part that cannot exist
  * without a live whole, on every backend.
  *
  * Covers the create-side owner (`resolveCompositionCreate`, one node/one
@@ -182,7 +182,7 @@ function nextGraphId(): string {
 export function registerCompositionExistenceIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe('composition existence (item E.2: `existence: "required"`)', () => {
+  describe('composition existence (`existence: "required"`)', () => {
     it("case 1: refuses a bare create with no partOf, and writes no node row", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const error = await store.nodes.EeSegment.create({}).catch(

@@ -209,7 +209,7 @@ describe("serializeSchema", () => {
     );
   });
 
-  it("serializes a metaEdges catalog entry with only name and description (roadmap F)", () => {
+  it("serializes a metaEdges catalog entry with only name and description", () => {
     // Pins `SerializedMetaEdge`'s post-removal shape: `transitive`,
     // `symmetric`, `reflexive`, `inverse`, and `inference` are gone, and
     // nothing should silently start re-emitting them.

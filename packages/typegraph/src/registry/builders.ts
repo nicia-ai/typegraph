@@ -72,7 +72,7 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
     edgeFacts: buildGraphEdgeKindFacts(graph.edges),
     // Memoized by serializeSchemaProperties itself (keyed on the Zod schema
     // reference), so this closure is called once per node kind per registry
-    // build, not once per closure pair — the C.2 structural-subsumption
+    // build, not once per closure pair — the structural-subsumption
     // check's schema source for a live, compile-time graph.
     nodePropertySchemas: (kind) => {
       const nodeType = nodeTypes.get(kind);

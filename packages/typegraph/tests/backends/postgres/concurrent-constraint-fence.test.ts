@@ -100,7 +100,7 @@ const Contractor = defineNode("Contractor", {
   schema: z.object({ name: z.string(), email: z.string() }),
 });
 
-/** A composition whole, and the part that holds at most one of them (R4). */
+/** A composition whole, and the part that holds at most one of them. */
 const Shelf = defineNode("Shelf", { schema: z.object({}) });
 const Book = defineNode("Book", { schema: z.object({ slug: z.string() }) });
 

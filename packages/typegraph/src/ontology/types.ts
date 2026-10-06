@@ -1,8 +1,5 @@
 import { type AnyEdgeType, type NodeProps, type NodeType } from "../core/types";
-import {
-  type CompositionExistence,
-  type CompositionPartSide,
-} from "../registry/composition-relation";
+import { type CompositionRealization } from "../registry/composition-relation";
 
 // ============================================================
 // Brand Key
@@ -19,7 +16,7 @@ export const META_EDGE_BRAND = "__metaEdge" as const;
  * Properties of a meta-edge.
  *
  * `transitive`/`symmetric`/`reflexive`/`inverse`/`inference` were removed
- * (roadmap F): no registry or closure code ever read them off a `MetaEdge` —
+ * along with the sameAs/differentFrom factories: no registry or closure code ever read them off a `MetaEdge` —
  * every behavioral decision for a built-in meta-edge is hardcoded per literal
  * name in `collectOntologyRelations` (`src/registry/kind-registry.ts`) and
  * `classifyKnownRelationSeverity` (`src/schema/ontology-change.ts`). They
@@ -67,13 +64,8 @@ export type OntologyRelation = Readonly<{
   metaEdge: MetaEdge;
   from: NodeType | AnyEdgeType | string; // string for external IRIs
   to: NodeType | AnyEdgeType | string;
-  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
-  via?: string;
-  /** R5's orientation. Meaningful only alongside `via`. */
-  partSide?: CompositionPartSide;
-  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
-  existence?: CompositionExistence;
-}>;
+}> &
+  CompositionRealization;
 
 // ============================================================
 // Type Guards
@@ -104,7 +96,7 @@ export function getTypeName(
 }
 
 // ============================================================
-// Typed Subsumption (C.1)
+// Typed Subsumption
 // ============================================================
 
 /**
@@ -134,13 +126,8 @@ export type TypedOntologyRelation<
   metaEdge: MetaEdge<M>;
   from: From;
   to: To;
-  /** See {@link OntologyRelation.via} — carried so a typed composition relation is still an `OntologyRelation`. */
-  via?: string;
-  /** See {@link OntologyRelation.partSide}. */
-  partSide?: CompositionPartSide;
-  /** See {@link OntologyRelation.existence}. */
-  existence?: CompositionExistence;
-}>;
+}> &
+  CompositionRealization;
 
 /**
  * `keyof T`, with any generic index-signature key (`[x: string]: ...`)
@@ -246,7 +233,7 @@ export type SubClassOfCheck<C extends NodeType, P extends NodeType> =
 /**
  * The `equivalentTo`/`sameAs` sibling of {@link SubClassOfCheck}: resolves to
  * `unknown` when `A` and `B`'s schemas are mutually structurally subtyping
- * (the D1 "mutual subsumption" reading between two registered kinds), or to
+ * (the "mutual subsumption" reading between two registered kinds), or to
  * a {@link StructuralSubtypeMismatch} naming the direction that fails and its
  * incompatible fields. Consumed the same way, as an intersection member on
  * the second parameter.
@@ -267,7 +254,7 @@ export type EquivalentToCheck<A extends NodeType, B extends NodeType> =
     >;
 
 /**
- * `N`, with the runtime-variable facts widened. C.1/C.2 guarantee that a
+ * `N`, with the runtime-variable facts widened. the compile-time and registry-build structural checks guarantee that a
  * subtype row satisfies the parent's PROPERTIES; they say nothing about
  * which concrete kind produced the row, so `Node<PolymorphicNodeType<N>>`
  * keeps every property fully typed while widening the `kind` discriminant

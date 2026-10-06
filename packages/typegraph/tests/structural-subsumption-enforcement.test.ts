@@ -8,11 +8,11 @@
  * A new registry construction that forgets the field is a TypeScript error
  * already (the field is required, not optional) — this test instead guards
  * against a construction that supplies the field but with the WRONG
- * literal, silently widening which registry the C.2 check skips.
+ * literal, silently widening which registry the structural subsumption check skips.
  *
  * The scan for BOTH entry points is independent of whether the
  * `"unenforced-baseline"` literal and the call itself appear in the same
- * text pattern (C13-R1-04): a direct `buildValidatedKindRegistry({ ...,
+ * text pattern: a direct `buildValidatedKindRegistry({ ...,
  * structuralSubsumption: "unenforced-baseline" })` call site is caught even
  * though it never mentions `buildRegistryFromSerializedSchema(`.
  *

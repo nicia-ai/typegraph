@@ -1,5 +1,5 @@
 /**
- * Validating import and the composition claim (item E).
+ * Validating import and the composition claim.
  *
  * `importEdgeInsertWork` (`src/interchange/import.ts`) is the ONE owner of an
  * imported edge's insert unit, and it now calls `edgeInsertClaims` — the same

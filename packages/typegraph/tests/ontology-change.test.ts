@@ -1,9 +1,8 @@
 /**
  * Unit tests for `classifyOntologyChanges` (`src/schema/ontology-change.ts`).
  *
- * Every relation-classification test below is load-bearing: the revert
- * checks are recorded in the scratchpad `lane-A-load-bearing.md` note, per
- * AGENTS.md.
+ * Every relation-classification test below is load-bearing: each case states the
+ * revert check, per AGENTS.md.
  */
 import { describe, expect, it } from "vitest";
 
@@ -166,7 +165,7 @@ const EDGES_FOR_COMPOSITION: Record<string, SerializedEdgeDef> = {
 };
 
 // ============================================================
-// The severity matrix (§1.3)
+// The severity matrix
 // ============================================================
 
 type MatrixRow = Readonly<{
@@ -433,7 +432,7 @@ describe("classifyOntologyChanges", () => {
       );
     });
 
-    // MUTATION CHECK (recorded in lane-A-load-bearing.md): flipping the
+    // MUTATION CHECK: flipping the
     // `disjointWith`-added row's severity in
     // `classifyKnownRelationSeverity` to "safe" with no probe makes this
     // exact row of the matrix fail.
@@ -476,7 +475,7 @@ describe("classifyOntologyChanges", () => {
       ]);
     });
 
-    // MUTATION CHECK (recorded in lane-A-load-bearing.md): deleting the
+    // MUTATION CHECK: deleting the
     // removed-kind guard in `classifyRelation` makes the first assertion
     // above fail (the removal reads as an ordinary warning instead of safe).
   });
@@ -508,7 +507,7 @@ describe("classifyOntologyChanges", () => {
       ]);
     });
 
-    // MUTATION CHECK (recorded in lane-A-load-bearing.md): computing the
+    // MUTATION CHECK: computing the
     // delta from the authored relations directly (skipping
     // `registry.disjointKindPairs()`'s propagated closure) drops the
     // ["Company", "Person"] pair and fails this assertion.
@@ -786,7 +785,7 @@ describe("classifyOntologyChanges", () => {
     it("propagates ConfigurationError rather than reporting an unresolved probe", () => {
       // `disjointWith(A, B)` plus `subClassOf(A, B)` is a contradiction
       // `validateOntologyRelations` already refuses at store open — the
-      // refuse-on-load precedent this module follows (ruling: no
+      // refuse-on-load precedent this module follows (there is no
       // "unresolved" probe variant).
       const incoherentRelations = [
         relation("disjointWith", "A", "B"),
@@ -817,7 +816,7 @@ describe("classifyOntologyChanges", () => {
     });
   });
 
-  describe("an in-place `existence` flip on an already-declared partOf/hasPart pair (item E.2)", () => {
+  describe("an in-place `existence` flip on an already-declared partOf/hasPart pair", () => {
     it('classifies optional -> required as ONE "modified" warning entry carrying both composition probes, never remove+add', () => {
       const before = snapshot({}, EDGES_FOR_COMPOSITION, [
         compositionRelation("partOf", "X", "Y", "edgeA"),

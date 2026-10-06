@@ -1,13 +1,11 @@
 /**
  * Cross-backend contract for ontology change classification with
- * data-validated tightening (roadmap §3.A).
+ * data-validated tightening.
  *
  * The preflight path (`createSchemaVersionMembers`) is dialect-agnostic, so
  * there is deliberately no per-dialect file here — a SQLite-only or
  * PG-only test would certify nothing the shared suite does not. Every case
- * states, in its own comment, the mutation that must make it fail; the
- * revert/mutation checks actually performed are recorded in the scratchpad
- * `lane-A-load-bearing.md` note.
+ * states, in its own comment, the mutation that must make it fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -155,7 +153,7 @@ function withoutCommitWithPreflight(
 const Task = defineNode("Task", { schema: z.object({}) });
 const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
 
-/** Item D.2's tightening: `acyclic` absent, then declared `true`. */
+/** Acyclicity tightening: `acyclic` absent, then declared `true`. */
 function acyclicTighteningGraph(id: string, withAcyclic: boolean) {
   return defineGraph({
     id,
@@ -258,7 +256,7 @@ export function registerOntologyTighteningIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("ontology change classification with data-validated tightening", () => {
-    it("refuses a disjointWith addition existing rows already violate (the roadmap probe)", async () => {
+    it("refuses a disjointWith addition existing rows already violate (the disjointness probe)", async () => {
       const id = "ontology_tightening_probe";
       const store = await context.createStore(probeGraph(id, false));
       await store.nodes.Person.create({}, { id: "shared" });
@@ -297,12 +295,12 @@ export function registerOntologyTighteningIntegrationTests(
       ]);
       expect(await activeVersion(context, id)).toBe(1);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): this case fails against
+    // MUTATION CHECK: this case fails against
     // today's `main` (the commit migrates instead of refusing) and fails
     // again when the classifier's `disjointWith`-added row is flipped to
     // "safe".
 
-    it("refuses declaring acyclic: true on an edge kind whose live rows already carry a cycle (item D.2)", async () => {
+    it("refuses declaring acyclic: true on an edge kind whose live rows already carry a cycle", async () => {
       const id = "ontology_tightening_acyclic_probe";
       const store = await context.createStore(
         acyclicTighteningGraph(id, false),
@@ -335,10 +333,10 @@ export function registerOntologyTighteningIntegrationTests(
       ]);
       expect(await activeVersion(context, id)).toBe(1);
     });
-    // MUTATION CHECK (lane-D2-load-bearing.md): classifying the `acyclic`
+    // MUTATION CHECK: classifying the `acyclic`
     // addition `safe` instead of `warning` (dropping its `probes` entry in
     // `edgeAcyclicityAddedDelta`'s caller) makes the commit migrate instead
-    // of refusing — the §2.1 defect this workstream exists to close,
+    // of refusing — the defect the tightening preflight exists to close,
     // reproduced for the acyclicity axis.
 
     it("refuses rolling back to a stricter version whose acyclic declaration live rows violate", async () => {
@@ -501,7 +499,7 @@ export function registerOntologyTighteningIntegrationTests(
       });
       expect(await activeVersion(context, id)).toBe(1);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): removing the
+    // MUTATION CHECK: removing the
     // `ontologyPreflight` step from `Store.evolve`'s composed callback makes
     // the evolve succeed and this test fail.
 
@@ -575,7 +573,7 @@ export function registerOntologyTighteningIntegrationTests(
       ]);
       expect(await activeVersion(context, id)).toBe(1);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): dropping
+    // MUTATION CHECK: dropping
     // `edgeEndpointAllowances` from the probe plan makes the commit succeed
     // and this test fail.
 
@@ -634,7 +632,7 @@ export function registerOntologyTighteningIntegrationTests(
       ]);
       expect(await activeVersion(context, id)).toBe(1);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): dropping the
+    // MUTATION CHECK: dropping the
     // `nodeUniquenessComponent` probe makes the commit succeed and this
     // test fail.
 
@@ -673,7 +671,7 @@ export function registerOntologyTighteningIntegrationTests(
       );
       expect(await activeVersion(context, id)).toBe(2);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): setting the `inverseOf` row
+    // MUTATION CHECK: setting the `inverseOf` row
     // to "warning" makes the first half of this test fail (auto-migrate
     // would succeed instead of throwing `breaking-change`).
 
@@ -709,7 +707,7 @@ export function registerOntologyTighteningIntegrationTests(
       expect(await activeVersion(context, id)).toBe(2);
       expect(await evolvedStore.verifyConstraintFences()).toEqual([]);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): making the preflight throw
+    // MUTATION CHECK: making the preflight throw
     // unconditionally makes this test fail (status would never reach
     // "migrated").
 
@@ -749,7 +747,7 @@ export function registerOntologyTighteningIntegrationTests(
       expect(result.status).toBe("migrated");
       expect(await activeVersion(context, id)).toBe(2);
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): classifying a `disjointWith`
+    // MUTATION CHECK: classifying a `disjointWith`
     // removal as "breaking" makes this migration refuse instead of
     // auto-migrating, and the test fails. (Reclassifying it as "warning"
     // alone does not: the `nodeDisjointness` delta is computed from pairs the
@@ -1098,7 +1096,7 @@ export function registerOntologyTighteningIntegrationTests(
       // refused (and therefore rolled-back) commit.
       expect(await store.nodes.Person.getById(shared.id)).toBeDefined();
     });
-    // MUTATION CHECK (lane-A-load-bearing.md): skipping the probe when
+    // MUTATION CHECK: skipping the probe when
     // `readConstraintFenceViolations` is absent from the preflight target
     // (instead of refusing) makes the tightening commit and this test fail.
 
@@ -1266,7 +1264,7 @@ export function registerOntologyTighteningIntegrationTests(
     });
     // MUTATION CHECK (verified): reverting `prepareSchemaTighteningPreflight`
     // to always report `ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR`
-    // (this workstream's fix for D1-R1-03) makes this case fail with
+    // makes this case fail with
     // `details.code` reading `"ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND"`.
   });
 }

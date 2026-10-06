@@ -67,7 +67,7 @@ describe("edgeCardinalityAxisReferences", () => {
   });
 
   // All twelve `cardinality` x `targetCardinality` combinations from the
-  // plan's composition matrix (§1.2).
+  // plan's composition matrix.
   const sourceValues = ["many", "one", "unique", "oneActive"] as const;
   const targetValues = ["many", "one", "oneActive"] as const;
   for (const cardinality of sourceValues) {
@@ -95,7 +95,7 @@ describe("edgeCardinalityAxisReferences", () => {
 
 describe("activeOnlyAxisReferences", () => {
   // The single owner of "does this declaration carry an active-only axis?"
-  // (review finding D1-R2-01): the update path's reentry probe/claim split
+  // The update path's reentry probe/claim split
   // and the write-fence eligibility gate both fold through this function
   // instead of re-spelling `claimsWhenBornEnded === false` inline. `oneActive`
   // is the only cardinality (on either side) with `claimsWhenBornEnded:
@@ -136,7 +136,7 @@ describe("activeOnlyAxisReferences", () => {
 });
 
 describe("edgeCardinalityAxis", () => {
-  it("keeps source axis strings byte-identical to the pre-D.1 spelling (no migration)", () => {
+  it("keeps source axis strings byte-identical to their original spelling (no migration)", () => {
     // These three literals are the actual bytes stored in
     // `typegraph_edge_claims.axis` for every pre-existing source claim.
     // Changing them orphans every row a live database already holds.

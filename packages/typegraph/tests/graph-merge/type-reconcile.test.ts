@@ -24,7 +24,7 @@ import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
 /**
- * `sameAs` has no public factory any more (roadmap F removed it, alongside
+ * `sameAs` has no public factory any more (it was removed, alongside
  * `MetaEdgeOptions`/`InferenceType`), and its meta-edge object is absent
  * from the public `core` export too. A document persisted before the
  * removal that still names a `sameAs` relation must keep loading and
@@ -464,7 +464,7 @@ describe("mostSpecificCommonKind and reconcileTypes port cases (formerly graph-m
   describe("sameAs folding", () => {
     /**
      * `sameAs` was the deprecated alias of `equivalentTo`, removed as a
-     * public factory (roadmap F) — only a persisted document can still name
+     * public factory — only a persisted document can still name
      * it, via {@link sameAsRelation}. The registry fold
      * (`collectOntologyRelations`) folds both meta-edges into the same
      * `equivalent` bucket, so a closure recognizing only `equivalentTo` would

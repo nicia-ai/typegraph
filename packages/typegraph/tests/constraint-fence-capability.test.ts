@@ -403,7 +403,7 @@ describe("constrained writes on a backend that cannot fence them", () => {
   });
 
   it("refuses an import into a graph whose only hazard is a target-cardinality claim", async () => {
-    // Acceptance criterion 5 (issue #610): a `targetCardinality`-only edge
+    // Issue #610: a `targetCardinality`-only edge
     // kind owes the same pre-write claim fence a source-`cardinality` kind
     // does, up front, before the first row — even though nothing here
     // declares a unique constraint, a disjoint partner, or a source-side
@@ -447,7 +447,7 @@ describe("constrained writes on a backend that cannot fence them", () => {
   // MUTATION CHECK (verified): in `edgeWriteNeedsConstraintFence`
   // (`src/store/constraints.ts`), replace
   // `edgeCardinalityAxisReferences(declarations).length === 0` with
-  // `(declarations.cardinality ?? "many") === "many"` (the pre-D.1 source-only
+  // `(declarations.cardinality ?? "many") === "many"` (the source-only
   // shape). `targetCardinality: "one"` is then invisible to the fold, the
   // import proceeds unrefused, and this case fails.
 

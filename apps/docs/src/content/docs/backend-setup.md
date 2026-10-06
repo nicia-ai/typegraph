@@ -2266,7 +2266,7 @@ unique constraint or has a disjoint partner — or any edge kind's `cardinality`
 or `targetCardinality` is non-`many`.
 The import writes both creates and updates, so the widest of those placements is
 what decides it. A graph declaring an `acyclic: true` edge kind — or any
-`partOf`/`hasPart` pair, whose composition relation D-10 checks with the same
+`partOf`/`hasPart` pair, whose composition relation is checked with the same
 exhaustive reachability probe — refuses the same way even when no other
 constraint applies: acyclicity has no claim row to substitute for the
 per-graph lock import otherwise takes none of, so the whole import is refused

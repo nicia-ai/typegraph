@@ -33,7 +33,7 @@ import {
 } from "./validate-structural-subsumption";
 
 /**
- * How `buildValidatedKindRegistry` enforces the C.2 structural-subsumption
+ * How `buildValidatedKindRegistry` enforces the structural-subsumption
  * contract for the registry it is about to build:
  *
  * - `"enforce"` — the default, and the only mode a store actually reads or
@@ -44,8 +44,8 @@ import {
  *   the fix-forward migration that repairs an already-incoherent persisted
  *   document — removing the offending relation is itself a relation change,
  *   so the diff would rebuild the (still-incoherent) BEFORE registry and
- *   throw before it could ever classify the removal as the fix. R2 ("refused
- *   on load") is satisfied by the live registry every commit path already
+ *   throw before it could ever classify the removal as the fix. The refuse-on-load guarantee is
+ *   satisfied by the live registry every commit path already
  *   builds from the code graph declaring the same relations, and by
  *   `getSchemaChanges` reporting it via the AFTER-side build — a diff is not
  *   a load.

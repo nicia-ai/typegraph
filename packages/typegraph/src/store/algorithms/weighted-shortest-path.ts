@@ -395,7 +395,7 @@ async function findWeightedShortestPathInWorkingTable(
       return state.frontierCount === 0;
     },
     async extractResult(context) {
-      // Selects rather than refuses (§5.1.3 of the design): the working-table
+      // Selects rather than refuses: the working-table
       // path is gated on temp tables/RETURNING, not recursive traversal, so
       // an engine that can run every relaxation round but lacks the
       // recursive CTE still gets a working extraction instead of a refusal
@@ -702,7 +702,7 @@ export async function collectPredecessorChain(
  * primary-key point read per hop instead of one recursive statement. Costs
  * `path length + 1` statements rather than 1, which is the applied-not-
  * refused answer for an engine that can run every relaxation round but
- * cannot run the final recursive read (§5.1.3 of the design).
+ * cannot run the final recursive read.
  */
 async function extractPathByPredecessorWalk(
   context: IterativeGraphRunContext,

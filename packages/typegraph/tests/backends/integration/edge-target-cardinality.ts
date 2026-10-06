@@ -8,9 +8,7 @@
  * edges rather than distinct neighbours, and an idempotent reopen of an
  * already-held axis does not refuse against itself.
  *
- * Each case states the mutation that must make it fail; the revert/mutation
- * checks actually performed are recorded in the scratchpad
- * `lane-D1-load-bearing.md` note.
+ * Each case states the mutation that must make it fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

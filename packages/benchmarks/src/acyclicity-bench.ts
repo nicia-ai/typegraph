@@ -1,5 +1,5 @@
 /**
- * Item D.2's benchmark gate (design note §13): prices the acyclicity
+ * Benchmark gate for edge acyclicity: prices the acyclicity
  * reachability probe against the `cardinality: "one"` fence baseline and
  * an unconstrained `many` baseline, on chain-append, chain-prepend, and
  * forest shapes.
@@ -10,21 +10,20 @@
  *   POSTGRES_URL=... pnpm --filter @nicia-ai/typegraph-benchmarks bench:acyclicity:postgres
  *   POSTGRES_URL=... pnpm --filter @nicia-ai/typegraph-benchmarks bench:acyclicity:contention
  *
- * The default and `:file`/`:postgres` invocations also print a §7.6
+ * The default and `:file`/`:postgres` invocations also print an
  * `EXPLAIN`/`EXPLAIN QUERY PLAN` reading of the probe statement itself,
  * asserting `typegraph_edges_from_idx` coverage rather than assuming it.
- * `:contention` is a separate mode (§13.4): *W* ∈ {2, 4, 8, 16} real
+ * `:contention` is a separate mode: *W* ∈ {2, 4, 8, 16} real
  * PostgreSQL connections appending to a shared acyclic relation for 30s
  * each, reporting aggregate throughput, p99 latency, and the fraction of
  * time spent waiting on the per-graph advisory lock — it requires
  * `--backend=postgres` (PGlite/SQLite cannot exhibit genuine contention) and
  * is not run as part of the ordinary latency invocations above.
  *
- * Scope note: the wide-DAG and diamond-lattice shapes from the design
- * note's §13.2 table are NOT implemented here; chain-append, chain-prepend,
+ * Scope note: wide-DAG and diamond-lattice shapes are NOT implemented here; chain-append, chain-prepend,
  * and forest are, at 10^4 and 10^5 edges. Report-only, no guardrails,
- * matching write-bench's stance. The ship-criteria decision (D-7) is the
- * lead's, run against this lane's own PostgreSQL numbers.
+ * matching write-bench's stance. Whether acyclicity ships as-is is decided
+ * from the PostgreSQL numbers.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -147,7 +146,7 @@ async function buildBackend(
  * Seeds edges the way each kind can afford. `plainMany` (no claim, no fence)
  * takes chunked `bulkCreate`; the two fenced kinds take one sequential
  * `create` per edge. For `dependsOn` that avoids the O(CHUNK^2) in-batch
- * acyclicity probe over a contiguous chain run (design note §9.3). For
+ * acyclicity probe over a contiguous chain run. For
  * `cardinalityOne` it avoids the atomic claim program's N-arm statements
  * (`buildDeleteStaleAtomicEdgeClaims` / `buildAcquireAtomicEdgeClaims`), whose
  * PostgreSQL executor cost grows super-linearly in the chunk size — a
@@ -205,8 +204,8 @@ async function seedChain(
 /**
  * `count` disjoint 4-node trees, each with a `root` this function returns:
  * a branching root with two children for `plainMany`/`dependsOn`, or (since
- * `cardinality: "one"` permits at most one outgoing edge per source, ruling
- * out a branching root) a 4-node linear chain for `cardinalityOne` — same
+ * `cardinality: "one"` permits at most one outgoing edge per source, which
+ * rules out a branching root) a 4-node linear chain for `cardinalityOne` — same
  * node count and walk depth, the only shape that edge kind's fence allows.
  */
 async function seedForest(
@@ -340,9 +339,9 @@ async function benchForest(
 }
 
 // ============================================================
-// §7.6 / §13.3's fourth reading: EXPLAIN (ANALYZE, BUFFERS) / EXPLAIN QUERY
+// Fourth reading: EXPLAIN (ANALYZE, BUFFERS) / EXPLAIN QUERY
 // PLAN of the reachability probe itself, asserting index coverage rather
-// than assuming it (design note line 516-517, 999-1003).
+// than assuming it.
 // ============================================================
 
 /**
@@ -539,7 +538,7 @@ async function explainAcyclicityProbe(
 }
 
 // ============================================================
-// §13.4 Contention run (PostgreSQL only, real server — PGlite is
+// Contention run (PostgreSQL only, real server — PGlite is
 // single-connection and cannot overlap). Not run by this lane's SQLite
 // invocations; wired behind `--contention --backend=postgres`.
 // ============================================================
@@ -560,7 +559,7 @@ type ContentionResult = Readonly<{
 /**
  * One writer's loop for the duration of the run: append a fresh node onto
  * the END of its own private chain (so writers never contend on the SAME
- * two-node cycle — see D-7's intent, which prices FENCE HOLD TIME, not
+ * two-node cycle — the point is to price FENCE HOLD TIME, not
  * refusal handling), recording each insert's latency.
  */
 async function runContentionWriter(
@@ -609,7 +608,7 @@ async function sampleAdvisoryWaitFraction(
  * of `dependsOn` contends for the SAME per-graph advisory lock regardless of
  * which chain it appends to (`edgeWriteNeedsConstraintFence` fences the
  * whole graph, not a chain), so this measures exactly the fence-hold-time
- * question §13.4 asks: how much of it is the probe.
+ * question the contention run asks: how much of it is the probe.
  */
 async function runContentionLevel(
   edgeKind: "cardinalityOne" | "dependsOn",
@@ -632,7 +631,7 @@ async function runContentionLevel(
     // Each writer gets its own disjoint chain, seeded up front so the
     // measured loop is pure append cost, matching `benchChainAppend`. The
     // chains are sized so the relation's TOTAL population reaches
-    // §13.4's stated 10^5 edges before the timed contention window opens —
+    // the target 10^5 edges before the timed contention window opens —
     // an append is O(1) regardless of chain length in this design (the
     // walk from a fresh leaf finds no out-edges), so this sizing is about
     // matching the stated population, not stressing the probe itself.
@@ -713,7 +712,7 @@ async function main(argv: readonly string[]): Promise<void> {
   const sqliteStorage: SqliteStorage =
     argv.includes("--storage=file") ? "file" : "memory";
 
-  // §13.4: a separate mode from the latency lane above — 30s per writer
+  // A separate mode from the latency lane above — 30s per writer
   // count is far too slow to run inline with every invocation, and the
   // measurement only means anything on a real PostgreSQL server (PGlite
   // cannot overlap two writers).
@@ -759,7 +758,7 @@ async function main(argv: readonly string[]): Promise<void> {
   });
   console.log(`\nappended run to ${historyPath}`);
 
-  console.log("\n§7.6 index-coverage reading:");
+  console.log("\nIndex-coverage reading:");
   for (const size of SIZES) {
     await explainAcyclicityProbe(backendKind, size);
   }
@@ -768,7 +767,7 @@ async function main(argv: readonly string[]): Promise<void> {
     "\nD-7 ship criteria (read manually against the numbers above):" +
       '\n  - acyclic insert p95 within ~3x the cardinality:"one" insert p95 at 10^5 edges on the forest shape, on both engines.' +
       '\n  - 8-writer PostgreSQL contention run keeps aggregate throughput within ~30% of the cardinality:"one" run: run separately with `--backend=postgres --contention` (30s per writer count, not run as part of this invocation).' +
-      "\nFail either => the maintained ancestor set needs to be designed before D.2 ships. This lane does not decide it — the lead does, from PostgreSQL numbers.",
+      "\nFail either => the maintained ancestor set needs to be designed before acyclicity ships. This lane does not decide it; the PostgreSQL numbers do.",
   );
 }
 

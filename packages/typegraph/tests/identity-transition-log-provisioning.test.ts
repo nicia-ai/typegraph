@@ -205,7 +205,7 @@ describe("identity transition log provisioning", () => {
       expect(members).toHaveLength(2);
 
       // Whether enablement itself notes a `schema-transition` transition is
-      // G1R2-02's separate concern (tests/identity-transition-log.test.ts);
+      // a separate concern (tests/identity-transition-log.test.ts);
       // this test only pins that the relations exist and the write path
       // (exercised here by an ordinary post-enablement fold) does not throw.
       await enabledStore.nodes.Person.create(

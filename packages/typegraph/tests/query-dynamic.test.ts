@@ -231,7 +231,7 @@ describe("traverseDynamic + toKindSet", () => {
   });
 
   it("throws ConfigurationError (EMPTY_KIND_SET) on an empty kind array", async () => {
-    // MUTATION CHECK (Ed-r2-2): dropping this guard lets `compileKindFilter`
+    // MUTATION CHECK: dropping this guard lets `compileKindFilter`
     // turn the empty list into a bare `1 = 0`, so the query would build and
     // execute successfully, always returning zero rows, instead of refusing
     // the invalid traversal — verified and reverted.
@@ -261,7 +261,7 @@ describe("traverseDynamic + toKindSet", () => {
   });
 
   it("throws KindNotFoundError on an unregistered kind", async () => {
-    // MUTATION CHECK (Ed-r2-2): `toKindSet`, unlike `toDynamic`, ran no
+    // MUTATION CHECK: `toKindSet`, unlike `toDynamic`, ran no
     // `registry.hasNodeType` check before this fix — a typo'd kind here
     // compiled to a kind filter no row matches (a permanent, silent empty
     // result) instead of throwing — verified and reverted.
@@ -279,7 +279,7 @@ describe("traverseDynamic + toKindSet", () => {
   });
 
   it("throws EndpointError when a kind in the set is not a valid endpoint", async () => {
-    // MUTATION CHECK (Ed-r2-2): `toKindSet` ran no `#assertValidEndpoint`
+    // MUTATION CHECK: `toKindSet` ran no `#assertValidEndpoint`
     // check before this fix — `authoredBy.to = [Author]`, so naming "Paper"
     // here compiled and executed rather than refusing — verified and
     // reverted.

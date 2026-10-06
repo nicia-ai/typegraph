@@ -73,6 +73,20 @@ export function isCompositionPartSide(
  */
 export type CompositionExistence = "optional" | "required";
 
+/**
+ * The fields that realize a composition relation on an ontology relation.
+ * Every relation shape (declared, typed, named, serialized, extension) carries
+ * exactly these, so the contract is documented once here.
+ */
+export type CompositionRealization = Readonly<{
+  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
+  via?: string;
+  /** Which end of the edge is the part. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
+  /** Whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
+}>;
+
 /** Every value `existence` may state, in declaration order. */
 export const COMPOSITION_EXISTENCE_VALUES = [
   "optional",

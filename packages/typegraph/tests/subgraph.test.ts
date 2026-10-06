@@ -158,7 +158,7 @@ async function seedTestGraph(store: Store<TestGraph>): Promise<TestIds> {
 }
 
 // ============================================================
-// R8 — composition widens the subgraph result's edge-key type
+// Composition widens the subgraph result's edge-key type
 // ============================================================
 //
 // Type-only fixtures: `compositionStore` is never a real store and none of
@@ -879,7 +879,7 @@ describe("store.subgraph()", () => {
 
   // ── Type-level tests ────────────────────────────────────────
 
-  describe("R8 — composition widens the result's edge-key type", () => {
+  describe("composition widens the result's edge-key type", () => {
     it("keeps the declared edges list when composition is absent or false", () => {
       expectTypeOf<
         AdjacencyKeyOf<Awaited<ReturnType<typeof subgraphWithoutComposition>>>

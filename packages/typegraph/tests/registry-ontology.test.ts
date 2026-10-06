@@ -36,7 +36,7 @@ import { metaEdgesByName } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";
 
 /**
- * `sameAs` has no public factory any more (roadmap F removed it), and its
+ * `sameAs` has no public factory any more (it was removed), and its
  * meta-edge object is absent from the public `core` export too — a document
  * persisted before the removal that still names a `sameAs` relation must
  * keep loading and folding exactly like `equivalentTo`.

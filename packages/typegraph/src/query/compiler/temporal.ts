@@ -129,13 +129,11 @@ export type TemporalFilterOptions = Readonly<{
 }>;
 
 /**
- * The columns {@link compileTemporalFilter} references beyond
- * `valid_from`/`valid_to`/`deleted_at` when `recordedAsOf` is set. THE one
- * spelling of "which extra columns does a recorded-pinned temporal filter
- * read" — a narrowed column projection (e.g. the recursive compiler's
- * `<edgeAlias>_directed_edges` CTE) must build its column list against this
- * constant (surfaced per-AST via `TemporalFilterPass.recordedColumns`)
- * rather than re-deriving "is this read recorded-pinned" itself.
+ * The columns {@link compileTemporalFilter} reads beyond
+ * `valid_from`/`valid_to`/`deleted_at` when `recordedAsOf` is set. A narrowed
+ * column projection (e.g. the recursive compiler's `<edgeAlias>_directed_edges`
+ * CTE) builds its column list from this via `TemporalFilterPass.recordedColumns`
+ * rather than re-deriving whether the read is recorded-pinned.
  */
 export const RECORDED_TEMPORAL_COLUMNS = [
   "recorded_from",

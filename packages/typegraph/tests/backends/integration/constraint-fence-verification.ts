@@ -339,7 +339,7 @@ export function registerConstraintFenceVerificationIntegrationTests(
     });
     // MUTATION CHECK (verified): have `fenceDeclarations`
     // (`src/store/claims/verify.ts`) emit source refs only (drop the
-    // `edgeCardinalityAxisReferences` fold in favor of the pre-D.1
+    // `edgeCardinalityAxisReferences` fold in favor of the source-only
     // single-cardinality read). The target-side violation this test asserts
     // goes unreported and `targetViolations` reads `[]`.
 
@@ -685,7 +685,7 @@ export function registerConstraintFenceVerificationIntegrationTests(
       },
       30_000,
     );
-    // MUTATION CHECK (lane-A-load-bearing.md): reverting
+    // MUTATION CHECK: reverting
     // `buildMisassignedEdgeEndpointAudit` to render the admitted pairs as an
     // `OR`-chain of bound equalities (rather than a `VALUES`-joined
     // `NOT EXISTS`) throws `SqliteError: Expression tree is too large` on

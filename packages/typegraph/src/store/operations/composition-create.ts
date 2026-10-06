@@ -2,7 +2,7 @@
  * `existence: "required"`: a composition part that cannot exist
  * without a live whole.
  *
- * THE two owners this lane adds, in one module because both directions of
+ * THE two owners, in one module because both directions of
  * the same rule ("a required part always has a live whole") belong beside
  * each other:
  *
@@ -22,7 +22,7 @@
  * Neither function issues a claim: `edgeInsertClaims`
  * (`src/store/claims/composition-claims.ts`) remains the one owner of the
  * one-whole-per-part invariant's
- * "at most one whole" claim, unchanged by this lane.
+ * "at most one whole" claim, unchanged here.
  *
  * Alongside them, the DISPOSITION owner every attachment against an
  * already-existing row runs through:

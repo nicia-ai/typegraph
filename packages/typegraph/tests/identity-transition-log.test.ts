@@ -353,7 +353,7 @@ describe("identity transition log", () => {
   });
 
   it("checkpoints and restores buffered identity-transition notes exactly like every other touch", async () => {
-    // §2.5: `noteIdentityTransition` "buffers alongside `touched`, is included
+    // `noteIdentityTransition` "buffers alongside `touched`, is included
     // in `checkpoint()` / `restore()` exactly as `touched` is". The only
     // shipped rollback seam over a capture session is
     // `runRecordedTransactionSavepoint` (used today by the archival import's
@@ -425,7 +425,7 @@ describe("identity transition log", () => {
   });
 
   it("throws the sealed-session ConfigurationError for a note taken after flush", async () => {
-    // §2.5: `noteIdentityTransition` "throws the same already-sealed
+    // `noteIdentityTransition` "throws the same already-sealed
     // `ConfigurationError` after `flush`" — `noteIdentityTransition`
     // (`RecordedCaptureSession`) carries its own copy of that check (with
     // `{ entity: "identity-transition", graphId }` details), but
@@ -528,9 +528,8 @@ describe("identity transition log", () => {
     const afterPrune = await readTransitions(ctx);
     expect(afterPrune.length).toBe(0);
 
-    // The Lead's BINDING ruling (the design note's top-of-file "Lead
-    // rulings", which supersedes §3.5's original draft text further down the
-    // SAME document): "a prune does NOT advance the content revision (same
+    // The binding contract (it supersedes an earlier draft of the
+    // same design): "a prune does NOT advance the content revision (same
     // as rebuildIdentityClosure)." Pinned in the SAME direction as the
     // rebuild above — a prune that started advancing the revision would fail
     // here, exactly as a rebuild that started would fail above.
@@ -754,7 +753,7 @@ describe("identity transition log", () => {
   });
 
   it("notes a schema-transition cause when first enablement folds a pre-existing same-id pair", async () => {
-    // §2.3: `schema-transition` is `identitySchemaCommitPreflight`'s cause
+    // `schema-transition` is `identitySchemaCommitPreflight`'s cause
     // whenever the closure changed and NO node kind was dropped —
     // distinguishing it from `kind-drop`, the other cause the same preflight
     // can emit. First enablement on a database that already holds a same-id

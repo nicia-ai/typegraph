@@ -20,18 +20,10 @@ export type TemporalFilterPass = Readonly<{
    */
   currentInstant: SqlFragment;
   /**
-   * Column names, beyond the always-present `valid_from`/`valid_to`/
-   * `deleted_at`, that {@link forAlias}'s filter will reference for this AST
-   * — `recorded_from`/`recorded_to` when the read is recorded-pinned,
-   * otherwise empty. A caller that narrows an edge/node projection to avoid
-   * a wildcard select (rather than emitting `alias.*`) must include these so
-   * its column list stays correct if the recorded pin is ever added to or
-   * removed from this AST; deriving that answer here, instead of a second
-   * `ast.recordedAsOf !== undefined` check at the narrowing site, is what
-   * keeps the two decisions from drifting apart (see recursive.ts's
-   * `<edgeAlias>_directed_edges` CTE).
+   * {@link RECORDED_TEMPORAL_COLUMNS} when the read is recorded-pinned,
+   * otherwise empty: the extra columns {@link forAlias}'s filter references.
    */
-  recordedColumns: readonly string[];
+  recordedColumns: readonly (typeof RECORDED_TEMPORAL_COLUMNS)[number][];
 }>;
 
 /**
@@ -49,7 +41,7 @@ export function createTemporalFilterPass(
   recordedReadBinding?: RecordedReadBinding,
 ): TemporalFilterPass {
   const currentTimestamp = currentReadInstantFor(readInstant);
-  const recordedColumns: readonly string[] =
+  const recordedColumns: TemporalFilterPass["recordedColumns"] =
     ast.recordedAsOf === undefined ? [] : RECORDED_TEMPORAL_COLUMNS;
   return {
     forAlias(tableAlias?: string): SqlFragment {

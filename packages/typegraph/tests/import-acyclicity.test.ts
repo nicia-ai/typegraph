@@ -1,5 +1,5 @@
 /**
- * Item D.2's import wiring (§10.1): the validating-import path checks
+ * Import wiring for edge acyclicity: the validating-import path checks
  * acyclicity per row, sequentially, for an acyclic edge kind — never
  * batched, since the in-batch overlay that lets cardinality/endpoint checks
  * see earlier rows in the same slice cannot account for a recursive

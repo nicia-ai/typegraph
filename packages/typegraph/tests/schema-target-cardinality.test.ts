@@ -1,6 +1,6 @@
 /**
  * Schema serialization, hashing, introspection and diffing for
- * `targetCardinality` (issue #610, §6).
+ * `targetCardinality` (issue #610).
  */
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -74,7 +74,7 @@ describe("targetCardinality serialization", () => {
 
   it("loads a document with no targetCardinality key as many", () => {
     // A graph that never declares the option already serializes without the
-    // key (see above) — this IS the shape a pre-D.1 stored document has.
+    // key (see above) — this IS the shape a stored document from before target-side cardinality has.
     // Round-trip it through the same zod parse a database read goes
     // through — `.default("many")` is what resolves the absent key instead
     // of dropping the declaration silently.

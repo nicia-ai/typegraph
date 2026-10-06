@@ -11,7 +11,7 @@
  * kinds (siblings, disjoint trees) are FLAGGED — never silently collapsed — and
  * surfaced as a {@link DroppedItem}.
  *
- * `equivalentTo` is mutual subsumption (D1): the registry folds an equivalence
+ * `equivalentTo` is mutual subsumption: the registry folds an equivalence
  * class into `subClassAncestors`/`subClassDescendants` before its transitive
  * closure, so `registry.isAssignableTo` is already true both ways for two
  * equivalent kinds. That is what makes "most specific" a single predicate

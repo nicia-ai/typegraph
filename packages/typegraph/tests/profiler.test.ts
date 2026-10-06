@@ -820,7 +820,7 @@ describe("QueryProfiler", () => {
       const profiledStore = profiler.attachToStore(store);
 
       // "industry" is a Company-only field, not on the polymorphic
-      // Organization alias's own (parent) schema — C.1/C.2 guarantee only
+      // Organization alias's own (parent) schema — the typed-subsumption checks guarantee only
       // the PARENT's properties on a polymorphic alias, so this predicate
       // (deliberately probing a subclass-only field) needs the same
       // documented cast pattern graph-extension tests use for a property

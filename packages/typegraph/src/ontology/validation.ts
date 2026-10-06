@@ -1,6 +1,5 @@
 import {
-  type CompositionExistence,
-  type CompositionPartSide,
+  type CompositionRealization,
   isCompositionMetaEdge,
   normalizePartWhole,
   ontologyRelationIdentityKey,
@@ -28,13 +27,8 @@ export type NamedOntologyRelation = Readonly<{
   metaEdge: string;
   from: string;
   to: string;
-  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
-  via?: string;
-  /** R5's orientation. Meaningful only alongside `via`. */
-  partSide?: CompositionPartSide;
-  /** Item E.2. Meaningful only alongside `via`. */
-  existence?: CompositionExistence;
-}>;
+}> &
+  CompositionRealization;
 
 type OntologyValidationIssueCode =
   | "ONTOLOGY_CYCLE"
@@ -178,8 +172,8 @@ export function validateOntologyRelations(
 /**
  * A reflexive `partOf`/`hasPart` pair naming its realizing edge is a
  * meaningful declaration ("a Section may be part of another Section"): its
- * soundness is an instance-level property (the union acyclicity check, item
- * E-b), not a kind-level one. A same-kind pair with no `via` is still refused
+ * soundness is an instance-level property (the union acyclicity check),
+ * not a kind-level one. A same-kind pair with no `via` is still refused
  * below by `ONTOLOGY_COMPOSITION_VIA_REQUIRED`, so this only widens the
  * self-loop exemption for a relation that is otherwise well-formed.
  */
@@ -361,7 +355,7 @@ function detectMultipleInversePartners(
 /**
  * Refuses an equivalence class that is not a set of node kinds.
  *
- * D1 makes `equivalentTo` MUTUAL SUBSUMPTION between registered kinds, and
+ * `equivalentTo` is MUTUAL SUBSUMPTION between registered kinds, and
  * subsumption is a node-kind relation: a node kind and an edge kind cannot
  * subsume each other, and two edge kinds have no defined substitution
  * semantics yet. The left parameter is widened only so an EDGE kind can be
@@ -462,7 +456,7 @@ function recordInversePartner(
  * required exactly on `partOf`/`hasPart` and forbidden everywhere else, and
  * `partSide` is meaningful only alongside `via`.
  *
- * This is what delivers R3: a persisted `partOf`/`hasPart` relation missing
+ * This ensures a persisted `partOf`/`hasPart` relation missing
  * `via` is refused on load, through the same `validateOntologyRelations`
  * path the compile-time builder and the extension builder already share.
  * The registration-dependent checks (orientation, cardinality, exactness,

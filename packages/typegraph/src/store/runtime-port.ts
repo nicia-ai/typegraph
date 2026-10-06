@@ -94,7 +94,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   captureEnabled?: boolean;
   /**
    * @internal The `uniqueSidecarBatch` bundle's verdict, resolved once at
-   * store construction against `backend` (ruling B8 spec item 2) and exposed
+   * store construction against `backend` and exposed
    * here so a Store-owned view (provenance's fact close/reopen) can build a
    * {@link file://./claims/node-claims.ts NodeClaimContext} without re-minting
    * a second verdict for the same backend — the same reason `backend` itself
@@ -103,12 +103,9 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * Optional at this boundary, required after resolution — the same pattern
    * `CompileQueryOptions.recursiveTraversal` uses: the one real producer
    * (`store.ts`'s constructor) always populates it, and the one real
-   * consumer (`provenance/index.ts`) asserts it with `requireDefined`. This
-   * shim predates the ruling that `StoreRuntime` is an `@internal`,
-   * symbol-keyed port no external consumer can name; later members are added
-   * as plain required members, and the API-surface checker's findings for
-   * them are recorded in `etc/api-surface-exceptions.json` rather than
-   * shimmed. Kept as is so its consumer's assertion stays truthful.
+   * consumer (`provenance/index.ts`) asserts it with `requireDefined`. The
+   * member stays optional at this boundary so the consumer's `requireDefined`
+   * assertion stays truthful.
    */
   uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
   /**
@@ -416,7 +413,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
-   * Item E.2: detaches a node import purges AFTER `foldImportedIdentityNodes`
+   * Detaches a node import purges AFTER `foldImportedIdentityNodes`
    * already folded it into identity for this attempt's batch — see
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
    */

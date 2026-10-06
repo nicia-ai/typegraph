@@ -10,8 +10,16 @@
  *   descendant (`registry.expandSubClasses`). The store-wide default:
  *   a supertype query is polymorphic unless narrowed.
  * - `"narrower"` — the kind and every `broader`/`narrower` descendant
- *   (`registry.expandNarrower`, C.3). No schema relationship is claimed, so
+ *   (`registry.expandNarrower`). No schema relationship is claimed, so
  *   the alias type is untyped.
+ *
+ * The axis-unknown overload of `from()` / `to()` / `fromDynamic()` /
+ * `toDynamic()` covers two call shapes with one rule: a `"narrower"`
+ * expansion (no schema relationship is claimed, so no per-kind type can be
+ * promised) and a forwarded options bag whose axis is not one literal — the
+ * option type itself, or a wrapper's `{ expansion?: "exact" }`. Neither pins
+ * the axis at compile time, so the alias takes the conservative untyped
+ * form; state a literal axis at the call site to keep the precise alias type.
  *
  * `from()` / `to()` / `fromDynamic()` / `toDynamic()` all resolve their
  * expansion through this one function and nothing else re-derives it.

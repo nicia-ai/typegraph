@@ -65,7 +65,7 @@ describe("target-only-constrained edge kind never takes a claim-free fast path",
   // (`src/store/operations/edge-operations.ts`), replace
   // `const declarations: EdgeCardinalityDeclarations = registration;` with
   // `{ cardinality: registration.cardinality ?? "many" }` (i.e. blind to
-  // `targetCardinality`, the pre-D.1 shape). `claimStatements(statements)
+  // `targetCardinality`, the source-only shape). `claimStatements(statements)
   // .length` then drops to 0 and the first assertion above fails — this one
   // mutation also fails the next two tests, since all three share this
   // construction site.

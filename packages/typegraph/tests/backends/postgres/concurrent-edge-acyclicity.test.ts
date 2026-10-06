@@ -1,5 +1,5 @@
 /**
- * Item D.2 (`acyclic: true`) under GENUINE contention on a real PostgreSQL
+ * Edge acyclicity (`acyclic: true`) under GENUINE contention on a real PostgreSQL
  * server: two independent connections each try to close the SAME two-node
  * cycle from opposite ends at once.
  *
@@ -20,8 +20,8 @@
  * the per-graph lock is taken, before the reachability probe, for an acyclic
  * edge create. It cannot pin the OUTCOME: PGlite is single-connection and
  * serial, so two writers can never actually overlap there. This suite is the
- * other half — design §14.2 calls this "the test the whole design exists
- * for". It runs two independent connections against one database and
+ * other half, and the test the whole design exists
+ * for. It runs two independent connections against one database and
  * asserts only OUTCOMES — how many callers succeeded, and that the surviving
  * graph has no cycle — never timing or ordering, because which of the two
  * wins the lock is genuinely arbitrary and asserting on it would make the
@@ -36,7 +36,7 @@
  * waits indefinitely, so a lock-order regression would otherwise stall the
  * run rather than report; the timeout turns a hang into a failure.
  *
- * ## §14.2 test 17 — a genuine engine cutoff mid-probe
+ * ## A genuine engine cutoff mid-probe
  *
  * The in-process suite (`tests/edge-acyclicity.test.ts`) proves
  * `EdgeAcyclicityIndeterminateError` is reported when the backend's
@@ -52,7 +52,7 @@
  * was written; `isStatementCutShortError` classifying `57014` is what
  * makes the write path report indeterminate rather than "no cycle" or a
  * raw driver error. Skipped here (no `POSTGRES_URL` in this environment);
- * the lead's Postgres lane exercises it.
+ * a PostgreSQL run exercises it.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -84,7 +84,7 @@ const CONTENTION_TIMEOUT_MS = 20_000;
 
 const Task = defineNode("Task", { schema: z.object({ name: z.string() }) });
 
-/** `cardinality: "many", acyclic: true`: the common D.2 case. */
+/** `cardinality: "many", acyclic: true`: the common acyclic case. */
 const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
 
 const graph = defineGraph({
@@ -266,7 +266,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
-      "§14.2 test 17: a statement_timeout cutoff mid-probe reports EdgeAcyclicityIndeterminateError and writes nothing",
+      "a statement_timeout cutoff mid-probe reports EdgeAcyclicityIndeterminateError and writes nothing",
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();

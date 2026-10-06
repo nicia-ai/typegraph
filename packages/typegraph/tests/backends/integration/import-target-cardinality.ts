@@ -1,6 +1,6 @@
 /**
  * Target-side edge cardinality during `importGraph` / `importGraphStream`
- * (issue #610, acceptance criterion 5, import half).
+ * (issue #610, import half).
  *
  * `registerPendingEdgeForCardinality` (`src/store/operations/edge-batch-validation.ts`)
  * is the pending-batch overlay every axis import reads: a same-chunk pair
@@ -8,8 +8,7 @@
  * conflict is, without waiting for a flush round trip.
  *
  * Every case states, in its own comment, the mutation that must make it
- * fail; the revert/mutation checks actually performed are recorded in the
- * scratchpad `lane-D1-load-bearing.md` note.
+ * fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

@@ -1,5 +1,5 @@
 /**
- * The composition delete cascade (item E-c, plan §4.2-4.4).
+ * The composition delete cascade.
  *
  * Two layers of coverage:
  *
@@ -60,7 +60,7 @@ import { createTestBackend, matchingObject } from "./test-utils";
 const emptySchema = z.object({});
 
 // ============================================================
-// Fixture: Podcast -> Episode -> Segment (the E-a registry fixture)
+// Fixture: Podcast -> Episode -> Segment (the composition registry fixture)
 // ============================================================
 
 const Podcast = defineNode("Podcast", {
@@ -94,7 +94,7 @@ function buildPodcastGraph(id: string) {
       Episode: {
         type: Episode,
         // `disconnect`, not the default `restrict`: an Episode that a part
-        // once reparented AWAY from (§ oneActive) still carries that ENDED
+        // once reparented AWAY from (`oneActive`) still carries that ENDED
         // segmentOf row (`findEdgesConnectedTo` returns ended-but-undeleted
         // edges, valid_to notwithstanding) — a plain `restrict` Episode would
         // therefore refuse to delete even once no LIVE part remains, which is
@@ -635,7 +635,7 @@ describe("composition cascade — delete", () => {
 
     // MUTATION: drop the `!ctx.registry.isCompositionEdge(edge.kind)` filter
     // from `enforceNodeDeleteBehavior`'s restrict arm and this throws
-    // `RestrictedDeleteError` instead of succeeding — the ruling is that a
+    // `RestrictedDeleteError` instead of succeeding — a
     // part may always be deleted out of its whole.
     await store.nodes.RestrictEpisode.delete(episode.id);
 
@@ -777,7 +777,7 @@ describe("composition cascade — delete", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("Q2: resurrecting a soft-deleted whole restores the whole ALONE", async () => {
+  it("resurrecting a soft-deleted whole restores the whole ALONE", async () => {
     const graph = buildPodcastGraph("cascade-resurrect-whole-alone");
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -940,7 +940,8 @@ describe("composition cascade — delete", () => {
 //
 // Every fixture above declares `partOf`, whose realizing edge always runs
 // PART -> WHOLE, so `compositionPartSide` infers `"from"` in every case —
-// R5's "via may run in either orientation" half is exercised by nothing.
+// the "via may run in either orientation" half of the contract is
+// exercised by nothing.
 // This fixture uses `hasPart`, whose realizing edge runs WHOLE -> PART, to
 // infer `partSide: "to"` instead, and nests a `partOf`-oriented (`"from"`)
 // grandchild under it so the closure walk crosses BOTH orientations in one
@@ -1107,7 +1108,7 @@ describe("composition cascade — to-oriented (hasPart) and mixed-orientation cl
  * A genuinely concurrent two-connection race against the SAME PostgreSQL
  * fence (two overlapping `pg_advisory_xact_lock` acquisitions on real
  * Postgres, not PGlite's single embedded connection) is a documented case
- * for the lead's Postgres lane: open a delete transaction, pause it
+ * for a real-PostgreSQL run: open a delete transaction, pause it
  * immediately after `planCompositionCascade` returns (before the cascade's
  * row work commits), start a concurrent attach transaction from a SECOND
  * connection, and assert it blocks on `typegraph:recorded-graph-write`

@@ -108,14 +108,14 @@ const knows = defineEdge("knows", {
   }),
 });
 
-/** Item D.2's primary fixture: `cardinality: "many"` with `acyclic: true`. */
+/** Primary acyclicity fixture: `cardinality: "many"` with `acyclic: true`. */
 const dependsOn = defineEdge("dependsOn", {
   schema: z.object({}),
 });
 
 /**
  * A second, independent acyclic relation over the same node kind — pins
- * D.2's per-kind scope: `a --dependsOn--> b` and `b --blockedBy--> a` are
+ * The per-kind scope of acyclicity: `a --dependsOn--> b` and `b --blockedBy--> a` are
  * both accepted because neither relation alone has a cycle.
  */
 const blockedBy = defineEdge("blockedBy", {

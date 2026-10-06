@@ -45,7 +45,7 @@ function subClassRegistry(
 
 /**
  * Builds a registry from a mix of `subClassOf` and `equivalentTo` relations —
- * D1 folds both into the SAME subsumption closure, so the axis determinism
+ * The registry folds both into the SAME subsumption closure, so the axis determinism
  * property must hold whether a component is connected by subclassing,
  * equivalence, or both.
  */
@@ -131,7 +131,7 @@ const equivalenceEdgesArb = fc
  * Every kind reachable from `kind` through subclass edges OR equivalence
  * edges, in either direction — the same "one connected component, one axis"
  * property must hold regardless of which meta-edge joined two kinds, since
- * the registry folds both into one subsumption closure (D1).
+ * the registry folds both into one subsumption closure.
  */
 function connectedKinds(
   kind: string,
@@ -196,7 +196,7 @@ const relationWithIriArb = fc
  * separate, pre-existing gap in `rootAncestor` (an IRI with an empty ancestor
  * set trivially passes its "maximal" check and can itself become the chosen
  * root, whose `expandSubClasses` then never contains the base kind) — already
- * present on this branch before D1, unrelated to the equivalence-routing
+ * present before the equivalence fold, unrelated to the equivalence-routing
  * defect this property pins, and out of scope here.
  */
 const ontologyWithIriArb = fc
@@ -235,7 +235,7 @@ function registryFromRawRelations(
 }
 
 describe("uniqueness claim axis determinism", () => {
-  // Regression for a defect found reviewing D1: a `subClassOf` endpoint that
+  // Regression for a defect found reviewing the equivalence fold: a `subClassOf` endpoint that
   // is an external IRI belonging to an equivalence class made `rootAncestor`
   // pick a "root" whose own `expandSubClasses` did not contain the kind that
   // asked — `getKindsForUniquenessCheck` returned a probe set missing the

@@ -1,8 +1,7 @@
 /**
- * Cross-backend code-point ordering for the equivalence-is-subsumption fold
- * (D1).
+ * Cross-backend code-point ordering for the equivalence-is-subsumption fold.
  *
- * Every kind-name ordering item B owns — the subclass-component sort behind
+ * Every kind-name ordering — the subclass-component sort behind
  * the `kindWithSubClasses` claim axis chief among them — moved from
  * `compareStrings` (UTF-16 code-unit order) to `compareCodePoints`
  * (code-point order, matching SQLite's `BINARY` and Postgres's `C`
@@ -76,7 +75,7 @@ const codePointOrderingGraph = defineGraph({
 export function registerOntologyEquivalenceIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe("Ontology equivalence — code-point ordering (D1)", () => {
+  describe("Ontology equivalence — code-point ordering", () => {
     it("orders the astral/BMP subclass component by code point, not code unit", async () => {
       const store = await context.createStore(codePointOrderingGraph);
       expect(store.registry.getSubClassComponent(ASTRAL_KIND)).toEqual([

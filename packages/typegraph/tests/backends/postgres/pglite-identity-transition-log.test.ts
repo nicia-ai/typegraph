@@ -1,5 +1,5 @@
 /**
- * G1-05: `readIdentityTransitions` must decode `recorded_at` / `valid_at`
+ * `readIdentityTransitions` must decode `recorded_at` / `valid_at`
  * through `toCanonicalIdentityTimestamp` (row-codec.ts) — the identity
  * module's one owner of "how is a raw driver timestamp value turned into a
  * canonical ISO string" — rather than a private, stricter
@@ -9,9 +9,9 @@
  * decoder that only accepts a string throws on that value.
  *
  * PGlite's own driver returns text rather than a `Date` for a timestamp
- * column, so this lane cannot exercise the `Date`-typed branch a real `pg`
+ * column, so this suite cannot exercise the `Date`-typed branch a real `pg`
  * connection would hit (see `toCanonicalIdentityTimestamp`'s `instanceof
- * Date` branch) — the lane note the finding itself calls out. It still
+ * Date` branch). It still
  * exercises the PostgreSQL DDL/dialect end to end and pins that the decode
  * path produces genuinely canonical ISO output, not merely "does not throw".
  */

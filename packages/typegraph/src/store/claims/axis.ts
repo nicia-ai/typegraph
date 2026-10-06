@@ -62,7 +62,7 @@ export const DISJOINT_CONSTRAINT_NAME = `${AXIS_SEPARATOR}disjointWith`;
  * compositionAcyclicRelation}).
  *
  * ONE string for the whole graph, not one per edge kind and not one per
- * population: R4's invariant is relation-wide, so two composition edges out
+ * population: the single-whole invariant is relation-wide, so two composition edges out
  * of one part must collide on one row regardless of which `partOf`/`hasPart`
  * pair or which realizing edge kind wrote it. Prefixed with the reserved
  * separator so no kind name can spell it (enforced the same way

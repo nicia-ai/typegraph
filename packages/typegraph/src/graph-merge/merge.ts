@@ -2972,7 +2972,7 @@ function tryNormalize<G extends GraphDef>(
   } catch (error) {
     // A refusal the normalizer already spelled as a typed invalid-option error
     // travels unchanged: re-wrapping it would bury the `details.option` the
-    // caller needs to know WHICH option was refused (§3.3). Anything else —
+    // caller needs to know WHICH option was refused. Anything else —
     // a zod parse failure, a bare validation throw — becomes the generic
     // invalid-options refusal with the original attached as its cause.
     return err(
@@ -3806,12 +3806,10 @@ function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
 }
 
 /**
- * Builds the typed plan-time conflict (ruling D-4) from the first violated
- * relation. D.2 itself only ever declares standalone singleton relations, so
- * more than one violated relation in a single plan is an item-E-composition
- * edge case rather than the common shape; naming every OTHER violated
- * relation in `details.additionalRelations` keeps that case debuggable
- * without complicating the primary message.
+ * Builds the typed plan-time conflict from the first violated relation. A
+ * plan can violate several relations at once (for example when composition
+ * relations overlap), so every other violated relation is named in
+ * `details.additionalRelations` without complicating the primary message.
  */
 function acyclicityMergeConflict(
   violations: readonly EdgeAcyclicityViolation[],
@@ -3852,7 +3850,7 @@ function acyclicityMergeConflict(
 }
 
 /**
- * D-4 (plan time): does the resolved plan's projected edge writes — layered
+ * Plan time: does the resolved plan's projected edge writes — layered
  * onto the target's CURRENT live edges — close a cycle in a declared-acyclic
  * relation. Runs for every commit mode (`merge()`'s direct commit and
  * `planMerge()`'s reviewable artifact both flow through `resolveMerge`,
@@ -4203,7 +4201,7 @@ async function resolveMerge<G extends GraphDef, Output>(
       );
     }
 
-    // D-4, plan time: does the resolved plan's edge writes — after
+    // Plan time: does the resolved plan's edge writes — after
     // canonicalization and repointing — close a cycle in a declared-acyclic
     // relation. Runs for BOTH commit modes, exactly like the one-id-one-truth
     // check above: a typed conflict here, before either callback runs, is

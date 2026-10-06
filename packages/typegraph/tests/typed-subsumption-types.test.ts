@@ -1,13 +1,12 @@
 /**
- * Compile-time type tests for C.1 (typed subsumption).
+ * Compile-time type tests for typed subsumption.
  *
  * Tests marked with @ts-expect-error verify that an incompatible
  * `subClassOf` / `equivalentTo` pair is refused AT COMPILE TIME,
  * with the failure carrier (`StructuralSubtypeMismatch`) naming the
  * offending fields. Load-bearing: see
  * tests/property/typed-subsumption-agreement.test.ts for the runtime-side
- * agreement pin, and lane-C13-load-bearing.md for the revert/mutation check
- * performed on this file.
+ * agreement pin.
  */
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
@@ -89,7 +88,7 @@ function first<T>(items: readonly T[]): T {
   return item;
 }
 
-describe("C.1 — subClassOf structural contract", () => {
+describe("subClassOf structural contract", () => {
   it("compiles when the child's schema extends the parent's", () => {
     const relation = subClassOf(Podcast, Media);
     expect(relation.metaEdge.name).toBe("subClassOf");
@@ -109,7 +108,7 @@ describe("C.1 — subClassOf structural contract", () => {
     subClassOf(Person, Employee);
   });
 
-  it("compiles for an empty-schema parent (C13-R1-10: the 4bf9b4f9 false-positive fix has no regression pin)", () => {
+  it("compiles for an empty-schema parent (a regression pin for the earlier false-positive fix)", () => {
     // A parent with an EMPTY schema (`z.object({})`) has `keyof {} = never`,
     // which is the exact inference trap `SubClassOfCheck`'s docblock
     // documents (`src/ontology/types.ts`): the intersection-parameter form
@@ -136,7 +135,7 @@ describe("C.1 — subClassOf structural contract", () => {
 
   it("accepts width subtyping — the child may add properties", () => {
     // Podcast adds rssUrl on top of Media's title; already exercised above,
-    // pinned again here for the width-subtyping-by-name test in §5.1.
+    // pinned again here for the width-subtyping-by-name test.
     const relation = subClassOf(Podcast, Media);
     expect(relation.to).toBe(Media);
   });
@@ -148,7 +147,7 @@ describe("C.1 — subClassOf structural contract", () => {
   });
 });
 
-describe("C.1 — equivalentTo mutual structural contract", () => {
+describe("equivalentTo mutual structural contract", () => {
   it("compiles both directions for an identical pair", () => {
     const Alpha = defineNode("Alpha", { schema: z.object({ x: z.string() }) });
     const Beta = defineNode("Beta", { schema: z.object({ x: z.string() }) });
@@ -174,7 +173,7 @@ describe("C.1 — equivalentTo mutual structural contract", () => {
   });
 });
 
-describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
+describe("alias typing under the polymorphic axis", () => {
   const MediaKind = defineNode("MediaAliasTest", {
     schema: z.object({ title: z.string() }),
   });
@@ -226,7 +225,7 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     expectTypeOf<Row["kind"]>().toEqualTypeOf<"MediaAliasTest">();
   });
 
-  it("widens kind to string when the ontology tuple is annotated as bare OntologyRelation[] (C13-R2-01)", () => {
+  it("widens kind to string when the ontology tuple is annotated as bare OntologyRelation[]", () => {
     // The changeset's Breaking-changes bullet blesses this exact pattern:
     // "Code that annotates a relation's result as `OntologyRelation` still
     // compiles unchanged." Annotating the array itself erases every element
@@ -274,8 +273,7 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
 
   it("refuses passing a polymorphic alias's row.id to the exact-kind collection's update()", () => {
     // A polymorphic-affected alias's `id` is widened so an exact `NodeId`
-    // is assignable TO it but not FROM it (§1.4 of the typed-subsumption
-    // plan) — the row may be a subclass, so `store.nodes.<K>.update(row.id)`
+    // is assignable TO it but not FROM it — the row may be a subclass, so `store.nodes.<K>.update(row.id)`
     // must not typecheck against the exact collection.
     const query = createQueryBuilder<typeof affectedGraph>(
       affectedGraph.id,
@@ -645,7 +643,7 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
   });
 });
 
-describe("R2 — typed relations and conservative widening", () => {
+describe("typed relations and conservative widening", () => {
   const IriMedia = defineNode("IriMedia", {
     schema: z.object({ title: z.string() }),
   });

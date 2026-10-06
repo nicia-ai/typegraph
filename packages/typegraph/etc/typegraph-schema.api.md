@@ -218,6 +218,13 @@ type CompositionPair = Readonly<{
 type CompositionPartSide = "from" | "to";
 
 // @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
 type CompositionRelation = Readonly<{
     pairs: readonly CompositionPair[];
     edgeKinds: ReadonlySet<string>;
@@ -929,10 +936,7 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type ExtensionPropertyModifiers = Readonly<{
@@ -2192,10 +2196,7 @@ type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 export type OntologySnapshot = Pick<SerializedSchema, "ontology" | "nodes" | "edges">;
@@ -2581,10 +2582,7 @@ export type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type SerializedPredicate = Readonly<{

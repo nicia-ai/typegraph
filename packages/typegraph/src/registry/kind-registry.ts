@@ -204,7 +204,7 @@ export class KindRegistry {
   readonly hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
 
   /**
-   * THE composition relation (item E): every declared `partOf`/`hasPart`
+   * THE composition relation: every declared `partOf`/`hasPart`
    * pair, its realizing edge, its orientation, and its whole-side
    * population. Defaults to empty so the many `new KindRegistry(...)` call
    * sites that predate composition (chiefly `tests/property/**`) keep
@@ -459,10 +459,10 @@ export class KindRegistry {
     return parts ? [...parts] : [];
   }
 
-  // === Composition Relation (item E) ===
+  // === Composition Relation ===
   //
   // `getParts`/`getWholes` above keep their declaration-level closure
-  // semantics unchanged (§2.8 of the composition design); they are
+  // semantics unchanged; they are
   // meaningful here because `via` is now required on every `partOf`/
   // `hasPart` relation, so every declared pair they close over is itself a
   // validated composition pair. The readers below are the ONLY way any
@@ -511,7 +511,7 @@ export class KindRegistry {
    * of the kind a `partOf`/`hasPart` was written against — is resolved onto
    * the composition relation's declared vocabulary; every reader below routes
    * through it so a subclass is never visible to one reader and invisible to
-   * another (E-a-r2-1). Edge-endpoint validation already accepts such a
+   * another. Edge-endpoint validation already accepts such a
    * subclass through `isAssignableToAny`, so these rows really do exist.
    */
   private compositionDeclaredKindsAssignableFrom(
@@ -615,7 +615,7 @@ export class KindRegistry {
    * `CompositionRelation.pairs` already carries).
    *
    * Deliberately plural. Two realizing edges may hold the same
-   * (part, whole) pair (E-a-2), and this reader used to answer with the
+   * (part, whole) pair, and this reader used to answer with the
    * code-point-FIRST one alone, which silently picked an attachment's
    * realizing edge for the caller. The caller now names it (`partOf`'s
    * `via`), and ambiguity is refused rather than resolved by sort order —
@@ -697,10 +697,10 @@ export class KindRegistry {
   }
 
   /**
-   * Item E.2. THE answer to "must a node of this kind have a whole" — total
+   * THE answer to "must a node of this kind have a whole" — total
    * over every concrete node kind, because `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED`
    * refuses any graph where that would be ambiguous. Returns `"optional"` for
-   * a kind that declares no part side at all. Every E.2 decision reads this
+   * a kind that declares no part side at all. Every existence decision reads this
    * one function.
    */
   compositionExistence(concretePartKind: string): CompositionExistence {
@@ -872,7 +872,7 @@ type CollectedOntologyRelations = Readonly<{
  * and the registry share this exact input so a declaration validation accepts
  * can never expand differently at runtime.
  *
- * D1 folds every `equivalentTo` pair into `subClassAncestors`/
+ * Every `equivalentTo` pair is folded into `subClassAncestors`/
  * `subClassDescendants` before this closure is built (see
  * {@link computeSubsumptionAndEquivalenceClosures}), so every equivalence-set
  * member is ALREADY reachable through `subClassDescendants` alone —
@@ -980,7 +980,7 @@ function collectOntologyRelations(
  * class's LOCAL (non-IRI) members. A kind outside every equivalence class is
  * absent (callers fall back to the kind itself).
  *
- * D1 folds `equivalentTo` into mutual subsumption by collapsing each class to
+ * `equivalentTo` is folded into mutual subsumption by collapsing each class to
  * ONE node before the transitive closure runs ({@link
  * computeSubsumptionAndEquivalenceClosures}), rather than by spelling out
  * every ordered pair of distinct members as a direct edge: a class of N
@@ -1008,7 +1008,7 @@ function collectOntologyRelations(
  * child), because that side walks OUTWARD from a real kind, but never a KEY
  * on the descendant side, because nothing collapses to look IT up. That made
  * `subClassAncestors`/`subClassDescendants` stop being exact inverses for
- * exactly the shape D1 exists to unify — an equivalence class routed through
+ * exactly the shape the fold exists to unify — an equivalence class routed through
  * an IRI that also terminates a `subClassOf` edge.
  */
 function computeEquivalenceRepresentatives(
@@ -1562,7 +1562,7 @@ function computeDisjointPairs(
  * are excluded — they are inert references, not local kinds that participate
  * in identity folding.
  *
- * D1 folds `equivalentTo` into mutual subsumption before this closure is
+ * `equivalentTo` is folded into mutual subsumption before this closure is
  * built ({@link computeSubsumptionAndEquivalenceClosures}), so an
  * equivalence-set member is
  * ALREADY a subclass descendant — walking `equivalenceSets` here too would be

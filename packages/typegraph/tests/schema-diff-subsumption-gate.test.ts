@@ -1,5 +1,5 @@
 /**
- * C.2/R2 gap fix: `computeSchemaDiff` reports an incompatible
+ * Gap fix: `computeSchemaDiff` reports an incompatible
  * `subClassOf`/`equivalentTo` hierarchy even when the diff touches NO
  * relation at all — only a node kind's PROPERTY schema, on a kind that
  * already participates in an existing hierarchy.

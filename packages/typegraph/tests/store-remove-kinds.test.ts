@@ -258,7 +258,7 @@ describe("Store.removeKinds — schema commit", () => {
     ).toBeUndefined();
   });
 
-  it("cascade-removes an ontology relation whose `via` edge is removed (E-a-r2-2)", async () => {
+  it("cascade-removes an ontology relation whose `via` edge is removed", async () => {
     // Section is compile-time; parentSection and the partOf relation naming
     // it as `via` are both added at runtime through evolve(). Removing the
     // edge alone must not leave the relation behind with a dangling `via` —
@@ -299,7 +299,7 @@ describe("Store.removeKinds — schema commit", () => {
     ).toBeUndefined();
   });
 
-  it("rejects removing a graph-extension edge referenced by a compile-time composition relation's `via` (E-a-r2-2)", () => {
+  it("rejects removing a graph-extension edge referenced by a compile-time composition relation's `via`", () => {
     // A compile-time `partOf` can name an edge kind as `via` before that
     // edge kind is ever registered — the edge is only added later, as a
     // graph-extension edge, by `store.evolve()`. `planRemovals` must treat

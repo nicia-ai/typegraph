@@ -755,32 +755,9 @@ function compileRecursiveCte(
   const directJoinKindField = direction === "out" ? "from_kind" : "to_kind";
   const directTargetKindField = direction === "out" ? "to_kind" : "from_kind";
 
-  /**
-   * Normalizes the direct and inverse edge readings into ONE relation —
-   * `directedEdgesCteName` — oriented uniformly as `tg_source_*` /
-   * `tg_target_*`, computed once, before recursion starts. This is what
-   * lets the merged recursive term below join `recursive_cte` exactly
-   * ONCE: standard SQL (and PostgreSQL in particular) refuses a recursive
-   * term whose self-reference appears more than once, even split across a
-   * `UNION ALL` of two otherwise-independent branches — PostgreSQL raises
-   * "recursive reference to query \"recursive_cte\" must not appear within
-   * its non-recursive term" for this shape. SQLite's recursive-CTE
-   * implementation is looser and would have accepted two self-joining
-   * branches, but a mechanism that has to behave identically on both
-   * backends is not sound if only one dialect can run it.
-   *
-   * A single JOIN also makes the old per-branch duplicate guard structurally
-   * unnecessary at the JOIN level: two UNIONed self-joins could each match
-   * the same self-loop edge and double-count it, but one JOIN matches an
-   * edge row at most once no matter how many OR-arms it would have
-   * satisfied. The guard still matters one level down, inside this CTE: an
-   * edge kind present in BOTH `directEdgeKinds` and `inverseEdgeKinds`
-   * (the ordinary `direction: "both"` case on one symmetric kind, never
-   * composition's) is walked both ways deliberately for a normal edge, but
-   * a genuine self-loop of that kind would still produce two rows here —
-   * one from each arm — that resolve to the identical (source, target)
-   * pair, so the guard drops the inverse arm's copy.
-   */
+  // PostgreSQL allows one recursive reference per recursive term, so both
+  // orientations are normalized into this single CTE before recursion starts.
+  const mixesOrientations = inverseEdgeKinds.length > 0;
   const directedEdgesCteName = `${traversal.edgeAlias}_directed_edges`;
 
   function compileRecursiveDirectedEdgesCte(): SqlFragment {
@@ -789,6 +766,8 @@ function compileRecursiveCte(
     const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
     const inverseTargetKindField =
       direction === "out" ? "from_kind" : "to_kind";
+    // A self-loop of a kind in both lists would yield two identical rows; the
+    // guard drops the inverse arm's copy.
     const duplicateGuard = compileInverseTraversalDuplicateGuard(
       directEdgeKinds,
       inverseEdgeKinds,
@@ -871,16 +850,8 @@ function compileRecursiveCte(
   }
 
   const recursiveBranchSql =
-    inverseEdgeKinds.length === 0 ?
+    mixesOrientations ?
       compileRecursiveBranch({
-        joinField: directJoinField,
-        targetField: directTargetField,
-        joinKindField: directJoinKindField,
-        targetKindField: directTargetKindField,
-        edgeKinds: directEdgeKinds,
-        pathDirection: sql`${qualifiedPathDirection(directJoinField)}`,
-      })
-    : compileRecursiveBranch({
         joinField: "tg_source_id",
         targetField: "tg_target_id",
         joinKindField: "tg_source_kind",
@@ -892,6 +863,14 @@ function compileRecursiveCte(
         edgeKinds: [...new Set([...directEdgeKinds, ...inverseEdgeKinds])],
         pathDirection: sql.raw(`e.${QUALIFIED_PATH_DIRECTION_COLUMN}`),
         edgeSource: sql.raw(directedEdgesCteName),
+      })
+    : compileRecursiveBranch({
+        joinField: directJoinField,
+        targetField: directTargetField,
+        joinKindField: directJoinKindField,
+        targetKindField: directTargetKindField,
+        edgeKinds: directEdgeKinds,
+        pathDirection: sql`${qualifiedPathDirection(directJoinField)}`,
       });
   const baseSelectColumns = [
     ...startColumnsFromBase,
@@ -927,9 +906,9 @@ function compileRecursiveCte(
         ${recursiveBranchSql}
       )
     `,
-    ...(inverseEdgeKinds.length === 0 ?
-      {}
-    : { precedingCte: compileRecursiveDirectedEdgesCte() }),
+    ...(mixesOrientations ?
+      { precedingCte: compileRecursiveDirectedEdgesCte() }
+    : {}),
   };
 }
 

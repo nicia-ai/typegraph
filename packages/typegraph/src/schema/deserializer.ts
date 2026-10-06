@@ -182,7 +182,7 @@ export function buildRegistryFromSerializedSchema(
       isEdgeKind: (name) => hasOwnKey(schema.edges, name),
     },
     // The persisted document's own projected property schema per node kind
-    // — the C.2 structural-subsumption check's schema source for a
+    // — the structural-subsumption check's schema source for a
     // deserialized ontology (`src/registry/validate-structural-subsumption.ts`).
     nodePropertySchemas: (kind) => {
       const nodeDef =

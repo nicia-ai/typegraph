@@ -280,7 +280,7 @@ function axisOf(
  * {@link ClaimValueSource} so the compiler, not a comment, is what proves this
  * fold reads no other field.
  */
-export type EndpointValueSource = Pick<
+type EndpointValueSource = Pick<
   ClaimValueSource,
   "fromKind" | "fromId" | "toKind" | "toId"
 >;

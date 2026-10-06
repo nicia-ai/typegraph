@@ -148,7 +148,7 @@ describe("Store.introspect", () => {
     expect(relation?.metaEdge).toBe("subClassOf");
   });
 
-  it("reports `via` and `partSide` on a composition relation (E-a-r2-5)", async () => {
+  it("reports `via` and `partSide` on a composition relation", async () => {
     // The only test of this copy site: OntologyIntrospection is the sole
     // one of the five via/partSide representations with no coverage, so a
     // dropped spread here is silent public-API data loss even though every

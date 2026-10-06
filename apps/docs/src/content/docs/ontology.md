@@ -930,7 +930,7 @@ subClassOf(Podcast, Media);
 // ArtificialIntelligence's schema, so this could not compile as subClassOf
 broader(MachineLearning, ArtificialIntelligence);
 
-// WRONG: Don't mix them — and since C.1/C.2, a subClassOf declaration whose
+// WRONG: Don't mix them — and a subClassOf declaration whose
 // child does not structurally extend the parent no longer compiles, and is
 // refused at registry build even when authored dynamically:
 // subClassOf(MachineLearning, ArtificialIntelligence);

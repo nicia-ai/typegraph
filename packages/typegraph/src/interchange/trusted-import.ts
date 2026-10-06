@@ -106,7 +106,7 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
 
   // Composition edge kinds are excluded from the plain acyclicity check
   // below and reported through their own reason: `acyclicEdgeKinds` folds
-  // item E's composition relation into its answer (D-10), and a graph whose
+  // the composition relation into its answer, and a graph whose
   // ONLY reachability relation is composition needs a message naming the
   // claim gap too, not just the reachability one.
   const compositionKinds = new Set(store.registry.compositionEdgeKinds());

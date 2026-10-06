@@ -1,11 +1,11 @@
 /**
- * The acyclicity probe (item D.2, `src/store/recursive-cte.ts`'s
+ * The acyclicity probe (`src/store/recursive-cte.ts`'s
  * `buildEdgeAcyclicityProbe`) must be an index seek on
  * `typegraph_edges_from_idx` (or, for a mixed-orientation relation, also
  * `typegraph_edges_to_idx`) for every real write path — never a scan of the
  * whole relation.
  *
- * The defect this guards against (measured by the lead via `EXPLAIN QUERY
+ * The defect this guards against (measured via `EXPLAIN QUERY
  * PLAN` on the real probe): the pre-fix probe folded the relation's live
  * edges and the proposed `seed` rows into one compound
  * `candidates(...) AS (SELECT ... FROM typegraph_edges ... UNION ALL SELECT
@@ -19,8 +19,7 @@
  * which has genuinely unwritten rows to hop through) still pays for the
  * compound shape — see `AcyclicityProbeSeed`'s docblock.
  *
- * Mutation check (recorded in the lane's load-bearing log,
- * scratchpad/lane-D2-probe-fix-load-bearing.md): temporarily routing the
+ * Mutation check: temporarily routing the
  * `"proposed"`/`"relation"` forms back through the old compound `candidates`
  * CTE (`buildProbeBodyDirect` calling `buildProbeBodyPlanned`'s helpers
  * instead of its own) makes every test below fail — `MATERIALIZE` reappears
@@ -73,7 +72,7 @@ function findProbeStatement(
   );
 }
 
-describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
+describe("edge-acyclicity probe: query plan", () => {
   it("a single create's probe seeks typegraph_edges_from_idx directly, no MATERIALIZE candidates", async () => {
     const { backend, captured, client } = createPlanCaptureBackend();
     const store = createStore(buildGraph(), backend);
@@ -108,8 +107,8 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
     // expected; `MATERIALIZE candidates` — the whole-relation copy — is the
     // regression this test exists to catch, and cannot appear at all now
     // that the `"proposed"` form has no `candidates` CTE.
-    // No standalone "no full scan" assertion here: verified empirically (the
-    // lane's load-bearing mutation check) that reverting to the old compound
+    // No standalone "no full scan" assertion here: verified empirically (by the
+    // mutation check) that reverting to the old compound
     // `candidates` CTE makes SQLite populate it via an INDEX SEARCH on
     // `typegraph_edges_to_idx` (filtered only by `graph_id`), never a bare
     // `SCAN e` — a scan-shaped assertion would never fire. The
@@ -148,8 +147,8 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
     const plan = explainQueryPlan(client, probeStatement);
 
     expect(plan).toMatch(/typegraph_edges_from_idx/);
-    // No standalone "no full scan" assertion here: verified empirically (the
-    // lane's load-bearing mutation check) that reverting to the old compound
+    // No standalone "no full scan" assertion here: verified empirically (by the
+    // mutation check) that reverting to the old compound
     // `candidates` CTE makes SQLite populate it via an INDEX SEARCH on
     // `typegraph_edges_to_idx` (filtered only by `graph_id`), never a bare
     // `SCAN e` — a scan-shaped assertion would never fire. The
@@ -163,7 +162,7 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
     const store = createStore(buildGraph(), backend);
 
     // `blockedBy` is not itself `acyclic: true` in this fixture — the mixed
-    // relation below is constructed directly, D-10/item-E style, exactly as
+    // relation below is constructed directly, in the composition style, exactly as
     // tests/edge-acyclicity.test.ts's mixed-orientation fixture does.
     // A larger population than the other two tests: SQLite's OR-optimization
     // (`MULTI-INDEX OR`, seeking BOTH `typegraph_edges_from_idx` and

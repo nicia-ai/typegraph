@@ -1,14 +1,14 @@
 /**
- * R3 — a persisted `partOf`/`hasPart` relation with no `via` is refused ON
+ * A persisted `partOf`/`hasPart` relation with no `via` is refused ON
  * LOAD, through the same `validateOntologyRelations` path the compile-time
- * builder and the extension builder already share (item E, lane E-a).
+ * builder and the extension builder already share.
  *
  * `deserializeSchema(schema).buildRegistry()` is the exact function every
  * schema loader (`createStoreWithSchema`, `ensureSchema`, `migrateSchema`)
  * calls to interpret a persisted document, so exercising it directly here
  * tests the real load-time refusal without standing up a backend.
  *
- * MUTATION CHECK (recorded in the lane's load-bearing note): removed the
+ * MUTATION CHECK: removed the
  * `relation.via === undefined` arm from `validateCompositionShape`
  * (`src/ontology/validation.ts`) — "refuses persisted partOf with no via"
  * flipped from throwing to passing (an inert relation loaded clean); no
@@ -34,7 +34,7 @@ import { matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
 
-describe("R3: a persisted composition relation missing `via` is refused on load", () => {
+describe("a persisted composition relation missing `via` is refused on load", () => {
   it("refuses persisted partOf with no via", () => {
     const Part = defineNode("Part", { schema: emptySchema });
     const Whole = defineNode("Whole", { schema: emptySchema });
@@ -129,15 +129,15 @@ describe("a `via` change diffs as remove + add, not a no-op", () => {
   });
 });
 
-describe("`partSide` round-trips across representations (E-a-4)", () => {
+describe("`partSide` round-trips across representations", () => {
   // `partSide` is the one composition field that cannot be re-derived on
-  // load: it is only required (and only meaningful) for the ambiguous R5
-  // shape (a reflexive pair whose realizing edge admits both orientations),
+  // load: it is only required (and only meaningful) for the ambiguous
+  // reflexive shape (a reflexive pair whose realizing edge admits both orientations),
   // so a dropped copy is silent until the next load of exactly that shape,
   // where it turns a valid persisted graph into an
   // ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED refusal.
   //
-  // MUTATION CHECK (recorded in the lane's load-bearing note): removed the
+  // MUTATION CHECK: removed the
   // `relation.partSide === undefined ? {} : { partSide: relation.partSide }`
   // spread from `buildRegistryFromSerializedSchema`
   // (`src/schema/deserializer.ts`) — "round-trips through
@@ -226,7 +226,7 @@ describe("`partSide` round-trips across representations (E-a-4)", () => {
   });
 });
 
-describe('item E.2: an explicit `existence: "optional"` hashes identically to omitting it', () => {
+describe('an explicit `existence: "optional"` hashes identically to omitting it', () => {
   it("matches the schema hash of an otherwise-identical graph that never states existence", async () => {
     const Part = defineNode("ExPart", { schema: emptySchema });
     const Whole = defineNode("ExWhole", { schema: emptySchema });

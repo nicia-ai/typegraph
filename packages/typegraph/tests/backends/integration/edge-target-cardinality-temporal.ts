@@ -1,6 +1,5 @@
 /**
- * Temporal semantics of the edge cardinality claim (issue #610, acceptance
- * criterion 6), table-driven over `{one, oneActive} x {source, target,
+ * Temporal semantics of the edge cardinality claim (issue #610), table-driven over `{one, oneActive} x {source, target,
  * both}`. `edgeCardinalitySpec(ref).claimsWhenBornEnded` and
  * `.holderLiveness` (`src/store/claims/edge-claims.ts`) are the two facts
  * this file pins per axis:
@@ -23,8 +22,7 @@
  * not a probe of the axis at all.
  *
  * Every case states, in its own comment, the mutation that must make it
- * fail; the revert/mutation checks actually performed are recorded in the
- * scratchpad `lane-D1-load-bearing.md` note.
+ * fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -437,8 +435,8 @@ export function registerEdgeTargetCardinalityTemporalIntegrationTests(
   });
 
   /**
-   * Regression coverage for the reentry probe's self-count bug (#610 D.1
-   * review finding D1-R1-01): a `clearValidTo` reopen with NO delete
+   * Regression coverage for the reentry probe's self-count bug (#610 review
+   * finding): a `clearValidTo` reopen with NO delete
    * transition used to re-probe EVERY declared axis, not just the
    * active-only one. A non-active-only axis (`one`/`unique`) never lost its
    * claim while the row stayed live and undeleted, so re-probing it counted
@@ -501,7 +499,7 @@ export function registerEdgeTargetCardinalityTemporalIntegrationTests(
             collection.update(edge.id, {}, { clearValidTo: true }),
           ).resolves.toBeDefined();
         });
-        // MUTATION CHECK (verified): revert the D.1 reentry-probe fix
+        // MUTATION CHECK (verified): revert the reentry-probe fix
         // (probe every declared axis on a `clearValidTo`-only reopen,
         // instead of only the active-only ones) — this case then throws
         // `CardinalityError` instead of resolving.

@@ -2,7 +2,7 @@
  * Property-based tests for the structural subtyping predicate.
  *
  * Uses `comparableSchemaArb` / `tightenArb` from `./arbitraries.ts` — shared
- * there (per the lead's ruling) so the C.1 lane's child/parent-agreement
+ * there so the child/parent-agreement
  * property test can reuse the same generators rather than re-deriving them.
  */
 import fc from "fast-check";

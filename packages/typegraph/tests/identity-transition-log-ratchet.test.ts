@@ -1,9 +1,9 @@
 /**
- * The Lead ruling's condition on the identity transition log's "no-log
+ * The condition on the identity transition log's "no-log
  * line": *a ratchet test asserts no code path reads membership from
  * `typegraph_identity_transitions`.*
  *
- * §2.1 of the design note states the invariant directly: "a transition row
+ * The invariant is stated directly: "a transition row
  * carries no membership... every membership answer in the replay API is
  * produced by calling `historicalIdentityReconstructionCtes`". That is
  * enforced by construction inside `src/identity/replay.ts` (see its own
@@ -20,7 +20,7 @@
  *
  * The allowlist is MODULE-level (a file may reference the relation more than
  * once — write plumbing, an index, a doc comment — for one already-reviewed
- * reason), matching how the ruling itself is phrased ("no CODE PATH reads
+ * reason), matching how the invariant itself is phrased ("no CODE PATH reads
  * membership"): a module either legitimately touches the physical relation
  * (as a writer, a reader, a DDL/schema declaration, or the whole-graph
  * `clear()` sweep) or it does not.
@@ -28,8 +28,8 @@
  * *Mutation*: add a `readIdentityTransitions(...)`-shaped call — or any
  * bare reference to `identityTransitionsTable` / `tables.identityTransitions`
  * / the raw table name — to a module not on `MODULE_ALLOWLIST` (for example,
- * reintroduce the fold-vs-restore probe this PR removed from
- * `service-maintenance.ts`, see G1-04) → the "undeclared" assertion fails,
+ * reintroduce the fold-vs-restore probe that was removed from
+ * `service-maintenance.ts`) → the "undeclared" assertion fails,
  * naming the file. *Mutation*: remove the ONE writer (`flush.ts`) from the
  * allowlist while its INSERT still stands → also fails "undeclared" (the
  * file is unnamed but the reference still exists). *Mutation*: delete an
@@ -70,7 +70,7 @@ const TRANSITION_LOG_REFERENCE = /\bidentityTransitions(Table)?\b/;
  * `identityTransitionsTable` or `tables.identityTransitions` itself (a
  * probe appending a `membersFromLog(rows)`-shaped helper to
  * `service-read.ts`, deriving membership from rows a caller already fetched
- * via `readIdentityTransitions`, is exactly this shape — see G1R2-05).
+ * via `readIdentityTransitions`, is exactly this shape).
  */
 const READ_TRANSITIONS_REFERENCE = /\breadIdentityTransitions\b/;
 
@@ -136,7 +136,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "backend/drizzle/schema/postgres.ts",
     reason:
-      "The Drizzle `pgTable` definition (columns, PK, the three indexes from §2.2) and the default table name.",
+      "The Drizzle `pgTable` definition (columns, PK, the three indexes) and the default table name.",
   },
   {
     file: "backend/drizzle/sqlite.ts",

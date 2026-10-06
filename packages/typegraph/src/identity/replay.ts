@@ -1,5 +1,5 @@
 /**
- * The replay algorithm (§3): pairs every identity transition with the class
+ * The replay algorithm: pairs every identity transition with the class
  * membership before and after it, reconstructed through the SAME historical
  * reader `asOf` / `asOfRecorded` reads already use. Replay can therefore never
  * disagree with a live read — see `historicalIdentityReconstructionCtes`
@@ -265,8 +265,7 @@ function publicTransition<G extends GraphDef>(
 }
 
 /**
- * Resolves `ref`'s CURRENT class canonical (§3.2 step 2's "one closure
- * probe"), one of the seeds of the lineage WALK (see
+ * Resolves `ref`'s CURRENT class canonical (one closure probe), one of the seeds of the lineage WALK (see
  * {@link lineageWalkSeeds}) — never the historical reconstruction.
  * Every transition note names the class canonical — never an arbitrary
  * member — as its `class` / `priorClass` columns, so `walkClassLineage` must
@@ -283,7 +282,7 @@ function publicTransition<G extends GraphDef>(
  * already had one. `historicalIdentityReconstructionCtes` resolves the same
  * class from any live member, canonical or not, so anchoring on the ORIGINAL
  * `ref` — which is guaranteed to exist for every boundary the walk from its
- * own canonical discovers — is both correct and what §9.3's brute-force
+ * own canonical discovers — is both correct and what the brute-force
  * oracle (`store.asOfRecorded(r).identity.membersOf(seed)`, using that same
  * original `ref`) is checked against.
  */
@@ -506,7 +505,7 @@ async function walkClassLineage<G extends GraphDef>(
  * revision `r` had been recorded, read from TODAY's valid-time vantage" — the
  * same hybrid `(recorded = r, valid = now)` coordinate `asOfRecorded` reads
  * use — so that `after(r)` here and `store.asOfRecorded(r).identity.membersOf`
- * can never disagree (the equivalence the exhaustiveness property test, §9.3,
+ * can never disagree (the equivalence the exhaustiveness property test
  * pins). A future-scheduled window simply has not closed yet at "now",
  * exactly as it has not closed for any other current-vantage read; replay
  * does not need it to have closed for this coordinate to be sound.
@@ -627,7 +626,7 @@ function windowedRows(
 
 /**
  * Cuts the windowed lineage into one page of at most `limit` BOUNDARIES
- * (distinct recorded revisions), not `limit` rows — §3.2 step 3 counts
+ * (distinct recorded revisions), not `limit` rows — a page counts
  * boundaries, and every note sharing a boundary shares one replay step, so a
  * row-counted page could split a single step's rows across two pages.
  *

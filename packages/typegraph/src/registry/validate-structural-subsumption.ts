@@ -1,7 +1,7 @@
 /**
- * The registry-build-time structural subsumption check (C.2, roadmap D2).
+ * The registry-build-time structural subsumption check.
  *
- * C.1 (`src/ontology/core-meta-edges.ts`) is a compile-time FILTER: it
+ * The compile-time filter in `src/ontology/core-meta-edges.ts` is a compile-time FILTER: it
  * catches every incompatibility TypeScript's structural assignability over
  * `z.infer` can see, but a value-level constraint (`z.string().min(3)`
  * tightening a bare `z.string()`) is invisible to it. This module is the
@@ -38,7 +38,7 @@
  * `src/registry/builders.ts`) or an external IRI — is skipped: subsumption
  * does not apply to a kind this registry does not know the shape of.
  *
- * **Known gap (C13-R1-09): `isAssignableTo(A, B) ⇒ every A row satisfies
+ * **Known gap: `isAssignableTo(A, B) ⇒ every A row satisfies
  * B's schema` does not hold for a kind whose Zod schema fails
  * `z.toJSONSchema` conversion.** `serializeSchemaProperties`
  * (`src/schema/serializer.ts`) catches that failure and projects `{ type:

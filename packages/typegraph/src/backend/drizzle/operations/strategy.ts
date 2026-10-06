@@ -619,10 +619,10 @@ export type CommonOperationStrategy = Readonly<{
     edgeKinds: readonly string[],
   ) => SQL;
   /**
-   * The composition (item E) variant of {@link buildContendedEdgeRowAudit}:
+   * The composition variant of {@link buildContendedEdgeRowAudit}:
    * the peer test is the oriented two-arm union
    * {@link file://./edge-claims.ts claimHolderTerms} folds a write's
-   * liveness predicate over, not exact-kind equality — R4's axis is
+   * liveness predicate over, not exact-kind equality — the composition axis is
    * relation-wide, so two different realizing edge kinds must be found
    * contending for one part.
    */

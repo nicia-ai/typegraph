@@ -9,8 +9,8 @@
  *
  * Everything here is evidence ALREADY IN HAND at the apply site — the plan
  * artifact's own digest and the anchors it was built from. Nothing is read,
- * recomputed, or invented; a
- * field the caller cannot evidence stays absent rather than being guessed.
+ * recomputed, or invented; a field the caller cannot evidence stays absent
+ * rather than being guessed.
  */
 import type { MergePlanAnchors, MergePlanArtifactV2 } from "./plan-schema";
 import type { IdentityDecisionProvenance } from "./typegraph-internal";

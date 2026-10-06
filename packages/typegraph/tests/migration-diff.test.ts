@@ -1158,7 +1158,7 @@ describe("computeSchemaDiff", () => {
     });
 
     it("classifies an added equivalentTo relation exactly like an added subClassOf relation", () => {
-      // D1's `equivalentTo` is mutual subsumption, but `diffOntology` is
+      // `equivalentTo` is mutual subsumption, but `diffOntology` is
       // meta-edge-agnostic — it keys relations as `${metaEdge}:${from}:${to}`
       // and assigns `severity: "safe"` to every addition regardless of which
       // meta-edge it is. Pin that this stays true after the fold: an

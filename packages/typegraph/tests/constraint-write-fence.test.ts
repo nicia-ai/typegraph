@@ -80,7 +80,7 @@ const knows = defineEdge("knows", { schema: z.object({}) });
 /** Cardinality `one`: an application count probe no database key repeats. */
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
 /**
- * `cardinality: "many", acyclic: true` (item D.2): the reachability probe
+ * `cardinality: "many", acyclic: true`: the reachability probe
  * has no database key behind it either — `CONSTRAINT_FENCE_BACKING.
  * edgeAcyclicity === "lockOnly"` — so it is fenced the same way.
  */
@@ -217,11 +217,11 @@ describe("constrained writes take the per-graph write fence", () => {
     expect(graphWriteLockCount(statements)).toBe(0);
   });
 
-  it("fences a many-cardinality ACYCLIC edge create and orders the lock before its reachability probe (D2-01)", async () => {
+  it("fences a many-cardinality ACYCLIC edge create and orders the lock before its reachability probe", async () => {
     // Load-bearing: mutate `edgeWriteNeedsConstraintFence`
     // (src/store/constraints.ts) to return `undefined` for the acyclic arm
-    // and this assertion drops from 1 to 0 — the exact regression D2-01
-    // found unguarded (11/12 cross-backend cases still passed with the fence
+    // and this assertion drops from 1 to 0 — the exact regression
+    // that went unguarded (11/12 cross-backend cases still passed with the fence
     // silently dropped, because none of them observed the lock STATEMENT
     // itself).
     const { store, statements, reset } = await createLoggedStore();

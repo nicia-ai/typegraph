@@ -93,7 +93,7 @@ export function mixedWritePlan(
 }
 
 /**
- * The plan for a batched mixed (node + composition edge) write (item E.2).
+ * The plan for a batched mixed (node + composition edge) write.
  *
  * Widens {@link foldBatchConstraintProbe}'s fold to `entity: "mixed"` for a
  * composition batch create: `executeNodeCreateBatch` and

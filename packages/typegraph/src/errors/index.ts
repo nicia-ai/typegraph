@@ -1205,7 +1205,7 @@ export type CompositionErrorDetails = Readonly<{
 
 /**
  * Thrown when a composition edge (`partOf`/`hasPart`) would give a part a
- * second whole. R4: a part holds exactly one whole across every declared
+ * second whole. A part holds exactly one whole across every declared
  * composition relation, enforced by one claim row per part
  * (`typegraph_edge_claims`, the reserved composition axis).
  */
@@ -1362,7 +1362,7 @@ function describeCompositionExistenceRefusal(
  * API cannot honor without silently dropping it.
  *
  * Its own class rather than a `CompositionError` code: `CompositionError` is
- * R4's "at most one whole" refusal; this is R-E.2's "at least one whole while
+ * the "at most one whole" refusal; this is the "at least one whole while
  * live, and a whole is never silently re-assigned" refusal — a different
  * invariant with a different shape (no incumbent edge to name on the create
  * leg). Shares `CompositionError`'s `"constraint"` category.

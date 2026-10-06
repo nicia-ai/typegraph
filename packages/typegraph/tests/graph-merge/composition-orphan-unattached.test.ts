@@ -1,5 +1,5 @@
 /**
- * Item E.2: the "unattached" composition-orphan arm —
+ * The "unattached" composition-orphan arm —
  * `compositionOrphansAmong`'s sibling in `src/graph-merge/merge.ts`
  * (`unattachedRequiredPartOrphansAmong` / `assertNoUnattachedRequiredParts`).
  *
@@ -312,7 +312,7 @@ describe.each(backendMatrix())(
       // thrown error is `CompositionExistenceError`, translated to
       // `MergeConstraintConflictError` at the merge boundary, not
       // `MergeCompositionOrphanError`. Either way nothing commits, which
-      // is the guarantee item E.2's merge-existence audit asks for.
+      // is the guarantee the merge-existence audit asks for.
       // `assertNoUnattachedRequiredParts`'s OWN distinguishing value is
       // the case the per-write detach refusal cannot reach at all — a
       // composition edge silently DROPPED by canonicalization

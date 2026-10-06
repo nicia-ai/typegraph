@@ -1,10 +1,10 @@
 /**
- * Data-validated tightening for a newly-declared composition pair (item E),
- * stacking on item A's schema-tightening preflight
+ * Data-validated tightening for a newly-declared composition pair,
+ * stacking on the schema-tightening preflight
  * (`src/schema/tightening-preflight.ts`, `prepareSchemaTighteningPreflight`).
  *
- * Before item E, `partOf`/`hasPart` classified as `safe` in both directions
- * (item A shipped it that way, pending composition's own constraints — see
+ * Before composition constraints existed, `partOf`/`hasPart` classified as `safe` in both directions
+ * (shipped that way, pending composition's own constraints — see
  * `src/schema/ontology-change.ts`'s module docblock). Adding the FIRST
  * `partOf`/`hasPart` pair over two edge kinds that already exist as
  * ordinary, independent cardinality-`one` edges is exactly the shape that
@@ -37,7 +37,7 @@ const CtAnthology = defineNode("CtAnthology", { schema: z.object({}) });
 const ctChapterOf = defineEdge("ctChapterOf", { schema: z.object({}) });
 const ctIncludedIn = defineEdge("ctIncludedIn", { schema: z.object({}) });
 
-// Item E.2: flipping an already-declared pair's `existence`.
+// Fixture for flipping an already-declared pair's `existence`.
 const CtSegment = defineNode("CtSegment", { schema: z.object({}) });
 const CtEpisode = defineNode("CtEpisode", { schema: z.object({}) });
 const ctSegmentOf = defineEdge("ctSegmentOf", { schema: z.object({}) });
@@ -63,7 +63,7 @@ function buildFlipGraph(id: string, required: boolean) {
   });
 }
 
-// Item E.2: two DIFFERENT part kinds sharing one realizing edge kind, only
+// Fixture for two DIFFERENT part kinds sharing one realizing edge kind, only
 // one of which is tightened to `existence: "required"`.
 const CtTag = defineNode("CtTag", { schema: z.object({}) });
 const CtClip = defineNode("CtClip", { schema: z.object({}) });
@@ -143,7 +143,7 @@ async function activeVersion(
 export function registerCompositionTighteningIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe("composition tightening (data-validated, item A + item E)", () => {
+  describe("composition tightening (data-validated)", () => {
     it("refuses declaring partOf/hasPart against a part that already has two live wholes", async () => {
       const id = "composition_tightening_dirty";
       const store = await context.createStore(buildGraph(id, false));
@@ -297,7 +297,7 @@ export function registerCompositionTighteningIntegrationTests(
     // incumbent the lock inserted the writing edge's own claim, so the
     // refusal names the refused edge rather than `unclaimed.id`.
 
-    it('item E.2: flipping an already-declared pair to existence: "required" refuses a DIRTY graph directly through ensureSchema, never reaching "breaking-change"', async () => {
+    it('flipping an already-declared pair to existence: "required" refuses a DIRTY graph directly through ensureSchema, never reaching "breaking-change"', async () => {
       const id = "composition_tightening_flip_required";
       const store = await context.createStore(buildFlipGraph(id, false));
       const orphan = await store.nodes.CtSegment.create({});
@@ -340,7 +340,7 @@ export function registerCompositionTighteningIntegrationTests(
     // `details.reason` check before ever reaching the composition
     // violation assertions.
 
-    it('item E.2: flipping an already-declared pair to existence: "required" auto-migrates a CLEAN graph directly through ensureSchema', async () => {
+    it('flipping an already-declared pair to existence: "required" auto-migrates a CLEAN graph directly through ensureSchema', async () => {
       const id = "composition_tightening_flip_required_clean";
       const store = await context.createStore(buildFlipGraph(id, false));
       const segment = await store.nodes.CtSegment.create({});
@@ -366,7 +366,7 @@ export function registerCompositionTighteningIntegrationTests(
     // data probe at all; the test's `COMPOSITION_WHOLE_REQUIRED`
     // assertion is the behavioral guarantee this test actually pins.
 
-    it('item E.2: loosening an already-declared pair from existence: "required" to optional is safe and auto-migrates through ensureSchema (a pure loosening is always safe)', async () => {
+    it('loosening an already-declared pair from existence: "required" to optional is safe and auto-migrates through ensureSchema (a pure loosening is always safe)', async () => {
       const id = "composition_tightening_flip_loosen";
       const store = await context.createStore(buildFlipGraph(id, true));
       const episode = await store.nodes.CtEpisode.create({});
@@ -398,7 +398,7 @@ export function registerCompositionTighteningIntegrationTests(
     // `"breaking-change"` instead of returning an upgraded store, and this
     // test fails on the destructuring `const [upgradedStore] = await …`.
 
-    it("item E.2: tightening one part kind never blocks on an unrelated OPTIONAL sibling sharing its edge kind", async () => {
+    it("tightening one part kind never blocks on an unrelated OPTIONAL sibling sharing its edge kind", async () => {
       const id = "composition_tightening_shared_edge_kind";
       const store = await context.createStore(buildSharedEdgeGraph(id, false));
       // Legal forever: CtTag's existence stays "optional" in both versions.

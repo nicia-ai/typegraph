@@ -504,7 +504,7 @@ the target's state at plan time. This error is the authoritative,
 apply-time re-verification of that same check, run under the per-graph write
 lock so it cannot miss an orphan the plan-time report's unlocked read raced
 past. `cause: "deleted"` names the whole a branch deletes while a part
-survives; `cause: "unattached"` (item E.2 composition existence) has no whole
+survives; `cause: "unattached"` (a part that requires a whole) has no whole
 to name — recompute the merge plan against the target's current state, or
 delete/attach the orphaned part in the branch before merging.
 
@@ -710,7 +710,7 @@ try {
 
 Moving a part is [`reparent`](/ontology#reparent-moving-a-part-to-a-new-whole)'s
 job: it retires the incumbent attachment and creates the new one in one
-transaction, which is the only order in which both R4 and
+transaction, which is the only order in which both the one-whole-per-part rule and
 `existence: "required"` hold.
 
 `details.incumbentEdgeId` names the edge that already holds the axis — the

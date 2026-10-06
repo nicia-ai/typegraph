@@ -362,7 +362,7 @@ function edgeCardinalityViolations(
   >();
   for (const row of rows) {
     // `scope` is split out and re-added only when defined: `row.scope` is a
-    // required-but-nullable field (R9), so a bare `...row` would spell
+    // required-but-nullable field, so a bare `...row` would spell
     // `scope: undefined` explicitly into the object literal below, which
     // `exactOptionalPropertyTypes` refuses for `ClaimEdgeCardinalityParams`'
     // OPTIONAL `scope`.

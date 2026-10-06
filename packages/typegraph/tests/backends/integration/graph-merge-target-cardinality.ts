@@ -1,6 +1,5 @@
 /**
- * Target-side edge cardinality during a graph merge (issue #610, acceptance
- * criterion 5, merge half).
+ * Target-side edge cardinality during a graph merge (issue #610, merge half).
  *
  * Two distinct target nodes, each already holding one incoming edge of a
  * `targetCardinality: "one"` kind, are reconciled into ONE canonical node by
@@ -11,8 +10,7 @@
  * exactly as it would for two ordinary writes to that node.
  *
  * Every case states, in its own comment, the mutation/revert that must make
- * it fail; the checks actually performed are recorded in the scratchpad
- * `lane-D1-load-bearing.md` note.
+ * it fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

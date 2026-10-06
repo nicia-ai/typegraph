@@ -3643,7 +3643,7 @@ async function processEdgeSlice(
     const { candidate, params, declarations } = prepared;
     const { edge } = candidate;
 
-    // Acyclic-kind rows never join the batched flush below (§10.1): the
+    // Acyclic-kind rows never join the batched flush below: the
     // in-batch overlay `cardinalityValidationBackend` intercepts
     // `countEdgesFrom` / `edgeExistsBetween`, not a recursive `execute`
     // statement, so it cannot account for an in-batch cycle. Each instead

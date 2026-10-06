@@ -64,7 +64,7 @@ const subClassOfMetaEdge = createMetaEdge(
 /**
  * Creates a subClassOf ontology relation.
  *
- * Compile-time structural contract (C.1, roadmap D2): `child`'s schema
+ * Compile-time structural contract: `child`'s schema
  * output must structurally extend `parent`'s — every property `parent`
  * requires, `child` has with a compatible type; `child` may add properties
  * or narrow an optional-in-parent property. A pair that fails this is
@@ -72,7 +72,7 @@ const subClassOfMetaEdge = createMetaEdge(
  * the incompatible fields, and — for pairs the type checker cannot see
  * through (refinements, transforms, value-level constraints) — at registry
  * build time by the authoritative runtime check
- * (`src/registry/validate-structural-subsumption.ts`). C.1 is a filter, not
+ * (`src/registry/validate-structural-subsumption.ts`). The compile-time check is a filter, not
  * the authority: it accepts strictly more than the registry does, never
  * less.
  *
@@ -180,7 +180,7 @@ const equivalentToMetaEdge = createMetaEdge(
 /**
  * Creates an equivalentTo ontology relation.
  *
- * Between two registered kinds, `equivalentTo` is MUTUAL SUBSUMPTION (D1):
+ * Between two registered kinds, `equivalentTo` is MUTUAL SUBSUMPTION:
  * `KindRegistry` folds the class into `subClassAncestors`/`subClassDescendants`
  * before the transitive closure, so `isAssignableTo`, `expandSubClasses`,
  * disjointness propagation and the `kindWithSubClasses` claim axis all agree
@@ -191,13 +191,13 @@ const equivalentToMetaEdge = createMetaEdge(
  * build (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`).
  *
  * Between two node kinds this carries the same compile-time structural
- * contract as `subClassOf` (C.1), checked in BOTH directions -- mutual
+ * contract as `subClassOf`, checked in BOTH directions -- mutual
  * subsumption means each kind's schema must extend the other's. The IRI
  * form (`equivalentTo(kind, iri)`) and the edge-to-node form carry no
  * check: an external IRI, and an edge kind paired with a node kind (always
  * refused at registry build), have no comparable schema pair.
  *
- * `sameAs` (removed, roadmap F) was a type-level alias of this relation: a
+ * `sameAs` (since removed) was a type-level alias of this relation: a
  * document persisted before the removal that still names a `sameAs`
  * relation continues to load and fold into the same equivalence bucket as
  * `equivalentTo` — `collectOntologyRelations`
@@ -234,7 +234,7 @@ export function equivalentTo(
 
 /**
  * `sameAs`'s meta-edge object. The public `sameAs()`/`differentFrom()`
- * factories were removed (roadmap F, R1), and neither this object nor
+ * factories were removed, and neither this object nor
  * {@link differentFromMetaEdge} is a member of the public `core` export: a
  * new graph definition cannot construct a relation carrying either name any
  * more, whether through a factory or by reaching into `core` directly.
@@ -306,12 +306,11 @@ const partOfMetaEdge = createMetaEdge(META_EDGE_PART_OF, "X is part of Y");
 export type CompositionOptions = Readonly<{
   /** The edge kind that realizes the composition instance-level. */
   via: AnyEdgeType;
-  /** R5: required only when the edge admits both orientations (e.g. same-kind containment). */
+  /** Required only when the edge admits both orientations (e.g. same-kind containment). */
   partSide?: CompositionPartSide;
   /**
-   * Item E.2. `"required"`: the part cannot exist without a live whole.
-   * Default `"optional"` — every declaration written before E.2 keeps its
-   * semantics.
+   * `"required"`: the part cannot exist without a live whole.
+   * Default `"optional"` keeps older declarations unchanged.
    */
   existence?: CompositionExistence;
 }>;
@@ -488,7 +487,7 @@ export function implies<A extends AnyEdgeType, B extends AnyEdgeType>(
 /**
  * The core ontology module containing all built-in meta-edges and their
  * relation factory functions. Deliberately excludes `sameAsMetaEdge` and
- * `differentFromMetaEdge` (roadmap F, R1 fix): a package consumer with
+ * `differentFromMetaEdge` (removed from it deliberately): a package consumer with
  * `core` in hand cannot construct a `sameAs`/`differentFrom` relation by
  * reaching into it any more than by calling the deleted factories — see
  * {@link metaEdgesByName} below for the internal-only record that still
@@ -527,7 +526,7 @@ export const core = {
 /**
  * Every built-in meta-edge by name, including `sameAs`/`differentFrom` —
  * which have no public factory and are absent from the public `core`
- * export above. This record is kept, per roadmap F ruling F-2, for exactly
+ * export above. This record is kept for exactly
  * as long as PERSISTED-DOCUMENT interpretation needs it: a `schema_doc`
  * committed before this removal can carry a `sameAs`/`differentFrom`
  * relation by name (`SerializedOntology.relations`,

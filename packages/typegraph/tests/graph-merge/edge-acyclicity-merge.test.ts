@@ -1,6 +1,5 @@
 /**
- * Item D.2, merge planner (design note "Lead rulings", D-4 reaffirmed
- * 2026-09-08): a cycle that would only exist once a merge combines edges
+ * Edge acyclicity in the merge planner: a cycle that would only exist once a merge combines edges
  * from more than one branch — or once canonicalization/repointing collapses
  * two staged nodes onto one survivor — is caught at PLAN TIME, before any
  * write, and surfaced as the typed `AcyclicityMergeConflictError` rather
@@ -15,10 +14,10 @@
  * `finalEdgeEndpoint`. It calls `readProposedEdgeAcyclicityViolations`, the
  * lock-free preview built on the SAME `assertEdgeRelationsAcyclic` /
  * `buildEdgeAcyclicityProbe` SQL the write path uses. This is the ONE caller
- * that passes the `"planned"` seed form (the D-4 seed-hop through the
+ * that passes the `"planned"` seed form (the seed-hop through the
  * plan's own not-yet-committed rows, `src/store/recursive-cte.ts`) — every
  * real write path passes `"proposed"` instead, which has no seed-hop and
- * joins `typegraph_edges` directly (item D.2 perf ruling, 2026-09-08) — so a
+ * joins `typegraph_edges` directly — so a
  * plan-time verdict and an eventual write verdict can never disagree.
  *
  * `resolveMerge` is shared by every entry point (`merge`, `mergeAgainstBase`,
@@ -26,7 +25,7 @@
  * runs identically whether a caller reviews a `MergePlanArtifact` before
  * deciding to apply it, or calls the one-shot `merge()`.
  *
- * Apply-time re-verification is UNCHANGED (D-4's ruling: a plan-time
+ * Apply-time re-verification is UNCHANGED (a plan-time
  * conflict, an apply-time drift is still a refusal). The plan-time preview
  * takes no per-graph write lock (see `assertResolvedPlanEdgesAcyclic`'s
  * docblock) and is inherently racy against a concurrent writer, so a cycle
@@ -38,7 +37,7 @@
  * `tests/backends/integration/edge-acyclicity.ts` ("refuses an in-batch
  * cycle in bulkCreate with zero rows committed").
  *
- * Mutation check (recorded in the lane's load-bearing log): changing
+ * Mutation check: changing
  * `readProposedEdgeAcyclicityViolations`'s probe call (src/store/acyclicity.ts)
  * from `kind: "planned"` back to `kind: "proposed"` — which has no seed-hop
  * — makes `planMerge()` resolve `ok` for the purely-proposed cycle in case

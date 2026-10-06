@@ -1,5 +1,5 @@
 /**
- * Composition relation declaration tests (item E, lane E-a).
+ * Composition relation declaration tests.
  *
  * Covers the two families of composition checks:
  *  - shape checks, owned by `validateOntologyRelations`
@@ -12,7 +12,7 @@
  *    (orientation, cardinality, exactness, population) — exercised through
  *    `buildKindRegistry`, which is how every real caller reaches them.
  *
- * MUTATION CHECK (recorded in the lane's load-bearing note): each
+ * MUTATION CHECK: each
  * `issues.push({ code: "ONTOLOGY_COMPOSITION_*", ... })` branch in
  * `src/ontology/validation.ts` and `src/registry/composition-relation.ts`
  * was deleted/commented in turn; exactly the one test naming that code
@@ -177,7 +177,7 @@ describe("composition registration checks (buildKindRegistry)", () => {
     );
   });
 
-  it("builds a reflexive composition pair when partSide disambiguates it (§2.7)", () => {
+  it("builds a reflexive composition pair when partSide disambiguates it", () => {
     const Section = defineNode("Section", { schema: emptySchema });
     const containsSection = defineEdge("containsSection", {
       schema: emptySchema,
@@ -455,7 +455,7 @@ describe("composition registration checks (buildKindRegistry)", () => {
     );
   });
 
-  it("ONTOLOGY_COMPOSITION_EXISTENCE_MIXED: one part kind declaring different existence across pairs (item E.2)", () => {
+  it("ONTOLOGY_COMPOSITION_EXISTENCE_MIXED: one part kind declaring different existence across pairs", () => {
     const SharedPart = defineNode("SharedPart", { schema: emptySchema });
     const WholeOne = defineNode("WholeOne", { schema: emptySchema });
     const WholeTwo = defineNode("WholeTwo", { schema: emptySchema });
@@ -810,7 +810,7 @@ describe("a valid multi-relation composition declaration", () => {
 });
 
 // ============================================================
-// Subclass-aware composition readers (E-a-r2-1)
+// Subclass-aware composition readers
 // ============================================================
 //
 // `compositionPopulation` resolves a concrete kind against a declared pair's
@@ -909,7 +909,7 @@ describe("composition readers resolve subclasses of a declared whole kind", () =
   });
 });
 
-describe("the mirrored partOf + hasPart idiom (E-a-3)", () => {
+describe("the mirrored partOf + hasPart idiom", () => {
   // apps/docs/src/content/docs/ontology.md teaches declaring both directions
   // of the same realizing edge: `partOf(Chapter, Book, { via })` and
   // `hasPart(Book, Chapter, { via })`. Both normalize to the identical
@@ -951,8 +951,8 @@ describe("the mirrored partOf + hasPart idiom (E-a-3)", () => {
   });
 });
 
-describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
-  // §2.5's "mixed orientations under one part kind are legal" already
+describe("two realizing edges over one (part, whole) pair", () => {
+  // "Mixed orientations under one part kind are legal", which already
   // implies several edges may realize one part kind; this is the same shape
   // for a single (part, whole) pair. The duplicate-relation key must key on
   // `via` (and `partSide`), not just `(metaEdge, from, to)`, or this refuses
@@ -1003,7 +1003,7 @@ describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
 });
 
 // ============================================================
-// partitionCompositionEdgeKindsByDirection — direct unit tests (Ed-r2-3)
+// partitionCompositionEdgeKindsByDirection — direct unit tests
 // ============================================================
 //
 // `QueryBuilder#navigateComposition` (parts()/wholes()) and
@@ -1050,7 +1050,7 @@ describe("partitionCompositionEdgeKindsByDirection", () => {
   });
 
   it("throws — never silently defaults — on an edge kind with no recorded part side", () => {
-    // MUTATION CHECK: before Ed-r2-3, `QueryBuilder#navigateComposition`
+    // MUTATION CHECK: before the fix, `QueryBuilder#navigateComposition`
     // silently defaulted a missing part side to "from"
     // (`registry.compositionPartSide(edgeKind) ?? "from"`) while
     // `buildSubgraphCompositionReachableCte` threw via `requireDefined` —

@@ -406,7 +406,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   entrypoint is one of those eight names, no entrypoint's debt decreased,
 //   and no other entrypoint moved.
 //
-// Ontology change classification batch (roadmap §3.A, item A): the fourth
+// Ontology change classification batch: the fourth
 // constraint-fence-audit family (`edgeEndpointAssignability`) adds
 // `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow` to
 // `src/backend/types.ts`'s `ReadConstraintFenceViolationsParams` /
@@ -450,24 +450,24 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `"@nicia-ai/typegraph"` alone can name every field of a narrowed
 //   `ConstraintFenceViolation` or `MigrationErrorDetails` without a subpath
 //   import. IN THIS BATCH's OWN commit, its debt therefore stayed at the
-//   pre-batch baseline (388), not 388→392 — item D.2 below moves `.` on top
-//   of that baseline instead. Gate (item A's own commit): every added symbol
+//   pre-batch baseline (388), not 388→392 — the edge acyclicity batch below moves `.` on top
+//   of that baseline instead. Gate (this batch's own commit): every added symbol
 //   at every OTHER moved entrypoint is one of the four names above (never
 //   `OntologyChange` itself, which is pre-existing debt everywhere including
 //   `.`), `.` is the one entrypoint this batch leaves unchanged, no OTHER
 //   entrypoint's debt decreased, and exactly 13 entrypoints moved in this
-//   commit (a later batch, item D.2, moves more — see below).
+//   commit (a later batch moves more — see below).
 //
-// Edge acyclicity batch (roadmap §3.D.2, item D.2): the store's
+// Edge acyclicity batch: the store's
 // `assertEdgeRelationsAcyclic` / `readEdgeAcyclicityViolations` add a fifth
 // `ConstraintFenceViolation` member (`src/store/claims/verify.ts`),
 // `EdgeAcyclicityViolation` (`src/store/acyclicity.ts`) — internal, exported
-// by name at NO entrypoint, unlike item A's `EdgeEndpointAllowance` /
+// by name at NO entrypoint, unlike the classification batch's `EdgeEndpointAllowance` /
 // `MisassignedEdgeEndpointRow`. A consumer narrowing `ConstraintFenceViolation`
 // to `{ family: "edgeAcyclicity" }` can therefore never import its shape by
 // name from any subpath, including `.` itself. Measured, not assumed: every
-// one of item A's SEVEN `ConstraintFenceViolation`-reaching entrypoints gains
-// exactly this one name, +1 apiece, on top of item A's own baseline —
+// one of the classification batch's SEVEN `ConstraintFenceViolation`-reaching entrypoints gains
+// exactly this one name, +1 apiece, on top of that batch's baseline —
 // `.` (388→389), `./graph-merge` (730→731), `./interchange` (713→714),
 // `./postgres/pglite` (710→711), `./profiler` (715→716), `./provenance`
 // (721→722), and `./sqlite/local` (710→711). No other entrypoint moves:
@@ -475,8 +475,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `./core`, `./graph-extension`, `./adapters/drizzle/indexes`, and
 // `./indexes` never reach `ConstraintFenceViolation` at all. Gate: every
 // moved entrypoint gains exactly one name (`EdgeAcyclicityViolation`), `.`
-// is no longer exempt the way it was in item A (a batch CAN move it — the
-// exemption was about item A's four names specifically, not a standing
+// is no longer exempt the way it was in the classification batch (a batch CAN
+// move it — the exemption was about that batch's four names specifically, not a standing
 // invariant), no entrypoint's debt decreased, and exactly 7 entrypoints
 // moved in THIS commit.
 //
@@ -490,7 +490,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // param types). `./core`, `./indexes` and `./adapters/drizzle/indexes` reach
 // none of those shapes and are unaffected.
 //
-// D.1 review fix (finding D1-R1-05): `.` (the package root) now exports
+// Target-side cardinality review fix: `.` (the package root) now exports
 // `EdgeCardinalityAxisRef` and `EdgeCardinalityDirection` directly — the two
 // types `EdgeCardinalityDeclaration` (already public from `.`) and
 // `CardinalityErrorDetails.direction` (already public from `.`) are built
@@ -500,20 +500,20 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // unaffected, since none of them re-exports either name and both remain
 // forgotten there exactly as the paragraph above describes.
 //
-// Transaction-scoped policy delete (EC1-R1-01 fix): `TransactionRuntime` and
+// Transaction-scoped policy delete: `TransactionRuntime` and
 // `StoreRuntime` both gain a `deleteNodeWithPolicy` member typed over
 // `NodeDeletePolicy` (`store/operations/node-write-pipeline.ts`) so merge
 // apply's node delete can bind to the SAME transaction's buffered hook
 // runner and attempt instead of a freshly-built Store-scoped context. This
-// is exactly the B8 `[STORE_RUNTIME]`-reachable set (`.`, `./graph-merge`,
+// is exactly the `[STORE_RUNTIME]`-reachable set (`.`, `./graph-merge`,
 // `./interchange`, `./profiler`, `./provenance`, `./sqlite/local`,
-// `./postgres/pglite`), each +1 for `NodeDeletePolicy` on top of the D.1 baseline: `.` 389→390,
+// `./postgres/pglite`), each +1 for `NodeDeletePolicy` on top of the target-side cardinality baseline: `.` 389→390,
 // `./graph-merge` 734→735, `./interchange` 717→718, `./postgres/pglite`
 // 714→715, `./profiler` 719→720, `./provenance` 725→726, `./sqlite/local`
 // 714→715. No other entrypoint renders `TransactionRuntime`/`StoreRuntime`,
 // so no other entrypoint moved.
 //
-// Composition relation (partOf/hasPart via/partSide, issue plan-E-a): every
+// Composition relation (partOf/hasPart via/partSide): every
 // entrypoint that reaches `KindRegistry`, `ExtensionOntologyRelation`, or the
 // registry closures picks up `CompositionPartSide` (a `@public` named export)
 // and, where the entrypoint also surfaces `RegistryClosures` internals,
@@ -521,7 +521,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // and `./adapters/drizzle/indexes` never reach the registry and are
 // unaffected.
 //
-// Typed subsumption batch (C.1/C.2/Q3/C.3): measured, not assumed — every
+// Typed subsumption batch: measured, not assumed — every
 // added name below was confirmed against a merge-base build run through this
 // same script (a temporary unconditional dump of each entrypoint's forgotten-
 // export set, diffed line by line against this batch's set, then reverted).
@@ -550,7 +550,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `projectTypeVisible` as DIRECT exports (visible in the api report diff, not
 // this ledger), so its forgotten-export debt is unaffected.
 //
-// C13-R2-01 follow-up: `SubsumptionAffected` gained a new private helper,
+// Typed subsumption follow-up: `SubsumptionAffected` gained a new private helper,
 // `OntologyTypeErased` (whether `G["ontology"]` has lost its `const`-inferred
 // tuple shape — see its docblock in `src/query/builder/types.ts`), reachable
 // through the exact same seven entrypoints as `SubsumptionAffected` itself
@@ -577,14 +577,14 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // both added names are `IdentityServiceContext`/`PlainNodeRef`, and no other
 // entrypoint moved.
 //
-// This is internal-convenience debt, not a user-facing requirement (G1R3-05):
+// This is internal-convenience debt, not a user-facing requirement:
 // `identityContext()`'s two consumers, replay and prune, are plain functions
 // over `IdentityServiceContext<G>`. The release batch below evaluates, and
 // declines, both ways of retiring these seven +2 entries — see that batch's
 // own comment for the reasoning; this one stays permanent, not staged.
 //
 // `ensureSchema`'s `historyEnabled` extra moved off the public
-// `SchemaManagerOptions` (G1R3-04) onto an unexported `EnsureSchemaInternalOptions`
+// `SchemaManagerOptions` onto an unexported `EnsureSchemaInternalOptions`
 // that only `ensureSchemaInternal` (imported directly by `store.ts`, never
 // re-exported) accepts, so it renders at no entrypoint at all — no ledger
 // entry to update for that change.
@@ -605,13 +605,13 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `IdentityTransferAssertion`, `IdentityRelation`) deliberately from
 // `src/graph-merge/index.ts` rather than leaving them as debt.
 //
-// Ruling (2026-09-09): the five `IdentityDecisionProvenance` entries above
+// Decision: the five `IdentityDecisionProvenance` entries above
 // stay PERMANENT debt, not retired. The only retirement this ledger's own
 // discipline allows is re-exporting the type from each of those five narrow
 // barrels — `./interchange`, `./postgres/pglite`, `./profiler`,
 // `./provenance`, `./sqlite/local` — purely to move a count, which is
 // exactly the "export machinery invented to avoid debt" this file's header
-// forbids and the identical `IdentityServiceContext` / `PlainNodeRef` ruling
+// forbids and the identical `IdentityServiceContext` / `PlainNodeRef` decision
 // two comments below already declined for the same reason. None of those
 // five barrels has a type-surface reason of its own to name a merge
 // decision's shape.
@@ -942,7 +942,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `DefaultAliasExpansionAxis`, `SearchExpansionAxis` and
 // `SubgraphResultEdgeKinds` — the fourth because none of those barrels
 // re-exports it, the same "has no business re-exporting" reasoning the
-// `IdentityDecisionProvenance` ruling above already applies. They do NOT
+// `IdentityDecisionProvenance` decision above already applies. They do NOT
 // move for the eight meta-edge constants: the ontology factories are
 // exported from the root barrel alone, so no narrow barrel renders them.
 //
@@ -1045,17 +1045,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // constants renamed in that merge are exported from `./graph-merge` directly
 // and add no forgotten name.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
-  // Roadmap F (meta-edge removal): removing the public `InferenceType`
+  // Meta-edge removal: removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
   // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped
   // exactly one forgotten export apiece from every entrypoint below that
-  // saw its count change under THIS ONE batch — Roadmap F only ever
+  // saw its count change under THIS ONE batch — that batch only ever
   // lowered a count, never raised one. That is not a standing guarantee
-  // for the ledger as a whole: later batches below (Item E.2 among them)
+  // for the ledger as a whole: later batches below (the composition existence batch among them)
   // document counts this ledger RAISES, each with its own gate on the
   // exact delta and the exact new names responsible.
   //
-  // Item E.2: `CompositionExistence` (the `existence: "optional" | "required"`
+  // Composition existence: `CompositionExistence` (the `existence: "optional" | "required"`
   // union) is a new public type, re-exported directly only from `.` and
   // `./ontology` (alongside its existing sibling `CompositionPartSide`).
   // Every OTHER entrypoint below reaches it only transitively — through a
@@ -1082,6 +1082,13 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `.`, which drops that entrypoint's forgotten-export count. Other
   // entrypoints still reach the renamed probe kinds and attachment props only
   // transitively, so their counts hold and only the fingerprint moves.
+  // `CompositionRealization` is the shared `{ via?, partSide?, existence? }`
+  // fragment intersected into every ontology relation shape (declared, typed,
+  // named, serialized and extension), so the composition fields are documented
+  // once. It is exported from no entrypoint, so it registers as one new
+  // forgotten name at each of the eighteen entrypoints that reach an ontology
+  // relation type: +1 apiece, no other name moved. `./adapters/drizzle/indexes`
+  // and `./indexes` never reach it and are unchanged.
   // `EdgeKindFacts` is the return type of the new `KindRegistry.edgeKindFacts`
   // reader. It is exported from no entrypoint, so it registers as one new
   // forgotten name wherever `KindRegistry` is reachable: `.`, `./schema` and
@@ -1093,57 +1100,57 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // through the identity lineage reads and gain it as a second name. Delta: +1 at
   // `.` and `./schema`, +2 at each of the seven; no other entrypoint moved.
   ".": {
-    count: 541,
-    sha256: "0f7b034fa765a52fe88040e038938f8cb0b896598a74a194265c0366199af93d",
+    count: 542,
+    sha256: "25819f0665670abf719249ccb38ace3f4234fbdc3e26a7250eb6e5ffe3c0a0eb",
   },
   "./adapters/drizzle/engine": {
-    count: 344,
-    sha256: "3656503c37464776f1a2bbfd5c2be9ee47dd5e7097abe3d04ea641c4372752a1",
+    count: 345,
+    sha256: "7090c4e2f930480b077701a55b3f28df1d50a9e6ff6b0bd9d1d8bb5c57587ea2",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 274,
-    sha256: "bcf53da0a2e01779d60c52252ec11edc36d9edd51a46bc1a54f90bbc3394c1a0",
+    count: 275,
+    sha256: "a471eee91a85079c86cd3683cd294604d2e9c161ee72d67cb58637f47ed6e313",
   },
   // The dedicated working-copy adapter exposes Store and durable strategy
   // signatures, making their portable implementation types transitively
   // visible here. Keep that large type graph isolated from the established
   // PostgreSQL adapter and pin its exact symbol set.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 940,
-    sha256: "616bc36504d842d6a4e2dfa68813b1b6dde998c89c095bc3cf4d0a4fa770bfa5",
+    count: 941,
+    sha256: "27d1b0503370933eb11db2087234505cb10d49220b006f7a4eb32dd231c4e23d",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 278,
-    sha256: "81a1a41a83fe415981315d81b4b5dd56576518da8ee56eb8d77f882f06337c06",
+    count: 279,
+    sha256: "3412610723ed2612300b820861b4dbb416e43a72c4281e547f247dcbcd9b8a41",
   },
   "./adapters/drizzle/sqlite": {
-    count: 275,
-    sha256: "8bd005b175b31e19424a92cc7cde96ad1024c91fc103c5ae6c788491c77ecf12",
+    count: 276,
+    sha256: "9c674430a0e8022cff1057c3629faf592e161af1fff8ff01c648ed85b4b3147c",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 278,
-    sha256: "485bdb92bac57c14399e756a0fe866158f2f3f4b8c084ed1f04a37b9d7292a75",
+    count: 279,
+    sha256: "441e997fecb17d8c2474fdd0cce69ec110efc7c644028e0ee38c755abad4a334",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 278,
-    sha256: "485bdb92bac57c14399e756a0fe866158f2f3f4b8c084ed1f04a37b9d7292a75",
+    count: 279,
+    sha256: "441e997fecb17d8c2474fdd0cce69ec110efc7c644028e0ee38c755abad4a334",
   },
   "./backend": {
-    count: 24,
-    sha256: "9ca5a50f6cacc1806ebf2282c233c34b0dafcd720d7129e76077a4b2589d75c2",
+    count: 25,
+    sha256: "45522da8ad21a75f24b4cd83714ff7ae205c68c3ad87986b55715a1eff0131fc",
   },
   "./core": {
-    count: 73,
-    sha256: "558fb671c7c7fc1053c0bc22a807110516596cd49364a1804abcce8d2878d621",
+    count: 74,
+    sha256: "735bff147c58e240841403d054dcc94e30e1b4d447664febcf56ba4ae7fe1326",
   },
   // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
-    count: 21,
-    sha256: "b843080b024c1fd44f59a8014eb8cbd91e698ce199233a8d7910eafdbcae526f",
+    count: 22,
+    sha256: "275e9f2bdb2b75721e5be5275e18a8cf75209bf4207847cd1c403052286fab62",
   },
   // Paged identity history: `IdentityFacade.transitionsOf` now returns the
   // named `IdentityTransitionHistory` instead of a bare array. The root
@@ -1160,28 +1167,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 934,
-    sha256: "3c50f7bf6358af33128257d70fe98cf3cef8a622e4028f33671546c024087142",
+    count: 935,
+    sha256: "0d6802b6a19a15314d5e6ad5e9c336fd2687e438d17c549ab94f16319c0bd987",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 919,
-    sha256: "5f4816cf468eb6938fc072192daa72426af5070a1911f163ea0e9a544f2c7acc",
+    count: 920,
+    sha256: "029423432b024197b14bdda59e0e3c5e4c900fe38848d5015a1fb3a1e7b257d9",
   },
   "./postgres/pglite": {
-    count: 925,
-    sha256: "0c44b4a34e43d3df7b900d8db8f0af46b1b952d012574dc7d7faa9f98e16ceb9",
+    count: 926,
+    sha256: "1222204f1834924a8fc5f886de9a89c731e7f89c5da469ecf080d4d58e5437d3",
   },
   "./profiler": {
-    count: 921,
-    sha256: "85bd425bad15d8935756303f6802c3662d430ef1279cdc127fad6df86c736f83",
+    count: 922,
+    sha256: "a28d1ae1569f16434bb65afa5b30036e1fcebdf289ebc68932f375676a4ce2e1",
   },
   "./provenance": {
-    count: 934,
-    sha256: "36f386c824c13797701755ef1a11001fa1a7f35b8f56d478b119576d042e8eaa",
+    count: 935,
+    sha256: "4747e168f902e89dac12cfba14ad3f132d21ae074c0073f54bcc450c8ac256b8",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1193,12 +1200,12 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 303,
-    sha256: "6b957a3718ca11ff883af2c26cec338ebabb4bc54ce4da3ace5095f29412d9b5",
+    count: 304,
+    sha256: "58b2ca51f7bc646a837645bf3ce5bb649d2f018be4380fb84398021408f26888",
   },
   "./sqlite/local": {
-    count: 925,
-    sha256: "0c44b4a34e43d3df7b900d8db8f0af46b1b952d012574dc7d7faa9f98e16ceb9",
+    count: 926,
+    sha256: "1222204f1834924a8fc5f886de9a89c731e7f89c5da469ecf080d4d58e5437d3",
   },
 };
 

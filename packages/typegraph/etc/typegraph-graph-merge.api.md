@@ -1226,7 +1226,7 @@ type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
     via?: CompositionViaRef;
 }>;
 
-// @public (undocumented)
+// @public
 type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>, RecursiveAliases & BuildRecursiveAliases<O extends {
     depth: infer D extends boolean | string;
 } ? D : false, O extends ({
@@ -1251,6 +1251,13 @@ type CompositionPair = Readonly<{
 
 // @public
 type CompositionPartSide = "from" | "to";
+
+// @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
 
 // @public
 type CompositionRelation = Readonly<{
@@ -3197,10 +3204,7 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type ExtensionPropertyModifiers = Readonly<{
@@ -6348,10 +6352,7 @@ type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type OntologyTypeErased<G extends GraphDef> = number extends G["ontology"]["length"] ? true : false;
@@ -7746,10 +7747,7 @@ type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type SerializedSchema = Readonly<{
@@ -8735,10 +8733,10 @@ type SubsumptionElementNamesKind<Relation, K extends string> = Relation extends 
     from: infer From;
     to: infer To;
 }) ? [
-Extract<Extract<MatchedEndpoints<Name, From, To>, {
-    kind: string;
-}>["kind"], K>
-] extends [never] ? false : true : false : never;
+Extract<EndpointKinds<MatchedEndpoints<Name, From, To>>, K>
+] extends ([
+never
+]) ? false : true : false : never;
 
 // @public
 type SubsumptionLiteralsErased<Relation> = Relation extends unknown ? Relation extends ({

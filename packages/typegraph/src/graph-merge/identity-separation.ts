@@ -221,6 +221,20 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   return { classKeyOf, separatedClassPairs, separatingAssertionIdOf };
 }
 
+/** The class-pair key for two participants, or undefined when either is unresolved or both share a class. */
+function separatedPairKey(
+  facts: IdentitySeparationFacts,
+  a: MergeKey,
+  b: MergeKey,
+): string | undefined {
+  const first = facts.classKeyOf.get(a);
+  const second = facts.classKeyOf.get(b);
+  if (first === undefined || second === undefined || first === second) {
+    return undefined;
+  }
+  return separationClassPairKey(first, second);
+}
+
 /**
  * The `different` assertion ids a refusal should name for this pair — empty
  * when the relation reported a separation the ledger's witness could not be
@@ -231,12 +245,9 @@ export function separatingAssertionIds(
   a: MergeKey,
   b: MergeKey,
 ): readonly string[] {
-  const first = facts.classKeyOf.get(a);
-  const second = facts.classKeyOf.get(b);
-  if (first === undefined || second === undefined) return [];
-  const witness = facts.separatingAssertionIdOf.get(
-    separationClassPairKey(first, second),
-  );
+  const key = separatedPairKey(facts, a, b);
+  const witness =
+    key === undefined ? undefined : facts.separatingAssertionIdOf.get(key);
   return witness === undefined ? [] : [witness];
 }
 
@@ -250,10 +261,6 @@ export function isSeparatedPair(
   a: MergeKey,
   b: MergeKey,
 ): boolean {
-  const first = facts.classKeyOf.get(a);
-  const second = facts.classKeyOf.get(b);
-  if (first === undefined || second === undefined || first === second) {
-    return false;
-  }
-  return facts.separatedClassPairs.has(separationClassPairKey(first, second));
+  const key = separatedPairKey(facts, a, b);
+  return key !== undefined && facts.separatedClassPairs.has(key);
 }

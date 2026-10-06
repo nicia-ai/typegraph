@@ -30,7 +30,6 @@ import {
   DisjointError,
   EndpointError,
   EndpointPairError,
-  UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
@@ -389,7 +388,7 @@ export function subClassComponent(
  * i.e. nothing sits strictly above it.
  *
  * "The ancestor with no ancestors" stopped being a definition once
- * `equivalentTo` became mutual subsumption (D1): an equivalence class is a
+ * `equivalentTo` became mutual subsumption: an equivalence class is a
  * cycle in the ancestor relation, so with `Company ≡ Corporation` and no other
  * parent, neither is ancestor-free and the old recursion never terminated.
  * Picking the code-point minimum of the maximal set restores termination AND
@@ -410,25 +409,6 @@ function rootAncestor(kind: string, registry: KindRegistry): string {
     (left, right) => compareCodePoints(left, right),
   );
   return ordered[0] ?? kind;
-}
-
-/**
- * Creates a uniqueness error.
- */
-export function createUniquenessError(
-  constraintName: string,
-  kind: string,
-  existingId: string,
-  newId: string,
-  fields: readonly string[],
-): UniquenessError {
-  return new UniquenessError({
-    constraintName,
-    kind,
-    existingId,
-    newId,
-    fields: [...fields],
-  });
 }
 
 // ============================================================

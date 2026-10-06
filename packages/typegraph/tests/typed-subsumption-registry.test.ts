@@ -1,13 +1,13 @@
 /**
- * C.2 — the registry-build-time structural subsumption check.
+ * The registry-build-time structural subsumption check.
  *
- * C.1 (compile time) refuses everything TypeScript's structural
+ * The compile-time check refuses everything TypeScript's structural
  * assignability over `z.infer` can see; it is blind to value-level
  * constraints (`z.string().min(3)` tightening a bare `z.string()`), so most
  * fixtures here deliberately construct pairs that are TYPE-compatible (so
  * `subClassOf`/`equivalentTo` compiles) but VALUE-level incompatible — the
- * "C.1 accepts strictly more than C.2 refuses" gap the roadmap names in
- * §1.3, and exactly the case only the runtime check can catch.
+ * "the compile-time check accepts strictly more than the registry check
+ * refuses" gap, and exactly the case only the runtime check can catch.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -20,7 +20,7 @@ import { deserializeSchema, serializeSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 
-describe("C.2 — subClassOf refused when the child is not a structural subtype", () => {
+describe("registry check — subClassOf refused when the child is not a structural subtype", () => {
   it("refuses a direct value-constraint mismatch, naming the codes and fields", () => {
     const Loose = defineNode("Loose", {
       schema: z.object({ code: z.string() }),
@@ -138,9 +138,9 @@ describe("C.2 — subClassOf refused when the child is not a structural subtype"
   it("refuses an opaque construct (z.intersection) as incomparable, never silently accepted", () => {
     // Child's `tag` differs from Parent's `tag` ONLY by a value-level
     // constraint (`minLength: 3`) TypeScript's z.infer cannot see, so the
-    // pair still compiles under C.1 (both infer `string`) — but the
+    // pair still compiles under the compile-time check (both infer `string`) — but the
     // projected JSON Schema is NOT byte-identical, so the identity rule
-    // (C13-R1-03) cannot fire, and the opaque `allOf` keyword must still
+    // cannot fire, and the opaque `allOf` keyword must still
     // surface the refusal. Width subtyping (the child adding "note") must
     // not mask it either. Two string schemas, because the projection merges
     // an intersection of two object schemas into one comparable object.
@@ -175,7 +175,7 @@ describe("C.2 — subClassOf refused when the child is not a structural subtype"
     );
   });
 
-  it("accepts a child that copies a recursive/intersection parent property VERBATIM and adds a field (C13-R1-03)", () => {
+  it("accepts a child that copies a recursive/intersection parent property VERBATIM and adds a field", () => {
     // A schema is trivially a subtype of itself regardless of which
     // keywords it carries — including `$ref` (recursive z.lazy) and `allOf`
     // (z.intersection), which the structural-subtype predicate otherwise
@@ -273,7 +273,7 @@ describe("C.2 — subClassOf refused when the child is not a structural subtype"
   });
 });
 
-describe("C.2 — equivalentTo refused in the failing direction only", () => {
+describe("registry check — equivalentTo refused in the failing direction only", () => {
   it("refuses the direction whose schema is not a structural subtype, with the equivalence code", () => {
     // X requires a tighter constraint than Y; X -> Y holds (X asks more),
     // Y -> X does not (a short Y-valid string fails X's bound).
@@ -309,7 +309,7 @@ describe("C.2 — equivalentTo refused in the failing direction only", () => {
   });
 });
 
-describe("C.2 — deserialized documents are checked identically to live graphs", () => {
+describe("registry check — deserialized documents are checked identically to live graphs", () => {
   it("refuses a persisted document carrying an incompatible subClassOf", () => {
     const Loose = defineNode("Loose", {
       schema: z.object({ code: z.string() }),
@@ -345,7 +345,7 @@ describe("C.2 — deserialized documents are checked identically to live graphs"
   });
 });
 
-describe("C.2 — evolve() checks an authored extension before any write", () => {
+describe("registry check — evolve() checks an authored extension before any write", () => {
   it("refuses an extension declaring an incompatible child, before the store accepts the kind", async () => {
     const Person = defineNode("Person", {
       schema: z.object({ name: z.string() }),
@@ -419,7 +419,7 @@ describe("C.2 — evolve() checks an authored extension before any write", () =>
   });
 });
 
-describe("C.2 — known gap: unconvertible Zod constructs project identically (C13-R1-09)", () => {
+describe("registry check — known gap: unconvertible Zod constructs project identically", () => {
   // `z.set()`/`z.map()` fail `z.toJSONSchema` and both collapse to the SAME
   // `{ type: "object" }` fallback (src/schema/serializer.ts), so this pair
   // — genuinely incompatible (Parent requires a "tags" set the Child
@@ -427,19 +427,19 @@ describe("C.2 — known gap: unconvertible Zod constructs project identically (C
   // pins the DOCUMENTED, not desired, current behavior (see the module
   // headers on validate-structural-subsumption.ts and serializer.ts): a
   // kind containing an unconvertible construct is effectively skipped by
-  // C.2, not guaranteed. A future serializer fix that distinguishes
+  // the registry check, not guaranteed. A future serializer fix that distinguishes
   // "unprojectable" from a real `{ type: "object" }` should make this test
   // start refusing the pair — update it deliberately then, not by
   // widening this pin further.
   //
   // Child genuinely lacks Parent's "tags" property, so `subClassOf(Child,
-  // Parent)` would also fail C.1's compile-time check for THIS pair — this
-  // reaches C.2 through the deserialized-document route instead, the same
+  // Parent)` would also fail the compile-time check for THIS pair — this
+  // reaches the registry check through the deserialized-document route instead, the same
   // way an older, laxer validator (or a hand-edited document) could have
   // written it, matching the "deserialized documents" pattern above. That is
   // not true in general: the next test reaches the same gap from a plain
   // live `defineGraph` (no deserialization needed at all) with a
-  // value-constraint mismatch C.1 cannot see (C13-R2-02).
+  // value-constraint mismatch the compile-time check cannot see.
   it("does not refuse a persisted subClassOf pair that differs only inside a z.set()/z.map() field", () => {
     const SetChild = defineNode("SetChild", {
       schema: z.object({ note: z.string() }),
@@ -470,17 +470,17 @@ describe("C.2 — known gap: unconvertible Zod constructs project identically (C
     ).not.toThrow();
   });
 
-  // C13-R2-02: the gap above is not confined to a hand-edited or otherwise
+  // The gap above is not confined to a hand-edited or otherwise
   // deserialized document. A live, ordinary `defineGraph` reaches it too, as
   // long as the incompatibility is hidden behind a VALUE-level constraint
-  // (invisible to C.1) rather than a missing property (which C.1 would
+  // (invisible to the compile-time check) rather than a missing property (which it would
   // refuse before this pair ever reached the registry). Both `tags` fields
   // infer to the identical `Set<string>` TypeScript type, so
   // `subClassOf(SetChildLive, SetParentLive)` compiles; `serializeSchemaProperties`
   // then collapses both kinds' `z.set()` field to the SAME `{ type: "object" }`
   // fallback, so the genuinely tighter `code` constraint on the parent is
   // never compared and `buildKindRegistry` accepts the pair.
-  it("does not refuse a live subClassOf pair whose incompatibility is hidden behind a z.set() field (C13-R2-02)", () => {
+  it("does not refuse a live subClassOf pair whose incompatibility is hidden behind a z.set() field", () => {
     const SetChildLive = defineNode("SetChildLive", {
       schema: z.object({ code: z.string(), tags: z.set(z.string()) }),
     });

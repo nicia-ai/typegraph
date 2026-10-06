@@ -248,7 +248,7 @@ describe("generated edge batch store consumer", () => {
     ).toBeUndefined();
   });
 
-  it("declines a composition edge kind realizing a required-existence part (item E.2)", () => {
+  it("declines a composition edge kind realizing a required-existence part", () => {
     // `assertCompositionExistencePreserved` reads the part row under the
     // held write lock — a decision this read-free fused command cannot
     // express, so a required-existence composition edge kind must take the
@@ -309,7 +309,7 @@ describe("generated edge batch store consumer", () => {
   // (src/store/operations/atomic-mutation-program.ts). This assertion then
   // fails.
 
-  it("accepts a composition edge kind whose part is optional-existence (item E.2)", () => {
+  it("accepts a composition edge kind whose part is optional-existence", () => {
     const AedOptPart = defineNode("AedOptPart", { schema: z.object({}) });
     const AedOptWhole = defineNode("AedOptWhole", { schema: z.object({}) });
     const aedOptPartOf = defineEdge("aedOptPartOf", { schema: z.object({}) });
@@ -435,7 +435,7 @@ describe("generated edge batch store consumer", () => {
     // exclusion alone cannot see the SECOND claim `compositionClaim` adds.
     // No separate exclusion is needed: `compositionAcyclicRelation`
     // (src/store/acyclicity.ts) folds EVERY composition-realizing edge kind
-    // into D-10's union the moment any `partOf`/`hasPart` pair exists, so
+    // into the composition relation's union the moment any `partOf`/`hasPart` pair exists, so
     // `edgeKindIsInAcyclicRelation` already answers `true` here — the exact
     // mechanism `tests/backends/integration/composition-fence.ts`'s
     // acyclicity cases already mutation-check.

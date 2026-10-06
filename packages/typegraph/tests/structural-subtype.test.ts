@@ -324,7 +324,7 @@ describe("additionalProperties", () => {
     );
   });
 
-  // C2-02: an OPEN child does not actually omit a parent-declared property it
+  // An OPEN child does not actually omit a parent-declared property it
   // leaves unnamed — any value satisfying the child could still carry that
   // key, so the child's additional-properties schema must narrow the
   // parent's declared property rather than being skipped. Before the fix,
@@ -555,7 +555,7 @@ describe("scalars", () => {
       parent: z.number(),
       expected: "subtype",
     },
-    // C2-01: `z.url()` and `z.jwt()` project `format` with NO accompanying
+    // `z.url()` and `z.jwt()` project `format` with NO accompanying
     // `pattern` (unlike every other format-bearing construct, e.g.
     // `z.email()`/`z.uuid()`), so `format` must itself be a constraint or a
     // bare `z.string()` is unsoundly accepted as a subtype of either.
@@ -679,7 +679,7 @@ describe("arrays and tuples", () => {
     );
   });
 
-  // C2-03: a tuple-with-rest child (`z.tuple([...], rest)`) has the SAME
+  // A tuple-with-rest child (`z.tuple([...], rest)`) has the SAME
   // `prefixItems` length as a closed parent tuple here, so the arity check
   // above cannot catch it — only checking that the parent is also closed
   // (no `items`) does.
@@ -803,11 +803,11 @@ describe("unions and nullability", () => {
     expect(result.verdict).toBe("incomparable");
   });
 
-  // C2-05: a hand-written schema carrying both `type` and `anyOf` must still
+  // A hand-written schema carrying both `type` and `anyOf` must still
   // be read as a union — `propertyTypeSignature` (migration's construct
   // SELECTOR, not a union detector) would read `type` first and hide the
   // `anyOf` entirely, silently dropping the parent's union constraint.
-  it("a parent carrying both type and anyOf still enforces the union (C2-05)", () => {
+  it("a parent carrying both type and anyOf still enforces the union", () => {
     const child: JsonSchema = { type: "string" };
     const parent: JsonSchema = {
       type: "string",
@@ -817,7 +817,7 @@ describe("unions and nullability", () => {
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "no-matching-union-member",
-      // C2-10: the child isn't itself a union, so no `anyOf[i]` segment is
+      // The child isn't itself a union, so no `anyOf[i]` segment is
       // synthesized onto a path the child schema doesn't actually have.
       path: [],
     });
@@ -825,11 +825,11 @@ describe("unions and nullability", () => {
 });
 
 // ============================================================
-// Union sibling keywords (C2-R2-01, C2-R2-04)
+// Union sibling keywords
 // ============================================================
 
 describe("union sibling keywords", () => {
-  // C2-R2-01: a union keyword is ANDed with any sibling keyword on the same
+  // A union keyword is ANDed with any sibling keyword on the same
   // schema object, not replaced by it. `compareUnion` alone only checks the
   // OR half of that AND (does the child match some member); dropping the
   // parent's sibling keywords entirely — as the predicate did before this
@@ -894,7 +894,7 @@ describe("union sibling keywords", () => {
     );
   });
 
-  // C2-R2-04: the verdict must not depend on the declared order of the
+  // The verdict must not depend on the declared order of the
   // parent's union members — an `incomparable` member earlier in the list
   // must not stop the search for a matching member later in the list.
   it("compareUnion's verdict is independent of parent-member order", () => {
@@ -1010,7 +1010,7 @@ describe("incomparable constructs", () => {
     });
   });
 
-  it("a searchable() field does not make a pair incomparable (D1; src/core/searchable.ts:120)", () => {
+  it("a searchable() field does not make a pair incomparable (src/core/searchable.ts:120)", () => {
     // Built from the real `searchable()` tag (not a hand-written literal) so
     // this test ratchets against a change to `SEARCHABLE_FIELD_KEY` or to the
     // tag's projected shape.
@@ -1025,14 +1025,14 @@ describe("incomparable constructs", () => {
     );
   });
 
-  it("an arbitrary .meta() key does not make a pair incomparable (D1: unknown keywords are ignored for subtyping)", () => {
+  it("an arbitrary .meta() key does not make a pair incomparable (unknown keywords are ignored for subtyping)", () => {
     const child = z.object({ a: z.string().meta({ myKey: 1 }) });
     const parent = z.object({ a: z.string() });
     assertVerdict(verdict(child, parent), "subtype");
     assertVerdict(verdict(parent, child), "subtype");
   });
 
-  // C2-06: standard JSON Schema 2020-12 vocabulary keywords this predicate's
+  // Standard JSON Schema 2020-12 vocabulary keywords this predicate's
   // rule set does not model must refuse rather than silently accept, even
   // though the Zod projection never emits them — the public
   // `isStructuralSubtype` surface takes an arbitrary hand-written schema.
@@ -1081,7 +1081,7 @@ describe("divergence from the migration predicate", () => {
     );
     expect(change.severity).toBe("breaking");
 
-    // C.2's question: "is every child value a valid parent value?" -> yes
+    // The registry check's question: "is every child value a valid parent value?" -> yes
     expect(isStructuralSubtype(projected(child), projected(parent))).toEqual({
       verdict: "subtype",
     });
@@ -1104,7 +1104,7 @@ describe("divergence from the migration predicate", () => {
     );
     expect(change.severity).toBe("safe");
 
-    // C.2's question: the parent's guarantee that `nickname` is present no
+    // The registry check's question: the parent's guarantee that `nickname` is present no
     // longer holds for every child value -> not a subtype
     const result = isStructuralSubtype(projected(child), projected(parent));
     expect(result).toMatchObject({
@@ -1184,7 +1184,7 @@ describe("projection coverage", () => {
     });
   });
 
-  // The actual ratchet (C2-R2-02): walks every keyword the projection emits
+  // The actual ratchet: walks every keyword the projection emits
   // across all of PROJECTION_CASES — recursing only through JSON-Schema
   // COMPOSITION edges (`properties` values, `items`, `prefixItems` members,
   // `propertyNames`, an object-valued `additionalProperties`, `anyOf`/`oneOf`
@@ -1219,7 +1219,7 @@ describe("projection coverage", () => {
   });
 
   // Each entry supplies its own [child, parent] pair, DIFFERING enough that
-  // rule 2's full-schema identity check (C13-R1-03) cannot fire — otherwise
+  // rule 2's full-schema identity check cannot fire — otherwise
   // the pair would short-circuit to `subtype` before the walk ever reaches
   // the construct under test. A self-recursive schema compared to an
   // IDENTICAL copy of itself is exactly this trap for a NESTED `$ref` (the
@@ -1277,7 +1277,7 @@ describe("projection coverage", () => {
     expect(result.verdict).toBe("incomparable");
   });
 
-  // C13-R1-03: an unmodeled construct (`$ref`/`allOf`/`not`/`contentEncoding`
+  // An unmodeled construct (`$ref`/`allOf`/`not`/`contentEncoding`
   // and friends) is still refused between two DIFFERENT schemas — see
   // INCOMPARABLE_BY_DESIGN above — but a schema is trivially a subtype of
   // itself regardless of which keywords it carries (rule 2), so an
@@ -1286,7 +1286,7 @@ describe("projection coverage", () => {
   // copy a recursive (`z.lazy`) or intersection (`z.intersection`) parent
   // property VERBATIM without the pair being refused as
   // SCHEMA_INCOMPARABLE.
-  describe("identical unmodeled constructs are reflexive (C13-R1-03)", () => {
+  describe("identical unmodeled constructs are reflexive", () => {
     it("z.never() self-comparison is a subtype", () => {
       const schema = projected(z.never());
       expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");

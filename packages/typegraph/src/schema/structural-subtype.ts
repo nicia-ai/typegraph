@@ -187,7 +187,7 @@ export function isStructuralSubtype(
 }
 
 // ============================================================
-// C.1 ↔ C.2 agreement projection
+// Compile-time / runtime agreement projection
 // ============================================================
 
 /**
@@ -200,7 +200,7 @@ export function isStructuralSubtype(
  * `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`, `multipleOf`,
  * `minItems`/`maxItems`) narrows a value at RUNTIME without narrowing its
  * static TYPE — `z.string()` and `z.string().min(3)` share the type
- * `string` — so C.1's compile-time check is blind to them.
+ * `string` — so the compile-time check is blind to them.
  */
 const TYPE_VISIBLE_KEYWORDS: ReadonlySet<string> = new Set([
   "type",
@@ -260,23 +260,23 @@ export function projectTypeVisible(schema: JsonSchema): JsonSchema {
 }
 
 /**
- * The RUNTIME prediction of what `subClassOf(child, parent)` / C.1's
- * conditional-type check resolves to: `isStructuralSubtype` applied to each
+ * The RUNTIME prediction of what `subClassOf(child, parent)`'s
+ * compile-time conditional-type check resolves to: `isStructuralSubtype` applied to each
  * side's {@link projectTypeVisible} projection, rather than the full schema.
  *
  * One comparison engine (`isStructuralSubtype`), one projection
  * (`projectTypeVisible`) — this is not a second walk of the schema, only a
- * narrower view fed into the same predicate C.2 uses.
+ * narrower view fed into the same predicate the runtime check uses.
  *
  * `isStructuralSubtype(c, p).verdict === "subtype"` implies
- * `isTypeLevelSubtype(c, p).verdict === "subtype"` — a hierarchy C.2 accepts
- * always compiles under C.1
+ * `isTypeLevelSubtype(c, p).verdict === "subtype"` — a hierarchy the runtime check accepts
+ * always compiles under the compile-time check
  * (`tests/property/typed-subsumption-agreement.test.ts`). The converse does
  * NOT hold: TypeScript cannot see a value-level constraint, so
  * `isTypeLevelSubtype` accepts pairs `isStructuralSubtype` refuses (a bare
  * `z.string()` child under a `z.string().min(3)` parent erases to identical
- * types but is not a runtime subtype) — this is "C.1 is a filter, C.2 is the
- * authority" (roadmap §1.3), not a defect in either predicate.
+ * types but is not a runtime subtype) — this is "the compile-time check is a
+ * filter, the runtime check is the authority", not a defect in either predicate.
  */
 export function isTypeLevelSubtype(
   child: JsonSchema,
@@ -619,7 +619,7 @@ function withoutUnionKeywords(schema: JsonSchema): JsonSchema {
  * never a false `subtype` accept — so no equivalent check runs for `child`.
  * Dropping the PARENT's sibling keywords is unsound: it silently narrows what
  * the parent constraint set actually excludes, which is exactly the defect
- * this function closes (C2-R2-01).
+ * this function closes.
  */
 function compareUnionSiblingConstraints(
   child: JsonSchema,
@@ -651,7 +651,7 @@ function compareUnion(
     // A parent member that is itself incomparable does not end the search:
     // the schema is order-insensitive by construction (unions are sets), so
     // a LATER parent member that matches must still be found before this
-    // reports `incomparable` (C2-R2-04) — the top-level verdict for a given
+    // reports `incomparable` — the top-level verdict for a given
     // pair must not depend on the declared order of the parent's members.
     let firstIncomparable: StructuralSubtypeResult | undefined;
     for (const parentMember of parentMembers) {

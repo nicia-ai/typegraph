@@ -1,5 +1,5 @@
 /**
- * In-process unit and refusal tests for item D.2 (`acyclic: true`).
+ * In-process unit and refusal tests for `acyclic: true`.
  *
  * Cross-backend query-and-constraint semantics live in
  * `tests/backends/integration/edge-acyclicity.ts`, run on every backend.
@@ -51,8 +51,8 @@ import { createTestBackend, matchingObject } from "./test-utils";
 
 const Task = defineNode("Task", { schema: z.object({ name: z.string() }) });
 // A second node kind exists solely so the mixed-orientation relation test
-// below can put a real Task/Milestone split on `blockedBy`'s endpoints — see
-// D2-07 / D2R2-03: with a single node kind, the reversed member's from_kind
+// below can put a real Task/Milestone split on `blockedBy`'s endpoints —
+// with a single node kind, the reversed member's from_kind
 // and to_kind columns are both the literal "Task", so a CASE-arm swap on the
 // projected kind columns is invisible.
 const Milestone = defineNode("Milestone", {
@@ -105,20 +105,19 @@ describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
   });
 });
 
-// D2R2-01: the single-create acyclicity gate must route through
+// The single-create acyclicity gate must route through
 // `edgeKindIsInAcyclicRelation` (the one owner, per `edgeAcyclic` in
 // edge-operations.ts), not re-read `registration.acyclic === true` directly.
-// Item E's composed relations will make a member kind participate in an
-// acyclic relation while its OWN registration carries no `acyclic` key
-// (D-10); until item E ships there is no way to produce that shape through
-// `defineGraph`, so this test simulates it exactly as the review that caught
-// this did: by making the shared predicate answer `true` for a plain edge
+// Composed relations make a member kind participate in an
+// acyclic relation while its OWN registration carries no `acyclic` key,
+// a shape a plain `acyclic` fixture cannot produce, so this test simulates
+// it by making the shared predicate answer `true` for a plain edge
 // kind, the same thing a composed relation will do for real. It spies on
 // `assertEdgeRelationsAcyclic` itself (rather than letting it run for real)
 // because that function's own relation lookup is an intra-module call that
 // a spy on the module's exports cannot intercept — the point here is
 // narrower and precise: does the single-create path even REACH the probe.
-describe("single-create acyclicity gate: routes through the one-owner predicate (D2R2-01)", () => {
+describe("single-create acyclicity gate: routes through the one-owner predicate", () => {
   it("calls assertEdgeRelationsAcyclic for a kind whose own registration has no acyclic flag, once the shared predicate says it is in a relation", async () => {
     const backend = createTestBackend();
     const store = createStore(graph, backend);
@@ -126,7 +125,7 @@ describe("single-create acyclicity gate: routes through the one-owner predicate 
     const b = await store.nodes.Task.create({ name: "b" });
 
     // `plainMany` declares no `acyclic` key at all (see the graph fixture
-    // above) — exactly the composed-member shape D-10 describes.
+    // above) — exactly the composed-member shape.
     expect(
       acyclicRelationForEdgeKind(graph, registry, "plainMany"),
     ).toBeUndefined();
@@ -322,7 +321,7 @@ describe("recursiveTraversal: { supported: false } refuses both the write and th
 });
 
 // ============================================================
-// §8 typed terminals (D2-02): the engine-cut-short indeterminate error and
+// Typed terminals: the engine-cut-short indeterminate error and
 // the fresh-snapshot isolation refusal. Both existed with zero coverage.
 // ============================================================
 
@@ -341,7 +340,7 @@ function backendWhoseExecuteThrows(code: unknown): GraphBackend {
 
 /**
  * A backend whose `execute` throws the shape a real Drizzle-wrapped driver
- * failure has (D2R2-04): the top-level error's `.message` is the query text
+ * failure has: the top-level error's `.message` is the query text
  * and carries no `code`, and the real driver error — carrying `code` — sits
  * one `.cause` link down, exactly how `DrizzleQueryError` wraps node-postgres
  * / postgres-js (see `src/utils/sql-errors.ts`'s `errorChain` doc comment).
@@ -408,7 +407,7 @@ describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a prop
     });
   }
 
-  it("reports EdgeAcyclicityIndeterminateError when the cut-short code sits one `.cause` link down (Drizzle-wrapped shape, D2R2-04)", async () => {
+  it("reports EdgeAcyclicityIndeterminateError when the cut-short code sits one `.cause` link down (Drizzle-wrapped shape)", async () => {
     const backend = backendWhoseExecuteThrowsNestedCause("57014");
     await expect(
       assertEdgeRelationsAcyclic(acyclicityContext(backend), [PROPOSED_EDGE]),
@@ -461,9 +460,9 @@ describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal
 });
 
 // ============================================================
-// D-10 / D2-07: the oriented (`reversed: true`) member. D.2 itself never
+// The oriented (`reversed: true`) member. Acyclicity itself never
 // constructs one — every real graph declares standalone, forward-only
-// relations — but item E's composition contract will, and the ~45 lines of
+// relations — but the composition contract does, and the ~45 lines of
 // generated SQL that walk a reversed member had zero execution before this.
 // ============================================================
 
@@ -533,7 +532,7 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
     const b = await store.nodes.Task.create({ name: "b" });
     // `c` is deliberately the OTHER node kind: with every node the same kind,
     // a from_kind/to_kind CASE-arm swap on the reversed member is invisible
-    // (both columns read "Task" either way) — see D2-07 / D2R2-03.
+    // (both columns read "Task" either way).
     const c = await store.nodes.Milestone.create({ name: "c" });
 
     // Given `blockedBy` is the RELATION's reversed member, these two stored
@@ -604,8 +603,8 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
 });
 
 // ============================================================
-// D-4 (reaffirmed 2026-09-08), re-audited for the `"proposed"`/`"planned"`
-// seed split (perf ruling, same date): a cycle formed ENTIRELY from rows
+// Plan-time cycle detection, audited for the `"proposed"`/`"planned"`
+// seed split: a cycle formed ENTIRELY from rows
 // with nothing live yet is only found by hopping through a `seed` source
 // that is NOT yet in the table — the `"planned"` form. `assertEdgeRelationsAcyclic`
 // (the write-path predicate) now passes `"proposed"`, which asserts its
@@ -618,7 +617,7 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
 // unwritten rows through `assertUnwrittenEdgeRelationsAcyclic`, covered by
 // the describe block after this one.
 //
-// Mutation check (recorded in the lane's load-bearing log): reverting
+// Mutation check: reverting
 // `buildAcyclicityAncestryStepDirect` back to joining the old compound
 // `candidates` CTE for the `"proposed"` form makes no test here fail (the
 // direct-join and compound shapes agree on already-live rows), which is
@@ -699,7 +698,7 @@ async function insertEdgesDirectly(
   }
 }
 
-describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERTED rows', () => {
+describe('the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERTED rows', () => {
   it("assertEdgeRelationsAcyclic refuses a three-edge cycle already inserted in this transaction", async () => {
     const backend = createTestBackend();
     const nodes = await seedThreeNodes(backend);

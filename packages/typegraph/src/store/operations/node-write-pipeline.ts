@@ -232,9 +232,8 @@ function nodeSyncContext(
  * composition cascade plans against — see {@link NodeDeletePolicy}.
  *
  * A composition edge is a SEPARATE, unconditional exclusion from the
- * `restrict` OBSTACLE count only (composition-contract-design.md's binding
- * ruling: a composition edge is never a restrict obstacle, on either the
- * part end — a part may always be deleted out of its whole — or an
+ * `restrict` OBSTACLE count only (by contract, a composition edge is never a
+ * restrict obstacle, on either the part end — a part may always be deleted out of its whole — or an
  * intermediate whole's upward edge into ITS OWN whole). This holds whether
  * or not the edge is this delete's own `consumedEdgeIds`, so it is checked
  * independently via `registry.isCompositionEdge` rather than folded into

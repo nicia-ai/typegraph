@@ -67,11 +67,11 @@ export const ALL_META_EDGE_NAMES = [
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // ============================================================
-// Structural Subsumption (C.1/C.2) Meta-Edges
+// Structural Subsumption Meta-Edges
 // ============================================================
 
 /**
- * The meta-edges the C.1/C.2 structural-subsumption contract applies to:
+ * The meta-edges the structural-subsumption contract applies to:
  * `subClassOf` (always one direction), and `equivalentTo`/`sameAs` (mutual
  * subsumption in both directions). The one owner of "is this relation a
  * subsumption relation" — `src/registry/build-validated.ts` and

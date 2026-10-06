@@ -1027,11 +1027,11 @@ async function refuseStrandedAssertionHistory(
  * boundary back exactly as a narrowing moved it, so it is noted under the same
  * cause whenever the stored end was finite.
  *
- * A repeat update that restates the SAME `validTo` moves nothing — §2.3
- * forbids manufacturing a boundary at which membership did not change, so
+ * A repeat update that restates the SAME `validTo` moves nothing — a
+ * transition boundary is only recorded where membership actually changed, so
  * this compares against the node's own stored `valid_to` and takes no note
- * when they already agree. `validAt` is the canonical operation instant
- * (§2.2), never `validTo` itself, which can be a future-scheduled window
+ * when they already agree. `validAt` is the canonical operation instant,
+ * never `validTo` itself, which can be a future-scheduled window
  * boundary rather than "when this happened".
  */
 export async function requireNodeValidityEndCompatible(

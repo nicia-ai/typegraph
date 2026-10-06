@@ -40,8 +40,7 @@ import { type JsonPointer } from "../query/json-pointer";
 import {
   COMPOSITION_EXISTENCE_VALUES,
   COMPOSITION_PART_SIDE_VALUES,
-  type CompositionExistence,
-  type CompositionPartSide,
+  type CompositionRealization,
 } from "../registry/composition-relation";
 
 // ============================================================
@@ -446,7 +445,7 @@ export type JsonSchema = Readonly<{
  * Serialized representation of a meta-edge.
  *
  * `transitive`/`symmetric`/`reflexive`/`inverse`/`inference` were removed
- * (roadmap F) — see `MetaEdgeProperties`'s docblock. The parsing zod schema
+ * along with the sameAs/differentFrom factories — see `MetaEdgeProperties`'s docblock. The parsing zod schema
  * (`serializedSchemaZod`, below) stays `.loose()` on this record, so an
  * older document that still carries those keys still parses; they are
  * simply never read.
@@ -467,13 +466,8 @@ export type SerializedOntologyRelation = Readonly<{
   metaEdge: string; // Meta-edge name
   from: string; // Node kind name or external IRI
   to: string; // Node kind name or external IRI
-  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
-  via?: string;
-  /** R5's orientation. Meaningful only alongside `via`. */
-  partSide?: CompositionPartSide;
-  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
-  existence?: CompositionExistence;
-}>;
+}> &
+  CompositionRealization;
 
 // ============================================================
 // Serialized Closures
@@ -578,7 +572,7 @@ export type SerializedEdgeDef = Readonly<{
   /**
    * Present, and `true`, only when the edge kind declares `acyclic: true`.
    * Absent (never `false`) so a graph with no acyclic edge kind serializes
-   * byte-identically to a pre-D.2 document and `computeSchemaHash` does not
+   * byte-identically to a older document and `computeSchemaHash` does not
    * move for it — see `serializeEdgeDef`.
    */
   acyclic?: boolean;
@@ -702,8 +696,8 @@ export const serializedSchemaZod = z
                 description: z.string().optional(),
               })
               // `.loose()`: an older document may still carry `transitive`/
-              // `symmetric`/`reflexive`/`inverse`/`inference` (removed,
-              // roadmap F) — they parse through unread rather than
+              // `symmetric`/`reflexive`/`inverse`/`inference` (removed
+              // with the sameAs/differentFrom factories) — they parse through unread rather than
               // rejecting the document.
               .loose(),
           )

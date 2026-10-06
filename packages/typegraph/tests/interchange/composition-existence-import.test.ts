@@ -1,5 +1,5 @@
 /**
- * Item E.2 — validating import and a required-existence composition part.
+ * Validating import and a required-existence composition part.
  *
  * Import writes every node row before any edge row (`processNodes` then
  * `processEdges`), so "does this part's composition edge arrive in the same
@@ -66,7 +66,7 @@ function buildGraph() {
 }
 
 /**
- * Item E.2: the SAME required-existence pair, plus an ordinary (non-composition)
+ * The SAME required-existence pair, plus an ordinary (non-composition)
  * edge kind on the part — `CeiTag`, connected via `ceiTaggedBy`. A part
  * refused for lacking a whole may still carry live, non-composition edges
  * this same import created; the purge must not choke on those.

@@ -1514,7 +1514,7 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("registry building", () => {
-    it("buildRegistry produces a valid KindRegistry, or refuses a fuzzed structural mismatch by name (C.2)", () => {
+    it("buildRegistry produces a valid KindRegistry, or refuses a fuzzed structural mismatch by name", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
@@ -1522,7 +1522,7 @@ describe("Schema Serialization Properties", () => {
 
           // `graphDefArb` picks a fuzzed `subClassOf`/`equivalentTo` pair
           // with no regard for schema compatibility, so a genuinely
-          // incompatible pair is a REACHABLE, correct outcome here (C.2)
+          // incompatible pair is a REACHABLE, correct outcome here
           // — the property is that buildRegistry() only ever fails with
           // this one typed, well-formed refusal, never an unrelated crash.
           const ALLOWED_STRUCTURAL_REFUSAL_CODES = new Set([
@@ -1557,7 +1557,7 @@ describe("Schema Serialization Properties", () => {
 });
 
 /**
- * A focused round-trip property over a fixed composition shape (E-a-9).
+ * A focused round-trip property over a fixed composition shape.
  *
  * `partOf`/`hasPart` are deliberately excluded from the generic
  * `ontologyArb` above (see its comment): a fuzzed `via` edge cannot be
@@ -1569,13 +1569,13 @@ describe("Schema Serialization Properties", () => {
  *  - a cross-kind pair, where orientation is unambiguous and `partSide` is
  *    INFERRED (never present on the wire) — this is what exercises `via`
  *    surviving the round trip;
- *  - a reflexive (R5) pair, where the edge admits both orientations and
+ *  - a reflexive pair, where the edge admits both orientations and
  *    `partSide` is REQUIRED and DECLARED — this is what exercises
  *    `partSide` itself, the one field that cannot be re-derived on load
- *    (E-a-4). A property that only ever generated the unambiguous shape
+ *    A property that only ever generated the unambiguous shape
  *    would never put a `partSide` on the wire to lose.
  */
-describe("composition relation round-trip (E-a-9)", () => {
+describe("composition relation round-trip", () => {
   it("serializes and deserializes a fuzzed cross-kind partOf/hasPart pair's via and inferred orientation", () => {
     fc.assert(
       fc.property(

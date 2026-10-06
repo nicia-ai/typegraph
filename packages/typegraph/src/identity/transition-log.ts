@@ -47,8 +47,8 @@ import {
 } from "./sql-target";
 
 /**
- * The nine exhaustive causes a materialized identity class can change under
- * (§2.3). Every writer that can move a member in or out of a class, or in or
+ * The nine exhaustive causes a materialized identity class can change under.
+ * Every writer that can move a member in or out of a class, or in or
  * out of coordinate visibility, notes through exactly one of these.
  */
 export type IdentityTransitionCause =
@@ -154,8 +154,8 @@ function sameMemberSet(
  * fold, detach, kind-drop, and schema-transition all call this directly —
  * never a second inline spelling of the comparison.
  *
- * `assert`'s own site, `mergeCurrentClasses`, is §12's SANCTIONED second
- * owner, not an oversight: fusing two classes has both sides in hand
+ * `assert`'s own site, `mergeCurrentClasses`, is the one sanctioned second
+ * owner of this decision, not an oversight: fusing two classes has both sides in hand
  * up front (never a snapshot-then-diff), so it derives its ONE resulting
  * record directly from `aClass[0]` / `bClass[0]` rather than calling this
  * predicate. It is a NARROWER decision than this function's general
@@ -163,7 +163,7 @@ function sameMemberSet(
  * the two must not drift on that narrower question: this predicate's OWN
  * merge branch (`sameMemberSet` false, one canonical replacing another)
  * agrees today. A future change to either must keep them agreeing, since the
- * replay walk before/after equivalence (§9.3) depends on the record
+ * replay walk's before/after equivalence depends on the record
  * `mergeCurrentClasses` emits carrying the same meaning this predicate's
  * would for the same fuse.
  *
@@ -913,8 +913,8 @@ async function readHighestRetainedTransitionRevision(
  * the next commit's revision, because restored revisions are not on this
  * graph's axis.
  *
- * Explicit operator action only — no automatic retention policy exists. Per
- * the ratified ruling, a prune does NOT advance the content revision (the
+ * Explicit operator action only — no automatic retention policy exists.
+ * Deliberately, a prune does NOT advance the content revision (the
  * same non-advancing contract `rebuildIdentityClosure` follows): it destroys
  * retained explanation, never truth, so branch staleness must track truth,
  * not explanation.

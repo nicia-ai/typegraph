@@ -614,15 +614,7 @@ export class TraversalBuilder<
     CoordinateState
   >;
 
-  /**
-   * The axis-unknown overload, which covers two call shapes with one rule:
-   * a `"narrower"` expansion (no schema relationship is claimed, so no
-   * per-kind type can be promised) and a forwarded options bag whose axis is
-   * not one literal — the option type itself, or a wrapper's
-   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
-   * alias takes the conservative untyped form; state a literal axis at the
-   * call site to keep the precise alias type.
-   */
+  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
@@ -733,15 +725,7 @@ export class TraversalBuilder<
     CoordinateState
   >;
 
-  /**
-   * The axis-unknown overload, which covers two call shapes with one rule:
-   * a `"narrower"` expansion (no schema relationship is claimed, so no
-   * per-kind type can be promised) and a forwarded options bag whose axis is
-   * not one literal — the option type itself, or a wrapper's
-   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
-   * alias takes the conservative untyped form; state a literal axis at the
-   * call site to keep the precise alias type.
-   */
+  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
@@ -807,12 +791,12 @@ export class TraversalBuilder<
   }
 
   /**
-   * C.3 endpoint admission for a `to()`/`toDynamic()` alias expanded through
+   * Endpoint admission for a `to()`/`toDynamic()` alias expanded through
    * `expansion: "narrower"`. `broader`/`narrower` is NOT an assignability axis —
    * unlike subclass expansion, a narrower kind is not automatically admitted
    * by `expandEdgeEndpointAllowance` — so each expanded kind is checked
    * individually through the existing `#assertValidEndpoint` owner, and a
-   * failure is re-raised as the C.3-specific, narrower-naming error rather
+   * failure is re-raised as the narrower-naming error rather
    * than the generic `EndpointError`.
    *
    * @throws ConfigurationError (`ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED`)
@@ -874,7 +858,7 @@ export class TraversalBuilder<
    * `parts()`/`wholes()`'s own registry-derived `targetKindList` pays
    * nothing for this — it is already registered and endpoint-valid by
    * construction — but `toKindSet` is a public finalizer like its siblings,
-   * so it cannot skip the checks they apply (Ed-r2-2).
+   * so it cannot skip the checks they apply.
    */
   toKindSet<A extends string>(
     kinds: readonly string[],

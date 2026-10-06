@@ -154,8 +154,7 @@ type InventoryEntry = Readonly<{
 }>;
 
 /**
- * The ten `WITH RECURSIVE` emission sites, measured on this branch (§2 of
- * the batch spec, reproduced from `grep -rn "WITH RECURSIVE" src
+ * The ten `WITH RECURSIVE` emission sites, measured on this branch (reproduced from `grep -rn "WITH RECURSIVE" src
  * --include=*.ts`) — sites G onward were added after that batch: site H (the
  * composition closure's exhaustive, set-semantics walk) in place of the
  * hop-bounded directed builder it replaced, site I (the acyclicity probe),
@@ -181,7 +180,7 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
     line: "return sql`WITH RECURSIVE reachable(id, kind) AS (${prepared.baseCase} UNION ${recursiveCase})`;",
     site: "H",
     reason:
-      "buildExhaustiveDirectedReachableCte compiles the composition closure subgraph({ composition: true }) reads (Ed-01's directed groups) as a SET-SEMANTICS walk: `UNION` over an (id, kind) frontier, bounded by its visited set with no hop ceiling, because a truncated prefix of a part tree is not an owned unit. Shares every row filter with the hop-bounded builders via prepareReachableFilters.",
+      "buildExhaustiveDirectedReachableCte compiles the composition closure subgraph({ composition: true }) reads as a SET-SEMANTICS walk: `UNION` over an (id, kind) frontier, bounded by its visited set with no hop ceiling, because a truncated prefix of a part tree is not an owned unit. Shares every row filter with the hop-bounded builders via prepareReachableFilters.",
   },
   {
     file: "identity/service-read.ts",

@@ -29,8 +29,8 @@ import { type PolymorphicNodeType } from "../../ontology/types";
 import {
   compositionViaKind,
   type CompositionViaRef,
+  partitionCompositionEdgeKindsByDirection,
 } from "../../registry/composition-relation";
-import { partitionCompositionEdgeKindsByDirection } from "../../registry/composition-relation";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -192,7 +192,7 @@ type DynamicNodeTypeFor<T> =
 /**
  * Options shared by `parts()` and `wholes()`. There is deliberately no
  * `expand`: `expand` means "same relation, more members" (ontology
- * implying/inverse expansion, Q1), and the composition edge-kind set these
+ * implying/inverse expansion), and the composition edge-kind set these
  * two steps traverse is derived from the registry's composition relation,
  * not from an expansion mode.
  */
@@ -224,14 +224,15 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
 type DynamicEdgeTypeFor<T> =
   T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
 
+/** The edge type `via` narrows the edge alias to, else `DynamicEdgeType`. */
+type CompositionNavigationEdge<O> =
+  O extends { via: infer V extends AnyEdgeType } ? V : DynamicEdgeType;
+
 /**
  * The `QueryBuilder` shape `parts()`/`wholes()` return: one alias definition
  * consumed by both methods' public signatures and their internal casts, so
  * the same generic expansion is never re-spelled four times over.
  */
-type CompositionNavigationEdge<O> =
-  O extends { via: infer V extends AnyEdgeType } ? V : DynamicEdgeType;
-
 type CompositionNavigationResult<
   G extends GraphDef,
   Aliases extends AliasMap,
@@ -470,7 +471,7 @@ export class QueryBuilder<
    * The alias's expansion axis is one option, `expansion` (default
    * `"subclasses"` — a supertype query is polymorphic unless
    * narrowed). `"exact"` restores the exact-kind reading; `"narrower"`
-   * expands through `broader`/`narrower` instead (C.3, untyped alias — no
+   * expands through `broader`/`narrower` instead (untyped alias — no
    * schema relationship is claimed). Omitting the option, passing `{}`, or
    * passing an explicit `undefined` all take the store default — which is
    * why the default overload's parameter spells `expansion?: undefined`
@@ -538,15 +539,7 @@ export class QueryBuilder<
     CoordinateState
   >;
 
-  /**
-   * The axis-unknown overload, which covers two call shapes with one rule:
-   * a `"narrower"` expansion (no schema relationship is claimed, so no
-   * per-kind type can be promised) and a forwarded options bag whose axis is
-   * not one literal — the option type itself, or a wrapper's
-   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
-   * alias takes the conservative untyped form; state a literal axis at the
-   * call site to keep the precise alias type.
-   */
+  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
@@ -672,15 +665,7 @@ export class QueryBuilder<
     CoordinateState
   >;
 
-  /**
-   * The axis-unknown overload, which covers two call shapes with one rule:
-   * a `"narrower"` expansion (no schema relationship is claimed, so no
-   * per-kind type can be promised) and a forwarded options bag whose axis is
-   * not one literal — the option type itself, or a wrapper's
-   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
-   * alias takes the conservative untyped form; state a literal axis at the
-   * call site to keep the precise alias type.
-   */
+  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
@@ -1299,9 +1284,7 @@ export class QueryBuilder<
       false,
     );
 
-    // `toSorted()`'s default order IS `utils/compare`'s `compareStrings` —
-    // deterministic UTF-16 code-unit order — and determinism is all this list
-    // needs.
+    // Sorted for deterministic output.
     const targetKindList = [...targetKinds].toSorted();
 
     // Recurse by default (the value proposition versus `traverse`): skip only

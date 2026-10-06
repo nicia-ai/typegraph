@@ -1,8 +1,8 @@
 /**
- * G1R3-01: `readTransitionRetentionDetails` must decode `pruned_at` through
+ * `readTransitionRetentionDetails` must decode `pruned_at` through
  * the identity module's one owner `toCanonicalIdentityTimestamp`
  * (row-codec.ts) — exactly the decoder `normalizeIdentityTransitionRow` in
- * the SAME file already uses for `recorded_at` / `valid_at` (G1-05). A second,
+ * the SAME file already uses for `recorded_at` / `valid_at`. A second,
  * stricter inline decoder (`asRowString`) throws on a JS `Date` (what
  * node-postgres returns for a `timestamp(..., { withTimezone: true })`
  * column) and passes non-ISO text through uncanonicalized (what a
@@ -39,7 +39,7 @@ function fakeTargetReturningPrunedAt(prunedAt: unknown): IdentityTarget {
   } as unknown as IdentityTarget;
 }
 
-describe("readTransitionRetentionDetails pruned_at decode (G1R3-01)", () => {
+describe("readTransitionRetentionDetails pruned_at decode", () => {
   it("decodes a node-postgres JS Date pruned_at without throwing", async () => {
     const target = fakeTargetReturningPrunedAt(
       new Date("2026-09-08T22:08:27.154Z"),

@@ -78,7 +78,7 @@ function assertTrue(condition: boolean, label: string): void {
 }
 
 /**
- * The labeling function §4 asks for: an audit view uses `restored?.at`
+ * The labeling function an audit view needs: it uses `restored?.at`
  * (never a revision comparison) to tell a transplanted explanation from one
  * this graph recorded itself. See "Archival transitions and the retention
  * watermark" in the identity guide.

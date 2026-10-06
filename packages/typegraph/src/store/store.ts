@@ -2119,7 +2119,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * @internal Item E.2. Detaches a node import purges after folding it into
+   * @internal Detaches a node import purges after folding it into
    * identity — a required composition part `assertImportedRequiredPartsAttached`
    * (`src/interchange/import.ts`) refuses AFTER `foldImportedIdentityNodes`
    * already ran for this attempt's batch. Always `"hard"`: the row this

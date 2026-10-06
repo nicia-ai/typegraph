@@ -141,7 +141,7 @@ function previewViolations(
 }
 
 /**
- * Item E.2. Resolves the delta's `via` edge kinds to their REQUIRED-existence
+ * Required-existence check. Resolves the delta's `via` edge kinds to their REQUIRED-existence
  * part kinds against the PROPOSED registry — reusing
  * {@link requiredCompositionPartKinds} (`../store/operations/composition-create`)
  * rather than re-spelling "which part kinds does a required existence pair
@@ -316,16 +316,16 @@ export function prepareSchemaTighteningPreflight(
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
   );
 
-  // Item E's composition declarations, delta-scoped to exactly the
+  // Composition declarations, delta-scoped to exactly the
   // `partOf`/`hasPart` pairs THIS commit adds (`grouped.composition.edgeKinds`)
   // — a pre-existing, already-tightened pair's data is never re-walked by an
   // unrelated commit, the same discipline `edgeCardinalities`/
   // `disjointKindPairs` above already honor. That delta-scoping is only
   // which edge kinds' rows are the OUTER (reported) rows: each declaration's
-  // own `scope.holders` — R4's oriented holder list — is still the WHOLE
+  // own `scope.holders` — the oriented holder list — is still the WHOLE
   // graph's composition holders, from `compositionEdgeCardinalityDeclarations`,
   // because a delta-scoped edge kind can still be found contending against a
-  // pre-existing, unrelated composition edge kind's live row (R4 is one
+  // pre-existing, unrelated composition edge kind's live row (the holder list is one
   // relation-wide invariant, not one per pair).
   const compositionEdgeCardinalities =
     grouped.composition === undefined ?
@@ -383,9 +383,9 @@ export function prepareSchemaTighteningPreflight(
           ),
         );
 
-    // Item E's D-10 acyclicity check, over the FULL proposed composition
+    // Composition acyclicity check, over the FULL proposed composition
     // relation rather than delta-scoped: unlike the single-whole audit
-    // above, a cross-kind cycle (D-10's whole point) can span a
+    // above, a cross-kind cycle can span a
     // pre-existing pair and the one this commit adds, so checking only the
     // new edge kind would miss exactly the cycle this check exists to
     // catch. Triggered by the delta (`grouped.composition` is only set when
@@ -408,7 +408,7 @@ export function prepareSchemaTighteningPreflight(
           [compositionRelation],
         );
 
-    // Item E.2's third composition check: for every required-existence part
+    // Third composition check: for every required-existence part
     // kind this commit's added pair(s) name, does a LIVE part already have
     // no live whole? Delta-scoped to WHICH part kinds are checked (only
     // those a `compositionRequiredWhole` probe names); the check itself

@@ -19,6 +19,13 @@ type CompositionExistence = "optional" | "required";
 type CompositionPartSide = "from" | "to";
 
 // @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
 export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 
 // @public
@@ -152,10 +159,7 @@ export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
-}>;
+}> & CompositionRealization;
 
 // @public
 type ExtensionPropertyModifiers = Readonly<{

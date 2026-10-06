@@ -340,14 +340,14 @@ function buildCreateInput(
   props: Record<string, unknown>,
   options?: NodeCreateOptions,
 ): CreateNodeInput {
-  const input: { kind: string; props: Record<string, unknown> } & {
-    -readonly [K in keyof NodeCreateOptions]: NodeCreateOptions[K];
-  } = { kind, props };
-  if (options?.id !== undefined) input.id = options.id;
-  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
-  if (options?.validTo !== undefined) input.validTo = options.validTo;
-  if (options?.partOf !== undefined) input.partOf = options.partOf;
-  return input;
+  return {
+    kind,
+    props,
+    ...(options?.id !== undefined && { id: options.id }),
+    ...(options?.validFrom !== undefined && { validFrom: options.validFrom }),
+    ...(options?.validTo !== undefined && { validTo: options.validTo }),
+    ...(options?.partOf !== undefined && { partOf: options.partOf }),
+  };
 }
 
 function buildUpdateInput(
@@ -518,10 +518,9 @@ export function createNodeCollection<
       }
       const rootAlias = "compare_and_set_candidate";
       const candidateIdColumn = `${rootAlias}_id`;
-      // Pinned exact-kind, defense in depth: `executeNodeSetUpdate` below
-      // re-filters `WHERE nodes.kind = <kind>` regardless of what this
-      // candidate subquery widens to, so a subclass id this pin would let
-      // through is filtered there anyway (tests/polymorphic-default.test.ts).
+      // Root pins to exact kind (here and in updateWhere) are redundant with
+      // `executeNodeSetUpdate`'s `WHERE nodes.kind = <kind>` filter, which
+      // re-filters whatever these candidate subqueries widen to.
       const candidateIds = createQuery()
         .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
@@ -615,9 +614,6 @@ export function createNodeCollection<
         );
       }
 
-      // Pinned exact-kind, defense in depth — same reason as
-      // compareAndSet's root pin above: the outer `WHERE nodes.kind = <kind>`
-      // in `executeNodeSetUpdate` re-filters this candidate set regardless.
       let base = createQuery()
         .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .temporal("asOf", readInstant);
@@ -630,9 +626,6 @@ export function createNodeCollection<
       for (const [index, relation] of exists.entries()) {
         const edgeAlias = `update_edge_${index}`;
         const relatedAlias = `update_related_${index}`;
-        // Pinned exact-kind, defense in depth — same as `base` above: this
-        // projects `rootAlias`'s id, still re-filtered by the outer
-        // `WHERE nodes.kind = <kind>` in `executeNodeSetUpdate`.
         const relationRoot = createQuery()
           .fromDynamic(kind, rootAlias, { expansion: "exact" })
           .temporal("asOf", readInstant);
@@ -647,13 +640,12 @@ export function createNodeCollection<
         if (relation.whereEdge !== undefined) {
           traversal = traversal.whereEdge(edgeAlias, relation.whereEdge);
         }
-        // Pinned exact-kind, GENUINELY LOAD-BEARING (unlike the root pins
-        // above): this alias's kind gates whether the `exists` predicate is
+        // Pinned exact-kind, load-bearing (unlike the root pins): this alias's kind gates whether the `exists` predicate is
         // satisfied at all, and only `rootAlias`'s id is projected — the
         // outer `WHERE nodes.kind = <kind>` fence never sees `relatedAlias`,
         // so widening it here would let a subclass-only related row
         // satisfy an `exists` check the caller declared against the exact
-        // parent kind (tests/polymorphic-default.test.ts, mutation-checked).
+        // parent kind.
         let related = traversal.toDynamic(relation.relatedKind, relatedAlias, {
           expansion: "exact",
         });

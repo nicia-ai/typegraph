@@ -4249,7 +4249,7 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
 
 /**
  * Present only on a composition claim: the reserved relation-wide axis
- * (item E, `COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
+ * (`COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
  * kinds whose live rows can hold it — every edge kind the graph's
  * `partOf`/`hasPart` declarations resolve to, tagged with which endpoint of
  * that kind carries the part. Absent means the ordinary per-edge-kind
@@ -4315,7 +4315,7 @@ export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef &
      * Present when this edge kind's declared axis is a composition axis —
      * see {@link CompositionClaimScope}. The fence-audit reader groups and
      * queries a composition declaration by its two oriented arms rather than
-     * by exact-kind equality, because R4's axis is relation-wide: two
+     * by exact-kind equality, because the composition axis is relation-wide: two
      * different realizing edge kinds contend for the SAME row.
      */
     scope?: CompositionClaimScope;

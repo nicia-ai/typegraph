@@ -1,5 +1,5 @@
 /**
- * Composition navigation (item E, lane E-d): `parts()` / `wholes()` and
+ * Composition navigation: `parts()` / `wholes()` and
  * `subgraph({ composition: true })`, on every backend.
  *
  * Fixture shape:
@@ -16,11 +16,9 @@
  * (partOf both times). The Book chain crosses two edge kinds under MIXED
  * orientation — `hasPart` (whole names the part) at the first level,
  * `partOf` (part names the whole) at the second — exercising the
- * `inverseEdgeKinds` union this lane's `parts()`/`wholes()` are built on.
+ * `inverseEdgeKinds` union `parts()`/`wholes()` are built on.
  *
- * Every case states the mutation/revert check that must make it fail; the
- * checks actually performed are recorded in the scratchpad
- * `lane-Ed-load-bearing.md` note.
+ * Every case states the mutation/revert check that must make it fail.
  */
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { z } from "zod";
@@ -303,7 +301,7 @@ export function registerCompositionNavigationIntegrationTests(
       const pin = await history.recordedNow();
       if (pin === undefined) throw new Error("recorded clock was not written");
 
-      // MUTATION CHECK (Ed-r2-1): the mixed-orientation shape above forces
+      // MUTATION CHECK: the mixed-orientation shape above forces
       // `parts()` to compile the `inverseEdgeKinds` union branch, whose
       // `_directed_edges` CTE narrows its edge projection. Reverting that
       // narrowing to omit `recorded_from`/`recorded_to` (dropping
@@ -572,7 +570,7 @@ export function registerCompositionNavigationIntegrationTests(
       const store = await context.createStore(compositionNavigationGraph);
       await seedCompositionFixtures(store);
 
-      // MUTATION CHECK (Ed-r2-5): before this fix,
+      // MUTATION CHECK: before this fix,
       // `this.#getKindNamesForAlias(fromAlias) ?? []` collapsed "no such
       // alias" into "this kind declares no composition parts" — the query
       // above threw `COMPOSITION_NO_PARTS_DECLARED` naming kinds

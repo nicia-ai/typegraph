@@ -300,6 +300,8 @@ type SubsumptionLiteralsErased<Relation> =
     : true
   : never;
 
+type EndpointKinds<Endpoint> = Extract<Endpoint, { kind: string }>["kind"];
+
 /**
  * True for an ontology-tuple element that NAMES kind `K` at one of the
  * endpoint positions {@link MatchedEndpoints} selects — the decided arm's
@@ -343,12 +345,9 @@ type SubsumptionElementNamesKind<Relation, K extends string> =
         to: infer To;
       }
     ) ?
-      [
-        Extract<
-          Extract<MatchedEndpoints<Name, From, To>, { kind: string }>["kind"],
-          K
-        >,
-      ] extends [never] ?
+      [Extract<EndpointKinds<MatchedEndpoints<Name, From, To>>, K>] extends (
+        [never]
+      ) ?
         false
       : true
     : false
@@ -437,8 +436,6 @@ type CompositionWholeKindsUndecidable<Relation> =
     : true
   : never;
 
-type EndpointKinds<Endpoint> = Extract<Endpoint, { kind: string }>["kind"];
-
 /**
  * The whole kinds one ontology-tuple element declares for part kind `K`:
  * `partOf(Part, Whole)` reads part → whole, `hasPart(Whole, Part)` the
@@ -493,7 +490,7 @@ export type CompositionWholeKinds<G extends GraphDef, K extends string> =
  * The alias type a `from(kind, alias)` call with NO explicit
  * `expansion` resolves to, under the polymorphic-by-default
  * axis. `PolymorphicNodeType` only when `K` is actually
- * {@link SubsumptionAffected} — a compile-time subtype guarantee (C.1/C.2)
+ * {@link SubsumptionAffected} — the structural-subtype check on `subClassOf`
  * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
  * brand, so a row may come back as a narrower concrete kind whenever the
  * axis can expand at all.
@@ -509,8 +506,7 @@ export type CompositionWholeKinds<G extends GraphDef, K extends string> =
  * kind even though it may come back as the extension's subclass at
  * runtime, which would let a subtype id round-trip through
  * `store.nodes.<K>.update()` typechecked and silently match nothing. Use
- * `fromDynamic()` (always `PolymorphicNodeType`-typed, §1.4 of the typed-
- * subsumption plan) or `{ expansion: "exact" }` for a kind a runtime
+ * `fromDynamic()` (always `PolymorphicNodeType`-typed) or `{ expansion: "exact" }` for a kind a runtime
  * extension subclasses.
  */
 export type AliasNodeType<G extends GraphDef, K extends string> =

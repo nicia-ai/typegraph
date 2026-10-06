@@ -1,5 +1,5 @@
 /**
- * The exhaustiveness property (§9.3): the identity transition log's cause set
+ * The exhaustiveness property: the identity transition log's cause set
  * is exhaustive, so `replay`'s `before(b_i) := after(b_{i-1})` reuse is sound.
  *
  * For a randomized sequence of identity-affecting operations, this asserts,
@@ -172,7 +172,7 @@ describe("identity replay exhaustiveness property", () => {
           // The replay seed exists from the FIRST observed revision,
           // created before any fc-generated intent runs — matching the
           // scenario every one of these assertions is actually specified
-          // against (§9.3's own worked example, and G1-01's probe, both
+          // against (the worked example and the probe both
           // create every lineage member before the first identity-affecting
           // op). A seed that a LATER "create" intent brings into existence
           // partway through the run legitimately sees an empty `membersOf`
@@ -348,7 +348,7 @@ describe("identity replay exhaustiveness property", () => {
 
           // A bare singleton coming into or out of existence (create/delete
           // with no fold or assertion partner) is NOT an identity transition
-          // by design (§2.3): the closure table carries no row for a
+          // by design: the closure table carries no row for a
           // singleton, so nothing changes there. `membersOf` still reports
           // the node's own trivial self-membership, though, so "did
           // membership change" is asked with the seed's OWN id excluded from
@@ -394,7 +394,7 @@ describe("identity replay exhaustiveness property", () => {
             }),
           );
 
-          // §9.3, assertion 1: membership changed at r IFF the transition log
+          // Assertion 1: membership changed at r IFF the transition log
           // (walked through `identityTransitionsOf` — the seed's own class
           // lineage, not a hand-rolled scan of the whole universe) carries a
           // row at r. Checked in BOTH directions, for every recorded revision
@@ -402,7 +402,7 @@ describe("identity replay exhaustiveness property", () => {
           // changed.
           //
           // ONE exception, by design, not by omission: `window-end` schedules
-          // a FUTURE valid-time boundary (§2.3), so a row it notes is
+          // a FUTURE valid-time boundary, so a row it notes is
           // deliberately SELF-REFERENTIAL (`class === priorClass`) — the
           // `asOfRecorded` diagonal read this test's brute force uses (same
           // wall-time as the recorded revision) cannot see a change that has
@@ -468,7 +468,7 @@ describe("identity replay exhaustiveness property", () => {
 
           const replay = await identityReplay(ctx, seed, { limit: 2000 });
 
-          // §9.3, assertion 2: `replay(seed)`'s step boundaries equal EXACTLY
+          // Assertion 2: `replay(seed)`'s step boundaries equal EXACTLY
           // the revisions at which membership changed, UNION the
           // self-referential `window-end` revisions above (each of which
           // legitimately produces a step whose `before` and `after` are
@@ -498,10 +498,10 @@ describe("identity replay exhaustiveness property", () => {
             ),
           );
 
-          // §9.3, assertion 3: every step's `after` equals brute-force
+          // Assertion 3: every step's `after` equals brute-force
           // membership at that revision, and every step's `before` equals it
           // at the PREVIOUS boundary — `boundary - 1` for the very first step
-          // (matching `before(b0) := reconstruct(ref, b0 - 1)`, §3.2 step 4;
+          // (matching `before(b0) := reconstruct(ref, b0 - 1)`;
           // NOT revision 0, which is only right when `b0` itself is 1), and
           // the previous replay boundary's `after` for every step thereafter.
           for (const step of replay.steps) {
@@ -524,7 +524,7 @@ describe("identity replay exhaustiveness property", () => {
           void lastRevision;
         },
       ),
-      // Pinned so the load-bearing mutation check (§9.2 L2 / this file's own
+      // Pinned so the load-bearing mutation check (see this file's own
       // header) is reproducible: the same seed must fail the same way every
       // time `diffClosureTransitions` (or any other exhaustiveness-owning
       // predicate) regresses, not fail on some invocations and pass on

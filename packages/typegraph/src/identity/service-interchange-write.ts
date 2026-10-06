@@ -656,9 +656,8 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   return runIdentityMutation(
     ctx,
     async (target, touch, markWritten, noteTransition) => {
-      // §2.3: `reconcile` names a union/split "always with decision
-      // populated". Without a governing decision this is an ordinary
-      // interchange apply, and its closure repair / import carry the cause
+      // A `reconcile` cause always carries a decision.
+      // Without a governing decision this is an ordinary interchange apply, and its closure repair / import carry the cause
       // that already describes them elsewhere (`retract` for the split a
       // batch of retractions can cause, `assert` for the union an import
       // performs) — never a hardcoded `reconcile` that would misrepresent an

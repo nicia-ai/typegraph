@@ -1,13 +1,12 @@
 /**
- * Item D.2 — `acyclic: true` on an edge registration.
+ * `acyclic: true` on an edge registration.
  *
  * Query-and-constraint semantics for the acyclicity fence, run on every
  * backend through the shared `integrationTestGraph` fixtures `dependsOn`
  * (`cardinality: "many", acyclic: true`) and `blockedBy` (`acyclic: true`,
  * default cardinality), both `Task -> Task`.
  *
- * Every case names the mutation that must make it fail — see
- * scratchpad/lane-D2-load-bearing.md for the verified revert/mutation runs.
+ * Every case names the mutation that must make it fail.
  */
 import { describe, expect, it } from "vitest";
 
@@ -73,7 +72,7 @@ async function storedEndpoints(
 export function registerEdgeAcyclicityIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe("edge acyclicity (item D.2)", () => {
+  describe("edge acyclicity", () => {
     it("refuses a direct two-cycle", async () => {
       const store = context.getStore();
       const a = await store.nodes.Task.create({ name: "a" });
@@ -133,8 +132,7 @@ export function registerEdgeAcyclicityIntegrationTests(
       // 30 stacked diamonds: each diamond doubles the path count from the
       // previous merge node, so the final merge node is reachable from the
       // root along 2^30 distinct paths through only ~120 edges. `UNION`
-      // (never `UNION ALL`) is what keeps this bounded — see the mutation
-      // note in scratchpad/lane-D2-load-bearing.md.
+      // (never `UNION ALL`) is what keeps this bounded.
       const diamondCount = 30;
       const root = await store.nodes.Task.create({ name: "root" });
       let current = root;
@@ -430,7 +428,7 @@ export function registerEdgeAcyclicityIntegrationTests(
 
     it("fences a many-cardinality acyclic edge under one transaction, both writes serialized", async () => {
       // The concurrency proof with two REAL sessions is
-      // tests/backends/postgres/concurrent-edge-acyclicity.test.ts (§14.2);
+      // tests/backends/postgres/concurrent-edge-acyclicity.test.ts;
       // this pins the classification the fence is taken FROM, and that
       // opposing creates inside one transaction serialize correctly (the
       // second sees the first's uncommitted insert).

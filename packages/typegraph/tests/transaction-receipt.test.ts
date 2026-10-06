@@ -271,7 +271,7 @@ describe("transaction receipt recorder", () => {
 
   // Load-bearing: `transitions` sits BESIDE `total` on `IdentityWriteSummary`,
   // never inside it — `total` stays the count of ledger truth rows a
-  // transaction produced (design §7.2). Revert check: fold
+  // transaction produced. Revert check: fold
   // `recordIdentityTransitions` into `recordIdentity`'s bucket (so it also
   // bumps `counters.identity.total` and the receipt's overall `total`) and
   // both `toEqual` assertions below fail (`total` reports 8, not 3).

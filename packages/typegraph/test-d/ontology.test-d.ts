@@ -29,8 +29,8 @@ const employedBy = defineEdge("employedBy", {
   schema: z.object({ role: z.string() }),
 });
 
-// Two node kinds — the unwidened, pre-D1 usage still typechecks.
-// C.1 narrows the return type to a TypedOntologyRelation (still assignable
+// Two node kinds — the unwidened usage still typechecks.
+// The factory narrows the return type to a TypedOntologyRelation (still assignable
 // to OntologyRelation, never identical to it), so this is an assignability
 // check, not an exact-type one.
 expectAssignable<OntologyRelation>(equivalentTo(Person, Individual));
@@ -41,7 +41,7 @@ expectAssignable<OntologyRelation>(
   equivalentTo(Person, "https://schema.org/Person"),
 );
 
-// D1's widened left parameter: an edge kind mapped to an external IRI, so an
+// The widened left parameter: an edge kind mapped to an external IRI, so an
 // edge can be declared equivalent to a cross-system vocabulary term.
 expectAssignable<OntologyRelation>(
   equivalentTo(worksAt, "https://schema.org/worksFor"),
@@ -61,8 +61,8 @@ expectAssignable<OntologyRelation>(equivalentTo(anyNode, anyNode));
 
 // A node kind paired with an edge kind, in EITHER order, has no defined
 // substitution semantics either — refused at registry build
-// (ONTOLOGY_EQUIVALENCE_INVALID_CLASS) — and the overload set (C13-R1-11)
-// tightened this to a compile-time refusal too, in the node-first direction.
+// (ONTOLOGY_EQUIVALENCE_INVALID_CLASS) — and the overload set
+// tightens this to a compile-time refusal too, in the node-first direction.
 // (The edge-first direction, `equivalentTo(anyEdge, anyNode)`, DOES
 // typecheck via the `(AnyEdgeType, NodeType)` overload; only the runtime
 // registry build refuses it, matching the two-edge-kind case's runtime-only
@@ -70,7 +70,7 @@ expectAssignable<OntologyRelation>(equivalentTo(anyNode, anyNode));
 expectError(equivalentTo(anyNode, anyEdge));
 
 // ============================================================
-// R2 — every meta-edge factory returns a typed relation
+// Every meta-edge factory returns a typed relation
 // ============================================================
 
 // The IRI overload keeps `from` at the exact kind and types `to` as the
@@ -82,7 +82,7 @@ expectType<string>(personIriEquivalence.to);
 expectType<"equivalentTo">(personIriEquivalence.metaEdge.name);
 expectAssignable<OntologyRelation>(personIriEquivalence);
 
-// The non-C.1 helpers carry their meta-edge name literal too, so
+// The other helpers carry their meta-edge name literal too, so
 // `SubsumptionAffected` can tell "this relation does not touch my kind"
 // from "this relation was never typed".
 const conceptBroader = broader(Individual, Person);
@@ -100,7 +100,7 @@ expectType<"disjointWith">(mediaDisjoint.metaEdge.name);
 expectAssignable<OntologyRelation>(mediaDisjoint);
 
 // ============================================================
-// R2 — SubsumptionAffected under the typed relations
+// SubsumptionAffected under the typed relations
 // ============================================================
 
 // An IRI-routed equivalence on `IriMedia` widens that kind's alias (the

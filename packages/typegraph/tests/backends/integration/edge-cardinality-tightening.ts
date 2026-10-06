@@ -1,11 +1,9 @@
 /**
- * Data-validated tightening for edge cardinality (issue #610, acceptance
- * criterion 7), stacking on item A's schema-tightening preflight
+ * Data-validated tightening for edge cardinality (issue #610), stacking on the schema-tightening preflight
  * (`src/schema/tightening-preflight.ts`, `prepareSchemaTighteningPreflight`).
  *
  * Every case states, in its own comment, the mutation that must make it
- * fail; the revert/mutation checks actually performed are recorded in the
- * scratchpad `lane-D1-load-bearing.md` note.
+ * fail.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -242,6 +240,6 @@ export function registerEdgeCardinalityTighteningIntegrationTests(
     // (`src/schema/edge-cardinality-change.ts`), skip the `direction ===
     // "source"` ref entirely (only ever push target refs). This case then
     // commits and `activeVersion` reads 2 instead of 1 — pinning that the
-    // generalization covers the axis item A's own plan never touched.
+    // generalization covers axes the original tightening plan never touched.
   });
 }

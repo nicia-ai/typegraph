@@ -478,7 +478,7 @@ describe("Query Builder - Subclass Expansion", () => {
     expect(ast.start.expansion).toBe("subclasses");
   });
 
-  // Q3 (roadmap): a supertype query is polymorphic by default once C ships.
+  // A supertype query is polymorphic by default.
   it("expands subclasses by default", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
@@ -590,7 +590,7 @@ describe("Query Compilation to SQL", () => {
   it("adds edge endpoint kind filters for outgoing traversals", () => {
     // Pinned exact-kind: Organization is a subClassOf parent in this
     // fixture graph, so an un-narrowed `.to()` would poly-expand to an
-    // `IN (...)` filter under the Q3 default — this test is about the
+    // `IN (...)` filter under the polymorphic default — this test is about the
     // single-kind filter shape itself.
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p", { expansion: "exact" })

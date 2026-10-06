@@ -40,6 +40,14 @@ export {
 } from "./closures";
 
 // Types
+export type {
+  CompositionExistence,
+  CompositionPartSide,
+} from "../registry/composition-relation";
+export {
+  compositionViaKind,
+  type CompositionViaRef,
+} from "../registry/composition-relation";
 export {
   type EquivalentToCheck,
   getTypeName,
@@ -53,12 +61,3 @@ export {
   type SubClassOfCheck,
   type TypedOntologyRelation,
 } from "./types";
-
-// R5's orientation, for `CompositionOptions.partSide`.
-export type { CompositionPartSide } from "../registry/composition-relation";
-// Item E.2, for `CompositionOptions.existence`.
-export type { CompositionExistence } from "../registry/composition-relation";
-export {
-  compositionViaKind,
-  type CompositionViaRef,
-} from "../registry/composition-relation";

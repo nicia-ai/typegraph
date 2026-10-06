@@ -6168,7 +6168,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
       // against the EXISTING row's own kind/id, never against `kind` as
       // requested — a subclass scope can match (and resurrect) under a
       // sibling/parent kind — and resolved unconditionally on the
-      // resurrection leg, which restores the whole alone (Q2) and owes the
+      // resurrection leg, which restores the whole alone and owes the
       // same required-existence refusal a fresh create owes.
       const compositionAttachment =
         isSoftDeleted || partOf !== undefined ?

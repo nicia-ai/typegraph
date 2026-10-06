@@ -1,7 +1,7 @@
 /**
  * PostgreSQL-dialect twin of `tests/backends/sqlite/edge-acyclicity-query-plan.test.ts`
  * (see that file's docblock for the full defect description). Runs against
- * PGlite — no live PostgreSQL server, per this lane's rule — but PGlite is a
+ * PGlite — no live PostgreSQL server, per the test-suite rule — but PGlite is a
  * real Postgres query planner and executor, so a plain `EXPLAIN` (no
  * `ANALYZE`: this asserts the PLAN, not measured row counts) genuinely
  * exercises the same index-choice logic a production PostgreSQL server
@@ -30,8 +30,7 @@
  * hundred nodes, several thousand edges) until the planner actually picks
  * the correlated seek; asserting on the correlated-seek `Index Cond` shape
  * at a size where the planner would not choose one is coverage theater; see
- * `extractRecursiveTerm`'s docblock and the mutation check recorded in
- * scratchpad/lane-D2-probe-fix-load-bearing.md.
+ * `extractRecursiveTerm`'s docblock and the mutation check below.
  *
  * The `Index Cond` shape is pinned, never the index name: PostgreSQL
  * satisfies `graph_id, kind, from_kind, from_id` equally well from
@@ -40,8 +39,7 @@
  * cheaper — both are genuine index seeks, so the index name is not the
  * fact this suite needs to hold.
  *
- * Mutation check (recorded in the lane's load-bearing log,
- * scratchpad/lane-D2-probe-fix-load-bearing.md): reverting
+ * Mutation check: reverting
  * `buildProbeBodyDirect` to route through `buildProbeBodyPlanned`'s
  * `candidates` CTE machinery makes the "no candidates(" assertions in every
  * test below fail immediately (the CTE reappears in the rendered SQL text),
@@ -218,7 +216,7 @@ async function seedNoiseEdges(
 const PLAN_FIXTURE_NODE_COUNT = 400;
 const PLAN_FIXTURE_NOISE_EDGE_COUNT = 4000;
 
-describe("edge-acyclicity probe (PostgreSQL dialect, PGlite): query plan (item D.2 perf ruling)", () => {
+describe("edge-acyclicity probe (PostgreSQL dialect, PGlite): query plan", () => {
   it("a single create's probe compiles no candidates CTE and its recursive step seeks a worktable-correlated index, never a Seq Scan of typegraph_edges", async () => {
     const { backend: raw, client } = await createLocalPgliteBackend({
       vector: false,

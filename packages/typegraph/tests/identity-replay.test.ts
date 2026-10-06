@@ -126,7 +126,7 @@ describe("identity replay", () => {
   });
 
   it("replays merge / split / re-merge: every step's before/after matches an independent asOfRecorded read", async () => {
-    // G1R2-09: `identityReplay` assigns `before = previousAfter` for every
+    // `identityReplay` assigns `before = previousAfter` for every
     // non-first boundary (replay.ts), so a loop comparing `current.before`
     // against `previous.after` compares a value against the variable it was
     // copied from — it cannot fail for any implementation of the walk. Every
@@ -201,17 +201,17 @@ describe("identity replay", () => {
     );
   });
 
-  // Load-bearing (R3): lineage DISCOVERY must ignore the caller's window.
+  // Load-bearing: lineage DISCOVERY must ignore the caller's window.
   // The seed set can only learn a class name from a note that mentions it,
   // and the note that teaches it routinely sits ABOVE the window — the walk
   // starts at the CURRENT canonical and hops backwards through `priorClass`.
   // Mutation check: give `readIdentityTransitions` back its `fromRevision` /
   // `toRevision` filters and pass the caller's bounds into
-  // `walkClassLineage` (its pre-R3 shape) — the walk from `a` then reads
+  // `walkClassLineage` (its earlier shape) — the walk from `a` then reads
   // nothing at or below the first merge's revision, both `windowed` and
   // `windowedReplay` come back empty, and the first two expectations here
   // fail. `pnpm exec vitest run tests/identity-replay.test.ts --maxWorkers=2`.
-  it("R3: a windowed read discovers lineage the window itself cannot see", async () => {
+  it("a windowed read discovers lineage the window itself cannot see", async () => {
     const store = await buildAbcStore();
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
@@ -251,11 +251,11 @@ describe("identity replay", () => {
     expect(unbounded.length).toBeGreaterThan(windowed.length);
   });
 
-  // Load-bearing (R7): the boundary limit pages, it never refuses. Mutation
+  // Load-bearing: the boundary limit pages, it never refuses. Mutation
   // check: make `pageBoundaries` (replay.ts) throw when
   // `boundaries.length > limit` instead of cutting the page — every
   // `limit: 1` call below rejects and the whole test fails.
-  it("R7: limit caps a page and hands back nextCursor, and the pages reassemble the whole lineage", async () => {
+  it("limit caps a page and hands back nextCursor, and the pages reassemble the whole lineage", async () => {
     const store = await buildAbcStore();
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
@@ -401,7 +401,7 @@ describe("identity replay", () => {
       },
     });
 
-    // G1R2-08: with no `fromRecorded` at all (an open start, closed only by
+    // with no `fromRecorded` at all (an open start, closed only by
     // `toRecorded`), `requestedFrom` must be ABSENT — never fabricated from
     // `toRecorded`, which is the caller's range END, not its start.
     await expect(

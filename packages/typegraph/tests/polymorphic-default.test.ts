@@ -1,5 +1,5 @@
 /**
- * Q3 — subclass expansion is the query default.
+ * Subclass expansion is the query default.
  *
  * `from`/`to`/`fromDynamic`/`toDynamic` default to `expansion: "subclasses"`
  * (a supertype query is polymorphic unless narrowed). Seven internal call
@@ -9,7 +9,7 @@
  * leg's root), `compareAndSet`, and `updateWhere`'s `exists` RELATED-kind
  * traversal).
  *
- * Two shapes of pin, told apart honestly (C13-R1-01) rather than claimed
+ * Two shapes of pin, told apart honestly rather than claimed
  * uniformly load-bearing:
  *
  * - `find({ where })` and the `exists` leg's RELATED-kind `toDynamic` pin
@@ -61,7 +61,7 @@ function buildGraph(id: string) {
   });
 }
 
-describe('Q3 — from()/to() default to expansion: "subclasses"', () => {
+describe('from()/to() default to expansion: "subclasses"', () => {
   it("store.query().from('Media', 'm') returns Podcast rows by default", async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(
@@ -129,7 +129,7 @@ describe('Q3 — from()/to() default to expansion: "subclasses"', () => {
   });
 });
 
-describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense in depth)", () => {
+describe("default pin — store.search() candidate subquery stays exact-kind (defense in depth)", () => {
   // NOT mutation-checked: `backend.fulltextSearch({ nodeKind: kind, ... })`
   // already scopes the physical search to the exact kind regardless of what
   // the candidate subquery's `from()` widens to, so dropping the
@@ -266,7 +266,7 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense
   });
 });
 
-describe("Q3 pin — collection APIs stay exact-kind", () => {
+describe("default pin — collection APIs stay exact-kind", () => {
   // Load-bearing: `nodes.Media.find()`'s no-`where` branch goes straight to
   // the exact-kind backend find path, and this pin is what keeps
   // `find({ where })` returning the identical row set. Mutation-checked:
@@ -343,7 +343,7 @@ describe("Q3 pin — collection APIs stay exact-kind", () => {
   });
 });
 
-describe("Q3 pin — updateWhere()'s exists-leg RELATED-kind toDynamic (load-bearing)", () => {
+describe("default pin — updateWhere()'s exists-leg RELATED-kind toDynamic (load-bearing)", () => {
   // Unlike the root-kind pins above, this one is NOT behind the outer
   // `WHERE nodes.kind = params.kind` fence: the related node's kind gates
   // whether the `exists` predicate is satisfied at all, and only the
@@ -395,7 +395,7 @@ describe("Q3 pin — updateWhere()'s exists-leg RELATED-kind toDynamic (load-bea
   });
 });
 
-describe("Q3 — store.subgraph() is unaffected by the query default", () => {
+describe("store.subgraph() is unaffected by the query default", () => {
   it("includeKinds is resolved literally regardless of subClassOf", async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(

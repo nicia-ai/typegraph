@@ -54,11 +54,11 @@
  * `broader`, `narrower` and `relatedTo` never gate a write and never change
  * which rows a claim contends for, so they stay `safe` in both directions.
  *
- * `partOf` / `hasPart` ADDED is item E's tightening: a newly declared
+ * `partOf` / `hasPart` ADDED is a composition tightening: a newly declared
  * composition pair can make an already-live part's second whole a violation
- * of R4 (one whole per part, relation-wide) it never was before, so it is
+ * of one whole per part (relation-wide) it never was before, so it is
  * `warning`, probed by `compositionSingleWhole` — the single-whole audit AND
- * D-10's acyclicity check over the PROPOSED composition relation, both run
+ * the composition acyclicity check over the PROPOSED composition relation, both run
  * against the proposed registry in `prepareSchemaTighteningPreflight`.
  * REMOVED is `breaking`: dropping a composition declaration is a
  * read/write-semantics change (parts stop being deletable-with-their-whole,
@@ -186,8 +186,8 @@ type OntologyDataProbeBody =
       kind: "compositionExistence";
       /**
        * The realizing (`via`) edge kinds of the `partOf`/`hasPart` pairs
-       * added this commit that ALSO declare `existence: "required"`. Item
-       * E.2: `prepareSchemaTighteningPreflight` audits these edge kinds'
+       * added this commit that ALSO declare `existence: "required"`.
+       * `prepareSchemaTighteningPreflight` audits these edge kinds'
        * required part kinds for a live part with no live whole — the same
        * delta-scoping discipline as `compositionSingleWhole`.
        */
@@ -277,7 +277,7 @@ function relationKey(relation: SerializedOntologyRelation): string {
  * Human-readable description of a relation for `OntologyChange.details`,
  * naming `via` (and `partSide`, when present) so a composition relation
  * re-pointed at a different realizing edge reads as a distinct change
- * instead of two identical-looking "removed"/"added" entries (E-a-8).
+ * instead of two identical-looking "removed"/"added" entries.
  * Also names `existence` when declared, so a rendered diff never shows a
  * bare `partOf(...)`/`hasPart(...)` pair with no hint of its existence
  * constraint.
@@ -618,7 +618,7 @@ function edgeAcyclicityTransitionDelta(
 
 /**
  * Edge kinds present on both sides whose `acyclic` flag went from
- * absent/`false` to `true` this commit — item D.2's tightening.
+ * absent/`false` to `true` this commit — an acyclic edge tightening.
  */
 function edgeAcyclicityAddedDelta(
   before: OntologySnapshot,
@@ -706,7 +706,7 @@ function classifyKnownRelationSeverity(
       if (direction !== "added") {
         return { severity: "breaking", probeKinds: [] };
       }
-      // Item E.2: this arm only ever sees a BRAND-NEW pair — flipping an
+      // Composition tightening: this arm only ever sees a BRAND-NEW pair — flipping an
       // already-declared pair's `existence` is classified separately by
       // `classifyExistenceChange` (relation identity, `via`/`partSide`
       // included, excludes `existence`; see `relationMapKey`'s docblock),
@@ -873,7 +873,7 @@ function classifyRelation(
  * Classifies an in-place `existence` flip on an already-declared `partOf`/
  * `hasPart` pair (same identity — `relationMapKey` excludes `existence`, so
  * this is the ONLY place that edit is classified; see its docblock). Mirrors
- * ruling E.2's tightening/loosening split for the whole-pair `added` case
+ * the tightening/loosening split for the whole-pair `added` case
  * above, but keyed off the existence delta directly rather than off
  * presence/absence of the pair itself:
  *
@@ -943,7 +943,7 @@ export function classifyOntologyChanges(
 ): readonly OntologyChange[] {
   const changes: OntologyChange[] = [];
 
-  // Edge-registration `acyclic`, item D.2. Independent of whether any
+  // Edge-registration `acyclic`. Independent of whether any
   // ontology relation changed — an edge kind's acyclicity axiom shares no
   // relation with `disjointWith` / `subClassOf` / `equivalentTo`, so this
   // never needs a `KindRegistry` and runs unconditionally, before the
@@ -1015,7 +1015,7 @@ export function classifyOntologyChanges(
   // migration that repairs an already-incoherent persisted document (see
   // `StructuralSubsumptionMode`'s docblock). AFTER stays enforced (the
   // default): a proposal that INTRODUCES an incompatible hierarchy is
-  // exactly what R2 requires this diff to catch before an upgrade.
+  // exactly what the preflight requires this diff to catch before an upgrade.
   const beforeRegistry = buildRegistryFromSerializedSchema(
     before,
     "unenforced-baseline",
