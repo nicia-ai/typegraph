@@ -44,6 +44,7 @@ export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
 export { registerGraphMergeCallbackIntegrationTests } from "./graph-merge-callbacks";
+export { registerGraphMergeCompositionIntegrationTests } from "./graph-merge-composition";
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerGraphMergeReviewV2IntegrationTests } from "./graph-merge-review-v2";

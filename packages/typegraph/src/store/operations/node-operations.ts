@@ -3005,8 +3005,11 @@ async function insertPreparedCompositionEdge<G extends GraphDef>(
 function resolveBatchCompositionWorks<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
+  backend: GraphBackend | TransactionBackend,
 ): readonly (CompositionCreateWork | undefined)[] {
-  return inputs.map((input) => resolveCompositionCreate(ctx.registry, input));
+  return inputs.map((input) =>
+    resolveCompositionCreate(ctx.registry, input, backend),
+  );
 }
 
 /**
@@ -3872,7 +3875,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   // for the two refusal arms (required-existence with no `partOf`; a
   // `partOf` naming an undeclared pair), which is what makes cases where no
   // node row survives provable rather than merely likely.
-  const compositionWork = resolveCompositionCreate(ctx.registry, input);
+  const compositionWork = resolveCompositionCreate(
+    ctx.registry,
+    input,
+    backend,
+  );
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
   const autocommitBackend =
@@ -4292,7 +4299,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   if (inputs.length === 0) return;
 
   // See `resolveBatchCompositionWorks`'s docblock.
-  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs);
+  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs, backend);
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
@@ -4439,7 +4446,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) return [];
 
   // See `executeNodeCreateNoReturnBatch`'s identical preamble.
-  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs);
+  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs, backend);
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
