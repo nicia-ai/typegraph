@@ -345,6 +345,7 @@ import {
   readNeighbors,
 } from "./neighbors";
 import {
+  applyIdentityWindowEnd,
   type EdgeOperationContext,
   edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
@@ -378,6 +379,7 @@ import {
   executeNodeSetUpdate,
   executeNodeUpdate,
   executeNodeUpsertUpdateBatch,
+  type IdentityWindowEndContext,
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
@@ -1762,6 +1764,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.lockIdentityImportTarget(target),
       foldImportedIdentityNodes: (target, references) =>
         this.foldImportedIdentityNodes(target, references),
+      applyImportedNodeWindowEnd: (target, input) =>
+        applyIdentityWindowEnd(this.#identityWindowEndContext(), target, input),
       detachDeletedImportedIdentityNode: (target, reference) =>
         this.detachDeletedImportedIdentityNode(target, reference),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
@@ -7447,6 +7451,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * receipt-tracked transaction, which is what leaves `recordCascadedParts`
    * absent there.
    */
+  /** The one binding of the node window-end identity hook to this graph. */
+  readonly #requireValidityEndCompatible = (
+    target: IdentityTarget,
+    ref: Readonly<{ kind: string; id: string }>,
+    validTo: string | undefined,
+  ): Promise<void> =>
+    requireNodeValidityEndCompatible(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+      ref,
+      validTo,
+    );
+
+  /**
+   * The slice of a node operation context `applyIdentityWindowEnd` reads, for
+   * the import update leg, which holds no operation context of its own.
+   */
+  #identityWindowEndContext(): IdentityWindowEndContext {
+    return this.#graph.identity === undefined ?
+        {}
+      : {
+          identity: {
+            requireValidityEndCompatible: this.#requireValidityEndCompatible,
+          },
+        };
+  }
+
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
@@ -7504,20 +7535,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 ref,
                 mode,
               ),
-            requireValidityEndCompatible: (
-              target: IdentityTarget,
-              ref: Readonly<{ kind: string; id: string }>,
-              validTo: string | undefined,
-            ) =>
-              requireNodeValidityEndCompatible(
-                {
-                  graphId: this.graphId,
-                  schema: this.#sqlSchema(),
-                },
-                target,
-                ref,
-                validTo,
-              ),
+            requireValidityEndCompatible: this.#requireValidityEndCompatible,
           },
         }),
       createOperationContext: (operation, entity, kind, id) =>

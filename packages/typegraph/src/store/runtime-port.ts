@@ -413,6 +413,28 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
+   * The identity half of an import update that states a node's `validTo`:
+   * refuses an end an identity assertion would outlive and notes the
+   * `window-end` transition, through the owner every store update runs
+   * (`applyIdentityWindowEnd`). A no-op for a graph without identity or a
+   * write that states no end.
+   *
+   * @throws {IdentityEndpointValidityError} when the end would strand an
+   * assertion's window.
+   */
+  applyImportedNodeWindowEnd: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+    input: Readonly<{ kind: string; id: string; validTo?: string }>,
+  ) => Promise<void>;
+  /**
    * Detaches a node import purges AFTER `foldImportedIdentityNodes`
    * already folded it into identity for this attempt's batch — see
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).

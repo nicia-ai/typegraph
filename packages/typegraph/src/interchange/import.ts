@@ -95,6 +95,7 @@ import {
   EdgeAcyclicityError,
   EdgeMatchIdentityConflictError,
   IdentityContradictionError,
+  IdentityEndpointValidityError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
   NodeNotFoundError,
@@ -376,6 +377,14 @@ type ImportWriteFrame = Readonly<{
   graph: GraphDef;
   schema: SqlSchema;
   dialect: DialectAdapter;
+  /**
+   * The identity half of a node update that states `validTo`, bound to this
+   * frame's target — the store's own window-end owner, reached through the
+   * runtime port.
+   */
+  applyNodeWindowEnd: (
+    input: Readonly<{ kind: string; id: string; validTo?: string }>,
+  ) => Promise<void>;
 }>;
 
 /**
@@ -474,6 +483,8 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     graph: inputs.graph,
     schema: inputs.schema,
     dialect: inputs.dialect,
+    applyNodeWindowEnd: (input) =>
+      inputs.runtime.applyImportedNodeWindowEnd(target, input),
   };
   await processNodes(
     frame,
@@ -1900,6 +1911,7 @@ async function processNodeSlice(
             validatedProps: props,
             uniqueConstraints,
             windowFence: updateWindow.value,
+            applyNodeWindowEnd: frame.applyNodeWindowEnd,
           });
           if (updateError === undefined) {
             // The update mutated the real backend's uniqueness rows directly;
@@ -2255,9 +2267,20 @@ async function updateImportedNode(
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     windowFence: ValidityLowerBoundFence;
+    applyNodeWindowEnd: ImportWriteFrame["applyNodeWindowEnd"];
   }>,
 ): Promise<string | undefined> {
   try {
+    // Before the row write, as every store update does it: a document's
+    // `validTo` may not end a node's window under an identity assertion that
+    // would outlive it, and an end that does land is a membership boundary
+    // the transition log records. Read-only up to its own note, so a refusal
+    // leaves the row and the transaction untouched.
+    await args.applyNodeWindowEnd({
+      kind: node.kind,
+      id: node.id,
+      ...(node.validTo !== undefined && { validTo: node.validTo }),
+    });
     // The widened guard wraps a WRITE here, not a probe, so what it recovers
     // from is worth stating: `reviseNode` raises neither a `DisjointError` nor a
     // `CardinalityError` — an in-place update cannot change a node's kind, so it
@@ -2283,6 +2306,7 @@ async function updateImportedNode(
     );
     return result.ok ? undefined : result.error;
   } catch (error) {
+    if (error instanceof IdentityEndpointValidityError) return error.message;
     if (
       !(error instanceof DatabaseOperationError) ||
       error.details.reason !== "no_row_returned"
@@ -2741,6 +2765,7 @@ async function processNode(
           validatedProps: propsResult.data,
           uniqueConstraints,
           windowFence: updateWindow.value,
+          applyNodeWindowEnd: frame.applyNodeWindowEnd,
         });
         if (updateError !== undefined) {
           return { status: "error", error: updateError };

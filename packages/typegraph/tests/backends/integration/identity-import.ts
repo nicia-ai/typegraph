@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  IdentityEndpointValidityError,
+} from "../../../src";
 import { snapshotExportContention } from "../../../src/backend/transaction-resource";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import {
   exportGraph,
   exportGraphStream,
+  FORMAT_VERSION,
   importGraph,
   importGraphStream,
 } from "../../../src/interchange";
 import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
 import { type Store } from "../../../src/store/store";
+import { requireDefined } from "../../../src/utils/presence";
 import {
   createTestBackend,
   expectAuditedBackend,
@@ -171,6 +178,118 @@ export function registerIdentityImportIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Operational Identity interchange", () => {
+    describe("a node window end stated by onConflict: update", () => {
+      function windowEndDocument(
+        ref: Ref,
+        properties: Record<string, unknown>,
+        validTo: string,
+      ) {
+        return {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external" as const },
+          nodes: [{ ...ref, properties, validTo }],
+          edges: [],
+        };
+      }
+
+      it("refuses an end an open identity assertion would outlive, as the store update does", async () => {
+        const store = await context.createHistoryStore(
+          identityInterchangeGraph("identity_import_window_end_refusal"),
+        );
+        const a = await store.nodes.Person.create({ name: "A" }, { id: "a" });
+        const b = await store.nodes.Person.create({ name: "B" }, { id: "b" });
+        await store.identity.assertSame(a, b);
+        const validTo = isoAt(24 * HOUR_MS);
+
+        await expect(
+          store.nodes.Person.update(a.id, {}, { validTo }),
+        ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+
+        const result = await importGraph(
+          store,
+          windowEndDocument(
+            { kind: "Person", id: "a" },
+            { name: "A" },
+            validTo,
+          ),
+          { onConflict: "update" },
+        );
+        console.info("import window-end refusal", {
+          nodes: result.nodes,
+          errors: result.errors,
+        });
+        expect(result.nodes).toEqual({ created: 0, updated: 0, skipped: 0 });
+        expect(result.errors).toEqual([
+          matchingObject({ entityType: "node", kind: "Person", id: "a" }),
+        ]);
+        const stored = await store.nodes.Person.getById(a.id);
+        expect(stored?.meta.validTo).toBeUndefined();
+        expect(await store.identity.assertionsOf(a)).toHaveLength(1);
+      });
+
+      it("records the window-end transition the store update records", async () => {
+        async function windowEndTransitions(
+          graphId: string,
+          endWindow: (
+            store: Awaited<ReturnType<typeof makeFoldClass>>,
+            validTo: string,
+          ) => Promise<void>,
+        ): Promise<number> {
+          const store = await makeFoldClass(graphId);
+          await endWindow(store, isoAt(24 * HOUR_MS));
+          const history = await store.identity.transitionsOf({
+            kind: "Author",
+            id: "shared",
+          });
+          return history.transitions.filter(
+            (transition) => transition.cause === "window-end",
+          ).length;
+        }
+        /** A same-id fold class: Person and Author both named `shared`. */
+        async function makeFoldClass(graphId: string) {
+          const store = await context.createHistoryStore(
+            identityInterchangeGraph(graphId),
+          );
+          await store.nodes.Person.create({ name: "S" }, { id: "shared" });
+          await store.nodes.Author.create({ penName: "S" }, { id: "shared" });
+          return store;
+        }
+
+        const viaStore = await windowEndTransitions(
+          "identity_import_window_end_store",
+          async (store, validTo) => {
+            const person = await store.nodes.Person.getById("shared" as never);
+            await store.nodes.Person.update(
+              requireDefined(person).id,
+              {},
+              { validTo },
+            );
+          },
+        );
+        const viaImport = await windowEndTransitions(
+          "identity_import_window_end_import",
+          async (store, validTo) => {
+            const result = await importGraph(
+              store,
+              windowEndDocument(
+                { kind: "Person", id: "shared" },
+                { name: "S" },
+                validTo,
+              ),
+              { onConflict: "update" },
+            );
+            expect(result.errors).toEqual([]);
+            expect(result.nodes.updated).toBe(1);
+          },
+        );
+
+        console.info("window-end transitions", { viaStore, viaImport });
+        expect(viaStore).toBe(1);
+        expect(viaImport).toBe(viaStore);
+      });
+    });
+
     it("round-trips state identity and re-imports it idempotently", async () => {
       const { store: source, alice, author, bob } = await seedSource(context);
       await source.identity.assertSame(alice, author);

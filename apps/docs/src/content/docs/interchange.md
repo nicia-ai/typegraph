@@ -316,6 +316,13 @@ and is unaffected. To update props over existing rows from a temporal export,
 either omit `validFrom` from the update document, export with
 `includeTemporal: false`, or import into a fresh graph and swap it in.
 
+On an identity-enabled graph the update leg's `validTo` goes through the same
+check a store update's does. An end that an identity assertion naming the node
+would outlive is reported as a per-row error (the
+`IdentityEndpointValidityError` message) and the row is left as it was; an end
+that lands on a member of an identity class records the `window-end`
+transition.
+
 ### Cancelling an export
 
 On a backend reporting `capabilities.execution.interactiveTransactions`, an export holds one
