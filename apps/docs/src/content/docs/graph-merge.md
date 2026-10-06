@@ -2818,7 +2818,9 @@ TypeGraph does not publish it. `abort()` atomically removes the copied graph
 and operation marker while preserving unrelated namespaces, and refuses if the
 target has changed. A retry with the same operation key returns the same proof
 after checking the target digest and base token; a different key cannot reuse
-the populated target.
+the populated target. The proof survives a library upgrade: a graph relation a
+later release adds enters the digest only once it holds rows for the graph, so
+a fork taken before the upgrade stays retryable and abortable after it.
 
 This first-party copy supports the bundled PostgreSQL table layout, bundled
 `pgvector` embedding storage, and default `tsvector` fulltext storage.
