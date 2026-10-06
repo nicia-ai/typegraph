@@ -1270,6 +1270,24 @@ export type GraphCommandSession = "root" | "transaction";
 export type GraphCommandIsolation =
   "read_committed" | "repeatable_read" | "serializable" | "unknown";
 
+/**
+ * What one acquisition of the per-graph write fence observed and did on the
+ * session that took it.
+ *
+ * `fenceRow` is `"advanced"` when the acquiring statement also advanced the
+ * graph's row in the fences relation. Every acquirer that can reach that
+ * relation writes the same row, so a session whose snapshot predates another
+ * acquirer's commit fails on the row with a serialization failure instead of
+ * deciding on a graph it can no longer see. `"none"` is an acquisition that
+ * took the keyed exclusion alone: nothing detects a stale snapshot there, so
+ * only an isolation that takes a fresh snapshot per statement may make a
+ * decision the fence alone protects.
+ */
+export type GraphWriteFenceAcquisition = Readonly<{
+  isolation: GraphCommandIsolation;
+  fenceRow: "advanced" | "none";
+}>;
+
 declare const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
 
 /** Compile-time evidence that graph-write coordination is already established. */
@@ -2707,9 +2725,11 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
   /**
    * PostgreSQL/PGlite transaction-scoped fast path that takes the active
-   * schema `FOR SHARE` fence and the recorded graph advisory lock in one SQL
-   * statement, in that order. The graph-lock CTE is reachable only through a
-   * matching schema row, so a stale Store never acquires the later lock.
+   * schema `FOR SHARE` fence, the recorded graph advisory lock and the graph's
+   * fence-row advance in one SQL statement, in that order. The graph-lock CTE
+   * is reachable only through a matching schema row, so a stale Store never
+   * acquires the later lock. The result reports what the statement observed
+   * and did, exactly as the portable acquisition does.
    *
    * Bundled PostgreSQL/PGlite transaction targets expose this member; their
    * root backends omit it so it cannot be used outside an already-open
@@ -2721,7 +2741,7 @@ export type GraphBackend = Readonly<{
   lockSchemaVersionAndGraphWrite?: (
     this: void,
     params: SchemaWriteFenceParams,
-  ) => Promise<GraphCommandIsolation>;
+  ) => Promise<GraphWriteFenceAcquisition>;
   /**
    * Internal schema-lifecycle seam for features whose data preflight must
    * commit atomically with the schema CAS. The callback runs in the same

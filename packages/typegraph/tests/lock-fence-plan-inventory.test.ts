@@ -4,7 +4,7 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **20** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **21** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
@@ -14,7 +14,9 @@
  *     trusted-import table lock (J18), and SQLite's own schema-commit/
  *     writer fence resolution (J19, the `row`-mechanism counterpart to
  *     J14/J15), plus adopted merge writer-slot acquisition (J20) and
- *     composed merge snapshot enforcement (J21), and adopted schema fence evidence (J22) — enumerated in both
+ *     composed merge snapshot enforcement (J21), adopted schema fence
+ *     evidence (J22), and the store-owned write unit's replay decision (J23)
+ *     — enumerated in both
  *     directions, keyed on `(file, trimmed
  *     line)` so line drift cannot rot the pin.
  *
@@ -106,7 +108,7 @@ type InventoryEntry = Readonly<{
   reason: string;
 }>;
 
-/** The 20 `resolveWriteFencePlan` call sites (Contract J, I8). */
+/** The 21 `resolveWriteFencePlan` call sites (Contract J, I8). */
 const CALL_SITES: readonly InventoryEntry[] = [
   {
     file: "backend/drizzle/postgres.ts",
@@ -184,6 +186,13 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J9a",
     reason:
       "The recorded-clock-allocation construction gate refuses an unfenced backend before any statement runs.",
+  },
+  {
+    file: "store/operations/write-transaction.ts",
+    line: "const plan = resolveWriteFencePlan(backend);",
+    site: "J23",
+    reason:
+      "A store-owned transaction replays on a stale-snapshot refusal only when its graph-write fence is a keyed acquisition that advances the fence row; a serialized engine takes none and never replays.",
   },
   {
     file: "store/operations/write-transaction.ts",
@@ -409,13 +418,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 20 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 21 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 20 declared call sites, both directions", () => {
-    expect(found).toHaveLength(20);
-    expect(CALL_SITES).toHaveLength(20);
+  it("has exactly the 21 declared call sites, both directions", () => {
+    expect(found).toHaveLength(21);
+    expect(CALL_SITES).toHaveLength(21);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

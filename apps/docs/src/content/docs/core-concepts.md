@@ -537,15 +537,32 @@ transactions refuses the write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`) rather
 than enforcing the rule only when nothing races.
 
 On PostgreSQL the check reads the relation after taking the fence, so the
-session must see what committed while it waited. A `REPEATABLE READ` session
-cannot, and its write is refused with `ConfigurationError`
+session must see what committed while it waited. A `READ COMMITTED` session
+does: every statement takes a new snapshot. A `REPEATABLE READ` or
+`SERIALIZABLE` session keeps the snapshot of its first statement however long
+it then waits, and PostgreSQL arbitrates `SERIALIZABLE` transactions only
+against each other, so a lock alone would let such a session and a
+`READ COMMITTED` writer close a cycle between them. The fence therefore also
+advances the graph's row in `typegraph_fences`, in the statement that takes
+the lock: a session whose snapshot predates another writer's commit fails on
+that row with a serialization failure (SQLSTATE `40001`) instead of checking a
+relation it can no longer see. The guarantee above holds at every isolation
+level, and between writers at different levels.
+
+Who retries depends on who owns the transaction. A collection write, an
+import or a merge commit that TypeGraph opened the transaction for is replayed
+whole, in a new transaction, and then sees the winner. Inside
+`store.transaction(...)`, an adopted transaction or
+`applyMergePlanInTransaction`, the failure surfaces as
+`TransactionConflictError`; re-run the whole transaction, or pass
+`store.transaction(fn, { retry: { attempts } })`.
+
+A custom backend whose write fence is an advisory lock with no fences relation
+(`tableNames.fences`) cannot detect a stale snapshot. There a
+`REPEATABLE READ` or `SERIALIZABLE` write is refused with `ConfigurationError`
 (`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`) in every frame of the transaction,
-batches and concurrent sibling writes included. A `SERIALIZABLE` session is
-accepted, but PostgreSQL only arbitrates it against other `SERIALIZABLE`
-transactions: a `SERIALIZABLE` writer and a `READ COMMITTED` writer of one
-acyclic relation can both commit and close a cycle between them. Write an
-acyclic relation at one isolation level; `READ COMMITTED`, the default, is the
-one the guarantee above describes.
+batches and concurrent sibling writes included; `READ COMMITTED` is the level
+it supports.
 
 Use `store.verifyConstraintFences()` to find edges already on a cycle (the
 `edgeAcyclicity` family), and see [Errors](/errors) for

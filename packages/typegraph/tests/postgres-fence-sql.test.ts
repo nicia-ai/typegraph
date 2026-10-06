@@ -29,6 +29,24 @@ import { renderPostgres, sql } from "../src/query/sql-fragment";
 import { requireDefined } from "../src/utils/presence";
 
 const fenceStatements = resolveFenceStatements(postgresFenceSql);
+// The style every bundled PostgreSQL lock site resolves: the advisory
+// mechanism, with the fences relation named.
+const fenceStatementsWithFenceRow = resolveFenceStatements(postgresFenceSql, {
+  mechanism: "advisory",
+  fencesTableName: "typegraph_fences",
+});
+const SNAPSHOT_FENCE_SQL =
+  "\n" +
+  '    WITH "fence_lock" AS MATERIALIZED (\n' +
+  '      SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2)) AS "lock_token"\n' +
+  "    )\n" +
+  "    \n" +
+  '    INSERT INTO "typegraph_fences" (key, generation)\n' +
+  '    SELECT $3, 1 FROM "fence_lock" WHERE TRUE\n' +
+  '    ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1\n' +
+  "    RETURNING generation, current_setting('transaction_isolation') AS transaction_isolation\n" +
+  "  \n" +
+  "  ";
 // `postgresFenceSql` always supplies `lockTables`, but `FenceSql`'s type
 // keeps every member optional (a `row`-mechanism target may omit it), so
 // this pinned test asserts presence once instead of at every call site.
@@ -73,6 +91,39 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
       "typegraph:recorded-graph-write",
       "graph-1",
     ]);
+  });
+
+  it("acquireKeyedSnapshotFence: the lock, then the fence-row advance, then the isolation fact, in one statement", () => {
+    const rendered = renderPostgres(
+      fenceStatementsWithFenceRow.acquireKeyedSnapshotFence(
+        "typegraph:recorded-graph-write",
+        "graph-1",
+      ),
+    );
+    expect(rendered.sql).toBe(SNAPSHOT_FENCE_SQL);
+    expect(rendered.params).toEqual([
+      "typegraph:recorded-graph-write",
+      "graph-1",
+      "typegraph:recorded-graph-write:graph-1",
+    ]);
+  });
+
+  it("acquireKeyedSnapshotFence: a target naming no fences relation gets the lock-only statement, which reports no generation", () => {
+    const rendered = renderPostgres(
+      fenceStatements.acquireKeyedSnapshotFence(
+        "typegraph:recorded-graph-write",
+        "graph-1",
+      ),
+    );
+    expect(rendered).toEqual(
+      renderPostgres(
+        fenceStatements.acquireKeyedWithIsolation(
+          "typegraph:recorded-graph-write",
+          "graph-1",
+        ),
+      ),
+    );
+    expect(rendered.sql).not.toContain("generation");
   });
 
   it.each([
@@ -126,22 +177,18 @@ describe("resolveFenceStatements: the default (advisory) style's isolationFact()
  * statement ran; this proves which one.
  */
 describe("postgresFenceSql: every lock site's real call, pinned", () => {
-  it("store/recorded-capture/clock.ts lockRecordedGraphWrite: acquireKeyedWithIsolation(typegraph:recorded-graph-write, graphId)", () => {
+  it("store/recorded-capture/clock.ts lockRecordedGraphWrite: acquireKeyedSnapshotFence(typegraph:recorded-graph-write, graphId)", () => {
     const rendered = renderPostgres(
-      fenceStatements.acquireKeyedWithIsolation(
+      fenceStatementsWithFenceRow.acquireKeyedSnapshotFence(
         "typegraph:recorded-graph-write",
         "graph-1",
       ),
     );
-    expect(rendered.sql).toBe(
-      "\n    SELECT\n" +
-        "      pg_advisory_xact_lock(hashtext($1), hashtext($2)),\n" +
-        "      current_setting('transaction_isolation') AS transaction_isolation\n" +
-        "  ",
-    );
+    expect(rendered.sql).toBe(SNAPSHOT_FENCE_SQL);
     expect(rendered.params).toEqual([
       "typegraph:recorded-graph-write",
       "graph-1",
+      "typegraph:recorded-graph-write:graph-1",
     ]);
   });
 

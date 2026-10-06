@@ -17,6 +17,7 @@ import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import type { GraphWriteFenceAcquisition } from "../src/backend/types";
 import { tsvectorStrategy } from "../src/query/dialect/fulltext-strategy";
 import { requireDefined } from "../src/utils/presence";
 
@@ -59,12 +60,26 @@ describe("schema + graph write fence", () => {
       });
 
       expect(backend.lockSchemaVersionAndGraphWrite).toBeUndefined();
-      await backend.transaction(async (tx) => {
-        await requireDefined(tx.lockSchemaVersionAndGraphWrite)({
-          expectedVersion: 1,
-          graphId: "fused-lock",
-        });
+      const acquire = (): Promise<GraphWriteFenceAcquisition> =>
+        backend.transaction((tx) =>
+          requireDefined(tx.lockSchemaVersionAndGraphWrite)({
+            expectedVersion: 1,
+            graphId: "fused-lock",
+          }),
+        );
+      // The fused statement reports what it observed and did, like the
+      // portable acquisition: the session's isolation, and the fence-row
+      // advance a snapshot-isolation session's freshness rests on.
+      await expect(acquire()).resolves.toEqual({
+        isolation: "read_committed",
+        fenceRow: "advanced",
       });
+      await acquire();
+      const fenceRows = await client.query<{ generation: string }>(
+        `SELECT generation FROM "typegraph_fences" WHERE key = $1`,
+        ["typegraph:recorded-graph-write:fused-lock"],
+      );
+      expect(fenceRows.rows.map((row) => Number(row.generation))).toEqual([2]);
 
       const strategy = createPostgresOperationStrategy(
         postgresTables,
@@ -87,6 +102,16 @@ describe("schema + graph write fence", () => {
         statement.indexOf('"graph_write_lock" as materialized'),
       );
       expect(statement).toContain('from "schema_fence"');
+      // The fence row is written only after — and only if — the advisory
+      // lock was taken: its row source is the lock CTE.
+      expect(statement).toContain('insert into "typegraph_fences"');
+      expect(statement).toContain('from "graph_write_lock"');
+      expect(
+        statement.indexOf('"graph_write_lock" as materialized'),
+      ).toBeLessThan(statement.indexOf('insert into "typegraph_fences"'));
+      expect(compiled.params).toContain(
+        "typegraph:recorded-graph-write:fused-lock",
+      );
     } finally {
       await client.close();
     }

@@ -23,6 +23,7 @@ import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createStoreWithSchema } from "../src/store";
 import { STORE_RUNTIME } from "../src/store/runtime-port";
+import { advisoryOnlyBackend } from "./advisory-only-backend";
 
 const Podcast = defineNode("Podcast", { schema: z.object({}) });
 const Episode = defineNode("Episode", { schema: z.object({}) });
@@ -156,42 +157,81 @@ describe("a composition PART declared onDelete: 'restrict' is statically ineligi
 // would plan from a stale snapshot and leave a just-attached part behind.
 // ============================================================
 
+const SNAPSHOT_ISOLATION_LEVELS = [
+  { setting: "repeatable read", isolation: "repeatable_read" },
+  { setting: "serializable", isolation: "serializable" },
+] as const;
+
 describe("a composition whole delete requires a snapshot taken after the fence", () => {
-  it("refuses under a repeatable-read server default, and deletes nothing", async () => {
-    const local = await createLocalPgliteBackend({ vector: false });
-    const backend = createPostgresBackend(local.db, { vector: false });
-    try {
-      const [store] = await createStoreWithSchema(graph, backend);
-      const podcast = await store.nodes.Podcast.create({});
-      const episode = await store.nodes.Episode.create({});
-      await store.edges.episodeOf.create(episode, podcast, {});
-      await local.client.exec(
-        "SET default_transaction_isolation = 'repeatable read'",
+  it.each(SNAPSHOT_ISOLATION_LEVELS)(
+    "refuses at $isolation on a port whose fence advances no fence row, and deletes nothing",
+    async ({ setting, isolation }) => {
+      const local = await createLocalPgliteBackend({ vector: false });
+      const backend = advisoryOnlyBackend(
+        createPostgresBackend(local.db, { vector: false }),
       );
+      try {
+        const [store] = await createStoreWithSchema(graph, backend);
+        const podcast = await store.nodes.Podcast.create({});
+        const episode = await store.nodes.Episode.create({});
+        await store.edges.episodeOf.create(episode, podcast, {});
+        await local.client.exec(
+          `SET default_transaction_isolation = '${setting}'`,
+        );
 
-      // MUTATION CHECK: removing `assertFencedSnapshotIsFresh` from
-      // `planCompositionCascade` lets this delete resolve — verified and
-      // reverted.
-      await expect(
-        store.nodes.Podcast.delete(podcast.id),
-      ).rejects.toMatchObject({
-        details: {
-          code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
-          isolation: "repeatable_read",
-        },
-      });
+        // MUTATION CHECK: removing `assertFencedSnapshotIsFresh` from
+        // `planCompositionCascade` lets this delete resolve — verified and
+        // reverted.
+        await expect(
+          store.nodes.Podcast.delete(podcast.id),
+        ).rejects.toMatchObject({
+          details: {
+            code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
+            isolation,
+            fenceRow: "none",
+          },
+        });
 
-      await local.client.exec(
-        "SET default_transaction_isolation = 'read committed'",
-      );
-      await expect(
-        store.nodes.Podcast.getById(podcast.id),
-      ).resolves.toBeDefined();
-      await expect(
-        store.nodes.Episode.getById(episode.id),
-      ).resolves.toBeDefined();
-    } finally {
-      await local.backend.close();
-    }
-  });
+        await local.client.exec(
+          "SET default_transaction_isolation = 'read committed'",
+        );
+        await expect(
+          store.nodes.Podcast.getById(podcast.id),
+        ).resolves.toBeDefined();
+        await expect(
+          store.nodes.Episode.getById(episode.id),
+        ).resolves.toBeDefined();
+      } finally {
+        await local.backend.close();
+      }
+    },
+  );
+
+  it.each(SNAPSHOT_ISOLATION_LEVELS)(
+    "cascades at $isolation on the bundled backend, whose fence advances the fence row",
+    async ({ setting }) => {
+      const local = await createLocalPgliteBackend({ vector: false });
+      const backend = createPostgresBackend(local.db, { vector: false });
+      try {
+        const [store] = await createStoreWithSchema(graph, backend);
+        const podcast = await store.nodes.Podcast.create({});
+        const episode = await store.nodes.Episode.create({});
+        await store.edges.episodeOf.create(episode, podcast, {});
+        await local.client.exec(
+          `SET default_transaction_isolation = '${setting}'`,
+        );
+
+        await store.nodes.Podcast.delete(podcast.id);
+
+        await expect(
+          store.nodes.Podcast.getById(podcast.id),
+        ).resolves.toBeUndefined();
+        await expect(
+          store.nodes.Episode.getById(episode.id),
+        ).resolves.toBeUndefined();
+      } finally {
+        await local.backend.close();
+      }
+    },
+  );
 });

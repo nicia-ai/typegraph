@@ -89,7 +89,7 @@ import {
   assertGraphCommandCoordination,
   assertGraphCommandExecutionContext,
   type GraphCommandExecutionContext,
-  normalizeGraphCommandIsolation,
+  readGraphWriteFenceAcquisition,
 } from "../command-contract";
 import {
   resolveEdgeEndpointIds,
@@ -4214,9 +4214,7 @@ export function createCommonOperationBackend(
               schemaGraphWriteFenceSql,
             ),
           );
-          if (row !== undefined) {
-            return normalizeGraphCommandIsolation(row["transaction_isolation"]);
-          }
+          if (row !== undefined) return readGraphWriteFenceAcquisition(row);
 
           // A blocked `FOR SHARE` can recheck the old active row out of its
           // statement snapshot without substituting the winner's new row. As

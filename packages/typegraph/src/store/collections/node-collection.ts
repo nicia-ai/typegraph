@@ -40,6 +40,7 @@ import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
   runResolvedMutationSetConverging,
@@ -967,7 +968,7 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOptionallyInTransaction(backend, async (target) => {
+          runOwnedMutationSetTransaction(backend, async (target) => {
             const rows = await getNodeRowsByIds(
               target,
               batchPointRead,
@@ -1295,7 +1296,9 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real

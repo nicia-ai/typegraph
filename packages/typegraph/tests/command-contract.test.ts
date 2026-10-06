@@ -1,17 +1,22 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertFencedSnapshotIsFresh,
+  assertGraphCommandConvergenceIsolation,
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   graphCommandCoordinationIsolation,
   graphCommandExecutionContext,
   mintGraphCommandCoordination,
+  observesPostFenceCommits,
+  readGraphWriteFenceAcquisition,
 } from "../src/backend/command-contract";
 import type {
   EdgeConvergeCreateCommand,
   EdgeRow,
   GraphCommand,
   GraphCommandPort,
+  GraphWriteFenceAcquisition,
   NodeCreateCommand,
   NodeRow,
 } from "../src/backend/types";
@@ -115,11 +120,10 @@ describe("authoritative graph command contract", () => {
         session: "transaction",
         execute: () => Promise.resolve(RESULT),
       };
-      const coordination = mintGraphCommandCoordination(
-        port,
-        "graph",
+      const coordination = mintGraphCommandCoordination(port, "graph", {
         isolation,
-      );
+        fenceRow: "none",
+      });
       expect(
         graphCommandCoordinationIsolation(port, "graph", coordination),
       ).toBe(isolation);
@@ -246,11 +250,10 @@ describe("authoritative graph command contract", () => {
       session: "transaction",
       execute: () => Promise.resolve(RESULT),
     };
-    const coordination = mintGraphCommandCoordination(
-      portA,
-      "other-graph",
-      "read_committed",
-    );
+    const coordination = mintGraphCommandCoordination(portA, "other-graph", {
+      isolation: "read_committed",
+      fenceRow: "none",
+    });
 
     expect(() =>
       executeAuthoritativeGraphCommand(portA, COMMAND, coordination),
@@ -265,14 +268,164 @@ describe("authoritative graph command contract", () => {
       session: "transaction",
       execute: () => Promise.resolve(RESULT),
     };
-    const coordination = mintGraphCommandCoordination(
-      port,
-      "graph",
-      "read_committed",
-    );
+    const coordination = mintGraphCommandCoordination(port, "graph", {
+      isolation: "read_committed",
+      fenceRow: "none",
+    });
 
     expect(() => graphCommandExecutionContext("root", coordination)).toThrow(
       "root command",
     );
+  });
+});
+
+/**
+ * Every acquisition the per-graph write fence can report, and whether a
+ * session that acquired it that way reads what the fence's previous holders
+ * committed. A lock cannot refresh a snapshot taken before the wait, so a
+ * snapshot isolation is trusted only when its acquisition advanced the
+ * graph's fence row — the write a stale session fails on.
+ */
+const FENCE_ACQUISITIONS: readonly Readonly<{
+  acquisition: GraphWriteFenceAcquisition;
+  observesWinner: boolean;
+}>[] = [
+  {
+    acquisition: { isolation: "read_committed", fenceRow: "advanced" },
+    observesWinner: true,
+  },
+  {
+    acquisition: { isolation: "read_committed", fenceRow: "none" },
+    observesWinner: true,
+  },
+  {
+    acquisition: { isolation: "repeatable_read", fenceRow: "advanced" },
+    observesWinner: true,
+  },
+  {
+    acquisition: { isolation: "repeatable_read", fenceRow: "none" },
+    observesWinner: false,
+  },
+  {
+    acquisition: { isolation: "serializable", fenceRow: "advanced" },
+    observesWinner: true,
+  },
+  {
+    acquisition: { isolation: "serializable", fenceRow: "none" },
+    observesWinner: false,
+  },
+  {
+    acquisition: { isolation: "unknown", fenceRow: "advanced" },
+    observesWinner: false,
+  },
+  {
+    acquisition: { isolation: "unknown", fenceRow: "none" },
+    observesWinner: false,
+  },
+];
+
+describe("a fenced decision observes the fence's previous holders", () => {
+  const port: GraphCommandPort = {
+    session: "transaction",
+    execute: () => Promise.resolve(RESULT),
+  };
+  const refusal = { code: "LOCK_ONLY_REQUIRES_FRESH_SNAPSHOT", subject: "It" };
+
+  // The two consumers read the SAME verdict off the coordination the
+  // acquisition minted: a lock-only read and match-key convergence.
+  it.each(FENCE_ACQUISITIONS.filter((entry) => entry.observesWinner))(
+    "$acquisition.isolation with fence row $acquisition.fenceRow is trusted",
+    ({ acquisition }) => {
+      expect(observesPostFenceCommits(acquisition)).toBe(true);
+      const coordination = mintGraphCommandCoordination(
+        port,
+        "graph",
+        acquisition,
+      );
+      expect(() => {
+        assertFencedSnapshotIsFresh(port, "graph", coordination, refusal);
+      }).not.toThrow();
+      expect(() => {
+        assertGraphCommandConvergenceIsolation(port, coordination);
+      }).not.toThrow();
+    },
+  );
+
+  it.each(FENCE_ACQUISITIONS.filter((entry) => !entry.observesWinner))(
+    "$acquisition.isolation with fence row $acquisition.fenceRow is refused",
+    ({ acquisition }) => {
+      expect(observesPostFenceCommits(acquisition)).toBe(false);
+      const coordination = mintGraphCommandCoordination(
+        port,
+        "graph",
+        acquisition,
+      );
+      expect(() => {
+        assertFencedSnapshotIsFresh(port, "graph", coordination, refusal);
+      }).toThrow(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            code: refusal.code,
+            ...acquisition,
+          }) as unknown,
+        }),
+      );
+      expect(() => {
+        assertGraphCommandConvergenceIsolation(port, coordination);
+      }).toThrow(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+            ...acquisition,
+          }) as unknown,
+        }),
+      );
+    },
+  );
+
+  it("needs no evidence where no keyed fence exists to wait on", () => {
+    expect(() => {
+      assertFencedSnapshotIsFresh(port, "graph", undefined, refusal);
+    }).not.toThrow();
+  });
+
+  it("refuses coordination earned for another graph as unobserved", () => {
+    const coordination = mintGraphCommandCoordination(port, "other-graph", {
+      isolation: "read_committed",
+      fenceRow: "advanced",
+    });
+    expect(() => {
+      assertFencedSnapshotIsFresh(port, "graph", coordination, refusal);
+    }).toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          isolation: "unknown",
+          fenceRow: "none",
+        }) as unknown,
+      }),
+    );
+  });
+});
+
+describe("readGraphWriteFenceAcquisition", () => {
+  it.each([
+    [
+      { transaction_isolation: "read committed", generation: "3" },
+      { isolation: "read_committed", fenceRow: "advanced" },
+    ],
+    [
+      { transaction_isolation: "serializable", generation: 1 },
+      { isolation: "serializable", fenceRow: "advanced" },
+    ],
+    [
+      { transaction_isolation: "repeatable read" },
+      { isolation: "repeatable_read", fenceRow: "none" },
+    ],
+    [{ generation: 7 }, { isolation: "unknown", fenceRow: "advanced" }],
+    // eslint-disable-next-line unicorn/no-null -- a driver reports an absent column value as SQL NULL
+    [{ generation: null }, { isolation: "unknown", fenceRow: "none" }],
+    [undefined, { isolation: "unknown", fenceRow: "none" }],
+  ] as const)("reads %o as %o", (row, expected) => {
+    expect(readGraphWriteFenceAcquisition(row)).toEqual(expected);
   });
 });

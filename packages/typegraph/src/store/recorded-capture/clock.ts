@@ -10,13 +10,13 @@ import {
 } from "../../backend/capabilities/write-fence";
 import {
   mintGraphCommandCoordination,
-  normalizeGraphCommandIsolation,
+  readGraphWriteFenceAcquisition,
 } from "../../backend/command-contract";
 import { postgresFenceSql } from "../../backend/drizzle/postgres-fence-sql";
 import type {
   GraphBackend,
   GraphCommandCoordination,
-  GraphCommandIsolation,
+  GraphWriteFenceAcquisition,
 } from "../../backend/types";
 import {
   createRecordedInstant,
@@ -24,12 +24,13 @@ import {
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../../core/temporal";
-import { ConfigurationError } from "../../errors";
+import { ConfigurationError, TransactionConflictError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { isSerializationFailure } from "../../utils/sql-errors";
 import { executeStatement } from "./guards";
 
 type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
@@ -126,24 +127,24 @@ const UNCOORDINATED_GRAPH_WRITE_LOCK = Object.freeze({
 function acquiredGraphWriteLock(
   target: Pick<GraphBackend, "commands">,
   graphId: string,
-  isolation: GraphCommandIsolation,
+  acquisition: GraphWriteFenceAcquisition,
 ): GraphWriteLock {
   return Object.freeze({
     coordination: mintGraphCommandCoordination(
       target.commands,
       graphId,
-      isolation,
+      acquisition,
     ),
   }) as GraphWriteLock;
 }
 
-/** Record an advisory lock acquired by a combined backend primitive. */
+/** Record a graph write fence acquired by a combined backend primitive. */
 export function acquiredGraphWriteLockFromCombinedFence(
   target: Pick<GraphBackend, "commands">,
   graphId: string,
-  isolation: GraphCommandIsolation,
+  acquisition: GraphWriteFenceAcquisition,
 ): GraphWriteLock {
-  return acquiredGraphWriteLock(target, graphId, isolation);
+  return acquiredGraphWriteLock(target, graphId, acquisition);
 }
 
 /**
@@ -179,7 +180,10 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * acquisition evicts its entry so a retry is not poisoned (in practice a
  * failed statement has aborted the Postgres transaction anyway).
  */
-export type RecordedGraphLockMemo = Map<string, Promise<GraphCommandIsolation>>;
+export type RecordedGraphLockMemo = Map<
+  string,
+  Promise<GraphWriteFenceAcquisition>
+>;
 
 export function createRecordedGraphLockMemo(): RecordedGraphLockMemo {
   return new Map();
@@ -198,11 +202,11 @@ const recordedGraphLockMemos = new WeakMap<object, RecordedGraphLockMemo>();
 export function memoizeAcquiredRecordedGraphWriteLock(
   backend: object,
   graphId: string,
-  isolation: GraphCommandIsolation,
+  acquisition: GraphWriteFenceAcquisition,
 ): void {
   const memo = recordedGraphLockMemos.get(backend);
   if (memo === undefined || memo.has(graphId)) return;
-  memo.set(graphId, Promise.resolve(isolation));
+  memo.set(graphId, Promise.resolve(acquisition));
 }
 
 export function registerRecordedGraphLockMemo(
@@ -212,22 +216,55 @@ export function registerRecordedGraphLockMemo(
   recordedGraphLockMemos.set(backend, memo);
 }
 
+/** The operation a stale-snapshot refusal of the graph write fence names. */
+const GRAPH_WRITE_FENCE_OPERATION = "per-graph write fence";
+
+/**
+ * THE one owner of what a failed graph-write fence acquisition raises, shared
+ * by the portable acquisition below and the fused schema + graph fence
+ * (`write-transaction.ts`).
+ *
+ * The acquisition advances the graph's fence row, so a session at a snapshot
+ * isolation whose snapshot predates another acquirer's commit is refused by
+ * the engine with a serialization failure — on purpose: every decision that
+ * session would go on to make reads a graph it can no longer see. That
+ * refusal is reported as a {@link TransactionConflictError} carrying the
+ * driver error as `cause`, so the owner of the transaction recognizes it
+ * whichever driver raised it: `runRetriedUnit` re-runs a unit the library
+ * owns, and a caller that owns the transaction re-runs it from the top. Any
+ * other failure propagates unchanged.
+ */
+export async function acquiringGraphWriteFence<T>(
+  target: object,
+  acquire: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await acquire();
+  } catch (error) {
+    if (!isSerializationFailure(error, target)) throw error;
+    throw new TransactionConflictError(
+      { operation: GRAPH_WRITE_FENCE_OPERATION, attempts: 1 },
+      { cause: error },
+    );
+  }
+}
+
 async function acquireRecordedGraphWriteLock(
   target: Pick<GraphBackend, "execute">,
   fenceSql: FenceStatements,
   graphId: string,
-): Promise<GraphCommandIsolation> {
-  const rows = await target.execute<
-    Readonly<{ transaction_isolation: unknown }>
-  >(
-    asCompiledRowsSql(
-      fenceSql.acquireKeyedWithIsolation(
-        RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
-        graphId,
+): Promise<GraphWriteFenceAcquisition> {
+  const rows = await acquiringGraphWriteFence(target, () =>
+    target.execute<Readonly<Record<string, unknown>>>(
+      asCompiledRowsSql(
+        fenceSql.acquireKeyedSnapshotFence(
+          RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+          graphId,
+        ),
       ),
     ),
   );
-  return normalizeGraphCommandIsolation(rows[0]?.transaction_isolation);
+  return readGraphWriteFenceAcquisition(rows[0]);
 }
 
 export async function lockRecordedGraphWrite(
@@ -259,12 +296,12 @@ export async function lockRecordedGraphWrite(
   }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
-    const isolation = await acquireRecordedGraphWriteLock(
+    const acquisition = await acquireRecordedGraphWriteLock(
       target,
       fence.sql,
       graphId,
     );
-    return acquiredGraphWriteLock(target, graphId, isolation);
+    return acquiredGraphWriteLock(target, graphId, acquisition);
   }
   let pending = effectiveMemo.get(graphId);
   if (pending === undefined) {
@@ -276,8 +313,8 @@ export async function lockRecordedGraphWrite(
     );
     effectiveMemo.set(graphId, pending);
   }
-  const isolation = await pending;
-  return acquiredGraphWriteLock(target, graphId, isolation);
+  const acquisition = await pending;
+  return acquiredGraphWriteLock(target, graphId, acquisition);
 }
 
 function failInvalidClock(value: unknown, cause?: unknown): never {

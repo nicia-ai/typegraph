@@ -7,7 +7,8 @@
  *
  * - **A stale plan.** A session whose snapshot predates its wait on the
  *   per-graph write fence does not see a part the fence holder just attached.
- *   Such a session is refused before the closure is read.
+ *   The fence acquisition advances the graph's fence row, so such a session
+ *   fails there with a serialization failure, before the closure is read.
  * - **A stale pre-image.** An ordinary property update takes no per-graph
  *   lock, so it can commit between a delete's read of the row and its
  *   tombstone, for a cascade member and a directly deleted node alike. The
@@ -28,11 +29,13 @@ import {
   defineNode,
   type NodeId,
   partOf,
+  TransactionConflictError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { requireDefined } from "../../../src/utils/presence";
+import { isSerializationFailure } from "../../../src/utils/sql-errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -137,11 +140,21 @@ function createGate(): Gate {
   return { opened, open: requireDefined(gate.open) };
 }
 
-/** Resolves once some session is parked waiting for an advisory lock. */
+/**
+ * Resolves once some session of THIS database is parked waiting for an
+ * advisory lock. `pg_locks` is cluster-wide, so the database filter keeps a
+ * suite running against another database from answering for this one.
+ */
 async function untilSessionWaitsOnFence(observer: Pool): Promise<void> {
   for (;;) {
     const { rows } = await observer.query<{ waiting: string }>(
-      "SELECT count(*) AS waiting FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+      `SELECT count(*) AS waiting
+       FROM pg_locks
+       WHERE locktype = 'advisory'
+         AND NOT granted
+         AND database = (
+           SELECT oid FROM pg_database WHERE datname = current_database()
+         )`,
     );
     if (Number(rows[0]?.waiting) > 0) return;
     await new Promise((resolve) => setTimeout(resolve, FENCE_WAIT_POLL_MS));
@@ -183,10 +196,10 @@ function createPausedDeleter(db: NodePgDatabase): Readonly<{
 describe.runIf(process.env["POSTGRES_URL"])(
   "composition cascade against a concurrent writer (PostgreSQL)",
   () => {
-    it(
-      "refuses a repeatable-read whole delete that waited on the fence while a part was attached",
+    it.each(["repeatable_read", "serializable"] as const)(
+      "fails a %s whole delete that waited on the fence while a part was attached",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async () => {
+      async (isolationLevel) => {
         const live = requirePostgres();
         const deleter = createStore(graph, createPostgresBackend(live.first));
         const attacher = createStore(graph, createPostgresBackend(live.second));
@@ -208,7 +221,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
         const deletion = deleter.transaction(
           (tx) => tx.nodes.Show.delete(show.id),
-          { isolationLevel: "repeatable_read" },
+          { isolationLevel },
         );
         // Observed before any await below can let it reject unhandled.
         const deletionOutcome = deletion.then(
@@ -219,15 +232,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
         release.open();
         await attach;
 
-        // MUTATION CHECK: removing `assertFencedSnapshotIsFresh` from
-        // `planCompositionCascade` lets the delete commit, leaving the show
-        // tombstoned under a live required clip — verified and reverted.
-        expect(await deletionOutcome).toMatchObject({
-          details: {
-            code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
-            isolation: "repeatable_read",
-          },
-        });
+        // MUTATION CHECK: acquiring the fence without advancing its fence
+        // row (`acquireKeyedWithIsolation` in `acquireRecordedGraphWriteLock`)
+        // turns this into a `COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`
+        // refusal, and additionally answering `true` for a snapshot isolation
+        // in `observesPostFenceCommits` lets the delete commit, leaving the
+        // show tombstoned under a live required clip — verified and reverted.
+        const outcome = await deletionOutcome;
+        expect(outcome).toBeInstanceOf(TransactionConflictError);
+        expect(isSerializationFailure(outcome)).toBe(true);
         expect(await deleter.nodes.Show.getById(show.id)).toBeDefined();
         expect(
           await deleter.nodes.Clip.getById(requireDefined(clipId)),

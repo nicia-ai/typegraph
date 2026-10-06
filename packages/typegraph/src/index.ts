@@ -222,6 +222,7 @@ export type {
   GraphEntityReadBackend,
   GraphEntityWriteBackend,
   GraphLifecycleBackend,
+  GraphWriteFenceAcquisition,
   HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   IndexMaterializationBackend,

@@ -206,6 +206,7 @@ export type {
   GraphCommandExecutionContext,
   GraphCommandIsolation,
   GraphCommandSession,
+  GraphWriteFenceAcquisition,
 } from "./command-contract";
 export {
   assertGraphCommandConvergenceIsolation,
