@@ -2370,8 +2370,12 @@ export class QueryBuilder<
     const kindAccessor = stringField(
       fieldRef(alias, ["kind"], { valueType: "string" }),
     );
-    const fulltextAccessor = createFulltextAccessor(alias, () =>
-      this.#hasSearchableField(kindNames),
+    const fulltextAccessor = createFulltextAccessor(
+      alias,
+      kindNames === undefined ? undefined : (
+        () =>
+          this.#config.schemaIntrospector.kindsWithoutSearchableField(kindNames)
+      ),
     );
 
     if (this.#state.dynamicNodeAliases.has(alias)) {
@@ -2423,11 +2427,6 @@ export class QueryBuilder<
         return this.#getFieldBuilderForProperty(kindNames, property, alias);
       },
     });
-  }
-
-  #hasSearchableField(kindNames: readonly string[] | undefined): boolean {
-    if (!kindNames) return false;
-    return this.#config.schemaIntrospector.hasSearchableField(kindNames);
   }
 
   /**

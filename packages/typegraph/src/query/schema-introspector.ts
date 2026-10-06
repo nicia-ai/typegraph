@@ -113,12 +113,15 @@ export type SchemaIntrospector = Readonly<{
     fieldName: string,
   ) => boolean;
   /**
-   * True iff the alias `kindNames` resolves to has searchable content: the
-   * kind subsuming all the others declares a `searchable()` field, or, when no
-   * kind does, every kind declares one — otherwise `.matches()` over unrelated
-   * kinds would silently miss some of them.
+   * The kinds that leave the alias `kindNames` resolves to without searchable
+   * content, empty when `$fulltext` is available: the kind subsuming all the
+   * others when it declares no `searchable()` field, or, when no kind subsumes
+   * the rest, each kind declaring none — `.matches()` over unrelated kinds
+   * would otherwise silently miss some of them.
    */
-  hasSearchableField: (kindNames: readonly string[]) => boolean;
+  kindsWithoutSearchableField: (
+    kindNames: readonly string[],
+  ) => readonly string[];
 }>;
 
 function sharedCacheKey(
@@ -150,7 +153,7 @@ export function createSchemaIntrospector(
     string,
     FieldTypeInfo | undefined
   >();
-  const searchableCache = new Map<string, boolean>();
+  const searchableGapCache = new Map<string, readonly string[]>();
   const declaredFieldCache = new Map<string, boolean>();
   const declaredEdgeFieldCache = new Map<string, boolean>();
 
@@ -335,23 +338,23 @@ export function createSchemaIntrospector(
     return declared;
   }
 
-  function hasSearchableField(kindNames: readonly string[]): boolean {
+  function kindsWithoutSearchableField(
+    kindNames: readonly string[],
+  ): readonly string[] {
     const cacheKey = [...kindNames].toSorted().join("|");
-    const cached = searchableCache.get(cacheKey);
+    const cached = searchableGapCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
     const subsuming = subsumingKinds(kindNames);
     const decidingKinds = subsuming.length > 0 ? subsuming : kindNames;
-    const result =
-      decidingKinds.length > 0 &&
-      decidingKinds.every((kindName) => {
-        const shape = getShapeForKind(kindName);
-        if (!shape) return false;
-        return Object.values(shape).some(
-          (info) => info.searchable !== undefined,
-        );
-      });
-    searchableCache.set(cacheKey, result);
+    const result = decidingKinds.filter((kindName) => {
+      const shape = getShapeForKind(kindName);
+      return (
+        shape === undefined ||
+        !Object.values(shape).some((info) => info.searchable !== undefined)
+      );
+    });
+    searchableGapCache.set(cacheKey, result);
     return result;
   }
 
@@ -362,7 +365,7 @@ export function createSchemaIntrospector(
     getSharedEdgeFieldTypeInfo,
     hasDeclaredField,
     hasDeclaredEdgeField,
-    hasSearchableField,
+    kindsWithoutSearchableField,
   };
 }
 

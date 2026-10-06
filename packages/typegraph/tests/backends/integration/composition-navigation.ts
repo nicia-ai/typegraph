@@ -658,6 +658,34 @@ export function registerCompositionNavigationIntegrationTests(
         .select((ctx) => ctx.w.id)
         .execute();
       expect(wholes.toSorted()).toEqual(ancestorIds.toSorted());
+
+      // A reflexive pair reaches its own kind again, so `via` narrows nothing
+      // here and the closure stays whole.
+      const partsVia = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(root.id))
+        .parts("x", { via: cnParentSection })
+        .select((ctx) => ctx.x.id)
+        .execute();
+      expect(partsVia.toSorted()).toEqual(descendantIds.toSorted());
+
+      const wholesVia = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(leaf.id))
+        .wholes("w", { via: "cnParentSection" })
+        .select((ctx) => ctx.w.id)
+        .execute();
+      expect(wholesVia.toSorted()).toEqual(ancestorIds.toSorted());
+
+      const owned = await store.subgraph(root.id, {
+        edges: [],
+        composition: true,
+      });
+      expect([...owned.nodes.keys()].toSorted()).toEqual(
+        chain.map((section) => section.id).toSorted(),
+      );
     });
 
     it("parts() with via walks only that realizing edge of a multi-level, two-edge whole", async () => {
