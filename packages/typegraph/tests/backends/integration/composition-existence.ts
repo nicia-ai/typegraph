@@ -23,6 +23,7 @@ import {
   defineNode,
   EdgeAcyclicityError,
   EndpointNotFoundError,
+  ENTITY_ALREADY_EXISTS_CODE,
   hasPart,
   partOf,
   RestrictedDeleteError,
@@ -237,6 +238,37 @@ export function registerCompositionExistenceIntegrationTests(
     // (it would happen to still pass, since inverting twice looks like
     // nothing changed for a `from`-side pair — the `has_*` case is the one
     // this mutation actually exposes).
+
+    it("case 2c: a part create whose id is taken reports the id collision, on every create entry", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const attachment = {
+        partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+      } as const;
+      const segment = await store.nodes.EeSegment.create({}, attachment);
+
+      // MUTATION CHECK: letting a composition create take the
+      // insert-if-absent path again (`finishNodeCreatePreparation`'s
+      // `allowInsertIfAbsent` true) makes the single create reject with
+      // CompositionError COMPOSITION_WHOLE_OCCUPIED, found on the incumbent's
+      // own edge — verified and reverted.
+      const attempts = [
+        () =>
+          store.nodes.EeSegment.create({}, { id: segment.id, ...attachment }),
+        () =>
+          store.nodes.EeSegment.bulkCreate([
+            { props: {}, id: segment.id, ...attachment },
+          ]),
+      ];
+      for (const attempt of attempts) {
+        const error = await attempt().catch((error_: unknown) => error_);
+        expect(error).toBeInstanceOf(ValidationError);
+        expect(
+          (error as ValidationError).details.issues.map((issue) => issue.code),
+        ).toContain(ENTITY_ALREADY_EXISTS_CODE);
+      }
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
+    });
 
     it("case 3: a failed edge (whole does not exist) aborts the node — no orphan row survives", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));

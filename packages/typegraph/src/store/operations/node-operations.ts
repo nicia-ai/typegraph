@@ -3995,11 +3995,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       ) ?
         "authoritative-plan"
       : "probe";
+    // A create that owes a composition edge learns whether its id is taken
+    // from the read, not from the insert: the edge is prepared before the
+    // node row is written, and against a live incumbent of the same id that
+    // preparation would find the incumbent's own attachment and report a
+    // composition refusal for what is an id collision.
     const prepared = await finishNodeCreatePreparation(
       ctx,
       draft,
       target,
-      true,
+      compositionWork === undefined,
       preparationMode,
       claimPlan,
     );
