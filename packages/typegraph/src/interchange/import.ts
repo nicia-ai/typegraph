@@ -95,6 +95,7 @@ import {
   EdgeAcyclicityError,
   EdgeMatchIdentityConflictError,
   IdentityContradictionError,
+  IdentityEndpointValidityError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
   NodeNotFoundError,
@@ -106,7 +107,10 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
-import { identityTransitionLogUnavailableError } from "../identity/transition-log";
+import {
+  type IdentityRestoreBaseline,
+  identityTransitionLogUnavailableError,
+} from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
@@ -142,6 +146,7 @@ import {
   COMPOSITION_ATTACHMENT_PAGE_SIZE,
   declaresRequiredCompositionParts,
   edgeWriteEndsOpenWindow,
+  readCompositionAttachmentsForPage,
   readCompositionPartStandings,
 } from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
@@ -340,16 +345,33 @@ type PendingRequiredPart = Readonly<{ kind: string; id: string }>;
  */
 type PendingRequiredParts = Map<string, PendingRequiredPart>;
 
+/** The result counters a committed row was counted under. */
+interface CommittedWriteCounts {
+  created: number;
+  updated: number;
+}
+
 /**
  * What an import must remember to undo a required part it has to refuse: the
- * parts themselves, and the ids of the edges this import created, so the
- * edges a purge removes with the part come off `result.edges.created` and no
- * edge that predates the import is ever counted as one it wrote. Empty for a
- * graph that declares no required part, which never purges.
+ * parts themselves, and how each row this import wrote was counted, so a
+ * purge takes exactly those counts back — a part created and then updated by
+ * a later duplicate row, an edge the purge removes with it — and no edge that
+ * predates the import is ever counted as one it wrote. Empty for a graph that
+ * declares no required part, which never purges.
  */
 type RequiredPartLedger = Readonly<{
+  /**
+   * Parts no row of the payload and no row of the target can attach, by
+   * `makeNodeKey`, decided before the first write
+   * ({@link readUnattachableRequiredParts}). A row that would create one is
+   * refused unwritten.
+   */
+  unattachableParts: ReadonlySet<string>;
   pendingParts: PendingRequiredParts;
-  createdEdgeIds: Set<string>;
+  /** Update rows this import applied to a pending part, by `makeNodeKey`. */
+  partUpdates: Map<string, number>;
+  /** How each edge this import wrote was counted, by edge id. */
+  edgeWrites: Map<string, CommittedWriteCounts>;
 }>;
 
 type ImportWriteFrame = Readonly<{
@@ -376,6 +398,14 @@ type ImportWriteFrame = Readonly<{
   graph: GraphDef;
   schema: SqlSchema;
   dialect: DialectAdapter;
+  /**
+   * The identity half of a node update that states `validTo`, bound to this
+   * frame's target — the store's own window-end owner, reached through the
+   * runtime port.
+   */
+  applyNodeWindowEnd: (
+    input: Readonly<{ kind: string; id: string; validTo?: string }>,
+  ) => Promise<void>;
 }>;
 
 /**
@@ -425,10 +455,13 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   /**
-   * The floor a streamed archival restore read before its first chunk; absent
-   * when this write plan is the whole restore, which reads its own.
+   * The destination as it stood before the import began, when the caller
+   * already read it: a streamed import reads it once, ahead of its first
+   * chunk, and hands it to the chunk that restores transitions. Absent for a
+   * single-document import, whose one attempt reads it itself before its
+   * first write.
    */
-  identityRestoreFloor?: number;
+  identityRestoreBaseline?: IdentityRestoreBaseline | undefined;
 }>;
 
 /**
@@ -455,14 +488,21 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
   // Every required-existence part THIS import creates, keyed by
-  // `makeNodeKey`, and every edge it creates. Frame-scoped, like
+  // `makeNodeKey`, and every edge it writes. Frame-scoped, like
   // `pendingMatchIdentityOwners`: nodes are written before any edge is even
   // seen (`processNodes` then `processEdges`), so whether a part ended up
-  // attached can only be decided once the whole edge set is written.
-  const pendingRequiredParts: PendingRequiredParts = new Map();
+  // attached can only be decided once the whole edge set is written — except
+  // for a part nothing can attach, which is settled here, before any row.
   const requiredPartLedger: RequiredPartLedger = {
-    pendingParts: pendingRequiredParts,
-    createdEdgeIds: new Set(),
+    unattachableParts: await readUnattachableRequiredParts(
+      target,
+      inputs.graphId,
+      inputs.registry,
+      inputs.data,
+    ),
+    pendingParts: new Map(),
+    partUpdates: new Map(),
+    edgeWrites: new Map(),
   };
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
@@ -479,7 +519,17 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     graph: inputs.graph,
     schema: inputs.schema,
     dialect: inputs.dialect,
+    applyNodeWindowEnd: (input) =>
+      inputs.runtime.applyImportedNodeWindowEnd(target, input),
   };
+  // Before the first row: whether this destination has identity history of
+  // its own is a fact about it BEFORE this import, and the node and assertion
+  // writes below record transitions of their own.
+  const identityRestoreBaseline =
+    inputs.identityRestoreBaseline ??
+    (archivalTransitionRestoreStated(inputs.data.identity) ?
+      await inputs.runtime.readIdentityRestoreBaselineAtTarget(target)
+    : undefined);
   await processNodes(
     frame,
     inputs.graphId,
@@ -490,7 +540,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
-    pendingRequiredParts,
+    requiredPartLedger,
   );
   await inputs.runtime.foldImportedIdentityNodes(
     target,
@@ -532,9 +582,9 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
       target,
       inputs.graphId,
       inputs.data.identity,
+      identityRestoreBaseline,
       result,
       errors,
-      inputs.identityRestoreFloor,
     );
   }
   return { result, errors, importedNodeIds };
@@ -544,7 +594,7 @@ async function importGraphData<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
   options: ResolvedImportOptions,
-  identityRestoreFloor?: number,
+  identityRestoreBaseline?: IdentityRestoreBaseline,
 ): Promise<ImportResult> {
   // Reject an identity payload aimed at an identity-disabled graph, and
   // runtime-validate the (bounded) identity section, BEFORE any entity write —
@@ -629,7 +679,7 @@ async function importGraphData<G extends GraphDef>(
     batchPointRead,
     uniqueSidecarBatch,
     statementExecution,
-    ...(identityRestoreFloor === undefined ? {} : { identityRestoreFloor }),
+    identityRestoreBaseline,
   };
 
   // One transaction on a transactional backend; runs directly otherwise, with
@@ -776,7 +826,12 @@ export async function importGraphStream<G extends GraphDef>(
   let receivedEdges = false;
   let receivedIdentity = false;
   let receivedIdentityTransitions = false;
-  let identityRestoreFloor: number | undefined;
+  // The destination before this stream's first chunk, when the header
+  // announces an archival transition restore. Read there, once: every chunk
+  // commits on its own, so by the time the transitions chunk runs the
+  // destination already holds the transitions this stream's own node and
+  // assertion chunks recorded.
+  let identityRestoreBaseline: IdentityRestoreBaseline | undefined;
   let releaseImportLease: (() => void) | undefined;
 
   try {
@@ -839,13 +894,17 @@ export async function importGraphStream<G extends GraphDef>(
             chunk.header.identity?.hasTransitions === true,
             chunk.header.identity?.retention,
           );
-          header = chunk.header;
-          if (announcesIdentityTransitionRestore(header)) {
-            identityRestoreFloor =
-              await storeRuntime(store).identityTransitionRestoreFloorAtTarget(
+          if (
+            chunk.header.identity?.mode === "archival" &&
+            (chunk.header.identity.hasTransitions === true ||
+              chunk.header.identity.retention !== undefined)
+          ) {
+            identityRestoreBaseline =
+              await storeRuntime(store).readIdentityRestoreBaselineAtTarget(
                 targetBackend,
               );
           }
+          header = chunk.header;
           break;
         }
         case "nodes": {
@@ -949,12 +1008,12 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity transitions without an identity header.",
             );
           }
-          // The restore floor was read at the header, before any chunk wrote.
-          // Transitions the header never announced have no floor to be
-          // restored against, and applying them without one would drop the
+          // The destination baseline was read at the header, before any chunk
+          // wrote. Transitions the header never announced have no baseline to
+          // be restored against, and applying them without one would drop the
           // retention watermark an announced stream sets.
           if (
-            identityRestoreFloor === undefined &&
+            identityRestoreBaseline === undefined &&
             chunk.transitions.length > 0
           ) {
             throw new Error(
@@ -968,7 +1027,7 @@ export async function importGraphStream<G extends GraphDef>(
               store,
               graphDataForChunk(header, [], [], [], chunk.transitions),
               { ...options, refreshStatistics: false },
-              identityRestoreFloor,
+              identityRestoreBaseline,
             ),
           );
           throwIfStreamChunkFailed(result, options);
@@ -1210,13 +1269,6 @@ function restoresIdentityTransitions(
   return hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0;
 }
 
-function announcesIdentityTransitionRestore(header: GraphDataHeader): boolean {
-  return restoresIdentityTransitions(
-    header.identity?.hasTransitions === true,
-    header.identity?.retention,
-  );
-}
-
 function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
   store: Store<G>,
   hasTransitions: boolean,
@@ -1418,9 +1470,9 @@ async function importIdentitySection<G extends GraphDef>(
   target: IdentityTarget,
   graphId: string,
   identity: NonNullable<GraphData["identity"]>,
+  restoreBaseline: IdentityRestoreBaseline | undefined,
   result: ImportResult,
   errors: ImportError[],
-  identityRestoreFloor: number | undefined,
 ): Promise<void> {
   try {
     const summary = await runtime.importIdentityAssertionsAtTarget(
@@ -1442,7 +1494,7 @@ async function importIdentitySection<G extends GraphDef>(
     runtime,
     target,
     identity,
-    identityRestoreFloor,
+    restoreBaseline,
   );
 }
 
@@ -1461,7 +1513,7 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
   target: IdentityTarget,
   identity: NonNullable<GraphData["identity"]>,
-  identityRestoreFloor: number | undefined,
+  restoreBaseline: IdentityRestoreBaseline | undefined,
 ): Promise<void> {
   const transitions = identity.transitions ?? [];
   if (identity.mode === "state") {
@@ -1479,12 +1531,32 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
       },
     );
   }
-  if (transitions.length === 0 && identity.retention === undefined) return;
+  if (!archivalTransitionRestoreStated(identity)) return;
   await runtime.importIdentityTransitionsAtTarget(
     target,
     transitions,
     identity.retention?.prunedBeforeRevision,
-    identityRestoreFloor,
+    requireDefined(
+      restoreBaseline,
+      "an archival transition restore reached its write with no destination baseline",
+    ),
+  );
+}
+
+/**
+ * Whether an identity section states an archival transition restore — rows
+ * to insert, or a retention watermark to carry — and so whether the import
+ * owes the destination's {@link IdentityRestoreBaseline}. THE one predicate
+ * both the baseline read (before the import's first write) and the restore
+ * itself (after its last) decide on, so neither runs without the other.
+ */
+function archivalTransitionRestoreStated(
+  identity: GraphData["identity"],
+): boolean {
+  return (
+    identity?.mode === "archival" &&
+    ((identity.transitions?.length ?? 0) > 0 ||
+      identity.retention !== undefined)
   );
 }
 
@@ -1700,6 +1772,91 @@ export function buildEdgeSchemaMap(
 // Node Processing
 // ============================================================
 
+/**
+ * The required-existence parts in `data` that nothing can attach: no
+ * composition edge in the payload names the part, and the target holds no
+ * current attachment for it. Whatever the rest of the import writes, such a
+ * part ends with no whole, so it is decided before the first row instead of
+ * after the last edge — a row that is never written is never a row another
+ * row of the same import collides with.
+ *
+ * Deliberately narrower than "will be refused". A part some payload edge
+ * names, or the target already attaches, is judged on the written rows
+ * ({@link assertImportedRequiredPartsAttached}): whether that edge attaches
+ * it depends on rows this import has yet to write.
+ */
+async function readUnattachableRequiredParts(
+  target: WriteTarget,
+  graphId: string,
+  registry: KindRegistry,
+  data: GraphData,
+): Promise<ReadonlySet<string>> {
+  if (!declaresRequiredCompositionParts(registry)) return new Set();
+  const namedByPayloadEdge = new Set<string>();
+  for (const edge of data.edges) {
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) continue;
+    const part = partSide === "from" ? edge.from : edge.to;
+    namedByPayloadEdge.add(makeNodeKey(part.kind, part.id));
+  }
+  const candidates = new Map<string, PendingRequiredPart>();
+  for (const node of data.nodes) {
+    if (registry.compositionExistence(node.kind) !== "required") continue;
+    const key = makeNodeKey(node.kind, node.id);
+    if (namedByPayloadEdge.has(key)) continue;
+    candidates.set(key, { kind: node.kind, id: node.id });
+  }
+  const unattachable = new Set<string>();
+  const parts = [...candidates.values()];
+  for (
+    let index = 0;
+    index < parts.length;
+    index += COMPOSITION_ATTACHMENT_PAGE_SIZE
+  ) {
+    const page = parts.slice(index, index + COMPOSITION_ATTACHMENT_PAGE_SIZE);
+    const attachments = await readCompositionAttachmentsForPage(
+      registry,
+      target,
+      graphId,
+      page,
+    );
+    for (const part of page) {
+      if (attachments.has(encodeTupleKey([part.kind, part.id]))) continue;
+      unattachable.add(makeNodeKey(part.kind, part.id));
+    }
+  }
+  return unattachable;
+}
+
+/**
+ * The refusal for a row that would CREATE a part
+ * {@link readUnattachableRequiredParts} settled as unattachable — asked by
+ * both create legs at the point each has found no existing row, and before
+ * either probes a constraint on the part's behalf. A row for a part already
+ * on the target is not a create and is not refused here.
+ */
+function unattachableRequiredPartRefusal(
+  ledger: RequiredPartLedger,
+  node: InterchangeNode,
+): ProcessResult | undefined {
+  if (!ledger.unattachableParts.has(makeNodeKey(node.kind, node.id))) {
+    return undefined;
+  }
+  return {
+    status: "error",
+    error: unattachedRequiredPartMessage({ kind: node.kind, id: node.id }),
+  };
+}
+
+/** The one message a required part refused for want of a whole is reported with. */
+function unattachedRequiredPartMessage(part: PendingRequiredPart): string {
+  return new CompositionExistenceError({
+    partKind: part.kind,
+    partId: part.id,
+    situation: "create",
+  }).message;
+}
+
 async function processNodes(
   frame: ImportWriteFrame,
   graphId: string,
@@ -1710,7 +1867,7 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: PendingRequiredParts,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
@@ -1726,7 +1883,7 @@ async function processNodes(
       result,
       errors,
       importedNodeIds,
-      pendingRequiredParts,
+      requiredPartLedger,
     );
   }
 }
@@ -1799,21 +1956,30 @@ async function processNodeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: PendingRequiredParts,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
     // A freshly created required-existence part owes a live whole before
     // this import commits — tracked here, judged by
     // `assertImportedRequiredPartsAttached` once every edge is written.
-    if (
-      outcome.status === "created" &&
-      registry.compositionExistence(node.kind) === "required"
-    ) {
-      pendingRequiredParts.set(makeNodeKey(node.kind, node.id), {
+    if (registry.compositionExistence(node.kind) !== "required") return;
+    const key = makeNodeKey(node.kind, node.id);
+    if (outcome.status === "created") {
+      requiredPartLedger.pendingParts.set(key, {
         kind: node.kind,
         id: node.id,
       });
+    } else if (
+      outcome.status === "updated" &&
+      requiredPartLedger.pendingParts.has(key)
+    ) {
+      // A later row for a part this import created: counted as an update,
+      // and taken back with the part if the part is refused.
+      requiredPartLedger.partUpdates.set(
+        key,
+        (requiredPartLedger.partUpdates.get(key) ?? 0) + 1,
+      );
     }
   };
 
@@ -1954,6 +2120,7 @@ async function processNodeSlice(
             validatedProps: props,
             uniqueConstraints,
             windowFence: updateWindow.value,
+            windowEndFrame: frame,
           });
           if (updateError === undefined) {
             // The update mutated the real backend's uniqueness rows directly;
@@ -1977,6 +2144,15 @@ async function processNodeSlice(
           break;
         }
       }
+      continue;
+    }
+
+    const unattachable = unattachableRequiredPartRefusal(
+      requiredPartLedger,
+      node,
+    );
+    if (unattachable !== undefined) {
+      record(node, unattachable);
       continue;
     }
 
@@ -2041,7 +2217,15 @@ async function processNodeSlice(
   for (const node of deferred) {
     record(
       node,
-      await processNode(frame, graphId, registry, node, schemas, options),
+      await processNode(
+        frame,
+        graphId,
+        registry,
+        node,
+        schemas,
+        options,
+        requiredPartLedger,
+      ),
     );
   }
 }
@@ -2273,6 +2457,69 @@ async function catchEdgeCreateRefusalWithSavepoint<T>(
 const NODE_UPDATE_TARGET_CHANGED_CODE =
   "INTERCHANGE_NODE_UPDATE_TARGET_CHANGED";
 
+/** The slice of an import write frame a node update that states `validTo` reads. */
+type NodeWindowEndFrame = Pick<
+  ImportWriteFrame,
+  | "target"
+  | "allocateEdgeSavepoint"
+  | "transactionMode"
+  | "statementExecution"
+  | "applyNodeWindowEnd"
+>;
+
+/**
+ * Runs one node update's row write under the identity half of the window end
+ * its document states, so the two stand or fall together.
+ *
+ * The identity half runs first, as every store update runs it: a `validTo` may
+ * not end a node's window under an identity assertion that would outlive it,
+ * and an end that does land is a membership boundary the transition log
+ * records. A store update that refuses aborts its transaction, taking that
+ * note with it. An import row that refuses is a per-row error and the
+ * transaction goes on, so a row that states an end and then fails (a
+ * uniqueness refusal the row's own claim raises, a target that changed) would
+ * otherwise leave a `window-end` transition for an end that never landed. The
+ * pair therefore runs behind a savepoint, which restores the recorded state it
+ * noted along with the SQL.
+ *
+ * A row that states no end has no identity half and takes no savepoint. Where
+ * the target takes none either (no transaction, or no raw statement member)
+ * the pair runs unguarded; no transaction means no recorded capture to leave a
+ * note in.
+ */
+async function updateNodeUnderWindowEnd(
+  frame: NodeWindowEndFrame,
+  node: InterchangeNode,
+  write: () => Promise<string | undefined>,
+): Promise<string | undefined> {
+  const applyWindowEnd = (): Promise<void> =>
+    frame.applyNodeWindowEnd({
+      kind: node.kind,
+      id: node.id,
+      ...(node.validTo !== undefined && { validTo: node.validTo }),
+    });
+  if (
+    node.validTo === undefined ||
+    frame.transactionMode === "none" ||
+    !frame.statementExecution.supported
+  ) {
+    await applyWindowEnd();
+    return write();
+  }
+  return runRecordedTransactionSavepoint<string | undefined>(
+    frame.target,
+    frame.statementExecution,
+    frame.allocateEdgeSavepoint(),
+    async () => {
+      await applyWindowEnd();
+      const rowError = await write();
+      return rowError === undefined ?
+          { action: "release", value: undefined }
+        : { action: "rollback", value: rowError, cause: new Error(rowError) };
+    },
+  );
+}
+
 /**
  * Updates an existing node under the effective validity lower bound this import
  * checked it carries, and reports a write that landed on nothing as a per-row
@@ -2309,6 +2556,7 @@ async function updateImportedNode(
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     windowFence: ValidityLowerBoundFence;
+    windowEndFrame: NodeWindowEndFrame;
   }>,
 ): Promise<string | undefined> {
   try {
@@ -2319,24 +2567,31 @@ async function updateImportedNode(
     // path's claim set carries uniqueness entries only. Widening the guard
     // therefore changes nothing here today; it is listed because a changed
     // contract re-audits its consumers.
-    const result = await catchDeclaredConstraintRefusal(() =>
-      // The fence is an ARGUMENT the method requires, not a spread the call
-      // site may forget: the guard's verdict travels to the statement that
-      // honors it, and an empty fence (`{}`) is the stated decision to assert
-      // nothing rather than an omission.
-      session.reviseNode(
-        {
-          existing: args.existing,
-          schema: args.schema,
-          validatedProps: args.validatedProps,
-          uniqueConstraints: args.uniqueConstraints,
-          ...(node.validTo !== undefined && { validTo: node.validTo }),
-        },
-        { validityLowerBound: args.windowFence },
-      ),
+    return await updateNodeUnderWindowEnd(
+      args.windowEndFrame,
+      node,
+      async () => {
+        const result = await catchDeclaredConstraintRefusal(() =>
+          // The fence is an ARGUMENT the method requires, not a spread the call
+          // site may forget: the guard's verdict travels to the statement that
+          // honors it, and an empty fence (`{}`) is the stated decision to
+          // assert nothing rather than an omission.
+          session.reviseNode(
+            {
+              existing: args.existing,
+              schema: args.schema,
+              validatedProps: args.validatedProps,
+              uniqueConstraints: args.uniqueConstraints,
+              ...(node.validTo !== undefined && { validTo: node.validTo }),
+            },
+            { validityLowerBound: args.windowFence },
+          ),
+        );
+        return result.ok ? undefined : result.error;
+      },
     );
-    return result.ok ? undefined : result.error;
   } catch (error) {
+    if (error instanceof IdentityEndpointValidityError) return error.message;
     if (
       !(error instanceof DatabaseOperationError) ||
       error.details.reason !== "no_row_returned"
@@ -2725,6 +2980,7 @@ async function processNode(
   node: InterchangeNode,
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ResolvedImportOptions,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<ProcessResult> {
   // Validate kind exists
   const schemaEntry = schemas.get(node.kind);
@@ -2795,6 +3051,7 @@ async function processNode(
           validatedProps: propsResult.data,
           uniqueConstraints,
           windowFence: updateWindow.value,
+          windowEndFrame: frame,
         });
         if (updateError !== undefined) {
           return { status: "error", error: updateError };
@@ -2803,6 +3060,12 @@ async function processNode(
       }
     }
   }
+
+  const unattachable = unattachableRequiredPartRefusal(
+    requiredPartLedger,
+    node,
+  );
+  if (unattachable !== undefined) return unattachable;
 
   // Create new node. Pre-check both declared node constraints (as the
   // collection create does) so a conflict is a per-row error rather than an
@@ -2909,19 +3172,23 @@ async function processEdges(
  * step (the row was created THIS import, so `session.purgeNode`'s uniqueness
  * release and embedding cleanup are exactly what an ordinary `hardDelete`
  * would run). Its delete-behavior enforcement is explicitly turned OFF
- * (`enforceDeleteBehavior: false`): the part row was born this import, so
- * there is no pre-existing reference for `restrict` to protect —
- * `hardDeleteNode` (`src/backend/drizzle/operation-backend-core.ts`)
- * unconditionally deletes every edge connected to the node before deleting
- * the node row itself, so nothing is left dangling. Passing the default
- * policy here would let a part's ordinary edge throw `RestrictedDeleteError`
- * PAST this function, aborting the whole import instead of refusing this one
- * row.
+ * (`enforceDeleteBehavior: false`): `hardDeleteNode`
+ * (`src/backend/drizzle/operation-backend-core.ts`) unconditionally deletes
+ * every edge connected to the node before deleting the node row itself, so
+ * nothing is left dangling, and passing the default policy here would let a
+ * part's ordinary edge throw `RestrictedDeleteError` PAST this function,
+ * aborting the whole import instead of refusing this one row.
  *
- * The counts track what is committed: the purged node comes off
- * `result.nodes.created`, and each edge this import created that the purge
- * removed with it comes off `result.edges.created` and is reported as its own
- * per-row error.
+ * The part row is new, but an edge touching it need not be: an earlier load
+ * with `validateReferences: false` can have written an edge ahead of the
+ * endpoint it names. Such an edge is removed with the part like any other.
+ *
+ * The result describes what is committed. The purged node comes off
+ * `result.nodes.created`, and off `result.nodes.updated` once for each later
+ * row of this import that updated it. EVERY edge the purge removed is
+ * reported as its own per-row error, whether or not this import wrote it,
+ * and comes off `result.edges.created` / `result.edges.updated` exactly as
+ * often as this import counted it there.
  *
  * This runs AFTER `foldImportedIdentityNodes` already folded the batch's new
  * node references into identity — a purged part's identity membership is
@@ -3007,16 +3274,13 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
 ): Promise<boolean> {
   const registration = frame.graph.nodes[part.kind];
   if (registration === undefined) return false;
-  // Read BEFORE the purge, which removes them with the node: the edges this
-  // import created that are about to go.
-  const connectedEdges = await frame.target.findEdgesConnectedTo({
+  // Read BEFORE the purge, which removes them with the node: every edge
+  // touching the part, whichever import wrote it.
+  const removedEdges = await frame.target.findEdgesConnectedTo({
     graphId,
     nodeKind: part.kind,
     nodeId: part.id,
   });
-  const removedEdges = connectedEdges.filter((edge) =>
-    ledger.createdEdgeIds.has(edge.id),
-  );
   try {
     await frame.session.purgeNode(
       {
@@ -3043,27 +3307,35 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     });
     return false;
   }
+  const partKey = makeNodeKey(part.kind, part.id);
   result.nodes.created--;
-  importedNodeIds.delete(makeNodeKey(part.kind, part.id));
-  ledger.pendingParts.delete(makeNodeKey(part.kind, part.id));
+  result.nodes.updated -= ledger.partUpdates.get(partKey) ?? 0;
+  importedNodeIds.delete(partKey);
+  ledger.pendingParts.delete(partKey);
+  ledger.partUpdates.delete(partKey);
   errors.push({
     entityType: "node",
     kind: part.kind,
     id: part.id,
-    error: new CompositionExistenceError({
-      partKind: part.kind,
-      partId: part.id,
-      situation: "create",
-    }).message,
+    error: unattachedRequiredPartMessage(part),
   });
   for (const edge of removedEdges) {
-    result.edges.created--;
-    ledger.createdEdgeIds.delete(edge.id);
+    const written = ledger.edgeWrites.get(edge.id);
+    result.edges.created -= written?.created ?? 0;
+    result.edges.updated -= written?.updated ?? 0;
+    ledger.edgeWrites.delete(edge.id);
+    // An edge this import never created was on the target before it ran —
+    // written ahead of its endpoint under `validateReferences: false`. It
+    // goes with the part all the same, so it is named all the same.
+    const origin =
+      (written?.created ?? 0) > 0 ?
+        ""
+      : " The edge was on the target before this import; re-import it together with the part and the part's composition edge.";
     errors.push({
       entityType: "edge",
       kind: edge.kind,
       id: edge.id,
-      error: `Edge "${edge.id}" was removed with its endpoint ${part.kind} "${part.id}", a required-existence part this import could not attach to a live whole.`,
+      error: `Edge "${edge.id}" was removed with its endpoint ${part.kind} "${part.id}", a required-existence part this import could not attach to a live whole.${origin}`,
     });
   }
   return true;
@@ -3330,13 +3602,22 @@ async function processEdgeSlice(
   pendingMatchIdentityOwners: Set<string>,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
-  // Only a graph that can purge a part ever reads the created-edge ids.
-  const tracksCreatedEdges = declaresRequiredCompositionParts(registry);
+  // Only a graph that can purge a part ever reads how its edges were counted.
+  const tracksEdgeWrites = declaresRequiredCompositionParts(registry);
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
-    if (tracksCreatedEdges && outcome.status === "created") {
-      requiredPartLedger.createdEdgeIds.add(edge.id);
+    if (
+      !tracksEdgeWrites ||
+      (outcome.status !== "created" && outcome.status !== "updated")
+    ) {
+      return;
     }
+    const counts = requiredPartLedger.edgeWrites.get(edge.id) ?? {
+      created: 0,
+      updated: 0,
+    };
+    counts[outcome.status] += 1;
+    requiredPartLedger.edgeWrites.set(edge.id, counts);
   };
 
   // The store's own in-batch cardinality accounting, constructed once per
@@ -3354,9 +3635,15 @@ async function processEdgeSlice(
   // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
   // property, and validity validation, plus in-slice duplicate deferral.
   const candidates: EdgeImportCandidate[] = [];
-  const deferred: InterchangeEdge[] = [];
-  const seenIds = new Set<string>();
-  for (const edge of batch) {
+  // Rows written one at a time after the flush, each with its slice position.
+  // They are deferred from two places — a repeated id here, an acyclic kind
+  // in the routing loop below — and written in DOCUMENT order, not deferral
+  // order: the second row naming an id must observe the first one's row.
+  const deferred: Readonly<{ edge: InterchangeEdge; sliceIndex: number }>[] =
+    [];
+  // The slice position of each id's FIRST occurrence — the one candidate.
+  const firstSliceIndexById = new Map<string, number>();
+  for (const [sliceIndex, edge] of batch.entries()) {
     const schemaEntry = edgeSchemas.get(edge.kind);
     if (!schemaEntry) {
       record(edge, {
@@ -3404,11 +3691,11 @@ async function processEdgeSlice(
       record(edge, { status: "error", error: validityError });
       continue;
     }
-    if (seenIds.has(edge.id)) {
-      deferred.push(edge);
+    if (firstSliceIndexById.has(edge.id)) {
+      deferred.push({ edge, sliceIndex });
       continue;
     }
-    seenIds.add(edge.id);
+    firstSliceIndexById.set(edge.id, sliceIndex);
     candidates.push({ edge, props: propsResult.data });
   }
 
@@ -3706,7 +3993,10 @@ async function processEdgeSlice(
     // where the row lands inside the transaction before the next row's
     // probe runs and the database itself carries the in-batch state.
     if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
-      deferred.push(edge);
+      deferred.push({
+        edge,
+        sliceIndex: requireDefined(firstSliceIndexById.get(edge.id)),
+      });
       continue;
     }
 
@@ -3863,7 +4153,9 @@ async function processEdgeSlice(
     }
   }
 
-  for (const edge of deferred) {
+  for (const { edge } of deferred.toSorted(
+    (left, right) => left.sliceIndex - right.sliceIndex,
+  )) {
     record(
       edge,
       await processEdge(

@@ -2984,8 +2984,11 @@ async function insertPreparedCompositionEdge<G extends GraphDef>(
 function resolveBatchCompositionWorks<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
+  backend: GraphBackend | TransactionBackend,
 ): readonly (CompositionCreateWork | undefined)[] {
-  return inputs.map((input) => resolveCompositionCreate(ctx.registry, input));
+  return inputs.map((input) =>
+    resolveCompositionCreate(ctx.registry, input, backend),
+  );
 }
 
 /**
@@ -4014,7 +4017,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   // for the two refusal arms (required-existence with no `partOf`; a
   // `partOf` naming an undeclared pair), which is what makes cases where no
   // node row survives provable rather than merely likely.
-  const compositionWork = resolveCompositionCreate(ctx.registry, input);
+  const compositionWork = resolveCompositionCreate(
+    ctx.registry,
+    input,
+    backend,
+  );
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
   const autocommitBackend =
@@ -4439,7 +4446,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   if (inputs.length === 0) return;
 
   // See `resolveBatchCompositionWorks`'s docblock.
-  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs);
+  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs, backend);
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
@@ -4586,7 +4593,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) return [];
 
   // See `executeNodeCreateNoReturnBatch`'s identical preamble.
-  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs);
+  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs, backend);
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
@@ -4735,6 +4742,14 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 // Node Update Operations
 // ============================================================
 
+/** The one identity hook {@link applyIdentityWindowEnd} reads off a context. */
+export type IdentityWindowEndContext = Readonly<{
+  identity?: Pick<
+    NonNullable<NodeOperationContext<GraphDef>["identity"]>,
+    "requireValidityEndCompatible"
+  >;
+}>;
+
 /** Whether a node write states a new valid-time window end — set or cleared. */
 function nodeWriteMovesWindowEnd(
   input: Readonly<{ validTo?: string; clearValidTo?: true }>,
@@ -4745,11 +4760,13 @@ function nodeWriteMovesWindowEnd(
 /**
  * The identity half of a node write that moves its own window end, inside the
  * write frame and before the row write: every update path that can carry
- * `validTo` or `clearValidTo` runs this one owner, so a narrowed, widened or
+ * `validTo` or `clearValidTo` runs this one owner — the store's own updates
+ * and interchange import's `onConflict: "update"` (through
+ * `StoreRuntime.applyImportedNodeWindowEnd`) — so a narrowed, widened or
  * cleared end is refused or noted the same way whichever path writes it.
  */
-async function applyIdentityWindowEnd<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
+export async function applyIdentityWindowEnd(
+  ctx: IdentityWindowEndContext,
   target: IdentityTarget,
   input: Readonly<{
     kind: string;

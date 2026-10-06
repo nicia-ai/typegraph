@@ -9,10 +9,12 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
+  pruneIdentityTransitions,
   type TransactionBackend,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
-import { IdentityContradictionError } from "../src/errors";
+import { RECORDED_MAX_REVISION } from "../src/core/temporal";
+import { IdentityContradictionError, ValidationError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import {
@@ -20,6 +22,7 @@ import {
   exportGraphStream,
   importGraph,
   importGraphStream,
+  type ImportResult,
 } from "../src/interchange";
 import {
   type GraphData,
@@ -33,7 +36,7 @@ import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
-import { storeRuntime } from "../src/store/runtime-port";
+import { storeBackend, storeRuntime } from "../src/store/runtime-port";
 import { generateId } from "../src/utils/id";
 import { requireDefined } from "../src/utils/presence";
 import {
@@ -398,6 +401,81 @@ describe("archival identity import window bounds", () => {
     });
     expect(restored.identity).toEqual(archive.identity);
   });
+
+  // An archived transition's `recordedRevision` is read back through
+  // `createRecordedInstant`, so a restore must refuse every value that
+  // function refuses. Accepting one would commit a row no read can return:
+  // `transitionsOf` and `replay` throw for every lineage that reaches it.
+  it.each([
+    { label: "zero", recordedRevision: 0 },
+    { label: "the open ceiling", recordedRevision: RECORDED_MAX_REVISION },
+  ])(
+    "refuses an archived transition whose recordedRevision is $label",
+    async ({ recordedRevision }) => {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const alice = await source.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const bob = await source.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await source.identity.assertSame(alice, bob);
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const identity = requireDefined(archive.identity);
+      const poisoned = {
+        ...archive,
+        identity: {
+          ...identity,
+          transitions: requireDefined(identity.transitions).map(
+            (transition) => ({ ...transition, recordedRevision }),
+          ),
+        },
+      };
+
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const refusal = await importGraph(target, poisoned, {
+        onConflict: "skip",
+      }).catch((error: unknown) => error);
+      console.info("unreadable recordedRevision", recordedRevision, refusal);
+      expect(refusal).toBeInstanceOf(ValidationError);
+      // Refused before any write: nothing was restored to trip a later read.
+      expect(await target.nodes.Person.count()).toBe(0);
+
+      // The boundary values the reader accepts are still restored.
+      const accepted = await importGraph(
+        target,
+        {
+          ...archive,
+          identity: {
+            ...identity,
+            transitions: requireDefined(identity.transitions).map(
+              (transition, index) => ({
+                ...transition,
+                recordedRevision: index === 0 ? 1 : RECORDED_MAX_REVISION - 1,
+              }),
+            ),
+          },
+        },
+        { onConflict: "skip" },
+      );
+      expect(accepted.errors).toEqual([]);
+      const { transitions } = await target.identity.transitionsOf(alice);
+      expect(transitions.length).toBeGreaterThan(0);
+    },
+  );
 
   // Load-bearing (L10): the archival round trip carries the transitions
   // section verbatim and the restore watermark reports the
@@ -1220,6 +1298,82 @@ describe("archival identity import window bounds", () => {
       importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
     ).rejects.toThrow(/did not announce/);
   });
+
+  // A restore into a destination that has recorded no identity history of its
+  // own sets the retention watermark at the destination's floor, so replay
+  // reports the restored history as explanations without snapshots. Whether
+  // the destination is such a graph is one fact about it before the import
+  // began, so `importGraph` and `importGraphStream` must reach the same
+  // answer for the same archive.
+  it.each([
+    { label: "an unpruned archive", pruneSource: false },
+    { label: "a pruned archive", pruneSource: true },
+  ])(
+    "importGraph and importGraphStream leave the same retention watermark for $label",
+    async ({ pruneSource }) => {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const alice = await source.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const bob = await source.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      const first = await source.identity.assertSame(alice, bob);
+      if (pruneSource) {
+        await pruneIdentityTransitions(source, {
+          beforeRecorded: requireDefined(await source.recordedNow()),
+        });
+      }
+      await source.identity.retractAssertion(first.assertion.id);
+      await source.identity.assertSame(alice, bob);
+
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      expect(archive.identity?.retention !== undefined).toBe(pruneSource);
+      const chunks: GraphInterchangeChunk[] = [];
+      for await (const chunk of exportGraphStream(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      })) {
+        chunks.push(chunk);
+      }
+
+      async function restoredWatermark(
+        restore: (target: typeof source) => Promise<ImportResult>,
+      ): Promise<number> {
+        const [target] = await createAdapterStoreWithSchema(
+          graph,
+          createTestBackend(),
+          { history: true },
+        );
+        const result = await restore(target);
+        expect(result.errors).toEqual([]);
+        const retention = await storeRuntime(
+          target,
+        ).identityTransitionRetentionAtTarget(storeBackend(target));
+        return retention.prunedBeforeRevision;
+      }
+
+      const viaDocument = await restoredWatermark((target) =>
+        importGraph(target, archive, { onConflict: "skip" }),
+      );
+      const viaStream = await restoredWatermark((target) =>
+        importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
+      );
+
+      console.info("restore watermark", { viaDocument, viaStream });
+      expect(viaDocument).toBeGreaterThan(0);
+      expect(viaStream).toBe(viaDocument);
+    },
+  );
 });
 
 // ============================================================

@@ -44,6 +44,7 @@ export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
 export { registerGraphMergeCallbackIntegrationTests } from "./graph-merge-callbacks";
+export { registerGraphMergeCompositionIntegrationTests } from "./graph-merge-composition";
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerGraphMergeReviewV2IntegrationTests } from "./graph-merge-review-v2";
@@ -55,6 +56,8 @@ export { registerHistoricalIdentityTraversalTests } from "./identity-historical-
 export { registerIdentityImportIntegrationTests } from "./identity-import";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
+export { registerImportDuplicateEdgeOrderIntegrationTests } from "./import-duplicate-edge-order";
+export { registerImportRequiredPartPurgeIntegrationTests } from "./import-required-part-purge";
 export { registerImportTargetCardinalityIntegrationTests } from "./import-target-cardinality";
 export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";

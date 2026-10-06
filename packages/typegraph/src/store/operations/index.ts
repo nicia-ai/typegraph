@@ -37,6 +37,7 @@ export {
   executeEdgeUpsertUpdateBatch,
 } from "./edge-operations";
 export {
+  applyIdentityWindowEnd,
   executeNodeBulkFindByConstraint,
   executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
@@ -58,6 +59,7 @@ export {
   executeNodeUpdate,
   executeNodeUpsertUpdate,
   executeNodeUpsertUpdateBatch,
+  type IdentityWindowEndContext,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
   prepareNodeReplacement,

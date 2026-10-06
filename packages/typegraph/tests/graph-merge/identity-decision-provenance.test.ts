@@ -32,7 +32,9 @@ import {
   applyMergePlan,
   applyMergePlanInTransaction,
   merge,
+  mergeIncremental,
   planMerge,
+  planMergeIncremental,
 } from "../../src/graph-merge/merge";
 import { unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
@@ -76,6 +78,14 @@ async function branchAssertingSame() {
     { kind: "Person", id: "b1" },
   );
   return { base, source };
+}
+
+/** A live target holding what the (empty) fork point holds, with a transition log. */
+async function emptyHistoryTarget() {
+  const [target] = await createStoreWithSchema(graph, openBackend(), {
+    history: true,
+  });
+  return target;
 }
 
 async function mergeTransitions(store: Store<typeof graph>) {
@@ -135,6 +145,48 @@ describe("an ordinary merge records decision provenance on its transitions", () 
           branchId: BRANCH,
           branchAncestry: BRANCH_ANCESTRY,
           mergePlanDigest: callerOwnedPlan.digest.value,
+        },
+      },
+    ]);
+  });
+
+  it("mergeIncremental() records the caller's branch alone, exactly as the planned incremental merge does", async () => {
+    const direct = await branchAssertingSame();
+    const directTarget = await emptyHistoryTarget();
+    unwrap(
+      await mergeIncremental({
+        forkPoint: direct.base,
+        target: directTarget,
+        branches: [direct.source],
+      }),
+    );
+
+    const planned = await branchAssertingSame();
+    const plannedTarget = await emptyHistoryTarget();
+    const plan = unwrap(
+      await planMergeIncremental({
+        forkPoint: planned.base,
+        target: plannedTarget,
+        branches: [planned.source],
+      }),
+    );
+    unwrap(await applyMergePlan(plannedTarget, plan));
+
+    // The reserved stand-in for the committed target is not a merged branch:
+    // recording it would also hide the sole branch's name.
+    expect(await mergeTransitions(directTarget)).toEqual([
+      {
+        cause: "reconcile",
+        decision: { branchId: BRANCH, branchAncestry: BRANCH_ANCESTRY },
+      },
+    ]);
+    expect(await mergeTransitions(plannedTarget)).toEqual([
+      {
+        cause: "reconcile",
+        decision: {
+          branchId: BRANCH,
+          branchAncestry: BRANCH_ANCESTRY,
+          mergePlanDigest: plan.digest.value,
         },
       },
     ]);

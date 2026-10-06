@@ -955,7 +955,10 @@ A `vector`/`hybrid` strategy with no embedder configured fails with a typed
 On a graph with `identity` enabled, a current `different` assertion between
 two nodes' identity classes vetoes a match **at plan time**, whichever source
 proposed it. There is no option to state: a `different` assertion is an
-integrity fact, so the veto runs for every identity-enabled merge.
+integrity fact, so the veto runs for every identity-enabled merge. It honors
+an assertion the target already holds and one a branch being merged adds
+alike: a branch can record `assertDifferent(a, b)` to keep entity resolution
+from fusing two entities it stages.
 
 | Proposed match | Outcome |
 | --- | --- |
@@ -1067,16 +1070,21 @@ part with no whole, both surfaced through the same
 - **`cause: "deleted"`** — a branch deletes a composition whole (see
   [Composition](/ontology#composition)) while a part attached to it on the
   target *after* the branch point, or independently of it, survives — the
-  branch's diff carries no deletion for that part, so applying the plan as
-  trusted would leave it pointing at a whole that no longer exists.
+  plan neither deletes that part nor moves it to another whole, so applying
+  the plan as trusted would leave it pointing at a whole that no longer
+  exists.
 - **`cause: "unattached"`** — a required-existence part (`existence:
   "required"`, see [Composition existence](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
   this merge writes, or whose composition edge this merge explicitly deletes
   or ends, resolves to no live whole at all after canonicalization. There is
   no whole to name for this cause, so `whole` is absent.
 
-`planMerge` and `planMergeIncremental` scan for both against the target's
-current state and report every finding in `MergePlanReview.compositionOrphans`:
+`planMerge` and `planMergeIncremental` judge both against the state the plan
+would leave — the target's current rows with the plan's own writes laid over
+them — and report every finding in `MergePlanReview.compositionOrphans`. A
+part the plan deletes, a part it moves to another whole (a merged `reparent`)
+and a required part it creates together with its composition edge are not
+orphans and are not reported:
 
 ```typescript
 type MergePlanCompositionOrphan = {
@@ -1097,6 +1105,13 @@ a guarantee against a concurrent attach racing the eventual apply. The
 silently dropped by canonicalization's endpoint-deleted repointing issues no
 write for any per-write guard to see — see
 [Limitations](/limitations#composition-existence-existence-required).
+
+A branch's composition writes merge as the unit they were written as. Apply
+replays a plan one row at a time, so it postpones the per-write
+required-existence rule for exactly the parts the plan touches and asserts it
+for those same parts once the plan's last edge has landed, inside the same
+transaction: a required part created with `partOf`, and a `reparent` under
+either cardinality, merge like any other edit.
 
 ## Edges follow their entities
 
@@ -2809,7 +2824,9 @@ TypeGraph does not publish it. `abort()` atomically removes the copied graph
 and operation marker while preserving unrelated namespaces, and refuses if the
 target has changed. A retry with the same operation key returns the same proof
 after checking the target digest and base token; a different key cannot reuse
-the populated target.
+the populated target. The proof survives a library upgrade: a graph relation a
+later release adds enters the digest only once it holds rows for the graph, so
+a fork taken before the upgrade stays retryable and abortable after it.
 
 This first-party copy supports the bundled PostgreSQL table layout, bundled
 `pgvector` embedding storage, and default `tsvector` fulltext storage.

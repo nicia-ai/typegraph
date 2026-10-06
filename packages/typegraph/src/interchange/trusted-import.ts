@@ -43,6 +43,23 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       kind,
     );
   }
+  // Composition first, ahead of the cardinality refusal below. Every
+  // composition edge kind must declare a part-side cardinality, so the
+  // cardinality check would otherwise always answer for it — with a reason a
+  // caller cannot branch on as composition, and advice (declare the kind
+  // unconstrained) the ontology refuses.
+  const compositionKinds = store.registry.compositionEdgeKinds();
+  if (compositionKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not enforce composition (`partOf`/`hasPart`): it writes no composition claim row and does not check the acyclicity relation, so a graph loaded this way can carry a part with two live wholes, or a part/whole cycle. store.verifyConstraintFences() reports either afterward.",
+      "composition_unsupported",
+      { graphId: store.graphId, edgeKinds: [...compositionKinds] },
+      {
+        suggestion:
+          'Use importGraphStream(), or importGraph() when a pair declares `existence: "required"`; both maintain the composition claim and its acyclicity check.',
+      },
+    );
+  }
   // Trusted import maintains no edge claim: `trustedImportGraphStream` writes
   // through `session.insertEdges` beneath the claim path entirely, so a
   // declared axis — source OR target — would be accepted here and written
@@ -104,28 +121,14 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
     );
   }
 
-  // Composition edge kinds are excluded from the plain acyclicity check
-  // below and reported through their own reason: `acyclicEdgeKinds` folds
-  // the composition relation into its answer, and a graph whose
-  // ONLY reachability relation is composition needs a message naming the
-  // claim gap too, not just the reachability one.
-  const compositionKinds = new Set(store.registry.compositionEdgeKinds());
-  const standaloneAcyclicKinds = acyclicEdgeKinds(
-    store.graph,
-    store.registry,
-  ).filter((edgeKind) => !compositionKinds.has(edgeKind));
-  if (standaloneAcyclicKinds.length > 0) {
+  // No composition kind reaches here (refused above), so every acyclic edge
+  // kind left is one declared `acyclic: true`.
+  const acyclicKinds = acyclicEdgeKinds(store.graph, store.registry);
+  if (acyclicKinds.length > 0) {
     throw new TrustedImportError(
       "Trusted import does not enforce edge acyclicity: it holds one transaction for the whole stream, validates nothing by contract, and has no per-row point to probe the relation at.",
       "acyclicity_unsupported",
-      { graphId: store.graphId, edgeKinds: standaloneAcyclicKinds },
-    );
-  }
-  if (compositionKinds.size > 0) {
-    throw new TrustedImportError(
-      "Trusted import does not enforce composition (`partOf`/`hasPart`): it writes no composition claim row and does not check the acyclicity relation, so a graph loaded this way can carry a part with two live wholes, or a part/whole cycle. store.verifyConstraintFences() reports either afterward.",
-      "composition_unsupported",
-      { graphId: store.graphId, edgeKinds: [...compositionKinds] },
+      { graphId: store.graphId, edgeKinds: acyclicKinds },
     );
   }
 

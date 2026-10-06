@@ -95,6 +95,18 @@ export type IdentityTransitionDraft = Omit<
 >;
 
 /**
+ * What an archival transition restore needs to know about its destination,
+ * as the destination stood before the import wrote anything. Read once per
+ * import by `readIdentityRestoreBaseline` (`service-interchange-write.ts`).
+ */
+export type IdentityRestoreBaseline = Readonly<{
+  /** Whether the graph had recorded identity transitions of its own. */
+  hasOwnHistory: boolean;
+  /** The first recorded revision the import itself could write at. */
+  floorRevision: number;
+}>;
+
+/**
  * One archived transition row as the interchange boundary hands it to
  * `importIdentityTransitionsIntoTarget` (`service-interchange-write.ts`) —
  * structurally identical to `InterchangeIdentityTransition`

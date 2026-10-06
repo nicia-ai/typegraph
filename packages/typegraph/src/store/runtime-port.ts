@@ -30,6 +30,7 @@ import { ConfigurationError } from "../errors";
 import { type IdentityServiceContext } from "../identity/service-types";
 import {
   type IdentityDecisionProvenance,
+  type IdentityRestoreBaseline,
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,
 } from "../identity/transition-log";
@@ -413,6 +414,28 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
+   * The identity half of an import update that states a node's `validTo`:
+   * refuses an end an identity assertion would outlive and notes the
+   * `window-end` transition, through the owner every store update runs
+   * (`applyIdentityWindowEnd`). A no-op for a graph without identity or a
+   * write that states no end.
+   *
+   * @throws {IdentityEndpointValidityError} when the end would strand an
+   * assertion's window.
+   */
+  applyImportedNodeWindowEnd: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+    input: Readonly<{ kind: string; id: string; validTo?: string }>,
+  ) => Promise<void>;
+  /**
    * Detaches a node import purges AFTER `foldImportedIdentityNodes`
    * already folded it into identity for this attempt's batch — see
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
@@ -474,20 +497,28 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     target: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>>;
   /**
-   * @internal The floor of an archival restore about to begin: the revision
-   * its first commit takes. A streamed restore reads it once, before its
-   * first chunk, and hands it to every `importIdentityTransitionsAtTarget`.
+   * @internal What an archival transition restore must know about this graph
+   * before the import's first write: whether it has identity history of its
+   * own, and its recorded-revision floor. Read once per import and handed to
+   * `importIdentityTransitionsAtTarget`.
    */
-  identityTransitionRestoreFloorAtTarget: (
-    target: GraphBackend | TransactionBackend,
-  ) => Promise<number>;
+  readIdentityRestoreBaselineAtTarget: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+  ) => Promise<IdentityRestoreBaseline>;
   /**
    * @internal Restores archival identity transitions inside an import
    * transaction. `carriedWatermark` is the source graph's own retention
    * watermark from the archival payload, used only when `transitions` is
-   * empty. `restoreFloor` is the floor a multi-transaction restore read
-   * before it began; `undefined` when this transaction is the whole restore
-   * (see `importIdentityTransitionsIntoTarget`).
+   * empty (see `importIdentityTransitionsIntoTarget`). `baseline` is the
+   * destination as it stood before the import began.
    */
   importIdentityTransitionsAtTarget: (
     target: Readonly<
@@ -501,7 +532,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
     transitions: readonly IdentityTransitionTransfer[],
     carriedWatermark: number | undefined,
-    restoreFloor: number | undefined,
+    baseline: IdentityRestoreBaseline,
   ) => Promise<Readonly<{ created: number; watermark: number | undefined }>>;
   /**
    * `decision` is the governing merge decision, when the apply runs under one:

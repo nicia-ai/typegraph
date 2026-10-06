@@ -45,6 +45,7 @@ import {
   encodeIdentityTransitionRow,
   hasNativeIdentityTransitionsBefore,
   type IdentityDecisionProvenance,
+  type IdentityRestoreBaseline,
   type IdentityTransitionTransfer,
   insertIdentityTransitionValues,
   writeIdentityTransitionRetentionWatermark,
@@ -518,6 +519,35 @@ function transitionShapeError(
 }
 
 /**
+ * Reads {@link IdentityRestoreBaseline} off `target`. THE one decision of
+ * whether a destination is fresh, taken once per import — at the start of
+ * `importGraph`'s transaction, and before the first chunk of
+ * `importGraphStream` — so both restore the same archive to the same
+ * watermark.
+ */
+export async function readIdentityRestoreBaseline(
+  ctx: IdentityTransitionImportContext,
+  target: IdentityTarget,
+): Promise<IdentityRestoreBaseline> {
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    const floorRevision = await readNextRecordedRevision(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    return {
+      floorRevision,
+      hasOwnHistory: await hasNativeIdentityTransitionsBefore(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        floorRevision,
+      ),
+    };
+  });
+}
+
+/**
  * Restores archival transition-log rows verbatim — no closure repair, no
  * re-derived membership, no renumbering onto the destination graph's live
  * revision sequence, because a restore records history, it does not relive
@@ -537,24 +567,26 @@ function transitionShapeError(
  * from "native" by number alone.
  *
  * The retention watermark is a SEPARATE, coarser signal — "this graph cannot
- * vouch for a complete history below revision N on its own axis". N is the
- * RESTORE FLOOR: the revision the restore's first commit takes. A document
- * restore is one transaction, so that is the revision this call itself
- * commits at; a streamed restore commits chunk by chunk, so the stream reads
- * it once before its first chunk and hands it in as `restoreFloor` — the
- * same number for every transitions chunk, which is what makes the two entry
- * points agree. Everything the restore itself records (the folds and unions
- * its nodes and assertions note) sits at or above the floor and stays
- * replayable.
- *
- * The watermark is only written when
- * {@link hasNativeIdentityTransitionsBefore} the floor answers `false`, i.e.
- * this graph recorded no identity transitions of its own before the restore
- * began. Writing it unconditionally would, for a graph that already has its
- * own retained history, stamp a floor over transitions the restore never
- * touched — misreporting `truncatedBefore`, and
- * `IDENTITY_REPLAY_HISTORY_TRUNCATED`, for classes the restore had nothing
- * to do with. The write goes through the same monotonic
+ * vouch for a complete history below revision N on its own axis" — and is
+ * only ever advanced here when the destination's {@link IdentityRestoreBaseline}
+ * says it had recorded no identity transitions of its own when the import
+ * began. That baseline is a fact about the destination BEFORE the import, so
+ * it is read once, ahead of the import's first write, and handed in
+ * ({@link readIdentityRestoreBaseline}): probing here instead would answer
+ * about a graph the import itself has already written to, and a streamed
+ * import — whose node and assertion chunks commit their own transitions
+ * before this one runs — would never find its destination fresh. Advancing it
+ * unconditionally (the original design here) would, for a graph that already
+ * has its own retained history, stamp a
+ * destination-clock-derived floor over transitions the restore never
+ * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
+ * for classes the restore had nothing to do with. A graph with no native
+ * rows yet has nothing of its own for that floor to misclassify, so setting
+ * it there stays sound: reading THIS graph's clock at restore time and
+ * adding one gives an honest floor on this graph's own timeline (there is no
+ * earlier revision on it yet), and every later one the destination goes on
+ * to record for real is, by the clock's own monotonicity, always at or
+ * above it. The watermark write goes through the same monotonic
  * `writeIdentityTransitionRetentionWatermark` `pruneIdentityTransitionsForContext`
  * uses, so a later restore can only raise the floor, never lower it.
  */
@@ -563,7 +595,7 @@ export async function importIdentityTransitionsIntoTarget(
   target: IdentityTarget,
   transitions: readonly IdentityTransitionTransfer[],
   carriedWatermark: number | undefined,
-  restoreFloor: number | undefined,
+  baseline: IdentityRestoreBaseline,
 ): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
   // Raw identity statements run through the capture-approved handle
   // `withRecordedIdentityMutationTarget` resolves — under `history: true` the
@@ -573,16 +605,8 @@ export async function importIdentityTransitionsIntoTarget(
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const destinationFloor =
-      restoreFloor ??
-      (await readNextRecordedRevision(rawTarget, ctx.schema, ctx.graphId));
+    const { floorRevision: destinationFloor, hasOwnHistory } = baseline;
     const restoredAt = nowIso();
-    const hasOwnHistory = await hasNativeIdentityTransitionsBefore(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-      destinationFloor,
-    );
     if (transitions.length === 0) {
       if (
         carriedWatermark === undefined ||

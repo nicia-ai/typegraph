@@ -40,6 +40,11 @@ export const GRAPH_ID_COLUMN = "graph_id";
  * The order is the order a namespace fork copies and digests relations in. It
  * is part of the fork's durable content digest, so it must not be reshuffled
  * for tidiness; `clear.order` carries the (different) deletion order.
+ *
+ * APPEND new relations at the end. A fork's digest names a relation added
+ * after its frozen baseline only once that relation holds rows
+ * (`DIGEST_BASELINE_RELATION_KEYS`, `src/graph-merge/namespace-fork.ts`), so
+ * an appended relation leaves every recorded fork proof verifiable.
  */
 export const GRAPH_RELATION_KEYS = [
   "nodes",

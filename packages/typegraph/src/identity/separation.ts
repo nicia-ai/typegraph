@@ -306,7 +306,7 @@ export async function bulkIsSeparated(
   if (
     !graphHasRows &&
     anyUnresolved &&
-    !(await separationFactsEmpty(target, schema, graphId, registry))
+    !(await emptySeparationRelationIsCorrect(target, schema, graphId, registry))
   ) {
     throw separationUnfilledError(graphId, schema);
   }
@@ -392,20 +392,19 @@ function separationReadinessProven(
 }
 
 /**
- * Whether this graph separates NOTHING — the memo read, the ledger probe, and
- * the memo write as one decision, so no caller assembles its own.
+ * Whether this graph separates NOTHING right now — the ledger's own answer,
+ * probed on every call.
  *
- * `true` means the ledger owes the relation no row: an empty relation is then
- * CORRECT rather than unfilled, and a caller whose only question is "can
- * anything here be separated" may stop. `false` means a live `different`
- * assertion exists — which {@link bulkIsSeparated} reads, together with the
- * relation holding no row for the graph, as proof that this graph's fill never
- * ran.
+ * `true` means no live `different` assertion exists, so nothing in the graph
+ * can be held apart and a caller whose only question is "can anything here be
+ * separated" may stop. It is never answered from the readiness memo: that
+ * memo records that an empty relation was once CORRECT, which stays true
+ * after a later `assertDifferent` fills the relation, while "separates
+ * nothing" stops being true at exactly that write. The merge's plan-time
+ * separation capture reads this.
  *
- * The proof is memoized per (registry, graphId), so a graph that uses only
- * `assertSame` pays the ledger probe once per Store handle instead of once per
- * caller. Both readers — the batch probe's zero-rows branch and the merge's
- * plan-time separation capture — settle the fact through here.
+ * An empty ledger is also the proof {@link emptySeparationRelationIsCorrect}
+ * memoizes, so finding one here records it.
  */
 export async function separationFactsEmpty(
   target: IdentityTarget,
@@ -413,12 +412,32 @@ export async function separationFactsEmpty(
   graphId: string,
   registry: KindRegistry,
 ): Promise<boolean> {
-  if (separationReadinessProven(registry, graphId)) return true;
   if (await hasLiveDifferentAssertions(target, schema, graphId, registry)) {
     return false;
   }
   proveSeparationReadiness(registry, graphId);
   return true;
+}
+
+/**
+ * Whether a separation relation holding NO row for this graph is correct
+ * rather than unfilled — the memo read and the ledger probe as one decision.
+ *
+ * `false` means a live `different` assertion exists while the relation holds
+ * no row for the graph: proof that this graph's fill never ran. The proof is
+ * memoized per (registry, graphId), so a graph that uses only `assertSame`
+ * pays the ledger probe once per Store handle. Only a reader that has just
+ * seen the relation empty may ask this; it says nothing about whether the
+ * graph separates anything now.
+ */
+async function emptySeparationRelationIsCorrect(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+  registry: KindRegistry,
+): Promise<boolean> {
+  if (separationReadinessProven(registry, graphId)) return true;
+  return separationFactsEmpty(target, schema, graphId, registry);
 }
 
 function proveSeparationReadiness(

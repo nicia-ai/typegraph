@@ -154,8 +154,9 @@ neither field — a clone's own history starts at its clone revision, and
 current-truth state export is not a backup of explanation.
 
 Restoring `identity.transitions` validates shape only (a known cause, a
-well-formed reference, a non-decreasing `recordedRevision` sequence) and
-inserts every row verbatim, never re-deriving membership or touching the
+well-formed reference, a `recordedRevision` a recorded instant can carry —
+an integer from 1, below `Number.MAX_SAFE_INTEGER` — in a non-decreasing
+sequence) and inserts every row verbatim, never re-deriving membership or touching the
 target's closure. Every restored row is marked internally as such — a
 restore always inserts rows this graph did not record itself, regardless of
 what the archive's own history looks like. A replay over the restored graph
@@ -316,6 +317,13 @@ document imported into a fresh graph creates those rows with their stated bounds
 and is unaffected. To update props over existing rows from a temporal export,
 either omit `validFrom` from the update document, export with
 `includeTemporal: false`, or import into a fresh graph and swap it in.
+
+On an identity-enabled graph the update leg's `validTo` goes through the same
+check a store update's does. An end that an identity assertion naming the node
+would outlive is reported as a per-row error (the
+`IdentityEndpointValidityError` message) and the row is left as it was; an end
+that lands on a member of an identity class records the `window-end`
+transition.
 
 ### Cancelling an export
 
@@ -642,9 +650,25 @@ the whole payload's edge set is known. A part created by this import is
 accepted when its composition edge arrives later in the SAME import (any
 batch), or when it is already attached on the target from before this import;
 otherwise it is reported as a per-row error on the node (`error` matches
-`/requires a whole/`) and its row is removed in the same transaction before
-the import commits — no orphan node row survives, and the rest of the import
-is unaffected.
+`/requires a whole/`) and no orphan node row survives the import.
+
+A part nothing can attach — no composition edge anywhere in the payload names
+it, and the target holds no attachment for it — is refused before its row is
+written. No other row of the import is judged against it, so the outcome does
+not depend on where the part sits in the document: a valid row sharing its
+unique value is committed whichever comes first. Every row of the document
+that would create the part is refused, a repeated one included, and an edge
+naming it is refused for its missing endpoint.
+
+A part some composition edge in the payload does name is written, and judged
+once the edges are in; if that edge turns out not to attach it (see below) its
+row is removed in the same transaction. That ordering is visible. A later row
+that collides with the part's row — the same value under a unique constraint,
+an edge that takes a slot the part's edge holds — is refused against it and
+reported naming the part, and it stays refused after the part is removed: the
+import does not judge that row again. Every other row is unaffected.
+Re-running the import without the refused part (or with a composition edge
+that attaches it) accepts the rows it displaced.
 
 "Attached" is judged on the written rows, by the same reader
 `store.verifyConstraintFences()` uses, so a composition edge in the payload is
@@ -652,9 +676,13 @@ not enough on its own: an edge whose window does not attach the part (an
 ended `oneActive` window), or whose whole does not exist (possible with
 `validateReferences: false`), leaves the part refused. The check repeats until
 nothing changes, so a required part attached only to a part this import
-refuses is refused with it. Every edge removed with a refused part is
-reported as its own per-row error on the edge, and `result.nodes.created` /
-`result.edges.created` count only what was committed.
+refuses is refused with it. Removing a written part removes every edge
+touching it, and each one is reported as its own per-row error on the edge.
+That includes an edge that was on the target before this import — one written
+ahead of the part under `validateReferences: false` — whose error says so. The
+`created` and `updated` counts of `result.nodes` and `result.edges` count only
+what was committed: a refused part, and each edge removed with it, comes off
+every count this import had added it to.
 
 With `onConflict: "update"`, a document whose `validTo` would end the open
 window of a live required part's composition edge is refused as a per-row

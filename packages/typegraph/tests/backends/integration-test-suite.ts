@@ -73,6 +73,7 @@ import {
   registerFulltextIntegrationTests,
   registerGraphAnnotationsIntegrationTests,
   registerGraphMergeCallbackIntegrationTests,
+  registerGraphMergeCompositionIntegrationTests,
   registerGraphMergePlanIntegrationTests,
   registerGraphMergeReviewIntegrationTests,
   registerGraphMergeReviewV2IntegrationTests,
@@ -83,6 +84,8 @@ import {
   registerIdentityIntegrationTests,
   registerIdentityReplayIntegrationTests,
   registerIdentitySeparationIntegrationTests,
+  registerImportDuplicateEdgeOrderIntegrationTests,
+  registerImportRequiredPartPurgeIntegrationTests,
   registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
@@ -386,10 +389,13 @@ export function createIntegrationTestSuite<
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerGraphMergeCallbackIntegrationTests(context);
+    registerGraphMergeCompositionIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
     registerGraphMergeTargetCardinalityIntegrationTests(context);
     registerGraphMergeReviewIntegrationTests(context);
     registerGraphMergeReviewV2IntegrationTests(context);
+    registerImportDuplicateEdgeOrderIntegrationTests(context);
+    registerImportRequiredPartPurgeIntegrationTests(context);
     registerImportTargetCardinalityIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);

@@ -167,6 +167,7 @@ import {
   foldIdentityForCreatedNodes,
   type IdentityImportSummary,
   type IdentityRebuildContext,
+  type IdentityRestoreBaseline,
   type IdentityServiceContext,
   type IdentityTransferAssertion,
   type IdentityTransitionCursor,
@@ -181,6 +182,7 @@ import {
   readIdentityAssertionsByIdsAtTarget,
   readIdentityAssertionsForInterchange,
   readIdentityAssertionsTouchingAtTarget,
+  readIdentityRestoreBaseline,
   readIdentityTransitionPageForInterchange,
   readTransitionRetentionDetails,
   rebuildIdentityClosureForContext,
@@ -344,6 +346,7 @@ import {
   readNeighbors,
 } from "./neighbors";
 import {
+  applyIdentityWindowEnd,
   type EdgeOperationContext,
   edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
@@ -377,6 +380,7 @@ import {
   executeNodeSetUpdate,
   executeNodeUpdate,
   executeNodeUpsertUpdateBatch,
+  type IdentityWindowEndContext,
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
@@ -1762,6 +1766,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.lockIdentityImportTarget(target),
       foldImportedIdentityNodes: (target, references) =>
         this.foldImportedIdentityNodes(target, references),
+      applyImportedNodeWindowEnd: (target, input) =>
+        applyIdentityWindowEnd(this.#identityWindowEndContext(), target, input),
       detachDeletedImportedIdentityNode: (target, reference) =>
         this.detachDeletedImportedIdentityNode(target, reference),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
@@ -1770,19 +1776,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readIdentityTransitionPageAtTarget(target, options),
       identityTransitionRetentionAtTarget: (target) =>
         this.identityTransitionRetentionAtTarget(target),
-      identityTransitionRestoreFloorAtTarget: (target) =>
-        this.identityTransitionRestoreFloorAtTarget(target),
+      readIdentityRestoreBaselineAtTarget: (target) =>
+        this.readIdentityRestoreBaselineAtTarget(target),
       importIdentityTransitionsAtTarget: (
         target,
         transitions,
         watermark,
-        restoreFloor,
+        baseline,
       ) =>
         this.importIdentityTransitionsAtTarget(
           target,
           transitions,
           watermark,
-          restoreFloor,
+          baseline,
         ),
       applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
         this.applyIdentityMergeAtTarget(
@@ -2225,25 +2231,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * @internal The floor of an archival restore about to begin on `target`:
-   * the revision its first commit takes.
+   * Refuses an archival transition restore this graph cannot hold: an
+   * identity-disabled graph has no transition log, and a history-off graph
+   * has nowhere for `transitionsOf` / `replay` to read restored rows back
+   * from, so restoring them would write data the store's own API can never
+   * surface. `importGraph` / `importGraphStream` (`interchange/import.ts`)
+   * already refuse this UPFRONT, before any node or edge write; this is the
+   * BACKSTOP every port method of the restore passes through.
    */
-  identityTransitionRestoreFloorAtTarget(
-    target: GraphBackend | TransactionBackend,
-  ): Promise<number> {
-    return readNextRecordedRevision(target, this.#sqlSchema(), this.graphId);
-  }
-
-  /** @internal Restores archival identity transitions inside an import transaction. */
-  importIdentityTransitionsAtTarget(
-    target: IdentityTarget,
-    transitions: readonly IdentityTransitionTransfer[],
-    carriedWatermark: number | undefined,
-    restoreFloor: number | undefined,
-  ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
-    if (transitions.length === 0 && carriedWatermark === undefined) {
-      return Promise.resolve({ created: 0, watermark: undefined });
-    }
+  #requireIdentityTransitionRestore(): void {
     if (this.#graph.identity === undefined) {
       throw new ConfigurationError(
         "Cannot import identity transitions into an identity-disabled graph.",
@@ -2253,28 +2249,42 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
-    // A history-off graph has nowhere for `transitionsOf` / `replay` to ever
-    // read these rows back from (both refuse with the same error below
-    // `history: true`), so restoring them here would write data the store's
-    // own API can never surface again — and, worse, silently. `importGraph`
-    // / `importGraphStream` (`interchange/import.ts`) already refuse this
-    // UPFRONT, before any node or edge write, whenever the document or
-    // stream header names a transitions section or a non-zero retention
-    // watermark — this is the BACKSTOP every archival-transitions restore
-    // still passes through, catching any caller that reaches this method
-    // directly.
     if (!this.#captureEnabled) {
       throw identityTransitionLogUnavailableError(
         this.graphId,
         this.#recordedTimeOwnership,
       );
     }
+  }
+
+  /** @internal Reads the destination facts an archival transition restore decides on. */
+  readIdentityRestoreBaselineAtTarget(
+    target: IdentityTarget,
+  ): Promise<IdentityRestoreBaseline> {
+    this.#requireIdentityTransitionRestore();
+    return readIdentityRestoreBaseline(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+    );
+  }
+
+  /** @internal Restores archival identity transitions inside an import transaction. */
+  importIdentityTransitionsAtTarget(
+    target: IdentityTarget,
+    transitions: readonly IdentityTransitionTransfer[],
+    carriedWatermark: number | undefined,
+    baseline: IdentityRestoreBaseline,
+  ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
+    if (transitions.length === 0 && carriedWatermark === undefined) {
+      return Promise.resolve({ created: 0, watermark: undefined });
+    }
+    this.#requireIdentityTransitionRestore();
     return importIdentityTransitionsIntoTarget(
       { graphId: this.graphId, schema: this.#sqlSchema() },
       target,
       transitions,
       carriedWatermark,
-      restoreFloor,
+      baseline,
     );
   }
 
@@ -7461,6 +7471,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ) => this.#withBulkOperationHooks(ctx, fn);
   }
 
+  /** The one binding of the node window-end identity hook to this graph. */
+  readonly #requireValidityEndCompatible = (
+    target: IdentityTarget,
+    ref: Readonly<{ kind: string; id: string }>,
+    validTo: string | undefined,
+  ): Promise<void> =>
+    requireNodeValidityEndCompatible(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+      ref,
+      validTo,
+    );
+
+  /**
+   * The slice of a node operation context `applyIdentityWindowEnd` reads, for
+   * the import update leg, which holds no operation context of its own.
+   */
+  #identityWindowEndContext(): IdentityWindowEndContext {
+    return this.#graph.identity === undefined ?
+        {}
+      : {
+          identity: {
+            requireValidityEndCompatible: this.#requireValidityEndCompatible,
+          },
+        };
+  }
+
   /**
    * `receiptRecorders` is the CHAIN of receipts a write through the
    * collections built from this context belongs to: the enclosing
@@ -7526,20 +7563,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 ref,
                 mode,
               ),
-            requireValidityEndCompatible: (
-              target: IdentityTarget,
-              ref: Readonly<{ kind: string; id: string }>,
-              validTo: string | undefined,
-            ) =>
-              requireNodeValidityEndCompatible(
-                {
-                  graphId: this.graphId,
-                  schema: this.#sqlSchema(),
-                },
-                target,
-                ref,
-                validTo,
-              ),
+            requireValidityEndCompatible: this.#requireValidityEndCompatible,
           },
         }),
       createOperationContext: (operation, entity, kind, id) =>

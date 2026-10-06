@@ -40,6 +40,7 @@
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import { backendDerivationChain } from "../../backend/derive-backend";
 import {
   type EdgeRow,
   type GraphBackend,
@@ -48,6 +49,7 @@ import {
   type LiveNodeRow,
   type NodeRow,
   rowPropsToObject,
+  type TransactionBackend,
 } from "../../backend/types";
 import {
   CompositionExistenceError,
@@ -378,6 +380,69 @@ function resolveCompositionAttachment(
 }
 
 /**
+ * Parts whose required existence a still-running write frame verifies itself,
+ * once its last row has landed, keyed by the frame's transaction target.
+ */
+const deferredExistenceFrames = new WeakMap<object, ReadonlySet<string>>();
+
+function deferredExistenceKey(part: CompositionNodeRef): string {
+  return encodeTupleKey([part.kind, part.id]);
+}
+
+/**
+ * Runs `write` with the required-existence rule deferred for exactly `parts`
+ * on `target`: inside it a named part may be created or restored before its
+ * composition edge exists, and may lose its attaching edge before the next one
+ * is written.
+ *
+ * For a caller replaying a complete, already-resolved write set whose rows
+ * satisfy the rule together and not one at a time (a graph merge's apply). The
+ * rule is postponed, never waived: the caller owes the same parts a check
+ * against the frame's final state on the same transaction, before it commits.
+ *
+ * Bound to the transaction target and to the parts by name, so a frame's
+ * deferral for one part licenses nothing for another part or another
+ * transaction, and it ends with `write`.
+ */
+export async function withDeferredCompositionExistence<Output>(
+  target: TransactionBackend,
+  parts: readonly CompositionNodeRef[],
+  write: () => Promise<Output>,
+): Promise<Output> {
+  if (parts.length === 0) return write();
+  if (deferredExistenceFrames.has(target)) {
+    throw new ConfigurationError(
+      "A composition existence deferral is already open on this transaction.",
+      { code: "COMPOSITION_EXISTENCE_DEFERRAL_NESTED" },
+    );
+  }
+  deferredExistenceFrames.set(
+    target,
+    new Set(parts.map((part) => deferredExistenceKey(part))),
+  );
+  try {
+    return await write();
+  } finally {
+    deferredExistenceFrames.delete(target);
+  }
+}
+
+/**
+ * Whether a frame open on `target` (or on the transaction it was derived
+ * from) has taken over the required-existence check for `part`. The one
+ * reader every existence refusal in this module consults.
+ */
+function compositionExistenceDeferred(
+  target: object,
+  part: CompositionNodeRef,
+): boolean {
+  const key = deferredExistenceKey(part);
+  return backendDerivationChain(target).some(
+    (link) => deferredExistenceFrames.get(link)?.has(key) === true,
+  );
+}
+
+/**
  * THE decision every node-create path asks: given the declared existence of
  * this kind and the caller's stated `partOf`, what composition edge does
  * this create owe — and is the pair legal? Refuses; never returns a silent
@@ -392,7 +457,15 @@ function resolveCompositionAttachment(
 export function resolveCompositionCreate(
   registry: KindRegistry,
   input: Pick<CreateNodeInput, "kind" | "id" | "partOf">,
+  target: object,
 ): CompositionCreateWork | undefined {
+  if (
+    input.partOf === undefined &&
+    input.id !== undefined &&
+    compositionExistenceDeferred(target, { kind: input.kind, id: input.id })
+  ) {
+    return undefined;
+  }
   return compositionCreateWork(
     registry,
     input,
@@ -436,7 +509,7 @@ function compositionCreateWork(
  * where only an open-ended row is a membership.
  *
  * `partOf` asks for an attachment, and an edge
- * {@link edgeCurrentlyAttachesPart} does not count is not one: no later call
+ * {@link compositionEdgeAttachesPart} does not count is not one: no later call
  * could find it as the incumbent, so a repeated get-or-create would insert it
  * again and a different whole would be accepted beside it; a required part
  * would be written with no whole at all. Judged against the edge this request
@@ -451,7 +524,7 @@ function assertStatedWindowAttachesPart(
 ): void {
   const { validTo } = attachment.edgeWindow;
   if (
-    edgeCurrentlyAttachesPart(registry, part.kind, {
+    compositionEdgeAttachesPart(registry, part.kind, {
       kind: pair.viaEdgeKind,
       deleted_at: undefined,
       valid_to: validTo,
@@ -553,7 +626,7 @@ export function compositionEdgeHasRequiredExistencePart(
  * function adds only the `deleted_at` gate `compositionEdgeCounts`'s callers
  * are each individually documented to apply themselves.
  */
-function edgeCurrentlyAttachesPart(
+export function compositionEdgeAttachesPart(
   registry: KindRegistry,
   partKind: string,
   edge: Pick<EdgeRow, "kind" | "deleted_at" | "valid_to">,
@@ -623,6 +696,7 @@ export async function assertCompositionExistencePreserved(
   if (reattached?.kind === part.kind && reattached.id === part.id) {
     return;
   }
+  if (compositionExistenceDeferred(backend, part)) return;
 
   // A row that no longer currently attaches (an already-ended
   // `population: "oneActive"` window) has nothing left to detach: the
@@ -632,7 +706,7 @@ export async function assertCompositionExistencePreserved(
   // Reads the SAME predicate `findLiveCompositionWhole` reads, so a row this
   // refusal protects is never invisible to `verifyConstraintFences`, and a
   // row that audit already reports unattached is never refused here.
-  if (!edgeCurrentlyAttachesPart(ctx.registry, part.kind, edge)) return;
+  if (!compositionEdgeAttachesPart(ctx.registry, part.kind, edge)) return;
 
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
   if (!isEndpointRowLive(partRow)) return;
@@ -738,7 +812,7 @@ function selectLiveCompositionAttachment(
     if (partSide === undefined) continue;
     const { part, whole } = compositionRowEndpoints(partSide, edge);
     if (part.kind !== concreteKind || part.id !== concreteId) continue;
-    if (!edgeCurrentlyAttachesPart(registry, concreteKind, edge)) continue;
+    if (!compositionEdgeAttachesPart(registry, concreteKind, edge)) continue;
     return { edge, whole };
   }
   return undefined;
@@ -1353,6 +1427,7 @@ export async function assertRestoredRequiredPartsAttached(
 ): Promise<void> {
   for (const part of parts) {
     if (ctx.registry.compositionExistence(part.kind) !== "required") continue;
+    if (compositionExistenceDeferred(target, part)) continue;
     const row = await target.getNode(ctx.graphId, part.kind, part.id);
     if (isEndpointRowLive(row)) continue;
     const attachment = await findLiveCompositionAttachment(
@@ -1452,7 +1527,7 @@ export const COMPOSITION_ATTACHMENT_PAGE_SIZE = 500;
  *
  * The port applies no temporal filter beyond `excludeDeleted`, exactly like
  * the `findEdgesConnectedTo` read it stands in for, so the population
- * decision remains {@link edgeCurrentlyAttachesPart}'s alone.
+ * decision remains {@link compositionEdgeAttachesPart}'s alone.
  */
 async function readPageAttachmentCandidateEdges(
   registry: KindRegistry,
@@ -1674,7 +1749,7 @@ export type CompositionPartStanding = Readonly<{
 /**
  * THE page-scoped answer to "is each of these parts held up by a live whole",
  * in input order: the current attachment
- * ({@link readCompositionAttachmentsForPage}, so {@link edgeCurrentlyAttachesPart}
+ * ({@link readCompositionAttachmentsForPage}, so {@link compositionEdgeAttachesPart}
  * decides which edge counts) composed with the whole's own liveness
  * ({@link readLiveCompositionWholes}).
  *
