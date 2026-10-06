@@ -52,8 +52,8 @@ import {
 } from "./ontology-change";
 import {
   assertUniquenessClaimGatesOpen,
+  declaredKindUniqueConstraints,
   mayGateUniquenessClaims,
-  survivingKindUniqueConstraints,
   type UniquenessClaimGate,
   uniquenessClaimGates,
 } from "./uniqueness-claim-gate";
@@ -329,7 +329,7 @@ export function prepareSchemaTighteningPreflight(
     params.before,
     params.after,
   );
-  const uniqueConstraints = survivingKindUniqueConstraints(
+  const uniqueConstraints = declaredKindUniqueConstraints(
     params.before,
     params.after,
   );

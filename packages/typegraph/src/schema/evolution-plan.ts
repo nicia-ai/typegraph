@@ -271,10 +271,12 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     schemaTightening,
   });
   // A uniqueness claim gate is an emptiness requirement on its kind, so it is
-  // listed as one; a kind the extension classifier already requires empty is
-  // not listed twice.
+  // listed as one. A kind the extension classifier already requires empty is
+  // not listed twice, and a kind this extension adds is already listed as new:
+  // its gate only guards rows an earlier removal left in the table, which the
+  // commit's own probe refuses.
   const classifiedEmptyNodeKinds = new Set(
-    groupedRequirements.requireEmpty
+    [...groupedRequirements.requireEmpty, ...groupedRequirements.addedKinds]
       .filter((requirement) => requirement.entity === "node")
       .map((requirement) => requirement.kindName),
   );

@@ -1585,14 +1585,16 @@ try {
 
 The `details.reason` value `"unique-constraint-requires-empty-kind"` means the
 commit would leave a uniqueness constraint unenforced over rows that already
-exist: it adds or reshapes a unique constraint on a kind that holds rows, or
-moves a `kindWithSubClasses` claim away from where a populated kind's claims
-sit (a removed `subClassOf` / `equivalentTo`, or a removed kind). A schema
+exist: it adds or reshapes a unique constraint on a kind that holds rows
+(including a kind the commit re-adds over rows a discarded drop left behind),
+or drops a member that sorts before the kind from the subclass component of a
+populated kind's `kindWithSubClasses` constraint (a removed `subClassOf` /
+`equivalentTo`, or a removed kind). A schema
 commit neither validates existing rows against a unique constraint nor
 rebuilds its claims, so the kind must be empty. `details.constraints` names
 each blocked constraint — `kind`, `constraintName`, `cause`
 (`"constraint-added"`, `"constraint-reshaped"` or `"claim-axis-moved"`) and
-the claim `axis`, plus `previousAxis` for a moved claim. Declare the
+the claim `axis`, plus `lostKinds` for a component that dropped members. Declare the
 constraint before the kind is populated, or empty the kind, commit, and write
 the rows back. See
 [Unique constraints need an empty kind](/schema-evolution#unique-constraints-need-an-empty-kind).

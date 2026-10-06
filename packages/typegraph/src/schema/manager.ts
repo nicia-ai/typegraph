@@ -8,7 +8,10 @@
  * - Error reporting for breaking changes
  */
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
-import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
+import {
+  countSchemaKindRows,
+  schemaKindHasRows,
+} from "../backend/schema-kind-emptiness";
 import {
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
@@ -1479,12 +1482,12 @@ function prepareEdgeMatchIdentityCommitPreflight(
   return async (backend): Promise<void> => {
     const populated: string[] = [];
     for (const kind of edgeKinds) {
-      const count = await countSchemaKindRows(backend, target.id, {
+      const hasRows = await schemaKindHasRows(backend, target.id, {
         entity: "edge",
         kind,
         rows: "all",
       });
-      if (count > 0) populated.push(kind);
+      if (hasRows) populated.push(kind);
     }
     if (populated.length === 0) return;
     throw edgeMatchIdentityRekeyPopulatedError(

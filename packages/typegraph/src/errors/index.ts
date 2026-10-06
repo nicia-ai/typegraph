@@ -1631,8 +1631,9 @@ export type MigrationErrorDetails =
       reason: "unique-constraint-requires-empty-kind";
       /**
        * The uniqueness constraints the commit would leave unenforced over
-       * existing rows — added, reshaped, or moved to a claim axis the kind's
-       * existing claims do not sit at — on a kind that still holds rows. A
+       * existing rows — added, reshaped, or left reading a subclass component
+       * that lost a member their claims may sit at — on a kind that still
+       * holds rows. A
        * gated constraint whose kind is empty is permitted and does NOT appear
        * here. Never empty.
        */

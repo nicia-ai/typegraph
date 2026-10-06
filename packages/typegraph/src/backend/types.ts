@@ -4655,6 +4655,11 @@ export type CountNodesByKindParams = Readonly<{
   temporalMode?: TemporalMode;
   /** Timestamp for "current" and "asOf" temporal modes. */
   asOf?: string;
+  /**
+   * Count at most this many rows. A backend that ignores it still returns a
+   * correct, merely larger, count.
+   */
+  limit?: number;
 }>;
 
 /**
@@ -4814,6 +4819,11 @@ export type CountEdgesByKindParams = Readonly<{
   temporalMode?: TemporalMode;
   /** Timestamp for "current" and "asOf" temporal modes. */
   asOf?: string;
+  /**
+   * Count at most this many rows. A backend that ignores it still returns a
+   * correct, merely larger, count.
+   */
+  limit?: number;
 }>;
 
 // ============================================================

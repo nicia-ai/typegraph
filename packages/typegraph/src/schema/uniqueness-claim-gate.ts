@@ -9,23 +9,30 @@
  *
  * - A constraint that is added or reshaped has no claim row for any existing
  *   node, so pre-existing duplicates stay and a new node duplicating an old
- *   value is accepted.
+ *   value is accepted. This holds for a kind the commit adds as well: rows a
+ *   dropped kind left behind (`discardDroppedKindRows`) become live again under
+ *   a re-added kind of the same name, with no claim.
  * - A `kindWithSubClasses` constraint writes at the code-point minimum of the
- *   kind's subclass component and probes that component. When the component
- *   changes so that the axis existing claims sit at is no longer one the kind
- *   probes — a removed `subClassOf` / `equivalentTo`, or a removed kind that
- *   was the minimum — later writes cannot see those claims.
+ *   kind's subclass component and probes that component. Claims of one kind
+ *   can sit at any axis of any component it belonged to while populated: a
+ *   merge moves where NEW claims are written without moving old ones. So a
+ *   component that loses a member sorting before the kind — a removed
+ *   `subClassOf` / `equivalentTo`, a removed kind — may leave claims at an axis
+ *   the kind no longer probes, whichever member was the minimum when the
+ *   previous schema was written. A lost member sorting after the kind cannot
+ *   hold its claims: the kind is always in its own component, so every axis it
+ *   was ever written at is at or before the kind.
  *
  * Neither can be repaired inside a schema commit, so both are refused while
  * the kind holds rows. A kind with no rows has no claims to strand and is
  * unaffected.
  */
-import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
+import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import { uniquenessClaimAxis } from "../store/claims/axis";
-import { compareStrings } from "../utils/compare";
+import { compareCodePoints, compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { type OntologySnapshot } from "./ontology-change";
 import { type SerializedUniqueConstraint } from "./types";
@@ -39,8 +46,10 @@ import {
  * kind declaring it holds no rows.
  *
  * `axis` is the claim axis the proposed schema writes the constraint at.
- * `previousAxis`, on a moved axis, is where the claims of existing rows sit:
- * an axis the kind no longer probes under the proposed schema.
+ * `lostKinds`, on a moved axis, are the members of the kind's subclass
+ * component under the previous schema that sort before the kind and are no
+ * longer in it: claims of existing rows may sit at any of their axes, which the
+ * kind no longer probes.
  */
 export type UniquenessClaimGate =
   | Readonly<{
@@ -54,30 +63,33 @@ export type UniquenessClaimGate =
       kind: string;
       constraintName: string;
       axis: string;
-      previousAxis: string;
+      lostKinds: readonly string[];
     }>;
 
-/** A unique constraint a kind present on both sides declares in `after`. */
-type SurvivingKindConstraint = Readonly<{
+/** A unique constraint a node kind declares in `after`. */
+type DeclaredKindConstraint = Readonly<{
   kind: string;
   constraint: SerializedUniqueConstraint;
   change: UniqueConstraintEnforcementChange | undefined;
 }>;
 
 /**
- * Every unique constraint `after` declares on a node kind `before` also has,
- * with how its declaration changed. A kind absent from `before` is skipped:
- * it cannot hold rows the commit would strand.
+ * Every unique constraint `after` declares on a node kind, with how its
+ * declaration changed. A kind `before` lacks has no declaration to compare, so
+ * each of its constraints reads as added: the kind may still own rows a
+ * previous removal left in the table.
  */
-export function survivingKindUniqueConstraints(
+export function declaredKindUniqueConstraints(
   before: OntologySnapshot,
   after: OntologySnapshot,
-): readonly SurvivingKindConstraint[] {
+): readonly DeclaredKindConstraint[] {
   return Object.entries(after.nodes)
     .toSorted(([left], [right]) => compareStrings(left, right))
     .flatMap(([kind, afterDef]) => {
-      if (!hasOwnKey(before.nodes, kind)) return [];
-      const existing = before.nodes[kind]?.uniqueConstraints ?? [];
+      const existing =
+        hasOwnKey(before.nodes, kind) ?
+          (before.nodes[kind]?.uniqueConstraints ?? [])
+        : [];
       return afterDef.uniqueConstraints.map((constraint) => ({
         kind,
         constraint,
@@ -93,7 +105,7 @@ export function survivingKindUniqueConstraints(
  * ontology decides).
  */
 export function mayGateUniquenessClaims(
-  constraints: readonly SurvivingKindConstraint[],
+  constraints: readonly DeclaredKindConstraint[],
   ontologyChanged: boolean,
 ): boolean {
   return constraints.some(
@@ -106,13 +118,18 @@ export function mayGateUniquenessClaims(
 /**
  * The gates a transition owes, in `(kind, constraint)` order.
  *
- * An unchanged constraint is gated exactly when the axis its existing claims
- * sit at falls outside the component the proposed schema probes. A component
- * that only GAINS members keeps the old axis inside it, so a merge moves
- * where new claims are written without hiding the old ones and is not gated.
+ * An unchanged constraint is gated exactly when the proposed component lost a
+ * member that sorts before the kind. A claim sits at the code-point minimum of
+ * the component it was written under, which contains the kind itself, so it
+ * sits at the kind or at a member before it. A component that only GAINS
+ * members, or loses only later ones, keeps every such axis inside it: a merge
+ * moves where new claims are written without hiding the old ones. Once an
+ * earlier member is lost, the axis of any earlier claim may be the lost one,
+ * and the previous schema's own axis does not tell which — an earlier merge
+ * leaves claims at more than one.
  */
 export function uniquenessClaimGates(
-  constraints: readonly SurvivingKindConstraint[],
+  constraints: readonly DeclaredKindConstraint[],
   beforeRegistry: KindRegistry,
   afterRegistry: KindRegistry,
 ): readonly UniquenessClaimGate[] {
@@ -129,18 +146,17 @@ export function uniquenessClaimGates(
           },
         ];
       }
-      const previousAxis = uniquenessClaimAxis(
-        kind,
-        constraint.scope,
-        beforeRegistry,
-      );
-      if (
-        constraint.scope === "kind" ||
-        afterRegistry.getSubClassComponent(kind).includes(previousAxis)
-      ) {
-        return [];
-      }
-      return [{ ...named, cause: "claim-axis-moved", previousAxis }];
+      if (constraint.scope === "kind") return [];
+      const proposedComponent = afterRegistry.getSubClassComponent(kind);
+      const lostKinds = beforeRegistry
+        .getSubClassComponent(kind)
+        .filter(
+          (member) =>
+            compareCodePoints(member, kind) < 0 &&
+            !proposedComponent.includes(member),
+        );
+      if (lostKinds.length === 0) return [];
+      return [{ ...named, cause: "claim-axis-moved", lostKinds }];
     },
   );
 }
@@ -154,15 +170,15 @@ type SchemaVersionTransition = Readonly<{
 function describeGate(gate: UniquenessClaimGate): string {
   const subject = `"${gate.constraintName}" on "${gate.kind}"`;
   if (gate.cause === "claim-axis-moved") {
-    return `${subject} (claim axis moves from "${gate.previousAxis}" to "${gate.axis}")`;
+    return `${subject} (no longer shares a subclass component with ${gate.lostKinds.map((lost) => `"${lost}"`).join(", ")}; claim axis "${gate.axis}")`;
   }
   return `${subject} (${gate.cause === "constraint-added" ? "added" : "reshaped"}, claim axis "${gate.axis}")`;
 }
 
 /**
- * Refuses when any gated kind holds rows. Counts the same row population
- * `Store.evolve` requires to be empty before it accepts a unique constraint
- * on a graph-extension kind, through the same counter.
+ * Refuses when any gated kind holds rows. Asks the same question over the
+ * same row population `Store.evolve` requires to be empty before it accepts a
+ * unique constraint on a graph-extension kind, through the same probe.
  *
  * @throws MigrationError (`reason: "unique-constraint-requires-empty-kind"`)
  *   naming every gate whose kind is populated.
@@ -174,12 +190,12 @@ export async function assertUniquenessClaimGatesOpen(
 ): Promise<void> {
   const populatedKinds = new Set<string>();
   for (const kind of new Set(gates.map((gate) => gate.kind))) {
-    const count = await countSchemaKindRows(target, transition.graphId, {
+    const populated = await schemaKindHasRows(target, transition.graphId, {
       entity: "node",
       kind,
       rows: "nonDeleted",
     });
-    if (count > 0) populatedKinds.add(kind);
+    if (populated) populatedKinds.add(kind);
   }
   const closed = gates.filter((gate) => populatedKinds.has(gate.kind));
   if (closed.length === 0) return;
@@ -188,7 +204,7 @@ export async function assertUniquenessClaimGatesOpen(
       `${closed.map((gate) => describeGate(gate)).join("; ")}. ` +
       "A schema commit does not validate existing rows against a unique constraint or rebuild its claims. " +
       "Declare the constraint, and the subclass hierarchy it spans, before the kind holds rows; " +
-      "otherwise delete the kind's rows, commit the schema, then write them again.",
+      "otherwise delete the kind's rows (for a re-added kind, run store.materializeRemovals() to reclaim rows its removal left), commit the schema, then write them again.",
     {
       graphId: transition.graphId,
       fromVersion: transition.fromVersion,
