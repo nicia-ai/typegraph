@@ -44,6 +44,7 @@ import {
 } from "../../backend/types";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
+  axisCountsRow,
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
   edgeCardinalitySpec,
@@ -195,19 +196,17 @@ export function createEdgeBatchValidationBackend(
    * pending entry per applicable axis — a `fromAndTo`-shaped axis (source
    * `unique`) into `pendingUniqueTargets`, a `from`/`to`-shaped one into
    * `pendingByTarget` under the same key `countEdgesAtEndpointCached` reads.
-   * An axis whose spec exempts a born-ended row (`claimsWhenBornEnded ===
-   * false`, and this row states a `validTo`) records nothing, matching the
-   * real claim it would never take.
+   * An axis that does not count this row (`axisCountsRow`: active-only, and
+   * the row states a `validTo`) records nothing, matching the real claim it
+   * would never take.
    */
   function registerPendingEdgeForCardinality(
     insertParams: InsertEdgeParams,
     declarations: EdgeCardinalityDeclarations,
   ): void {
     for (const ref of edgeCardinalityAxisReferences(declarations)) {
+      if (!axisCountsRow(ref, insertParams)) continue;
       const spec = edgeCardinalitySpec(ref);
-      if (!spec.claimsWhenBornEnded && insertParams.validTo !== undefined) {
-        continue;
-      }
       if (spec.keyShape === "fromAndTo") {
         pendingUniqueTargets.add(
           buildEdgeBetweenCacheKey(

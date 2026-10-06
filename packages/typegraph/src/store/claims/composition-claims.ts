@@ -22,6 +22,7 @@ import { type CompositionPartSide } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import {
+  axisCountsRow,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
@@ -148,15 +149,8 @@ export function edgeInsertClaims(
     subject,
   );
   const composition = compositionClaim(registry, subject);
-  // The same "does a row born already ended still claim?" exemption
-  // {@link edgeCardinalityClaims} applies to every ordinary axis, applied to
-  // composition's own axis: an edge born ended never joins a
-  // `claimsWhenBornEnded: false` (`oneActive`) population, composition
-  // included.
   const owesComposition =
-    composition !== undefined &&
-    (edgeCardinalitySpec(composition).claimsWhenBornEnded ||
-      subject.validTo === undefined);
+    composition !== undefined && axisCountsRow(composition, subject);
   return sortedByClaimTarget(
     owesComposition ? [...ordinary, composition] : ordinary,
   );
@@ -189,6 +183,11 @@ export function edgeKindOwesAnyClaim(
  * true` (`one`) axis in the first place and must not re-probe it, so it
  * re-takes composition only when composition's OWN population is
  * `oneActive`.
+ *
+ * Either way the row must be one composition counts ({@link axisCountsRow}):
+ * resurrecting an ENDED `oneActive` history row attaches nothing, so it owes
+ * no claim and is not refused because the part holds another whole — the
+ * same exemption {@link edgeInsertClaims} gives the identical row born ended.
  */
 export function compositionReentryClaim(
   registry: KindRegistry,
@@ -196,7 +195,7 @@ export function compositionReentryClaim(
   reentersLivePopulation: boolean,
 ): ClaimEdgeCardinalityParams | undefined {
   const claim = compositionClaim(registry, subject);
-  if (claim === undefined) return undefined;
+  if (claim === undefined || !axisCountsRow(claim, subject)) return undefined;
   if (reentersLivePopulation) return claim;
   return edgeCardinalitySpec(claim).claimsWhenBornEnded ? undefined : claim;
 }

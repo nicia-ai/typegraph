@@ -414,6 +414,44 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(requireDefined(open[0]).meta.validTo).toBeUndefined();
     });
 
+    it("resurrecting an ended `oneActive` history row attaches nothing and is not refused", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const showA = await store.nodes.CaShow.create({});
+      const showB = await store.nodes.CaShow.create({});
+      const reel = await store.nodes.CaReel.create(
+        { slug: "reel-1" },
+        { partOf: { whole: { kind: "CaShow", id: showA.id } } },
+      );
+      await store.nodes.CaReel.reparent(reel.id, {
+        whole: { kind: "CaShow", id: showB.id },
+      });
+      const history = requireDefined(
+        (
+          await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" })
+        ).find((edge) => edge.toId === showA.id),
+      );
+      expect(history.meta.validTo).toBeDefined();
+      await store.edges.caReelOf.delete(history.id);
+
+      // MUTATION CHECK: returning the composition claim unconditionally for a
+      // resurrection in `compositionReentryClaim` refuses this with
+      // CompositionError COMPOSITION_WHOLE_OCCUPIED, although the row would
+      // stay ended — verified and reverted.
+      await store.edges.caReelOf.bulkUpsertById([
+        { id: history.id, from: reel, to: showA, props: {} },
+      ]);
+
+      const restored = requireDefined(
+        (
+          await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" })
+        ).find((edge) => edge.id === history.id),
+      );
+      expect(restored.meta.validTo).toBe(history.meta.validTo);
+      const live = await store.edges.caReelOf.find({});
+      expect(live.map((edge) => edge.toId)).toEqual([showB.id]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
     it("reparent is ONE move instant: the ended window and the new one abut", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const showA = await store.nodes.CaShow.create({});
