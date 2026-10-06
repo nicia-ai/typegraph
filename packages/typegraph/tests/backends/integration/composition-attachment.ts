@@ -32,6 +32,7 @@ import {
   asNodeId,
   CompositionExistenceError,
   ConfigurationError,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -43,6 +44,7 @@ import {
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
+import { withBindBudget } from "./bind-budget";
 import { type IntegrationTestContext } from "./test-context";
 
 const CaBook = defineNode("CaBook", { schema: z.object({}) });
@@ -414,47 +416,59 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(requireDefined(open[0]).meta.validTo).toBeUndefined();
     });
 
-    it("resurrecting an ended `oneActive` history row attaches nothing and is not refused", async () => {
-      const store = await context.createStore(buildGraph(nextGraphId()));
-      const showA = await store.nodes.CaShow.create({});
-      const showB = await store.nodes.CaShow.create({});
-      const reel = await store.nodes.CaReel.create(
-        { slug: "reel-1" },
-        { partOf: { whole: { kind: "CaShow", id: showA.id } } },
-      );
-      await store.nodes.CaReel.reparent(reel.id, {
-        whole: { kind: "CaShow", id: showB.id },
-      });
-      const afterMove = await store.edges.caReelOf.find(
-        {},
-        { temporalMode: "includeEnded" },
-      );
-      const history = requireDefined(
-        afterMove.find((edge) => edge.toId === showA.id),
-      );
-      expect(history.meta.validTo).toBeDefined();
-      await store.edges.caReelOf.delete(history.id);
+    it.each(["bulkUpsertById", "getOrCreateByEndpoints"] as const)(
+      "resurrecting an ended `oneActive` history row through %s attaches nothing and is not refused",
+      async (entry) => {
+        const store = await context.createStore(buildGraph(nextGraphId()));
+        const showA = await store.nodes.CaShow.create({});
+        const showB = await store.nodes.CaShow.create({});
+        const reel = await store.nodes.CaReel.create(
+          { slug: "reel-1" },
+          { partOf: { whole: { kind: "CaShow", id: showA.id } } },
+        );
+        await store.nodes.CaReel.reparent(reel.id, {
+          whole: { kind: "CaShow", id: showB.id },
+        });
+        const afterMove = await store.edges.caReelOf.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        const history = requireDefined(
+          afterMove.find((edge) => edge.toId === showA.id),
+        );
+        expect(history.meta.validTo).toBeDefined();
+        await store.edges.caReelOf.delete(history.id);
 
-      // MUTATION CHECK: returning the composition claim unconditionally for a
-      // resurrection in `compositionReentryClaim` refuses this with
-      // CompositionError COMPOSITION_WHOLE_OCCUPIED, although the row would
-      // stay ended — verified and reverted.
-      await store.edges.caReelOf.bulkUpsertById([
-        { id: history.id, from: reel, to: showA, props: {} },
-      ]);
+        // MUTATION CHECK: returning the composition claim unconditionally for a
+        // resurrection in `compositionReentryClaim` refuses this with
+        // CompositionError COMPOSITION_WHOLE_OCCUPIED, although the row would
+        // stay ended — verified and reverted.
+        if (entry === "bulkUpsertById") {
+          await store.edges.caReelOf.bulkUpsertById([
+            { id: history.id, from: reel, to: showA, props: {} },
+          ]);
+        } else {
+          const { action } = await store.edges.caReelOf.getOrCreateByEndpoints(
+            reel,
+            showA,
+            {},
+          );
+          expect(action).toBe("resurrected");
+        }
 
-      const afterRestore = await store.edges.caReelOf.find(
-        {},
-        { temporalMode: "includeEnded" },
-      );
-      const restored = requireDefined(
-        afterRestore.find((edge) => edge.id === history.id),
-      );
-      expect(restored.meta.validTo).toBe(history.meta.validTo);
-      const live = await store.edges.caReelOf.find({});
-      expect(live.map((edge) => edge.toId)).toEqual([showB.id]);
-      expect(await store.verifyConstraintFences()).toEqual([]);
-    });
+        const afterRestore = await store.edges.caReelOf.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        const restored = requireDefined(
+          afterRestore.find((edge) => edge.id === history.id),
+        );
+        expect(restored.meta.validTo).toBe(history.meta.validTo);
+        const live = await store.edges.caReelOf.find({});
+        expect(live.map((edge) => edge.toId)).toEqual([showB.id]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      },
+    );
 
     it("reparent is ONE move instant: the ended window and the new one abut", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
@@ -780,6 +794,32 @@ export function registerCompositionAttachmentIntegrationTests(
         });
       },
     );
+
+    it("bulkCreate attaches more parts than one acyclicity statement can carry", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      const bindBudget = 100;
+      const partCount = 30;
+      const budgeted = createStore(
+        graph,
+        withBindBudget(store.backend, bindBudget),
+      );
+      const show = await store.nodes.CaShow.create({});
+
+      // MUTATION CHECK: sending every prepared composition edge in one probe
+      // statement (`readUnwrittenEdgeReaches` never slicing) binds more than
+      // the budget for these 30 parts, and the budgeted backend refuses the
+      // statement — verified and reverted.
+      await budgeted.nodes.CaClip.bulkCreate(
+        Array.from({ length: partCount }, () => ({
+          props: {},
+          partOf: { whole: { kind: "CaShow", id: show.id } },
+        })),
+      );
+
+      expect(await store.edges.caClipOf.find({})).toHaveLength(partCount);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
 
     it("reparent inside a transaction counts as ONE node write intent", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));

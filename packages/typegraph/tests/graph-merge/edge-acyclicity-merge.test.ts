@@ -58,6 +58,8 @@ import { merge, planMerge } from "../../src/graph-merge/merge";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
+import { withBindBudget } from "../backends/integration/bind-budget";
 import { backendMatrix } from "./test-utils";
 
 const Task = defineNode("Task", { schema: z.object({ key: z.string() }) });
@@ -285,6 +287,38 @@ describe.each(backendMatrix())(
     // `readProposedEdgeAcyclicityViolations` in
     // `assertResolvedPlanEdgesAcyclic` refuses each with
     // AcyclicityMergeConflictError — verified and reverted.
+    it("(d) previews more proposed edges than one acyclicity statement can carry", async () => {
+      const bindBudget = 100;
+      const edgeCount = 30;
+      const [target] = await createStoreWithSchema(
+        graph,
+        withBindBudget(await makeBackend(), bindBudget),
+        { revisionTracking: true },
+      );
+      const ids = Array.from(
+        { length: edgeCount + 1 },
+        (_unused, index) => `t${String(index)}`,
+      );
+      for (const id of ids) {
+        await target.nodes.Task.create({ key: id }, { id });
+      }
+
+      const chained = await makeBranch(target, "chained");
+      for (const [index, id] of ids.slice(0, -1).entries()) {
+        await chained.store.edges.dependsOn.create(
+          { kind: "Task", id },
+          { kind: "Task", id: requireDefined(ids[index + 1]) },
+          {},
+        );
+      }
+
+      // MUTATION CHECK: sending every proposed edge in one statement
+      // (`readUnwrittenEdgeReaches` never slicing) binds more than the budget
+      // for these 30 edges, and the budgeted backend refuses the plan's
+      // preview — verified and reverted.
+      expect(isErr(await planMerge(target, [chained]))).toBe(false);
+    });
+
     it("(c) merges a branch that reverses an edge of an acyclic relation", async () => {
       const target = await makeTarget();
       await target.nodes.Task.create({ key: "a" }, { id: "a" });

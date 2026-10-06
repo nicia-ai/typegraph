@@ -591,6 +591,32 @@ export function registerCompositionExistenceIntegrationTests(
 
       expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
     });
+
+    it("case 9b: a whole delete removes a composition edge resurrected onto a deleted part", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const segment = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      await store.nodes.EeSegment.delete(segment.id);
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
+      // Edge resurrection reads no endpoint, so the part's own deleted edge
+      // comes back live with the part still tombstoned.
+      const { action } = await store.edges.eeSegmentOf.getOrCreateByEndpoints(
+        segment,
+        episode,
+        {},
+      );
+      expect(action).toBe("resurrected");
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
+
+      // MUTATION CHECK: the same early return as case 9a leaves this edge
+      // live between two tombstones — verified and reverted.
+      await store.nodes.EeEpisode.delete(episode.id);
+
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
+    });
     // MUTATION CHECK: restoring the early return on an empty `plan.members`
     // in `applyCompositionCascade` leaves the edge live between two
     // tombstoned nodes — verified and reverted.
