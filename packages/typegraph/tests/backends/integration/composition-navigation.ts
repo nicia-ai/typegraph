@@ -142,6 +142,93 @@ const noCompositionGraph = defineGraph({
   edges: {},
 });
 
+const CsDoc = defineNode("CsDoc", { schema: z.object({}) });
+const CsSection = defineNode("CsSection", { schema: z.object({}) });
+const CsRichSection = defineNode("CsRichSection", { schema: z.object({}) });
+const CsParagraph = defineNode("CsParagraph", { schema: z.object({}) });
+const csSectionOf = defineEdge("csSectionOf", { schema: z.object({}) });
+const csParagraphOf = defineEdge("csParagraphOf", { schema: z.object({}) });
+
+const SUBSUMPTION_CLOSURE_NODES = {
+  CsDoc: { type: CsDoc },
+  CsSection: { type: CsSection },
+  CsRichSection: { type: CsRichSection },
+  CsParagraph: { type: CsParagraph },
+} as const;
+
+/**
+ * The second-level pair is declared on a SUBCLASS of the kind the first
+ * level reaches: `Doc <- Section`, `RichSection <- Paragraph`.
+ */
+const closureThroughSubclassWholeGraph = defineGraph({
+  id: "composition_closure_subclass_whole",
+  nodes: SUBSUMPTION_CLOSURE_NODES,
+  edges: {
+    csSectionOf: {
+      type: csSectionOf,
+      from: [CsSection],
+      to: [CsDoc],
+      cardinality: "one",
+    },
+    csParagraphOf: {
+      type: csParagraphOf,
+      from: [CsParagraph],
+      to: [CsRichSection],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    subClassOf(CsRichSection, CsSection),
+    partOf(CsSection, CsDoc, { via: csSectionOf }),
+    partOf(CsParagraph, CsRichSection, {
+      via: csParagraphOf,
+      existence: "required",
+    }),
+  ],
+});
+
+/**
+ * The second-level pair is declared on a SUPERCLASS of the kind the first
+ * level reaches: `Doc <- RichSection`, `Section <- Paragraph`.
+ */
+const closureThroughSuperclassWholeGraph = defineGraph({
+  id: "composition_closure_superclass_whole",
+  nodes: SUBSUMPTION_CLOSURE_NODES,
+  edges: {
+    csSectionOf: {
+      type: csSectionOf,
+      from: [CsRichSection],
+      to: [CsDoc],
+      cardinality: "one",
+    },
+    csParagraphOf: {
+      type: csParagraphOf,
+      from: [CsParagraph],
+      to: [CsSection],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    subClassOf(CsRichSection, CsSection),
+    partOf(CsRichSection, CsDoc, { via: csSectionOf }),
+    partOf(CsParagraph, CsSection, {
+      via: csParagraphOf,
+      existence: "required",
+    }),
+  ],
+});
+
+const SUBSUMPTION_CLOSURE_GRAPHS = [
+  [
+    "a pair declared on a subclass of a reached kind",
+    closureThroughSubclassWholeGraph,
+  ],
+  [
+    "a pair declared on a superclass of a reached kind",
+    closureThroughSuperclassWholeGraph,
+  ],
+] as const;
+
 type CompositionStore = InspectableStore<typeof compositionNavigationGraph>;
 
 function adjacencyEdgeIds(
@@ -624,6 +711,79 @@ export function registerCompositionNavigationIntegrationTests(
         }),
       );
     });
+
+    // MUTATION CHECK (all three cases): making the registry closure resolve
+    // only the root kind through subsumption (dropping the re-resolution of
+    // each reached kind) fails every case for both graphs — verified and
+    // reverted.
+    describe.each(SUBSUMPTION_CLOSURE_GRAPHS)(
+      "closure through %s",
+      (_label, graph) => {
+        async function seedSubsumptionClosure() {
+          const store = await context.createStore(graph);
+          const doc = await store.nodes.CsDoc.create({});
+          const rich = await store.nodes.CsRichSection.create(
+            {},
+            { partOf: { whole: doc } },
+          );
+          const paragraph = await store.nodes.CsParagraph.create(
+            {},
+            { partOf: { whole: rich } },
+          );
+          return { store, doc, rich, paragraph };
+        }
+
+        it("parts() and wholes() return the whole closure", async () => {
+          const { store, doc, rich, paragraph } =
+            await seedSubsumptionClosure();
+
+          const parts = await store
+            .query()
+            .from("CsDoc", "d")
+            .parts("p")
+            .select((ctx) => ctx.p.id)
+            .execute();
+          expect(new Set(parts)).toEqual(new Set([rich.id, paragraph.id]));
+
+          const wholes = await store
+            .query()
+            .from("CsParagraph", "p")
+            .wholes("w")
+            .select((ctx) => ctx.w.id)
+            .execute();
+          expect(new Set(wholes)).toEqual(new Set([rich.id, doc.id]));
+        });
+
+        it("subgraph({ composition: true }) returns the complete owned unit", async () => {
+          const { store, doc, rich, paragraph } =
+            await seedSubsumptionClosure();
+
+          const result = await store.subgraph(doc.id, {
+            edges: [],
+            composition: true,
+          });
+
+          expect(new Set(result.nodes.keys())).toEqual(
+            new Set([doc.id, rich.id, paragraph.id]),
+          );
+        });
+
+        it("deleting the whole cascades through the whole closure", async () => {
+          const { store, doc, rich, paragraph } =
+            await seedSubsumptionClosure();
+
+          await store.nodes.CsDoc.delete(doc.id);
+
+          expect(
+            await store.nodes.CsRichSection.getById(rich.id),
+          ).toBeUndefined();
+          expect(
+            await store.nodes.CsParagraph.getById(paragraph.id),
+          ).toBeUndefined();
+          expect(await store.verifyConstraintFences()).toEqual([]);
+        });
+      },
+    );
 
     it("subgraph({ composition: true }) exports the whole plus its parts", async () => {
       const store = await context.createStore(compositionNavigationGraph);
