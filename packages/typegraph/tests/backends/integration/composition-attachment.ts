@@ -425,10 +425,12 @@ export function registerCompositionAttachmentIntegrationTests(
       await store.nodes.CaReel.reparent(reel.id, {
         whole: { kind: "CaShow", id: showB.id },
       });
+      const afterMove = await store.edges.caReelOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
       const history = requireDefined(
-        (
-          await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" })
-        ).find((edge) => edge.toId === showA.id),
+        afterMove.find((edge) => edge.toId === showA.id),
       );
       expect(history.meta.validTo).toBeDefined();
       await store.edges.caReelOf.delete(history.id);
@@ -441,10 +443,12 @@ export function registerCompositionAttachmentIntegrationTests(
         { id: history.id, from: reel, to: showA, props: {} },
       ]);
 
+      const afterRestore = await store.edges.caReelOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
       const restored = requireDefined(
-        (
-          await store.edges.caReelOf.find({}, { temporalMode: "includeEnded" })
-        ).find((edge) => edge.id === history.id),
+        afterRestore.find((edge) => edge.id === history.id),
       );
       expect(restored.meta.validTo).toBe(history.meta.validTo);
       const live = await store.edges.caReelOf.find({});
