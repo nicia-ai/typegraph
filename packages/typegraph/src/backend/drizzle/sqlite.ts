@@ -106,6 +106,10 @@ import {
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
+  REVISION_JOURNAL_ENTITY,
+  type RevisionJournalEntity,
+} from "../revision-journal";
+import {
   createSerializedExecutionQueue,
   runWithSerializedQueue,
   type SerializedExecutionQueue,
@@ -481,13 +485,17 @@ function sqliteRevisionChangeTriggerSpecs(
   name: string;
   table: string;
   action: "INSERT" | "UPDATE" | "DELETE";
-  entity: "node" | "edge" | "identity";
+  entity: RevisionJournalEntity;
   complete: 0 | 1;
 }>[] {
   const targets = [
-    { entity: "node", table: names.nodes, complete: 1 },
-    { entity: "edge", table: names.edges, complete: 1 },
-    { entity: "identity", table: names.identityAssertions, complete: 0 },
+    { entity: REVISION_JOURNAL_ENTITY.node, table: names.nodes, complete: 1 },
+    { entity: REVISION_JOURNAL_ENTITY.edge, table: names.edges, complete: 1 },
+    {
+      entity: REVISION_JOURNAL_ENTITY.identity,
+      table: names.identityAssertions,
+      complete: 0,
+    },
   ] as const;
   const actions = ["INSERT", "UPDATE", "DELETE"] as const;
   return targets.flatMap(({ entity, table, complete }) =>
@@ -507,8 +515,9 @@ function sqliteRevisionChangeTriggers(
   return sqliteRevisionChangeTriggerSpecs(names).map(
     ({ name, table, action, entity, complete }) => {
       const row = action === "DELETE" ? "OLD" : "NEW";
-      const kind = entity === "identity" ? "''" : `${row}.kind`;
-      const id = entity === "identity" ? "''" : `${row}.id`;
+      const recordsKey = entity !== REVISION_JOURNAL_ENTITY.identity;
+      const kind = recordsKey ? `${row}.kind` : "''";
+      const id = recordsKey ? `${row}.id` : "''";
       return `CREATE TRIGGER IF NOT EXISTS ${quoteRevisionJournalIdentifier(name)} AFTER ${action} ON ${quoteRevisionJournalIdentifier(table)} BEGIN INSERT INTO ${quoteRevisionJournalIdentifier(names.revisionChanges)} (entry_id, graph_id, revision, complete, entity, kind, id) SELECT lower(hex(randomblob(16))), ${row}.graph_id, COALESCE((SELECT revision FROM ${quoteRevisionJournalIdentifier(names.recordedClock)} WHERE graph_id = ${row}.graph_id), 0) + 1, ${complete}, '${entity}', ${kind}, ${id}; END`;
     },
   );

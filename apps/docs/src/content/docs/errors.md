@@ -966,7 +966,7 @@ The five `details.reason` values on `GRAPH_MERGE_PROVENANCE_ID_COLLISION`:
 
 | `details.reason` | The state that was found |
 | --- | --- |
-| `application-graph` | The id holds rows (in any per-graph table) or a schema that is not the sidecar's, so it belongs to an application. Rename the colliding graph or point the merge elsewhere. |
+| `application-graph` | The id holds rows (in any per-graph table) or a schema that is not the sidecar's, so it belongs to an application. When a pre-marker sidecar is classified, revision-change journal entries that record its own stored `Provenance` rows are not counted; every other journal entry is. Rename the colliding graph or point the merge elsewhere. |
 | `empty-legacy-sidecar` | A pre-marker sidecar with no rows at all, which carries no evidence of authorship and is indistinguishable from an application graph of the same shape. |
 | `unupgradeable-legacy-sidecar` | A pre-marker sidecar whose rows do not verify as provenance this library wrote for *this* target, so it cannot be upgraded to an owned sidecar. |
 | `unowned-exact-schema-graph` | The current sidecar schema with no ownership marker. Because the marker is written *first*, this library cannot have produced this state; contents are not consulted, so an empty or provenance-shaped occupant is refused too. |

@@ -2,6 +2,21 @@ import { ConfigurationError } from "../errors";
 import type { GraphBackend } from "./types";
 
 /**
+ * The `entity` a revision-journal entry records for a write to each journaled
+ * relation. The trigger builders pass these values as each trigger's target and
+ * the provenance sidecar's occupancy probe matches on them. The PostgreSQL
+ * trigger function body and the lineage reader still spell their own literals.
+ */
+export const REVISION_JOURNAL_ENTITY = {
+  node: "node",
+  edge: "edge",
+  identity: "identity",
+} as const;
+
+export type RevisionJournalEntity =
+  (typeof REVISION_JOURNAL_ENTITY)[keyof typeof REVISION_JOURNAL_ENTITY];
+
+/**
  * Install the revision-change journal on a privileged backend during schema
  * bootstrap or adoption. This is the only runtime API that invokes its DDL.
  */

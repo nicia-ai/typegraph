@@ -75,6 +75,7 @@ import {
   projectBackendWithout,
 } from "../../src/backend/derive-backend";
 import { resolveGraphRelationNames } from "../../src/backend/graph-relations";
+import { installRevisionChangesJournal } from "../../src/backend/revision-journal";
 import type { NodeRow } from "../../src/backend/types";
 import { asEdgeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
@@ -199,6 +200,21 @@ function identityAssertionsTable(backend: GraphBackend): string {
 /** The physical revision-journal table, resolved through the shared inventory. */
 function revisionChangesTable(backend: GraphBackend): string {
   return resolveGraphRelationNames(backend.tableNames).revisionChanges;
+}
+
+/** What one revision-journal entry records about the write that produced it. */
+type JournalEntry = Readonly<{ entity: string; kind: string; id: string }>;
+
+/** Every revision-journal entry stored under `graphId`, in a stable order. */
+async function readJournalEntries(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<readonly JournalEntry[]> {
+  return backend.execute<JournalEntry>(
+    asCompiledRowsSql(
+      sql`SELECT entity, kind, id FROM ${sql.identifier(revisionChangesTable(backend))} WHERE graph_id = ${graphId} ORDER BY entity, kind, id`,
+    ),
+  );
 }
 
 /** Reads the durable ownership marker row straight from the backend. */
@@ -1644,6 +1660,139 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
       openProvenanceStore(backend, careGraph.id),
     ).resolves.toBeDefined();
   });
+
+  it("upgrades a legacy sidecar whose own writes the revision triggers journaled", async () => {
+    const backend = await makeBackend();
+    const sidecarId = provenanceGraphId(careGraph.id);
+    // The triggers are database-wide: once installed they journal EVERY node
+    // write, the pre-marker sidecar's own `Provenance` rows included, under the
+    // sidecar's graph id. Those entries name rows the upgrade verifies one by
+    // one, so they are the sidecar's own history rather than an application's.
+    await installRevisionChangesJournal(backend);
+    const [legacyStore] = await createStoreWithSchema(
+      legacyShapedGraph(),
+      backend,
+    );
+    const legacyId = await provenanceNodeId(careGraph.id, SIDECAR_RECORD);
+    await legacyStore.nodes.Provenance.create(
+      { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+      { id: legacyId },
+    );
+    await expect(readJournalEntries(backend, sidecarId)).resolves.toEqual([
+      { entity: "node", kind: "Provenance", id: legacyId },
+    ]);
+
+    const upgraded = await openProvenanceStore(backend, careGraph.id);
+
+    await expect(
+      upgraded.nodes.Provenance.getById(legacyId as never),
+    ).resolves.toMatchObject({ id: legacyId });
+    await expect(readOwnerMarker(backend)).resolves.toMatchObject({
+      id: PROVENANCE_OWNER_ROW_ID,
+    });
+  });
+
+  // Each entry is one the stored `Provenance` row cannot account for. The first
+  // two differ from the row's own entry in exactly one column and reuse its id,
+  // so a rule that matched on the id alone would excuse them. The last names a
+  // `Provenance` row that IS stored, but under another graph id — what a copied
+  // sidecar or a colliding application row provides — so a rule that looked the
+  // row up without the graph id would excuse it.
+  it.each<
+    Readonly<{
+      evidence: string;
+      entryFor: (storedId: string) => JournalEntry;
+      storedUnderAnotherGraph?: true;
+    }>
+  >([
+    {
+      evidence: "a node of another kind under the stored row's id",
+      entryFor: (storedId: string) => ({
+        entity: "node",
+        kind: "Patient",
+        id: storedId,
+      }),
+    },
+    {
+      evidence: "an edge under the stored row's kind and id",
+      entryFor: (storedId: string) => ({
+        entity: "edge",
+        kind: "Provenance",
+        id: storedId,
+      }),
+    },
+    {
+      evidence: "a Provenance row that is no longer stored",
+      entryFor: () => ({
+        entity: "node",
+        kind: "Provenance",
+        id: "prov_hard-deleted",
+      }),
+    },
+    {
+      evidence: "an identity assertion",
+      entryFor: () => ({ entity: "identity", kind: "", id: "" }),
+    },
+    {
+      evidence: "a Provenance row stored only under another graph id",
+      entryFor: () => ({
+        entity: "node",
+        kind: "Provenance",
+        id: "prov_stored-elsewhere",
+      }),
+      storedUnderAnotherGraph: true,
+    },
+  ])(
+    "refuses a journaled legacy sidecar whose journal also records $evidence",
+    async ({ entryFor, storedUnderAnotherGraph }) => {
+      const backend = await makeBackend();
+      const sidecarId = provenanceGraphId(careGraph.id);
+      await installRevisionChangesJournal(backend);
+      const [legacyStore] = await createStoreWithSchema(
+        legacyShapedGraph(),
+        backend,
+      );
+      const legacyId = await provenanceNodeId(careGraph.id, SIDECAR_RECORD);
+      await legacyStore.nodes.Provenance.create(
+        { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+        { id: legacyId },
+      );
+      const entry = entryFor(legacyId);
+      if (storedUnderAnotherGraph === true) {
+        await backend.insertNode({
+          graphId: "another-graph",
+          kind: entry.kind,
+          id: entry.id,
+          props: { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+        });
+      }
+      // Plants one journal entry under the sidecar's graph id that no row
+      // stored under that graph id accounts for.
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`
+            INSERT INTO ${sql.identifier(revisionChangesTable(backend))}
+                          (entry_id, graph_id, revision, complete, entity, kind, id)
+                        VALUES (${"journal-unaccounted"}, ${sidecarId}, ${1}, TRUE, ${entry.entity}, ${entry.kind}, ${entry.id})
+          `,
+        ),
+      );
+
+      await expect(
+        openProvenanceStore(backend, careGraph.id),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+          reason: "application-graph",
+        },
+      });
+      await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+      await expect(
+        legacyStore.nodes.Provenance.getById(legacyId as never),
+      ).resolves.toMatchObject({ id: legacyId });
+    },
+  );
 
   it("claims a FREE id inside the schema fence, before registering the schema", async () => {
     cleanups = [];
