@@ -561,11 +561,13 @@ function withCascadeConsumedEdges(
  * deletes, the batch, and each cascade member — runs through this, so what one
  * node's delete owes has a single owner.
  *
- * `existing` is the live pre-image a top-level soft delete read before
- * planning its cascade. A cascade member supplies none: its row is read here,
- * at the moment of its own delete. Returns whether a row was written: `false`
- * only on the soft path, for a row that is already gone — which a caller
- * supplying `existing` has already ruled out.
+ * `existing` is the live row a top-level soft delete read before planning its
+ * cascade. A cascade member supplies none: its row is read here, at the
+ * moment of its own delete. Either way the row is evidence the node was live,
+ * not the pre-image its uniqueness release is computed from — that is read
+ * after the tombstone, by `applyNodeSoftDelete`. Returns whether a row was
+ * written: `false` only on the soft path, for a row that is already gone —
+ * which a caller supplying `existing` has already ruled out.
  */
 async function deleteNodeRowInFrame<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -783,12 +785,11 @@ async function applyCompositionCascade<G extends GraphDef>(
 ): Promise<void> {
   const memberPolicy = cascadeMemberDeletePolicy(plan);
   for (const member of plan.members) {
-    // Each member's delete reads its own pre-image now rather than writing
-    // against a row the plan read: an ordinary update takes no per-graph
-    // lock, so it can commit after the plan, and the delete must release the
-    // uniqueness entries of the props the node holds at that moment. A member
-    // gone by then is skipped. This narrows the window to the member's own
-    // read-then-write; it does not fence an unlocked writer out of it.
+    // Each member's delete reads its own row now rather than writing against
+    // one the plan read: a member gone by then is skipped. What the delete
+    // releases is decided later still, from the row as tombstoned
+    // (`applyNodeSoftDelete`), because an ordinary update takes no per-graph
+    // lock and can commit at any point before that.
     await deleteNodeRowInFrame(
       ctx,
       session,

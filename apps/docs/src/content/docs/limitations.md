@@ -271,11 +271,11 @@ are not what happens:
   the closure is read. A `SERIALIZABLE` transaction is accepted, but is
   arbitrated only against other `SERIALIZABLE` writers; delete wholes and
   attach parts at one isolation level (`READ COMMITTED`, the default).
-- **A property update racing a cascade is not fenced.** An ordinary node
-  update takes no per-graph lock. Each part's delete reads the part again
-  when it runs, so it releases the unique keys the part holds then, but an
-  update that commits between that read and the delete's own write is still
-  possible, as it is for any direct delete.
+- **A property update racing a delete is not fenced, but cannot strand a
+  unique key.** An ordinary node update takes no per-graph lock, so it can
+  commit while a delete, direct or cascaded, is in flight. The delete
+  releases the unique keys of the props the row holds once it is tombstoned,
+  so the key such an update moved the node to is released with it.
 - **There is no cascade PREVIEW API in this release.** `cascadedParts` reports
   what a delete removed, after the fact. To decide *before* deleting, read
   the closure yourself with

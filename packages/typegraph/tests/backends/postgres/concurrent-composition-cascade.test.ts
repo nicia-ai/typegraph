@@ -9,9 +9,10 @@
  *   per-graph write fence does not see a part the fence holder just attached.
  *   Such a session is refused before the closure is read.
  * - **A stale pre-image.** An ordinary property update takes no per-graph
- *   lock, so it can commit between the plan and a member's own delete. The
- *   member's delete reads its row again at that moment, so the uniqueness
- *   entries it releases are the ones the node holds then.
+ *   lock, so it can commit between a delete's read of the row and its
+ *   tombstone, for a cascade member and a directly deleted node alike. The
+ *   delete releases the uniqueness entries of the props the row holds once
+ *   it is tombstoned.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -147,6 +148,38 @@ async function untilSessionWaitsOnFence(observer: Pool): Promise<void> {
   }
 }
 
+/**
+ * A store whose deletes park at the delete-behavior judge's first connected
+ * edge read: after the delete (and a cascade's plan) has read the node rows,
+ * before any row is written. Only the timing is injected.
+ */
+function createPausedDeleter(db: NodePgDatabase): Readonly<{
+  deleter: ReturnType<typeof createStore<typeof graph>>;
+  planned: Gate;
+  resume: Gate;
+}> {
+  const backend = createPostgresBackend(db);
+  const planned = createGate();
+  const resume = createGate();
+  const pausedBackend = deriveBackend(backend, {
+    transaction: (fn, options) =>
+      backend.transaction(
+        (tx) =>
+          fn(
+            deriveBackend(tx, {
+              findEdgesConnectedTo: async (params) => {
+                planned.open();
+                await resume.opened;
+                return tx.findEdgesConnectedTo(params);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+  return { deleter: createStore(graph, pausedBackend), planned, resume };
+}
+
 describe.runIf(process.env["POSTGRES_URL"])(
   "composition cascade against a concurrent writer (PostgreSQL)",
   () => {
@@ -208,29 +241,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const backend = createPostgresBackend(live.first);
-        const planned = createGate();
-        const resume = createGate();
-        // Parks the cascade after its plan has read the member and before any
-        // row is written: the delete-behavior judge is the first caller of
-        // this read. Only the timing is injected.
-        const pausedBackend = deriveBackend(backend, {
-          transaction: (fn, options) =>
-            backend.transaction(
-              (tx) =>
-                fn(
-                  deriveBackend(tx, {
-                    findEdgesConnectedTo: async (params) => {
-                      planned.open();
-                      await resume.opened;
-                      return tx.findEdgesConnectedTo(params);
-                    },
-                  }),
-                ),
-              options,
-            ),
-        });
-        const deleter = createStore(graph, pausedBackend);
+        const { deleter, planned, resume } = createPausedDeleter(live.first);
         const updater = createStore(graph, createPostgresBackend(live.second));
         const show = await updater.nodes.Show.create({}, { id: "show" });
         const other = await updater.nodes.Show.create({}, { id: "other" });
@@ -254,6 +265,40 @@ describe.runIf(process.env["POSTGRES_URL"])(
           updater.nodes.Clip.create(
             { slug: "new" },
             { id: "clip2", partOf: { whole: other } },
+          ),
+        ).resolves.toMatchObject({ id: "clip2" });
+      },
+    );
+
+    it(
+      "releases the unique key a directly deleted node holds once it is tombstoned",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        const live = requirePostgres();
+        const { deleter, planned, resume } = createPausedDeleter(live.first);
+        const updater = createStore(graph, createPostgresBackend(live.second));
+        const show = await updater.nodes.Show.create({}, { id: "show" });
+        const clip = await updater.nodes.Clip.create(
+          { slug: "old" },
+          { id: "clip", partOf: { whole: show } },
+        );
+
+        // Parked after the delete read its pre-image, before the tombstone.
+        const deletion = deleter.nodes.Clip.delete(clip.id);
+        await planned.opened;
+        await updater.nodes.Clip.update(clip.id, { slug: "new" });
+        resume.open();
+        await deletion;
+
+        // MUTATION CHECK: releasing from the pre-image's props in
+        // `applyNodeSoftDelete` leaves "new" claimed by the tombstoned clip,
+        // and this create is refused with UniquenessError — verified and
+        // reverted.
+        expect(await updater.nodes.Clip.getById(clip.id)).toBeUndefined();
+        await expect(
+          updater.nodes.Clip.create(
+            { slug: "new" },
+            { id: "clip2", partOf: { whole: show } },
           ),
         ).resolves.toMatchObject({ id: "clip2" });
       },
