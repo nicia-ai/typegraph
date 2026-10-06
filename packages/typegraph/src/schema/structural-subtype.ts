@@ -1126,7 +1126,7 @@ function compareObject(
   const childPropertyNames = child.propertyNames ?? { type: STRING_TYPE_TOKEN };
   if (
     parent.propertyNames !== undefined &&
-    !propertySchemasEqual(childPropertyNames, parent.propertyNames)
+    !sameSchema(childPropertyNames, parent.propertyNames, walk)
   ) {
     return notSubtype("property-names-mismatch", [
       ...path,

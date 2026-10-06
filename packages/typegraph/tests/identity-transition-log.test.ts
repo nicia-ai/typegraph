@@ -341,7 +341,7 @@ describe("identity transition log", () => {
     );
     await store.nodes.Person.create({ name: "A" }, { id: "a" });
     await store.nodes.Person.create({ name: "B" }, { id: "b" });
-    await store.identity.assertSame(
+    const asserted = await store.identity.assertSame(
       { kind: "Person", id: "a" },
       { kind: "Person", id: "b" },
     );
@@ -350,6 +350,9 @@ describe("identity transition log", () => {
     const rows = await readTransitions(ctx);
     const detachRows = rows.filter((row) => row.cause === "detach");
     expect(detachRows.length).toBeGreaterThanOrEqual(1);
+    for (const row of detachRows) {
+      expect(row.assertion_ids).toEqual([asserted.assertion.id]);
+    }
   });
 
   it("checkpoints and restores buffered identity-transition notes exactly like every other touch", async () => {
@@ -732,7 +735,7 @@ describe("identity transition log", () => {
     const tag = await evolved.getNodeCollectionOrThrow("Tag").create({
       label: "author",
     });
-    await evolved.identity.assertSame(person, tag);
+    const asserted = await evolved.identity.assertSame(person, tag);
 
     const removed = await evolved.removeKinds(["Tag"]);
     const ctx = storeRuntime(removed).identityContext();
@@ -750,6 +753,9 @@ describe("identity transition log", () => {
     );
     const kindDropRows = rows.filter((row) => row.cause === "kind-drop");
     expect(kindDropRows.length).toBeGreaterThanOrEqual(1);
+    for (const row of kindDropRows) {
+      expect(row.assertion_ids).toEqual([asserted.assertion.id]);
+    }
   });
 
   it("notes a schema-transition cause when first enablement folds a pre-existing same-id pair", async () => {

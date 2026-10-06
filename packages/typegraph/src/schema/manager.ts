@@ -2129,8 +2129,10 @@ export async function getSchemaChanges<G extends GraphDef>(
  * when the stored or the current ontology adds or removes a relation whose
  * coherence `getSchemaChanges` could not determine (`ConfigurationError` from
  * `classifyOntologyChanges` — a schema document written under an older,
- * laxer validator can hold an ontology today's hardening rejects). A document
- * this predicate cannot interpret is, by construction, one the privileged
+ * laxer validator can hold an ontology today's hardening rejects), or when
+ * the current graph declares a `subClassOf`/`equivalentTo`/`sameAs` hierarchy
+ * the structural-subsumption check refuses, whether or not anything changed.
+ * A document this predicate cannot interpret is, by construction, one the privileged
  * path must look at, so this function never throws for that reason: it is
  * the routing check a least-privilege runtime relies on to decide *before* a
  * write discovers the migration wall mid-request, and a throw here would

@@ -1423,6 +1423,15 @@ function chainedReferenceSchema(minLength: number, extra: boolean): JsonSchema {
   };
 }
 
+function recordWithKeyLimit(maxLength: number): JsonSchema {
+  return {
+    type: "object",
+    propertyNames: { $ref: "#/$defs/key" },
+    additionalProperties: { type: "string" },
+    $defs: { key: { type: "string", maxLength } },
+  };
+}
+
 describe("a `$ref` is identical only when what it resolves to is", () => {
   interface Tree {
     readonly value: string;
@@ -1445,16 +1454,6 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
     const parent = projected(parentSchema);
     const child = projected(childSchema);
     const value = { tree: { value: "a", children: [] } };
-    console.log(
-      "child tree:",
-      JSON.stringify(child.properties?.["tree"]),
-      "parent tree:",
-      JSON.stringify(parent.properties?.["tree"]),
-      "child $defs:",
-      JSON.stringify(child["$defs"]),
-      "parent $defs:",
-      JSON.stringify(parent["$defs"]),
-    );
     // The trap: the property schemas are textually the same reference.
     expect(child.properties?.["tree"]).toEqual(parent.properties?.["tree"]);
     expect(child["$defs"]).not.toEqual(parent["$defs"]);
@@ -1510,6 +1509,18 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
       verdict: "incomparable",
       reason: "schema-reference",
     });
+  });
+
+  it("compares `propertyNames` by what its reference resolves to, not by its name", () => {
+    expect(
+      isStructuralSubtype(recordWithKeyLimit(10), recordWithKeyLimit(3)),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "property-names-mismatch",
+    });
+    expect(
+      isStructuralSubtype(recordWithKeyLimit(3), recordWithKeyLimit(3)),
+    ).toEqual({ verdict: "subtype" });
   });
 
   it("follows a definition that references another definition", () => {
