@@ -1100,8 +1100,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // through the identity lineage reads and gain it as a second name. Delta: +1 at
   // `.` and `./schema`, +2 at each of the seven; no other entrypoint moved.
   ".": {
-    count: 542,
-    sha256: "25819f0665670abf719249ccb38ace3f4234fbdc3e26a7250eb6e5ffe3c0a0eb",
+    count: 543,
+    sha256: "414192087274739706c7e0600a45eeb90193b2b158b462749f382513ed54c37b",
   },
   "./adapters/drizzle/engine": {
     count: 345,
@@ -1120,13 +1120,13 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // visible here. Keep that large type graph isolated from the established
   // PostgreSQL adapter and pin its exact symbol set.
   // `IdentityRestoreBaseline` is the destination snapshot an archival
-  // transition restore decides on, named by
+  // transition restore decides on, named only by the internal
   // `StoreRuntime.readIdentityRestoreBaselineAtTarget` and
-  // `importIdentityTransitionsAtTarget`. `.` exports it directly; the seven
-  // Store-bearing entrypoints (`./adapters/drizzle/postgres/working-copy`,
+  // `importIdentityTransitionsAtTarget`. No entrypoint exports it: `.` and
+  // the seven Store-bearing entrypoints (`./adapters/drizzle/postgres/working-copy`,
   // `./graph-merge`, `./interchange`, `./postgres/pglite`, `./profiler`,
   // `./provenance`, `./sqlite/local`) reach it only through the runtime port
-  // and gain it as a forgotten name: +1 apiece, no other name moved.
+  // and carry it as a forgotten name: +1 apiece, no other name moved.
   "./adapters/drizzle/postgres/working-copy": {
     count: 942,
     sha256: "e540b44220daa7f999be7566b547f6e5d3b092d42db74aa14ddb3af97db5caf2",

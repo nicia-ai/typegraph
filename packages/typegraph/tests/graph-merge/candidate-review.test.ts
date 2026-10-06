@@ -9,6 +9,8 @@ import {
   isErr,
   MERGE_REVIEW_FORMAT_VERSION,
   MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+  MERGE_REVIEW_FORMAT_VERSION_V1,
+  MERGE_REVIEW_FORMAT_VERSION_V2,
   MergePlanningStaleError,
   MergeReviewError,
   planCandidateWriteSetReview,
@@ -20,7 +22,11 @@ import {
   reviewDigest,
   reviewOptionEvidence,
 } from "../../src/graph-merge/review-evidence";
-import type { MergeReviewArtifact } from "../../src/graph-merge/review-schema";
+import {
+  isSupportedMergeReviewFormatVersion,
+  type MergeReviewArtifact,
+  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
+} from "../../src/graph-merge/review-schema";
 import { storeBackend } from "../../src/store/runtime-port";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
@@ -141,7 +147,23 @@ describe("candidate review wire and coherent capture", () => {
 
   // Formats 1 and 2 are the whole-target and candidate-scoped formats that
   // embedded a version-1 plan.
-  it.each([1, 2])(
+  /* eslint-disable @typescript-eslint/no-deprecated -- the deprecated historical constants are the subject of these tests. */
+  it("keeps the historical format constants at their released values, outside the supported set", () => {
+    expect(MERGE_REVIEW_FORMAT_VERSION_V1).toBe(1);
+    expect(MERGE_REVIEW_FORMAT_VERSION_V2).toBe(2);
+    expect(MERGE_REVIEW_FORMAT_VERSION).toBe(3);
+    expect(MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED).toBe(4);
+    expect(SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS).toEqual([3, 4]);
+    for (const historical of [
+      MERGE_REVIEW_FORMAT_VERSION_V1,
+      MERGE_REVIEW_FORMAT_VERSION_V2,
+    ])
+      expect(isSupportedMergeReviewFormatVersion(historical)).toBe(false);
+    for (const supported of SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)
+      expect(isSupportedMergeReviewFormatVersion(supported)).toBe(true);
+  });
+
+  it.each([MERGE_REVIEW_FORMAT_VERSION_V1, MERGE_REVIEW_FORMAT_VERSION_V2])(
     "refuses a review stored under earlier format %d as an unsupported version, not as malformed",
     async (earlierFormat) => {
       const { args } = await setup();
@@ -170,6 +192,7 @@ describe("candidate review wire and coherent capture", () => {
       expect(makeBackend).not.toHaveBeenCalled();
     },
   );
+  /* eslint-enable @typescript-eslint/no-deprecated */
 
   it("refuses a mixed-revision baseline even when the inner planner sees a stable newer target", async () => {
     const { args, backend } = await setup();

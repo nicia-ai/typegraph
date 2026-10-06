@@ -591,11 +591,20 @@ The review artifact records its format and scope, so revalidation applies the
 rule originally reviewed. A review stored under format 1 or 2 embeds a
 version-1 plan and is refused with `MergeReviewError`
 `details.reason: "unsupported-version"`; plan and review the candidate write
-set again.
-Candidate-scoped review refuses graphs outside those eligibility rules.
+set again. `MERGE_REVIEW_FORMAT_VERSION_V1` and
+`MERGE_REVIEW_FORMAT_VERSION_V2` remain exported as deprecated historical
+constants (`1` and `2`) naming exactly those formats this release refuses as
+`unsupported-version`; neither is a supported format.
+
+An explicitly requested candidate review scope (`reviewScope: "candidate"`) is
+refused with `details.reason: "candidate-scope-ineligible"` on a graph outside
+the eligibility rules. Candidate write-set planning is not refused for
+ineligibility: `planCandidateWriteSet`, and a review planned without
+`reviewScope`, silently fall back to the complete-clone, whole-target planner
+there and yield the plan and conflicts that planner yields.
 On a `oneActive` graph, a custom backend must expose
-`findActiveEdgesBySourceV1` for candidate-scoped review; the complete-clone
-candidate planner and whole-target review remain available when it does not.
+`findActiveEdgesBySourceV1` for a candidate-scoped review; without it the
+fallback and the whole-target review remain available.
 A graph that declares a target-side cardinality, an `acyclic` edge or a
 composition pair is not eligible either: those constraints depend on rows
 outside the candidate's own scope.

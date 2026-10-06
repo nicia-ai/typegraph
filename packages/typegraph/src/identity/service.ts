@@ -55,7 +55,6 @@ export type {
   IdentityTransferAssertion,
 } from "./service-types";
 export type {
-  IdentityRestoreBaseline,
   IdentityTransitionCursor,
   IdentityTransitionTransfer,
 } from "./transition-log";
