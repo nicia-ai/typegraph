@@ -182,6 +182,7 @@ function createQueryBuilderWithContext<
   const schemaIntrospector = createSchemaIntrospector(
     registry.nodeKinds,
     registry.edgeKinds,
+    (childKind, parentKind) => registry.isAssignableTo(childKind, parentKind),
   );
   if (options?.identityEnabled === true && registry.identity === undefined) {
     throw new ConfigurationError(

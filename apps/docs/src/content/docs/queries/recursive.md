@@ -582,8 +582,10 @@ no extra call.
 
 **Recursion is the default**, matching the value proposition over `traverse()`:
 `parts()`/`wholes()` reach the full transitive closure unless you pass
-`maxHops: 1` for the direct level only. `depth` and `path` behave exactly as
-they do for `.recursive({ depth, path })`. Like any recursive step, they chain
+`maxHops: 1` for the direct level only. Unlike a bare `.recursive()`, which
+stops at 10 hops unless told otherwise, an omitted `maxHops` here recurses to
+the deepest bound a recursive traversal accepts (1000 levels). `depth` and
+`path` behave exactly as they do for `.recursive({ depth, path })`. Like any recursive step, they chain
 after earlier fixed or recursive traversals as a later stage (see
 [Chaining Fixed and Recursive Traversals](#chaining-fixed-and-recursive-traversals)).
 
@@ -596,6 +598,13 @@ const directChildren = await store
   .select((ctx) => ctx.x)
   .execute();
 ```
+
+**`via` narrows the walk to one realizing edge.** `parts("x", { via: episodeOf })`
+on the Podcast above follows `episodeOf` alone, so it returns the Episodes and
+not their Segments; pass the edge's type or its kind string. A `via` that
+realizes no pair at the source alias itself, such as `segmentOf` on a Podcast,
+is refused with `ConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`), and
+`details.declaredVia` lists the edges that would work.
 
 **The result alias is untyped** (reached via `.field(name)`, like
 [`fromDynamic`](/queries/source#runtime-declared-kinds)): the parts or wholes

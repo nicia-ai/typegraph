@@ -659,8 +659,9 @@ Both `paginate()` and `stream()` require an `orderBy()` clause:
 Cursor pagination and streaming automatically append the keys that identify one result row, so a
 sort that ties never skips or repeats a row at a page boundary. For the start node that is
 `id ASC`, or `kind ASC` and `id ASC` for a multi-kind source. Each traversal then adds the `id` of
-the edge it matched: one start node that fans out into several rows, and two parallel edges
-between the same pair of nodes, page as distinct rows. Existing caller-specified identity ordering
+the edge it matched: one start node that fans out into several rows, two parallel edges
+between the same pair of nodes, and several rows that reach one intermediate node of a multi-hop
+traversal, page as distinct rows. Existing caller-specified identity ordering
 is preserved, and order keys may read any alias in the query: the start node, a traversed node, or
 an edge. Offset pagination needs an explicit total ordering.
 

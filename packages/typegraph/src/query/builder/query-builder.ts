@@ -44,6 +44,7 @@ import {
   type TraversalDirection,
   type TraversalExpansion,
 } from "../ast";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../compiler";
 import { validateAggregateOperand } from "../compiler/aggregate-validation";
 import {
   createOuterReferenceExpression,
@@ -131,6 +132,15 @@ import {
   validateTraversalOptions,
 } from "./validation";
 
+/**
+ * How deep `parts()`/`wholes()` recurse when the caller states no `maxHops`.
+ * A composition is a forest (each part holds one whole, and the realizing
+ * edges are acyclic), so the closure is bounded by the stored rows rather than
+ * by a branching factor, and the widest bound a recursive traversal accepts
+ * costs nothing extra.
+ */
+const COMPOSITION_CLOSURE_MAX_HOPS = MAX_EXPLICIT_RECURSIVE_DEPTH;
+
 function resolveAggregateFieldTypeInfo(
   introspector: SchemaIntrospector,
   nodeKindNames: readonly string[] | undefined,
@@ -199,7 +209,10 @@ type DynamicNodeTypeFor<T> =
 export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
   /** Alias to navigate from (defaults to current/last traversal target). */
   from?: keyof Aliases & string;
-  /** Maximum recursion depth. `1` reaches only the direct level. */
+  /**
+   * Maximum recursion depth. `1` reaches only the direct level; omitted, the
+   * walk recurses to the deepest bound a recursive traversal accepts.
+   */
   maxHops?: number;
   /**
    * Include recursion depth in output, as `.recursive({ depth })` takes it:
@@ -213,9 +226,10 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
    */
   path?: RecursiveTraversalOptions["path"];
   /**
-   * Realize the walk through this edge only. An edge TYPE is checked at
-   * compile time; a kind string is checked at runtime. A kind that realizes
-   * no composition pair for the source alias is refused
+   * Realize the walk through this edge only, reaching the kinds this edge
+   * alone reaches from the source alias. An edge TYPE is checked at compile
+   * time; a kind string is checked at runtime. A kind that realizes no
+   * composition pair at the source alias itself is refused
    * (`COMPOSITION_VIA_NOT_DECLARED`), never silently dropped.
    */
   via?: CompositionViaRef;
@@ -1009,8 +1023,11 @@ export class QueryBuilder<
    * one) pays nothing extra to compile.
    *
    * Recurses by default — the difference from `traverse`, which reaches only
-   * the direct level — to the full transitive parts closure; pass `maxHops:
-   * 1` for direct parts only. The result alias stays `DynamicNodeType`: a
+   * the direct level — to the full transitive parts closure, up to the
+   * deepest bound a recursive traversal accepts rather than a bare
+   * `.recursive()`'s implicit cap; pass `maxHops: 1` for direct parts only.
+   * `via` narrows the walk to one realizing edge and to the kinds that edge
+   * alone reaches. The result alias stays `DynamicNodeType`: a
    * realizing edge can admit more than one part kind, and a conditional node
    * type on this alias is not assignable back onto `QueryBuilder`. `via` as
    * an edge type does type the edge alias.
@@ -1142,6 +1159,13 @@ export class QueryBuilder<
       relation === "parts" ?
         registry.compositionPartKindsUnder(kind)
       : registry.compositionWholeKindsOver(kind);
+    const targetKindsVia = (
+      kind: string,
+      viaEdgeKind: string,
+    ): readonly string[] =>
+      relation === "parts" ?
+        registry.compositionPartKindsUnderVia(kind, viaEdgeKind)
+      : registry.compositionWholeKindsOverVia(kind, viaEdgeKind);
 
     const edgeKinds = new Set<string>();
     for (const kind of sourceKinds) {
@@ -1149,8 +1173,25 @@ export class QueryBuilder<
     }
     const viaKind =
       options?.via === undefined ? undefined : compositionViaKind(options.via);
+    // A walk narrowed to one edge reaches only what that edge reaches from
+    // the source alias, so its target kinds are that edge's own closure, not
+    // the whole composition closure.
+    const declaredTargetKinds = new Set(
+      sourceKinds.flatMap((kind) =>
+        viaKind === undefined ?
+          targetKindsUnder(kind)
+        : targetKindsVia(kind, viaKind),
+      ),
+    );
     if (viaKind !== undefined) {
-      if (!edgeKinds.has(viaKind)) {
+      if (declaredTargetKinds.size === 0) {
+        const declaredVia = [...edgeKinds]
+          .filter((edgeKind) =>
+            sourceKinds.some(
+              (kind) => targetKindsVia(kind, edgeKind).length > 0,
+            ),
+          )
+          .toSorted();
         throw new ConfigurationError(
           `.${relation}("${nodeAlias}") via "${viaKind}" realizes no composition pair for alias "${fromAlias}".`,
           {
@@ -1158,7 +1199,7 @@ export class QueryBuilder<
             relation,
             alias: fromAlias,
             via: viaKind,
-            declaredVia: [...edgeKinds].toSorted(),
+            declaredVia,
           },
           {
             suggestion: `Pass via naming one of the declared realizing edges, or omit it to walk every composition edge of this alias.`,
@@ -1203,11 +1244,9 @@ export class QueryBuilder<
     // applies, or a real row is silently dropped from the result instead of
     // refused or returned.
     const targetKinds = new Set<string>();
-    for (const kind of sourceKinds) {
-      for (const targetKind of targetKindsUnder(kind)) {
-        for (const concreteKind of registry.expandSubClasses(targetKind)) {
-          targetKinds.add(concreteKind);
-        }
+    for (const targetKind of declaredTargetKinds) {
+      for (const concreteKind of registry.expandSubClasses(targetKind)) {
+        targetKinds.add(concreteKind);
       }
     }
 
@@ -1287,7 +1326,8 @@ export class QueryBuilder<
     // Sorted for deterministic output.
     const targetKindList = [...targetKinds].toSorted();
 
-    // Recurse by default (the value proposition versus `traverse`): skip only
+    // Recurse by default (the value proposition versus `traverse`), to the
+    // closure rather than a bare `.recursive()`'s implicit cap: skip only
     // when the caller both asked for exactly one hop and requested neither a
     // depth nor a path column, so no accepted option is ever silently
     // dropped by the optimization.
@@ -1298,9 +1338,7 @@ export class QueryBuilder<
     return (willRecurse ?
       traversalBuilder
         .recursive({
-          ...(options?.maxHops === undefined ?
-            {}
-          : { maxHops: options.maxHops }),
+          maxHops: options?.maxHops ?? COMPOSITION_CLOSURE_MAX_HOPS,
           ...(options?.depth === undefined ? {} : { depth: options.depth }),
           ...(options?.path === undefined ? {} : { path: options.path }),
         })

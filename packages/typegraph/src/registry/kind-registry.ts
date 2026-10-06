@@ -685,6 +685,62 @@ export class KindRegistry {
   }
 
   /**
+   * The kinds reachable from `kind` along one direction through
+   * `viaEdgeKind` ALONE: the opposite endpoint of each of that edge's pairs
+   * `kind` anchors, then of each pair a reached kind anchors, to a fixed
+   * point. A reached kind anchors a pair declared against itself, a kind it
+   * is assignable to, or one of its subclasses, since its rows may be of any
+   * of them. Empty when `viaEdgeKind` realizes no pair at `kind` itself.
+   */
+  #compositionKindsAlongVia(
+    kind: string,
+    side: CompositionSide,
+    viaEdgeKind: string,
+  ): readonly string[] {
+    const pairs = this.#composition.pairs.filter(
+      (pair) => pair.viaEdgeKind === viaEdgeKind,
+    );
+    const reached = new Set<string>();
+    const pending = [kind];
+    for (const anchorKind of pending) {
+      for (const pair of pairs) {
+        const [anchor, target] =
+          side === "part" ?
+            [pair.wholeKind, pair.partKind]
+          : [pair.partKind, pair.wholeKind];
+        const anchors =
+          this.isAssignableTo(anchorKind, anchor) ||
+          (anchorKind !== kind && this.isAssignableTo(anchor, anchorKind));
+        if (!anchors || reached.has(target)) continue;
+        reached.add(target);
+        pending.push(target);
+      }
+    }
+    return [...reached].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+  }
+
+  /**
+   * Every part kind under `wholeKind` reachable through `viaEdgeKind` alone
+   * — the by-`via` narrowing of {@link compositionPartKindsUnder}.
+   */
+  compositionPartKindsUnderVia(
+    wholeKind: string,
+    viaEdgeKind: string,
+  ): readonly string[] {
+    return this.#compositionKindsAlongVia(wholeKind, "part", viaEdgeKind);
+  }
+
+  /** The wholes mirror of {@link compositionPartKindsUnderVia}. */
+  compositionWholeKindsOverVia(
+    partKind: string,
+    viaEdgeKind: string,
+  ): readonly string[] {
+    return this.#compositionKindsAlongVia(partKind, "whole", viaEdgeKind);
+  }
+
+  /**
    * The whole-side population a composition part of this concrete kind is
    * held to — total over every concrete node kind that can appear as a
    * composition part, because `ONTOLOGY_COMPOSITION_POPULATION_MIXED`

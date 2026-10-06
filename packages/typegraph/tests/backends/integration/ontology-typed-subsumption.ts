@@ -11,10 +11,12 @@ import { z } from "zod";
 
 import {
   broader,
+  count,
   defineEdge,
   defineGraph,
   defineNode,
   embedding,
+  field,
   searchable,
   subClassOf,
 } from "../../../src";
@@ -127,6 +129,80 @@ const searchGraph = defineGraph({
   edges: {},
   ontology: [subClassOf(SearchPodcast, SearchMedia)],
 });
+
+// A hierarchy the structural contract admits: the subclass omits every
+// parent-optional property, and narrows `code` from `string | number` to
+// `string`. The parent alias promises the parent's property types.
+const OptionalMedia = defineNode("TsOptionalMedia", {
+  schema: z.object({
+    title: z.string(),
+    tags: z.array(z.string()).optional(),
+    featured: z.boolean().optional(),
+    info: z.object({ lang: z.string() }).optional(),
+    rank: z.number().optional(),
+    code: z.union([z.string(), z.number()]).optional(),
+  }),
+});
+const OptionalPodcast = defineNode("TsOptionalPodcast", {
+  schema: z.object({
+    title: z.string(),
+    rssUrl: z.string(),
+    code: z.string().optional(),
+  }),
+});
+
+const optionalFieldGraph = defineGraph({
+  id: "typed_subsumption_optional_field_integration",
+  nodes: {
+    TsOptionalMedia: { type: OptionalMedia },
+    TsOptionalPodcast: { type: OptionalPodcast },
+  },
+  edges: {},
+  ontology: [subClassOf(OptionalPodcast, OptionalMedia)],
+});
+
+// The parent declares the only `searchable()` field; the subclass redeclares
+// `title` as a plain string, which is the same structural type.
+const SearchableDocument = defineNode("TsSearchableDoc", {
+  schema: z.object({ title: searchable({ language: "english" }) }),
+});
+const PlainMemo = defineNode("TsPlainMemo", {
+  schema: z.object({ title: z.string(), note: z.string() }),
+});
+
+const parentSearchableGraph = defineGraph({
+  id: "typed_subsumption_parent_searchable_integration",
+  nodes: {
+    TsSearchableDoc: { type: SearchableDocument },
+    TsPlainMemo: { type: PlainMemo },
+  },
+  edges: {},
+  ontology: [subClassOf(PlainMemo, SearchableDocument)],
+});
+
+async function seedOptionalFieldStore(context: IntegrationTestContext) {
+  const store = await context.createStore(optionalFieldGraph);
+  await store.nodes.TsOptionalMedia.create({
+    title: "alpha",
+    tags: ["a", "b"],
+    featured: true,
+    info: { lang: "en" },
+    rank: 3,
+    code: "c",
+  });
+  await store.nodes.TsOptionalMedia.create({
+    title: "bravo",
+    featured: false,
+    rank: 1,
+    code: "a",
+  });
+  await store.nodes.TsOptionalPodcast.create({
+    title: "charlie",
+    rssUrl: "https://x",
+    code: "b",
+  });
+  return store;
+}
 
 export function registerOntologyTypedSubsumptionIntegrationTests(
   context: IntegrationTestContext,
@@ -338,6 +414,127 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       expect(result.affectedCount).toBe(1);
       const stillPodcast = await store.nodes.TsPodcast.getById(podcast.id);
       expect(stillPodcast?.title).toBe("before");
+    });
+  });
+
+  describe("Typed subsumption — parent properties a subclass omits", () => {
+    it("decodes a field-level select as the parent's property types", async () => {
+      const store = await seedOptionalFieldStore(context);
+
+      const exact = await store
+        .query()
+        .from("TsOptionalMedia", "m", { expansion: "exact" })
+        .orderBy("m", "title", "asc")
+        .select((ctx) => ({
+          title: ctx.m.title,
+          tags: ctx.m.tags,
+          featured: ctx.m.featured,
+          info: ctx.m.info,
+          rank: ctx.m.rank,
+        }))
+        .execute();
+      const polymorphic = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .orderBy("m", "title", "asc")
+        .select((ctx) => ({
+          title: ctx.m.title,
+          tags: ctx.m.tags,
+          featured: ctx.m.featured,
+          info: ctx.m.info,
+          rank: ctx.m.rank,
+        }))
+        .execute();
+
+      expect(exact[0]).toEqual({
+        title: "alpha",
+        tags: ["a", "b"],
+        featured: true,
+        info: { lang: "en" },
+        rank: 3,
+      });
+      expect(polymorphic.slice(0, 2)).toEqual(exact);
+      expect(polymorphic[2]?.title).toBe("charlie");
+      expect(polymorphic[2]?.tags ?? undefined).toBeUndefined();
+      expect(polymorphic[2]?.featured ?? undefined).toBeUndefined();
+      expect(polymorphic[2]?.info ?? undefined).toBeUndefined();
+    });
+
+    it("filters, orders and groups by a parent property a subclass omits or narrows", async () => {
+      const store = await seedOptionalFieldStore(context);
+
+      const filtered = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .whereNode("m", (m) => m.rank.gt(1))
+        .select((ctx) => ctx.m.title)
+        .execute();
+      expect(filtered).toEqual(["alpha"]);
+
+      const byRank = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .whereNode("m", (m) => m.rank.isNotNull())
+        .orderBy("m", "rank", "asc")
+        .select((ctx) => ctx.m.title)
+        .execute();
+      expect(byRank).toEqual(["bravo", "alpha"]);
+
+      const byCode = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .orderBy("m", "code", "asc")
+        .select((ctx) => ctx.m.title)
+        .execute();
+      expect(byCode).toEqual(["bravo", "charlie", "alpha"]);
+
+      const grouped = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .groupBy("m", "featured")
+        .aggregate({ featured: field("m", "featured"), total: count("m") })
+        .execute();
+      expect(grouped).toHaveLength(3);
+      expect(grouped.find((row) => row.featured === true)?.total).toBe(1);
+      expect(grouped.find((row) => row.featured === false)?.total).toBe(1);
+    });
+
+    it("still refuses a property only the subclass declares", async () => {
+      const store = await context.createStore(optionalFieldGraph);
+
+      expect(() =>
+        store
+          .query()
+          .from("TsOptionalMedia", "m")
+          .orderBy("m", "rssUrl", "asc"),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("runs $fulltext.matches() when only the parent kind declares searchable content", async (ctx) => {
+      const store = await context.createStore(parentSearchableGraph);
+      if (store.backend.capabilities.fulltext?.supported !== true) {
+        ctx.skip();
+      }
+
+      const document = await store.nodes.TsSearchableDoc.create({
+        title: "unique_ts_parent_marker climate",
+      });
+      await store.nodes.TsPlainMemo.create({
+        title: "unique_ts_parent_marker climate",
+        note: "not indexed",
+      });
+
+      const matches = await store
+        .query()
+        .from("TsSearchableDoc", "d")
+        .whereNode("d", (d) => d.$fulltext.matches("unique_ts_parent_marker"))
+        .select((selection) => ({
+          id: selection.d.id,
+          kind: selection.d.kind,
+        }))
+        .execute();
+
+      expect(matches).toEqual([{ id: document.id, kind: "TsSearchableDoc" }]);
     });
   });
 
