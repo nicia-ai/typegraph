@@ -201,8 +201,9 @@ a `differentFrom` relation exactly like the always-safe row.
 - **Removing `disjointWith`** never invalidates anything — loosening a
   constraint cannot make an existing row wrong — so it stays safe and
   auto-migrates unconditionally.
-- **Adding or removing `inverseOf` or `implies`** changes what a default
-  `expand: "inverse"` / `expand: "implying"` traversal returns for existing
+- **Adding or removing `inverseOf` or `implies`** changes what an
+  `expand: "inverse"` (the store default) or opt-in `expand: "implying"`
+  traversal returns for existing
   edges — a read-semantics change, not a data-validity one — so it is
   `breaking` and requires an explicit `migrateSchema()`, the same treatment
   the Operational Identity `sameIdAcrossKinds` flip gets.

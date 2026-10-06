@@ -2399,7 +2399,7 @@ TOMBSTONED whole is reported — a state the delete cascade cannot produce, but 
 direct backend write, a custom port, or a bypassed import can. The write path's
 own incumbent decision is deliberately narrower: a tombstoned whole still holds
 its part's attachment there, so a second whole cannot quietly take it. Unlike
-the claim-backed families, this one is a portable scan (`findNodesByKind` paged,
+the families a backend answers, this one is a portable scan (`findNodesByKind` paged,
 each page's attachments resolved through the same owner the write-path detach
 refusal reads, and each page's wholes read once per kind through the batch
 point read) rather than a `readConstraintFenceViolations` backend member — this runs only at an

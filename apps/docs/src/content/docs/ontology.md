@@ -803,7 +803,7 @@ into a store or committed as a schema version (`createStore`,
 authored through a graph extension, not just `implies()` calls in code.
 
 **Changing this on a populated graph**: adding or removing `implies` changes
-what a default `expand: "implying"` traversal returns for existing edges —
+what an `expand: "implying"` traversal returns for existing edges —
 the same read-semantics reasoning as `inverseOf` — so it is also `breaking`
 and requires an explicit `migrateSchema()`. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
