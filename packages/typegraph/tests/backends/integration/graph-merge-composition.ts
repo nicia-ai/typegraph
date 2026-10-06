@@ -244,6 +244,42 @@ export function registerGraphMergeCompositionIntegrationTests(
           expect(await target.verifyConstraintFences()).toEqual([]);
         });
 
+        it("merges a create and a reparent into a history-capturing target", async () => {
+          // History capture records every replayed row; the plan's
+          // composition rows must still land as one unit there.
+          const target = await context.createHistoryStore(
+            compositionGraph(existence, cardinality),
+          );
+          await target.nodes.GmcWhole.create({ label: "w1" }, { id: "w1" });
+          await target.nodes.GmcWhole.create({ label: "w2" }, { id: "w2" });
+          await target.nodes.GmcPart.create(
+            { label: "p1" },
+            { id: "p1", partOf: { whole: wholeRef("w1") } },
+          );
+          const source = unwrap(
+            await branch(target, () => context.createIsolatedBackend(), {
+              id: asBranchId("branch-a"),
+            }),
+          );
+          await source.store.nodes.GmcPart.reparent(
+            asNodeId<typeof Part>("p1"),
+            { whole: wholeRef("w2") },
+          );
+          await source.store.nodes.GmcPart.create(
+            { label: "p2" },
+            { id: "p2", partOf: { whole: wholeRef("w1") } },
+          );
+
+          const merged = await merge(target, [source]);
+          if (isErr(merged)) throw merged.error;
+
+          const edges = await target.edges.gmcHolds.find();
+          expect(
+            Object.fromEntries(edges.map((edge) => [edge.fromId, edge.toId])),
+          ).toEqual({ p1: "w2", p2: "w1" });
+          expect(await target.verifyConstraintFences()).toEqual([]);
+        });
+
         it("reports no orphan for a part the plan itself deletes", async () => {
           const target = await seededTarget(context, existence, cardinality);
           const source = await fork(context, target);
