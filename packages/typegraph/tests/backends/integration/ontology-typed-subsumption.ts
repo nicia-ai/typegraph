@@ -11,14 +11,20 @@ import { z } from "zod";
 
 import {
   broader,
+  count,
   defineEdge,
   defineGraph,
   defineNode,
   embedding,
+  field,
   searchable,
   subClassOf,
 } from "../../../src";
-import { ConfigurationError, EndpointError } from "../../../src/errors";
+import {
+  ConfigurationError,
+  EndpointError,
+  UnsupportedPredicateError,
+} from "../../../src/errors";
 import { type IntegrationTestContext } from "./test-context";
 
 const Media = defineNode("TsMedia", {
@@ -127,6 +133,117 @@ const searchGraph = defineGraph({
   edges: {},
   ontology: [subClassOf(SearchPodcast, SearchMedia)],
 });
+
+// A hierarchy the structural contract admits: the subclass omits every
+// parent-optional property, and narrows `code` from `string | number` to
+// `string`. The parent alias promises the parent's property types.
+const OptionalMedia = defineNode("TsOptionalMedia", {
+  schema: z.object({
+    title: z.string(),
+    tags: z.array(z.string()).optional(),
+    featured: z.boolean().optional(),
+    info: z.object({ lang: z.string() }).optional(),
+    rank: z.number().optional(),
+    code: z.union([z.string(), z.number()]).optional(),
+  }),
+});
+const OptionalPodcast = defineNode("TsOptionalPodcast", {
+  schema: z.object({
+    title: z.string(),
+    rssUrl: z.string(),
+    code: z.string().optional(),
+  }),
+});
+
+const optionalFieldGraph = defineGraph({
+  id: "typed_subsumption_optional_field_integration",
+  nodes: {
+    TsOptionalMedia: { type: OptionalMedia },
+    TsOptionalPodcast: { type: OptionalPodcast },
+  },
+  edges: {},
+  ontology: [subClassOf(OptionalPodcast, OptionalMedia)],
+});
+
+// The parent declares the only `searchable()` and `embedding()` fields, both
+// optional. The structural contract does not see either annotation, so a
+// subclass may omit the field (it holds no such content) or redeclare it as a
+// plain string / number array (it holds content the parent's index never
+// reaches).
+const SearchableDocument = defineNode("TsSearchableDoc", {
+  schema: z.object({
+    title: searchable({ language: "english" }).optional(),
+    vector: embedding(3).optional(),
+  }),
+});
+const TitlelessMemo = defineNode("TsTitlelessMemo", {
+  schema: z.object({ note: z.string() }),
+});
+const RedeclaredTitleMemo = defineNode("TsRedeclaredTitleMemo", {
+  schema: z.object({ title: z.string().optional(), note: z.string() }),
+});
+const RedeclaredVectorMemo = defineNode("TsRedeclaredVectorMemo", {
+  schema: z.object({ vector: z.array(z.number()).optional() }),
+});
+
+const omittedSearchableGraph = defineGraph({
+  id: "typed_subsumption_omitted_searchable_integration",
+  nodes: {
+    TsSearchableDoc: { type: SearchableDocument },
+    TsTitlelessMemo: { type: TitlelessMemo },
+  },
+  edges: {},
+  ontology: [subClassOf(TitlelessMemo, SearchableDocument)],
+});
+
+const redeclaredTitleGraph = defineGraph({
+  id: "typed_subsumption_redeclared_title_integration",
+  nodes: {
+    TsSearchableDoc: { type: SearchableDocument },
+    TsRedeclaredTitleMemo: { type: RedeclaredTitleMemo },
+  },
+  edges: {},
+  ontology: [subClassOf(RedeclaredTitleMemo, SearchableDocument)],
+});
+
+const redeclaredVectorGraph = defineGraph({
+  id: "typed_subsumption_redeclared_vector_integration",
+  nodes: {
+    TsSearchableDoc: { type: SearchableDocument },
+    TsRedeclaredVectorMemo: { type: RedeclaredVectorMemo },
+  },
+  edges: {},
+  ontology: [
+    // The compile-time filter reads the branded `EmbeddingValue`; the registry
+    // build, which compares projected JSON Schema, accepts the plain array.
+    // @ts-expect-error a plain number array is not the branded embedding type
+    subClassOf(RedeclaredVectorMemo, SearchableDocument),
+  ],
+});
+
+async function seedOptionalFieldStore(context: IntegrationTestContext) {
+  const store = await context.createStore(optionalFieldGraph);
+  await store.nodes.TsOptionalMedia.create({
+    title: "alpha",
+    tags: ["a", "b"],
+    featured: true,
+    info: { lang: "en" },
+    rank: 3,
+    code: "c",
+  });
+  await store.nodes.TsOptionalMedia.create({
+    title: "bravo",
+    featured: false,
+    rank: 1,
+    code: "a",
+  });
+  await store.nodes.TsOptionalPodcast.create({
+    title: "charlie",
+    rssUrl: "https://x",
+    code: "b",
+  });
+  return store;
+}
 
 export function registerOntologyTypedSubsumptionIntegrationTests(
   context: IntegrationTestContext,
@@ -338,6 +455,172 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       expect(result.affectedCount).toBe(1);
       const stillPodcast = await store.nodes.TsPodcast.getById(podcast.id);
       expect(stillPodcast?.title).toBe("before");
+    });
+  });
+
+  describe("Typed subsumption — parent properties a subclass omits", () => {
+    it("decodes a field-level select as the parent's property types", async () => {
+      const store = await seedOptionalFieldStore(context);
+
+      const exact = await store
+        .query()
+        .from("TsOptionalMedia", "m", { expansion: "exact" })
+        .orderBy("m", "title", "asc")
+        .select((ctx) => ({
+          title: ctx.m.title,
+          tags: ctx.m.tags,
+          featured: ctx.m.featured,
+          info: ctx.m.info,
+          rank: ctx.m.rank,
+        }))
+        .execute();
+      const polymorphic = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .orderBy("m", "title", "asc")
+        .select((ctx) => ({
+          title: ctx.m.title,
+          tags: ctx.m.tags,
+          featured: ctx.m.featured,
+          info: ctx.m.info,
+          rank: ctx.m.rank,
+        }))
+        .execute();
+
+      expect(exact[0]).toEqual({
+        title: "alpha",
+        tags: ["a", "b"],
+        featured: true,
+        info: { lang: "en" },
+        rank: 3,
+      });
+      expect(polymorphic.slice(0, 2)).toEqual(exact);
+      expect(polymorphic[2]?.title).toBe("charlie");
+      expect(polymorphic[2]?.tags ?? undefined).toBeUndefined();
+      expect(polymorphic[2]?.featured ?? undefined).toBeUndefined();
+      expect(polymorphic[2]?.info ?? undefined).toBeUndefined();
+    });
+
+    it("filters, orders and groups by a parent property a subclass omits or narrows", async () => {
+      const store = await seedOptionalFieldStore(context);
+
+      const filtered = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .whereNode("m", (m) => m.rank.gt(1))
+        .select((ctx) => ctx.m.title)
+        .execute();
+      expect(filtered).toEqual(["alpha"]);
+
+      const byRank = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .whereNode("m", (m) => m.rank.isNotNull())
+        .orderBy("m", "rank", "asc")
+        .select((ctx) => ctx.m.title)
+        .execute();
+      expect(byRank).toEqual(["bravo", "alpha"]);
+
+      const byCode = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .orderBy("m", "code", "asc")
+        .select((ctx) => ctx.m.title)
+        .execute();
+      expect(byCode).toEqual(["bravo", "charlie", "alpha"]);
+
+      const grouped = await store
+        .query()
+        .from("TsOptionalMedia", "m")
+        .groupBy("m", "featured")
+        .aggregate({ featured: field("m", "featured"), total: count("m") })
+        .execute();
+      expect(grouped).toHaveLength(3);
+      expect(grouped.find((row) => row.featured === true)?.total).toBe(1);
+      expect(grouped.find((row) => row.featured === false)?.total).toBe(1);
+    });
+
+    it("still refuses a property only the subclass declares", async () => {
+      const store = await context.createStore(optionalFieldGraph);
+
+      expect(() =>
+        store
+          .query()
+          .from("TsOptionalMedia", "m")
+          .orderBy("m", "rssUrl", "asc"),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("runs $fulltext.matches() when the subclass omits the parent's searchable field", async (ctx) => {
+      const store = await context.createStore(omittedSearchableGraph);
+      if (store.backend.capabilities.fulltext?.supported !== true) {
+        ctx.skip();
+      }
+
+      const document = await store.nodes.TsSearchableDoc.create({
+        title: "unique_ts_parent_marker climate",
+      });
+      await store.nodes.TsTitlelessMemo.create({
+        note: "unique_ts_parent_marker climate",
+      });
+
+      const matches = await store
+        .query()
+        .from("TsSearchableDoc", "d")
+        .whereNode("d", (d) => d.$fulltext.matches("unique_ts_parent_marker"))
+        .select((selection) => ({
+          id: selection.d.id,
+          kind: selection.d.kind,
+        }))
+        .execute();
+
+      expect(matches).toEqual([{ id: document.id, kind: "TsSearchableDoc" }]);
+    });
+
+    it("refuses $fulltext.matches() when a subclass redeclares the searchable field untagged", async () => {
+      const store = await context.createStore(redeclaredTitleGraph);
+
+      let caught: unknown;
+      try {
+        store
+          .query()
+          .from("TsSearchableDoc", "d")
+          .whereNode("d", (d) => d.$fulltext.matches("anything"));
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(UnsupportedPredicateError);
+      expect((caught as Error).message).toContain(
+        'kind "TsRedeclaredTitleMemo"',
+      );
+
+      await store.nodes.TsSearchableDoc.create({ title: "alpha" });
+      await store.nodes.TsRedeclaredTitleMemo.create({
+        title: "alpha",
+        note: "n",
+      });
+      const byTitle = await store
+        .query()
+        .from("TsSearchableDoc", "d")
+        .whereNode("d", (d) => d.title.eq("alpha"))
+        .select((selection) => selection.d.kind)
+        .execute();
+      expect(byTitle.toSorted()).toEqual([
+        "TsRedeclaredTitleMemo",
+        "TsSearchableDoc",
+      ]);
+    });
+
+    it("refuses an embedding accessor when a subclass redeclares the vector field untagged", async () => {
+      const store = await context.createStore(redeclaredVectorGraph);
+
+      expect(() =>
+        store
+          .query()
+          .from("TsSearchableDoc", "d")
+          .whereNode("d", (d) => d.vector.similarTo([1, 0, 0], 5)),
+      ).toThrow(ConfigurationError);
     });
   });
 

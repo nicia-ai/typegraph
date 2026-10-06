@@ -290,6 +290,75 @@ async function seedCompositionFixtures(store: CompositionStore) {
   };
 }
 
+// A whole with two realizing edges (`vnEpisodeOf`, `vnTrailerOf`) over a
+// second level (`vnSegmentOf`): the shape `via` exists to narrow.
+const VnPodcast = defineNode("VnPodcast", {
+  schema: z.object({ title: z.string() }),
+});
+const VnEpisode = defineNode("VnEpisode", {
+  schema: z.object({ title: z.string() }),
+});
+const VnSegment = defineNode("VnSegment", {
+  schema: z.object({ title: z.string() }),
+});
+const VnTrailer = defineNode("VnTrailer", {
+  schema: z.object({ title: z.string() }),
+});
+const vnEpisodeOf = defineEdge("vnEpisodeOf", { schema: z.object({}) });
+const vnSegmentOf = defineEdge("vnSegmentOf", { schema: z.object({}) });
+const vnTrailerOf = defineEdge("vnTrailerOf", { schema: z.object({}) });
+
+const compositionViaGraph = defineGraph({
+  id: "composition_navigation_via",
+  nodes: {
+    VnPodcast: { type: VnPodcast },
+    VnEpisode: { type: VnEpisode },
+    VnSegment: { type: VnSegment },
+    VnTrailer: { type: VnTrailer },
+  },
+  edges: {
+    vnEpisodeOf: {
+      type: vnEpisodeOf,
+      from: [VnEpisode],
+      to: [VnPodcast],
+      cardinality: "one",
+    },
+    vnSegmentOf: {
+      type: vnSegmentOf,
+      from: [VnSegment],
+      to: [VnEpisode],
+      cardinality: "one",
+    },
+    vnTrailerOf: {
+      type: vnTrailerOf,
+      from: [VnTrailer],
+      to: [VnPodcast],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    partOf(VnEpisode, VnPodcast, { via: vnEpisodeOf }),
+    partOf(VnSegment, VnEpisode, { via: vnSegmentOf }),
+    partOf(VnTrailer, VnPodcast, { via: vnTrailerOf }),
+  ],
+});
+
+async function seedCompositionViaFixtures(
+  store: InspectableStore<typeof compositionViaGraph>,
+) {
+  const podcast = await store.nodes.VnPodcast.create({ title: "The Pod" });
+  const episode = await store.nodes.VnEpisode.create({ title: "Episode" });
+  const segment = await store.nodes.VnSegment.create({ title: "Segment" });
+  const trailer = await store.nodes.VnTrailer.create({ title: "Trailer" });
+  await store.edges.vnEpisodeOf.create(episode, podcast, {});
+  await store.edges.vnSegmentOf.create(segment, episode, {});
+  await store.edges.vnTrailerOf.create(trailer, podcast, {});
+  return { podcast, episode, segment, trailer };
+}
+
+/** Deeper than the implicit cap a bare `.recursive()` applies. */
+const DEEP_SECTION_CHAIN_LENGTH = 15;
+
 export function registerCompositionNavigationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -632,6 +701,154 @@ export function registerCompositionNavigationIntegrationTests(
           `${sectionRoot.id}>${sectionChild.id}`,
           `${sectionRoot.id}>${sectionGrandchild.id}`,
         ].toSorted(),
+      );
+    });
+
+    it("parts()/wholes() reach the whole closure of a chain deeper than the implicit recursive cap", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const root = await store.nodes.CnSection.create({ title: "Section 0" });
+      const chain = [root];
+      for (let level = 1; level < DEEP_SECTION_CHAIN_LENGTH; level += 1) {
+        const section = await store.nodes.CnSection.create({
+          title: `Section ${level}`,
+        });
+        await store.edges.cnParentSection.create(
+          section,
+          requireDefined(chain.at(-1)),
+          {},
+        );
+        chain.push(section);
+      }
+      const leaf = requireDefined(chain.at(-1));
+      const descendantIds = chain.slice(1).map((section) => section.id);
+      const ancestorIds = chain.slice(0, -1).map((section) => section.id);
+
+      const parts = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(root.id))
+        .parts("x", { depth: "level" })
+        .select((ctx) => ({ id: ctx.x.id, level: ctx.level }))
+        .execute();
+      expect(parts.map((row) => row.id).toSorted()).toEqual(
+        descendantIds.toSorted(),
+      );
+      expect(Math.max(...parts.map((row) => row.level))).toBe(
+        DEEP_SECTION_CHAIN_LENGTH - 1,
+      );
+
+      const wholes = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(leaf.id))
+        .wholes("w")
+        .select((ctx) => ctx.w.id)
+        .execute();
+      expect(wholes.toSorted()).toEqual(ancestorIds.toSorted());
+
+      // A reflexive pair reaches its own kind again, so `via` narrows nothing
+      // here and the closure stays whole.
+      const partsVia = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(root.id))
+        .parts("x", { via: cnParentSection })
+        .select((ctx) => ctx.x.id)
+        .execute();
+      expect(partsVia.toSorted()).toEqual(descendantIds.toSorted());
+
+      const wholesVia = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(leaf.id))
+        .wholes("w", { via: "cnParentSection" })
+        .select((ctx) => ctx.w.id)
+        .execute();
+      expect(wholesVia.toSorted()).toEqual(ancestorIds.toSorted());
+
+      const owned = await store.subgraph(root.id, {
+        edges: [],
+        composition: true,
+      });
+      expect([...owned.nodes.keys()].toSorted()).toEqual(
+        chain.map((section) => section.id).toSorted(),
+      );
+    });
+
+    it("parts() with via walks only that realizing edge of a multi-level, two-edge whole", async () => {
+      const store = await context.createStore(compositionViaGraph);
+      const { podcast, episode, trailer } =
+        await seedCompositionViaFixtures(store);
+
+      const partsVia = (
+        via: typeof vnEpisodeOf | typeof vnTrailerOf | string,
+        maxHops?: number,
+      ) =>
+        store
+          .query()
+          .from("VnPodcast", "p")
+          .whereNode("p", (p) => p.id.eq(podcast.id))
+          .parts("x", { via, ...(maxHops === undefined ? {} : { maxHops }) })
+          .select((ctx) => ({ id: ctx.x.id, kind: ctx.x.kind }))
+          .execute();
+
+      const episodeRow = { id: episode.id, kind: "VnEpisode" };
+      expect(await partsVia(vnEpisodeOf)).toEqual([episodeRow]);
+      expect(await partsVia("vnEpisodeOf")).toEqual([episodeRow]);
+      expect(await partsVia(vnEpisodeOf, 1)).toEqual([episodeRow]);
+      expect(await partsVia(vnTrailerOf)).toEqual([
+        { id: trailer.id, kind: "VnTrailer" },
+      ]);
+    });
+
+    it("wholes() with via walks only that realizing edge", async () => {
+      const store = await context.createStore(compositionViaGraph);
+      const { podcast, episode, segment } =
+        await seedCompositionViaFixtures(store);
+
+      const segmentWholes = await store
+        .query()
+        .from("VnSegment", "s")
+        .whereNode("s", (s) => s.id.eq(segment.id))
+        .wholes("w", { via: vnSegmentOf })
+        .select((ctx) => ({ id: ctx.w.id, kind: ctx.w.kind }))
+        .execute();
+      expect(segmentWholes).toEqual([{ id: episode.id, kind: "VnEpisode" }]);
+
+      const episodeWholes = await store
+        .query()
+        .from("VnEpisode", "e")
+        .whereNode("e", (episodeNode) => episodeNode.id.eq(episode.id))
+        .wholes("w", { via: "vnEpisodeOf" })
+        .select((ctx) => ({ id: ctx.w.id, kind: ctx.w.kind }))
+        .execute();
+      expect(episodeWholes).toEqual([{ id: podcast.id, kind: "VnPodcast" }]);
+    });
+
+    it("parts()/wholes() refuse a via that realizes no pair at the source alias itself", async () => {
+      const store = await context.createStore(compositionViaGraph);
+
+      expect(() =>
+        store.query().from("VnPodcast", "p").parts("x", { via: vnSegmentOf }),
+      ).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "COMPOSITION_VIA_NOT_DECLARED",
+            via: "vnSegmentOf",
+            declaredVia: ["vnEpisodeOf", "vnTrailerOf"],
+          }),
+        }),
+      );
+      expect(() =>
+        store.query().from("VnSegment", "s").wholes("w", { via: vnEpisodeOf }),
+      ).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "COMPOSITION_VIA_NOT_DECLARED",
+            via: "vnEpisodeOf",
+            declaredVia: ["vnSegmentOf"],
+          }),
+        }),
       );
     });
 

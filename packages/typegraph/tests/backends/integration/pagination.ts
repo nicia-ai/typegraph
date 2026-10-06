@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { expr } from "../../../src";
+import { count, expr, field } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { seedProductsForCursorPagination } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
@@ -21,6 +21,61 @@ async function seedFanOut(context: IntegrationTestContext) {
       .traverse("knows", "edge")
       .to("Person", "neighbor");
   return { store, hub, names, fanOut };
+}
+
+/**
+ * Three articles by one author who works at two companies, plus one article by
+ * a second author at one of them: the shared author is an intermediate node
+ * several upstream rows reach, so each of its companies belongs to several
+ * result rows.
+ */
+async function seedFanIn(context: IntegrationTestContext) {
+  const store = context.getStore();
+  const [shared, solo] = await Promise.all([
+    store.nodes.Person.create({ name: "shared" }),
+    store.nodes.Person.create({ name: "solo" }),
+  ]);
+  const [acme, globex] = await Promise.all([
+    store.nodes.Company.create({ name: "acme" }),
+    store.nodes.Company.create({ name: "globex" }),
+  ]);
+  await store.edges.worksAt.create(shared, acme, { role: "editor" });
+  await store.edges.worksAt.create(shared, globex, { role: "editor" });
+  await store.edges.worksAt.create(solo, acme, { role: "writer" });
+  const articles = [];
+  for (const [title, author] of [
+    ["a1", shared],
+    ["a2", shared],
+    ["a3", shared],
+    ["a4", solo],
+  ] as const) {
+    const article = await store.nodes.Article.create({
+      title,
+      body: title,
+      category: "fan-in",
+      published: true,
+    });
+    await store.edges.authoredBy.create(article, author);
+    articles.push(article);
+  }
+  const articleIds = articles.map((article) => article.id);
+  const authored = () =>
+    store
+      .query()
+      .from("Article", "article")
+      .whereNode("article", (article) => article.id.in(articleIds))
+      .traverse("authoredBy", "authorship")
+      .to("Person", "author");
+  const rows = [
+    "a1>acme",
+    "a1>globex",
+    "a2>acme",
+    "a2>globex",
+    "a3>acme",
+    "a3>globex",
+    "a4>acme",
+  ];
+  return { store, authored, rows };
 }
 
 export function registerPaginationIntegrationTests(
@@ -382,6 +437,88 @@ export function registerPaginationIntegrationTests(
       const forward = await walkForward((options) => query.paginate(options));
 
       expect(forward.toSorted()).toEqual(names.filter((name) => name !== "n3"));
+    });
+  });
+  describe("Multi-hop traversal over a shared intermediate node", () => {
+    it.each([1, 2, 3, 5])(
+      "pages the rows execute() returns at page size %i",
+      async (pageSize) => {
+        const { authored, rows } = await seedFanIn(context);
+        const query = authored()
+          .traverse("worksAt", "employment")
+          .to("Company", "company")
+          .orderBy("article", "title", "asc")
+          .select((ctx) => `${ctx.article.title}>${ctx.company.name}`);
+
+        const executed = await query.execute();
+        const paged: string[] = [];
+        let after: string | undefined;
+        for (let page = 0; page <= rows.length; page += 1) {
+          const result = await query.paginate({
+            first: pageSize,
+            ...(after === undefined ? {} : { after }),
+          });
+          paged.push(...result.data);
+          after = result.nextCursor;
+          if (after === undefined) break;
+        }
+        const streamed: string[] = [];
+        for await (const row of query.stream({ batchSize: pageSize })) {
+          streamed.push(row);
+        }
+
+        expect(executed.toSorted()).toEqual(rows);
+        expect(paged.toSorted()).toEqual(rows);
+        expect(streamed.toSorted()).toEqual(rows);
+      },
+    );
+
+    it("returns one row per path through a completed-match where()", async () => {
+      const { authored, rows } = await seedFanIn(context);
+
+      const filtered = await authored()
+        .traverse("worksAt", "employment")
+        .to("Company", "company")
+        .where((fields) => expr.neq(fields.company.name, expr.literal("none")))
+        .select((ctx) => `${ctx.article.title}>${ctx.company.name}`)
+        .execute();
+
+      expect(filtered.toSorted()).toEqual(rows);
+    });
+
+    it("returns one row per path through an optional second traversal", async () => {
+      const { authored, rows } = await seedFanIn(context);
+
+      const optional = await authored()
+        .optionalTraverse("worksAt", "employment")
+        .to("Company", "company")
+        .select((ctx) => `${ctx.article.title}>${ctx.company?.name ?? "-"}`)
+        .execute();
+
+      expect(optional.toSorted()).toEqual(rows);
+    });
+
+    it("aggregates one row per path", async () => {
+      const { authored } = await seedFanIn(context);
+
+      const counted = await authored()
+        .traverse("worksAt", "employment")
+        .to("Company", "company")
+        .groupBy("company", "name")
+        .aggregate({
+          company: field("company", "name"),
+          paths: count("article"),
+        })
+        .execute();
+
+      expect(
+        counted.toSorted((left, right) =>
+          left.company.localeCompare(right.company),
+        ),
+      ).toEqual([
+        { company: "acme", paths: 4 },
+        { company: "globex", paths: 3 },
+      ]);
     });
   });
 }

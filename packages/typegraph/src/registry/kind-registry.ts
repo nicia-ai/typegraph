@@ -520,20 +520,32 @@ export class KindRegistry {
    * re-resolved through subsumption before the next step: a pair declared on
    * a subclass of a reached kind, and a pair declared on a superclass of one,
    * are both crossed.
+   *
+   * `viaEdgeKind` narrows the walk to the pairs that one edge realizes, so
+   * the closure is empty when it realizes no pair at `kind` itself.
    */
   #compositionClosureAlong(
     kind: string,
     side: CompositionSide,
+    viaEdgeKind?: string,
   ): CompositionClosure {
-    const cacheKey = encodeTupleKey([side, kind]);
+    const cacheKey = encodeTupleKey(
+      viaEdgeKind === undefined ? [side, kind] : [side, kind, viaEdgeKind],
+    );
     const cached = this.#compositionClosureCache.get(cacheKey);
     if (cached !== undefined) return cached;
+    const pairs =
+      viaEdgeKind === undefined ?
+        this.#composition.pairs
+      : this.#composition.pairs.filter(
+          (pair) => pair.viaEdgeKind === viaEdgeKind,
+        );
     const reachedKinds = new Set<string>();
     const edgeKinds = new Set<string>();
     const expanded = new Set<string>([kind]);
     const frontier = [kind];
     for (const concreteKind of frontier) {
-      for (const pair of this.#composition.pairs) {
+      for (const pair of pairs) {
         const [anchorKind, oppositeKind] =
           side === "part" ?
             [pair.wholeKind, pair.partKind]
@@ -653,6 +665,27 @@ export class KindRegistry {
   /** Every concrete whole kind transitively over `partKind`, subclasses included, across every composition relation. */
   compositionWholeKindsOver(partKind: string): readonly string[] {
     return this.#compositionClosureAlong(partKind, "whole").kinds;
+  }
+
+  /**
+   * Every concrete part kind under `wholeKind` reachable through
+   * `viaEdgeKind` alone — the by-`via` narrowing of
+   * {@link compositionPartKindsUnder}. Empty when `viaEdgeKind` realizes no
+   * pair at `wholeKind` itself.
+   */
+  compositionPartKindsUnderVia(
+    wholeKind: string,
+    viaEdgeKind: string,
+  ): readonly string[] {
+    return this.#compositionClosureAlong(wholeKind, "part", viaEdgeKind).kinds;
+  }
+
+  /** The wholes mirror of {@link compositionPartKindsUnderVia}. */
+  compositionWholeKindsOverVia(
+    partKind: string,
+    viaEdgeKind: string,
+  ): readonly string[] {
+    return this.#compositionClosureAlong(partKind, "whole", viaEdgeKind).kinds;
   }
 
   /**
