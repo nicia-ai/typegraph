@@ -538,6 +538,31 @@ export function registerCompositionExistenceIntegrationTests(
     // `hardDeleteEdgesBatch` directly. Every cascade of a required part then
     // starts refusing (this test throws instead of resolving).
 
+    it("case 9a: a whole delete removes the composition edge of a part that is already dead", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const segment = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      // Tombstone the part by a route that leaves its composition edge live
+      // (the raw backend member, as in case 8), so the cascade discovers one
+      // member, finds it dead, and has no live member to delete.
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeSegment",
+        id: segment.id,
+      });
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
+
+      await store.nodes.EeEpisode.delete(episode.id);
+
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
+    });
+    // MUTATION CHECK: restoring the early return on an empty `plan.members`
+    // in `applyCompositionCascade` leaves the edge live between two
+    // tombstoned nodes — verified and reverted.
+
     it("case 9b: a whole delete a part's `restrict` refuses, caught in a transaction, deletes nothing", async () => {
       type ExistenceStore = Awaited<
         ReturnType<typeof context.createStore<ReturnType<typeof buildGraph>>>

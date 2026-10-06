@@ -556,13 +556,11 @@ function withCascadeConsumedEdges(
  * deletes, the batch, and each cascade member — runs through this, so what one
  * node's delete owes has a single owner.
  *
- * `existing` is a live pre-image the caller has already read under this
- * frame's own write lock, and so must not read again: the top-level soft
- * delete reads it before planning the cascade, and each cascade member's row
- * comes off the plan that proved the member live
- * (`planCompositionCascade`'s `members`). Returns whether a row was written:
- * `false` only on the soft path, for a row that is already gone — which a
- * caller supplying `existing` has already ruled out.
+ * `existing` is the live pre-image a top-level soft delete read before
+ * planning its cascade. A cascade member supplies none: its row is read here,
+ * at the moment of its own delete. Returns whether a row was written: `false`
+ * only on the soft path, for a row that is already gone — which a caller
+ * supplying `existing` has already ruled out.
  */
 async function deleteNodeRowInFrame<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -778,16 +776,14 @@ async function applyCompositionCascade<G extends GraphDef>(
   mode: NodeDeleteMode,
   session: NodeWriteSession,
 ): Promise<void> {
-  if (plan.members.length === 0) return;
-
   const memberPolicy = cascadeMemberDeletePolicy(plan);
   for (const member of plan.members) {
-    // The soft path writes against the row the PLAN read, not a fresh one:
-    // both reads happen under this frame's per-graph write lock, so the
-    // plan's row IS the fenced pre-image, and a second read could only
-    // return it again. (A member the plan found dead is never in
-    // `plan.members` at all — `liveDiscoveredMembers` drops it — while the
-    // edges this cascade consumed are still cleaned up below.)
+    // Each member's delete reads its own pre-image now rather than writing
+    // against a row the plan read: an ordinary update takes no per-graph
+    // lock, so it can commit after the plan, and the delete must release the
+    // uniqueness entries of the props the node holds at that moment. A member
+    // gone by then is skipped. This narrows the window to the member's own
+    // read-then-write; it does not fence an unlocked writer out of it.
     await deleteNodeRowInFrame(
       ctx,
       session,
@@ -796,9 +792,13 @@ async function applyCompositionCascade<G extends GraphDef>(
       member.kind,
       member.id,
       memberPolicy,
-      member.row,
     );
   }
+  // Runs even when no member is live. A member the plan found already dead is
+  // absent from `plan.members` while its edge is still in
+  // `plan.consumedEdgeIds`, and the root's own delete is told to skip every
+  // consumed edge, so nothing else would remove it.
+  //
   // The explicit cleanup that guarantees no composition edge row survives
   // its endpoints, even when a member's own onDelete is `restrict`: every
   // consumed edge was deliberately excluded from each endpoint's own

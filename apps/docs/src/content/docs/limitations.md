@@ -263,6 +263,19 @@ are not what happens:
   `store.transactionWithReceipt` receipt carries the same refs for every
   cascade in the transaction. `onOperationStart` never carries them — the
   cascade has not been planned when the operation begins.
+- **A PostgreSQL `REPEATABLE READ` transaction cannot delete a whole.** The
+  parts closure is read under the per-graph write fence with no claim row
+  behind it, so the session must see a part attached while it waited. A
+  `REPEATABLE READ` snapshot cannot, and the delete is refused with
+  `ConfigurationError` (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`) before
+  the closure is read. A `SERIALIZABLE` transaction is accepted, but is
+  arbitrated only against other `SERIALIZABLE` writers; delete wholes and
+  attach parts at one isolation level (`READ COMMITTED`, the default).
+- **A property update racing a cascade is not fenced.** An ordinary node
+  update takes no per-graph lock. Each part's delete reads the part again
+  when it runs, so it releases the unique keys the part holds then, but an
+  update that commits between that read and the delete's own write is still
+  possible, as it is for any direct delete.
 - **There is no cascade PREVIEW API in this release.** `cascadedParts` reports
   what a delete removed, after the fact. To decide *before* deleting, read
   the closure yourself with

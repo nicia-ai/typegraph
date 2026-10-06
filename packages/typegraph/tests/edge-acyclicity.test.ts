@@ -84,6 +84,23 @@ const graph = defineGraph({
 });
 const registry = buildKindRegistry(graph);
 
+/** `ownedBy` takes the per-graph fence (a cardinality claim) without being acyclic. */
+const ownedBy = defineEdge("ownedBy", { schema: z.object({}) });
+const fencedSiblingGraph = defineGraph({
+  id: "unit_acyclicity_fenced_sibling",
+  nodes: { Task: { type: Task } },
+  edges: {
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+    ownedBy: { type: ownedBy, from: [Task], to: [Task], cardinality: "one" },
+  },
+});
+
 describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
   it("collects every acyclic edge kind as its own singleton, forward relation", () => {
     expect(acyclicEdgeRelations(graph, registry)).toEqual([
@@ -456,6 +473,77 @@ describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal
     } finally {
       await client.close();
     }
+  });
+
+  // The guard reads the isolation off the lock token, and a frame that does
+  // not acquire the per-graph lock itself — a nested managed write, or a
+  // sibling started while a peer's acquisition is in flight — must carry the
+  // acquiring frame's token rather than an evidence-free one.
+  //
+  // MUTATION CHECK (both cases): handing a non-acquiring frame
+  // `uncapturedGraphWriteLock()` again in `runInWriteTransactionAttempt` lets
+  // each write resolve — verified and reverted.
+  async function withRepeatableReadStore(
+    run: (
+      store: ReturnType<typeof createStore<typeof fencedSiblingGraph>>,
+      setIsolation: (level: string) => Promise<void>,
+    ) => Promise<void>,
+  ): Promise<void> {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generateVectorlessPostgresMigrationSQL());
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+      });
+      await run(createStore(fencedSiblingGraph, backend), (level) =>
+        client.exec(`SET default_transaction_isolation = '${level}'`),
+      );
+    } finally {
+      await client.close();
+    }
+  }
+
+  it("refuses a bulkGetOrCreateByEndpoints batch that only resurrects", async () => {
+    await withRepeatableReadStore(async (store, setIsolation) => {
+      const a = await store.nodes.Task.create({ name: "a" });
+      const b = await store.nodes.Task.create({ name: "b" });
+      const retired = await store.edges.dependsOn.create(b, a);
+      await store.edges.dependsOn.delete(retired.id);
+      await setIsolation("repeatable read");
+
+      await expect(
+        store.edges.dependsOn.bulkGetOrCreateByEndpoints([
+          { from: b, to: a, props: {} },
+        ]),
+      ).rejects.toMatchObject({
+        details: {
+          code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+    });
+  });
+
+  it("refuses an acyclic create racing a sibling write that takes the fence first", async () => {
+    await withRepeatableReadStore(async (store, setIsolation) => {
+      const a = await store.nodes.Task.create({ name: "a" });
+      const b = await store.nodes.Task.create({ name: "b" });
+      await setIsolation("repeatable read");
+
+      await expect(
+        store.transaction((tx) =>
+          Promise.all([
+            tx.edges.ownedBy.create(a, b),
+            tx.edges.dependsOn.create(a, b),
+          ]),
+        ),
+      ).rejects.toMatchObject({
+        details: {
+          code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+    });
   });
 });
 

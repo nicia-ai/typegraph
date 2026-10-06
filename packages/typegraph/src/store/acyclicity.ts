@@ -25,7 +25,7 @@
  * future-dated edge close a cycle no write ever probed.
  */
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
-import { observesPostFenceCommits } from "../backend/command-contract";
+import { assertFencedSnapshotIsFresh } from "../backend/command-contract";
 import { graphCommandCoordinationIsolation } from "../backend/command-contract";
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
@@ -427,38 +427,19 @@ async function readViolatingOriginKeys(
 }
 
 /**
- * A fresh-snapshot guard, applied only where an isolation question exists:
- * `ctx.lock.coordination` is `undefined` for `engine-serialized` /
- * `caller-serialized` write-fence plans (SQLite's single writer, or a
- * caller-serialized deployment), where there is nothing to observe — see
- * `uncapturedGraphWriteLock`. A keyed acquisition on a shared session
- * (`lock` / `row`) mints real coordination, and this is the one place that
- * verifies the session it belongs to actually observes commits made while
- * it waited for the fence.
+ * The acyclicity probe is a lock-only read, so it runs only on a session that
+ * observes commits made while it waited for the fence.
  *
  * @throws ConfigurationError (`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`)
  */
 function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
-  if (ctx.lock.coordination === undefined) return;
-  const isolation = graphCommandCoordinationIsolation(
+  assertFencedSnapshotIsFresh(
     ctx.target.commands,
     ctx.graphId,
     ctx.lock.coordination,
-  );
-  if (observesPostFenceCommits(isolation)) return;
-  throw new ConfigurationError(
-    "Edge-acyclicity requires a transaction isolation that observes writes " +
-      "committed while this session waited for the per-graph write fence.",
     {
       code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
-      graphId: ctx.graphId,
-      isolation,
-    },
-    {
-      suggestion:
-        "Use read_committed or serializable transaction isolation, or " +
-        "configure a custom PostgreSQL graph-write fence to report the " +
-        "effective transaction isolation.",
+      subject: "Edge-acyclicity",
     },
   );
 }
