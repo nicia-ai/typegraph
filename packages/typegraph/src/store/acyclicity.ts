@@ -121,6 +121,14 @@ export function standaloneAcyclicRelation(
  * permanent ancestor edge, so a former ancestor could never be placed under a
  * former descendant.
  *
+ * `standaloneAcyclicEdgeKinds` are the realizing edge kinds that are ALSO
+ * declared `acyclic: true`. Such a kind keeps the standalone rule, every
+ * non-deleted row counting, inside this relation too: a write is probed
+ * against this relation alone ({@link acyclicRelationForEdgeKind}) while the
+ * audit reads both, so a narrower population here would accept a cycle through
+ * an ended row that the kind's own declaration forbids, and the audit would
+ * then report it.
+ *
  * Named after {@link COMPOSITION_RELATION_NAME} (the same reserved axis the
  * composition CLAIM is written at, `src/store/claims/axis.ts`) — the
  * acyclicity relation and the claim relation are two independent invariants
@@ -134,6 +142,7 @@ export function standaloneAcyclicRelation(
  */
 export function compositionAcyclicRelation(
   registry: KindRegistry,
+  standaloneAcyclicEdgeKinds: ReadonlySet<string> = new Set(),
 ): AcyclicEdgeRelation | undefined {
   const edgeKinds = registry.compositionEdgeKinds();
   if (edgeKinds.length === 0) return undefined;
@@ -147,7 +156,8 @@ export function compositionAcyclicRelation(
       return {
         edgeKind,
         reversed: partSide === "to",
-        ...(compositionCountsEndedRows(partSide, population) ?
+        ...(compositionCountsEndedRows(partSide, population) ||
+        standaloneAcyclicEdgeKinds.has(edgeKind) ?
           {}
         : { openEndedOnly: true as const }),
       };
@@ -186,7 +196,10 @@ export function acyclicEdgeRelations(
   const standalone = Object.entries(graph.edges)
     .filter(([, registration]) => registration.acyclic === true)
     .map(([edgeKind]) => standaloneAcyclicRelation(edgeKind));
-  const composition = compositionAcyclicRelation(registry);
+  const composition = compositionAcyclicRelation(
+    registry,
+    new Set(standalone.map((relation) => relation.name)),
+  );
   const relations = [
     ...standalone,
     ...(composition === undefined ? [] : [composition]),

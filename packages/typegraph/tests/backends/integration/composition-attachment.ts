@@ -17,6 +17,7 @@
  *   CaFolder  --(caParentFolder,   partOf, part->whole, reflexive)-- CaFolder
  *   CaRelic   --(caRelicOf,        partOf, part->whole, oneActive)-- CaVault
  *   CaReel    --(caReelOf,         partOf, part->whole, oneActive)-- CaShow
+ *   CaCell    --(caCellUnder,      partOf, part->whole, oneActive, acyclic)-- CaCell
  *
  * CaVault's OWN schema declares properties named `via`, `props`, `validFrom`
  * and `validTo` — the attachment's option names — so a whole passed as a
@@ -67,6 +68,8 @@ const CaTrack = defineNode("CaTrack", { schema: z.object({}) });
 const CaFolder = defineNode("CaFolder", { schema: z.object({}) });
 /** A reflexive part whose moves leave ended history rows (`oneActive`). */
 const CaUnit = defineNode("CaUnit", { schema: z.object({}) });
+/** A reflexive `oneActive` part whose realizing edge is also `acyclic: true`. */
+const CaCell = defineNode("CaCell", { schema: z.object({}) });
 /** Declares no composition pair at all — `reparent`'s not-a-part refusal. */
 const CaReader = defineNode("CaReader", { schema: z.object({}) });
 
@@ -110,6 +113,7 @@ const caClipOf = defineEdge("caClipOf", { schema: z.object({}) });
 const caHasTrack = defineEdge("caHasTrack", { schema: z.object({}) });
 const caParentFolder = defineEdge("caParentFolder", { schema: z.object({}) });
 const caUnitUnder = defineEdge("caUnitUnder", { schema: z.object({}) });
+const caCellUnder = defineEdge("caCellUnder", { schema: z.object({}) });
 const caRelicOf = defineEdge("caRelicOf", {
   schema: z.object({ order: z.number().optional() }),
 });
@@ -130,6 +134,7 @@ function buildGraph(id: string) {
       CaTrack: { type: CaTrack },
       CaFolder: { type: CaFolder, onDelete: "cascade" },
       CaUnit: { type: CaUnit },
+      CaCell: { type: CaCell },
       CaReader: { type: CaReader },
       CaVault: { type: CaVault },
       CaRelic: { type: CaRelic },
@@ -184,6 +189,13 @@ function buildGraph(id: string) {
         to: [CaUnit],
         cardinality: "oneActive",
       },
+      caCellUnder: {
+        type: caCellUnder,
+        from: [CaCell],
+        to: [CaCell],
+        cardinality: "oneActive",
+        acyclic: true,
+      },
       caRelicOf: {
         type: caRelicOf,
         from: [CaRelic],
@@ -209,6 +221,7 @@ function buildGraph(id: string) {
         partSide: "from",
       }),
       partOf(CaUnit, CaUnit, { via: caUnitUnder, partSide: "from" }),
+      partOf(CaCell, CaCell, { via: caCellUnder, partSide: "from" }),
       partOf(CaRelic, CaVault, { via: caRelicOf }),
       partOf(CaReel, CaShow, { via: caReelOf }),
     ],
@@ -662,6 +675,33 @@ export function registerCompositionAttachmentIntegrationTests(
           whole: { kind: "CaUnit", id: former.id },
         }),
       ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+    });
+
+    it("an `acyclic: true` declaration on a `oneActive` realizing edge keeps counting its ended rows", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaCell.create({});
+      const former = await store.nodes.CaCell.create(
+        {},
+        { partOf: { whole: { kind: "CaCell", id: root.id } } },
+      );
+      const report = await store.nodes.CaCell.create(
+        {},
+        { partOf: { whole: { kind: "CaCell", id: former.id } } },
+      );
+      await store.nodes.CaCell.reparent(report.id, {
+        whole: { kind: "CaCell", id: root.id },
+      });
+
+      // MUTATION CHECK: dropping the `standaloneAcyclicEdgeKinds` exemption in
+      // `compositionAcyclicRelation` accepts this move, and the audit then
+      // reports the cycle the kind's own `acyclic: true` forbids — verified
+      // and reverted.
+      await expect(
+        store.nodes.CaCell.reparent(former.id, {
+          whole: { kind: "CaCell", id: report.id },
+        }),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
     // `population: "oneActive"` retires by ending the incumbent's window,
