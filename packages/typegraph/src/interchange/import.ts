@@ -146,6 +146,7 @@ import {
   COMPOSITION_ATTACHMENT_PAGE_SIZE,
   declaresRequiredCompositionParts,
   edgeWriteEndsOpenWindow,
+  readCompositionAttachmentsForPage,
   readCompositionPartStandings,
 } from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
@@ -359,6 +360,13 @@ interface CommittedWriteCounts {
  * declares no required part, which never purges.
  */
 type RequiredPartLedger = Readonly<{
+  /**
+   * Parts no row of the payload and no row of the target can attach, by
+   * `makeNodeKey`, decided before the first write
+   * ({@link readUnattachableRequiredParts}). A row that would create one is
+   * refused unwritten.
+   */
+  unattachableParts: ReadonlySet<string>;
   pendingParts: PendingRequiredParts;
   /** Update rows this import applied to a pending part, by `makeNodeKey`. */
   partUpdates: Map<string, number>;
@@ -483,8 +491,15 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   // `makeNodeKey`, and every edge it writes. Frame-scoped, like
   // `pendingMatchIdentityOwners`: nodes are written before any edge is even
   // seen (`processNodes` then `processEdges`), so whether a part ended up
-  // attached can only be decided once the whole edge set is written.
+  // attached can only be decided once the whole edge set is written — except
+  // for a part nothing can attach, which is settled here, before any row.
   const requiredPartLedger: RequiredPartLedger = {
+    unattachableParts: await readUnattachableRequiredParts(
+      target,
+      inputs.graphId,
+      inputs.registry,
+      inputs.data,
+    ),
     pendingParts: new Map(),
     partUpdates: new Map(),
     edgeWrites: new Map(),
@@ -1734,6 +1749,91 @@ export function buildEdgeSchemaMap(
 // Node Processing
 // ============================================================
 
+/**
+ * The required-existence parts in `data` that nothing can attach: no
+ * composition edge in the payload names the part, and the target holds no
+ * current attachment for it. Whatever the rest of the import writes, such a
+ * part ends with no whole, so it is decided before the first row instead of
+ * after the last edge — a row that is never written is never a row another
+ * row of the same import collides with.
+ *
+ * Deliberately narrower than "will be refused". A part some payload edge
+ * names, or the target already attaches, is judged on the written rows
+ * ({@link assertImportedRequiredPartsAttached}): whether that edge attaches
+ * it depends on rows this import has yet to write.
+ */
+async function readUnattachableRequiredParts(
+  target: WriteTarget,
+  graphId: string,
+  registry: KindRegistry,
+  data: GraphData,
+): Promise<ReadonlySet<string>> {
+  if (!declaresRequiredCompositionParts(registry)) return new Set();
+  const namedByPayloadEdge = new Set<string>();
+  for (const edge of data.edges) {
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) continue;
+    const part = partSide === "from" ? edge.from : edge.to;
+    namedByPayloadEdge.add(makeNodeKey(part.kind, part.id));
+  }
+  const candidates = new Map<string, PendingRequiredPart>();
+  for (const node of data.nodes) {
+    if (registry.compositionExistence(node.kind) !== "required") continue;
+    const key = makeNodeKey(node.kind, node.id);
+    if (namedByPayloadEdge.has(key)) continue;
+    candidates.set(key, { kind: node.kind, id: node.id });
+  }
+  const unattachable = new Set<string>();
+  const parts = [...candidates.values()];
+  for (
+    let index = 0;
+    index < parts.length;
+    index += COMPOSITION_ATTACHMENT_PAGE_SIZE
+  ) {
+    const page = parts.slice(index, index + COMPOSITION_ATTACHMENT_PAGE_SIZE);
+    const attachments = await readCompositionAttachmentsForPage(
+      registry,
+      target,
+      graphId,
+      page,
+    );
+    for (const part of page) {
+      if (attachments.has(encodeTupleKey([part.kind, part.id]))) continue;
+      unattachable.add(makeNodeKey(part.kind, part.id));
+    }
+  }
+  return unattachable;
+}
+
+/**
+ * The refusal for a row that would CREATE a part
+ * {@link readUnattachableRequiredParts} settled as unattachable — asked by
+ * both create legs at the point each has found no existing row, and before
+ * either probes a constraint on the part's behalf. A row for a part already
+ * on the target is not a create and is not refused here.
+ */
+function unattachableRequiredPartRefusal(
+  ledger: RequiredPartLedger,
+  node: InterchangeNode,
+): ProcessResult | undefined {
+  if (!ledger.unattachableParts.has(makeNodeKey(node.kind, node.id))) {
+    return undefined;
+  }
+  return {
+    status: "error",
+    error: unattachedRequiredPartMessage({ kind: node.kind, id: node.id }),
+  };
+}
+
+/** The one message a required part refused for want of a whole is reported with. */
+function unattachedRequiredPartMessage(part: PendingRequiredPart): string {
+  return new CompositionExistenceError({
+    partKind: part.kind,
+    partId: part.id,
+    situation: "create",
+  }).message;
+}
+
 async function processNodes(
   frame: ImportWriteFrame,
   graphId: string,
@@ -2024,6 +2124,15 @@ async function processNodeSlice(
       continue;
     }
 
+    const unattachable = unattachableRequiredPartRefusal(
+      requiredPartLedger,
+      node,
+    );
+    if (unattachable !== undefined) {
+      record(node, unattachable);
+      continue;
+    }
+
     // Both declared node constraints are probed here, per row, against the
     // pending-aware overlay — so an in-slice pair (a `Person` and a `Company`
     // sharing an id, two rows apart) is seen through `pendingNodes` and refuses
@@ -2085,7 +2194,15 @@ async function processNodeSlice(
   for (const node of deferred) {
     record(
       node,
-      await processNode(frame, graphId, registry, node, schemas, options),
+      await processNode(
+        frame,
+        graphId,
+        registry,
+        node,
+        schemas,
+        options,
+        requiredPartLedger,
+      ),
     );
   }
 }
@@ -2781,6 +2898,7 @@ async function processNode(
   node: InterchangeNode,
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ResolvedImportOptions,
+  requiredPartLedger: RequiredPartLedger,
 ): Promise<ProcessResult> {
   // Validate kind exists
   const schemaEntry = schemas.get(node.kind);
@@ -2860,6 +2978,12 @@ async function processNode(
       }
     }
   }
+
+  const unattachable = unattachableRequiredPartRefusal(
+    requiredPartLedger,
+    node,
+  );
+  if (unattachable !== undefined) return unattachable;
 
   // Create new node. Pre-check both declared node constraints (as the
   // collection create does) so a conflict is a per-row error rather than an
@@ -3111,11 +3235,7 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     entityType: "node",
     kind: part.kind,
     id: part.id,
-    error: new CompositionExistenceError({
-      partKind: part.kind,
-      partId: part.id,
-      situation: "create",
-    }).message,
+    error: unattachedRequiredPartMessage(part),
   });
   for (const edge of removedEdges) {
     const written = ledger.edgeWrites.get(edge.id);

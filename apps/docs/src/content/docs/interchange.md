@@ -649,16 +649,25 @@ the whole payload's edge set is known. A part created by this import is
 accepted when its composition edge arrives later in the SAME import (any
 batch), or when it is already attached on the target from before this import;
 otherwise it is reported as a per-row error on the node (`error` matches
-`/requires a whole/`) and its row is removed in the same transaction before
-the import commits — no orphan node row survives.
+`/requires a whole/`) and no orphan node row survives the import.
 
-The refused part's row exists while the rest of the payload is processed, and
-that ordering is visible. A later row that collides with it — the same value
-under a unique constraint, an edge that takes a slot the part's edge holds —
-is refused against it and reported naming the part, and it stays refused after
-the part is removed: the import does not judge that row again. Every other row
-is unaffected. Re-running the import without the refused part (or with its
-composition edge added) accepts the rows it displaced.
+A part nothing can attach — no composition edge anywhere in the payload names
+it, and the target holds no attachment for it — is refused before its row is
+written. No other row of the import is judged against it, so the outcome does
+not depend on where the part sits in the document: a valid row sharing its
+unique value is committed whichever comes first. Every row of the document
+that would create the part is refused, a repeated one included, and an edge
+naming it is refused for its missing endpoint.
+
+A part some composition edge in the payload does name is written, and judged
+once the edges are in; if that edge turns out not to attach it (see below) its
+row is removed in the same transaction. That ordering is visible. A later row
+that collides with the part's row — the same value under a unique constraint,
+an edge that takes a slot the part's edge holds — is refused against it and
+reported naming the part, and it stays refused after the part is removed: the
+import does not judge that row again. Every other row is unaffected.
+Re-running the import without the refused part (or with a composition edge
+that attaches it) accepts the rows it displaced.
 
 "Attached" is judged on the written rows, by the same reader
 `store.verifyConstraintFences()` uses, so a composition edge in the payload is
@@ -666,7 +675,7 @@ not enough on its own: an edge whose window does not attach the part (an
 ended `oneActive` window), or whose whole does not exist (possible with
 `validateReferences: false`), leaves the part refused. The check repeats until
 nothing changes, so a required part attached only to a part this import
-refuses is refused with it. Removing a refused part removes every edge
+refuses is refused with it. Removing a written part removes every edge
 touching it, and each one is reported as its own per-row error on the edge.
 That includes an edge that was on the target before this import — one written
 ahead of the part under `validateReferences: false` — whose error says so. The

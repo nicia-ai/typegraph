@@ -129,6 +129,26 @@ function buildIdentityEnabledGraph() {
   });
 }
 
+/**
+ * A composition edge to an episode that does not exist. Written under
+ * `validateReferences: false`, it attaches nothing, so its segment is written
+ * and then refused once the edges are in — the purge these tests drive. A
+ * segment with no composition edge at all is refused before its row is
+ * written and never reaches the purge.
+ */
+function danglingSegmentOf(
+  id: string,
+  segmentId: string,
+): GraphData["edges"][number] {
+  return {
+    kind: "ceiSegmentOf",
+    id,
+    from: { kind: "CeiSegment", id: segmentId },
+    to: { kind: "CeiEpisode", id: "episode-missing" },
+    properties: {},
+  };
+}
+
 function payload(data: Pick<GraphData, "nodes" | "edges">): GraphData {
   return {
     formatVersion: FORMAT_VERSION,
@@ -243,19 +263,22 @@ describe("validating import: required composition existence", () => {
       await backend.close();
     }
   });
-  // MUTATION CHECK: skip the `assertImportedRequiredPartsAttached` call in
-  // `runImportWritePlanAttempt` (src/interchange/import.ts) — `seg-orphan`
-  // then commits as a live, unattached required part, and the last
-  // assertion above (`toBeUndefined()`) fails.
+  // MUTATION CHECK: drop the `unattachableRequiredPartRefusal` check from
+  // `processNodeSlice` AND skip the `assertImportedRequiredPartsAttached`
+  // call in `runImportWritePlanAttempt` (src/interchange/import.ts) —
+  // `seg-orphan` then commits as a live, unattached required part, and the
+  // last assertion above (`toBeUndefined()`) fails. Either one alone still
+  // refuses it: the first before the row is written, the second after.
 
   it("refuses an unattached required part that also carries a live, non-composition edge without aborting the whole import", async () => {
     const { backend } = createLocalSqliteBackend();
     try {
       const [store] = await createStoreWithSchema(buildGraphWithTag(), backend);
 
-      // `seg-1` has no `partOf`/`ceiSegmentOf` edge at all (refused for
-      // lacking a whole) but DOES carry a live `ceiTaggedBy` edge to
-      // `tag-1` — an ordinary edge this same import creates alongside it.
+      // `seg-1`'s only `ceiSegmentOf` edge names an episode that does not
+      // exist (refused for lacking a whole, once its row and edges are
+      // written) and it DOES carry a live `ceiTaggedBy` edge to `tag-1` —
+      // an ordinary edge this same import creates alongside it.
       const result = await importGraph(
         store,
         payload({
@@ -264,6 +287,7 @@ describe("validating import: required composition existence", () => {
             { kind: "CeiTag", id: "tag-1", properties: {} },
           ],
           edges: [
+            danglingSegmentOf("e-part-1", "seg-1"),
             {
               kind: "ceiTaggedBy",
               id: "e-tag-1",
@@ -273,7 +297,7 @@ describe("validating import: required composition existence", () => {
             },
           ],
         }),
-        { onConflict: "error", batchSize: 100 },
+        { onConflict: "error", batchSize: 100, validateReferences: false },
       );
 
       // One per-row error for the refused part — not a thrown transaction
@@ -281,17 +305,22 @@ describe("validating import: required composition existence", () => {
       // policy saw the still-live `ceiTaggedBy` edge and threw
       // `RestrictedDeleteError` PAST this function's per-row error channel,
       // aborting the whole import.
-      expect(result.errors).toHaveLength(2);
+      expect(result.errors).toHaveLength(3);
       expect(result.errors[0]?.entityType).toBe("node");
       expect(result.errors[0]?.id).toBe("seg-1");
       expect(result.errors[0]?.error).toMatch(/requires a whole/u);
-      // The edge the purge removed with the part is reported too, and comes
+      // Each edge the purge removed with the part is reported too, and comes
       // off the created count: the result tracks what was committed.
-      expect(result.errors[1]).toMatchObject({
-        entityType: "edge",
-        kind: "ceiTaggedBy",
-        id: "e-tag-1",
-      });
+      expect(
+        result.errors
+          .slice(1)
+          .map((error) => [error.entityType, error.id, error.error]),
+      ).toEqual(
+        expect.arrayContaining([
+          ["edge", "e-tag-1", expect.stringMatching(/was removed with/u)],
+          ["edge", "e-part-1", expect.stringMatching(/was removed with/u)],
+        ]),
+      );
       expect(result.edges.created).toBe(0);
       expect(result.nodes.created).toBe(1);
 
@@ -347,12 +376,15 @@ describe("validating import: required composition existence", () => {
         store,
         payload({
           nodes: [{ kind: "CeiSegment", id: "shared-id", properties: {} }],
-          edges: [],
+          edges: [danglingSegmentOf("e-part", "shared-id")],
         }),
-        { onConflict: "error", batchSize: 100 },
+        { onConflict: "error", batchSize: 100, validateReferences: false },
       );
 
-      expect(result.errors).toHaveLength(1);
+      expect(result.errors.map((error) => error.id)).toEqual([
+        "shared-id",
+        "e-part",
+      ]);
       expect(
         await store.nodes.CeiSegment.getById("shared-id" as never),
       ).toBeUndefined();
