@@ -812,11 +812,77 @@ export async function liveNodeKindsSharingIds(
   return liveKindsById;
 }
 
+type FoldContext = Pick<
+  IdentityServiceContext<GraphDef>,
+  "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
+>;
+
+/**
+ * The READ half of folding created nodes into identity: for each reference, the
+ * live nodes of other kinds sharing its id, each validated as `same` against
+ * it ({@link validateCurrentRelation}) — the contradictions a fold can raise.
+ * Returns the references the fold materializes a closure over (each reference
+ * with its peers); nothing is written.
+ *
+ * One owner of that verdict, read by the fold itself and by
+ * {@link assertIdentityFoldable}, so the answer a batch reaches before its
+ * first write is the answer the fold gives when the write lands.
+ */
+async function validateFoldPeers(
+  ctx: FoldContext,
+  rawTarget: Backend,
+  references: readonly PlainNodeRef[],
+): Promise<readonly PlainNodeRef[]> {
+  const liveKindsById = await liveNodeKindsSharingIds(
+    ctx,
+    rawTarget,
+    references.map((ref) => ref.id),
+  );
+  const closureReferences: PlainNodeRef[] = [];
+  for (const ref of references) {
+    // Registry order, not row-arrival order: which conflicting peer
+    // `validateCurrentRelation` reports first must not depend on how the
+    // engine happened to return rows. Iterating the registry also drops
+    // rows whose kind is outside it — those never participate in identity.
+    const liveKinds = liveKindsById.get(ref.id);
+    const peers: PlainNodeRef[] = [];
+    if (liveKinds !== undefined) {
+      for (const kind of ctx.registry.nodeKinds.keys()) {
+        if (kind === ref.kind || !liveKinds.has(kind)) continue;
+        peers.push({ kind, id: ref.id });
+      }
+    }
+    if (peers.length === 0) continue;
+    for (const peer of peers) {
+      await validateCurrentRelation(ctx, rawTarget, "same", "fold", ref, peer);
+    }
+    closureReferences.push(ref, ...peers);
+  }
+  return closureReferences;
+}
+
+/**
+ * Whether folding `references` into identity would be refused, answered by
+ * reading alone: raises the `IdentityContradictionError` the fold would, and
+ * writes nothing. A frame that restores several rows calls it for all of them
+ * before its first statement, so a refusal the fold can only reach after a row
+ * is written is not left to the write. The references are judged against the
+ * identity state as stored, with the frame's own earlier restores not yet
+ * folded.
+ */
+export async function assertIdentityFoldable(
+  ctx: FoldContext,
+  target: Backend,
+  references: readonly PlainNodeRef[],
+): Promise<void> {
+  if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
+  await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    await validateFoldPeers(ctx, rawTarget, references);
+  });
+}
+
 export async function foldIdentityForCreatedNodes(
-  ctx: Pick<
-    IdentityServiceContext<GraphDef>,
-    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
-  >,
+  ctx: FoldContext,
   target: Backend,
   references: readonly PlainNodeRef[],
   // `restore` (a node resurrection re-running the fold) vs. `fold` (an
@@ -839,38 +905,11 @@ export async function foldIdentityForCreatedNodes(
   await withRecordedIdentityMutationTarget(
     target,
     async (rawTarget, _touch, noteTransition) => {
-      const liveKindsById = await liveNodeKindsSharingIds(
+      const closureReferences = await validateFoldPeers(
         ctx,
         rawTarget,
-        references.map((ref) => ref.id),
+        references,
       );
-      const closureReferences: PlainNodeRef[] = [];
-      for (const ref of references) {
-        // Registry order, not row-arrival order: which conflicting peer
-        // `validateCurrentRelation` reports first must not depend on how the
-        // engine happened to return rows. Iterating the registry also drops
-        // rows whose kind is outside it — those never participate in identity.
-        const liveKinds = liveKindsById.get(ref.id);
-        const peers: PlainNodeRef[] = [];
-        if (liveKinds !== undefined) {
-          for (const kind of ctx.registry.nodeKinds.keys()) {
-            if (kind === ref.kind || !liveKinds.has(kind)) continue;
-            peers.push({ kind, id: ref.id });
-          }
-        }
-        if (peers.length === 0) continue;
-        for (const peer of peers) {
-          await validateCurrentRelation(
-            ctx,
-            rawTarget,
-            "same",
-            "fold",
-            ref,
-            peer,
-          );
-        }
-        closureReferences.push(ref, ...peers);
-      }
       if (closureReferences.length === 0) return;
       const transitions = await replaceAffectedClosure(
         rawTarget,

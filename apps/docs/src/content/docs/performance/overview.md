@@ -438,14 +438,27 @@ kind's cardinality (`CardinalityError`), is refused after the batch's new
 rows were written. Treat every bulk call the same way: do not catch a refusal and
 commit unless a partially applied batch is acceptable.
 
-Composition attachments are the exception, because a half-attached batch
-would leave ownership in a state no single call asked for.
-`bulkCreate` / `bulkInsert` with `partOf`, `bulkReparent`, and
+Composition attachments made through the node collection are the exception,
+because a half-attached batch would leave ownership in a state no single call
+asked for. `bulkCreate` / `bulkInsert` with `partOf`, `bulkReparent`, and
 `bulkGetOrCreateByConstraint` reach every verdict their existing rows can
-raise before the first write, so a caught refusal leaves nothing written. See
-[Composition](/ontology#composition) and
+raise before the first write, so a caught refusal leaves those rows untouched.
+Two things stay outside that: `bulkGetOrCreateByConstraint` creates its
+unmatched items after the matched ones, so a refusal only a **new** row's own
+preparation can reach (a second unique key it loses, a disjoint kind holding
+its id) can still follow the matched items' writes; and writing a realizing
+edge directly through `edges.<via>.bulkUpsertById` or
+`bulkGetOrCreateByEndpoints` is an ordinary edge batch, which keeps the rule
+above. See [Composition](/ontology#composition) and
 [`partOf` on get-or-create](/ontology#partof-on-get-or-create-is-a-postcondition)
 for the exact guarantee and what stays outside it.
+
+Deciding a batch's matched items before writing costs reads. A
+`bulkGetOrCreateByConstraint` batch with more than one item that owes a write
+(an update, a resurrection, or an attachment not already held), or one such
+item next to a new row that states an attachment, runs one extra fenced pass
+that reads each item once more before the per-item writes. A batch whose
+matched items all need nothing stays read-only.
 
 ### Choosing the right pattern
 

@@ -20,10 +20,15 @@
  *   CaCell    --(caCellUnder,      partOf, part->whole, oneActive, acyclic)-- CaCell
  *   CaNest    --(caNestUnder,      partOf, part->whole, reflexive)-- CaNest
  *
+ *   CaSlot    --(caSlotIn,         partOf, part->whole, one both ways)-- CaRack
+ *
  * CaNest carries a unique key, so a get-or-create batch can name one of its
  * own matched items as the batch's shared whole. CaStamp is no part at all:
  * it carries TWO unique constraints, so a get-or-create update leg can be
- * refused on the one the lookup did not use.
+ * refused on the one the lookup did not use. CaSlot's whole holds ONE part
+ * (`targetCardinality: "one"`), so a matched part and a new one cannot both
+ * attach to it. CaGhost is no part either: it is disjoint with CaSpirit, so a
+ * tombstoned ghost whose id a spirit now holds cannot be resurrected.
  *
  * CaVault's OWN schema declares properties named `via`, `props`, `validFrom`
  * and `validTo` — the attachment's option names — so a whole passed as a
@@ -37,12 +42,15 @@ import { z } from "zod";
 
 import {
   asNodeId,
+  CardinalityError,
   CompositionExistenceError,
   ConfigurationError,
   createStore,
   defineEdge,
   defineGraph,
   defineNode,
+  DisjointError,
+  disjointWith,
   EdgeAcyclicityError,
   hasPart,
   NodeNotFoundError,
@@ -126,6 +134,26 @@ const CA_STAMP_LABEL_UNIQUE = {
   scope: "kind",
   collation: "binary",
 } as const;
+/** A part whose whole holds at most one part. */
+const CaSlot = defineNode("CaSlot", { schema: z.object({ slug: z.string() }) });
+const CaRack = defineNode("CaRack", { schema: z.object({}) });
+const CA_SLOT_SLUG_UNIQUE = {
+  name: "ca_slot_slug",
+  fields: ["slug"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+/** Disjoint with CaSpirit: a ghost cannot share an id with a live spirit. */
+const CaGhost = defineNode("CaGhost", {
+  schema: z.object({ slug: z.string(), note: z.string().optional() }),
+});
+const CaSpirit = defineNode("CaSpirit", { schema: z.object({}) });
+const CA_GHOST_SLUG_UNIQUE = {
+  name: "ca_ghost_slug",
+  fields: ["slug"],
+  scope: "kind",
+  collation: "binary",
+} as const;
 const CA_VAULT_PROPS = {
   via: "caChapterOf",
   props: { order: 7 },
@@ -152,6 +180,7 @@ const caRelicOf = defineEdge("caRelicOf", {
 });
 
 const caReelOf = defineEdge("caReelOf", { schema: z.object({}) });
+const caSlotIn = defineEdge("caSlotIn", { schema: z.object({}) });
 const caNestUnder = defineEdge("caNestUnder", { schema: z.object({}) });
 
 function buildGraph(id: string) {
@@ -174,6 +203,10 @@ function buildGraph(id: string) {
       CaRelic: { type: CaRelic },
       CaReel: { type: CaReel, unique: [CA_REEL_SLUG_UNIQUE] },
       CaNest: { type: CaNest, unique: [CA_NEST_SLUG_UNIQUE] },
+      CaSlot: { type: CaSlot, unique: [CA_SLOT_SLUG_UNIQUE] },
+      CaRack: { type: CaRack },
+      CaGhost: { type: CaGhost, unique: [CA_GHOST_SLUG_UNIQUE] },
+      CaSpirit: { type: CaSpirit },
       CaStamp: {
         type: CaStamp,
         unique: [CA_STAMP_CODE_UNIQUE, CA_STAMP_LABEL_UNIQUE],
@@ -253,6 +286,13 @@ function buildGraph(id: string) {
         to: [CaNest],
         cardinality: "one",
       },
+      caSlotIn: {
+        type: caSlotIn,
+        from: [CaSlot],
+        to: [CaRack],
+        cardinality: "one",
+        targetCardinality: "one",
+      },
     },
     ontology: [
       partOf(CaChapter, CaBook, { via: caChapterOf }),
@@ -270,6 +310,8 @@ function buildGraph(id: string) {
       partOf(CaRelic, CaVault, { via: caRelicOf }),
       partOf(CaReel, CaShow, { via: caReelOf }),
       partOf(CaNest, CaNest, { via: caNestUnder, partSide: "from" }),
+      partOf(CaSlot, CaRack, { via: caSlotIn }),
+      disjointWith(CaGhost, CaSpirit),
     ],
   });
 }
@@ -1480,7 +1522,7 @@ export function registerCompositionAttachmentIntegrationTests(
     // Each case catches the refusal INSIDE an enclosing transaction and
     // commits: the operations layer has no savepoints, so anything the batch
     // wrote before refusing would stay. MUTATION CHECK, shared by all of
-    // them: drop the `assertExistingGetOrCreateLegsApplicable` call from
+    // them: drop the `assertGetOrCreateBatchApplicable` call from
     // `executeNodeBulkGetOrCreateByConstraint`
     // (src/store/operations/node-operations.ts) — the item listed FIRST is
     // then written before the later item refuses, and survives.
@@ -1787,6 +1829,122 @@ export function registerCompositionAttachmentIntegrationTests(
         first.id,
         second.id,
       ]);
+    });
+
+    // --------------------------------------------------------
+    // The same rule for what a batch is about to CREATE, and for a
+    // resurrection a disjoint kind now blocks
+    // --------------------------------------------------------
+
+    it("bulkGetOrCreateByConstraint attaches no matched part when a new row's attachment exceeds the whole's bound", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const rack = await store.nodes.CaRack.create({});
+      await store.nodes.CaSlot.create({ slug: "a" });
+
+      // The rack holds ONE slot: the matched "a" and the new row together
+      // exceed it, and only the batch counted as a whole sees that.
+      //
+      // MUTATION CHECK: leave the rows to create out of the moves
+      // `assertGetOrCreateBatchApplicable` counts
+      // (`newRowAttachmentMoves`, src/store/operations/node-operations.ts) —
+      // "a" is then attached before the create batch refuses "new", and
+      // survives the caught refusal.
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.CaSlot.bulkGetOrCreateByConstraint(
+            "ca_slot_slug",
+            [{ props: { slug: "a" } }, { props: { slug: "new" } }],
+            { partOf: { whole: rack } },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(CardinalityError);
+      expect(await store.edges.caSlotIn.find({})).toEqual([]);
+      const slots = await store.nodes.CaSlot.find({});
+      expect(slots.map((slot) => slot.slug)).toEqual(["a"]);
+    });
+
+    it("bulkGetOrCreateByConstraint resurrects and updates no earlier item when a later tombstone's id is held by a disjoint kind", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const live = await store.nodes.CaGhost.create({
+        slug: "live",
+        note: "before",
+      });
+      const gone = await store.nodes.CaGhost.create(
+        { slug: "gone" },
+        { id: "shared-id" },
+      );
+      await store.nodes.CaGhost.delete(gone.id);
+      await store.nodes.CaSpirit.create({}, { id: gone.id });
+
+      // The refusal is a read (`checkDisjointnessConstraint`, the answer a
+      // create gets), so it must precede the "live" row's update.
+      //
+      // MUTATION CHECK: drop the `checkDisjointnessConstraint` read for a
+      // restoring leg in `assertGetOrCreateBatchApplicable`
+      // (src/store/operations/node-operations.ts) — "live" is then updated
+      // before the resurrection's claim refuses, and survives the caught
+      // refusal.
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.CaGhost.bulkGetOrCreateByConstraint(
+            "ca_ghost_slug",
+            [
+              { props: { slug: "live", note: "changed" } },
+              { props: { slug: "gone" } },
+            ],
+            { ifExists: "update" },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(DisjointError);
+      const after = requireDefined(await store.nodes.CaGhost.getById(live.id));
+      expect(after.note).toBe("before");
+      expect(after.meta.version).toBe(live.meta.version);
+      expect(await store.nodes.CaGhost.getById(gone.id)).toBeUndefined();
+    });
+
+    it('bulkGetOrCreateByConstraint with ifExists "update" lets a new row take a unique key a matched item gives up', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const first = await store.nodes.CaStamp.create({
+        code: "a",
+        label: "one",
+      });
+
+      // The create batch runs after the matched update, which is what frees
+      // the label "one" for the new row. A frame that prepared the new row
+      // against the stored claims alone would refuse it.
+      //
+      // MUTATION CHECK: prepare the rows to create inside
+      // `assertGetOrCreateBatchApplicable` against the stored claims
+      // (`prepareBatchCreates(ctx, creates, target, ...)`) — "new" is then
+      // refused for a key "a" stops holding in this same batch.
+      const results = await store.nodes.CaStamp.bulkGetOrCreateByConstraint(
+        "ca_stamp_code",
+        [
+          { props: { code: "a", label: "renamed" } },
+          { props: { code: "new", label: "one" } },
+        ],
+        { ifExists: "update" },
+      );
+
+      expect(results.map((entry) => entry.action)).toEqual([
+        "updated",
+        "created",
+      ]);
+      expect(results.map((entry) => entry.node.label)).toEqual([
+        "renamed",
+        "one",
+      ]);
+      expect(results[0]?.node.id).toBe(first.id);
     });
 
     // ========================================================

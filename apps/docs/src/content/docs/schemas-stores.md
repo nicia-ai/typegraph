@@ -1412,10 +1412,12 @@ store.nodes.Person.bulkGetOrCreateByConstraint(
 
 Items whose constraint matches an existing node are decided together before
 the batch writes anything: every attachment verdict a stated `partOf` can
-reach, and — with `ifExists: "update"` or on a resurrection — the property
-update's validation and unique-key probes. A refusal from a matched item
-therefore leaves nothing written, including when you catch it on `tx` inside
-`store.transaction(...)`. Unmatched items are created afterwards; see
+reach (counting the attachments of the rows the batch will create), and —
+with `ifExists: "update"` or on a resurrection — the property update's
+validation and unique-key probes, a restored row's disjointness and identity
+checks. A refusal from a matched item therefore leaves nothing written,
+including when you catch it on `tx` inside `store.transaction(...)`. Unmatched
+items are created afterwards; see
 [`partOf` on get-or-create is a postcondition](/ontology#partof-on-get-or-create-is-a-postcondition)
 for what a new row can still refuse after the matched items wrote.
 

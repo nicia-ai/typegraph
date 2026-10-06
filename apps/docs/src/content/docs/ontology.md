@@ -599,29 +599,57 @@ matched an existing node, each verdict a read can decide:
 
 - the attachment's own — satisfied, attach, or one of the refusals in the
   table above, plus a dead or missing whole, a cardinality bound, and
-  acyclicity judged over all of the batch's attachments together;
+  acyclicity judged over all of the batch's attachments together. The
+  attachments of the items it will **create** are counted in that same set,
+  after the matched ones, so a matched part and a new row that together
+  exceed a whole's bound are refused before the matched part is attached;
 - with `ifExists: "update"` or on a resurrection, the property update's —
   schema validation of the merged properties, and its unique keys, probed in
   item order so a later item may take a key an earlier item of the same
   batch gives up and is refused a key an earlier item takes;
+- on a resurrection, the same refusals a create would raise: a required part
+  restored with no live whole, an id that a `disjointWith` kind now holds,
+  and an identity contradiction (`sameIdAcrossKinds: "fold"`) the restored
+  row's fold would raise, judged against the identity state as stored;
 - for the items it will create, the refusals that need no read at all (a
   required part with no `partOf`, an undeclared or ambiguous pair).
 
 A refusal from any of them therefore leaves no item attached, updated or
 resurrected, including when you catch it on `tx` inside
-`store.transaction(...)`. Two things remain outside that guarantee:
+`store.transaction(...)`. What remains outside that guarantee:
 
-- **A new row's own refusals.** The unmatched items are created after the
-  matched ones are written, and what only a new row's preparation can decide
-  — a second unique key it loses, or a bound on the whole's side that its
-  attachment exceeds — is raised then. Caught inside an enclosing
-  transaction, it leaves the matched items' writes in place.
+- **A new row's own non-attachment refusals.** The unmatched items are
+  created after the matched ones are written. What only a new row's own
+  preparation decides — a second unique key it loses, or a disjoint kind
+  holding its id — is raised then, and caught inside an enclosing
+  transaction it leaves the matched items' writes in place. These are not
+  decided up front because they can depend on the batch's own order: a
+  matched update that gives up a key is what lets a new row take it.
 - **A concurrent writer the fence does not exclude.** A node kind whose
   unique keys are enforced by the key itself takes no per-graph write fence,
   so another transaction can claim a key, or remove a matched row, between
   the batch's reads and its write. That surfaces as the same typed error
   (`UniquenessError`, `NodeNotFoundError`) from the write, after earlier
   items wrote.
+- **An identity fold that depends on another restored row of the same
+  batch.** Each restored row's fold is judged against the identity state as
+  stored, so a contradiction that only appears once another row of the
+  batch has been restored is raised when that restore lands.
+
+The up-front verdicts cost one extra fenced read pass over the batch, paid
+only by a batch with more than one item that owes a write (an item that
+already satisfies the stated attachment owes none), or one such item next
+to a new row that states an attachment. A batch that finds everything
+satisfied stays read-only and reads each part's attachment once.
+
+Writing a realizing edge directly is a different surface. `edges.<via>.bulkCreate`
+and `bulkInsert` decide every item before writing any, but
+`edges.<via>.bulkUpsertById` and `bulkGetOrCreateByEndpoints` are ordinary edge
+batches that do not decide the whole batch first: an item refused for a second
+whole (`CompositionError`) can follow earlier edges of the batch that were
+already written, and a caller who catches it inside an enclosing transaction
+keeps them. See
+[A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows).
 
 #### `existence`: a part that cannot exist without a whole
 

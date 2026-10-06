@@ -639,14 +639,24 @@ not take a savepoint per bulk call. Let the refusal propagate so the
 transaction rolls back, or rethrow after handling it. See
 [Catching a bulk refusal inside a transaction](/performance/overview#catching-a-bulk-refusal-inside-a-transaction).
 
-Batches that attach composition parts do not have this limit for the rows
-that already exist: `bulkCreate` / `bulkInsert` with `partOf`, `bulkReparent`
-and `bulkGetOrCreateByConstraint` decide every such item before writing any.
-`bulkGetOrCreateByConstraint` still creates its unmatched items after its
-matched ones, so a refusal only a **new** row can raise — a second unique key
-it loses, or a cardinality bound its attachment exceeds — is reached after
-the matched items wrote. See
+Batches that attach composition parts through the **node collection** do not
+have this limit for the rows that already exist: `bulkCreate` / `bulkInsert`
+with `partOf`, `bulkReparent` and `bulkGetOrCreateByConstraint` decide every
+such item before writing any. `bulkGetOrCreateByConstraint` creates its
+unmatched items after its matched ones: it counts their attachments with the
+matched ones up front, but a refusal only a **new** row's own preparation can
+raise — a second unique key it loses, or a disjoint kind holding its id — is
+reached after the matched items wrote. See
 [`partOf` on get-or-create is a postcondition](/ontology#partof-on-get-or-create-is-a-postcondition).
+
+Writing a composition's **realizing edge** through the edge collection is an
+ordinary edge batch. `edges.<via>.bulkCreate` and `bulkInsert` decide every
+item before writing any, but `edges.<via>.bulkUpsertById` and
+`bulkGetOrCreateByEndpoints` do not decide the whole batch first, so an item
+refused for a second whole (`CompositionError`) can follow earlier edges of the
+same batch that are already written. Attach through
+`nodes.<Kind>.reparent` / `bulkReparent` or `partOf` when the batch must not
+leave a partial attachment.
 
 ## Graph Analytics Limits
 

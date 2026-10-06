@@ -401,6 +401,15 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
       references: readonly Readonly<{ kind: string; id: string }>[],
       cause: "fold" | "restore",
     ) => Promise<void>;
+    /**
+     * The read-only half of {@link foldCreated}: refuses, writing nothing,
+     * what folding `references` would refuse, so a batch that restores several
+     * rows reaches that verdict before its first statement.
+     */
+    assertFoldable: (
+      target: IdentityTarget,
+      references: readonly Readonly<{ kind: string; id: string }>[],
+    ) => Promise<void>;
     detachDeleted: (
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
@@ -3305,12 +3314,15 @@ type DecidedAttachmentMove = Readonly<{
   /** The caller-stated move instant (`reparent`'s `at`), when there is one. */
   moveAt: string | undefined;
   /**
-   * The part row is a tombstone that a later statement of the same frame
-   * restores (a get-or-create resurrection), so its endpoint read is skipped —
-   * the same fact the decision itself was reached under
-   * (`decideCompositionAttachmentUnderFence`'s `partRowRestoredByUpdate`).
+   * What the frame already knows about the two endpoint rows
+   * ({@link CompositionEndpointEvidence}): `"restoredByUpdate"` for a tombstone
+   * a later statement of the same frame restores (a get-or-create
+   * resurrection, the fact the decision itself was reached under —
+   * `decideCompositionAttachmentUnderFence`'s `partRowRestoredByUpdate`), and
+   * `"primedWhole"` for a row this frame is about to create, whose whole was
+   * read by the caller.
    */
-  partRowRestoredByUpdate: boolean;
+  endpoints: CompositionEndpointEvidence;
 }>;
 
 /**
@@ -3376,7 +3388,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     );
 
   const prepared: PreparedAttachmentMove[] = [];
-  for (const { partId, decided, moveAt, partRowRestoredByUpdate } of moves) {
+  for (const { partId, decided, moveAt, endpoints } of moves) {
     if (decided.disposition === "satisfied") {
       prepared.push({ partId, decided });
       continue;
@@ -3394,10 +3406,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
       partId,
       attachmentWindow(work, moveInstant),
       {
-        endpoints:
-          partRowRestoredByUpdate ?
-            { source: "restoredByUpdate" }
-          : { source: "read" },
+        endpoints,
         validateAcyclicity: false,
       },
     );
@@ -3632,7 +3641,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
     target,
     lock,
     await prepareCompositionAttachmentMoves(ctx, target, lock, "nodes.attach", [
-      { partId, decided, moveAt, partRowRestoredByUpdate: false },
+      { partId, decided, moveAt, endpoints: { source: "read" } },
     ]),
   );
   return requireDefined(
@@ -3714,7 +3723,7 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
  * fence. It can only ever SKIP work — anything else escalates to the fence,
  * which owns every refusal and every write. One spelling, read by the
  * postcondition itself and by the batch that counts how many of its matched
- * items still owe a write ({@link assertExistingGetOrCreateLegsApplicable}).
+ * items still owe a write ({@link partitionExistingGetOrCreateLegs}).
  */
 async function existingPartOfPostconditionHeld<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3850,27 +3859,33 @@ type ExistingGetOrCreateMatch = Readonly<{
   leg: ExistingGetOrCreateLeg;
 }>;
 
+type GetOrCreateResult = Readonly<{ node: Node; action: GetOrCreateAction }>;
+
 /**
- * The WRITE of one existing-row leg, in its own write plan — every refusal
- * the leg can reach precedes its own first statement
- * ({@link executeNodeUpsertUpdate}, {@link applyExistingPartOfPostcondition}).
+ * The WRITE of one existing-row leg that owes one, in its own write plan —
+ * every refusal the leg can reach precedes its own first statement
+ * ({@link executeNodeUpsertUpdate}, {@link runCompositionAttachmentWritePlan}).
+ * The caller has already established that the leg owes a write: a `"found"`
+ * leg owes it only when its attachment is not held
+ * ({@link existingPartOfPostconditionHeld}).
  */
-async function applyExistingGetOrCreateLeg<G extends GraphDef>(
+async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   backend: GraphBackend | TransactionBackend,
   match: ExistingGetOrCreateMatch,
-): Promise<Readonly<{ node: Node; action: GetOrCreateAction }>> {
+): Promise<GetOrCreateResult> {
   const { existing, validatedProps, leg } = match;
   if (leg.leg === "found") {
-    if (leg.request !== undefined) {
-      await applyExistingPartOfPostcondition(
-        ctx,
-        backend,
-        existing.kind,
-        existing.id,
+    await runCompositionAttachmentWritePlan(
+      ctx,
+      existing.kind,
+      existing.id,
+      requireDefined(
         leg.request,
-      );
-    }
+        "a found get-or-create leg owes a write only for a stated attachment",
+      ),
+      backend,
+    );
     return { node: rowToNode(existing), action: "found" };
   }
   const node = await executeNodeUpsertUpdate(
@@ -3892,10 +3907,92 @@ async function applyExistingGetOrCreateLeg<G extends GraphDef>(
 }
 
 /**
- * The READ half of a BATCH of existing-row legs: every refusal any of them
+ * One existing-row leg of the SINGLE-item entry: a `"found"` leg discharges
+ * its stated attachment as a postcondition
+ * ({@link applyExistingPartOfPostcondition}, whose lock-free pre-check keeps an
+ * already-satisfied call read-only); any other leg is written
+ * ({@link writeOwedExistingGetOrCreateLeg}).
+ */
+async function applyExistingGetOrCreateLeg<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  match: ExistingGetOrCreateMatch,
+): Promise<GetOrCreateResult> {
+  const { existing, leg } = match;
+  if (leg.leg !== "found") {
+    return writeOwedExistingGetOrCreateLeg(ctx, backend, match);
+  }
+  if (leg.request !== undefined) {
+    await applyExistingPartOfPostcondition(
+      ctx,
+      backend,
+      existing.kind,
+      existing.id,
+      leg.request,
+    );
+  }
+  return { node: rowToNode(existing), action: "found" };
+}
+
+/**
+ * The matches of a batch split by whether they owe a write, each judged ONCE.
+ * A `"found"` leg owes one only when its stated attachment is not already held
+ * (the lock-free pre-check, {@link existingPartOfPostconditionHeld}); a
+ * revising leg (an update or a resurrection) always does. The batch writes the
+ * `owed` ones and returns the rest as found, so the pre-check is not read
+ * again per item at write time.
+ */
+async function partitionExistingGetOrCreateLegs<
+  G extends GraphDef,
+  M extends ExistingGetOrCreateMatch,
+>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  matches: readonly M[],
+): Promise<Readonly<{ owed: readonly M[]; held: readonly M[] }>> {
+  const owed: M[] = [];
+  const held: M[] = [];
+  for (const match of matches) {
+    const { existing, leg } = match;
+    if (
+      leg.leg === "found" &&
+      (leg.request === undefined ||
+        (await existingPartOfPostconditionHeld(
+          ctx,
+          backend,
+          existing.kind,
+          existing.id,
+          leg.request,
+        )))
+    ) {
+      held.push(match);
+    } else {
+      owed.push(match);
+    }
+  }
+  return { owed, held };
+}
+
+/**
+ * Whether a batch of get-or-create items must have its verdicts reached before
+ * its first write: at least one matched item owes a write that something else
+ * in the batch could still refuse after — another owed matched item, or the
+ * attachment of a row the batch is about to create. With exactly one owed leg
+ * and no such row, that leg's own write plan already reaches every verdict
+ * before its first statement, and the batch needs no frame of its own.
+ */
+function getOrCreateBatchDecidesBeforeWriting(
+  owedCount: number,
+  attachingCreateCount: number,
+): boolean {
+  return owedCount > 0 && (owedCount > 1 || attachingCreateCount > 0);
+}
+
+/**
+ * The READ half of a BATCH of get-or-create writes: every refusal any of them
  * can reach by reading, under the fence, before the batch's first statement.
  *
- * Each leg runs in its own write plan ({@link applyExistingGetOrCreateLeg})
+ * Each leg runs in its own write plan ({@link writeOwedExistingGetOrCreateLeg})
  * and orders its own reads before its own writes, which is enough for one
  * leg and not for several: on a caller's enclosing `store.transaction(...)`
  * there is no nested frame to roll back, so a leg refused after an earlier
@@ -3914,49 +4011,43 @@ async function applyExistingGetOrCreateLeg<G extends GraphDef>(
  *   `props` or window, a dead whole) and the attachments PREPARED together
  *   ({@link prepareCompositionAttachmentMoves}: part liveness, cardinality
  *   counting the batch's earlier edges, and one acyclicity probe over all of
- *   them);
+ *   them) — the attachments of the rows the batch is about to CREATE among
+ *   them, counted after the matched ones in the order the batch writes them,
+ *   so a whole-side bound the matched and the new rows exceed together is
+ *   refused here and not after the matched items wrote;
  * - a restoring leg that states no attachment may only bring back a part
  *   that still holds a live whole
- *   ({@link assertRestoredRequiredPartsAttached});
+ *   ({@link assertRestoredRequiredPartsAttached}), and may not bring back a
+ *   row whose id a disjoint kind now holds ({@link checkDisjointnessConstraint},
+ *   the very read a create answers it by);
  * - every property update is validated against the row it will merge over
  *   ({@link resolveNodeUpdateProps}) and its uniqueness claims probed in
  *   order, a later row seeing the keys an earlier row gives up or takes
- *   ({@link assertNodeClaimTransitionsAvailable}).
+ *   ({@link assertNodeClaimTransitionsAvailable});
+ * - a restoring leg's identity fold is read too (the identity hook
+ *   `assertFoldable`), against the identity state as stored.
  *
- * What no read can decide stays with the write: a peer that is not excluded
- * by the fence (a kind whose unique keys are enforced by the claim row's
- * primary key alone takes none) can still claim a key, or remove a row,
- * between this frame and a leg's statement.
- *
- * A batch in which at most one item owes a write needs none of this: that
- * leg's own frame already reaches every verdict before its first statement,
- * and the items that owe nothing stay read-only.
+ * What stays with the write: a peer that is not excluded by the fence (a kind
+ * whose unique keys are enforced by the claim row's primary key alone takes
+ * none) can still claim a key, or remove a row, between this frame and a
+ * leg's statement; an identity refusal that depends on another row this same
+ * batch restores is judged when the restore lands; and a NEW row's own
+ * non-attachment refusals (a unique key it loses, a disjoint kind holding its
+ * id) are judged when the create batch prepares it, because a matched update
+ * of the same batch may hand it a key — which only the write, in order,
+ * resolves.
  */
-async function assertExistingGetOrCreateLegsApplicable<G extends GraphDef>(
+async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   backend: GraphBackend | TransactionBackend,
-  matches: readonly ExistingGetOrCreateMatch[],
+  batch: Readonly<{
+    owed: readonly ExistingGetOrCreateMatch[];
+    attachingCreates: readonly CreateNodeInput[];
+    createWorks: readonly (CompositionCreateWork | undefined)[];
+    partOf: CompositionAttachment | undefined;
+  }>,
 ): Promise<void> {
-  const owed: ExistingGetOrCreateMatch[] = [];
-  for (const match of matches) {
-    const { existing, leg } = match;
-    if (
-      leg.leg === "found" &&
-      (leg.request === undefined ||
-        (await existingPartOfPostconditionHeld(
-          ctx,
-          backend,
-          existing.kind,
-          existing.id,
-          leg.request,
-        )))
-    ) {
-      continue;
-    }
-    owed.push(match);
-  }
-  if (owed.length < 2) return;
-
+  const { owed, attachingCreates, createWorks, partOf } = batch;
   const revisions = owed.flatMap((match) =>
     match.leg.leg === "revise" ? [{ ...match, leg: match.leg }] : [],
   );
@@ -3972,6 +4063,7 @@ async function assertExistingGetOrCreateLegsApplicable<G extends GraphDef>(
             undefined
           : compositionEdgeConstraintFence(ctx, leg.request.work),
         ),
+        ...compositionBatchConstraintProbes(ctx, createWorks),
       ],
       revisions.some(({ leg }) => leg.restoresRow) &&
         nodeRequiresIdentityLock(ctx),
@@ -3996,11 +4088,19 @@ async function assertExistingGetOrCreateLegsApplicable<G extends GraphDef>(
         const restoresRow = leg.leg === "revise" && leg.restoresRow;
         if (current === undefined || (!restoresRow && !isLiveNodeRow(current)))
           throw new NodeNotFoundError(kind, id);
+        if (restoresRow) {
+          await checkDisjointnessConstraint(
+            { graphId: ctx.graphId, registry: ctx.registry, backend: target },
+            kind,
+            id,
+          );
+        }
         if (leg.request !== undefined) {
           moves.push({
             partId: id,
             moveAt: undefined,
-            partRowRestoredByUpdate: restoresRow,
+            endpoints:
+              restoresRow ? { source: "restoredByUpdate" } : { source: "read" },
             decided: await decideCompositionAttachmentUnderFence(
               ctx.registry,
               target,
@@ -4020,6 +4120,17 @@ async function assertExistingGetOrCreateLegsApplicable<G extends GraphDef>(
           );
         }
       }
+      // A restoring leg re-runs the identity fold when it lands; what that
+      // fold would refuse is read here, for every restoring leg at once.
+      await ctx.identity?.assertFoldable(
+        target,
+        revisions
+          .filter(({ leg }) => leg.restoresRow)
+          .map(({ existing }) => ({ kind: existing.kind, id: existing.id })),
+      );
+      moves.push(
+        ...(await newRowAttachmentMoves(ctx, target, attachingCreates, partOf)),
+      );
       await prepareCompositionAttachmentMoves(
         ctx,
         target,
@@ -4039,6 +4150,50 @@ async function assertExistingGetOrCreateLegsApplicable<G extends GraphDef>(
     },
     { didWrite: () => false },
   );
+}
+
+/**
+ * The attachments of the rows a batch is about to create, as the moves
+ * {@link prepareCompositionAttachmentMoves} counts alongside the matched
+ * items' — each an `"attach"` of a part the frame has no row for yet, judged
+ * against its whole's row (read once per distinct whole) exactly as the create
+ * batch will judge it. The part's id is a stand-in: the created row's real id
+ * is assigned when the create batch prepares it, and nothing the frame counts
+ * depends on it.
+ */
+async function newRowAttachmentMoves<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  attachingCreates: readonly CreateNodeInput[],
+  partOf: CompositionAttachment | undefined,
+): Promise<readonly DecidedAttachmentMove[]> {
+  const wholeRows = new Map<string, BackendNodeRow | undefined>();
+  const moves: DecidedAttachmentMove[] = [];
+  for (const { kind } of attachingCreates) {
+    const id = generateId();
+    const request = requireDefined(
+      resolveGetOrCreateAttachmentRequest(ctx, kind, id, partOf),
+      "a create that owes a composition attachment resolved to no request",
+    );
+    const wholeKey = refKey(request.work.whole);
+    if (!wholeRows.has(wholeKey)) {
+      wholeRows.set(
+        wholeKey,
+        await target.getNode(
+          ctx.graphId,
+          request.work.whole.kind,
+          request.work.whole.id,
+        ),
+      );
+    }
+    moves.push({
+      partId: id,
+      moveAt: undefined,
+      endpoints: { source: "primedWhole", wholeRow: wholeRows.get(wholeKey) },
+      decided: { request, disposition: "attach" },
+    });
+  }
+  return moves;
 }
 
 // ============================================================
@@ -4218,7 +4373,7 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
         decisions.push({
           partId: item.id,
           moveAt: item.moveAt,
-          partRowRestoredByUpdate: false,
+          endpoints: { source: "read" },
           decided: await decideCompositionAttachmentUnderFence(
             ctx.registry,
             target,
@@ -7398,14 +7553,41 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // The creates' read-free refusals (a required part with no `partOf`, an
     // undeclared or ambiguous pair) are reached here, before any matched item
     // writes, rather than when the create batch runs in step 6.
-    resolveBatchCompositionWorks(ctx, createInputs, backend);
+    const createWorks = resolveBatchCompositionWorks(
+      ctx,
+      createInputs,
+      backend,
+    );
+    const attachingCreates = createInputs.filter(
+      (_input, position) => createWorks[position] !== undefined,
+    );
 
-    // Step 5: Reach every matched item's verdict, then write the matched
-    // items. See `assertExistingGetOrCreateLegsApplicable` for why the
-    // verdicts of the whole set precede the first write.
-    await assertExistingGetOrCreateLegsApplicable(ctx, backend, matches);
-    for (const match of matches) {
-      results[match.index] = await applyExistingGetOrCreateLeg(
+    // Step 5: Write the matched items that owe a write — after the verdicts
+    // of the whole batch, when it owes any. See
+    // `assertGetOrCreateBatchApplicable` for why those precede the first write.
+    const { owed, held } = await partitionExistingGetOrCreateLegs(
+      ctx,
+      backend,
+      matches,
+    );
+    if (
+      getOrCreateBatchDecidesBeforeWriting(owed.length, attachingCreates.length)
+    ) {
+      await assertGetOrCreateBatchApplicable(ctx, backend, {
+        owed,
+        attachingCreates,
+        createWorks,
+        partOf,
+      });
+    }
+    for (const match of held) {
+      results[match.index] = {
+        node: rowToNode(match.existing),
+        action: "found",
+      };
+    }
+    for (const match of owed) {
+      results[match.index] = await writeOwedExistingGetOrCreateLeg(
         ctx,
         backend,
         match,
@@ -7417,10 +7599,10 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // After the matched items on purpose: a matched item's refusal must
     // precede the first row this call writes, or a caller catching it inside
     // an enclosing `store.transaction(...)` keeps the created parts of a batch
-    // that threw. The converse does not hold — a NEW row's own refusal that
-    // only its preparation can reach (a second unique key it loses, a bound on
-    // the whole's side its edge exceeds) is raised here, after the matched
-    // items wrote.
+    // that threw. The converse is the batch frame's job above for the
+    // attachments of these rows; what only their own preparation can refuse
+    // (a second unique key, a disjoint kind) is raised here, after the
+    // matched items wrote, because a matched update may hand them a key.
     if (createInputs.length > 0) {
       const createdNodes = await executeNodeCreateBatch(
         ctx,
