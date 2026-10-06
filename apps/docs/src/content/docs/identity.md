@@ -735,17 +735,21 @@ with a fabricated before/after reconstructed from the destination's own,
 unrelated state.
 
 The restore also sets the destination's retention watermark to the
-**destination's own current recorded revision + 1**, but only when this
-graph has recorded no identity transitions of its own yet. A fresh graph has
-nothing of its own for that floor to misclassify, so setting it there is
-safe, and `replay` reports it as `truncatedBefore` — the point below which
-this graph's own timeline carries no retained explanation. A graph that
-already has its own retained transitions keeps its existing watermark
-untouched: advancing it from a restore-time floor would otherwise
-misclassify this graph's own, fully-retained history for classes the
-restore never touched as pruned. Either way, the watermark is a coarser,
-separate signal from the per-row marker above — it is never what decides
-whether one row's transition may appear in `steps`.
+**revision the restore's first commit takes on the destination**, but only
+when the graph recorded no identity transitions of its own before the restore
+began. `importGraph` and `importGraphStream` set the same watermark for the
+same archive: a streamed restore commits chunk by chunk, and the unions and
+folds its own node and assertion chunks record do not count as earlier
+history. A fresh graph has nothing of its own for that floor to misclassify,
+so setting it there is safe, and `replay` reports it as `truncatedBefore` —
+the point below which this graph's own timeline carries no retained
+explanation. What the restore itself records sits at or above the floor and
+stays replayable. A graph that already had its own retained transitions
+keeps its existing watermark untouched: advancing it from a restore-time
+floor would otherwise misclassify this graph's own, fully-retained history
+for classes the restore never touched as pruned. Either way, the watermark is
+a coarser, separate signal from the per-row marker above — it is never what
+decides whether one row's transition may appear in `steps`.
 
 Archival transitions export is always **whole-graph**: unlike assertions,
 `exportGraph`'s `nodeKinds` filter does not scope the transitions section.

@@ -43,7 +43,7 @@ import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   encodeIdentityTransitionRow,
-  hasNativeIdentityTransitions,
+  hasNativeIdentityTransitionsBefore,
   type IdentityDecisionProvenance,
   type IdentityTransitionTransfer,
   insertIdentityTransitionValues,
@@ -537,29 +537,33 @@ function transitionShapeError(
  * from "native" by number alone.
  *
  * The retention watermark is a SEPARATE, coarser signal — "this graph cannot
- * vouch for a complete history below revision N on its own axis" — and is
- * only ever advanced here when {@link hasNativeIdentityTransitions} answers
- * `false`, i.e. this graph has recorded no identity transitions of its own
- * yet. Advancing it unconditionally (the original design here) would, for a
- * graph that already has its own retained history, stamp a
- * destination-clock-derived floor over transitions the restore never
- * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
- * for classes the restore had nothing to do with. A graph with no native
- * rows yet has nothing of its own for that floor to misclassify, so setting
- * it there stays sound: reading THIS graph's clock at restore time and
- * adding one gives an honest floor on this graph's own timeline (there is no
- * earlier revision on it yet), and every later one the destination goes on
- * to record for real is, by the clock's own monotonicity, always at or
- * above it. The watermark write goes through the same monotonic
+ * vouch for a complete history below revision N on its own axis". N is the
+ * RESTORE FLOOR: the revision the restore's first commit takes. A document
+ * restore is one transaction, so that is the revision this call itself
+ * commits at; a streamed restore commits chunk by chunk, so the stream reads
+ * it once before its first chunk and hands it in as `restoreFloor` — the
+ * same number for every transitions chunk, which is what makes the two entry
+ * points agree. Everything the restore itself records (the folds and unions
+ * its nodes and assertions note) sits at or above the floor and stays
+ * replayable.
+ *
+ * The watermark is only written when
+ * {@link hasNativeIdentityTransitionsBefore} the floor answers `false`, i.e.
+ * this graph recorded no identity transitions of its own before the restore
+ * began. Writing it unconditionally would, for a graph that already has its
+ * own retained history, stamp a floor over transitions the restore never
+ * touched — misreporting `truncatedBefore`, and
+ * `IDENTITY_REPLAY_HISTORY_TRUNCATED`, for classes the restore had nothing
+ * to do with. The write goes through the same monotonic
  * `writeIdentityTransitionRetentionWatermark` `pruneIdentityTransitionsForContext`
- * uses, so a graph that later restores again can only raise its own floor,
- * never lower it.
+ * uses, so a later restore can only raise the floor, never lower it.
  */
 export async function importIdentityTransitionsIntoTarget(
   ctx: IdentityTransitionImportContext,
   target: IdentityTarget,
   transitions: readonly IdentityTransitionTransfer[],
   carriedWatermark: number | undefined,
+  restoreFloor: number | undefined,
 ): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
   // Raw identity statements run through the capture-approved handle
   // `withRecordedIdentityMutationTarget` resolves — under `history: true` the
@@ -569,16 +573,15 @@ export async function importIdentityTransitionsIntoTarget(
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const destinationFloor = await readNextRecordedRevision(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-    );
+    const destinationFloor =
+      restoreFloor ??
+      (await readNextRecordedRevision(rawTarget, ctx.schema, ctx.graphId));
     const restoredAt = nowIso();
-    const hasOwnHistory = await hasNativeIdentityTransitions(
+    const hasOwnHistory = await hasNativeIdentityTransitionsBefore(
       rawTarget,
       ctx.schema,
       ctx.graphId,
+      destinationFloor,
     );
     if (transitions.length === 0) {
       if (

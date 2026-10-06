@@ -38,24 +38,17 @@
  * `src/registry/builders.ts`) or an external IRI — is skipped: subsumption
  * does not apply to a kind this registry does not know the shape of.
  *
- * **Known gap: `isAssignableTo(A, B) ⇒ every A row satisfies
- * B's schema` does not hold for a kind whose Zod schema fails
- * `z.toJSONSchema` conversion.** `serializeSchemaProperties`
- * (`src/schema/serializer.ts`) catches that failure and projects `{ type:
- * "object" }` for ANY unconvertible construct (`z.set()`, `z.map()`, and
- * others), so two structurally unrelated kinds that both contain one — say
- * a child dropping a field the parent requires, buried inside a `z.set()`
- * element — project to the SAME `{ type: "object" }` and pass this check as
- * "subtype" via ordinary property equality, with no way for this predicate
- * to tell "genuinely identical" from "both unprojectable" apart. This is
- * NOT new to this module — `serializeSchemaProperties` has fallen back this
- * way since it was introduced — but this module is the first consumer that
- * turns its output into a hard correctness GUARANTEE rather than a
- * best-effort introspection view. Fixing it belongs in the serializer (make
- * "unprojectable" a distinct, non-`{type:"object"}` signal this module can
- * refuse on), not here; until then, a kind containing `z.set()`/`z.map()`/
- * another unconvertible construct is effectively SKIPPED by this check
- * (silently, not `incomparable`) rather than guaranteed.
+ * **Known gap: `isAssignableTo(A, B) ⇒ every A row satisfies B's schema`
+ * is not guaranteed for a pair where EITHER kind's Zod schema fails
+ * `z.toJSONSchema` conversion** (`z.set()`, `z.map()`, `z.date()`,
+ * `z.bigint()`, a `.transform()`, `embedding()` and any other `z.custom()`).
+ * Such a kind has no projection — `isUnprojectableSchemaProjection`
+ * (`src/schema/serializer.ts`) is the one test for that — so there is
+ * nothing to compare and the pair is skipped, whichever side it is on. The
+ * placeholder is never compared as a schema: read as one it is an open
+ * object declaring no properties, which would refuse a genuine subtype as
+ * missing a property it declares. The compile-time check still holds for
+ * such a pair; what is lost is the value-level half only this module sees.
  *
  * `evolve()` re-declaring an existing kind needs no special path: the
  * registry is rebuilt from the merged graph and this module walks the WHOLE
@@ -63,6 +56,7 @@
  * parents, its children, and its equivalents in one pass. Do not add a
  * second, narrower re-check for the `evolve()` case.
  */
+import { isUnprojectableSchemaProjection } from "../schema/serializer";
 import {
   isStructuralSubtype,
   type StructuralIncomparableReason,
@@ -110,7 +104,8 @@ export type DeclaredSubsumptionPair = (
  * Every `(child, parent)` pair in `closures.subClassAncestors`'s transitive
  * closure whose projected schemas are NOT a structural subtype, in stable
  * `compareCodePoints` order. Empty when every pair the closure produces is
- * either a genuine subtype or unregistered (skipped).
+ * either a genuine subtype, unregistered, or unprojectable on either side
+ * (both skipped).
  */
 export function findStructuralSubsumptionViolations(
   closures: Pick<KindRegistry, "subClassAncestors">,
@@ -137,6 +132,12 @@ export function findStructuralSubsumptionViolations(
       // Unregistered kind (external IRI, or a parent this document only
       // references) — subsumption does not apply; skip, do not throw.
       if (childSchema === undefined || parentSchema === undefined) continue;
+      if (
+        isUnprojectableSchemaProjection(childSchema) ||
+        isUnprojectableSchemaProjection(parentSchema)
+      ) {
+        continue;
+      }
 
       const result = isStructuralSubtype(childSchema, parentSchema);
       if (result.verdict === "subtype") continue;

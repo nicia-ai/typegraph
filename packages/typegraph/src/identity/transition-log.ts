@@ -780,30 +780,37 @@ export async function readIdentityTransitionPageForInterchange(
 type RawNativeTransitionExistsRow = Readonly<{ transition_id: unknown }>;
 
 /**
- * Whether `graphId` already has at least one NATIVE (non-restored) identity
- * transition row — one this graph itself recorded through the live capture
- * flush, as opposed to one an archival restore inserted verbatim.
+ * Whether `graphId` holds a NATIVE (non-restored) identity transition row
+ * recorded below `revision` — history this graph recorded itself, through
+ * the live capture flush, before the restore that is asking began.
  *
  * Archival restore (`importIdentityTransitionsIntoTarget`,
  * `service-interchange-write.ts`) consults this BEFORE deciding whether to
- * advance the retention watermark: a graph that already has its own retained
- * history has honest boundaries the restore never touched, and stamping a
- * restore-derived floor over them would misreport `truncatedBefore` (or the
- * `IDENTITY_REPLAY_HISTORY_TRUNCATED` refusal) for classes the restore had
- * nothing to do with. A graph with no native rows yet — fresh, or one whose
- * only transitions so far are themselves restored — has nothing of its own
- * for a floor to misclassify, so the restore is free to set one.
+ * set the retention watermark, passing the revision its own first commit
+ * takes: a graph with earlier history of its own has honest boundaries the
+ * restore never touched, and a restore-derived floor over them would
+ * misreport `truncatedBefore` (or the `IDENTITY_REPLAY_HISTORY_TRUNCATED`
+ * refusal) for classes the restore had nothing to do with.
+ *
+ * The bound is what keeps the restore's OWN notes out of the answer. Importing
+ * an archive's nodes and assertions notes ordinary native transitions (a
+ * fold, the union an assertion makes); a streamed restore has committed them
+ * by the time its transitions arrive, and counting them as "history of its
+ * own" would leave every streamed restore without a watermark.
  */
-export async function hasNativeIdentityTransitions(
+export async function hasNativeIdentityTransitionsBefore(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,
+  revision: number,
 ): Promise<boolean> {
   const rows = await target.execute<RawNativeTransitionExistsRow>(
     asCompiledRowsSql(sql`
       SELECT transition_id
       FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId} AND restored_at IS NULL
+      WHERE graph_id = ${graphId}
+        AND restored_at IS NULL
+        AND recorded_revision < ${revision}
       LIMIT 1
     `),
   );
@@ -929,8 +936,8 @@ export function requireIdentityTransitionLog(
  * INSERT ... ON CONFLICT, shared by `pruneIdentityTransitionsForContext`
  * (which pairs it with deleting the rows it now covers) and archival restore
  * (`importIdentityTransitionsIntoTarget`, `service-interchange-write.ts`,
- * which sets it to the highest restored revision + 1 without deleting
- * anything — a restore into a fresh graph has nothing there to delete). The
+ * which sets it to the revision the restore's first commit takes, without
+ * deleting anything — a restore into a fresh graph has nothing there to delete). The
  * `WHERE` guard makes the write itself monotonic: a `resolvedWatermark` at or
  * below what is already stored is a no-op, so neither caller needs its own
  * read-compare-write race guard beyond the one each already has for its own

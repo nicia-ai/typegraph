@@ -26,7 +26,13 @@ import {
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
-import { exportGraph, importGraph } from "../../../src/interchange";
+import {
+  exportGraph,
+  exportGraphStream,
+  type GraphInterchangeChunk,
+  importGraph,
+  importGraphStream,
+} from "../../../src/interchange";
 import { getActiveSchema, migrateSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -300,6 +306,115 @@ export function registerIdentityReplayIntegrationTests(
         toRecorded: latest,
       });
       expect(fresh.truncatedBefore).toBeUndefined();
+    });
+  });
+
+  describe("archival restore sets one watermark on either entry point", () => {
+    for (const variant of ["unpruned", "pruned"] as const) {
+      it(`importGraph and importGraphStream agree on truncatedBefore for an ${variant} source`, async () => {
+        const source = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_restore_parity_source_${variant}`),
+        );
+        const alice = personRef("rp-alice");
+        const bob = personRef("rp-bob");
+        await source.nodes.Person.create({}, { id: alice.id });
+        await source.nodes.Person.create({}, { id: bob.id });
+        const first = await source.identity.assertSame(alice, bob);
+        await source.identity.retractAssertion(first.assertion.id);
+        await source.identity.assertSame(alice, bob);
+        if (variant === "pruned") {
+          const history = await source.identity.transitionsOf(alice);
+          await pruneIdentityTransitions(source, {
+            beforeRecorded: requireDefined(history.transitions.at(-1)).recorded,
+          });
+        }
+        const archive = await exportGraph(source, {
+          identityMode: "archival",
+        });
+        // Collected before any import: one backend serves source and targets.
+        const chunks: GraphInterchangeChunk[] = [];
+        for await (const chunk of exportGraphStream(source, {
+          identityMode: "archival",
+        })) {
+          chunks.push(chunk);
+        }
+        expect(chunks.map((chunk) => chunk.type)).toContain("identity");
+        expect(chunks.at(-1)?.type).toBe("identity-transitions");
+
+        const documentTarget = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_restore_parity_document_${variant}`),
+        );
+        const streamTarget = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_restore_parity_stream_${variant}`),
+        );
+        const documentResult = await importGraph(documentTarget, archive, {
+          onConflict: "skip",
+        });
+        const streamResult = await importGraphStream(
+          streamTarget,
+          (async function* replayChunks() {
+            await Promise.resolve();
+            yield* chunks;
+          })(),
+          { onConflict: "skip" },
+        );
+        expect(documentResult.errors).toEqual([]);
+        expect(streamResult.errors).toEqual([]);
+
+        const documentReplay = await documentTarget.identity.replay(alice);
+        const documentFloor = requireDefined(documentReplay.truncatedBefore);
+        const streamReplay = await streamTarget.identity.replay(alice);
+        expect(
+          recordedInstantRevision(requireDefined(streamReplay.truncatedBefore)),
+        ).toBe(recordedInstantRevision(documentFloor));
+        // The floor sits at the restore's first commit, so the union the
+        // restore itself recorded is still a replayable step.
+        expect(streamReplay.steps.map((step) => step.transition.cause)).toEqual(
+          ["assert"],
+        );
+      });
+    }
+
+    it("leaves a destination's own earlier history unfloored on a streamed restore", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_restore_native_source"),
+      );
+      await source.nodes.Person.create({}, { id: "rn-a" });
+      await source.nodes.Person.create({}, { id: "rn-b" });
+      await source.identity.assertSame(personRef("rn-a"), personRef("rn-b"));
+      const chunks: GraphInterchangeChunk[] = [];
+      for await (const chunk of exportGraphStream(source, {
+        identityMode: "archival",
+      })) {
+        chunks.push(chunk);
+      }
+
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_restore_native_target"),
+      );
+      await target.nodes.Person.create({}, { id: "rn-own-a" });
+      await target.nodes.Person.create({}, { id: "rn-own-b" });
+      await target.identity.assertSame(
+        personRef("rn-own-a"),
+        personRef("rn-own-b"),
+      );
+      const streamResult = await importGraphStream(
+        target,
+        (async function* replayChunks() {
+          await Promise.resolve();
+          yield* chunks;
+        })(),
+        { onConflict: "skip" },
+      );
+      expect(streamResult.errors).toEqual([]);
+
+      const own = await target.identity.replay(personRef("rn-own-a"));
+      expect(own.truncatedBefore).toBeUndefined();
     });
   });
 

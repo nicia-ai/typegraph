@@ -100,14 +100,16 @@ authored extension, and a deserialized persisted document), throwing a
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | the same, but the pair is incomparable |
 
 **Known gap:** the registry check compares kinds' projected JSON Schema, and
-a Zod construct `z.toJSONSchema` cannot convert (`z.set()`, `z.map()`, and
-others) projects as a generic `{ type: "object" }` for every kind that
-contains one — so two kinds that differ only inside such a field are
-indistinguishable to the check and a genuinely incompatible pair is silently
-accepted rather than refused. This applies equally to a compile-time graph,
-an `evolve()`-authored extension, and a deserialized document; avoid
-`z.set()`/`z.map()` on a node schema that participates in `subClassOf` or
-`equivalentTo` until the projection is made distinguishable.
+a kind whose schema holds a Zod construct `z.toJSONSchema` cannot convert has
+no projection to compare: `z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a
+`.transform()`, and any `z.custom()`, which includes TypeGraph's own
+`embedding()`. A `subClassOf` or `equivalentTo` pair with such a kind on
+**either** side is skipped by the registry check rather than guaranteed, so a
+subclass that adds an `embedding()` to its parent opens normally, and a pair
+that is incompatible only at the value level (a tighter `z.string().min(5)`
+on the parent, say) is accepted rather than refused. The compile-time check
+still applies to these pairs. This holds equally for a compile-time graph, an
+`evolve()`-authored extension, and a deserialized document.
 
 If your hierarchy is a **taxonomy** rather than a genuine subtype
 relationship — the child doesn't actually extend the parent's schema —
@@ -411,6 +413,17 @@ resolve to and stops parts from being deleted with their whole, so
 `store.verifyConstraintFences()` (the `family: "composition"` entries) reports
 the same violations after the fact for rows written by trusted import or direct
 SQL.
+
+**Upgrading a graph that declared `partOf(part, whole)` with no `via`**: an
+earlier release accepted that form and stored it. Upgrade the library first,
+then give the relation its `via` (or delete it) in the graph, and open the
+graph with `createStoreWithSchema()` or commit it with `migrateSchema()`. The
+stored relation realized nothing, so its removal is `safe`; the pair you
+declare with `via` is a newly added pair and is checked against existing rows
+as described above. A graph that still declares the relation without `via` is
+refused at registry build. See
+[Structural subsumption is checked before you upgrade](/schema-evolution#structural-subsumption-is-checked-before-you-upgrade)
+for the full order.
 
 #### Attaching a part: `partOf: { whole, via?, props? }`
 

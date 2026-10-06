@@ -181,7 +181,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "identity/service-interchange-write.ts",
     reason:
-      "Imports the IdentityDecisionProvenance type to type a governed-apply's decision metadata before handing it to noteTransition, and importIdentityTransitionsIntoTarget's archival restore, which calls transition-log.ts's own encodeIdentityTransitionRow / insertIdentityTransitionValues / writeIdentityTransitionRetentionWatermark / hasNativeIdentityTransitions to write and check rows verbatim — delegating to the relation's one owner, never a second inline write, and never a membership read.",
+      "Imports the IdentityDecisionProvenance type to type a governed-apply's decision metadata before handing it to noteTransition, and importIdentityTransitionsIntoTarget's archival restore, which calls transition-log.ts's own encodeIdentityTransitionRow / insertIdentityTransitionValues / writeIdentityTransitionRetentionWatermark / hasNativeIdentityTransitionsBefore to write and check rows verbatim — delegating to the relation's one owner, never a second inline write, and never a membership read.",
   },
   {
     file: "store/recorded-capture.ts",

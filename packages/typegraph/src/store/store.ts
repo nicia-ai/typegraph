@@ -411,6 +411,7 @@ import {
   forceRecordedGraphRevision,
   lockRecordedGraphWrite,
   mintsOriginNamespacedAnchor,
+  readNextRecordedRevision,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
@@ -1770,8 +1771,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readIdentityTransitionPageAtTarget(target, options),
       identityTransitionRetentionAtTarget: (target) =>
         this.identityTransitionRetentionAtTarget(target),
-      importIdentityTransitionsAtTarget: (target, transitions, watermark) =>
-        this.importIdentityTransitionsAtTarget(target, transitions, watermark),
+      identityTransitionRestoreFloorAtTarget: (target) =>
+        this.identityTransitionRestoreFloorAtTarget(target),
+      importIdentityTransitionsAtTarget: (
+        target,
+        transitions,
+        watermark,
+        restoreFloor,
+      ) =>
+        this.importIdentityTransitionsAtTarget(
+          target,
+          transitions,
+          watermark,
+          restoreFloor,
+        ),
       applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
         this.applyIdentityMergeAtTarget(
           target,
@@ -2212,11 +2225,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
+  /**
+   * @internal The floor of an archival restore about to begin on `target`:
+   * the revision its first commit takes.
+   */
+  identityTransitionRestoreFloorAtTarget(
+    target: GraphBackend | TransactionBackend,
+  ): Promise<number> {
+    return readNextRecordedRevision(target, this.#sqlSchema(), this.graphId);
+  }
+
   /** @internal Restores archival identity transitions inside an import transaction. */
   importIdentityTransitionsAtTarget(
     target: IdentityTarget,
     transitions: readonly IdentityTransitionTransfer[],
     carriedWatermark: number | undefined,
+    restoreFloor: number | undefined,
   ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
     if (transitions.length === 0 && carriedWatermark === undefined) {
       return Promise.resolve({ created: 0, watermark: undefined });
@@ -2251,6 +2275,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       transitions,
       carriedWatermark,
+      restoreFloor,
     );
   }
 

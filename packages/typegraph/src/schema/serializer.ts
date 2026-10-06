@@ -713,23 +713,44 @@ export function serializeSchemaProperties(schema: z.ZodType): JsonSchema {
   return computed;
 }
 
+/**
+ * What a schema `z.toJSONSchema` cannot convert projects as: `z.set()`,
+ * `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, a `z.custom()`
+ * (which is what `embedding()` is), and any other construct with no JSON
+ * Schema spelling. ONE such field collapses the whole kind to this
+ * placeholder, so it states nothing about the kind's properties: it is the
+ * absence of a projection, in the persisted form documents have always
+ * carried (changing that form would change every such graph's schema hash).
+ *
+ * A genuine projection is never mistaken for it, because Zod stamps every
+ * converted schema with `$schema` — an empty `z.object({})` included.
+ */
+const UNPROJECTABLE_SCHEMA_PROJECTION: JsonSchema = Object.freeze({
+  type: "object",
+});
+
+/**
+ * Whether `projection` is the unprojectable placeholder rather than a
+ * schema. The one owner of that decision, for a live graph's projection and
+ * a persisted document's alike: a consumer that compares projections must
+ * ask this first, since the placeholder compared as a schema reads as an
+ * open object declaring no properties — a false statement about the kind.
+ */
+export function isUnprojectableSchemaProjection(
+  projection: JsonSchema,
+): boolean {
+  const keys = Object.keys(projection);
+  return (
+    keys.length === 1 &&
+    projection.type === UNPROJECTABLE_SCHEMA_PROJECTION.type
+  );
+}
+
 function serializeZodSchema(schema: z.ZodType): JsonSchema {
   try {
-    // Zod 4 has toJSONSchema as a standard export
-    const jsonSchema = z.toJSONSchema(schema);
-    return jsonSchema as JsonSchema;
+    return z.toJSONSchema(schema) as JsonSchema;
   } catch {
-    // Fallback for schemas that can't be converted (e.g. z.set(), z.map()).
-    // Every unconvertible construct collapses to this SAME `{ type: "object" }`
-    // projection, so two structurally unrelated schemas that both fail
-    // conversion become indistinguishable to any caller comparing
-    // projections — including src/registry/validate-structural-subsumption.ts
-    // which otherwise treats identical projections as proof of
-    // structural subtyping. Fine for a best-effort introspection view; NOT
-    // sound as an equality oracle. A caller that needs to tell "genuinely
-    // identical" from "both unprojectable" apart cannot do so from this
-    // return value alone.
-    return { type: "object" };
+    return UNPROJECTABLE_SCHEMA_PROJECTION;
   }
 }
 

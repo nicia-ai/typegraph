@@ -12,7 +12,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, equivalentTo, subClassOf } from "../src";
+import {
+  defineGraph,
+  defineNode,
+  embedding,
+  equivalentTo,
+  subClassOf,
+} from "../src";
 import { ConfigurationError } from "../src/errors";
 import { defineGraphExtension } from "../src/graph-extension";
 import { buildKindRegistry } from "../src/registry/builders";
@@ -419,18 +425,12 @@ describe("registry check — evolve() checks an authored extension before any wr
   });
 });
 
-describe("registry check — known gap: unconvertible Zod constructs project identically", () => {
-  // `z.set()`/`z.map()` fail `z.toJSONSchema` and both collapse to the SAME
-  // `{ type: "object" }` fallback (src/schema/serializer.ts), so this pair
-  // — genuinely incompatible (Parent requires a "tags" set the Child
-  // doesn't even declare) — is silently ACCEPTED rather than refused. This
-  // pins the DOCUMENTED, not desired, current behavior (see the module
-  // headers on validate-structural-subsumption.ts and serializer.ts): a
-  // kind containing an unconvertible construct is effectively skipped by
-  // the registry check, not guaranteed. A future serializer fix that distinguishes
-  // "unprojectable" from a real `{ type: "object" }` should make this test
-  // start refusing the pair — update it deliberately then, not by
-  // widening this pin further.
+describe("registry check — known gap: a pair with an unprojectable kind is skipped", () => {
+  // A kind holding a construct `z.toJSONSchema` cannot convert has no
+  // projection (src/schema/serializer.ts), so a pair with such a kind on
+  // either side is SKIPPED by the registry check rather than guaranteed.
+  // This pair is genuinely incompatible (Parent requires a "tags" set the
+  // Child does not declare) and is accepted: the documented gap.
   //
   // Child genuinely lacks Parent's "tags" property, so `subClassOf(Child,
   // Parent)` would also fail the compile-time check for THIS pair — this
@@ -476,9 +476,8 @@ describe("registry check — known gap: unconvertible Zod constructs project ide
   // (invisible to the compile-time check) rather than a missing property (which it would
   // refuse before this pair ever reached the registry). Both `tags` fields
   // infer to the identical `Set<string>` TypeScript type, so
-  // `subClassOf(SetChildLive, SetParentLive)` compiles; `serializeSchemaProperties`
-  // then collapses both kinds' `z.set()` field to the SAME `{ type: "object" }`
-  // fallback, so the genuinely tighter `code` constraint on the parent is
+  // `subClassOf(SetChildLive, SetParentLive)` compiles; neither kind has a
+  // projection, so the genuinely tighter `code` constraint on the parent is
   // never compared and `buildKindRegistry` accepts the pair.
   it("does not refuse a live subClassOf pair whose incompatibility is hidden behind a z.set() field", () => {
     const SetChildLive = defineNode("SetChildLive", {
@@ -508,5 +507,105 @@ describe("registry check — known gap: unconvertible Zod constructs project ide
     // `code: "hi"` satisfies neither `SetParentLive`'s declared nor its
     // intended contract, yet the registry calls it assignable.
     expect(registry.isAssignableTo("SetChildLive", "SetParentLive")).toBe(true);
+  });
+
+  // The mirror case: only the CHILD is unprojectable. Its whole schema
+  // projects as the placeholder, which carries none of the properties the
+  // child really declares, so comparing it would refuse a genuine subtype
+  // as "missing" a property it has. The pair is skipped, like the others.
+  const UNPROJECTABLE_FIELDS = {
+    embedding: () => embedding(3),
+    "optional embedding": () => embedding(3).optional(),
+    "z.set": () => z.set(z.string()),
+    "z.map": () => z.map(z.string(), z.number()),
+    "z.date": () => z.date(),
+    "z.bigint": () => z.bigint(),
+    transform: () => z.string().transform((value) => value.length),
+  } as const;
+
+  const PROJECTABLE_PARENTS = {
+    "a required property": () => z.object({ title: z.string() }),
+    "an optional property": () => z.object({ title: z.string().optional() }),
+  } as const;
+
+  for (const [parentLabel, parentSchema] of Object.entries(
+    PROJECTABLE_PARENTS,
+  )) {
+    for (const [fieldLabel, field] of Object.entries(UNPROJECTABLE_FIELDS)) {
+      it(`skips a subclass adding ${fieldLabel} under a parent with ${parentLabel}`, () => {
+        const Document = defineNode("Document", { schema: parentSchema() });
+        const Article = defineNode("Article", {
+          schema: z.object({
+            title: z.string(),
+            body: z.string(),
+            extra: field(),
+          }),
+        });
+        const graph = defineGraph({
+          id: "subclass_unprojectable_child",
+          nodes: { Document: { type: Document }, Article: { type: Article } },
+          edges: {},
+          ontology: [subClassOf(Article, Document)],
+        });
+
+        expect(
+          buildKindRegistry(graph).isAssignableTo("Article", "Document"),
+        ).toBe(true);
+        // The persisted document reaches the same verdict as the live graph.
+        expect(() =>
+          deserializeSchema(serializeSchema(graph, 1)).buildRegistry(),
+        ).not.toThrow();
+      });
+    }
+  }
+
+  it("skips an equivalentTo pair when one side is unprojectable", () => {
+    const Plain = defineNode("Plain", {
+      schema: z.object({ title: z.string() }),
+    });
+    const Dated = defineNode("Dated", {
+      schema: z.object({ title: z.string(), at: z.date().optional() }),
+    });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "equivalence_unprojectable_side",
+          nodes: { Plain: { type: Plain }, Dated: { type: Dated } },
+          edges: {},
+          ontology: [equivalentTo(Plain, Dated)],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("opens a store whose subclass adds an embedding to its parent", async () => {
+    const Content = defineNode("Content", {
+      schema: z.object({ title: z.string(), createdBy: z.string() }),
+    });
+    const Document = defineNode("Document", {
+      schema: z.object({
+        title: z.string(),
+        createdBy: z.string(),
+        embedding: embedding(8).optional(),
+      }),
+    });
+    const [store] = await createStoreWithSchema(
+      defineGraph({
+        id: "subclass_embedding_store",
+        nodes: { Content: { type: Content }, Document: { type: Document } },
+        edges: {},
+        ontology: [subClassOf(Document, Content)],
+      }),
+      createTestBackend(),
+    );
+
+    await store.nodes.Document.create({ title: "Spec", createdBy: "ada" });
+    const contents = await store
+      .query()
+      .from("Content", "content")
+      .select((context) => context.content)
+      .execute();
+    expect(contents.map((content) => content.kind)).toEqual(["Document"]);
   });
 });
