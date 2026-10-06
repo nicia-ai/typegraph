@@ -1264,6 +1264,15 @@ guessing how incident and exact-pair rows should be interpreted:
 | `EDGE_HETEROGENEOUS_READ_MIXED_ENDPOINT_MODES` | The request contains both incident-endpoint rows (without an opposite endpoint) and exact directed-pair rows. Supply an opposite endpoint for every row to request exact-pair matching. |
 | `EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED` | The endpoint set cannot fit within the backend's bind-parameter budget. Split the request into smaller calls. |
 
+#### Pagination guard codes
+
+`paginate()`, `page()` and `stream()` refuse a query whose cursor could not
+position itself, instead of returning pages that silently lose rows:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECURSIVE_PAGINATION_UNSUPPORTED` | The query contains a recursive traversal (`recursive()`, `parts()` or `wholes()`). A recursive row has no single edge to extend the start node's keyset cursor with, so the rows of one start node that straddle a page boundary would be dropped. `details.operation` names the refused surface. Read the walk with `execute()` and an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the walk for each page. See [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated). |
+
 #### Operational Identity guard codes
 
 Operational Identity lifecycle failures use stable `details.code` values on

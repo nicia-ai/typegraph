@@ -229,6 +229,15 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 10
 ```
 
+### Recursive traversals cannot be paginated
+
+`paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
+`parts()` or `wholes()`) with a `ConfigurationError` (`details.code` is
+`RECURSIVE_PAGINATION_UNSUPPORTED`), because a keyset cursor cannot position itself inside the rows
+one start node fans out into. Use `execute()` with an explicit `limit()` or `maxHops`, or page the
+start nodes in a non-recursive query and run the walk for each page. See
+[Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated).
+
 ## Composition Cascade
 
 Deleting a [composition](/ontology#composition) whole cascades leaf-first
