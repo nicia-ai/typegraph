@@ -669,7 +669,9 @@ Tier 1 is enforced, in full, at write time:
   rows composition itself counts as memberships: an ended row of a
   `oneActive` realizing edge is the history a `reparent` leaves behind, not a
   membership, so earlier moves never stop a part from later moving under one
-  of its former descendants.
+  of its former descendants. A realizing edge kind that is also declared
+  `acyclic: true` keeps that declaration's rule: every non-deleted row of the
+  kind counts, ended or not.
 - **Leaf-first cascade.** Deleting a whole deletes its live parts closure
   leaf-first, in the same transaction, each part through its own node-delete
   pipeline. See
