@@ -156,8 +156,10 @@ export function compositionAcyclicRelation(
       return {
         edgeKind,
         reversed: partSide === "to",
-        ...(compositionCountsEndedRows(partSide, population) ||
-        standaloneAcyclicEdgeKinds.has(edgeKind) ?
+        ...((
+          compositionCountsEndedRows(partSide, population) ||
+          standaloneAcyclicEdgeKinds.has(edgeKind)
+        ) ?
           {}
         : { openEndedOnly: true as const }),
       };
