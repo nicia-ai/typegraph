@@ -638,16 +638,22 @@ function assertClusterNotSeparated(
 }
 
 /**
- * The ONE order merged branches are recorded in: code-point by branch id.
- * A plan artifact's `MergePlanAnchors.branches` and the identity decision's
- * `branchAncestry` both read it here, so the same logical merge run through
- * `merge()` and through `planMerge` + `applyMergePlan` records comparable
- * replay provenance instead of two orderings that only happen to agree.
+ * The ONE list merged branches are recorded as: the caller's branches,
+ * code-point by branch id. A plan artifact's `MergePlanAnchors.branches` and
+ * the identity decision's `branchAncestry` both read it here, so the same
+ * logical merge run directly and through a plan + `applyMergePlan` records the
+ * same replay provenance instead of two lists that only happen to agree.
+ *
+ * The reserved stand-in an incremental merge stages its committed target
+ * under is not a merged branch and is never recorded, whichever list the
+ * caller holds.
  */
 function branchesInAnchorOrder<G extends GraphDef>(
   branches: readonly GraphBranch<G>[],
 ): readonly GraphBranch<G>[] {
-  return [...branches].sort((left, right) => compareStrings(left.id, right.id));
+  return branches
+    .filter((branch) => branch.id !== COMMITTED_TARGET_BRANCH)
+    .toSorted((left, right) => compareStrings(left.id, right.id));
 }
 
 /**
