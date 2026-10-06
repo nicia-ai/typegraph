@@ -174,25 +174,59 @@ async function createStreamingImportTarget(
   return target;
 }
 
+/** A one-node document stating that node's window end. */
+function windowEndDocument(
+  ref: Ref,
+  properties: Record<string, unknown>,
+  validTo: string,
+) {
+  return {
+    formatVersion: FORMAT_VERSION,
+    exportedAt: new Date().toISOString(),
+    source: { type: "external" as const },
+    nodes: [{ ...ref, properties, validTo }],
+    edges: [],
+  };
+}
+
+/** A same-id fold class: Person and Author both named `shared`. */
+async function makeFoldClass(context: IntegrationTestContext, graphId: string) {
+  const store = await context.createHistoryStore(
+    identityInterchangeGraph(graphId),
+  );
+  await store.nodes.Person.create({ name: "S" }, { id: "shared" });
+  await store.nodes.Author.create({ penName: "S" }, { id: "shared" });
+  return store;
+}
+
+/**
+ * How many `window-end` transitions the fold class records once `endWindow`
+ * has ended the Person member's window.
+ */
+async function windowEndTransitions(
+  context: IntegrationTestContext,
+  graphId: string,
+  endWindow: (
+    store: Awaited<ReturnType<typeof makeFoldClass>>,
+    validTo: string,
+  ) => Promise<void>,
+): Promise<number> {
+  const store = await makeFoldClass(context, graphId);
+  await endWindow(store, isoAt(24 * HOUR_MS));
+  const history = await store.identity.transitionsOf({
+    kind: "Author",
+    id: "shared",
+  });
+  return history.transitions.filter(
+    (transition) => transition.cause === "window-end",
+  ).length;
+}
+
 export function registerIdentityImportIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Operational Identity interchange", () => {
     describe("a node window end stated by onConflict: update", () => {
-      function windowEndDocument(
-        ref: Ref,
-        properties: Record<string, unknown>,
-        validTo: string,
-      ) {
-        return {
-          formatVersion: FORMAT_VERSION,
-          exportedAt: new Date().toISOString(),
-          source: { type: "external" as const },
-          nodes: [{ ...ref, properties, validTo }],
-          edges: [],
-        };
-      }
-
       it("refuses an end an open identity assertion would outlive, as the store update does", async () => {
         const store = await context.createHistoryStore(
           identityInterchangeGraph("identity_import_window_end_refusal"),
@@ -229,34 +263,8 @@ export function registerIdentityImportIntegrationTests(
       });
 
       it("records the window-end transition the store update records", async () => {
-        async function windowEndTransitions(
-          graphId: string,
-          endWindow: (
-            store: Awaited<ReturnType<typeof makeFoldClass>>,
-            validTo: string,
-          ) => Promise<void>,
-        ): Promise<number> {
-          const store = await makeFoldClass(graphId);
-          await endWindow(store, isoAt(24 * HOUR_MS));
-          const history = await store.identity.transitionsOf({
-            kind: "Author",
-            id: "shared",
-          });
-          return history.transitions.filter(
-            (transition) => transition.cause === "window-end",
-          ).length;
-        }
-        /** A same-id fold class: Person and Author both named `shared`. */
-        async function makeFoldClass(graphId: string) {
-          const store = await context.createHistoryStore(
-            identityInterchangeGraph(graphId),
-          );
-          await store.nodes.Person.create({ name: "S" }, { id: "shared" });
-          await store.nodes.Author.create({ penName: "S" }, { id: "shared" });
-          return store;
-        }
-
         const viaStore = await windowEndTransitions(
+          context,
           "identity_import_window_end_store",
           async (store, validTo) => {
             const person = await store.nodes.Person.getById("shared" as never);
@@ -268,6 +276,7 @@ export function registerIdentityImportIntegrationTests(
           },
         );
         const viaImport = await windowEndTransitions(
+          context,
           "identity_import_window_end_import",
           async (store, validTo) => {
             const result = await importGraph(
