@@ -37,6 +37,7 @@ import { canUseSparseCandidatePlanning } from "../../../src/graph-merge/sparse-c
 import { asBranchId } from "../../../src/graph-merge/types";
 import { importGraph } from "../../../src/interchange";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
+import { storeBackend } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -1000,6 +1001,85 @@ export function registerGraphMergeReviewIntegrationTests(
         unwrap(await revalidateCandidateWriteSetReview({ ...args, review }))
           .status,
       ).toBe("changed");
+    });
+    it("refuses to revalidate a candidate-scoped review once the target can no longer be read sparsely", async () => {
+      const target = await context.createHistoryStore(
+        boundedActiveCardinalityGraph,
+      );
+      const source = await target.nodes.Item.create(itemProps("source"), {
+        id: "source",
+        validFrom,
+      });
+      const proposed = await target.nodes.Artifact.create(
+        { content: "proposed" },
+        { id: "proposed", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "scope-capability-loss",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [
+          {
+            kind: "activeLimited",
+            id: "candidate-edge",
+            from: { kind: "Item", id: source.id },
+            to: { kind: "Artifact", id: proposed.id },
+            properties: {},
+            validFrom,
+          },
+        ],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.baseline.scope).toBe("referenced");
+      const {
+        writeSet: _writeSet,
+        reviewScope: _reviewScope,
+        ...revalidate
+      } = args;
+      expect(
+        unwrap(
+          await revalidateCandidateWriteSetReview({ ...revalidate, review }),
+        ).status,
+      ).toBe("compatible");
+
+      const backend = storeBackend(target);
+      const descriptor = Object.getOwnPropertyDescriptor(
+        backend,
+        "findActiveEdgesBySourceV1",
+      );
+      expect(descriptor).toBeDefined();
+      Reflect.deleteProperty(backend, "findActiveEdgesBySourceV1");
+      try {
+        expect(canUseSparseCandidatePlanning(target)).toBe(false);
+        const refused = await revalidateCandidateWriteSetReview({
+          ...revalidate,
+          review,
+        });
+        expect(isErr(refused) && refused.error.code).toBe("GRAPH_MERGE_REVIEW");
+        expect(isErr(refused) && refused.error.details["reason"]).toBe(
+          "candidate-scope-ineligible",
+        );
+      } finally {
+        if (descriptor)
+          Object.defineProperty(
+            backend,
+            "findActiveEdgesBySourceV1",
+            descriptor,
+          );
+      }
+      expect(
+        unwrap(
+          await revalidateCandidateWriteSetReview({ ...revalidate, review }),
+        ).status,
+      ).toBe("compatible");
     });
     it("preserves whole-target and candidate-scoped approval decisions for an unrelated original row update", async () => {
       const target = await context.createHistoryStore(boundedGraph);

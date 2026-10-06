@@ -434,9 +434,12 @@ approval records in the target before calling
 Both review formats support candidate write sets only. They do not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
-Candidate planning on revision-tracked graphs reads existing candidate ids and
-edge endpoints by key, then seeds only those rows in the transient working
-copy. On identity-enabled graphs, it also follows live same-id peers and
+On an eligible revision-tracked graph, candidate planning reads existing
+candidate ids and edge endpoints by key, then seeds only those rows in the
+transient working copy. A graph that declares a target-side cardinality, an
+`acyclic` edge or a composition pair is not eligible: those constraints depend
+on rows the sparse base never reads, so planning there silently uses the
+complete clone, whole-target path. On identity-enabled graphs, it also follows live same-id peers and
 current identity assertions from those references to a fixed point. The
 planner reads peers of a candidate edge with `one` cardinality by source,
 peers of a `unique` edge by its endpoint pair, and the active peer of a
@@ -452,8 +455,10 @@ still fences the target revision before and after these reads. With edge
 match-identity constraints, a backend offering `findEdgesByMatchIdentity`
 seeds the exact durable owners named by the candidate. A missing keyed read,
 an owner excluded from the clone projection, or a target without revision
-tracking uses the complete clone path. A custom backend lacking the optional
-`findActiveEdgesBySourceV1` read also uses that path for `oneActive` graphs.
+tracking uses the complete clone path, as does a graph declaring a
+target-side cardinality, an `acyclic` edge or a composition pair. A custom
+backend lacking the optional `findActiveEdgesBySourceV1` read also uses that
+path for `oneActive` graphs.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
@@ -560,7 +565,7 @@ evidence return `MergeReviewError` (`GRAPH_MERGE_REVIEW`). Existing typed planni
 and constraint errors remain errors rather than compatibility statuses. A target
 change during evidence capture/planning returns `MergePlanningStaleError`.
 
-The V1 baseline is deliberately conservative:
+The whole-target baseline (format 3) is deliberately conservative:
 
 - Every original node and edge row, including tombstones and validity metadata,
   must remain unchanged. Editing an old audit record requires a new review even
@@ -601,7 +606,10 @@ refused with `details.reason: "candidate-scope-ineligible"` on a graph outside
 the eligibility rules. Candidate write-set planning is not refused for
 ineligibility: `planCandidateWriteSet`, and a review planned without
 `reviewScope`, silently fall back to the complete-clone, whole-target planner
-there and yield the plan and conflicts that planner yields.
+there and yield the plan and conflicts that planner yields. Revalidating a
+stored candidate-scoped review is refused with the same reason when the target
+can no longer be read sparsely, for example after a custom backend loses
+`findActiveEdgesBySourceV1` on a `oneActive` graph.
 On a `oneActive` graph, a custom backend must expose
 `findActiveEdgesBySourceV1` for a candidate-scoped review; without it the
 fallback and the whole-target review remain available.
