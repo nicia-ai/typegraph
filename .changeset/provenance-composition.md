@@ -15,7 +15,4 @@ A non-fact whole whose validity window has ENDED still holds its parts up: it is
 ### Breaking
 
 - `RetractionReport.died` can name a fact that was not believed before the transition, when that fact was live, unsupported and closed by it. A consumer treating `died` as a subset of the previously believed set sees an extra entry instead of a silent tombstone.
-- `retract` / `retractMany` close the required composition parts of any whole they close, and `unRetract` / `unRetractMany` reopen the ones that regained support. A caller that relied on a closed whole keeping its required parts believed sees them tombstoned, listed in `RetractionReport.died`.
-- `createRetractionCapability` throws `PROVENANCE_REQUIRED_PART_NOT_A_FACT` for a configuration it previously accepted. Declare the part kind a fact kind, or move the relation off `existence: "required"`.
-- `store.verifyConstraintFences()` reports a `compositionExistence` violation for a live required part attached to a tombstoned whole, which previously read clean.
 - `GraphReadBackend` gains the optional `getNodes` member it already had on `GraphBackend`, so a read surface narrowed by hand can pass the batch point read through.
