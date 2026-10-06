@@ -508,7 +508,7 @@ describe("composition cascade — delete", () => {
     expect(reusedTitle.title).toBe("Pilot");
   });
 
-  it("reads each cascade member's row ONCE: the soft delete writes against the row the plan proved live", async () => {
+  it("reads each cascade member's pre-image again at its own delete, not off the plan", async () => {
     const graph = buildPodcastGraph("cascade-member-row-reuse");
     const raw = createTestBackend();
     const reads: string[] = [];
@@ -537,19 +537,21 @@ describe("composition cascade — delete", () => {
     reads.length = 0;
     await store.nodes.Podcast.delete(podcast.id);
 
-    // One read per member, taken by `planCompositionCascade`'s liveness pass;
-    // the delete of each member writes against THAT row.
+    // Two reads per member: `planCompositionCascade`'s liveness pass, then the
+    // member's own delete reading the pre-image it writes against. An update
+    // can commit between the two without taking the per-graph lock;
+    // `tests/backends/postgres/concurrent-composition-cascade.test.ts` pins
+    // what that second read buys on a real second connection.
     expect(
       reads.filter((read) => read === `Episode/${episode.id}`),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       reads.filter((read) => read === `Segment/${segment.id}`),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
   });
-  // MUTATION: stop passing `member.row` as `deleteNodeRowInFrame`'s `existing`
-  // in `applyCompositionCascade` (src/store/operations/node-operations.ts) —
-  // each member is then read a second time for its own pre-image and both
-  // filters find 2 reads.
+  // MUTATION: carry the plan's row on each member and pass it as
+  // `deleteNodeRowInFrame`'s `existing` in `applyCompositionCascade`
+  // (src/store/operations/node-operations.ts) — both filters then find 1 read.
 
   it("aborts a restricting grandchild's delete ATOMICALLY — zero rows changed", async () => {
     const graph = buildPodcastGraph("cascade-restrict-abort");

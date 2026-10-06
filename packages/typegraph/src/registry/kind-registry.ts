@@ -479,6 +479,17 @@ export class KindRegistry {
   }
 
   /**
+   * The whole-side population of `edgeKind`'s rows, or `undefined` if it is
+   * not a composition edge. A property of the realizing edge kind's own
+   * declaration, so every pair sharing one `via` agrees on it
+   * (`ONTOLOGY_COMPOSITION_VIA_MIXED` refuses a graph where they would not).
+   */
+  compositionEdgePopulation(edgeKind: string): "one" | "oneActive" | undefined {
+    return this.#composition.pairs.find((pair) => pair.viaEdgeKind === edgeKind)
+      ?.population;
+  }
+
+  /**
    * Whether `kind` (or a superclass it is assignable to) is a composition
    * WHOLE — declares parts under {@link compositionEdgeKindsUnder}. The one
    * owner of this classification, read by a node-delete's constraint fence,

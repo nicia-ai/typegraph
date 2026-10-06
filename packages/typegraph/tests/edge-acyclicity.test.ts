@@ -447,6 +447,26 @@ describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a prop
   });
 });
 
+async function withRepeatableReadStore(
+  run: (
+    store: ReturnType<typeof createStore<typeof fencedSiblingGraph>>,
+    setIsolation: (level: string) => Promise<void>,
+  ) => Promise<void>,
+): Promise<void> {
+  const client = await PGlite.create();
+  try {
+    await client.exec(generateVectorlessPostgresMigrationSQL());
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    await run(createStore(fencedSiblingGraph, backend), async (level) => {
+      await client.exec(`SET default_transaction_isolation = '${level}'`);
+    });
+  } finally {
+    await client.close();
+  }
+}
+
 describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal branch", () => {
   it("refuses an acyclic edge create under a repeatable-read server default (PGlite, real PostgreSQL dialect)", async () => {
     const client = await PGlite.create();
@@ -483,26 +503,6 @@ describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal
   // MUTATION CHECK (both cases): handing a non-acquiring frame
   // `uncapturedGraphWriteLock()` again in `runInWriteTransactionAttempt` lets
   // each write resolve — verified and reverted.
-  async function withRepeatableReadStore(
-    run: (
-      store: ReturnType<typeof createStore<typeof fencedSiblingGraph>>,
-      setIsolation: (level: string) => Promise<void>,
-    ) => Promise<void>,
-  ): Promise<void> {
-    const client = await PGlite.create();
-    try {
-      await client.exec(generateVectorlessPostgresMigrationSQL());
-      const backend = createPostgresBackend(drizzlePglite(client), {
-        vector: false,
-      });
-      await run(createStore(fencedSiblingGraph, backend), (level) =>
-        client.exec(`SET default_transaction_isolation = '${level}'`),
-      );
-    } finally {
-      await client.close();
-    }
-  }
-
   it("refuses a bulkGetOrCreateByEndpoints batch that only resurrects", async () => {
     await withRepeatableReadStore(async (store, setIsolation) => {
       const a = await store.nodes.Task.create({ name: "a" });

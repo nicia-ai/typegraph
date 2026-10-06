@@ -61,17 +61,37 @@ function compositionHolders(
  * `holderLiveness` with no new table: `edgeCardinalitySpec` already answers
  * both for every `(direction, cardinality)` pair, composition or not.
  *
- * Exported as the one owner of that mapping: the cascade's membership
- * population predicate (`src/store/operations/composition-cascade.ts`) reads
- * its spec through this function rather than re-spelling the orientation fold.
+ * The one owner of that mapping: {@link compositionCountsEndedRows} reads its
+ * spec through this function rather than re-spelling the orientation fold.
  */
-export function compositionAxisRef(
+function compositionAxisRef(
   partSide: CompositionPartSide,
   population: "one" | "oneActive",
 ): EdgeCardinalityAxisRef {
   return partSide === "from" ?
       { direction: "source", cardinality: population }
     : { direction: "target", cardinality: population };
+}
+
+/**
+ * Whether a composition row whose validity window has ENDED is still a
+ * membership under this orientation and population.
+ *
+ * `population: "one"` binds part and whole for the row's whole life, ended or
+ * not. `population: "oneActive"` holds only while the window is open: an
+ * ended row is the history a reparent leaves behind and attaches nothing.
+ * Read off {@link edgeCardinalitySpec}'s `holderLiveness` rather than
+ * re-spelled, so the claim, the cascade's closure and the acyclicity relation
+ * agree on which rows are in the composition relation.
+ */
+export function compositionCountsEndedRows(
+  partSide: CompositionPartSide,
+  population: "one" | "oneActive",
+): boolean {
+  return (
+    edgeCardinalitySpec(compositionAxisRef(partSide, population))
+      .holderLiveness !== "liveAndActive"
+  );
 }
 
 /**

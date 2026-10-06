@@ -142,7 +142,7 @@ const noCompositionGraph = defineGraph({
   edges: {},
 });
 
-const CsDoc = defineNode("CsDoc", { schema: z.object({}) });
+const CsReport = defineNode("CsReport", { schema: z.object({}) });
 const CsSection = defineNode("CsSection", { schema: z.object({}) });
 const CsRichSection = defineNode("CsRichSection", { schema: z.object({}) });
 const CsParagraph = defineNode("CsParagraph", { schema: z.object({}) });
@@ -150,7 +150,7 @@ const csSectionOf = defineEdge("csSectionOf", { schema: z.object({}) });
 const csParagraphOf = defineEdge("csParagraphOf", { schema: z.object({}) });
 
 const SUBSUMPTION_CLOSURE_NODES = {
-  CsDoc: { type: CsDoc },
+  CsReport: { type: CsReport },
   CsSection: { type: CsSection },
   CsRichSection: { type: CsRichSection },
   CsParagraph: { type: CsParagraph },
@@ -158,7 +158,7 @@ const SUBSUMPTION_CLOSURE_NODES = {
 
 /**
  * The second-level pair is declared on a SUBCLASS of the kind the first
- * level reaches: `Doc <- Section`, `RichSection <- Paragraph`.
+ * level reaches: `Report <- Section`, `RichSection <- Paragraph`.
  */
 const closureThroughSubclassWholeGraph = defineGraph({
   id: "composition_closure_subclass_whole",
@@ -167,7 +167,7 @@ const closureThroughSubclassWholeGraph = defineGraph({
     csSectionOf: {
       type: csSectionOf,
       from: [CsSection],
-      to: [CsDoc],
+      to: [CsReport],
       cardinality: "one",
     },
     csParagraphOf: {
@@ -179,7 +179,7 @@ const closureThroughSubclassWholeGraph = defineGraph({
   },
   ontology: [
     subClassOf(CsRichSection, CsSection),
-    partOf(CsSection, CsDoc, { via: csSectionOf }),
+    partOf(CsSection, CsReport, { via: csSectionOf }),
     partOf(CsParagraph, CsRichSection, {
       via: csParagraphOf,
       existence: "required",
@@ -189,7 +189,7 @@ const closureThroughSubclassWholeGraph = defineGraph({
 
 /**
  * The second-level pair is declared on a SUPERCLASS of the kind the first
- * level reaches: `Doc <- RichSection`, `Section <- Paragraph`.
+ * level reaches: `Report <- RichSection`, `Section <- Paragraph`.
  */
 const closureThroughSuperclassWholeGraph = defineGraph({
   id: "composition_closure_superclass_whole",
@@ -198,7 +198,7 @@ const closureThroughSuperclassWholeGraph = defineGraph({
     csSectionOf: {
       type: csSectionOf,
       from: [CsRichSection],
-      to: [CsDoc],
+      to: [CsReport],
       cardinality: "one",
     },
     csParagraphOf: {
@@ -210,7 +210,7 @@ const closureThroughSuperclassWholeGraph = defineGraph({
   },
   ontology: [
     subClassOf(CsRichSection, CsSection),
-    partOf(CsRichSection, CsDoc, { via: csSectionOf }),
+    partOf(CsRichSection, CsReport, { via: csSectionOf }),
     partOf(CsParagraph, CsSection, {
       via: csParagraphOf,
       existence: "required",
@@ -721,25 +721,25 @@ export function registerCompositionNavigationIntegrationTests(
       (_label, graph) => {
         async function seedSubsumptionClosure() {
           const store = await context.createStore(graph);
-          const doc = await store.nodes.CsDoc.create({});
+          const report = await store.nodes.CsReport.create({});
           const rich = await store.nodes.CsRichSection.create(
             {},
-            { partOf: { whole: doc } },
+            { partOf: { whole: report } },
           );
           const paragraph = await store.nodes.CsParagraph.create(
             {},
             { partOf: { whole: rich } },
           );
-          return { store, doc, rich, paragraph };
+          return { store, report, rich, paragraph };
         }
 
         it("parts() and wholes() return the whole closure", async () => {
-          const { store, doc, rich, paragraph } =
+          const { store, report, rich, paragraph } =
             await seedSubsumptionClosure();
 
           const parts = await store
             .query()
-            .from("CsDoc", "d")
+            .from("CsReport", "d")
             .parts("p")
             .select((ctx) => ctx.p.id)
             .execute();
@@ -751,28 +751,28 @@ export function registerCompositionNavigationIntegrationTests(
             .wholes("w")
             .select((ctx) => ctx.w.id)
             .execute();
-          expect(new Set(wholes)).toEqual(new Set([rich.id, doc.id]));
+          expect(new Set(wholes)).toEqual(new Set([rich.id, report.id]));
         });
 
         it("subgraph({ composition: true }) returns the complete owned unit", async () => {
-          const { store, doc, rich, paragraph } =
+          const { store, report, rich, paragraph } =
             await seedSubsumptionClosure();
 
-          const result = await store.subgraph(doc.id, {
+          const result = await store.subgraph(report.id, {
             edges: [],
             composition: true,
           });
 
           expect(new Set(result.nodes.keys())).toEqual(
-            new Set([doc.id, rich.id, paragraph.id]),
+            new Set([report.id, rich.id, paragraph.id]),
           );
         });
 
         it("deleting the whole cascades through the whole closure", async () => {
-          const { store, doc, rich, paragraph } =
+          const { store, report, rich, paragraph } =
             await seedSubsumptionClosure();
 
-          await store.nodes.CsDoc.delete(doc.id);
+          await store.nodes.CsReport.delete(report.id);
 
           expect(
             await store.nodes.CsRichSection.getById(rich.id),

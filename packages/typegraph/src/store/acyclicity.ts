@@ -19,17 +19,18 @@
  * that cuts the search short (statement timeout, resource exhaustion) is
  * reported as indeterminate, never as "no cycle".
  *
- * Population: every non-deleted edge of the relation
- * counts, regardless of its validity window. A cycle is a property of the
- * edge relation, not of an instant, so honoring `validTo` would let a
- * future-dated edge close a cycle no write ever probed.
+ * Population: every non-deleted edge of a standalone `acyclic: true`
+ * relation counts, regardless of its validity window. A cycle is a property
+ * of the edge relation, not of an instant, so honoring `validTo` would let a
+ * future-dated edge close a cycle no write ever probed. The composition
+ * relation takes its population from composition instead — see
+ * {@link compositionAcyclicRelation}.
  */
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import { assertFencedSnapshotIsFresh } from "../backend/command-contract";
-import { graphCommandCoordinationIsolation } from "../backend/command-contract";
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { ConfigurationError, EdgeAcyclicityError } from "../errors";
+import { EdgeAcyclicityError } from "../errors";
 import { EdgeAcyclicityIndeterminateError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { type DialectAdapter } from "../query/dialect/types";
@@ -42,6 +43,7 @@ import {
   COMPOSITION_RELATION_NAME,
   displayAcyclicRelationName,
 } from "./claims/axis";
+import { compositionCountsEndedRows } from "./claims/composition-claims";
 import { type GraphWriteLock } from "./recorded-capture/clock";
 import {
   type AcyclicityProbeSeed,
@@ -60,6 +62,13 @@ import {
 export type AcyclicRelationMember = Readonly<{
   edgeKind: string;
   reversed: boolean;
+  /**
+   * Set when only rows whose validity window is still open are in the
+   * relation. Absent for every standalone `acyclic: true` kind, whose
+   * non-deleted rows all count; set for a composition kind whose ended rows
+   * are history rather than memberships.
+   */
+  openEndedOnly?: true;
 }>;
 
 /** One acyclic relation: a name, and the oriented edge kinds that form it. */
@@ -100,6 +109,14 @@ export function standaloneAcyclicRelation(
  * probe walks uniformly, so a cycle spanning both is caught even though
  * neither edge kind is acyclic alone.
  *
+ * Membership follows the composition relation's own population rule
+ * ({@link compositionCountsEndedRows}), not the standalone one: an ended row
+ * of a `oneActive` realizing edge is the history a reparent leaves and is not
+ * in the relation, exactly as the composition claim, the cascade's closure
+ * and the attachment reader treat it. Counting it would make every move a
+ * permanent ancestor edge, so a former ancestor could never be placed under a
+ * former descendant.
+ *
  * Named after {@link COMPOSITION_RELATION_NAME} (the same reserved axis the
  * composition CLAIM is written at, `src/store/claims/axis.ts`) — the
  * acyclicity relation and the claim relation are two independent invariants
@@ -118,10 +135,19 @@ export function compositionAcyclicRelation(
   if (edgeKinds.length === 0) return undefined;
   return {
     name: COMPOSITION_RELATION_NAME,
-    members: edgeKinds.map((edgeKind) => ({
-      edgeKind,
-      reversed: registry.compositionPartSide(edgeKind) === "to",
-    })),
+    members: edgeKinds.map((edgeKind) => {
+      const partSide = requireDefined(registry.compositionPartSide(edgeKind));
+      const population = requireDefined(
+        registry.compositionEdgePopulation(edgeKind),
+      );
+      return {
+        edgeKind,
+        reversed: partSide === "to",
+        ...(compositionCountsEndedRows(partSide, population) ?
+          {}
+        : { openEndedOnly: true as const }),
+      };
+    }),
   };
 }
 

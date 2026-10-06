@@ -25,11 +25,13 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type NodeId,
   partOf,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -48,7 +50,14 @@ const graph = defineGraph({
     Show: { type: Show },
     Clip: {
       type: Clip,
-      unique: [{ name: "clip_slug", fields: ["slug"], scope: "kind" }],
+      unique: [
+        {
+          name: "clip_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
     },
   },
   edges: {
@@ -120,11 +129,11 @@ beforeEach(async () => {
 type Gate = Readonly<{ opened: Promise<void>; open: () => void }>;
 
 function createGate(): Gate {
-  let open: () => void = () => undefined;
+  const gate: { open?: () => void } = {};
   const opened = new Promise<void>((resolve) => {
-    open = resolve;
+    gate.open = resolve;
   });
-  return { opened, open };
+  return { opened, open: requireDefined(gate.open) };
 }
 
 /** Resolves once some session is parked waiting for an advisory lock. */
@@ -152,11 +161,13 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
         const attached = createGate();
         const release = createGate();
+        let clipId: NodeId<typeof Clip> | undefined;
         const attach = attacher.transaction(async (tx) => {
-          await tx.nodes.Clip.create(
+          const clip = await tx.nodes.Clip.create(
             { slug: "c1" },
             { id: "clip", partOf: { whole: show } },
           );
+          clipId = clip.id;
           attached.open();
           await release.opened;
         });
@@ -168,7 +179,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         // Observed before any await below can let it reject unhandled.
         const deletionOutcome = deletion.then(
-          () => undefined,
+          () => "committed" as const,
           (error: unknown) => error,
         );
         await untilSessionWaitsOnFence(live.observer);
@@ -185,7 +196,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
           },
         });
         expect(await deleter.nodes.Show.getById(show.id)).toBeDefined();
-        expect(await deleter.nodes.Clip.getById("clip")).toBeDefined();
+        expect(
+          await deleter.nodes.Clip.getById(requireDefined(clipId)),
+        ).toBeDefined();
         expect(await deleter.verifyConstraintFences()).toEqual([]);
       },
     );
@@ -221,14 +234,14 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const updater = createStore(graph, createPostgresBackend(live.second));
         const show = await updater.nodes.Show.create({}, { id: "show" });
         const other = await updater.nodes.Show.create({}, { id: "other" });
-        await updater.nodes.Clip.create(
+        const clip = await updater.nodes.Clip.create(
           { slug: "old" },
           { id: "clip", partOf: { whole: show } },
         );
 
         const deletion = deleter.nodes.Show.delete(show.id);
         await planned.opened;
-        await updater.nodes.Clip.update("clip", { slug: "new" });
+        await updater.nodes.Clip.update(clip.id, { slug: "new" });
         resume.open();
         await deletion;
 
@@ -236,7 +249,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         // `deleteNodeRowInFrame` as the member's pre-image leaves "new"
         // claimed by the tombstoned clip, and this create is refused with
         // UniquenessError — verified and reverted.
-        expect(await updater.nodes.Clip.getById("clip")).toBeUndefined();
+        expect(await updater.nodes.Clip.getById(clip.id)).toBeUndefined();
         await expect(
           updater.nodes.Clip.create(
             { slug: "new" },

@@ -24,8 +24,7 @@ import {
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStringTuples } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { compositionAxisRef } from "../claims/composition-claims";
-import { edgeCardinalitySpec } from "../claims/edge-claims";
+import { compositionCountsEndedRows } from "../claims/composition-claims";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type CompositionNodeRef } from "../types";
 
@@ -104,11 +103,9 @@ export function cascadedPartReferences(
  * Whether one composition edge row still counts as a live membership under
  * its pair's declared whole-side population.
  *
- * Restated from {@link edgeCardinalitySpec}'s `holderLiveness` for a row
- * already known non-deleted (every reader of this predicate excludes
- * deleted rows before calling it) — imported rather than re-spelled, so a
- * `holderLiveness` value can never disagree with the population this
- * predicate treats as counting.
+ * {@link compositionCountsEndedRows} owns the population rule; this applies
+ * it to a row already known non-deleted (every reader of this predicate
+ * excludes deleted rows before calling it).
  *
  * `population: "one"` (`holderLiveness: "live"`) counts unconditionally: the
  * part/whole binding persists for the row's entire life, ended or not.
@@ -122,8 +119,8 @@ export function compositionEdgeCounts(
   row: Pick<EdgeRow, "valid_to">,
 ): boolean {
   return (
-    edgeCardinalitySpec(compositionAxisRef(pair.partSide, pair.population))
-      .holderLiveness !== "liveAndActive" || row.valid_to === undefined
+    compositionCountsEndedRows(pair.partSide, pair.population) ||
+    row.valid_to === undefined
   );
 }
 

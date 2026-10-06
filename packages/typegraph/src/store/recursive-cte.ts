@@ -660,6 +660,30 @@ function kindKeys(members: readonly AcyclicRelationMember[]): {
   return { forward, reversed, all: [...forward, ...reversed] };
 }
 
+/**
+ * The window predicate a relation's stored rows must also satisfy to be in
+ * it: empty when every non-deleted row counts — every standalone relation,
+ * so those statements stay byte-identical. The one spelling every reader of
+ * stored rows below appends, so the seed, the walk and the planned candidates
+ * cannot disagree about which rows are in the relation.
+ */
+function relationWindowFilters(
+  members: readonly AcyclicRelationMember[],
+  alias: string,
+): readonly SqlFragment[] {
+  const openEndedOnly = members
+    .filter((member) => member.openEndedOnly === true)
+    .map((member) => member.edgeKind);
+  if (openEndedOnly.length === 0) return [];
+  const isOpenEndedOnlyRow = compileKindFilter(
+    sql.raw(`${alias}.kind`),
+    openEndedOnly,
+  );
+  return [
+    sql`(NOT (${isOpenEndedOnlyRow}) OR ${sql.raw(`${alias}.valid_to`)} IS NULL)`,
+  ];
+}
+
 function reversedForEdgeKind(
   members: readonly AcyclicRelationMember[],
   edgeKind: string,
@@ -768,7 +792,13 @@ function buildAcyclicitySeed(
     members,
     "e",
   );
-  return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE e.graph_id = ${graphId} AND ${edgeKindFilter} AND e.deleted_at IS NULL)`;
+  const rowFilters = [
+    sql`e.graph_id = ${graphId}`,
+    edgeKindFilter,
+    sql`e.deleted_at IS NULL`,
+    ...relationWindowFilters(members, "e"),
+  ];
+  return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE ${sql.join(rowFilters, sql` AND `)})`;
 }
 
 /**
@@ -791,6 +821,7 @@ function buildLiveEdgeCandidates(
     sql`e.graph_id = ${graphId}`,
     edgeKindFilter,
     sql`e.deleted_at IS NULL`,
+    ...relationWindowFilters(members, "e"),
   ];
 
   // `orientedEndpointColumns` returns plain columns (no CASE, no OR) when
@@ -901,7 +932,11 @@ function buildAcyclicityAncestryStepDirect(
   forceWorktableOuterJoinOrder: boolean,
 ): SqlFragment {
   const { forward, reversed, all } = kindKeys(members);
-  const commonWhere = [sql`e.graph_id = ${graphId}`, sql`e.deleted_at IS NULL`];
+  const commonWhere = [
+    sql`e.graph_id = ${graphId}`,
+    sql`e.deleted_at IS NULL`,
+    ...relationWindowFilters(members, "e"),
+  ];
   // The "next node" projection is shared via `orientedEndpointColumns`. The
   // JOIN predicate below is NOT: see that function's docblock for why a
   // CASE-wrapped equality can't stand in for the OR-of-arms shape here.

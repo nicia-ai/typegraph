@@ -332,6 +332,10 @@ const heldGraphWriteLocks = new WeakMap<
   Map<string, Promise<GraphWriteLock>>
 >();
 
+function noop(): void {
+  // Marks a rejection as observed; the acquiring frame reports the error.
+}
+
 type GraphWriteLockAcquisition = Readonly<{
   promise: Promise<GraphWriteLock>;
   resolve: (lock: GraphWriteLock) => void;
@@ -348,7 +352,7 @@ function pendingGraphWriteLockAcquisition(): GraphWriteLockAcquisition {
   const promise = new Promise<GraphWriteLock>((resolve, reject) => {
     settle = { resolve, reject };
   });
-  promise.catch(() => undefined);
+  promise.catch(noop);
   if (settle === undefined) {
     throw new CompilerInvariantError(
       "A promise executor did not run synchronously.",

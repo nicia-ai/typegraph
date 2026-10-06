@@ -63,6 +63,8 @@ const CaAlbum = defineNode("CaAlbum", { schema: z.object({}) });
 const CaTrack = defineNode("CaTrack", { schema: z.object({}) });
 /** A reflexive composition pair — the acyclicity coverage below. */
 const CaFolder = defineNode("CaFolder", { schema: z.object({}) });
+/** A reflexive part whose moves leave ended history rows (`oneActive`). */
+const CaUnit = defineNode("CaUnit", { schema: z.object({}) });
 /** Declares no composition pair at all — `reparent`'s not-a-part refusal. */
 const CaReader = defineNode("CaReader", { schema: z.object({}) });
 
@@ -105,6 +107,7 @@ const caPageOf = defineEdge("caPageOf", { schema: z.object({}) });
 const caClipOf = defineEdge("caClipOf", { schema: z.object({}) });
 const caHasTrack = defineEdge("caHasTrack", { schema: z.object({}) });
 const caParentFolder = defineEdge("caParentFolder", { schema: z.object({}) });
+const caUnitUnder = defineEdge("caUnitUnder", { schema: z.object({}) });
 const caRelicOf = defineEdge("caRelicOf", {
   schema: z.object({ order: z.number().optional() }),
 });
@@ -124,6 +127,7 @@ function buildGraph(id: string) {
       CaAlbum: { type: CaAlbum },
       CaTrack: { type: CaTrack },
       CaFolder: { type: CaFolder, onDelete: "cascade" },
+      CaUnit: { type: CaUnit },
       CaReader: { type: CaReader },
       CaVault: { type: CaVault },
       CaRelic: { type: CaRelic },
@@ -172,6 +176,12 @@ function buildGraph(id: string) {
         to: [CaFolder],
         cardinality: "one",
       },
+      caUnitUnder: {
+        type: caUnitUnder,
+        from: [CaUnit],
+        to: [CaUnit],
+        cardinality: "oneActive",
+      },
       caRelicOf: {
         type: caRelicOf,
         from: [CaRelic],
@@ -196,6 +206,7 @@ function buildGraph(id: string) {
         via: caParentFolder,
         partSide: "from",
       }),
+      partOf(CaUnit, CaUnit, { via: caUnitUnder, partSide: "from" }),
       partOf(CaRelic, CaVault, { via: caRelicOf }),
       partOf(CaReel, CaShow, { via: caReelOf }),
     ],
@@ -560,6 +571,46 @@ export function registerCompositionAttachmentIntegrationTests(
       ).toEqual(
         new Set([`${child.id}->${root.id}`, `${grandchild.id}->${child.id}`]),
       );
+    });
+
+    it("a `oneActive` move's ended history row does not constrain later moves", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaUnit.create({});
+      const former = await store.nodes.CaUnit.create(
+        {},
+        { partOf: { whole: { kind: "CaUnit", id: root.id } } },
+      );
+      const report = await store.nodes.CaUnit.create(
+        {},
+        { partOf: { whole: { kind: "CaUnit", id: former.id } } },
+      );
+      // `report` leaves `former`: the edge between them is ended, not deleted.
+      await store.nodes.CaUnit.reparent(report.id, {
+        whole: { kind: "CaUnit", id: root.id },
+      });
+
+      // MUTATION CHECK: counting every non-deleted row of a `oneActive`
+      // realizing edge in `compositionAcyclicRelation` (dropping
+      // `openEndedOnly`) refuses this swap with EdgeAcyclicityError "already
+      // reaches", through the ended row — verified and reverted.
+      await store.nodes.CaUnit.reparent(former.id, {
+        whole: { kind: "CaUnit", id: report.id },
+      });
+
+      const live = await store.edges.caUnitUnder.find({});
+      expect(
+        new Set(live.map((edge) => `${edge.fromId}->${edge.toId}`)),
+      ).toEqual(
+        new Set([`${report.id}->${root.id}`, `${former.id}->${report.id}`]),
+      );
+      expect(await store.verifyConstraintFences()).toEqual([]);
+
+      // A cycle among the LIVE rows is still refused.
+      await expect(
+        store.nodes.CaUnit.reparent(report.id, {
+          whole: { kind: "CaUnit", id: former.id },
+        }),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
     });
 
     it("reparent inside a transaction counts as ONE node write intent", async () => {
