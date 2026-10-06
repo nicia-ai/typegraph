@@ -1,8 +1,46 @@
 // Doltgres spike smoke test — run: pnpm smoke:doltgres
 // Requires a Doltgres on localhost:4132. Either works:
-//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.3.3   (latest release)
+//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.4.0   (latest release)
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
+//
+// RE-MEASURED 2026-10-06 on TypeGraph main 1672a5e8 against BOTH the 1.4.0 release
+// (fbeef2fd, 2026-10-01) and a doltgresql main build at 3134f14d (43 commits later).
+// Deltas since 2026-09-30:
+//   - 1.4.0 RELEASED everything that was main-only: #3324 (the match-identity CHECK),
+//     #3388 (`ASC NULLS LAST`) and the #3405 locking option. The typed walk therefore runs
+//     on a published image for the first time; the "1.3.3 is blocked at the first edge
+//     write" history below describes the older release, not the current one.
+//   - doltgresql#3466 is FIXED on main (PR #3506, merged 2026-10-06, unreleased):
+//     `to_regprocedure` exists and the `regproc` family resolves user-defined functions.
+//     1.4.0 still lacks it. The probe is pinned `fixed-unreleased` and passes on both.
+//   - That fix UNMASKS two more gaps on the same path, present on 1.4.0 and main alike.
+//     With `to_regprocedure` in place `revisionTracking: true` bootstraps and installs
+//     the revision-change journal's triggers, and then EVERY write to the node, edge and
+//     identity tables fails, because the trigger function cannot run:
+//       1. `TG_ARGV` (and `TG_NARGS`) are not resolvable inside a trigger function:
+//          `column "tg_argv" could not be found in any table in scope`. The arguments
+//          are stored (`pg_trigger.tgargs`/`tgnargs` are right) and `TG_OP`, `NEW`, `OLD`
+//          and `to_jsonb(NEW)` work, so it is the variable binding alone. The previous
+//          revision of this file claimed TG_ARGV worked; it had checked the catalog, not
+//          the variable.
+//       2. `format()` is MySQL's number formatter `FORMAT(X, D)`, not PostgreSQL's
+//          `format(formatstr, ...)`. One argument is an arity error; two return a
+//          formatted number, so `format('%I', 'x')` is silently `'0'` and the journal's
+//          `EXECUTE format('INSERT INTO %I ...', TG_ARGV[0])` would execute the text `0`.
+//     The rest of the function is fine: with both spelled out by hand (literal table
+//     names, no `format`) the same body journals a row identical to PostgreSQL 18.4's,
+//     dynamic `EXECUTE ... INTO ... USING` included. On main this is WORSE than the
+//     to_regprocedure refusal it replaces — a store that bootstraps and then cannot
+//     write, rather than one refused at construction — so the posture gate now performs
+//     a journaled write, reports the gap as SKIP, and drops the triggers again so the
+//     rest of the walk measures what it measured before.
+//   - `SET LOCAL` is accepted on main (#3445, unreleased) and is transaction-scoped, so
+//     the per-search `efSearch` override no longer errors there. There is still no real
+//     ANN index for it to tune. Pinned `fixed-unreleased`.
+//   - #2600 is still open and nothing about locking moved: row-locking clauses,
+//     `LOCK TABLE` and the two-argument advisory lock are missing on both builds.
+// Both builds report 51 passed, 0 failed, 2 skipped, in both locking-option modes.
 //
 // RE-MEASURED 2026-09-30 on TypeGraph main b85a3379 against a doltgresql main build at
 // 4f1448bd (no release since 1.3.3). Deltas since 2026-09-16:
@@ -108,8 +146,9 @@
 // `row`/`drain: "none"` refuses with `WRITE_FENCE_UNAVAILABLE` ("identity enablement drain
 // requires a table lock"), because identity DDL is a table-lock drain site — and
 // `drain: "table-lock"` would only get as far as the `LOCK TABLE` that Doltgres cannot
-// parse. `history` and `revisionTracking` construct and run, since a keyed lock is all
-// they need.
+// parse. `history` constructs and runs, since a keyed lock is all it needs;
+// `revisionTracking` needs no more of the fence but is blocked on its trigger function
+// (see the 2026-10-06 deltas above).
 //
 // WHAT ELSE 1.3.3 CHANGED, AND WHAT DID NOT.
 //
@@ -145,8 +184,9 @@
 //     the refusal and the raw engine error surfaces instead of the typed connected-edge
 //     refusal. Correctness is intact; the diagnosis is what is lost.
 //
-// A run on main therefore reports 48 passed, 0 failed, 2 skipped; on 1.3.3, 27 passed,
-// 0 failed, 23 skipped (the walk is reported step-by-step as skipped, never dropped).
+// At that revision a run on main reported 48 passed, 0 failed, 2 skipped; on 1.3.3, 27
+// passed, 0 failed, 23 skipped (the walk is reported step-by-step as skipped, never
+// dropped). The current numbers are in the 2026-10-06 block at the top.
 //
 // pgvector is real and read-side works: `CREATE EXTENSION vector` reports extversion
 // 0.8.6, `vector(N)` columns, `<=>`/`<->`/`<#>` and `ORDER BY <distance> LIMIT` all work,
@@ -290,6 +330,13 @@ const identityGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+/** A graph of its own, so the journaled write leaves the walk's graph untouched. */
+const revisionGraph = defineGraph({
+  id: "doltgres-smoke-revision",
+  nodes: { Person: { type: Person } },
+  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+});
+
 type StepOutcome = "pass" | "fail" | "skip";
 type StepResult = Readonly<{
   step: string;
@@ -419,16 +466,36 @@ function report(): void {
 // (doltgresql#3234) used to panic the server and tear the connection down, and a poisoned
 // pool connection would then be handed to an unrelated step.
 
+/**
+ * The two gaps behind the revision-change journal's trigger function, found once
+ * doltgresql#3466 stopped masking them. Not yet reported upstream.
+ */
+const REVISION_JOURNAL_GAP_ISSUE = "TG_ARGV / format(), not yet filed upstream";
+const TG_ARGV_UNRESOLVED = 'column "tg_argv" could not be found';
+/** What the journal's `EXECUTE format(...)` raises once TG_ARGV resolves: it runs `0`. */
+const FORMAT_RETURNS_ZERO = 'at or near "0": syntax error';
+const TO_REGPROCEDURE_MISSING = "'to_regprocedure' not found";
+
 /** What a probe is pinned to produce. */
 type Expectation =
   | Readonly<{ kind: "supported" }>
   /** The engine must reject it, with an error containing `message`. */
-  | Readonly<{ kind: "unsupported"; message: string; issue: string }>;
+  | Readonly<{ kind: "unsupported"; message: string; issue: string }>
+  /**
+   * Rejected by the latest release with `message`, accepted by a build of main. Passes on
+   * both and names which one it observed, so the battery is right against the published
+   * image while tracking main.
+   */
+  | Readonly<{ kind: "fixed-unreleased"; message: string; issue: string }>;
 
 const SUPPORTED: Expectation = { kind: "supported" };
 
 function unsupported(message: string, issue: string): Expectation {
   return { kind: "unsupported", message, issue };
+}
+
+function fixedUnreleased(message: string, issue: string): Expectation {
+  return { kind: "fixed-unreleased", message, issue };
 }
 
 /**
@@ -473,12 +540,21 @@ async function probe(
       );
       return;
     }
+    const fixedOnMain = expectation.kind === "fixed-unreleased";
     if (failure === undefined) {
-      results.push({
-        step: name,
-        outcome: "fail",
-        detail: `NOW SUPPORTED — ${expectation.issue} looks fixed; re-run the walk`,
-      });
+      results.push(
+        fixedOnMain ?
+          {
+            step: name,
+            outcome: "pass",
+            detail: `supported on this build (${expectation.issue} fixed on main, unreleased)`,
+          }
+        : {
+            step: name,
+            outcome: "fail",
+            detail: `NOW SUPPORTED — ${expectation.issue} looks fixed; re-run the walk`,
+          },
+      );
       return;
     }
     const detail = describeError(failure);
@@ -487,7 +563,10 @@ async function probe(
         {
           step: name,
           outcome: "pass",
-          detail: `unsupported as pinned (${expectation.issue})`,
+          detail:
+            fixedOnMain ?
+              `unsupported on this build as pinned (${expectation.issue}, fixed on main, unreleased)`
+            : `unsupported as pinned (${expectation.issue})`,
         }
       : {
           step: name,
@@ -784,10 +863,10 @@ async function runDeviationBattery(): Promise<void> {
      ON CONFLICT ("id") DO UPDATE SET "embedding" = EXCLUDED."embedding"`,
   ]);
   // The per-search `efSearch` override is applied with `SET LOCAL` inside the search's own
-  // transaction, so an approximate search cannot be tuned per call.
+  // transaction. 1.4.0 rejects it; main accepts it and scopes it to the transaction.
   await probe(
-    "pgvector: per-search efSearch blocked (SET LOCAL)",
-    unsupported("SET LOCAL is not yet supported", "doltgresql#3099"),
+    "pgvector: per-search efSearch (SET LOCAL)",
+    fixedUnreleased("SET LOCAL is not yet supported", "doltgresql#3099"),
     [`BEGIN`, `SET LOCAL hnsw.ef_search = 40`],
   );
   // `materializeIndexes()` builds the ANN index CONCURRENTLY.
@@ -833,9 +912,35 @@ async function runDeviationBattery(): Promise<void> {
     [...PROBE_SETUP, `BEGIN`, `LOCK TABLE "probe_rows" IN SHARE MODE`],
   );
   await probe(
-    "revision journal: to_regprocedure missing",
-    unsupported("'to_regprocedure' not found", "doltgresql#3466"),
+    "revision journal: to_regprocedure",
+    fixedUnreleased(TO_REGPROCEDURE_MISSING, "doltgresql#3466"),
     [`SELECT to_regprocedure('pg_catalog.now()')`],
+  );
+  // The two gaps the to_regprocedure fix unmasks. The journal's trigger function reads its
+  // table names from TG_ARGV and splices them with format('%I').
+  await probe(
+    "revision journal: TG_ARGV unresolved in a trigger function",
+    unsupported(TG_ARGV_UNRESOLVED, REVISION_JOURNAL_GAP_ISSUE),
+    [
+      `DROP TABLE IF EXISTS "probe_trigger"`,
+      `DROP FUNCTION IF EXISTS probe_trigger_argv()`,
+      `CREATE TABLE "probe_trigger" ("id" text PRIMARY KEY, "seen" text)`,
+      `CREATE FUNCTION probe_trigger_argv() RETURNS trigger LANGUAGE plpgsql AS $probe$
+       BEGIN NEW."seen" := TG_ARGV[0]; RETURN NEW; END $probe$`,
+      `CREATE TRIGGER "probe_trigger_argv" BEFORE INSERT ON "probe_trigger"
+       FOR EACH ROW EXECUTE FUNCTION probe_trigger_argv('journal')`,
+      `INSERT INTO "probe_trigger" ("id") VALUES ('a')`,
+    ],
+  );
+  // One argument is an arity error, which is what this pins. Two arguments do NOT error:
+  // `format('%I', 'x')` returns `'0'`, MySQL's FORMAT(X, D) applied to a non-number.
+  await probe(
+    "revision journal: format() is the MySQL number formatter",
+    unsupported(
+      "function 'FORMAT' expected 2 or 3 arguments",
+      REVISION_JOURNAL_GAP_ISSUE,
+    ),
+    [`SELECT format('hello')`],
   );
   await probeFenceRowRace();
 
@@ -1011,6 +1116,68 @@ const WALK_STEPS: readonly string[] = [
 ];
 
 /**
+ * Why a `revisionTracking: true` store cannot journal a write, by the error that surfaces.
+ * Ordered as an engine meets them: each one masks the next.
+ */
+const REVISION_JOURNAL_GAPS: readonly Readonly<{
+  message: string;
+  reason: string;
+}>[] = [
+  {
+    message: TO_REGPROCEDURE_MISSING,
+    reason:
+      "blocked at bootstrap (doltgresql#3466, fixed on main, unreleased): the " +
+      "revision-change journal's install guard and readiness check call `to_regprocedure`.",
+  },
+  {
+    message: TG_ARGV_UNRESOLVED,
+    reason:
+      `blocked at the first write (${REVISION_JOURNAL_GAP_ISSUE}): the journal installs, ` +
+      "but its trigger function reads its table names from TG_ARGV, which Doltgres does " +
+      "not bind (pg_trigger.tgargs is populated; TG_OP, NEW and OLD work). The store " +
+      "bootstraps and then refuses every write.",
+  },
+  {
+    message: FORMAT_RETURNS_ZERO,
+    reason:
+      `blocked at the first write (${REVISION_JOURNAL_GAP_ISSUE}): the journal's trigger ` +
+      "function splices table names with format('%I', ...), which Doltgres resolves to " +
+      "MySQL's FORMAT(X, D) and returns '0', so the dynamic statement it executes is `0`.",
+  },
+];
+
+/**
+ * Removes the revision-change journal's triggers and function. They are installed on the
+ * shared node, edge and identity tables, so a journal whose function cannot run would
+ * otherwise fail every write the rest of this battery makes.
+ */
+async function dropRevisionJournalTriggers(): Promise<void> {
+  const client = new Client(DOLTGRES_CONNECTION);
+  await client.connect();
+  try {
+    const installed = await client.query<{ tgname: string; relname: string }>(
+      `SELECT t.tgname, c.relname FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       WHERE t.tgname LIKE 'tg_rc_%'`,
+    );
+    for (const { tgname, relname } of installed.rows) {
+      await client.query(
+        `DROP TRIGGER IF EXISTS ${quoteIdentifier(tgname)} ON ${quoteIdentifier(relname)}`,
+      );
+    }
+    await client.query(
+      `DROP FUNCTION IF EXISTS "typegraph_record_revision_change"()`,
+    );
+  } finally {
+    await client.end();
+  }
+}
+
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+/**
  * Act 2 — the posture gates.
  *
  * These are about TypeGraph's capability model rather than Doltgres's SQL, and they are
@@ -1027,22 +1194,30 @@ async function runPostureGates(
     return `schema ${validation.status}`;
   });
 
+  // Construction alone is not the measurement: with `to_regprocedure` present the journal
+  // installs, and it is the first journaled write that shows whether its trigger function
+  // can run. The triggers sit on the shared node/edge tables, so they are dropped again
+  // whatever happened — otherwise every later write in the walk would fail with them.
   await stepAllowingPinnedGap(
-    "revisionTracking constructs under row",
+    "revisionTracking constructs and journals a write under row",
     async () => {
-      const [, validation] = await createAdapterStoreWithSchema(
-        graph,
-        backend,
-        { revisionTracking: true },
-      );
-      return `schema ${validation.status}`;
+      try {
+        const [revisionStore, validation] = await createAdapterStoreWithSchema(
+          revisionGraph,
+          backend,
+          { revisionTracking: true },
+        );
+        await revisionStore.nodes.Person.create({
+          name: "Revision",
+          email: "revision@example.com",
+        });
+        return `schema ${validation.status}, journaled write accepted`;
+      } finally {
+        await dropRevisionJournalTriggers();
+      }
     },
     (detail) =>
-      detail.includes("'to_regprocedure' not found") ?
-        "blocked (doltgresql#3466): the revision-change journal's install guard and " +
-        "readiness check call `to_regprocedure`, which Doltgres lacks. PL/pgSQL trigger " +
-        "functions, CREATE TRIGGER and pg_trigger (tgfoid/tgargs/tgtype) all work."
-      : undefined,
+      REVISION_JOURNAL_GAPS.find((gap) => detail.includes(gap.message))?.reason,
   );
 
   await step("identity graph refused (table-lock drain)", async () => {
@@ -1079,7 +1254,7 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
   // says exactly which upstream issue stands in the way.
   if (!matchIdentityCheckParses) {
     const reason =
-      "not measured: 1.3.3 lacks the doltgresql#3324 bracket fix, so every edge write " +
+      "not measured: this build lacks the doltgresql#3324 bracket fix (released in 1.4.0), so every edge write " +
       "fails on the match-identity CHECK (the declaration matrix above records the block; " +
       "the store does construct and node writes do run)";
     results.push({
@@ -1090,8 +1265,8 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
     for (const name of WALK_STEPS) {
       skip(name, reason);
     }
-    // Act 2 needs no typed writes: history/revisionTracking construct, and identity is
-    // refused, on both builds.
+    // Act 2 does not depend on the walk: history constructs, revisionTracking reports its
+    // own gap, and identity is refused, whether or not edge writes work.
     await runPostureGates(backend);
     return;
   }
