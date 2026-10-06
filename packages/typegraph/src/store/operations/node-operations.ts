@@ -3517,6 +3517,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
       partId,
       request,
       lock,
+      { partRowRestoredByUpdate: false },
     ),
     moveAt,
   );
@@ -5109,6 +5110,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       }
       await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
+      const restoresPartRow = options?.clearDeleted === true;
       // Reads first, then writes — `prepareCompositionAttachmentDecision`
       // owns the reason.
       const decided =
@@ -5120,6 +5122,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
             input.id,
             compositionAttachment,
             lock,
+            { partRowRestoredByUpdate: restoresPartRow },
           )
         );
       const preparedAttachment =
@@ -5130,7 +5133,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
             lock,
             input.id,
             decided,
-            { partRowRestoredByUpdate: options?.clearDeleted === true },
+            { partRowRestoredByUpdate: restoresPartRow },
           )
         );
       const node = await performNodeUpdateWithResurrectionRecovery(

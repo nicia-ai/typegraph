@@ -1185,6 +1185,47 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
+    it("getOrCreateByConstraint never resurrects a required part under a tombstoned whole it is still attached to", async () => {
+      const store = await context.createStore(buildKeyedGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const attachment = {
+        partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+      } as const;
+      const { node: segment } =
+        await store.nodes.EeKeyedSegment.getOrCreateByConstraint(
+          "byKey",
+          { key: "seg-1" },
+          attachment,
+        );
+      // Both ends tombstoned by a route that leaves the composition edge live
+      // (what a provenance retraction of a whole and its required part
+      // leaves), so the incumbent attachment is "satisfied" by a dead whole.
+      for (const node of [segment, episode]) {
+        await store.backend.deleteNode({
+          graphId: store.graphId,
+          kind: node.kind,
+          id: node.id,
+        });
+      }
+      expect(await store.edges.eeKeyedSegmentOf.find({})).toHaveLength(1);
+
+      // MUTATION CHECK: reading the whole only for the "attach" and "replace"
+      // dispositions in `decideCompositionAttachmentUnderFence` makes this
+      // resolve with action "resurrected" — verified and reverted.
+      await expect(
+        store.nodes.EeKeyedSegment.getOrCreateByConstraint(
+          "byKey",
+          { key: "seg-1" },
+          attachment,
+        ),
+      ).rejects.toBeInstanceOf(EndpointNotFoundError);
+
+      expect(
+        await store.nodes.EeKeyedSegment.getById(segment.id),
+      ).toBeUndefined();
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
     it("getOrCreateByConstraint: partOf applied on created, refused on found/updated naming the current whole", async () => {
       const store = await context.createStore(buildKeyedGraph(nextGraphId()));
       const episodeA = await store.nodes.EeEpisode.create({});

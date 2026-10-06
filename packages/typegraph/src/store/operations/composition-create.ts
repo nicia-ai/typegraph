@@ -1246,8 +1246,13 @@ export function assertCompositionWholeEndpointLive(
  * a tombstone until the update restores it, so a part-liveness read taken
  * here would refuse every resurrection; the edge preparation reads it on the
  * legs where it is live, and the restoring update is the proof on the leg
- * where it is not. A `"satisfied"` disposition writes nothing, so it owes no
- * fresh liveness read.
+ * where it is not. A `"satisfied"` disposition attaches nothing, so on a live
+ * part it owes no fresh liveness read. On the resurrection leg it does: the
+ * frame is about to restore the part under the attachment it already holds,
+ * and a part's tombstone can outlive its whole's with the edge between them
+ * still live, so the whole is read and a dead one refused exactly as on the
+ * attaching dispositions — the verdict every other restore entry reaches
+ * through {@link assertRestoredRequiredPartsAttached}.
  *
  * `target` is the frame's own transaction target, which is the only reason
  * the verdict can be trusted: a verdict from a lock-free read is exactly what
@@ -1263,6 +1268,7 @@ export async function decideCompositionAttachmentUnderFence(
   partId: string,
   request: CompositionAttachmentRequest,
   lock: GraphWriteLock,
+  frame: Readonly<{ partRowRestoredByUpdate: boolean }>,
 ): Promise<FencedCompositionAttachment> {
   void lock;
   const incumbent = await findLiveCompositionAttachment(
@@ -1278,7 +1284,7 @@ export async function decideCompositionAttachmentUnderFence(
     request,
     incumbent,
   );
-  if (disposition === "attach" || disposition === "replace") {
+  if (disposition !== "satisfied" || frame.partRowRestoredByUpdate) {
     const { whole } = request.work;
     const wholeRow = await target.getNode(graphId, whole.kind, whole.id);
     assertCompositionWholeEndpointLive(request.work, wholeRow);
