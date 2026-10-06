@@ -18,13 +18,14 @@
 //     With `to_regprocedure` in place `revisionTracking: true` bootstraps and installs
 //     the revision-change journal's triggers, and then EVERY write to the node, edge and
 //     identity tables fails, because the trigger function cannot run:
-//       1. `TG_ARGV` (and `TG_NARGS`) are not resolvable inside a trigger function:
-//          `column "tg_argv" could not be found in any table in scope`. The arguments
-//          are stored (`pg_trigger.tgargs`/`tgnargs` are right) and `TG_OP`, `NEW`, `OLD`
-//          and `to_jsonb(NEW)` work, so it is the variable binding alone. The previous
-//          revision of this file claimed TG_ARGV worked; it had checked the catalog, not
-//          the variable.
-//       2. `format()` is MySQL's number formatter `FORMAT(X, D)`, not PostgreSQL's
+//       1. doltgresql#3545 — `TG_ARGV` is not resolvable inside a trigger function:
+//          `column "tg_argv" could not be found in any table in scope`. Of the trigger
+//          special variables only `TG_OP` is bound; `TG_NARGS`, `TG_NAME`,
+//          `TG_TABLE_NAME` and the rest are missing too. The arguments are stored
+//          (`pg_trigger.tgargs`/`tgnargs` are right) and `NEW`, `OLD` and `to_jsonb(NEW)`
+//          work, so it is the variable binding alone. The previous revision of this file
+//          claimed TG_ARGV worked; it had checked the catalog, not the variable.
+//       2. doltgresql#3546 — `format()` is MySQL's number formatter `FORMAT(X, D)`, not PostgreSQL's
 //          `format(formatstr, ...)`. One argument is an arity error; two return a
 //          formatted number, so `format('%I', 'x')` is silently `'0'` and the journal's
 //          `EXECUTE format('INSERT INTO %I ...', TG_ARGV[0])` would execute the text `0`.
@@ -468,9 +469,10 @@ function report(): void {
 
 /**
  * The two gaps behind the revision-change journal's trigger function, found once
- * doltgresql#3466 stopped masking them. Not yet reported upstream.
+ * doltgresql#3466 stopped masking them.
  */
-const REVISION_JOURNAL_GAP_ISSUE = "TG_ARGV / format(), not yet filed upstream";
+const TG_ARGV_ISSUE = "doltgresql#3545";
+const FORMAT_ISSUE = "doltgresql#3546";
 const TG_ARGV_UNRESOLVED = 'column "tg_argv" could not be found';
 /** What the journal's `EXECUTE format(...)` raises once TG_ARGV resolves: it runs `0`. */
 const FORMAT_RETURNS_ZERO = 'at or near "0": syntax error';
@@ -920,7 +922,7 @@ async function runDeviationBattery(): Promise<void> {
   // table names from TG_ARGV and splices them with format('%I').
   await probe(
     "revision journal: TG_ARGV unresolved in a trigger function",
-    unsupported(TG_ARGV_UNRESOLVED, REVISION_JOURNAL_GAP_ISSUE),
+    unsupported(TG_ARGV_UNRESOLVED, TG_ARGV_ISSUE),
     [
       `DROP TABLE IF EXISTS "probe_trigger"`,
       `DROP FUNCTION IF EXISTS probe_trigger_argv()`,
@@ -936,10 +938,7 @@ async function runDeviationBattery(): Promise<void> {
   // `format('%I', 'x')` returns `'0'`, MySQL's FORMAT(X, D) applied to a non-number.
   await probe(
     "revision journal: format() is the MySQL number formatter",
-    unsupported(
-      "function 'FORMAT' expected 2 or 3 arguments",
-      REVISION_JOURNAL_GAP_ISSUE,
-    ),
+    unsupported("function 'FORMAT' expected 2 or 3 arguments", FORMAT_ISSUE),
     [`SELECT format('hello')`],
   );
   await probeFenceRowRace();
@@ -1132,7 +1131,7 @@ const REVISION_JOURNAL_GAPS: readonly Readonly<{
   {
     message: TG_ARGV_UNRESOLVED,
     reason:
-      `blocked at the first write (${REVISION_JOURNAL_GAP_ISSUE}): the journal installs, ` +
+      `blocked at the first write (${TG_ARGV_ISSUE}): the journal installs, ` +
       "but its trigger function reads its table names from TG_ARGV, which Doltgres does " +
       "not bind (pg_trigger.tgargs is populated; TG_OP, NEW and OLD work). The store " +
       "bootstraps and then refuses every write.",
@@ -1140,7 +1139,7 @@ const REVISION_JOURNAL_GAPS: readonly Readonly<{
   {
     message: FORMAT_RETURNS_ZERO,
     reason:
-      `blocked at the first write (${REVISION_JOURNAL_GAP_ISSUE}): the journal's trigger ` +
+      `blocked at the first write (${FORMAT_ISSUE}): the journal's trigger ` +
       "function splices table names with format('%I', ...), which Doltgres resolves to " +
       "MySQL's FORMAT(X, D) and returns '0', so the dynamic statement it executes is `0`.",
   },
