@@ -33,6 +33,7 @@ import {
   type QualifiedRecursivePath,
   subClassOf,
 } from "../../../src";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../../src/query/compiler/recursive";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import {
@@ -358,6 +359,13 @@ async function seedCompositionViaFixtures(
 
 /** Deeper than the implicit cap a bare `.recursive()` applies. */
 const DEEP_SECTION_CHAIN_LENGTH = 15;
+
+/**
+ * One node longer than the deepest chain a bounded recursion can walk
+ * (`MAX_EXPLICIT_RECURSIVE_DEPTH` hops reach `MAX_EXPLICIT_RECURSIVE_DEPTH + 1`
+ * nodes), so the chain's last node is reachable only by an exhaustive closure.
+ */
+const BEYOND_HOP_CEILING_CHAIN_LENGTH = MAX_EXPLICIT_RECURSIVE_DEPTH + 2;
 
 export function registerCompositionNavigationIntegrationTests(
   context: IntegrationTestContext,
@@ -774,6 +782,67 @@ export function registerCompositionNavigationIntegrationTests(
         chain.map((section) => section.id).toSorted(),
       );
     });
+
+    it("parts()/wholes() return the complete closure of a chain past the hop ceiling, and a stated maxHops stays bounded", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const sectionIds = Array.from(
+        { length: BEYOND_HOP_CEILING_CHAIN_LENGTH },
+        (_, index) => `cn-beyond-ceiling-${index}`,
+      );
+      await store.nodes.CnSection.bulkInsert(
+        sectionIds.map((id, index) => ({
+          id,
+          props: { title: `Section ${index}` },
+        })),
+      );
+      await store.edges.cnParentSection.bulkInsert(
+        sectionIds.slice(1).map((id, index) => ({
+          from: { kind: "CnSection", id },
+          to: { kind: "CnSection", id: requireDefined(sectionIds[index]) },
+        })),
+      );
+      const rootId = requireDefined(sectionIds[0]);
+      const leafId = requireDefined(sectionIds.at(-1));
+
+      const parts = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(rootId))
+        .parts("x", { depth: "level" })
+        .select((ctx) => ({ id: ctx.x.id, level: ctx.level }))
+        .execute();
+      expect(parts).toHaveLength(BEYOND_HOP_CEILING_CHAIN_LENGTH - 1);
+      expect(parts.map((row) => row.id)).toContain(leafId);
+      expect(Math.max(...parts.map((row) => row.level))).toBe(
+        BEYOND_HOP_CEILING_CHAIN_LENGTH - 1,
+      );
+
+      const wholes = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(leafId))
+        .wholes("w")
+        .select((ctx) => ctx.w.id)
+        .execute();
+      expect(wholes).toHaveLength(BEYOND_HOP_CEILING_CHAIN_LENGTH - 1);
+      expect(wholes).toContain(rootId);
+
+      const bounded = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(rootId))
+        .parts("x", { maxHops: MAX_EXPLICIT_RECURSIVE_DEPTH })
+        .select((ctx) => ctx.x.id)
+        .execute();
+      expect(bounded).toHaveLength(MAX_EXPLICIT_RECURSIVE_DEPTH);
+      expect(bounded).not.toContain(leafId);
+    });
+    // MUTATION CHECK: restore the implicit `MAX_EXPLICIT_RECURSIVE_DEPTH`
+    // ceiling for a `parts()`/`wholes()` call that states no `maxHops` (drop
+    // `exhaustive` from the traversal's variable-length state). The closure
+    // then stops one node short and the length and `leafId`/`rootId`
+    // assertions fail; the explicit `maxHops` assertion passes either way,
+    // pinning that a stated bound is honored exactly.
 
     it("parts() with via walks only that realizing edge of a multi-level, two-edge whole", async () => {
       const store = await context.createStore(compositionViaGraph);

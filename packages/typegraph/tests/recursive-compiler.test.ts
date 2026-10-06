@@ -584,6 +584,43 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain("r.depth < 500");
     });
 
+    it("applies no hop ceiling to an exhaustive traversal, which ends on cycle prevention alone", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({ exhaustive: true }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).not.toContain("r.depth <");
+      expect(sql).toContain("r.path");
+    });
+    // MUTATION CHECK: emit `maxDepthCondition` for an exhaustive spec too
+    // (drop the `vl.exhaustive === true ? undefined` arm) and `r.depth <`
+    // returns.
+
+    it("refuses an exhaustive traversal that also allows cycles", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              exhaustive: true,
+              cyclePolicy: "allow",
+            }),
+          }),
+        ],
+      });
+
+      expect(() => getSqlString(ast)).toThrow(
+        'exhaustive recursive traversal requires cyclePolicy "prevent"',
+      );
+    });
+    // MUTATION CHECK: delete the `vl.exhaustive === true && !shouldEnforceCycleCheck`
+    // guard and this compiles an unbounded, uncycle-checked recursion.
+
     it("throws when explicit maxDepth exceeds MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
       const ast = createAst({
         traversals: [
