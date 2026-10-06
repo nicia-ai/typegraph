@@ -154,8 +154,9 @@ neither field — a clone's own history starts at its clone revision, and
 current-truth state export is not a backup of explanation.
 
 Restoring `identity.transitions` validates shape only (a known cause, a
-well-formed reference, a non-decreasing `recordedRevision` sequence) and
-inserts every row verbatim, never re-deriving membership or touching the
+well-formed reference, a `recordedRevision` a recorded instant can carry —
+an integer from 1, below `Number.MAX_SAFE_INTEGER` — in a non-decreasing
+sequence) and inserts every row verbatim, never re-deriving membership or touching the
 target's closure. Every restored row is marked internally as such — a
 restore always inserts rows this graph did not record itself, regardless of
 what the archive's own history looks like. A replay over the restored graph

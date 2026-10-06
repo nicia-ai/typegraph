@@ -12,7 +12,8 @@ import {
   type TransactionBackend,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
-import { IdentityContradictionError } from "../src/errors";
+import { RECORDED_MAX_REVISION } from "../src/core/temporal";
+import { IdentityContradictionError, ValidationError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import {
@@ -398,6 +399,81 @@ describe("archival identity import window bounds", () => {
     });
     expect(restored.identity).toEqual(archive.identity);
   });
+
+  // An archived transition's `recordedRevision` is read back through
+  // `createRecordedInstant`, so a restore must refuse every value that
+  // function refuses. Accepting one would commit a row no read can return:
+  // `transitionsOf` and `replay` throw for every lineage that reaches it.
+  it.each([
+    { label: "zero", recordedRevision: 0 },
+    { label: "the open ceiling", recordedRevision: RECORDED_MAX_REVISION },
+  ])(
+    "refuses an archived transition whose recordedRevision is $label",
+    async ({ recordedRevision }) => {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const alice = await source.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const bob = await source.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await source.identity.assertSame(alice, bob);
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const identity = requireDefined(archive.identity);
+      const poisoned = {
+        ...archive,
+        identity: {
+          ...identity,
+          transitions: requireDefined(identity.transitions).map(
+            (transition) => ({ ...transition, recordedRevision }),
+          ),
+        },
+      };
+
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const refusal = await importGraph(target, poisoned, {
+        onConflict: "skip",
+      }).catch((error: unknown) => error);
+      console.info("unreadable recordedRevision", recordedRevision, refusal);
+      expect(refusal).toBeInstanceOf(ValidationError);
+      // Refused before any write: nothing was restored to trip a later read.
+      expect(await target.nodes.Person.count()).toBe(0);
+
+      // The boundary values the reader accepts are still restored.
+      const accepted = await importGraph(
+        target,
+        {
+          ...archive,
+          identity: {
+            ...identity,
+            transitions: requireDefined(identity.transitions).map(
+              (transition, index) => ({
+                ...transition,
+                recordedRevision: index === 0 ? 1 : RECORDED_MAX_REVISION - 1,
+              }),
+            ),
+          },
+        },
+        { onConflict: "skip" },
+      );
+      expect(accepted.errors).toEqual([]);
+      const { transitions } = await target.identity.transitionsOf(alice);
+      expect(transitions.length).toBeGreaterThan(0);
+    },
+  );
 
   // Load-bearing (L10): the archival round trip carries the transitions
   // section verbatim and the restore watermark reports the

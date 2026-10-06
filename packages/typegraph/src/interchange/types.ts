@@ -9,6 +9,7 @@
  */
 import { z } from "zod";
 
+import { isRecordedRevision } from "../core/temporal";
 import { isCanonicalIsoDate } from "../utils/date";
 
 // ============================================================
@@ -202,7 +203,14 @@ const InterchangeIdentityTransitionDecisionSchema = z.strictObject({
 export const InterchangeIdentityTransitionSchema = z.object({
   transitionId: z.string().min(1),
   cause: InterchangeIdentityTransitionCauseSchema,
-  recordedRevision: z.number().int().nonnegative(),
+  // The range a recorded instant can carry, by the predicate that reads the
+  // restored row back: a revision outside it would be stored and then throw
+  // on every `transitionsOf` and `replay` that reaches it.
+  recordedRevision: z
+    .number()
+    .refine((revision) => isRecordedRevision(revision), {
+      message: "recordedRevision is outside the recorded-revision range",
+    }),
   recordedAt: z.iso.datetime(),
   validAt: ValidityTimestampSchema,
   class: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
