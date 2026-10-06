@@ -30,6 +30,7 @@ import { ConfigurationError } from "../errors";
 import { type IdentityServiceContext } from "../identity/service-types";
 import {
   type IdentityDecisionProvenance,
+  type IdentityRestoreBaseline,
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,
 } from "../identity/transition-log";
@@ -496,10 +497,28 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     target: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>>;
   /**
+   * @internal What an archival transition restore must know about this graph
+   * before the import's first write: whether it has identity history of its
+   * own, and its recorded-revision floor. Read once per import and handed to
+   * `importIdentityTransitionsAtTarget`.
+   */
+  readIdentityRestoreBaselineAtTarget: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+  ) => Promise<IdentityRestoreBaseline>;
+  /**
    * @internal Restores archival identity transitions inside an import
    * transaction. `carriedWatermark` is the source graph's own retention
    * watermark from the archival payload, used only when `transitions` is
-   * empty (see `importIdentityTransitionsIntoTarget`).
+   * empty (see `importIdentityTransitionsIntoTarget`). `baseline` is the
+   * destination as it stood before the import began.
    */
   importIdentityTransitionsAtTarget: (
     target: Readonly<
@@ -513,6 +532,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
     transitions: readonly IdentityTransitionTransfer[],
     carriedWatermark: number | undefined,
+    baseline: IdentityRestoreBaseline,
   ) => Promise<Readonly<{ created: number; watermark: number | undefined }>>;
   /**
    * `decision` is the governing merge decision, when the apply runs under one:

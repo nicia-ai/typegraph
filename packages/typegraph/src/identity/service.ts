@@ -22,6 +22,7 @@ export {
   IDENTITY_IMPORT_PROGRESS,
   importIdentityAssertionsIntoTarget,
   importIdentityTransitionsIntoTarget,
+  readIdentityRestoreBaseline,
 } from "./service-interchange-write";
 export type { IdentityRebuildContext } from "./service-maintenance";
 export {
@@ -54,6 +55,7 @@ export type {
   IdentityTransferAssertion,
 } from "./service-types";
 export type {
+  IdentityRestoreBaseline,
   IdentityTransitionCursor,
   IdentityTransitionTransfer,
 } from "./transition-log";

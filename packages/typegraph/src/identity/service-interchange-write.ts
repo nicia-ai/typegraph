@@ -45,6 +45,7 @@ import {
   encodeIdentityTransitionRow,
   hasNativeIdentityTransitions,
   type IdentityDecisionProvenance,
+  type IdentityRestoreBaseline,
   type IdentityTransitionTransfer,
   insertIdentityTransitionValues,
   writeIdentityTransitionRetentionWatermark,
@@ -538,9 +539,14 @@ function transitionShapeError(
  *
  * The retention watermark is a SEPARATE, coarser signal — "this graph cannot
  * vouch for a complete history below revision N on its own axis" — and is
- * only ever advanced here when {@link hasNativeIdentityTransitions} answers
- * `false`, i.e. this graph has recorded no identity transitions of its own
- * yet. Advancing it unconditionally (the original design here) would, for a
+ * only ever advanced here when the destination's {@link IdentityRestoreBaseline}
+ * says it had recorded no identity transitions of its own when the import
+ * began. That baseline is a fact about the destination BEFORE the import, so
+ * it is read once, ahead of the import's first write, and handed in
+ * ({@link readIdentityRestoreBaseline}): probing here instead would answer
+ * about a graph the import itself has already written to, and a streamed
+ * import — whose node and assertion chunks commit their own transitions
+ * before this one runs — would never find its destination fresh. Advancing it unconditionally (the original design here) would, for a
  * graph that already has its own retained history, stamp a
  * destination-clock-derived floor over transitions the restore never
  * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
@@ -555,11 +561,37 @@ function transitionShapeError(
  * uses, so a graph that later restores again can only raise its own floor,
  * never lower it.
  */
+/**
+ * Reads {@link IdentityRestoreBaseline} off `target`. THE one decision of
+ * whether a destination is fresh, taken once per import — at the start of
+ * `importGraph`'s transaction, and before the first chunk of
+ * `importGraphStream` — so both restore the same archive to the same
+ * watermark.
+ */
+export async function readIdentityRestoreBaseline(
+  ctx: IdentityTransitionImportContext,
+  target: IdentityTarget,
+): Promise<IdentityRestoreBaseline> {
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => ({
+    floorRevision: await readNextRecordedRevision(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    ),
+    hasOwnHistory: await hasNativeIdentityTransitions(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    ),
+  }));
+}
+
 export async function importIdentityTransitionsIntoTarget(
   ctx: IdentityTransitionImportContext,
   target: IdentityTarget,
   transitions: readonly IdentityTransitionTransfer[],
   carriedWatermark: number | undefined,
+  baseline: IdentityRestoreBaseline,
 ): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
   // Raw identity statements run through the capture-approved handle
   // `withRecordedIdentityMutationTarget` resolves — under `history: true` the
@@ -569,17 +601,8 @@ export async function importIdentityTransitionsIntoTarget(
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const destinationFloor = await readNextRecordedRevision(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-    );
+    const { floorRevision: destinationFloor, hasOwnHistory } = baseline;
     const restoredAt = nowIso();
-    const hasOwnHistory = await hasNativeIdentityTransitions(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-    );
     if (transitions.length === 0) {
       if (
         carriedWatermark === undefined ||

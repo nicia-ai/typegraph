@@ -107,7 +107,10 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
-import { identityTransitionLogUnavailableError } from "../identity/transition-log";
+import {
+  type IdentityRestoreBaseline,
+  identityTransitionLogUnavailableError,
+} from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
@@ -342,7 +345,10 @@ type PendingRequiredPart = Readonly<{ kind: string; id: string }>;
 type PendingRequiredParts = Map<string, PendingRequiredPart>;
 
 /** The result counters a committed row was counted under. */
-interface CommittedWriteCounts { created: number; updated: number }
+interface CommittedWriteCounts {
+  created: number;
+  updated: number;
+}
 
 /**
  * What an import must remember to undo a required part it has to refuse: the
@@ -440,6 +446,14 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+  /**
+   * The destination as it stood before the import began, when the caller
+   * already read it: a streamed import reads it once, ahead of its first
+   * chunk, and hands it to the chunk that restores transitions. Absent for a
+   * single-document import, whose one attempt reads it itself before its
+   * first write.
+   */
+  identityRestoreBaseline?: IdentityRestoreBaseline | undefined;
 }>;
 
 /**
@@ -493,6 +507,14 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     applyNodeWindowEnd: (input) =>
       inputs.runtime.applyImportedNodeWindowEnd(target, input),
   };
+  // Before the first row: whether this destination has identity history of
+  // its own is a fact about it BEFORE this import, and the node and assertion
+  // writes below record transitions of their own.
+  const identityRestoreBaseline =
+    inputs.identityRestoreBaseline ??
+    (archivalTransitionRestoreStated(inputs.data.identity) ?
+      await inputs.runtime.readIdentityRestoreBaselineAtTarget(target)
+    : undefined);
   await processNodes(
     frame,
     inputs.graphId,
@@ -545,6 +567,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
       target,
       inputs.graphId,
       inputs.data.identity,
+      identityRestoreBaseline,
       result,
       errors,
     );
@@ -556,6 +579,7 @@ async function importGraphData<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
   options: ResolvedImportOptions,
+  identityRestoreBaseline?: IdentityRestoreBaseline,
 ): Promise<ImportResult> {
   // Reject an identity payload aimed at an identity-disabled graph, and
   // runtime-validate the (bounded) identity section, BEFORE any entity write —
@@ -640,6 +664,7 @@ async function importGraphData<G extends GraphDef>(
     batchPointRead,
     uniqueSidecarBatch,
     statementExecution,
+    identityRestoreBaseline,
   };
 
   // One transaction on a transactional backend; runs directly otherwise, with
@@ -786,6 +811,12 @@ export async function importGraphStream<G extends GraphDef>(
   let receivedEdges = false;
   let receivedIdentity = false;
   let receivedIdentityTransitions = false;
+  // The destination before this stream's first chunk, when the header
+  // announces an archival transition restore. Read there, once: every chunk
+  // commits on its own, so by the time the transitions chunk runs the
+  // destination already holds the transitions this stream's own node and
+  // assertion chunks recorded.
+  let identityRestoreBaseline: IdentityRestoreBaseline | undefined;
   let releaseImportLease: (() => void) | undefined;
 
   try {
@@ -848,6 +879,16 @@ export async function importGraphStream<G extends GraphDef>(
             chunk.header.identity?.hasTransitions === true,
             chunk.header.identity?.retention,
           );
+          if (
+            chunk.header.identity?.mode === "archival" &&
+            (chunk.header.identity.hasTransitions === true ||
+              chunk.header.identity.retention !== undefined)
+          ) {
+            identityRestoreBaseline =
+              await storeRuntime(store).readIdentityRestoreBaselineAtTarget(
+                targetBackend,
+              );
+          }
           header = chunk.header;
           break;
         }
@@ -959,6 +1000,7 @@ export async function importGraphStream<G extends GraphDef>(
               store,
               graphDataForChunk(header, [], [], [], chunk.transitions),
               { ...options, refreshStatistics: false },
+              identityRestoreBaseline,
             ),
           );
           throwIfStreamChunkFailed(result, options);
@@ -1390,6 +1432,7 @@ async function importIdentitySection<G extends GraphDef>(
   target: IdentityTarget,
   graphId: string,
   identity: NonNullable<GraphData["identity"]>,
+  restoreBaseline: IdentityRestoreBaseline | undefined,
   result: ImportResult,
   errors: ImportError[],
 ): Promise<void> {
@@ -1409,7 +1452,12 @@ async function importIdentitySection<G extends GraphDef>(
     result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
-  await importIdentityTransitionsSection(runtime, target, identity);
+  await importIdentityTransitionsSection(
+    runtime,
+    target,
+    identity,
+    restoreBaseline,
+  );
 }
 
 /**
@@ -1427,6 +1475,7 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
   target: IdentityTarget,
   identity: NonNullable<GraphData["identity"]>,
+  restoreBaseline: IdentityRestoreBaseline | undefined,
 ): Promise<void> {
   const transitions = identity.transitions ?? [];
   if (identity.mode === "state") {
@@ -1444,11 +1493,32 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
       },
     );
   }
-  if (transitions.length === 0 && identity.retention === undefined) return;
+  if (!archivalTransitionRestoreStated(identity)) return;
   await runtime.importIdentityTransitionsAtTarget(
     target,
     transitions,
     identity.retention?.prunedBeforeRevision,
+    requireDefined(
+      restoreBaseline,
+      "an archival transition restore reached its write with no destination baseline",
+    ),
+  );
+}
+
+/**
+ * Whether an identity section states an archival transition restore — rows
+ * to insert, or a retention watermark to carry — and so whether the import
+ * owes the destination's {@link IdentityRestoreBaseline}. THE one predicate
+ * both the baseline read (before the import's first write) and the restore
+ * itself (after its last) decide on, so neither runs without the other.
+ */
+function archivalTransitionRestoreStated(
+  identity: GraphData["identity"],
+): boolean {
+  return (
+    identity?.mode === "archival" &&
+    ((identity.transitions?.length ?? 0) > 0 ||
+      identity.retention !== undefined)
   );
 }
 

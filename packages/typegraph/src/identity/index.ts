@@ -13,6 +13,7 @@ export {
 } from "./replay";
 export {
   type IdentityDecisionProvenance,
+  type IdentityRestoreBaseline,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,

@@ -717,8 +717,14 @@ with a fabricated before/after reconstructed from the destination's own,
 unrelated state.
 
 The restore also sets the destination's retention watermark to the
-**destination's own current recorded revision + 1**, but only when this
-graph has recorded no identity transitions of its own yet. A fresh graph has
+**destination's own recorded revision + 1, as it stood before the import
+began**, but only when the graph had recorded no identity transitions of its
+own by then. Both are read once, ahead of the import's first write — at the
+start of `importGraph`'s transaction, and before the first chunk of
+`importGraphStream` — so the two entry points restore one archive to the same
+watermark, and the transitions the import's own node and assertion writes
+record do not make the destination look as if it already had a history. A
+fresh graph has
 nothing of its own for that floor to misclassify, so setting it there is
 safe, and `replay` reports it as `truncatedBefore` — the point below which
 this graph's own timeline carries no retained explanation. A graph that

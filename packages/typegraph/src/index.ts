@@ -135,12 +135,13 @@ export {
   type IdentityReplay,
   type IdentityReplayOptions,
   type IdentityReplayStep,
-  type IdentitySamePathStep,
-  type IdentityTransition,
-  type IdentityTransitionCause,
   // The archival transition page a port implementer reads and writes through
   // `StoreRuntime.readIdentityTransitionPageAtTarget` /
   // `importIdentityTransitionsAtTarget`, named so the port is implementable.
+  type IdentityRestoreBaseline,
+  type IdentitySamePathStep,
+  type IdentityTransition,
+  type IdentityTransitionCause,
   type IdentityTransitionCursor,
   type IdentityTransitionHistory,
   type IdentityTransitionTransfer,
