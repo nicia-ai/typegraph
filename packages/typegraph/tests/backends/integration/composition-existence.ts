@@ -687,6 +687,39 @@ export function registerCompositionExistenceIntegrationTests(
       }
     });
 
+    it("case 9d: a whole delete its own `restrict` refuses, caught in a transaction, removes no part's edge", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const podcast = await store.nodes.EePodcast.create({});
+      const root = await store.nodes.EeFolder.create({});
+      const part = await store.nodes.EeFolder.create(
+        {},
+        { partOf: { whole: root } },
+      );
+      await store.edges.eeCites.create(root, podcast, {});
+      // The part is already dead with its composition edge still live, so the
+      // cascade has no live member and one consumed edge.
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeFolder",
+        id: part.id,
+      });
+
+      let refusal: unknown;
+      await store.transaction(async (tx) => {
+        refusal = await tx.nodes.EeFolder.delete(root.id).catch(
+          (error: unknown) => error,
+        );
+      });
+
+      // MUTATION CHECK: judge the root only when the cascade has a live member
+      // (`cascadeWritesBeforeRoot` in `planCascadingNodeDelete`,
+      // src/store/operations/node-operations.ts) and the consumed edge is
+      // removed before the root's refusal — verified and reverted.
+      expect(refusal).toBeInstanceOf(RestrictedDeleteError);
+      expect(await store.edges.eeFolderOf.find({})).toHaveLength(1);
+      expect(await store.nodes.EeFolder.getById(root.id)).toBeDefined();
+    });
+
     it("case 9c: a part's `restrict` is judged against the edges the parts deleted before it remove", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const root = await store.nodes.EeFolder.create({});

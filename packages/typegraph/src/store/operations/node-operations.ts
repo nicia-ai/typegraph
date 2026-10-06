@@ -662,7 +662,9 @@ function noPlannedDeleteEffects(): PlannedDeleteEffects {
  *
  * `judgeRoot: false` is the delete whose root statement is the frame's first
  * write when it has no parts: that statement's own enforcement already
- * precedes everything, and judging it here would only repeat its read.
+ * precedes everything, and judging it here would only repeat its read. A
+ * cascade with a consumed edge to remove writes first, so its root is judged
+ * here whatever the caller says ({@link cascadeWritesBeforeRoot}).
  *
  * An empty plan when `policy?.cascadeComposition` is `false` (merge apply's
  * request: its plan already carries the part deletions) or when the kind
@@ -711,11 +713,21 @@ async function planCascadingNodeDelete<G extends GraphDef>(
 
   const memberPolicy = cascadeMemberDeletePolicy(plan);
   for (const member of plan.members) await judge(member, memberPolicy);
-  if (judgeRoot || plan.members.length > 0) {
+  if (judgeRoot || cascadeWritesBeforeRoot(plan)) {
     await judge(root, withCascadeConsumedEdges(policy, plan.consumedEdgeIds));
   }
   for (const edgeId of plan.consumedEdgeIds) effects.removedEdgeIds.add(edgeId);
   return plan;
+}
+
+/**
+ * Whether the cascade issues a statement ahead of the root's own delete: a
+ * live member to delete, or a consumed edge to remove. A member the walk found
+ * already dead still has its edge in `plan.consumedEdgeIds`, and that edge's
+ * removal is a write like any other, so the root's refusal must precede it.
+ */
+function cascadeWritesBeforeRoot(plan: CompositionCascadePlan): boolean {
+  return plan.members.length > 0 || plan.consumedEdgeIds.size > 0;
 }
 
 /**
