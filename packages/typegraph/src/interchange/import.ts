@@ -3300,9 +3300,15 @@ async function processEdgeSlice(
   // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
   // property, and validity validation, plus in-slice duplicate deferral.
   const candidates: EdgeImportCandidate[] = [];
-  const deferred: InterchangeEdge[] = [];
-  const seenIds = new Set<string>();
-  for (const edge of batch) {
+  // Rows written one at a time after the flush, each with its slice position.
+  // They are deferred from two places — a repeated id here, an acyclic kind
+  // in the routing loop below — and written in DOCUMENT order, not deferral
+  // order: the second row naming an id must observe the first one's row.
+  const deferred: Readonly<{ edge: InterchangeEdge; sliceIndex: number }>[] =
+    [];
+  // The slice position of each id's FIRST occurrence — the one candidate.
+  const firstSliceIndexById = new Map<string, number>();
+  for (const [sliceIndex, edge] of batch.entries()) {
     const schemaEntry = edgeSchemas.get(edge.kind);
     if (!schemaEntry) {
       record(edge, {
@@ -3350,11 +3356,11 @@ async function processEdgeSlice(
       record(edge, { status: "error", error: validityError });
       continue;
     }
-    if (seenIds.has(edge.id)) {
-      deferred.push(edge);
+    if (firstSliceIndexById.has(edge.id)) {
+      deferred.push({ edge, sliceIndex });
       continue;
     }
-    seenIds.add(edge.id);
+    firstSliceIndexById.set(edge.id, sliceIndex);
     candidates.push({ edge, props: propsResult.data });
   }
 
@@ -3652,7 +3658,10 @@ async function processEdgeSlice(
     // where the row lands inside the transaction before the next row's
     // probe runs and the database itself carries the in-batch state.
     if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
-      deferred.push(edge);
+      deferred.push({
+        edge,
+        sliceIndex: requireDefined(firstSliceIndexById.get(edge.id)),
+      });
       continue;
     }
 
@@ -3809,7 +3818,9 @@ async function processEdgeSlice(
     }
   }
 
-  for (const edge of deferred) {
+  for (const { edge } of deferred.toSorted(
+    (left, right) => left.sliceIndex - right.sliceIndex,
+  )) {
     record(
       edge,
       await processEdge(
