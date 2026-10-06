@@ -74,7 +74,9 @@ export type SchemaIntrospector = Readonly<{
    * contract makes every row satisfy it, so a subclass that omits a
    * parent-optional property or narrows its type does not make the field
    * unusable. Without such a kind the answer is `undefined` unless every kind
-   * declares the field with an agreeing type.
+   * declares the field with an agreeing type. A kind that redeclares an
+   * `embedding()` field untagged (or a `searchable()` field untagged) also
+   * returns the strict answer, since the parent's index would not reach it.
    */
   getSharedFieldTypeInfo: (
     kindNames: readonly string[],
@@ -115,9 +117,10 @@ export type SchemaIntrospector = Readonly<{
   /**
    * The kinds that leave the alias `kindNames` resolves to without searchable
    * content, empty when `$fulltext` is available: the kind subsuming all the
-   * others when it declares no `searchable()` field, or, when no kind subsumes
-   * the rest, each kind declaring none — `.matches()` over unrelated kinds
-   * would otherwise silently miss some of them.
+   * others when it declares no `searchable()` field, any kind beneath it that
+   * redeclares one of its `searchable()` fields untagged, or, when no kind
+   * subsumes the rest, each kind declaring none — `.matches()` would
+   * otherwise silently miss some of them.
    */
   kindsWithoutSearchableField: (
     kindNames: readonly string[],
@@ -193,6 +196,31 @@ export function createSchemaIntrospector(
       : mergeFieldTypeInfos(infos);
   }
 
+  /**
+   * The field as the kind subsuming the others declares it, unless a kind
+   * redeclares it without the indexing tag the subsuming declaration carries.
+   * The structural contract does not see that tag (`searchable()` and
+   * `embedding()` are annotations, not constraints), so a subclass may legally
+   * redeclare a tagged field untagged — and its rows then never reach the
+   * fulltext or vector index the parent-typed accessor reads. Those aliases
+   * fall back to the strict all-kinds merge rather than silently omit rows.
+   */
+  function resolveFromSubsumingKinds(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): FieldTypeInfo | undefined {
+    const resolved = mergeDeclaredFieldTypeInfos(
+      subsumingKinds(kindNames),
+      fieldName,
+    );
+    if (resolved === undefined) return undefined;
+    const everyKindKeepsIndexingTags = kindNames.every((kindName) => {
+      const info = getFieldTypeInfo(kindName, fieldName);
+      return info === undefined || keepsIndexingTags(resolved, info);
+    });
+    return everyKindKeepsIndexingTags ? resolved : undefined;
+  }
+
   function getSharedFieldTypeInfo(
     kindNames: readonly string[],
     fieldName: string,
@@ -203,7 +231,7 @@ export function createSchemaIntrospector(
     }
 
     const resolved =
-      mergeDeclaredFieldTypeInfos(subsumingKinds(kindNames), fieldName) ??
+      resolveFromSubsumingKinds(kindNames, fieldName) ??
       mergeDeclaredFieldTypeInfos(kindNames, fieldName);
     sharedFieldTypeInfoCache.set(cacheKey, resolved);
     return resolved;
@@ -338,6 +366,47 @@ export function createSchemaIntrospector(
     return declared;
   }
 
+  function hasSearchableContent(kindName: string): boolean {
+    const shape = getShapeForKind(kindName);
+    return (
+      shape !== undefined &&
+      Object.values(shape).some((info) => info.searchable !== undefined)
+    );
+  }
+
+  /**
+   * With no subsuming kind, every kind must declare searchable content. With
+   * one, its declaration decides — and a kind beneath it that redeclares one
+   * of its searchable fields untagged still holds that text, unindexed, so it
+   * is named too. A kind that omits the field holds no text there.
+   */
+  function computeKindsWithoutSearchableField(
+    kindNames: readonly string[],
+  ): readonly string[] {
+    const subsuming = subsumingKinds(kindNames);
+    if (subsuming.length === 0) {
+      return kindNames.filter((kindName) => !hasSearchableContent(kindName));
+    }
+    const parentsWithoutContent = subsuming.filter(
+      (kindName) => !hasSearchableContent(kindName),
+    );
+    if (parentsWithoutContent.length > 0) return parentsWithoutContent;
+
+    const searchableFieldNames = subsuming.flatMap((kindName) =>
+      Object.entries(getShapeForKind(kindName) ?? {})
+        .filter(([, info]) => info.searchable !== undefined)
+        .map(([fieldName]) => fieldName),
+    );
+    return kindNames.filter(
+      (kindName) =>
+        !subsuming.includes(kindName) &&
+        searchableFieldNames.some((fieldName) => {
+          const info = getFieldTypeInfo(kindName, fieldName);
+          return info !== undefined && info.searchable === undefined;
+        }),
+    );
+  }
+
   function kindsWithoutSearchableField(
     kindNames: readonly string[],
   ): readonly string[] {
@@ -345,15 +414,7 @@ export function createSchemaIntrospector(
     const cached = searchableGapCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    const subsuming = subsumingKinds(kindNames);
-    const decidingKinds = subsuming.length > 0 ? subsuming : kindNames;
-    const result = decidingKinds.filter((kindName) => {
-      const shape = getShapeForKind(kindName);
-      return (
-        shape === undefined ||
-        !Object.values(shape).some((info) => info.searchable !== undefined)
-      );
-    });
+    const result = computeKindsWithoutSearchableField(kindNames);
     searchableGapCache.set(cacheKey, result);
     return result;
   }
@@ -367,6 +428,16 @@ export function createSchemaIntrospector(
     hasDeclaredEdgeField,
     kindsWithoutSearchableField,
   };
+}
+
+function keepsIndexingTags(
+  resolved: FieldTypeInfo,
+  info: FieldTypeInfo,
+): boolean {
+  return (
+    (info.valueType === "embedding") === (resolved.valueType === "embedding") &&
+    (resolved.searchable === undefined || info.searchable !== undefined)
+  );
 }
 
 function schemaAllowsAbsence(schema: z.ZodType): boolean {

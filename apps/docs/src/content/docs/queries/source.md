@@ -151,7 +151,11 @@ By default (`expansion` absent, or explicitly `"subclasses"`):
   omits a parent-optional property, or narrows its type, does not change that:
   its rows read as absent or as the parent's type. `$fulltext.matches()` is
   likewise available when the parent kind declares a `searchable()` field, and
-  matches only the rows that have searchable content
+  matches only the rows that have searchable content. A subclass that
+  redeclares that field as a plain string (or an `embedding()` field as a plain
+  number array) is still a valid subtype, but its rows would never reach the
+  index, so `$fulltext.matches()` refuses and names the kind, and the embedding
+  accessor is not offered
 
 **Annotating a relation as `OntologyRelation` widens every alias in the
 graph.** Every relation factory returns a typed relation carrying its

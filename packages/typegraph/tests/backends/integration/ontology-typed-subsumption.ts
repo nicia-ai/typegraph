@@ -20,7 +20,11 @@ import {
   searchable,
   subClassOf,
 } from "../../../src";
-import { ConfigurationError, EndpointError } from "../../../src/errors";
+import {
+  ConfigurationError,
+  EndpointError,
+  UnsupportedPredicateError,
+} from "../../../src/errors";
 import { type IntegrationTestContext } from "./test-context";
 
 const Media = defineNode("TsMedia", {
@@ -161,23 +165,60 @@ const optionalFieldGraph = defineGraph({
   ontology: [subClassOf(OptionalPodcast, OptionalMedia)],
 });
 
-// The parent declares the only `searchable()` field; the subclass redeclares
-// `title` as a plain string, which is the same structural type.
+// The parent declares the only `searchable()` and `embedding()` fields, both
+// optional. The structural contract does not see either annotation, so a
+// subclass may omit the field (it holds no such content) or redeclare it as a
+// plain string / number array (it holds content the parent's index never
+// reaches).
 const SearchableDocument = defineNode("TsSearchableDoc", {
-  schema: z.object({ title: searchable({ language: "english" }) }),
+  schema: z.object({
+    title: searchable({ language: "english" }).optional(),
+    vector: embedding(3).optional(),
+  }),
 });
-const PlainMemo = defineNode("TsPlainMemo", {
-  schema: z.object({ title: z.string(), note: z.string() }),
+const TitlelessMemo = defineNode("TsTitlelessMemo", {
+  schema: z.object({ note: z.string() }),
+});
+const RedeclaredTitleMemo = defineNode("TsRedeclaredTitleMemo", {
+  schema: z.object({ title: z.string().optional(), note: z.string() }),
+});
+const RedeclaredVectorMemo = defineNode("TsRedeclaredVectorMemo", {
+  schema: z.object({ vector: z.array(z.number()).optional() }),
 });
 
-const parentSearchableGraph = defineGraph({
-  id: "typed_subsumption_parent_searchable_integration",
+const omittedSearchableGraph = defineGraph({
+  id: "typed_subsumption_omitted_searchable_integration",
   nodes: {
     TsSearchableDoc: { type: SearchableDocument },
-    TsPlainMemo: { type: PlainMemo },
+    TsTitlelessMemo: { type: TitlelessMemo },
   },
   edges: {},
-  ontology: [subClassOf(PlainMemo, SearchableDocument)],
+  ontology: [subClassOf(TitlelessMemo, SearchableDocument)],
+});
+
+const redeclaredTitleGraph = defineGraph({
+  id: "typed_subsumption_redeclared_title_integration",
+  nodes: {
+    TsSearchableDoc: { type: SearchableDocument },
+    TsRedeclaredTitleMemo: { type: RedeclaredTitleMemo },
+  },
+  edges: {},
+  ontology: [subClassOf(RedeclaredTitleMemo, SearchableDocument)],
+});
+
+const redeclaredVectorGraph = defineGraph({
+  id: "typed_subsumption_redeclared_vector_integration",
+  nodes: {
+    TsSearchableDoc: { type: SearchableDocument },
+    TsRedeclaredVectorMemo: { type: RedeclaredVectorMemo },
+  },
+  edges: {},
+  ontology: [
+    // The compile-time filter reads the branded `EmbeddingValue`; the registry
+    // build, which compares projected JSON Schema, accepts the plain array.
+    // @ts-expect-error a plain number array is not the branded embedding type
+    subClassOf(RedeclaredVectorMemo, SearchableDocument),
+  ],
 });
 
 async function seedOptionalFieldStore(context: IntegrationTestContext) {
@@ -510,8 +551,8 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       ).toThrow(ConfigurationError);
     });
 
-    it("runs $fulltext.matches() when only the parent kind declares searchable content", async (ctx) => {
-      const store = await context.createStore(parentSearchableGraph);
+    it("runs $fulltext.matches() when the subclass omits the parent's searchable field", async (ctx) => {
+      const store = await context.createStore(omittedSearchableGraph);
       if (store.backend.capabilities.fulltext?.supported !== true) {
         ctx.skip();
       }
@@ -519,9 +560,8 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       const document = await store.nodes.TsSearchableDoc.create({
         title: "unique_ts_parent_marker climate",
       });
-      await store.nodes.TsPlainMemo.create({
-        title: "unique_ts_parent_marker climate",
-        note: "not indexed",
+      await store.nodes.TsTitlelessMemo.create({
+        note: "unique_ts_parent_marker climate",
       });
 
       const matches = await store
@@ -535,6 +575,52 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         .execute();
 
       expect(matches).toEqual([{ id: document.id, kind: "TsSearchableDoc" }]);
+    });
+
+    it("refuses $fulltext.matches() when a subclass redeclares the searchable field untagged", async () => {
+      const store = await context.createStore(redeclaredTitleGraph);
+
+      let caught: unknown;
+      try {
+        store
+          .query()
+          .from("TsSearchableDoc", "d")
+          .whereNode("d", (d) => d.$fulltext.matches("anything"));
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(UnsupportedPredicateError);
+      expect((caught as Error).message).toContain(
+        'kind "TsRedeclaredTitleMemo"',
+      );
+
+      await store.nodes.TsSearchableDoc.create({ title: "alpha" });
+      await store.nodes.TsRedeclaredTitleMemo.create({
+        title: "alpha",
+        note: "n",
+      });
+      const byTitle = await store
+        .query()
+        .from("TsSearchableDoc", "d")
+        .whereNode("d", (d) => d.title.eq("alpha"))
+        .select((selection) => selection.d.kind)
+        .execute();
+      expect(byTitle.toSorted()).toEqual([
+        "TsRedeclaredTitleMemo",
+        "TsSearchableDoc",
+      ]);
+    });
+
+    it("refuses an embedding accessor when a subclass redeclares the vector field untagged", async () => {
+      const store = await context.createStore(redeclaredVectorGraph);
+
+      expect(() =>
+        store
+          .query()
+          .from("TsSearchableDoc", "d")
+          .whereNode("d", (d) => d.vector.similarTo([1, 0, 0], 5)),
+      ).toThrow(ConfigurationError);
     });
   });
 
