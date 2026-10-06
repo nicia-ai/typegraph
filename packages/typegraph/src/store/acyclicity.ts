@@ -699,10 +699,16 @@ export async function assertEdgeRelationsAcyclic(
  * Order-insensitive: a proposed row that is already live only adds reaches,
  * never removes one, so the probe means the same thing before and after the
  * insert.
+ *
+ * `excludedEdgeIds` names stored edges the same frame retires before it
+ * writes `proposed` (a batch of moves), with the meaning
+ * {@link readProposedEdgeAcyclicityViolations} gives it: the overlay is the
+ * state the frame produces.
  */
 export async function assertUnwrittenEdgeRelationsAcyclic(
   ctx: AcyclicityProbeContext,
   proposed: readonly ProposedRelationEdge[],
+  excludedEdgeIds: readonly string[] = [],
 ): Promise<void> {
   const probeable = selfLoopFreeAcyclicGroups(ctx, proposed);
   if (probeable.length === 0) return;
@@ -710,7 +716,12 @@ export async function assertUnwrittenEdgeRelationsAcyclic(
   assertFreshSnapshot(ctx);
 
   for (const { relation, edges } of probeable) {
-    const reaches = await readUnwrittenEdgeReaches(ctx, relation, edges, []);
+    const reaches = await readUnwrittenEdgeReaches(
+      ctx,
+      relation,
+      edges,
+      excludedEdgeIds,
+    );
     const [violatingEdge] = proposedEdgesOnOverlayCycle(edges, reaches, 1);
     if (violatingEdge === undefined) continue;
     throw cycleRefusal(relation, violatingEdge);

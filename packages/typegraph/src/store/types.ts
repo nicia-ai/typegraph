@@ -1340,15 +1340,14 @@ export type NodeCollection<
   ) => Promise<NodeReparentResult<Via>>;
 
   /**
-   * Moves several parts in one transaction, one item at a time in the order
-   * given: a later item is judged against the graph the earlier moves left.
-   * A refusal before the first write leaves every part where it was. A
-   * refusal mid-batch throws with the earlier items' moves already written:
-   * called on the store, the batch's own transaction rolls them back; called
-   * on `tx` inside `store.transaction(...)`, they are part of that
-   * transaction, so let the error propagate to roll them back rather than
-   * catching it and committing. Each item is {@link NodeReparentOptions}
-   * plus the part id.
+   * Moves several parts in one transaction. Every item's verdict is reached
+   * before the first write, so a refusal leaves every part where it was,
+   * including when the caller catches it inside `store.transaction(...)`.
+   * The batch is judged on the state it produces as a whole: two moves that
+   * close a cycle between them are refused, and a part may move under one
+   * the same batch moves out from under it, in either item order. A part
+   * listed twice is refused with a `ValidationError`. Each item is
+   * {@link NodeReparentOptions} plus the part id.
    */
   bulkReparent: <
     const Via extends CompositionViaRef | undefined =

@@ -355,8 +355,8 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { whole: { kind: "CaChapter", id: chapter.id } } },
       );
 
-      // MUTATION CHECK: skip the retire (drop the `if (disposition ===
-      // "replace")` block in `applyCompositionAttachmentDecision`,
+      // MUTATION CHECK: skip the retire (drop the retire loop in
+      // `writeCompositionAttachmentMoves`,
       // src/store/operations/node-operations.ts)
       // — the attach then loses the composition claim and this rejects with
       // COMPOSITION_WHOLE_OCCUPIED instead of moving the chapter.
@@ -593,9 +593,9 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { whole: { kind: "CaFolder", id: child.id } } },
       );
 
-      // MUTATION CHECK: pass `validateAcyclicity: false` in
-      // `attachCompositionCreateEdge` (src/store/operations/node-operations.ts)
-      // — the move then succeeds and leaves a three-node composition ring
+      // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call in
+      // `prepareCompositionAttachmentMoves`
+      // (src/store/operations/node-operations.ts) — the move then succeeds and leaves a three-node composition ring
       // that no ordinary delete can unwind (`CompositionCycleError`).
       await expect(
         store.nodes.CaFolder.reparent(root.id, {
@@ -654,6 +654,132 @@ export function registerCompositionAttachmentIntegrationTests(
         }),
       ).rejects.toBeInstanceOf(EdgeAcyclicityError);
     });
+
+    // `population: "oneActive"` retires by ending the incumbent's window,
+    // `population: "one"` by deleting it; both reflexive, so one batch can
+    // carry a cycle.
+    const reflexivePairs = [
+      { population: "oneActive", kind: "CaUnit", via: "caUnitUnder" },
+      { population: "one", kind: "CaFolder", via: "caParentFolder" },
+    ] as const;
+
+    describe.each(reflexivePairs)(
+      "bulkReparent on a `population: $population` pair",
+      ({ population, kind, via }) => {
+        async function seed() {
+          const store = await context.createStore(buildGraph(nextGraphId()));
+          const nodes = requireDefined(store.getNodeCollection(kind));
+          const edges = requireDefined(store.getEdgeCollection(via));
+          const rootA = await nodes.create({});
+          const rootB = await nodes.create({});
+          const first = await nodes.create(
+            {},
+            { partOf: { whole: { kind, id: rootA.id } } },
+          );
+          const second = await nodes.create(
+            {},
+            { partOf: { whole: { kind, id: rootA.id } } },
+          );
+          const liveLinks = async (): Promise<ReadonlySet<string>> =>
+            new Set(
+              (await edges.find({})).map(
+                (edge) => `${edge.fromId}->${edge.toId}`,
+              ),
+            );
+          return { store, edges, rootA, rootB, first, second, liveLinks };
+        }
+
+        it("leaves no earlier move behind when a later item is refused and the caller catches it in a transaction", async () => {
+          const { store, edges, rootA, rootB, first, second, liveLinks } =
+            await seed();
+          const before = await liveLinks();
+          const refusedBatches = [
+            // A destination that does not exist.
+            [
+              { id: first.id, options: { whole: { kind, id: rootB.id } } },
+              { id: second.id, options: { whole: { kind, id: "missing" } } },
+            ],
+            // A cycle the batch's own moves close between them.
+            [
+              { id: first.id, options: { whole: { kind, id: rootB.id } } },
+              { id: rootB.id, options: { whole: { kind, id: first.id } } },
+            ],
+            // A move instant that precedes the window it would end. Only a
+            // `oneActive` retire ends a window; a `one` retire deletes.
+            ...(population === "oneActive" ?
+              [
+                [
+                  { id: first.id, options: { whole: { kind, id: rootB.id } } },
+                  {
+                    id: second.id,
+                    options: {
+                      whole: { kind, id: rootB.id },
+                      at: "1999-01-01T00:00:00.000Z",
+                    },
+                  },
+                ],
+              ]
+            : []),
+          ];
+
+          // MUTATION CHECK: deciding and writing one item at a time in
+          // `executeNodeReparentBatch` leaves `first` under `rootB` after
+          // each of these — verified and reverted.
+          for (const items of refusedBatches) {
+            await store.transaction(async (tx) => {
+              const parts = requireDefined(tx.getNodeCollection(kind));
+              await expect(parts.bulkReparent(items)).rejects.toThrow();
+            });
+            expect(await liveLinks()).toEqual(before);
+          }
+          expect(before).toEqual(
+            new Set([`${first.id}->${rootA.id}`, `${second.id}->${rootA.id}`]),
+          );
+          expect(
+            await edges.find({}, { temporalMode: "includeEnded" }),
+          ).toHaveLength(2);
+          expect(await store.verifyConstraintFences()).toEqual([]);
+        });
+
+        it("judges acyclicity on the state the whole batch produces, in either item order", async () => {
+          const { store, rootA, first, liveLinks } = await seed();
+          const nodes = requireDefined(store.getNodeCollection(kind));
+          const leaf = await nodes.create(
+            {},
+            { partOf: { whole: { kind, id: first.id } } },
+          );
+
+          // `first` moves under its own child while that child moves out from
+          // under it: a cycle only if the first item is judged alone.
+          const results = await nodes.bulkReparent([
+            { id: first.id, options: { whole: { kind, id: leaf.id } } },
+            { id: leaf.id, options: { whole: { kind, id: rootA.id } } },
+          ]);
+
+          expect(results.map((result) => result.moved)).toEqual([true, true]);
+          const links = await liveLinks();
+          expect(links.has(`${first.id}->${leaf.id}`)).toBe(true);
+          expect(links.has(`${leaf.id}->${rootA.id}`)).toBe(true);
+          expect(links.has(`${leaf.id}->${first.id}`)).toBe(false);
+          expect(await store.verifyConstraintFences()).toEqual([]);
+        });
+
+        it("refuses a batch that names one part twice, moving nothing", async () => {
+          const { store, rootA, rootB, first, liveLinks } = await seed();
+          const nodes = requireDefined(store.getNodeCollection(kind));
+          const before = await liveLinks();
+
+          await expect(
+            nodes.bulkReparent([
+              { id: first.id, options: { whole: { kind, id: rootB.id } } },
+              { id: first.id, options: { whole: { kind, id: rootA.id } } },
+            ]),
+          ).rejects.toBeInstanceOf(ValidationError);
+
+          expect(await liveLinks()).toEqual(before);
+        });
+      },
+    );
 
     it("reparent inside a transaction counts as ONE node write intent", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));

@@ -376,7 +376,7 @@ describe("a refused attachment and the property update it came with", () => {
     // MUTATION CHECK: delete the whole-liveness read in
     // `decideCompositionAttachmentUnderFence`
     // (src/store/operations/composition-create.ts) — i.e. revert to letting
-    // `attachCompositionCreateEdge`'s own `assertLiveEdgeEndpoints` be the
+    // `prepareCompositionCreateEdge`'s own `assertLiveEdgeEndpoints` be the
     // only place a dead whole is caught. The refusal then follows
     // `performNodeUpdateWithResurrectionRecovery` instead of preceding it,
     // and `code` below reads "mutated".
@@ -479,9 +479,10 @@ describe("a refused attachment and the property update it came with", () => {
       { partOf: { whole: { kind: "AfWhole", id: wholeB.id } } },
     );
 
-    // MUTATION CHECK: in `applyCompositionAttachmentDecision`
-    // (src/store/operations/node-operations.ts), move the
-    // `prepareCompositionCreateEdge` call below the incumbent's retirement.
+    // MUTATION CHECK: retire the incumbent inside
+    // `prepareCompositionAttachmentMoves`
+    // (src/store/operations/node-operations.ts), ahead of its
+    // `prepareCompositionCreateEdge` call.
     // The cardinality refusal then follows the retirement, and the part below
     // is left with no live attachment.
     await store.transaction(async (tx) => {

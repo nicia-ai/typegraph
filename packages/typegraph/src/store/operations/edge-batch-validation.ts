@@ -361,18 +361,19 @@ function countEdgesAtEndpointIncludes(
 
 /**
  * The frame's write target as a replacement edge's preparation must read it:
- * with `retiring` — a row this same frame retires AFTER the preparation and
- * BEFORE the insert — already gone from every endpoint count it holds.
+ * with `retiring` — the rows this same frame retires AFTER the preparation
+ * and BEFORE the inserts — already gone from every endpoint count it holds.
  *
- * `reparent`'s replace arm (`applyCompositionAttachmentDecision`,
- * `node-operations.ts`) is the caller: preparing the replacement before the
+ * `reparent`'s replace arm (`prepareCompositionAttachmentMoves`,
+ * `node-operations.ts`) is the caller, with the incumbent of every move in
+ * its batch: preparing the replacement before the
  * incumbent is retired is what keeps a refusal the preparation raises
  * (cardinality, acyclicity, invalid edge props) from leaving the part
  * detached when the caller catches it inside an enclosing transaction, and
  * preparing it against the raw count would refuse every move whose incumbent
  * realizes the same edge kind — the incumbent still counts against the
- * part's own cardinality until it is retired. Subtracting the one row the
- * frame retires yields exactly the count the insert will see: a
+ * part's own cardinality until it is retired. Subtracting the rows the
+ * frame retires yields exactly the count the inserts will see: a
  * `population: "one"` incumbent is soft-deleted (leaves a `live` count), a
  * `population: "oneActive"` incumbent has its window ended (leaves a
  * `liveAndActive` count), and the axis a pair's population names is the
@@ -384,14 +385,18 @@ function countEdgesAtEndpointIncludes(
  */
 export function createRetiringEdgeValidationBackend(
   target: WriteTarget,
-  retiring: EdgeRow,
+  retiring: readonly EdgeRow[],
 ): WriteTarget {
+  if (retiring.length === 0) return target;
   return deriveBackend(target, {
     countEdgesAtEndpoint: async (
       params: CountEdgesAtEndpointParams,
     ): Promise<number> => {
       const count = await target.countEdgesAtEndpoint(params);
-      return countEdgesAtEndpointIncludes(params, retiring) ? count - 1 : count;
+      const leaving = retiring.filter((row) =>
+        countEdgesAtEndpointIncludes(params, row),
+      );
+      return count - leaving.length;
     },
   } satisfies Partial<WriteTarget>);
 }

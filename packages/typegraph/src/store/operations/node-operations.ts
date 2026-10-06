@@ -275,6 +275,7 @@ import {
   createRetiringEdgeValidationBackend,
 } from "./edge-batch-validation";
 import {
+  assertCompositionEdgeWindowEndable,
   assertPreparedEdgeCreatesAcyclic,
   edgeCardinalityDeclarations,
   type EdgeCreatePrepared,
@@ -2871,48 +2872,6 @@ async function batchCheckUniqueAcrossKinds(
 // ============================================================
 
 /**
- * Inserts one create's composition edge, in the SAME transaction
- * the node row lands in, through the ordinary edge-create validation/prepare
- * pipeline (`validateAndPrepareEdgeCreate`/`edgeInsertWork`,
- * `edge-operations.ts`) — the identical work a caller's own
- * `store.edges.<kind>.create(...)` would run, just issued against this
- * frame's `target`/`session` instead of opening a second write. A failed
- * edge (a lost `COMPOSITION_WHOLE_OCCUPIED` claim, a dead or missing whole
- * endpoint, a cardinality or acyclicity refusal) throws and aborts the node
- * create too — `edgeInsertClaims` (`composition-claims.ts`) remains the
- * sole owner of the claim; this adds none. A no-op when `work` is
- * `undefined` (the ordinary, no-`partOf` create), so every call site can
- * call it unconditionally.
- *
- * The two halves — {@link prepareCompositionCreateEdge} (every read) and
- * {@link insertPreparedCompositionEdge} (the one statement) — are also
- * callable separately, for a frame that must run the reads before OTHER
- * statements of its own ({@link executeNodeUpsertUpdate}).
- */
-async function attachCompositionCreateEdge<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  session: WriteSession,
-  target: WriteTarget,
-  lock: GraphWriteLock,
-  work: CompositionCreateWork | undefined,
-  partId: string,
-  temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
-): Promise<EdgeCreatePrepared | undefined> {
-  if (work === undefined) return undefined;
-  const prepared = await prepareCompositionCreateEdge(
-    ctx,
-    target,
-    lock,
-    work,
-    partId,
-    temporal,
-    { endpoints: { source: "read" }, validateAcyclicity: true },
-  );
-  await insertPreparedCompositionEdge(ctx, session, prepared);
-  return prepared;
-}
-
-/**
  * What a composition edge's preparation already HOLDS about its two endpoint
  * rows, and therefore what it still owes — stated as the evidence rather than
  * as a "skip the reads" flag, so each arm is bound to the proof that earned
@@ -2944,9 +2903,15 @@ type CompositionEndpointEvidence =
   | Readonly<{ source: "restoredByUpdate" }>;
 
 /**
- * The READ half of {@link attachCompositionCreateEdge}: every
- * refusal the composition edge can reach before its insert, with no
- * statement issued.
+ * The READ half of a composition edge's insert: every refusal the edge can
+ * reach before its insert, with no statement issued. It runs the ordinary
+ * edge-create validation (`validateAndPrepareEdgeCreate`, `edge-operations.ts`)
+ * — the identical work a caller's own `store.edges.<kind>.create(...)` would
+ * run — against this frame's `target`, so the edge lands in the SAME
+ * transaction as the row work that owes it.
+ * {@link insertPreparedCompositionEdge} is the one statement that follows;
+ * `edgeInsertClaims` (`composition-claims.ts`) remains the sole owner of the
+ * claim it carries.
  *
  * An attachment whose window would leave the edge born NOT attaching its part
  * never reaches here: `resolveCompositionCreate` /
@@ -2983,8 +2948,8 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
 }
 
 /**
- * The WRITE half of {@link attachCompositionCreateEdge}: the one
- * insert statement, carrying the claims the prepared declarations decide.
+ * The WRITE half of {@link prepareCompositionCreateEdge}: the one insert
+ * statement, carrying the claims the prepared declarations decide.
  */
 async function insertPreparedCompositionEdge<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3257,12 +3222,15 @@ async function insertPreparedCompositionEdges<G extends GraphDef>(
  * the write, which is what keeps two racing callers requesting different
  * wholes from ending in a silent move (one wins, one refuses).
  *
- * Taking the decision as a parameter rather than reaching for it is what lets
- * a frame that owes other statements sequence its reads first: the
+ * The write is split from its reads
+ * ({@link prepareCompositionAttachmentMoves}, then
+ * {@link writeCompositionAttachmentMoves}) so a frame applying several
+ * decisions reaches every verdict before its first statement. A frame that
+ * owes OTHER statements sequences its reads first in the same way: the
  * get-or-create update leg ({@link executeNodeUpsertUpdate}) decides, then
  * prepares the edge ({@link prepareCompositionAttachmentDecision}), updates
- * properties, and only then inserts — it never reaches this function, whose
- * `"replace"` arm is `reparent`'s alone.
+ * properties, and only then inserts — it never reaches the `"replace"` arm,
+ * which is `reparent`'s alone.
  *
  * How the incumbent retires follows the population declared on the INCUMBENT
  * row's own pair, resolved through the realizing edge that actually holds
@@ -3311,116 +3279,225 @@ function attachmentWindow(
   return moveAt === undefined ? work.edgeWindow : { validFrom: moveAt };
 }
 
-async function applyCompositionAttachmentDecision<G extends GraphDef>(
+/** One fenced decision a frame is about to apply, with its move instant. */
+type DecidedAttachmentMove = Readonly<{
+  partId: string;
+  decided: FencedCompositionAttachment;
+  /** The caller-stated move instant (`reparent`'s `at`), when there is one. */
+  moveAt: string | undefined;
+}>;
+
+/**
+ * One decision with every verdict its write can reach already passed.
+ * `replacement` is absent for a `"satisfied"` decision, which writes nothing;
+ * `retire` is present for a `"replace"` decision.
+ */
+type PreparedAttachmentMove = Readonly<{
+  partId: string;
+  decided: FencedCompositionAttachment;
+  replacement?: EdgeCreatePrepared;
+  retire?: Readonly<{
+    incumbent: BackendEdgeRow;
+    population: "one" | "oneActive";
+    moveInstant: string;
+  }>;
+}>;
+
+/**
+ * The READ half of applying a SET of fenced decisions: every refusal any of
+ * them can reach, with no statement issued. A frame that moves several parts
+ * (`bulkReparent`) therefore refuses before its first move, and a caller that
+ * catches the refusal inside an enclosing `store.transaction(...)` — where
+ * there is no nested frame to roll back — is left with no part moved.
+ *
+ * The set is judged as the state it produces, not one move at a time:
+ *
+ * - CARDINALITY is counted with every incumbent the set retires already gone
+ *   ({@link createRetiringEdgeValidationBackend}) and every earlier
+ *   replacement already present ({@link createEdgeBatchValidationBackend}).
+ * - ACYCLICITY is probed once, as an overlay of every replacement on the
+ *   stored relation less the retired incumbents
+ *   ({@link assertPreparedEdgeCreatesAcyclic}), so two moves that close a
+ *   cycle between them are refused, and a move under a part that the same
+ *   set moves out of the way is not.
+ * - Each RETIRE's own verdict is reached here too: a `oneActive` incumbent's
+ *   window end ({@link assertCompositionEdgeWindowEndable}) and a `one`
+ *   incumbent's delete ({@link assertCompositionExistencePreserved}).
+ *
+ * `"replace"` reads ONE clock value per move — the instant the incumbent
+ * window ends is the instant the new attachment begins.
+ */
+async function prepareCompositionAttachmentMoves<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  operation: string,
+  moves: readonly DecidedAttachmentMove[],
+): Promise<readonly PreparedAttachmentMove[]> {
+  const retiring = moves.flatMap(({ decided }) =>
+    decided.disposition === "replace" ?
+      [
+        requireDefined(
+          decided.incumbent,
+          'decideCompositionIncumbent answered "replace" with no incumbent read',
+        ).edge,
+      ]
+    : [],
+  );
+  const { backend: validationTarget, registerPendingEdgeForCardinality } =
+    createEdgeBatchValidationBackend(
+      createRetiringEdgeValidationBackend(target, retiring),
+    );
+
+  const prepared: PreparedAttachmentMove[] = [];
+  for (const { partId, decided, moveAt } of moves) {
+    if (decided.disposition === "satisfied") {
+      prepared.push({ partId, decided });
+      continue;
+    }
+    const { work } = decided.request;
+    const part = { kind: work.partKind, id: partId };
+    const incumbent =
+      decided.disposition === "replace" ? decided.incumbent : undefined;
+    const moveInstant = incumbent === undefined ? moveAt : (moveAt ?? nowIso());
+    const replacement = await prepareCompositionCreateEdge(
+      ctx,
+      validationTarget,
+      lock,
+      work,
+      partId,
+      attachmentWindow(work, moveInstant),
+      { endpoints: { source: "read" }, validateAcyclicity: false },
+    );
+    registerPendingEdgeForCardinality(
+      replacement.insertParams,
+      replacement.declarations,
+    );
+    if (incumbent === undefined || moveInstant === undefined) {
+      prepared.push({ partId, decided, replacement });
+      continue;
+    }
+    // How the incumbent retires follows the population declared on ITS OWN
+    // pair, resolved through the realizing edge that holds the attachment.
+    const { population } = requireCompositionPairVia(
+      ctx.registry,
+      work.partKind,
+      incumbent.whole.kind,
+      incumbent.edge.kind,
+    );
+    if (population === "oneActive") {
+      await assertCompositionEdgeWindowEndable(
+        ctx,
+        incumbent.edge,
+        part,
+        moveInstant,
+        target,
+        lock,
+      );
+    } else {
+      // For this arm the exemption's own match is unconditional: the edge
+      // retired is always the part's own current edge, so the function
+      // returns at its `reattachedPart` early return. Reached anyway so a
+      // rule added ABOVE that return applies to a `population: "one"` move
+      // too, as it does to the `oneActive` arm through the edge update body.
+      await assertCompositionExistencePreserved(
+        {
+          graphId: ctx.graphId,
+          registry: ctx.registry,
+          lock,
+          reattachedPart: part,
+        },
+        incumbent.edge,
+        target,
+      );
+    }
+    prepared.push({
+      partId,
+      decided,
+      replacement,
+      retire: { incumbent: incumbent.edge, population, moveInstant },
+    });
+  }
+
+  await assertPreparedEdgeCreatesAcyclic(
+    ctx,
+    target,
+    lock,
+    operation,
+    prepared.flatMap((move) =>
+      move.replacement === undefined ? [] : [move.replacement],
+    ),
+    retiring.map((edge) => edge.id),
+  );
+  return prepared;
+}
+
+/**
+ * The WRITE half of {@link prepareCompositionAttachmentMoves}: every retire,
+ * then every insert. Retiring first is what lets two moves exchange a slot
+ * the realizing edge kind bounds — each replacement's claim is taken only
+ * after the row that held it has let go — and is the order the preparation's
+ * counts assumed.
+ *
+ * A `population: "one"` incumbent is DELETED (a `one` binding persists for
+ * the row's whole life, ended or not, so an ended row would still read as an
+ * attachment); a `population: "oneActive"` incumbent has its window ENDED at
+ * the move instant, leaving the previous membership readable as valid-time
+ * history.
+ */
+async function writeCompositionAttachmentMoves<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
-  partId: string,
-  decided: FencedCompositionAttachment,
-  moveAt?: string,
-): Promise<AttachmentApplyResult> {
-  const { request, disposition } = decided;
-  const { work } = request;
-  const partKind = work.partKind;
-  if (disposition === "satisfied") {
-    return {
-      wrote: false,
-      edge:
-        decided.incumbent === undefined ?
-          undefined
-        : rowToEdge(decided.incumbent.edge),
-    };
-  }
-
-  if (disposition === "attach") {
-    const prepared = await attachCompositionCreateEdge(
-      ctx,
-      session,
-      target,
-      lock,
-      work,
-      partId,
-      attachmentWindow(work, moveAt),
-    );
-    return {
-      wrote: true,
-      edge:
-        prepared === undefined ? undefined : (
-          await readHeldEdge(target, ctx.graphId, prepared.insertParams.id)
-        ),
-    };
-  }
-
-  // `"replace"`: the incumbent is retired and the requested attachment takes
-  // its place. ONE clock read for ONE move — the instant the incumbent window
-  // ends is the instant the new attachment begins.
-  const incumbent = requireDefined(
-    decided.incumbent,
-    'decideCompositionIncumbent answered "replace" with no incumbent read',
-  );
-  const moveInstant = moveAt ?? nowIso();
-  // Prepared BEFORE the incumbent is retired, so a refusal leaves the part
-  // attached where it was; `createRetiringEdgeValidationBackend` owns why the
-  // count must already exclude the retiring row.
-  const replacement = await prepareCompositionCreateEdge(
-    ctx,
-    createRetiringEdgeValidationBackend(target, incumbent.edge),
-    lock,
-    work,
-    partId,
-    attachmentWindow(work, moveInstant),
-    { endpoints: { source: "read" }, validateAcyclicity: true },
-  );
-  const incumbentPair = requireCompositionPairVia(
-    ctx.registry,
-    partKind,
-    incumbent.whole.kind,
-    incumbent.edge.kind,
-  );
-  if (incumbentPair.population === "oneActive") {
-    await endCompositionEdgeWindow(
-      ctx,
-      incumbent.edge,
-      { kind: partKind, id: partId },
-      moveInstant,
-      session,
-      target,
-      lock,
-    );
-  } else {
-    // Through the same owner every other retire path goes through, with the
-    // move's `reattachedPart` evidence — though for THIS arm the exemption's
-    // own match is unconditional: the edge retired here is always the part's
-    // own current edge, so `reattached.kind === part.kind && reattached.id ===
-    // part.id` is true on every call, and the function returns before any rule
-    // in its body runs (`composition-create.ts`'s `reattachedPart` early
-    // return). Kept anyway so a rule added ABOVE that early return applies to
-    // a `population: "one"` move too, without a second call site to remember —
-    // the same reason the `oneActive` arm reaches it via
-    // `endCompositionEdgeWindow` -> `performEdgeUpdateConverging`; a direct
-    // `retireEdge` has no other way in.
-    await assertCompositionExistencePreserved(
-      {
-        graphId: ctx.graphId,
-        registry: ctx.registry,
+  moves: readonly PreparedAttachmentMove[],
+): Promise<readonly AttachmentApplyResult[]> {
+  for (const { partId, decided, retire } of moves) {
+    if (retire === undefined) continue;
+    if (retire.population === "oneActive") {
+      await endCompositionEdgeWindow(
+        ctx,
+        retire.incumbent,
+        { kind: decided.request.work.partKind, id: partId },
+        retire.moveInstant,
+        session,
+        target,
         lock,
-        reattachedPart: { kind: partKind, id: partId },
-      },
-      incumbent.edge,
-      target,
-    );
-    await session.retireEdge({
-      id: incumbent.edge.id,
-      kind: incumbent.edge.kind,
-    });
+      );
+    } else {
+      await session.retireEdge({
+        id: retire.incumbent.id,
+        kind: retire.incumbent.kind,
+      });
+    }
   }
-
-  await insertPreparedCompositionEdge(ctx, session, replacement);
-  return {
-    wrote: true,
-    edge: await readHeldEdge(target, ctx.graphId, replacement.insertParams.id),
-  };
+  for (const { replacement } of moves) {
+    if (replacement !== undefined) {
+      await insertPreparedCompositionEdge(ctx, session, replacement);
+    }
+  }
+  const results: AttachmentApplyResult[] = [];
+  for (const { decided, replacement } of moves) {
+    results.push(
+      replacement === undefined ?
+        {
+          wrote: false,
+          edge:
+            decided.incumbent === undefined ?
+              undefined
+            : rowToEdge(decided.incumbent.edge),
+        }
+      : {
+          wrote: true,
+          edge: await readHeldEdge(
+            target,
+            ctx.graphId,
+            replacement.insertParams.id,
+          ),
+        },
+    );
+  }
+  return results;
 }
 
 /**
@@ -3444,7 +3521,7 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
  * `onIncumbent: "refuse"` (`resolveGetOrCreateAttachmentRequest`), so
  * `decideCompositionIncumbent` refuses a different incumbent instead of
  * answering `"replace"`; a move is `reparent`'s
- * ({@link applyCompositionAttachmentDecision}). Reaching it is an invariant
+ * ({@link prepareCompositionAttachmentMoves}). Reaching it is an invariant
  * failure, not a supported path.
  *
  * `partRowRestoredByUpdate` names the resurrection leg: the part row is a
@@ -3492,10 +3569,12 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
 }
 
 /**
- * The fenced attachment in one call — decide, then apply — for a frame whose
- * only statements are the attachment's own ({@link executeNodeReparent}'s
- * write plan). A frame that owes other statements calls the two halves
- * separately so its refusals come first ({@link executeNodeUpsertUpdate}).
+ * The fenced attachment of ONE part in one call — decide, prepare, write —
+ * for a frame whose only statements are the attachment's own
+ * ({@link runCompositionAttachmentWritePlan}). A frame that owes other
+ * statements calls the halves separately so its refusals come first
+ * ({@link executeNodeUpsertUpdate}), as does one that moves several parts
+ * ({@link executeNodeReparentBatch}).
  */
 async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3506,22 +3585,31 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
   request: CompositionAttachmentRequest,
   moveAt?: string,
 ): Promise<AttachmentApplyResult> {
-  return applyCompositionAttachmentDecision(
+  const decided = await decideCompositionAttachmentUnderFence(
+    ctx.registry,
+    target,
+    ctx.graphId,
+    partId,
+    request,
+    lock,
+    { partRowRestoredByUpdate: false },
+  );
+  const [result] = await writeCompositionAttachmentMoves(
     ctx,
     session,
     target,
     lock,
-    partId,
-    await decideCompositionAttachmentUnderFence(
-      ctx.registry,
+    await prepareCompositionAttachmentMoves(
+      ctx,
       target,
-      ctx.graphId,
-      partId,
-      request,
       lock,
-      { partRowRestoredByUpdate: false },
+      "nodes.attach",
+      [{ partId, decided, moveAt }],
     ),
-    moveAt,
+  );
+  return requireDefined(
+    result,
+    "writeCompositionAttachmentMoves returned no result for its one move",
   );
 }
 
@@ -3764,6 +3852,22 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
       ),
     };
   });
+  const seenIds = new Set<string>();
+  for (const item of resolved) {
+    // One part holds one whole, so two moves of one part in one batch have no
+    // final state to judge.
+    if (seenIds.has(item.id)) {
+      throw new ValidationError(
+        `bulkReparent requires distinct part ids; received "${item.id}" more than once.`,
+        { entityType: "node", kind, operation: "update", id: item.id, issues: [] },
+        {
+          suggestion:
+            "List each part once, with the whole it should end up under.",
+        },
+      );
+    }
+    seenIds.add(item.id);
+  }
   for (const item of resolved) {
     const gate = await backend.getNode(ctx.graphId, kind, item.id);
     if (!gate || !isLiveNodeRow(gate))
@@ -3779,30 +3883,51 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      const results: NodeReparentResult[] = [];
+      // Every item is decided, then every move prepared, before the first
+      // write: see `prepareCompositionAttachmentMoves`.
+      const decisions: DecidedAttachmentMove[] = [];
       for (const item of resolved) {
+        // Re-read under the lock: the gate above is lock-free, and a
+        // concurrent delete between the two must not leave this frame
+        // attaching a tombstoned part to a live whole.
         const part = await target.getNode(ctx.graphId, kind, item.id);
         if (!part || !isLiveNodeRow(part)) {
           throw new NodeNotFoundError(kind, item.id);
         }
-        const applied = await applyCompositionAttachmentUnderFence(
-          ctx,
-          session,
-          target,
-          lock,
-          item.id,
-          item.request,
-          item.moveAt,
-        );
-        results.push({
-          moved: applied.wrote,
-          edge: requireDefined(
-            applied.edge,
-            "a reparent that did not refuse produced no holding edge",
+        decisions.push({
+          partId: item.id,
+          moveAt: item.moveAt,
+          decided: await decideCompositionAttachmentUnderFence(
+            ctx.registry,
+            target,
+            ctx.graphId,
+            item.id,
+            item.request,
+            lock,
+            { partRowRestoredByUpdate: false },
           ),
         });
       }
-      return results;
+      const applied = await writeCompositionAttachmentMoves(
+        ctx,
+        session,
+        target,
+        lock,
+        await prepareCompositionAttachmentMoves(
+          ctx,
+          target,
+          lock,
+          "nodes.reparent",
+          decisions,
+        ),
+      );
+      return applied.map((result) => ({
+        moved: result.wrote,
+        edge: requireDefined(
+          result.edge,
+          "a reparent that did not refuse produced no holding edge",
+        ),
+      }));
     },
     { didWrite: (results) => results.some((result) => result.moved) },
   );

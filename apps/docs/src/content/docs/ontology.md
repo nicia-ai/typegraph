@@ -496,12 +496,12 @@ await store.nodes.Chapter.reparent(chapter.id, {
 `via` and `props` as `create`'s `partOf`: a realizing edge whose schema has
 required fields needs them restated on every move. It returns
 `{ edge, moved }`. `bulkReparent` runs the same move for many parts in one
-transaction, one item at a time in the order given, so a later item is judged
-against the graph the earlier moves left. A refusal partway through throws
-with the earlier items already moved: on the store the batch's own
-transaction rolls them back, but on `tx` inside `store.transaction(...)` they
-belong to your transaction, so let the error propagate instead of catching it
-and committing. A single `reparent` has no such window.
+transaction. Every item's verdict is reached before the first write, so a
+refused batch moves nothing, including when you catch the refusal on `tx`
+inside `store.transaction(...)`. The batch is judged on the state it produces
+as a whole: two moves that close a cycle between them are refused, and a part
+may move under one that the same batch moves out from under it, whichever
+order the items are listed in. Listing one part twice is a `ValidationError`.
 
 `at` is the move instant, and its only spelling: the same timestamp ends the
 old window and opens the new one. Omit it to read the clock once. `reparent`

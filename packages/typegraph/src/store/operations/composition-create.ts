@@ -29,10 +29,11 @@
  * {@link resolveCompositionAttachmentRequest} builds the request read-free,
  * and {@link decideCompositionAttachmentUnderFence} re-reads the incumbent on
  * the frame's own fenced target and answers with the decision itself —
- * "satisfied", "attach" or "replace" — or refuses. The write half of that
- * decision (`applyCompositionAttachmentDecision`, `node-operations.ts`) takes
- * the answer as a parameter, which is what lets a frame that owes other
- * statements decide BEFORE its first one. These functions are here rather than
+ * "satisfied", "attach" or "replace" — or refuses. The halves that apply
+ * that decision (`prepareCompositionAttachmentMoves` and
+ * `writeCompositionAttachmentMoves`, `node-operations.ts`) take the answer as
+ * a parameter, which is what lets a frame that owes other statements, or
+ * several decisions, decide BEFORE its first one. These functions are here rather than
  * beside the write plan because the decision is pure: the write plan owns the
  * lock and the statements, this module owns what they mean.
  */
