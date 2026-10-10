@@ -29,7 +29,7 @@ import {
   isMissingTableError,
   isNotNullColumnViolation,
   isPostgresConcurrentDdlRaceError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteMissingEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteStaleSnapshotError,
@@ -892,20 +892,31 @@ describe("edge match-identity provisioning error classifiers", () => {
     );
   });
 
-  it("recognizes only the two duplicate-column adoption races", () => {
+  it("recognizes only a duplicate-column race on a column the adoption plans", () => {
+    const adoptionColumns = ["match_identity_name", "match_identity_key"];
     expect(
-      isSqliteDuplicateEdgeMatchIdentityColumnError(
+      isSqliteDuplicateColumnError(
         Object.assign(new Error("duplicate column name: match_identity_key"), {
           code: "SQLITE_ERROR",
         }),
+        adoptionColumns,
       ),
     ).toBe(true);
     expect(
-      isSqliteDuplicateEdgeMatchIdentityColumnError(
+      isSqliteDuplicateColumnError(
         Object.assign(new Error("duplicate column name: props"), {
           code: "SQLITE_ERROR",
         }),
+        adoptionColumns,
       ),
     ).toBe(false);
+    expect(
+      isSqliteDuplicateColumnError(
+        Object.assign(new Error("duplicate column name: restored_at"), {
+          code: "SQLITE_ERROR",
+        }),
+        ["restored_at"],
+      ),
+    ).toBe(true);
   });
 });

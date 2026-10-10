@@ -50,7 +50,7 @@ function createMinimalAst(alias: string, extraFields: string[] = []): QueryAst {
     start: {
       alias,
       kinds: ["TestKind"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [],
@@ -345,7 +345,7 @@ describe("compileSetOperation", () => {
     it("throws when ordering with SELECT * (empty projection)", () => {
       // Create a set operation with empty projection (SELECT *)
       const emptyProjectionAst: QueryAst = {
-        start: { alias: "a", kinds: ["TestKind"], includeSubClasses: false },
+        start: { alias: "a", kinds: ["TestKind"], expansion: "exact" as const },
         traversals: [],
         predicates: [],
         projection: { fields: [] }, // SELECT *
@@ -367,7 +367,7 @@ describe("compileSetOperation", () => {
     it("normalizes equivalent field representations for matching", () => {
       // Create projection with path: ["props"] + jsonPointer
       const projectionWithPointer: QueryAst = {
-        start: { alias: "a", kinds: ["TestKind"], includeSubClasses: false },
+        start: { alias: "a", kinds: ["TestKind"], expansion: "exact" as const },
         traversals: [],
         predicates: [],
         projection: {

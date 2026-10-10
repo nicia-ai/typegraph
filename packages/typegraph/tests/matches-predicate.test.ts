@@ -569,13 +569,13 @@ describe(".matches() with polymorphic alias", () => {
       body: "casual take",
     });
 
-    // includeSubClasses expands "Content" to ["Content", "Article", "BlogPost"].
+    // expansion: "subclasses" expands "Content" to ["Content", "Article", "BlogPost"].
     // The polymorphic accessor types lose individual field typing; the
     // runtime introspector still recognizes title as searchable across
     // all three kinds and emits a node_kind IN (...) filter.
     const results = await store
       .query()
-      .from("Content", "d", { includeSubClasses: true })
+      .from("Content", "d", { expansion: "subclasses" })
       .whereNode("d", (d) =>
         (d as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
           "renewable",
@@ -589,12 +589,12 @@ describe(".matches() with polymorphic alias", () => {
     expect(ids).toEqual([article.id, blog.id].toSorted());
   });
 
-  it("rejects polymorphic matches when any subclass lacks searchable() fields", async () => {
-    // Parent + two subclasses where only one declares `searchable()`.
-    // `hasSearchableField` uses `.every()`, so the runtime guard throws
-    // rather than silently producing partial results across the mixed
-    // set. This pins the behavior for the kbgraph-style shape where a
-    // parent kind has heterogeneous children.
+  it("rejects polymorphic matches when the parent kind lacks searchable() fields", async () => {
+    // Parent + two subclasses where only one subclass declares
+    // `searchable()`. The parent alias reads the parent's declaration, which
+    // has no searchable content, so the runtime guard throws and names the
+    // parent kind rather than silently producing partial results across the
+    // mixed set.
     const Media = defineNode("Media", {
       schema: z.object({ title: z.string() }),
     });
@@ -627,7 +627,7 @@ describe(".matches() with polymorphic alias", () => {
     expect(() =>
       mixedStore
         .query()
-        .from("Media", "m", { includeSubClasses: true })
+        .from("Media", "m", { expansion: "subclasses" })
         .whereNode("m", (m) =>
           (m as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
             "searchable",
@@ -636,7 +636,7 @@ describe(".matches() with polymorphic alias", () => {
         )
         .select((ctx) => ({ id: ctx.m.id }))
         .execute(),
-    ).toThrow(/searchable\(\)/i);
+    ).toThrow(/kind "Media" has no fields declared with searchable\(\)/);
   });
 
   it("hybrid SQL appends user orderBy as RRF tiebreaker", () => {
@@ -783,7 +783,7 @@ describe(".matches() with polymorphic alias", () => {
 
     const results = await store
       .query()
-      .from("Content", "d", { includeSubClasses: true })
+      .from("Content", "d", { expansion: "subclasses" })
       .whereNode("d", (d) =>
         (d as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
           "quantum",
@@ -832,7 +832,7 @@ describe(".matches() with polymorphic alias", () => {
       buildKindRegistry(VectorPolyGraph),
     );
     const ast = polyQuery
-      .from("PolyVector", "v", { includeSubClasses: true })
+      .from("PolyVector", "v", { expansion: "subclasses" })
       .whereNode("v", (v) =>
         (v as unknown as PropsAccessor<typeof PolyChild>).embedding.similarTo(
           queryEmbedding,

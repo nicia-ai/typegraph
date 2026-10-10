@@ -434,7 +434,7 @@ async function prepareResolvedNodeClaims(
  * It goes through {@link withNodeCreateClaimsBatch} — the claim writer every
  * create-shaped write uses — and not through a uniqueness-only insert, for a
  * reason the preparation step makes load-bearing: `hardDeleteUniquesByNodeIds`
- * clears every claim the affected nodes OWN, and after WS2 that includes their
+ * clears every claim the affected nodes OWN, and that includes their
  * `disjointWith` reservations. A rebuild that restored only the uniqueness
  * family would leave each merged node unfenced against a disjoint namesake for
  * the rest of the graph's life. The claim writer restores what

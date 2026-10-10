@@ -318,16 +318,40 @@ function recordedClockParts(row: ClockRow): RecordedClockParts | undefined {
   return { revision, recordedAt: recordedClockWallTime(row.recorded_at) };
 }
 
+const FIRST_RECORDED_REVISION = 1;
+
+function revisionAfter(clockRevision: number | undefined): number {
+  return clockRevision === undefined ?
+      FIRST_RECORDED_REVISION
+    : clockRevision + 1;
+}
+
+/**
+ * The revision the graph's next recorded commit will be allocated — the
+ * committed clock plus one, or the first revision when the graph has no clock
+ * row yet. It is also the highest floor that can truthfully be stated over the
+ * graph's own history: nothing on this graph's axis exists at or above it, and
+ * everything the graph records afterwards lands at or above it. One owner for
+ * the allocation itself and for every reader that reasons about that floor.
+ */
+export async function readNextRecordedRevision(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<number> {
+  const clock = await readRecordedClockParts(target, schema, graphId);
+  return revisionAfter(clock?.revision);
+}
+
 function nextRecordedCommitParts(
   previous: RecordedClockParts | undefined,
 ): RecordedClockParts {
   const wallTime = nowIso();
-  if (previous === undefined) {
-    return { revision: 1, recordedAt: wallTime };
-  }
+  const revision = revisionAfter(previous?.revision);
+  if (previous === undefined) return { revision, recordedAt: wallTime };
 
   return {
-    revision: previous.revision + 1,
+    revision,
     // Keep diagonal replay cumulative across backward clock corrections without
     // manufacturing a new millisecond for same-ms commits. Throughput can make
     // this component repeat, never run ahead of the greatest observed wall time.

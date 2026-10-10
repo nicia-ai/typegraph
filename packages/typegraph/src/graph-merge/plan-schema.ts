@@ -3,7 +3,15 @@ import { z } from "zod";
 import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_PLAN_FORMAT_VERSION = 1 as const;
+// Bumped 1 -> 2 for the composition-orphan review field: a required field
+// added under the SAME version number would make `mergePlanArtifactV2Schema`
+// (`.strict()`) reject every plan artifact serialized before composition
+// existed as "malformed", when the correct signal is "this artifact predates
+// a format this library version understands" — `parseMergePlanArtifact`
+// reads `formatVersion` before any other validation specifically to draw
+// that distinction (`unsupported-version` vs `malformed`), and a same-version
+// field addition would defeat it silently by falling through to the schema.
+export const MERGE_PLAN_FORMAT_VERSION = 2 as const;
 export const MERGE_PLAN_DIGEST_ALGORITHM = "sha256" as const;
 
 export type MergePlanEntityRef = Readonly<{ kind: string; id: string }>;
@@ -55,6 +63,8 @@ export type MergePlanNodeUpsert = Readonly<{
   unsetProps: readonly string[];
   validFrom?: string | null | undefined;
   validTo?: string | undefined;
+  /** Reopens the row: its upper bound is cleared. Exclusive with `validTo`. */
+  clearValidTo?: true | undefined;
 }>;
 
 export type MergePlanEdgeDelete = MergePlanEntityRef;
@@ -68,6 +78,8 @@ export type MergePlanEdgeUpsert = Readonly<{
   unsetProps: readonly string[];
   validFrom?: string | null | undefined;
   validTo?: string | undefined;
+  /** Reopens the row: its upper bound is cleared. Exclusive with `validTo`. */
+  clearValidTo?: true | undefined;
 }>;
 
 export type MergePlanIdentityAssertion = Readonly<{
@@ -183,7 +195,7 @@ export type MergePlanCandidateDiagnostic = Readonly<{
     | "retained"
     | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity";
+        reason: "diameter" | "baseAmbiguity" | "separation";
       }>
     | undefined;
 }>;
@@ -202,6 +214,34 @@ export type MergePlanTypeReconciliation = Readonly<{
   decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
 }>;
 
+/**
+ * A live, required-existence composition part this merge would leave with no
+ * whole. Two independent causes, both surfaced through the SAME shape and
+ * the SAME `MergeCompositionOrphanError` — a caller distinguishes them only
+ * by `cause`, never by a second error class:
+ *
+ * - `"deleted"`: a whole the plan deletes has a live
+ *   part the plan does NOT itself delete — attached on the target after the
+ *   branch point, or independently of it — found by re-reading the parts
+ *   closure (`planCompositionCascade`) against every planned node deletion.
+ *   `whole` is that about-to-be-deleted whole.
+ * - `"unattached"`: a required-existence part THIS
+ *   MERGE WRITES resolves, after canonicalization, to no live whole at
+ *   all — its composition edge was dropped or collapsed while both
+ *   endpoints survive. There is no whole to name, so `whole` is absent.
+ *
+ * Surfaced here so a dry run reports it; apply re-verifies the same finding
+ * under the write lock and refuses with `MergeCompositionOrphanError` when
+ * it recurs.
+ */
+export type MergePlanCompositionOrphan = Readonly<{
+  part: MergePlanEntityRef;
+  /** Present for `cause: "deleted"`; absent for `cause: "unattached"` — there is no whole to name. */
+  whole?: MergePlanEntityRef;
+  viaEdgeKind: string;
+  cause: "deleted" | "unattached";
+}>;
+
 export type MergePlanReview = Readonly<{
   resolutions: readonly MergePlanEntityResolution[];
   conflicts: readonly JsonValue[];
@@ -212,7 +252,10 @@ export type MergePlanReview = Readonly<{
   baseAmbiguities: readonly JsonValue[];
   provenanceRecords: readonly JsonValue[];
   warnings: readonly string[];
+  compositionOrphans: readonly MergePlanCompositionOrphan[];
   diagnostics?: MergePlanDiagnostics | undefined;
+  /** Optional, omitted when empty — see the review schema's format-version note. */
+  identityConflicts?: readonly JsonValue[] | undefined;
 }>;
 
 export type MergePlanProvenanceOptions = Readonly<{
@@ -225,7 +268,7 @@ export type MergePlanDigest = Readonly<{
   value: string;
 }>;
 
-export type MergePlanArtifactV1 = Readonly<{
+export type MergePlanArtifactV2 = Readonly<{
   formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
   digest: MergePlanDigest;
   mode: "snapshot" | "incremental";
@@ -239,9 +282,9 @@ export type MergePlanArtifactV1 = Readonly<{
 }>;
 
 /** Current public merge-plan artifact type. */
-export type MergePlanArtifact = MergePlanArtifactV1;
+export type MergePlanArtifact = MergePlanArtifactV2;
 
-export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
 
 const nonEmptyStringSchema = z.string().min(1);
 // Zod 4's number schema rejects NaN and infinities by default.
@@ -323,8 +366,13 @@ const nodeUpsertSchema = z
     unsetProps: z.array(nonEmptyStringSchema),
     validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
   })
-  .strict();
+  .strict()
+  .refine((upsert) => upsert.validTo === undefined || !upsert.clearValidTo, {
+    message: 'A write states either "validTo" or "clearValidTo", never both',
+    path: ["clearValidTo"],
+  });
 
 const edgeUpsertSchema = z
   .object({
@@ -336,8 +384,13 @@ const edgeUpsertSchema = z
     unsetProps: z.array(nonEmptyStringSchema),
     validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
   })
-  .strict();
+  .strict()
+  .refine((upsert) => upsert.validTo === undefined || !upsert.clearValidTo, {
+    message: 'A write states either "validTo" or "clearValidTo", never both',
+    path: ["clearValidTo"],
+  });
 
 const mergePlanIdentityAssertionSchema = z
   .object({
@@ -527,7 +580,7 @@ const diagnosticsSchema = z
               z
                 .object({
                   kind: z.literal("excluded"),
-                  reason: z.enum(["diameter", "baseAmbiguity"]),
+                  reason: z.enum(["diameter", "baseAmbiguity", "separation"]),
                 })
                 .strict(),
             ])
@@ -538,6 +591,32 @@ const diagnosticsSchema = z
     total: nonNegativeIntegerSchema,
     limit: nonNegativeIntegerSchema,
     truncated: z.boolean(),
+  })
+  .strict();
+
+const identityProvenanceRecordSchema = z
+  .object({
+    role: z.enum(["node", "edge"]),
+    canonicalId: nonEmptyStringSchema,
+    canonicalKind: nonEmptyStringSchema,
+    branchId: nonEmptyStringSchema,
+    sourceId: nonEmptyStringSchema,
+  })
+  .strict();
+
+/**
+ * The public `IdentityUnresolvedConflict`, validated STRICTLY rather than as
+ * opaque JSON: an entry the merge could not have produced fails at parse,
+ * where the plan artifact is read, rather than at the point a consumer reaches
+ * into a field that is not there.
+ */
+const identityUnresolvedConflictSchema = z
+  .object({
+    kind: z.literal("separation"),
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    assertionIds: z.array(nonEmptyStringSchema),
+    source: matchSourceSchema.optional(),
   })
   .strict();
 
@@ -611,11 +690,22 @@ const mergePlanReviewSchema = z
           entity: z.enum(["node", "edge"]),
           kind: nonEmptyStringSchema,
           id: nonEmptyStringSchema,
-          validTo: nonEmptyStringSchema,
+          validTo: nonEmptyStringSchema.optional(),
+          clearValidTo: z.literal(true).optional(),
           claimedBy: z.array(nonEmptyStringSchema),
           precedence: z.literal("target").optional(),
         })
-        .strict(),
+        .strict()
+        .refine(
+          (resolution) =>
+            (resolution.validTo === undefined) ===
+            (resolution.clearValidTo === true),
+          {
+            message:
+              'A validity end states exactly one of "validTo" or "clearValidTo"',
+            path: ["clearValidTo"],
+          },
+        ),
     ),
     baseAmbiguities: z.array(
       z
@@ -625,19 +715,24 @@ const mergePlanReviewSchema = z
         })
         .strict(),
     ),
-    provenanceRecords: z.array(
+    provenanceRecords: z.array(identityProvenanceRecordSchema),
+    warnings: z.array(z.string()),
+    compositionOrphans: z.array(
       z
         .object({
-          role: z.enum(["node", "edge"]),
-          canonicalId: nonEmptyStringSchema,
-          canonicalKind: nonEmptyStringSchema,
-          branchId: nonEmptyStringSchema,
-          sourceId: nonEmptyStringSchema,
+          part: mergePlanEntityRefSchema,
+          whole: mergePlanEntityRefSchema.optional(),
+          viaEdgeKind: nonEmptyStringSchema,
+          cause: z.enum(["deleted", "unattached"]),
         })
         .strict(),
     ),
-    warnings: z.array(z.string()),
     diagnostics: diagnosticsSchema.optional(),
+    // Optional and omitted when empty (the `diagnostics` precedent above): a
+    // merge the separation veto never touched produces a review object
+    // byte-identical to one written before the veto existed, so
+    // `MERGE_PLAN_FORMAT_VERSION` stays at 2 and those artifacts still parse.
+    identityConflicts: z.array(identityUnresolvedConflictSchema).optional(),
   })
   .strict();
 
@@ -648,7 +743,7 @@ const mergePlanDigestSchema = z
   })
   .strict();
 
-const mergePlanArtifactV1BaseSchema = z
+const mergePlanArtifactV2BaseSchema = z
   .object({
     formatVersion: z.literal(MERGE_PLAN_FORMAT_VERSION),
     digest: mergePlanDigestSchema,
@@ -665,15 +760,15 @@ const mergePlanArtifactV1BaseSchema = z
   })
   .strict();
 
-const mergePlanArtifactV1InputBaseSchema = mergePlanArtifactV1BaseSchema.omit({
+const mergePlanArtifactV2InputBaseSchema = mergePlanArtifactV2BaseSchema.omit({
   digest: true,
 });
-type ParsedMergePlanArtifactV1Input = z.infer<
-  typeof mergePlanArtifactV1InputBaseSchema
+type ParsedMergePlanArtifactV2Input = z.infer<
+  typeof mergePlanArtifactV2InputBaseSchema
 >;
 
 function addSemanticIssues(
-  artifact: ParsedMergePlanArtifactV1Input,
+  artifact: ParsedMergePlanArtifactV2Input,
   ctx: z.RefinementCtx,
 ): void {
   if (artifact.mode !== artifact.anchors.kind) {
@@ -831,8 +926,8 @@ function addSemanticIssues(
 }
 
 function addResolutionEvidenceIssues(
-  artifact: ParsedMergePlanArtifactV1Input,
-  resolution: ParsedMergePlanArtifactV1Input["review"]["resolutions"][number],
+  artifact: ParsedMergePlanArtifactV2Input,
+  resolution: ParsedMergePlanArtifactV2Input["review"]["resolutions"][number],
   resolutionIndex: number,
   ctx: z.RefinementCtx,
 ): void {
@@ -916,7 +1011,7 @@ function addResolutionEvidenceIssues(
 }
 
 function addEvidenceIssues(
-  evidence: ParsedMergePlanArtifactV1Input["review"]["resolutions"][number]["decisiveEdges"][number],
+  evidence: ParsedMergePlanArtifactV2Input["review"]["resolutions"][number]["decisiveEdges"][number],
   path: readonly (string | number)[],
   ctx: z.RefinementCtx,
 ): void {
@@ -1012,12 +1107,12 @@ function entityKey(entity: MergePlanEntityRef): string {
   return JSON.stringify([entity.kind, entity.id]);
 }
 
-export const mergePlanArtifactV1InputSchema =
-  mergePlanArtifactV1InputBaseSchema.superRefine((artifact, ctx) =>
+export const mergePlanArtifactV2InputSchema =
+  mergePlanArtifactV2InputBaseSchema.superRefine((artifact, ctx) =>
     addSemanticIssues(artifact, ctx),
   );
 
-export const mergePlanArtifactV1Schema =
-  mergePlanArtifactV1BaseSchema.superRefine((artifact, ctx) =>
+export const mergePlanArtifactV2Schema =
+  mergePlanArtifactV2BaseSchema.superRefine((artifact, ctx) =>
     addSemanticIssues(artifact, ctx),
   );

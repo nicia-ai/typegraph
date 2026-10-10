@@ -420,8 +420,8 @@ describe("getOrCreateByEndpoints convergence", () => {
             (target) =>
               fn({
                 ...target,
-                countEdgesFrom: async (params) => {
-                  if (reported) return target.countEdgesFrom(params);
+                countEdgesAtEndpoint: async (params) => {
+                  if (reported) return target.countEdgesAtEndpoint(params);
                   reported = true;
                   return 1;
                 },
@@ -780,9 +780,9 @@ describe("getOrCreateByEndpoints convergence", () => {
                     endpointProbes += 1;
                     return target.getNode(graphId, nodeKind, id);
                   },
-                  countEdgesFrom: async (params) => {
+                  countEdgesAtEndpoint: async (params) => {
                     cardinalityProbes += 1;
-                    return target.countEdgesFrom(params);
+                    return target.countEdgesAtEndpoint(params);
                   },
                 }),
               ),

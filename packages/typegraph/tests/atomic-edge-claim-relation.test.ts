@@ -21,11 +21,19 @@ import {
   buildAcquireAtomicEdgeClaims,
   buildAssertAtomicEdgeClaimsOwned,
   buildDeleteStaleAtomicEdgeClaims,
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
+  buildLockEdgeClaimGuarded,
+  buildReadEdgeClaimIncumbents,
+  buildTakeOverEdgeClaim,
+  buildTakeOverEdgeClaimGuarded,
 } from "../src/backend/drizzle/operations/edge-claims";
 import type { Tables } from "../src/backend/drizzle/operations/shared";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
-import type { ClaimEdgeCardinalityParams } from "../src/backend/types";
+import type {
+  ClaimEdgeCardinalityParams,
+  CompositionClaimScope,
+} from "../src/backend/types";
 
 const SCHEMA_FENCE = { graphId: "graph-1", expectedVersion: 1 } as const;
 const LOCK_CLAUSE = drizzleSql`FOR SHARE`;
@@ -37,12 +45,19 @@ const FIXED_PARAM_COUNT = 3;
 /** The DELETE carries no timestamp — it only releases. */
 const DELETE_FIXED_PARAM_COUNT = 2;
 
+type SourceCardinality = Extract<
+  ClaimEdgeCardinalityParams,
+  Readonly<{ direction: "source" }>
+>["cardinality"];
+
 function claim(
   index: number,
-  cardinality: ClaimEdgeCardinalityParams["cardinality"],
+  cardinality: SourceCardinality,
+  scope?: CompositionClaimScope,
 ): ClaimEdgeCardinalityParams {
   return {
     graphId: "graph-1",
+    direction: "source",
     cardinality,
     edgeKind: "worksAt",
     edgeId: `edge-${index}`,
@@ -50,12 +65,30 @@ function claim(
     fromId: `person-${index}`,
     toKind: "Company",
     toId: `company-${index}`,
+    ...(scope === undefined ? {} : { scope }),
   };
 }
 
+/** The same claim on the TARGET population: a different predicate shape. */
+function targetClaim(index: number): ClaimEdgeCardinalityParams {
+  return { ...claim(index, "one"), direction: "target", cardinality: "one" };
+}
+
+/**
+ * A composition claim's scope: the oriented realizing edge kinds whose live
+ * rows can hold the relation-wide axis.
+ */
+const COMPOSITION_SCOPE: CompositionClaimScope = {
+  kind: "composition",
+  holders: [
+    { edgeKind: "worksAt", partSide: "from" },
+    { edgeKind: "includedIn", partSide: "to" },
+  ],
+};
+
 function claims(
   count: number,
-  cardinality: ClaimEdgeCardinalityParams["cardinality"],
+  cardinality: SourceCardinality,
 ): readonly ClaimEdgeCardinalityParams[] {
   return Array.from({ length: count }, (_unused, index) =>
     claim(index, cardinality),
@@ -123,6 +156,44 @@ const BUILDERS: readonly (readonly [string, ClaimStatementBuilder, number])[] =
     ],
   ];
 
+type SingleRowClaimStatementBuilder = (
+  tables: Tables,
+  params: ClaimEdgeCardinalityParams,
+) => SQL;
+
+const SINGLE_ROW_BUILDERS: readonly (readonly [
+  string,
+  SingleRowClaimStatementBuilder,
+])[] = [
+  [
+    "buildLockEdgeClaimGuarded",
+    (tables, params) => buildLockEdgeClaimGuarded(tables, params, TIMESTAMP),
+  ],
+  [
+    "buildTakeOverEdgeClaim",
+    (tables, params) => buildTakeOverEdgeClaim(tables, params, TIMESTAMP),
+  ],
+  [
+    "buildTakeOverEdgeClaimGuarded",
+    (tables, params) =>
+      buildTakeOverEdgeClaimGuarded(tables, params, TIMESTAMP),
+  ],
+];
+
+/**
+ * How a rendered statement matches a claim's holders: the number of oriented
+ * `kind IN (...)` arms, and whether the scope's OTHER realizing kind
+ * (`includedIn` — never the claim's own `worksAt`) is bound at all.
+ */
+function compositionHolderShape(
+  rendered: Readonly<{ sql: string; params: readonly unknown[] }>,
+): Readonly<{ armPairs: number; crossKindHolderBound: boolean }> {
+  return {
+    armPairs: rendered.sql.match(/"kind" IN \(/g)?.length ?? 0,
+    crossKindHolderBound: rendered.params.includes("includedIn"),
+  };
+}
+
 describe.each(DIALECTS)(
   "atomic edge claim statements on %s",
   (_dialectName, tables, dialect) => {
@@ -159,7 +230,7 @@ describe.each(DIALECTS)(
         }
       });
 
-      it("renders one statement per cardinality group, keyed by its own spec", () => {
+      it("renders one statement per predicate shape, keyed by its own spec", () => {
         const statements = build(tables, [
           claim(0, "one"),
           claim(1, "unique"),
@@ -186,6 +257,41 @@ describe.each(DIALECTS)(
         expect(oneGroup.params).toContain("edge-2");
         expect(uniqueGroup.params).toContain("unique:worksAt");
         expect(oneActiveGroup.params).toContain("oneActive:worksAt");
+      });
+
+      /**
+       * The spec is read off the axis NAME, so the same cardinality on the two
+       * populations asks for different endpoint terms. Grouping on the bare
+       * cardinality would put both in one statement and fence the target
+       * population on the source endpoint.
+       */
+      it("splits the same cardinality on the two populations", () => {
+        const statements = build(tables, [claim(0, "one"), targetClaim(1)]);
+        expect(statements).toHaveLength(2);
+      });
+
+      /**
+       * A composition claim's holders are predicate shape, not values, so a
+       * composition-scoped row cannot share a statement with an ordinary one —
+       * and two rows carrying the same scope must still share ONE.
+       */
+      it("splits a composition scope from the ordinary shape and folds its peers", () => {
+        const statements = build(tables, [
+          claim(0, "one"),
+          claim(1, "one", COMPOSITION_SCOPE),
+          claim(2, "one", COMPOSITION_SCOPE),
+        ]);
+        expect(statements).toHaveLength(2);
+
+        const [ordinary, composition] = statements.map((statement) =>
+          render(dialect, statement),
+        );
+        if (ordinary === undefined || composition === undefined) {
+          throw new Error("missing group");
+        }
+        expect(ordinary.params).toContain("edge-0");
+        expect(composition.params).toContain("edge-1");
+        expect(composition.params).toContain("edge-2");
       });
     });
 
@@ -219,6 +325,11 @@ describe.each(DIALECTS)(
             LOCK_CLAUSE,
           ),
       ],
+      [
+        "buildReadEdgeClaimIncumbents",
+        (entries: readonly ClaimEdgeCardinalityParams[]) =>
+          buildReadEdgeClaimIncumbents(tables, entries),
+      ],
     ] as const)("%s spells each group's own spec", (_name, build) => {
       it.each([
         ["one", false, false],
@@ -238,6 +349,94 @@ describe.each(DIALECTS)(
           }).toEqual({ keyedOnTarget, activeOnly });
         },
       );
+
+      /**
+       * A composition group's holder predicate is the oriented two-arm OR, the
+       * one `claimHolderTerms` renders for every layer, and it is rendered ONCE
+       * for the group rather than per row — the whole point of carrying the
+       * scope in the group key instead of in a guard column.
+       */
+      it("renders the composition scope's oriented arms once per group", () => {
+        const [statement] = build([
+          claim(0, "one", COMPOSITION_SCOPE),
+          claim(1, "one", COMPOSITION_SCOPE),
+        ]);
+        if (statement === undefined) throw new Error("no statement");
+        const { sql: statementSql, params } = render(dialect, statement);
+        expect({
+          fromArm: statementSql.includes(
+            '"from_kind" = "proposed"."from_kind"',
+          ),
+          toArm: statementSql.includes('"to_kind" = "proposed"."from_kind"'),
+          armPairs: statementSql.match(/"kind" IN \(/g)?.length ?? 0,
+          holderKinds: params.filter((parameter) => parameter === "includedIn")
+            .length,
+        }).toEqual({
+          fromArm: true,
+          toArm: true,
+          armPairs: 2,
+          holderKinds: 1,
+        });
+      });
     });
+    /**
+     * The single-row statements bind their values rather than reading them
+     * off `proposed`, but a composition claim's holder predicate must still be
+     * the oriented two-arm OR: without the scope it degrades to
+     * `kind = <own edge kind>`, and a second whole attached through a
+     * DIFFERENT realizing edge kind is no longer a competing holder.
+     */
+    describe.each(SINGLE_ROW_BUILDERS)(
+      "%s (single row)",
+      (_builderName, build) => {
+        it("renders the composition scope's oriented arms, so a cross-kind whole competes", () => {
+          expect(
+            compositionHolderShape(
+              render(
+                dialect,
+                build(tables, claim(0, "one", COMPOSITION_SCOPE)),
+              ),
+            ),
+          ).toEqual({ armPairs: 2, crossKindHolderBound: true });
+        });
+
+        it("renders an ordinary claim's holder as its own edge kind", () => {
+          expect(
+            compositionHolderShape(
+              render(dialect, build(tables, claim(0, "one"))),
+            ),
+          ).toEqual({ armPairs: 0, crossKindHolderBound: false });
+        });
+      },
+    );
   },
 );
+
+/**
+ * The PostgreSQL fused create (`claimable_axis`) decides the same axis in one
+ * statement, so it carries the same holder predicate.
+ */
+describe("buildInsertEdgeIfEndpointsLiveWithCardinalityClaim on PostgreSQL", () => {
+  it("renders the composition scope's oriented arms, so a cross-kind whole competes", () => {
+    const composition = claim(0, "one", COMPOSITION_SCOPE);
+    const statement = buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
+      postgresTables,
+      {
+        graphId: composition.graphId,
+        id: composition.edgeId,
+        kind: composition.edgeKind,
+        fromKind: composition.fromKind,
+        fromId: composition.fromId,
+        toKind: composition.toKind,
+        toId: composition.toId,
+        props: {},
+      },
+      composition,
+      TIMESTAMP,
+    );
+    expect(compositionHolderShape(render(new PgDialect(), statement))).toEqual({
+      armPairs: 2,
+      crossKindHolderBound: true,
+    });
+  });
+});

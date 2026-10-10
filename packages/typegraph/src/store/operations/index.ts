@@ -37,6 +37,7 @@ export {
   executeEdgeUpsertUpdateBatch,
 } from "./edge-operations";
 export {
+  applyIdentityWindowEnd,
   executeNodeBulkFindByConstraint,
   executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
@@ -49,12 +50,16 @@ export {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReparent,
+  executeNodeReparentBatch,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
+  executeNodeRevive,
   executeNodeSetUpdate,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
   executeNodeUpsertUpdateBatch,
+  type IdentityWindowEndContext,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
   prepareNodeReplacement,
@@ -63,7 +68,6 @@ export { runWritePlan } from "./write-executor";
 export {
   edgeWritePlan,
   mixedWritePlan,
-  nodeBatchWritePlan,
   nodeWritePlan,
   type RowWorkKind,
   type WritePlan,

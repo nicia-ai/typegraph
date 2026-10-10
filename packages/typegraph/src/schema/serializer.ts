@@ -36,6 +36,7 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
@@ -512,6 +513,18 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     ...(targetKindsBySource === undefined ? {} : { targetKindsBySource }),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
+    // Omitted (rather than always written, like `cardinality`) when the
+    // registration leaves it undeclared or declares the default explicitly:
+    // a graph that never uses this option must serialize byte-identically,
+    // and hash byte-identically, to a document produced before this option
+    // existed — the deserializer's `.default("many")` (`src/schema/types.ts`)
+    // is what reads an absent key back as unconstrained.
+    ...((
+      registration.targetCardinality === undefined ||
+      registration.targetCardinality === "many"
+    ) ?
+      {}
+    : { targetCardinality: registration.targetCardinality }),
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     ...(registration.matchIdentity === undefined ?
       {}
@@ -521,6 +534,10 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
           fields: [...registration.matchIdentity.fields],
         },
       }),
+    // Emitted only when true: `computeSchemaHash` hashes this document, so
+    // emitting `acyclic: false` on every edge would move the hash of every
+    // existing graph on next open (see `SerializedEdgeDef.acyclic`).
+    ...(registration.acyclic === true ? { acyclic: true } : {}),
     description: edge.description,
     ...(annotations === undefined ? {} : { annotations }),
   };
@@ -532,6 +549,11 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
 
 /**
  * Serializes the complete ontology.
+ *
+ * `metaEdges` is derived 1:1 from `relations` — see
+ * `SerializedOntology.metaEdges`'s docblock — so it is computed here purely
+ * for introspection and carries no information `classifyOntologyChanges`
+ * (`src/schema/ontology-change.ts`) needs; that module diffs `relations`.
  */
 function serializeOntology(
   relations: readonly OntologyRelation[],
@@ -573,11 +595,6 @@ function serializeOntology(
 function serializeMetaEdge(metaEdge: MetaEdge): SerializedMetaEdge {
   return {
     name: metaEdge.name,
-    transitive: metaEdge.properties.transitive,
-    symmetric: metaEdge.properties.symmetric,
-    reflexive: metaEdge.properties.reflexive,
-    inverse: metaEdge.properties.inverse,
-    inference: metaEdge.properties.inference,
     description: metaEdge.properties.description,
   };
 }
@@ -592,6 +609,7 @@ function serializeOntologyRelation(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    ...compositionRelationFields(relation),
   };
 }
 
@@ -695,14 +713,44 @@ export function serializeSchemaProperties(schema: z.ZodType): JsonSchema {
   return computed;
 }
 
+/**
+ * What a schema `z.toJSONSchema` cannot convert projects as: `z.set()`,
+ * `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, a `z.custom()`
+ * (which is what `embedding()` is), and any other construct with no JSON
+ * Schema spelling. ONE such field collapses the whole kind to this
+ * placeholder, so it states nothing about the kind's properties: it is the
+ * absence of a projection, in the persisted form documents have always
+ * carried (changing that form would change every such graph's schema hash).
+ *
+ * A genuine projection is never mistaken for it, because Zod stamps every
+ * converted schema with `$schema` — an empty `z.object({})` included.
+ */
+const UNPROJECTABLE_SCHEMA_PROJECTION: JsonSchema = Object.freeze({
+  type: "object",
+});
+
+/**
+ * Whether `projection` is the unprojectable placeholder rather than a
+ * schema. The one owner of that decision, for a live graph's projection and
+ * a persisted document's alike: a consumer that compares projections must
+ * ask this first, since the placeholder compared as a schema reads as an
+ * open object declaring no properties — a false statement about the kind.
+ */
+export function isUnprojectableSchemaProjection(
+  projection: JsonSchema,
+): boolean {
+  const keys = Object.keys(projection);
+  return (
+    keys.length === 1 &&
+    projection.type === UNPROJECTABLE_SCHEMA_PROJECTION.type
+  );
+}
+
 function serializeZodSchema(schema: z.ZodType): JsonSchema {
   try {
-    // Zod 4 has toJSONSchema as a standard export
-    const jsonSchema = z.toJSONSchema(schema);
-    return jsonSchema as JsonSchema;
+    return z.toJSONSchema(schema) as JsonSchema;
   } catch {
-    // Fallback for schemas that can't be converted
-    return { type: "object" };
+    return UNPROJECTABLE_SCHEMA_PROJECTION;
   }
 }
 

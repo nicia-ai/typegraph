@@ -118,6 +118,7 @@ export type EdgeCollectionConfig = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeUpdate: (
     input: {
@@ -281,6 +282,20 @@ export type UpsertUpdateEdgeInput = EdgeUpdateInput &
     validFrom?: string | null;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>;
+
+/**
+ * What a batch create states beyond its own rows.
+ */
+export type EdgeCreateBatchOptions = Readonly<{
+  /**
+   * The updates the caller writes right after this batch, inside the same
+   * frame. The ones that resurrect re-admit their edge to the live relation
+   * this batch is probed against, so they join this batch's one acyclicity
+   * probe: a refusal then precedes every write of the combined set, instead
+   * of surfacing at a resurrection after this batch's rows are stored.
+   */
+  pairedUpdates?: readonly EdgeUpsertUpdateBatchEntry[];
+}>;
 
 export type EdgeUpsertUpdateBatchEntry = Readonly<{
   input: UpsertUpdateEdgeInput;
@@ -1078,7 +1093,9 @@ export function createEdgeCollection<
         );
         if (mutationAttempt.outcome === "unsupported") {
           if (toCreate.length > 0) {
-            const created = await executeEdgeCreateBatch(createInputs, target);
+            const created = await executeEdgeCreateBatch(createInputs, target, {
+              pairedUpdates: updateEntries,
+            });
             for (const [index, entry] of toCreate.entries()) {
               results[entry.index] = narrowEdge<E>(
                 requireDefined(created[index]),

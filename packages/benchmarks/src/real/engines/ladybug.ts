@@ -6,7 +6,7 @@
  *
  * Unlike the TypeGraph schema (`../schema/snb-graph`), which models the
  * polymorphic Message supertype (Post | Comment) through an ontological
- * `includeSubClasses` workaround, LadybugDB's DDL supports multi-pair
+ * `expansion: "subclasses"` workaround, LadybugDB's DDL supports multi-pair
  * `CREATE REL TABLE` natively (`HasCreator(FROM Post TO Person, FROM Comment
  * TO Person)`, `ReplyOf(FROM Comment TO Post, FROM Comment TO Comment)`), so
  * no workaround is needed here — but MATCH/CREATE on the Post/Comment split
@@ -483,7 +483,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
   // ReplyOf can only continue through Comment nodes (Post has no outgoing
   // ReplyOf edge), so this always resolves the unique root Post without
   // needing the ancestor-chain-plus-depth workaround `./typegraph-queries.ts`
-  // uses for its ontological `includeSubClasses` traversal.
+  // uses for its ontological subclass-expansion traversal.
   const rootWalkStatement = await conn.prepare(
     `MATCH (c:Comment {id: $id})-[:ReplyOf*1..${ROOT_WALK_MAX_HOPS}]->(root:Post) RETURN DISTINCT root.id AS id;`,
   );

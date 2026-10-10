@@ -1,9 +1,8 @@
 import { requireDefined } from "../utils/presence";
 /**
  * A deterministic disjoint-set forest (union-find), shared by every merge phase
- * that folds a set of items into equivalence classes — ontology equivalence
- * (`closures.ts`), candidate clustering (`clustering.ts`), and cross-kind identity
- * grouping (`sources.ts`).
+ * that folds a set of items into equivalence classes — candidate clustering
+ * (`clustering.ts`) and cross-kind identity grouping (`sources.ts`).
  *
  * Determinism is the load-bearing property: path compression keeps `find` flat,
  * and the union rule makes the chosen representative a pure function of the union

@@ -40,11 +40,13 @@ import {
   defineGraph,
   defineGraphExtension,
   defineNode,
+  partOf,
 } from "../../src";
 import { deriveBackend } from "../../src/backend/derive-backend";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../../src/backend/types";
 import type { EngineRevision, LineageMembers } from "../../src/backend/types";
+import type { GraphDef } from "../../src/core/define-graph";
 import {
   applyDurableMergePlan,
   applyMergePlan,
@@ -64,6 +66,7 @@ import {
 } from "../../src/graph-merge";
 import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
 import { storeBackend } from "../../src/store/runtime-port";
+import type { Store } from "../../src/store/store";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -98,6 +101,27 @@ const divergentGraph = defineGraph({
   id: "durable-branch-test",
   nodes: { Person: { type: WidenedPerson } },
   edges: {},
+});
+
+/** Operational identity: a merged `same` assertion is identity-ledger work. */
+const identityGraph = defineGraph({
+  id: "durable-branch-identity",
+  nodes: { Person: { type: Person } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
+const Album = defineNode("Album", { schema: z.object({}) });
+const Track = defineNode("Track", { schema: z.object({}) });
+const trackOf = defineEdge("trackOf", { schema: z.object({}) });
+/** Composition: a merged part owes cascade and single-whole enforcement. */
+const compositionGraph = defineGraph({
+  id: "durable-branch-composition",
+  nodes: { Album: { type: Album }, Track: { type: Track } },
+  edges: {
+    trackOf: { type: trackOf, from: [Track], to: [Album], cardinality: "one" },
+  },
+  ontology: [partOf(Track, Album, { via: trackOf })],
 });
 
 /** The opaque, JSON-serializable locator the fake in-memory strategy stores. */
@@ -138,8 +162,8 @@ function sameOrigin(a: DurableBranchOrigin, b: DurableBranchOrigin): boolean {
   );
 }
 
-type FakeDurableHost = Readonly<{
-  strategy: DurableWorkingCopyStrategy<G, LocatorDescriptor>;
+type FakeDurableHost<THostGraph extends GraphDef = G> = Readonly<{
+  strategy: DurableWorkingCopyStrategy<THostGraph, LocatorDescriptor>;
   /** Overrides the complete origin the host attests for a locator. */
   attest: (locator: string, origin: DurableBranchOrigin) => void;
   /** How many working-copy connections have been closed. */
@@ -174,9 +198,9 @@ type FakeDurableHostOptions = Readonly<{
  * from the base via the ordinary clone strategy; `seal` records the attested
  * origin; `reopen` reconnects to that database; `destroy` verifies then deletes.
  */
-function createFakeDurableHost(
+function createFakeDurableHost<THostGraph extends GraphDef = G>(
   options: FakeDurableHostOptions = {},
-): FakeDurableHost {
+): FakeDurableHost<THostGraph> {
   const databases = new Map<string, Database.Database>();
   const allocations = new Map<
     string,
@@ -211,7 +235,7 @@ function createFakeDurableHost(
     return database;
   };
 
-  const strategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+  const strategy: DurableWorkingCopyStrategy<THostGraph, LocatorDescriptor> = {
     type: "fake-in-memory-durable-host",
     version: 1,
     create: async (baseStore, base, branchId, allocationId) => {
@@ -244,7 +268,7 @@ function createFakeDurableHost(
           forkRevision: FIXED_REVISION,
         };
       }
-      const seed = cloneWorkingCopyStrategy<G>(() =>
+      const seed = cloneWorkingCopyStrategy<THostGraph>(() =>
         Promise.resolve(openDurableBackend(database)),
       );
       const store = await seed.create(baseStore, base);
@@ -691,6 +715,84 @@ describe("durable branch", () => {
     expect(isErr(applied)).toBe(true);
     expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe("Alice");
     await created.branch.close();
+  });
+
+  /**
+   * A plan owing identity or composition work is applied by the portable
+   * applier inside the target transaction, so the ledger and the composition
+   * edge land with the node rows.
+   */
+  async function assertDurableApplyForSemanticPlan<THostGraph extends GraphDef>(
+    semanticGraph: THostGraph,
+    mutate: (branchStore: Store<THostGraph>) => Promise<void>,
+    verify: (baseStore: Store<THostGraph>) => Promise<void>,
+  ): Promise<void> {
+    const semanticHost = createFakeDurableHost<THostGraph>();
+    cleanups.push(async () => {
+      semanticHost.closeAll();
+    });
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    const [baseStore] = await createStoreWithSchema(
+      semanticGraph,
+      fixture.backend,
+      { revisionTracking: true },
+    );
+    const created = unwrap(
+      await branchDurable(baseStore, semanticHost.strategy),
+    );
+    await mutate(created.branch.store);
+    const plan = unwrap(await planMerge(baseStore, [created.branch]));
+
+    const applied = await applyDurableMergePlan({
+      target: baseStore,
+      branch: created.branch,
+      descriptor: created.descriptor,
+      strategy: semanticHost.strategy,
+      plan,
+    });
+
+    if (isErr(applied)) throw applied.error;
+    await verify(baseStore);
+    await created.branch.close();
+  }
+
+  it("applies a durable plan carrying identity assertions", async () => {
+    await assertDurableApplyForSemanticPlan(
+      identityGraph,
+      async (branchStore) => {
+        await branchStore.nodes.Person.create({ name: "Ada" }, { id: "a" });
+        await branchStore.nodes.Person.create({ name: "Ada L." }, { id: "b" });
+        await branchStore.identity.assertSame(
+          { kind: "Person", id: "a" },
+          { kind: "Person", id: "b" },
+        );
+      },
+      async (baseStore) => {
+        await expect(
+          baseStore.identity.areSame(
+            { kind: "Person", id: "a" },
+            { kind: "Person", id: "b" },
+          ),
+        ).resolves.toBe(true);
+      },
+    );
+  });
+
+  it("applies a durable plan writing composition parts and edges", async () => {
+    await assertDurableApplyForSemanticPlan(
+      compositionGraph,
+      async (branchStore) => {
+        const album = await branchStore.nodes.Album.create({}, { id: "album" });
+        await branchStore.nodes.Track.create(
+          {},
+          { id: "track", partOf: { whole: { kind: "Album", id: album.id } } },
+        );
+      },
+      async (baseStore) => {
+        await expect(baseStore.edges.trackOf.find()).resolves.toHaveLength(1);
+      },
+    );
   });
 
   it("refuses a wrong strategy, wrong descriptor version, malformed envelope, and wrong graph", async () => {

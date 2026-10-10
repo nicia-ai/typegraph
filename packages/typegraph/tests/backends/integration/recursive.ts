@@ -1,12 +1,48 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { expr } from "../../../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  expr,
+  inverseOf,
+} from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   seedKnowsChain,
   seedPeopleForRecursiveDepthTracking,
 } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
+
+const QpPerson = defineNode("QpPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const qpParentOf = defineEdge("qpParentOf", {
+  schema: z.object({ weight: z.number() }),
+});
+const qpChildOf = defineEdge("qpChildOf", {
+  schema: z.object({ weight: z.number() }),
+});
+const qpSibling = defineEdge("qpSibling", {
+  schema: z.object({ weight: z.number() }),
+});
+
+/**
+ * Inverse and symmetric edge kinds, so the default `expand: "inverse"`
+ * compiles a mixed-orientation traversal: `qpParentOf` walked as stored and
+ * `qpChildOf` walked reversed, or `qpSibling` walked both ways.
+ */
+const qualifiedInverseGraph = defineGraph({
+  id: "qualified_inverse_paths",
+  nodes: { QpPerson: { type: QpPerson } },
+  edges: {
+    qpParentOf: { type: qpParentOf, from: [QpPerson], to: [QpPerson] },
+    qpChildOf: { type: qpChildOf, from: [QpPerson], to: [QpPerson] },
+    qpSibling: { type: qpSibling, from: [QpPerson], to: [QpPerson] },
+  },
+  ontology: [inverseOf(qpParentOf, qpChildOf), inverseOf(qpSibling, qpSibling)],
+});
 
 export function registerRecursiveIntegrationTests(
   context: IntegrationTestContext,
@@ -508,6 +544,121 @@ export function registerRecursiveIntegrationTests(
           { type: "node", kind: "Person", id: person.id },
         ],
       ]);
+    });
+
+    it("labels each hop's direction across an inverse-expanded traversal", async () => {
+      const store = await context.createStore(qualifiedInverseGraph);
+      const grandparent = await store.nodes.QpPerson.create({
+        name: "grandparent",
+      });
+      const parent = await store.nodes.QpPerson.create({ name: "parent" });
+      const child = await store.nodes.QpPerson.create({ name: "child" });
+      const parentEdge = await store.edges.qpParentOf.create(
+        grandparent,
+        parent,
+        { weight: 1 },
+      );
+      const childEdge = await store.edges.qpChildOf.create(child, parent, {
+        weight: 2,
+      });
+      const expectedRoute = [
+        { type: "node", kind: "QpPerson", id: grandparent.id },
+        {
+          type: "edge",
+          kind: "qpParentOf",
+          id: parentEdge.id,
+          direction: "out",
+        },
+        { type: "node", kind: "QpPerson", id: parent.id },
+        { type: "edge", kind: "qpChildOf", id: childEdge.id, direction: "in" },
+        { type: "node", kind: "QpPerson", id: child.id },
+      ];
+
+      const unfiltered = await store
+        .query()
+        .from("QpPerson", "root")
+        .whereNode("root", (person) => person.id.eq(grandparent.id))
+        .traverse("qpParentOf", "edge", { expand: "inverse" })
+        .recursive({ maxHops: 2, path: { format: "qualified" } })
+        .to("QpPerson", "descendant")
+        .orderBy("descendant", "name", "asc")
+        .select((row) => row.descendant_path)
+        .execute();
+      expect(unfiltered).toEqual([expectedRoute, expectedRoute.slice(0, 3)]);
+
+      const filtered = await store
+        .query()
+        .from("QpPerson", "root")
+        .whereNode("root", (person) => person.id.eq(grandparent.id))
+        .traverse("qpParentOf", "edge", { expand: "inverse" })
+        .whereEdge("edge", (edge) => edge.weight.gte(1))
+        .recursive({ maxHops: 2, path: { format: "qualified" } })
+        .to("QpPerson", "descendant")
+        .orderBy("descendant", "name", "asc")
+        .select((row) => row.descendant_path)
+        .execute();
+      expect(filtered).toEqual([expectedRoute, expectedRoute.slice(0, 3)]);
+    });
+
+    it("labels both directions of a symmetric edge kind", async () => {
+      const store = await context.createStore(qualifiedInverseGraph);
+      const middle = await store.nodes.QpPerson.create({ name: "middle" });
+      const outgoing = await store.nodes.QpPerson.create({ name: "outgoing" });
+      const incoming = await store.nodes.QpPerson.create({ name: "incoming" });
+      const outgoingEdge = await store.edges.qpSibling.create(
+        middle,
+        outgoing,
+        { weight: 1 },
+      );
+      const incomingEdge = await store.edges.qpSibling.create(
+        incoming,
+        middle,
+        { weight: 1 },
+      );
+      const expectedRoutes = [
+        [
+          { type: "node", kind: "QpPerson", id: middle.id },
+          {
+            type: "edge",
+            kind: "qpSibling",
+            id: incomingEdge.id,
+            direction: "in",
+          },
+          { type: "node", kind: "QpPerson", id: incoming.id },
+        ],
+        [
+          { type: "node", kind: "QpPerson", id: middle.id },
+          {
+            type: "edge",
+            kind: "qpSibling",
+            id: outgoingEdge.id,
+            direction: "out",
+          },
+          { type: "node", kind: "QpPerson", id: outgoing.id },
+        ],
+      ];
+
+      for (const withEdgePredicate of [false, true]) {
+        const traversal = store
+          .query()
+          .from("QpPerson", "root")
+          .whereNode("root", (person) => person.id.eq(middle.id))
+          .traverse("qpSibling", "edge", { expand: "inverse" });
+        const rows = await (
+          withEdgePredicate ?
+            traversal.whereEdge("edge", (edge) => edge.weight.eq(1))
+          : traversal)
+          .recursive({
+            minHops: 1,
+            maxHops: 1,
+            path: { format: "qualified" },
+          })
+          .to("QpPerson", "peer")
+          .orderBy("peer", "name", "asc")
+          .select((row) => row.peer_path)
+          .execute();
+        expect(rows).toEqual(expectedRoutes);
+      }
     });
 
     it("includes only the seed when expansion stops at depth zero", async () => {

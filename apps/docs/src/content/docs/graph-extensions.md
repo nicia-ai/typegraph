@@ -306,11 +306,59 @@ Adding allowed pairs broadens an extension edge. Removing a pair tightens it,
 even if the overall source and target kind sets stay the same. Tightening
 currently requires the **entire edge kind** to be empty, not just the removed pair.
 
+A runtime-authored edge may declare `acyclic: true`, exactly like a
+compile-time one — its live relation becomes a DAG, enforced under the same
+per-graph write fence:
+
+```ts
+const proposal = defineGraphExtension({
+  edges: {
+    dependsOn: {
+      from: ["Task"],
+      to: ["Task"],
+      properties: {},
+      acyclic: true,
+    },
+  },
+});
+```
+
+It may also declare `cardinality` and `targetCardinality`, bounding the edges
+leaving one source and the edges pointing at one target exactly as a
+compile-time registration does. The same atomic claims enforce them on every
+write path, so a second edge at a `targetCardinality: "one"` target is refused
+with `CardinalityError` (`details.direction: "target"`). A platform that accepts
+extension documents from untrusted authors should therefore expect an extension
+to introduce edge-count constraints, not only additive kinds.
+
 ### Ontology
 
 Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology
 relations between kinds (subClassOf, partOf, etc.). The meta-edge name
 must match a meta-edge known to the merged graph.
+
+A `subClassOf` (or `equivalentTo`/`sameAs`) relation declared this way is
+checked against the same structural contract a compile-time declaration
+gets — the child's schema must extend the parent's — at `evolve()`, before
+any write. Because extension relations are authored as plain data (`{
+metaEdge: "subClassOf", from: "Child", to: "Parent" }`) rather than through
+the typed `subClassOf()` function, there is no compile-time check to catch
+the mismatch first; `evolve()` throws a `ConfigurationError` (the same codes
+`/ontology` documents) and no kind from the extension becomes reachable.
+This also covers **redeclaring** an existing kind through a later
+`evolve()`: the registry is rebuilt from the merged graph on every call, so
+a redeclaration that breaks a hierarchy it already participates in — as a
+parent, a child, or an equivalent — is re-checked and refused just as a
+first declaration would be.
+
+**A `subClassOf` declared through `evolve()` is invisible to the
+compile-time alias type.** `evolve()` returns `Store<G>` with the same
+compile-time `G` it was called on, so a base-graph kind that only becomes
+polymorphic through an extension's `subClassOf` still types `from(kind,
+alias)` as the narrow, exact kind — even though a row may come back as the
+extension's subclass at runtime. See [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion) for the `fromDynamic()` /
+`expansion: "exact"` workaround.
 
 ## `store.evolve(extension, options?)`
 
@@ -350,7 +398,10 @@ opens its write transaction. It returns an immutable `"noop"` or `"change"`
 plan with `graphId`, `baseline: { version, hash }`, and
 `result: { version, hash }`. Change plans expose an ordered `requirements`
 array whose entries name new-kind additions, empty-kind checks, vector slots,
-and identity work. A `new-kind` entry describes a graph delta; it does not
+ontology tightening, and identity work. An `ontology-tightening` entry lists
+the ontology changes and newly constrained edge cardinalities that existing
+rows must satisfy; apply checks them on the fenced session and refuses with
+the same `MigrationError` `evolve()` raises. A `new-kind` entry describes a graph delta; it does not
 indicate that a removal is queued or direct callers to run
 `materializeRemovals()`. The plan is opaque and bound to the loaded TypeGraph
 module: it cannot be serialized, cloned, or reconstructed. It can be passed between
@@ -711,7 +762,9 @@ The `store.search` facade — `fulltext`, `vector`, `hybrid`, and
 `rebuildFulltext` — accepts any registered kind, compile-time or
 runtime, with no type cast. The hit's `node` type narrows to the
 concrete typed node only when the kind literal is statically known
-in `Store<G>`; extension kinds widen to the base `Node`. Misspelled
+in `Store<G>` (and the call does not state `expansion: "subclasses"` on a
+kind the ontology can affect, which widens `kind` and the `NodeId` brand);
+extension kinds widen to the base `Node`. Misspelled
 kind names throw `KindNotFoundError` at the call site instead of
 returning empty results.
 
@@ -1072,6 +1125,16 @@ any target references to it. A source entry whose targets are exhausted is also
 removed. The edge kind survives while another valid pair remains; it is cascaded
 only when no pairs remain. For example, removing `Course` from the `assignedTo`
 extension above preserves `Employee → Department`.
+
+Removing a kind from the middle of a subclass chain cuts its surviving
+subclasses off from every edge kind that admitted them through it. When a live
+edge still relies on that admission, `removeKinds()` refuses with
+`MigrationError` (`reason: "ontology-tightening-violated"`) and lists the
+edges in `details.violations`; see
+[Ontology changes are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+Edges touching rows of the removed kind itself never block the removal; the
+rows are reclaimed by `materializeRemovals()` or an `eager` removal, not at
+commit.
 
 Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code

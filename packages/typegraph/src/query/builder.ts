@@ -10,6 +10,7 @@
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { resolveDefaultAliasExpansion } from "./builder/alias-expansion";
 import {
   type CreateQueryBuilderOptions,
   type EmptyAliasMap,
@@ -61,6 +62,8 @@ export type {
   BatchResults,
   CommonPropertyKeys,
   CompiledOneStatementRead,
+  CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
@@ -179,6 +182,7 @@ function createQueryBuilderWithContext<
   const schemaIntrospector = createSchemaIntrospector(
     registry.nodeKinds,
     registry.edgeKinds,
+    (childKind, parentKind) => registry.isAssignableTo(childKind, parentKind),
   );
   if (options?.identityEnabled === true && registry.identity === undefined) {
     throw new ConfigurationError(
@@ -210,6 +214,10 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
+    defaultExpansion: resolveDefaultAliasExpansion(
+      options?.defaultExpansion,
+      "defaultExpansion",
+    ),
     identityEnabled:
       options?.identityEnabled ?? registry.identity !== undefined,
     identitySameIdAcrossKinds:
@@ -244,7 +252,7 @@ function createQueryBuilderWithContext<
     startAlias: "",
     currentAlias: "",
     startKinds: [],
-    includeSubClasses: false,
+    startExpansion: "exact",
     traversals: [],
     predicates: [],
     projection: [],

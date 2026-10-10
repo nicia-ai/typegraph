@@ -32,6 +32,7 @@ import {
   defineGraph,
   defineNode,
   migrateLegacyRecordedTime,
+  pruneIdentityTransitions,
   recordedRelation,
   UnsupportedBackendCapabilityError,
 } from "../src";
@@ -56,9 +57,11 @@ import {
   createEngineRecordedInstant,
   createRecordedInstant,
 } from "../src/core/temporal";
-import { ConfigurationError } from "../src/errors";
+import { ConfigurationError, IdentityReplayError } from "../src/errors";
 import { MergePlanCapabilityError } from "../src/graph-merge/errors";
 import { planMerge } from "../src/graph-merge/merge";
+import { exportGraphStream, importGraphStream } from "../src/interchange";
+import { type GraphInterchangeChunk } from "../src/interchange/types";
 import { createQueryBuilder } from "../src/query/builder";
 import { compileQuery } from "../src/query/compiler";
 import {
@@ -750,6 +753,84 @@ describe("engine-native recorded time: transaction receipts", () => {
       ),
     );
     expect(observedSessions).toHaveLength(baselineSessions + 1);
+  });
+});
+
+// Engine-native `history: true` gets none of TypeGraph's recorded capture, so
+// no identity transition log exists to replay. The refusal must name THAT
+// state: "open with history: true" is wrong advice to a store that already did.
+describe("engine-native recorded time: identity replay", () => {
+  const engineNativeReplayRefusal = {
+    details: {
+      code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED",
+      graphId: identityGraph.id,
+    },
+  };
+
+  it("refuses transitionsOf, replay and prune with the engine-native code, on the store and inside a transaction", async () => {
+    const { backend } = createEngineNativeBackend([]);
+    const [store] = await createStoreWithSchema(identityGraph, backend, {
+      history: true,
+    });
+    const person = await store.nodes.PersonRecord.create({ name: "Ada" });
+    const ref = { kind: "PersonRecord", id: person.id } as const;
+
+    await expect(store.identity.transitionsOf(ref)).rejects.toBeInstanceOf(
+      IdentityReplayError,
+    );
+    await expect(store.identity.transitionsOf(ref)).rejects.toMatchObject(
+      engineNativeReplayRefusal,
+    );
+    await expect(store.identity.replay(ref)).rejects.toMatchObject(
+      engineNativeReplayRefusal,
+    );
+    await expect(
+      pruneIdentityTransitions(store, {
+        beforeRecorded: "2026-01-01T00:00:00.000Z",
+      }),
+    ).rejects.toMatchObject(engineNativeReplayRefusal);
+    await expect(
+      store.transaction((tx) => tx.identity.transitionsOf(ref)),
+    ).rejects.toMatchObject(engineNativeReplayRefusal);
+  });
+
+  // Load-bearing: the upfront archival-restore guard must gate on TypeGraph
+  // capture, as the store's own backstop does. Revert check: gate it on the
+  // public `store.historyEnabled` again (true for engine-native history) and
+  // the guard passes, so the stream writes its nodes before the backstop
+  // refuses at the final section.
+  it("refuses an archival-transitions restore before writing any node", async () => {
+    const [source] = await createStoreWithSchema(
+      identityGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    const person = await source.nodes.PersonRecord.create({ name: "Ada" });
+    const author = await source.nodes.AuthorRecord.create({
+      penName: "A. Lovelace",
+    });
+    await source.identity.assertSame(person, author);
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(chunk);
+    }
+
+    const { backend } = createEngineNativeBackend([]);
+    const [target] = await createStoreWithSchema(identityGraph, backend, {
+      history: true,
+    });
+    async function* replayChunks(): AsyncIterable<GraphInterchangeChunk> {
+      for (const chunk of chunks) {
+        await Promise.resolve();
+        yield chunk;
+      }
+    }
+    await expect(
+      importGraphStream(target, replayChunks(), { onConflict: "skip" }),
+    ).rejects.toMatchObject(engineNativeReplayRefusal);
+    expect(await target.nodes.PersonRecord.count()).toBe(0);
   });
 });
 

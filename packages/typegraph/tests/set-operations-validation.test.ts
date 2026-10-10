@@ -31,7 +31,7 @@ function createMinimalAst(
     start: {
       alias,
       kinds: ["TestKind"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [],

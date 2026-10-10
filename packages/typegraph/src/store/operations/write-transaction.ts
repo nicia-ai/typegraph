@@ -82,7 +82,11 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError, StaleVersionError } from "../../errors";
+import {
+  CompilerInvariantError,
+  ConfigurationError,
+  StaleVersionError,
+} from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
@@ -102,7 +106,10 @@ import {
   memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
-import { type OperationHookContext } from "../types";
+import {
+  type OperationHookContext,
+  type OperationOutcomeFacts,
+} from "../types";
 
 /**
  * The slice of an operation context {@link runInWriteTransaction} needs: the
@@ -295,7 +302,8 @@ export function forceWriteTransactionRevision(
 
 /**
  * Graphs whose per-graph write lock a still-running {@link runInWriteTransaction}
- * frame already holds on a given target.
+ * frame already holds — or is still acquiring — on a given target, each with
+ * the acquisition's own evidence token.
  *
  * `pg_advisory_xact_lock` is reentrant and held to the end of the top-level
  * transaction, so re-acquiring it is pure round-trip churn. Operations compose
@@ -303,14 +311,55 @@ export function forceWriteTransactionRevision(
  * update against ITS transaction target — and each nested call would otherwise
  * pay a lock round trip the enclosing frame already paid.
  *
+ * The entry is the acquisition PROMISE, not a bare marker: a nested or sibling
+ * frame that skips the round trip awaits it and works under the very token
+ * the acquiring frame minted. That token carries the isolation the lock
+ * statement observed on this session, so a decision that must see commits
+ * made while the session waited for the fence is judged identically in every
+ * frame of the transaction. Handing such a frame an evidence-free token
+ * instead would read as "this engine serializes writers" and skip the check.
+ *
  * `store.transaction(...)` is covered by {@link WriteTransactionSession}
  * instead; this covers the operation-calls-operation nesting inside a single
- * managed write. Same caveat as the capture layer's memo in
+ * managed write and sibling frames started before the first acquisition
+ * returns. Same caveat as the capture layer's memo in
  * `recorded-capture/clock.ts`: NOT savepoint-aware. A manual `SAVEPOINT` rolled
  * back across the outer acquisition releases the lock but not this entry;
  * manual savepoints inside a managed write are outside the contract.
  */
-const heldGraphWriteLocks = new WeakMap<object, Set<string>>();
+const heldGraphWriteLocks = new WeakMap<
+  object,
+  Map<string, Promise<GraphWriteLock>>
+>();
+
+function noop(): void {
+  // Marks a rejection as observed; the acquiring frame reports the error.
+}
+
+type GraphWriteLockAcquisition = Readonly<{
+  promise: Promise<GraphWriteLock>;
+  resolve: (lock: GraphWriteLock) => void;
+  reject: (error: unknown) => void;
+}>;
+
+/**
+ * An acquisition other frames can await before it has started. A failed one
+ * is observed here so that it is not an unhandled rejection when no sibling
+ * frame happens to be waiting; the acquiring frame rethrows the error itself.
+ */
+function pendingGraphWriteLockAcquisition(): GraphWriteLockAcquisition {
+  let settle: Omit<GraphWriteLockAcquisition, "promise"> | undefined;
+  const promise = new Promise<GraphWriteLock>((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  promise.catch(noop);
+  if (settle === undefined) {
+    throw new CompilerInvariantError(
+      "A promise executor did not run synchronously.",
+    );
+  }
+  return { promise, ...settle };
+}
 
 function adoptedConstraintWriterSlotError(
   ctx: Pick<WriteTransactionContext, "graphId">,
@@ -610,8 +659,12 @@ export {
 
 /** What a caller must change to make each refused constraint class writable. */
 const CONSTRAINT_FENCE_ADVICE = {
+  edgeAcyclicity:
+    "drop `acyclic: true` from the edge and detect cycles in application code",
   edgeCardinality:
     'declare the edge `cardinality: "many"` and enforce the limit in application code',
+  edgeComposition:
+    "drop the `partOf`/`hasPart` declaration realized by this edge kind and enforce the single-whole rule in application code",
   edgeMatchKeyConvergence:
     "use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces, instead of `getOrCreateByEndpoints`",
   nodeDisjointness:
@@ -800,11 +853,10 @@ function runInWriteTransactionAttempt<T>(
     );
     const session =
       needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
-    // Either constructor yields the same compile-time evidence token; which one
-    // ran says why no acquisition was needed. `uncapturedGraphWriteLock` covers
-    // both "this store needs no lock" and "an enclosing frame on this target
-    // already holds it" — in the second case the lock is genuinely held, which
-    // is a stronger claim than the constructor makes, not a weaker one.
+    // A frame that does not acquire works under the token of whichever frame
+    // did: the transaction session's, or the acquisition an enclosing or
+    // sibling frame on this target registered. `uncapturedGraphWriteLock` is
+    // left for the one case with nothing to hold — this store needs no lock.
     //
     // The claim is registered SYNCHRONOUSLY, before any await: two frames on
     // one target that both reached this point would otherwise each read an
@@ -812,18 +864,23 @@ function runInWriteTransactionAttempt<T>(
     // leaving the first frame's `finally` clearing a Set the map no longer
     // holds, and the graph marked held forever. Reading-and-registering with no
     // suspension point in between makes that interleaving unrepresentable.
-    const held = heldGraphWriteLocks.get(target) ?? new Set<string>();
+    const held =
+      heldGraphWriteLocks.get(target) ??
+      new Map<string, Promise<GraphWriteLock>>();
     heldGraphWriteLocks.set(target, held);
+    const heldLock = needsGraphWriteLock ? held.get(ctx.graphId) : undefined;
     const acquiresLock =
       needsGraphWriteLock &&
       session?.lock === undefined &&
-      !held.has(ctx.graphId);
-    // Marked before the acquisition rather than after it, for the same reason:
-    // a sibling frame that starts while this one is still awaiting the lock
-    // must see the claim, not race it. Its statements queue behind ours on the
-    // one connection either way, so observing an in-flight claim as held is
-    // correct. A failed acquisition retracts the claim.
-    if (acquiresLock) held.add(ctx.graphId);
+      heldLock === undefined;
+    // Registered before the acquisition rather than after it, for the same
+    // reason: a sibling frame that starts while this one is still awaiting the
+    // lock must see the claim, not race it. Its statements queue behind ours on
+    // the one connection either way, and it awaits this acquisition for its
+    // token. A failed acquisition retracts the claim.
+    const acquisition =
+      acquiresLock ? pendingGraphWriteLockAcquisition() : undefined;
+    if (acquisition !== undefined) held.set(ctx.graphId, acquisition.promise);
     const expectedSchemaVersion = ctx.schemaVersion;
     const combinedSchemaGraphFence =
       (
@@ -850,7 +907,7 @@ function runInWriteTransactionAttempt<T>(
         lock =
           acquiresLock ?
             await lockRecordedGraphWrite(target, ctx.graphId)
-          : (session?.lock ?? uncapturedGraphWriteLock());
+          : (session?.lock ?? (await heldLock) ?? uncapturedGraphWriteLock());
       } else {
         // The optional strong member owns the same canonical order as the two
         // portable calls: schema row first, graph advisory lock second. It is
@@ -869,9 +926,13 @@ function runInWriteTransactionAttempt<T>(
         );
       }
     } catch (error) {
-      if (acquiresLock) held.delete(ctx.graphId);
+      if (acquisition !== undefined) {
+        held.delete(ctx.graphId);
+        acquisition.reject(error);
+      }
       throw error;
     }
+    acquisition?.resolve(lock);
     if (session !== undefined) session.lock = lock;
     const result = await (acquiresLock ?
       fn(target, lock, transactionMode).finally(() => held.delete(ctx.graphId))
@@ -910,6 +971,7 @@ export type HookedWriteOperationContext = WriteTransactionContext &
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
     ) => Promise<T>;
   }>;
 
@@ -934,10 +996,12 @@ export function runHookedWriteOperation<T>(
     transactionMode: WriteTransactionMode,
   ) => Promise<T>,
   options?: WriteTransactionOptions<T>,
+  operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
 ): Promise<T> {
   return ctx.withOperationHooks(
     opContext,
     () => runInWriteTransaction(ctx, backend, body, options),
     options?.didWrite,
+    operationFacts,
   );
 }

@@ -104,7 +104,45 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * index and reads every anchor row without it.
    */
   graphIdOrderIndexDdl?: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
+   * statements for the identity transition log, the version-6 adoption
+   * step — rendered once by the caller from its own dialect's DDL
+   * generators, the same way `fencesTableDdl` is. A brand-new relation
+   * needs no ALTER-shaped migration, so this step's `bootstrap` is
+   * `"covered-by-generated-ddl"`; `adopt()` still ensures it for the
+   * OFFLINE adoption path, which never calls `generateDdl()`. Scoped to
+   * exactly this relation (not the identity-enablement `ensureIdentityTables`
+   * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
+   * relation: a database that predates this release owes it regardless of
+   * whether any graph in it has Operational Identity enabled. Older callers
+   * may omit it; version-6 adoption then refuses with a clear error.
+   */
+  identityTransitionsTableDdl?: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` for the transition log's per-graph
+   * retention watermark, the version-6 adoption step's other half.
+   */
+  identityTransitionRetentionTableDdl?: string;
 }>;
+
+/**
+ * The refusal an adoption step raises when the profile omitted DDL it needs.
+ * A dep added after a profile was written is optional so that profile still
+ * constructs; the step that needs it is where its absence is an error.
+ */
+function missingAdoptionDeps(
+  adoptionVersion: number,
+  deps: Readonly<Record<string, unknown>>,
+): ConfigurationError {
+  const missingDependencies = Object.entries(deps)
+    .filter(([, value]) => value === undefined)
+    .map(([name]) => name);
+  return new ConfigurationError(
+    `Base-schema version ${adoptionVersion} adoption requires ${missingDependencies.join(" and ")}.`,
+    { missingDependencies, adoptionVersion },
+  );
+}
 
 export type BaseSchemaMembers = Readonly<{
   adoptBaseSchema: () => Promise<void>;
@@ -119,8 +157,9 @@ export type BaseSchemaMembers = Readonly<{
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
  * rows table), version 3 (the recorded-relations' and recorded
  * identity-assertions relation's `since_idx` indexes), version 4 (the
- * revision-changes relation), and version 5 (the byte-ordered `graph_id`
- * indexes) all follow the same prepare/adopt-before/adopt-after bootstrap
+ * revision-changes relation), version 5 (the byte-ordered `graph_id`
+ * indexes), and version 6 (the identity transition log plus its retention
+ * watermark) all follow the same prepare/adopt-before/adopt-after bootstrap
  * sequencing.
  */
 export function createBaseSchemaMembers(
@@ -140,6 +179,8 @@ export function createBaseSchemaMembers(
     revisionChangesTableDdl,
     revisionChangesIndexDdl,
     graphIdOrderIndexDdl = [],
+    identityTransitionsTableDdl,
+    identityTransitionRetentionTableDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -183,20 +224,10 @@ export function createBaseSchemaMembers(
             revisionChangesTableDdl === undefined ||
             revisionChangesIndexDdl === undefined
           ) {
-            throw new ConfigurationError(
-              "Base-schema version 4 adoption requires revision-change table and index DDL.",
-              {
-                missingDependencies: [
-                  ...(revisionChangesTableDdl === undefined ?
-                    ["revisionChangesTableDdl"]
-                  : []),
-                  ...(revisionChangesIndexDdl === undefined ?
-                    ["revisionChangesIndexDdl"]
-                  : []),
-                ],
-                adoptionVersion: 4,
-              },
-            );
+            throw missingAdoptionDeps(4, {
+              revisionChangesTableDdl,
+              revisionChangesIndexDdl,
+            });
           }
           await ensureTable(revisionChangesTableDdl);
           for (const ddl of revisionChangesIndexDdl) {
@@ -214,6 +245,25 @@ export function createBaseSchemaMembers(
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
+      {
+        version: 6,
+        async adopt(): Promise<void> {
+          if (
+            identityTransitionsTableDdl === undefined ||
+            identityTransitionRetentionTableDdl === undefined
+          ) {
+            throw missingAdoptionDeps(6, {
+              identityTransitionsTableDdl,
+              identityTransitionRetentionTableDdl,
+            });
+          }
+          for (const ddl of identityTransitionsTableDdl) {
+            await ensureTable(ddl);
+          }
+          await ensureTable(identityTransitionRetentionTableDdl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
     ],
   });
 
@@ -224,9 +274,7 @@ export function createBaseSchemaMembers(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateDdl();
       for (const statement of statements) {
         await ensureTable(statement);

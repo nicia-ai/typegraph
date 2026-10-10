@@ -40,6 +40,11 @@ export const GRAPH_ID_COLUMN = "graph_id";
  * The order is the order a namespace fork copies and digests relations in. It
  * is part of the fork's durable content digest, so it must not be reshuffled
  * for tidiness; `clear.order` carries the (different) deletion order.
+ *
+ * APPEND new relations at the end. A fork's digest names a relation added
+ * after its frozen baseline only once that relation holds rows
+ * (`DIGEST_BASELINE_RELATION_KEYS`, `src/graph-merge/namespace-fork.ts`), so
+ * an appended relation leaves every recorded fork proof verifiable.
  */
 export const GRAPH_RELATION_KEYS = [
   "nodes",
@@ -61,6 +66,8 @@ export const GRAPH_RELATION_KEYS = [
   "contributionMaterializations",
   "kindRemovals",
   "reconciliationMarkers",
+  "identityTransitions",
+  "identityTransitionRetention",
 ] as const;
 
 export type GraphRelationKey = (typeof GRAPH_RELATION_KEYS)[number];
@@ -157,14 +164,14 @@ const REBUILD_AFTER_CLONE = {
 
 const BEHAVIOR = {
   nodes: {
-    clear: { kind: "delete", order: 12, missingTable: "required" },
+    clear: { kind: "delete", order: 14, missingTable: "required" },
     role: "content",
     presenceAnchor: true,
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   edges: {
-    clear: { kind: "delete", order: 11, missingTable: "required" },
+    clear: { kind: "delete", order: 13, missingTable: "required" },
     role: "content",
     presenceAnchor: true,
     provisionedBy: "base",
@@ -189,19 +196,19 @@ const BEHAVIOR = {
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   revisionOrigins: {
-    clear: { kind: "delete", order: 19, missingTable: "tolerated" },
+    clear: { kind: "delete", order: 21, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   revisionChanges: {
-    clear: { kind: "delete", order: 13, missingTable: "tolerated" },
+    clear: { kind: "delete", order: 15, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   identityAssertions: {
-    clear: { kind: "delete", order: 8, missingTable: "tolerated" },
+    clear: { kind: "delete", order: 10, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
@@ -213,31 +220,31 @@ const BEHAVIOR = {
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   identityClosure: {
-    clear: { kind: "delete", order: 7, missingTable: "tolerated" },
+    clear: { kind: "delete", order: 9, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   identitySeparation: {
-    clear: { kind: "delete", order: 6, missingTable: "tolerated" },
+    clear: { kind: "delete", order: 8, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   uniques: {
-    clear: { kind: "delete", order: 9, missingTable: "required" },
+    clear: { kind: "delete", order: 11, missingTable: "required" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   edgeClaims: {
-    clear: { kind: "delete", order: 10, missingTable: "tolerated" },
+    clear: { kind: "delete", order: 12, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   schemaVersions: {
-    clear: { kind: "delete", order: 18, missingTable: "required" },
+    clear: { kind: "delete", order: 20, missingTable: "required" },
     role: "bookkeeping",
     presenceAnchor: true,
     provisionedBy: "base",
@@ -250,7 +257,7 @@ const BEHAVIOR = {
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   indexMaterializations: {
-    clear: { kind: "delete", order: 14, missingTable: "required" },
+    clear: { kind: "delete", order: 16, missingTable: "required" },
     role: "bookkeeping",
     provisionedBy: "base",
     workingCopyClonePolicy: REBUILD_AFTER_CLONE,
@@ -258,7 +265,7 @@ const BEHAVIOR = {
   contributionMaterializations: {
     clear: {
       kind: "delete",
-      order: 17,
+      order: 19,
       missingTable: "tolerated",
       preservable: true,
     },
@@ -267,13 +274,28 @@ const BEHAVIOR = {
     workingCopyClonePolicy: REBUILD_AFTER_CLONE,
   },
   kindRemovals: {
-    clear: { kind: "delete", order: 15, missingTable: "required" },
+    clear: { kind: "delete", order: 17, missingTable: "required" },
     role: "bookkeeping",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   reconciliationMarkers: {
-    clear: { kind: "delete", order: 16, missingTable: "required" },
+    clear: { kind: "delete", order: 18, missingTable: "required" },
+    role: "bookkeeping",
+    provisionedBy: "base",
+    workingCopyClonePolicy: COPY_GRAPH_ROWS,
+  },
+  identityTransitions: {
+    clear: { kind: "delete", order: 7, missingTable: "tolerated" },
+    role: "content",
+    provisionedBy: "base",
+    workingCopyClonePolicy: COPY_GRAPH_ROWS,
+  },
+  // The retention watermark travels with the log it bounds: a copy that kept
+  // the transitions but lost the watermark would report pruned history as
+  // complete.
+  identityTransitionRetention: {
+    clear: { kind: "delete", order: 6, missingTable: "tolerated" },
     role: "bookkeeping",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,

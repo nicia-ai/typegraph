@@ -52,3 +52,24 @@ export function compareCodePoints(left: string, right: string): number {
   if (leftExhausted && rightExhausted) return 0;
   return leftExhausted ? -1 : 1;
 }
+
+/**
+ * Lexicographic {@link compareStrings} over two string tuples: earlier
+ * elements decide first, and a strict prefix sorts before its extension. The
+ * order a NUL-separated composite key would give, without building the key —
+ * for a tuple whose elements may themselves contain any character.
+ */
+export function compareStringTuples(
+  left: readonly string[],
+  right: readonly string[],
+): number {
+  const shared = Math.min(left.length, right.length);
+  for (let index = 0; index < shared; index += 1) {
+    const verdict = compareStrings(
+      requireDefined(left[index]),
+      requireDefined(right[index]),
+    );
+    if (verdict !== 0) return verdict;
+  }
+  return left.length - right.length;
+}

@@ -392,6 +392,21 @@ export function buildStandardTraversalCte(
     : ctx.dialect.capabilities.emitNotMaterializedHint ? sql`NOT MATERIALIZED `
     : sql``;
 
+  // A traversal CTE holds one row per edge matched from its frontier, and the
+  // outer query joins it back on the frontier node's (id, kind). The start CTE
+  // holds each node once, but an earlier traversal's CTE holds a node once per
+  // path into it; expanding each of those rows and then joining on the node
+  // would return every path once per path. So unless this CTE carries the
+  // whole path forward itself, it expands each frontier node exactly once. The
+  // derived table keeps the CTE's name, so the frontier reads the same either
+  // way.
+  const frontierHoldsOneRowPerNode =
+    carryForwardPreviousColumns || previousAlias === ast.start.alias;
+  const frontierSource =
+    frontierHoldsOneRowPerNode ?
+      sql`cte_${sql.raw(previousAlias)}`
+    : sql`(SELECT DISTINCT ${sql.raw(previousAlias)}_id, ${sql.raw(previousAlias)}_kind FROM cte_${sql.raw(previousAlias)}) AS cte_${sql.raw(previousAlias)}`;
+
   const previousIdColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)}`;
   const previousKindColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`;
   const identityFrontierExpansion =
@@ -490,7 +505,7 @@ export function buildStandardTraversalCte(
     if (pinFrontierAheadOfEdges) {
       return sql`
         SELECT ${sql.join(selectColumns, sql`, `)}
-        FROM cte_${sql.raw(previousAlias)}
+        FROM ${frontierSource}
         ${frontierJoin}
         CROSS JOIN ${ctx.schema.edgesTable} e
         JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
@@ -502,7 +517,7 @@ export function buildStandardTraversalCte(
 
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
-      FROM cte_${sql.raw(previousAlias)}
+      FROM ${frontierSource}
       ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
@@ -1269,8 +1284,8 @@ export function buildStandardEmbeddingsCte(
     const tableName = vectorStrategy.tableName(graphId, kind, fieldPath);
     const slotDescriptor = vectorSlots?.get(vectorSlotKey(kind, fieldPath));
     // Use the predicate's explicit metric if given, else this kind's DECLARED
-    // metric (the one its ANN index was built for). Resolving per kind keeps an
-    // includeSubClasses union correct when subkinds declare different metrics.
+    // metric (the one its ANN index was built for). Resolving per kind keeps a
+    // subclass-expanded union correct when subkinds declare different metrics.
     const branchMetric = metric ?? slotDescriptor?.metric ?? "cosine";
 
     // Approximate opt-in: retrieve this kind's candidates via the

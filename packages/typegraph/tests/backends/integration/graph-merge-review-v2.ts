@@ -4,6 +4,7 @@ import { z } from "zod";
 import { defineGraph, defineNode } from "../../../src";
 import {
   captureCandidateWriteSetTarget,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
 } from "../../../src/graph-merge";
@@ -21,7 +22,7 @@ const graph = defineGraph({
 export function registerGraphMergeReviewV2IntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe("candidate-scoped identity review V2", () => {
+  describe("candidate-scoped identity review", () => {
     it("requires renewed review after an identity assertion joins the retained closure", async () => {
       const target = await context.createHistoryStore(graph);
       const seed = await target.nodes.Person.create(
@@ -68,7 +69,9 @@ export function registerGraphMergeReviewV2IntegrationTests(
         reviewScope: "candidate" as const,
       };
       const review = unwrap(await planCandidateWriteSetReview(args));
-      expect(review.formatVersion).toBe(2);
+      expect(review.formatVersion).toBe(
+        MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+      );
       expect(review.baseline.identityReferences).toContainEqual({
         kind: "Person",
         id: seed.id,

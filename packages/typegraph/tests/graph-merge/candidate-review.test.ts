@@ -7,6 +7,8 @@ import {
   asBranchId,
   captureCandidateWriteSetTarget,
   isErr,
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   MergePlanningStaleError,
   MergeReviewError,
   planCandidateWriteSetReview,
@@ -134,6 +136,38 @@ describe("candidate review wire and coherent capture", () => {
       if (isErr(result)) expect(result.error).toBeInstanceOf(MergeReviewError);
       expect(makeBackend).not.toHaveBeenCalled();
       expect(await args.target.nodes.Item.count()).toBe(0);
+    },
+  );
+
+  // Formats 1 and 2 are the whole-target and candidate-scoped formats that
+  // embedded a version-1 plan.
+  it.each([1, 2])(
+    "refuses a review stored under earlier format %d as an unsupported version, not as malformed",
+    async (earlierFormat) => {
+      const { args } = await setup();
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+      const stored: unknown = { ...review, formatVersion: earlierFormat };
+      const makeBackend = vi.fn(args.makeBackend);
+
+      const result = await revalidateCandidateWriteSetReview({
+        ...args,
+        makeBackend,
+        review: stored,
+      });
+
+      if (!isErr(result))
+        throw new Error("Expected an unsupported-version refusal.");
+      expect(result.error).toBeInstanceOf(MergeReviewError);
+      expect(result.error.details).toEqual({
+        reason: "unsupported-version",
+        received: earlierFormat,
+        supported: [
+          MERGE_REVIEW_FORMAT_VERSION,
+          MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+        ],
+      });
+      expect(makeBackend).not.toHaveBeenCalled();
     },
   );
 

@@ -120,12 +120,69 @@ const current = after ? store.asOfRecorded(after) : undefined;
 
 The report partitions facts relative to the retracted source:
 
-- `died`: facts that were believed before and lost grounded support
+- `died`: every fact whose currency this transition closed
 - `survivedVia`: affected facts that still have a firing justification
 - `unaffected`: previously believed facts outside the source's provenance
 
+`died` names every close, including a fact that was not believed to begin with.
+A live fact is unsupported whenever no justification of it fires, and a
+transition that reaches such a fact closes it and reports it. Ordinary store
+calls reach that state: a justification with two premises, one of them a source
+created with its retracted flag already set, leaves the fact it derives live and
+unsupported from the moment it is linked, with no constraint violated and
+nothing for `store.verifyConstraintFences()` to report. The composition case is
+narrower — a required part whose whole was tombstoned outside the store's own
+paths — and that one the fence audit does report. Either way a tombstone the
+report cannot mention would be invisible data loss, so the pass that writes the
+tombstones and the report that names them read one set of rows.
+
 `unRetract(source)` clears the source flag, recomputes support, and reopens
 facts that regain support.
+
+## Composition and retraction
+
+A [required composition part](/ontology#composition) cannot exist without a
+live whole, so its belief status follows its whole's. Support treats the
+dependency as part of the fact's grounding: a required part is supported only
+while the whole it currently hangs from is itself supported (a whole that is
+also a fact kind) or live (any other whole, including a plain node that carries
+no belief status at all).
+
+Closing a whole therefore closes its required parts in the same transition,
+transitively through a part that is itself a whole, and the report names every
+one of them in `died`. Reopening the whole reopens the parts that are otherwise
+supported, because a reopen is driven by support rather than by a ledger of
+what a close closed: a part whose own justification no longer fires stays
+closed. A required part is closed even when a different source supports it —
+the existence dependency dominates its own grounding.
+
+An optional part is untouched. It can exist with no whole, so it keeps both its
+attachment to the closed whole and its own belief status; the composition claim
+still stops a second whole from taking it.
+
+No edge is deleted by any of this, so `store.verifyConstraintFences()`'s
+`compositionExistence` family reports nothing after a close: a closed required
+part is tombstoned, not an orphan.
+
+A whole that is not a fact is held to the same liveness the write path holds an
+attachment's whole to: present and not tombstoned. A closed validity window does
+not make it dead, because the write path would still accept it as a whole. A
+whole that IS tombstoned leaves its live required parts unsupported, which is
+also what the `compositionExistence` audit reports for that state. A transition
+that reaches such a part closes it and names it in `died`, even though the part
+was already unbelieved when the transition began.
+
+Each closed fact fires its own `delete` operation hook, parts included — unlike
+the delete cascade, which emits one event for the whole. A belief close has no
+cascade to report: every part reaching the close is a fact of its own, closed by
+its own support verdict, so its hook is its own too.
+
+A configuration that cannot reach a required part is refused when the capability
+is created. If a fact kind is the whole of an `existence: "required"` pair whose
+part kind is not itself in `fact.kinds`, `createRetractionCapability` throws
+`ConfigurationError` (`PROVENANCE_REQUIRED_PART_NOT_A_FACT`) naming both kinds —
+closing such a whole would leave a live required part hanging from it, and no
+transition could fix that.
 
 Use `retractMany(sources)` or `unRetractMany(sources)` to change several source
 flags in one recorded transaction:

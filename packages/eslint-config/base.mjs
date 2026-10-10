@@ -11,6 +11,7 @@ import tseslint from "typescript-eslint";
  * Common ignore patterns for all packages
  */
 export const ignores = [
+  ".declaration-emit/**",
   ".stryker-tmp/**",
   ".wrangler/**",
   "coverage/**",

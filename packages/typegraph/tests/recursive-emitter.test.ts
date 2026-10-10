@@ -37,7 +37,7 @@ function createRecursivePlan(): LogicalPlan {
     },
     start: {
       alias: "p",
-      includeSubClasses: false,
+      expansion: "exact" as const,
       kinds: ["Person"],
     },
     temporalMode: { mode: "current" as const },
@@ -133,7 +133,7 @@ describe("emitRecursiveQuerySql", () => {
             },
           ],
         },
-        start: { alias: "p", includeSubClasses: false, kinds: ["Person"] },
+        start: { alias: "p", expansion: "exact" as const, kinds: ["Person"] },
         temporalMode: { mode: "current" as const },
         traversals: [
           {
@@ -184,7 +184,7 @@ describe("emitRecursiveQuerySql", () => {
             },
           ],
         },
-        start: { alias: "p", includeSubClasses: false, kinds: ["Person"] },
+        start: { alias: "p", expansion: "exact" as const, kinds: ["Person"] },
         temporalMode: { mode: "current" as const },
         traversals: [
           {
@@ -235,7 +235,7 @@ describe("emitRecursiveQuerySql", () => {
             },
           ],
         },
-        start: { alias: "p", includeSubClasses: false, kinds: ["Person"] },
+        start: { alias: "p", expansion: "exact" as const, kinds: ["Person"] },
         temporalMode: { mode: "current" as const },
         traversals: [
           {

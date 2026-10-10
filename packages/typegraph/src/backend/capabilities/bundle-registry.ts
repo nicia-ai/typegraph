@@ -817,7 +817,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 90, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 92, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -939,13 +939,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   tableNames: {
     kind: "reasoned",
     reason:
-      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
-    // 28, including the namespace fork's and managed PostgreSQL copy's backend table-name probes and the graph storage inventory's one resolution of the graph-relation names. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.",
+    // 32, including the namespace fork's and managed PostgreSQL copy's backend table-name probes, the graph storage inventory's one resolution of the graph-relation names, three acyclicity readers and the composition tightening probe. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy and managed PostgreSQL copy read the
     // connected backend's names to fence physical target bindings.
-    accesses: 28,
+    accesses: 32,
   },
   fenceSql: {
     kind: "reasoned",
@@ -964,6 +964,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     reason:
       "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.",
     accesses: 4,
+  },
+  setActiveVersionWithPreflight: {
+    kind: "reasoned",
+    reason:
+      "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent, and a fixed-schema working copy refuses it when present.",
+    accesses: 2,
   },
   lockSchemaVersionForWrite: {
     kind: "reasoned",
@@ -1261,7 +1267,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "heterogeneousEndpointSetRead",
     // Import prefetches existing endpoint pairs through the same bulk-read
     // capability rather than issuing one probe per incoming edge.
-    ceiling: 5,
+    // `store/operations/composition-cascade.ts`'s `planCompositionCascade`
+    // reads one round's whole-side composition edges the same way
+    // `findConnectedEdgesForNodeBatch` (`node-operations.ts`) already does.
+    // `composition-create.ts`'s `readCompositionUnattachedParts` reads one
+    // page's attachment candidates per orientation instead of one connected-edges
+    // read per row.
+    ceiling: 7,
   },
   fulltextSearch: {
     kind: "deferred",

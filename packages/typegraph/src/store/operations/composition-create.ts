@@ -1,0 +1,1839 @@
+/**
+ * `existence: "required"`: a composition part that cannot exist
+ * without a live whole.
+ *
+ * THE two owners, in one module because both directions of
+ * the same rule ("a required part always has a live whole") belong beside
+ * each other:
+ *
+ * - {@link resolveCompositionCreate} — every node-create path's ONE answer
+ *   to "given this kind's declared existence and the caller's stated
+ *   `partOf`, what composition edge does this create owe, and is the pair
+ *   legal". Reached by `create`, `bulkCreate`, and both get-or-create
+ *   entries (`src/store/operations/node-operations.ts`).
+ * - {@link assertCompositionExistencePreserved} — the refusal every path
+ *   that would separate a live required part from its whole raises: ending
+ *   a composition edge's window, soft-deleting it, or hard-deleting it. The
+ *   three call sites live in `src/store/operations/edge-operations.ts`,
+ *   at the work-assembly sites that feed `edge-write-pipeline.ts`'s
+ *   pipeline entries — never inside those entries, which deliberately
+ *   resolve no schema and no constraints (see that module's docblock).
+ *
+ * Neither function issues a claim: `edgeInsertClaims`
+ * (`src/store/claims/composition-claims.ts`) remains the one owner of the
+ * one-whole-per-part invariant's
+ * "at most one whole" claim, unchanged here.
+ *
+ * Alongside them, the DISPOSITION owner every attachment against an
+ * already-existing row runs through:
+ * {@link resolveCompositionAttachmentRequest} builds the request read-free,
+ * and {@link decideCompositionAttachmentUnderFence} re-reads the incumbent on
+ * the frame's own fenced target and answers with the decision itself —
+ * "satisfied", "attach" or "replace" — or refuses. The halves that apply
+ * that decision (`prepareCompositionAttachmentMoves` and
+ * `writeCompositionAttachmentMoves`, `node-operations.ts`) take the answer as
+ * a parameter, which is what lets a frame that owes other statements, or
+ * several decisions, decide BEFORE its first one. These functions are here rather than
+ * beside the write plan because the decision is pure: the write plan owns the
+ * lock and the statements, this module owns what they mean.
+ */
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import { backendDerivationChain } from "../../backend/derive-backend";
+import {
+  type EdgeRow,
+  type GraphBackend,
+  type GraphReadBackend,
+  isLiveNodeRow,
+  type LiveNodeRow,
+  type NodeRow,
+  rowPropsToObject,
+  type TransactionBackend,
+} from "../../backend/types";
+import {
+  CompositionExistenceError,
+  ConfigurationError,
+  EndpointNotFoundError,
+  ValidationError,
+} from "../../errors";
+import { validateEdgeProps } from "../../errors/validation";
+import {
+  type CompositionPair,
+  compositionViaKind,
+} from "../../registry/composition-relation";
+import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
+import {
+  assertOrderedValidityWindow,
+  nowIso,
+  statedBoundMatchesStored,
+  validateCanonicalIsoDate,
+  validateOptionalCanonicalIsoDate,
+  validateStatedValidityLowerBound,
+} from "../../utils/date";
+import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
+import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  type CompositionAttachment,
+  type CompositionNodeRef,
+  type CreateEdgeInput,
+  type CreateNodeInput,
+  type NodeReparentOptions,
+} from "../types";
+import {
+  compositionEdgeCounts,
+  compositionRowEndpoints,
+  wholeSide,
+} from "./composition-cascade";
+
+const ATTACHMENT_KEYS = ["whole", "via", "props", "validFrom", "validTo"];
+const REPARENT_OPTION_KEYS = ["whole", "via", "props", "at"];
+
+/** A stated window bound differs from the one an already-held attachment stores. */
+const COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE =
+  "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT";
+/** A stated `validTo` would write an edge that does not attach its part. */
+const COMPOSITION_ATTACHMENT_WINDOW_BOUNDED_CODE =
+  "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED";
+
+/**
+ * Where an attachment was stated: the argument name its refusals are
+ * reported under, and the top-level keys that argument accepts.
+ */
+type AttachmentSurface = Readonly<{ path: string; keys: readonly string[] }>;
+
+const PART_OF_SURFACE: AttachmentSurface = {
+  path: "partOf",
+  keys: ATTACHMENT_KEYS,
+};
+const REPARENT_SURFACE: AttachmentSurface = {
+  path: "options",
+  keys: REPARENT_OPTION_KEYS,
+};
+
+/**
+ * A caller's attachment as the rest of this module reads it: the whole
+ * reduced to its `kind` and `id`, `via` to its edge-kind string, the window
+ * gathered into the shape the edge insert takes. `props` stays optional
+ * because "no `props` stated" and `props: {}` are different requests to an
+ * already-satisfied attachment.
+ */
+export type StatedCompositionAttachment = Readonly<{
+  whole: CompositionNodeRef;
+  viaKind?: string;
+  props?: Record<string, unknown>;
+  edgeWindow: Readonly<{ validFrom?: string | null; validTo?: string }>;
+}>;
+
+function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readWholeRef(whole: unknown): CompositionNodeRef | undefined {
+  if (!isObject(whole)) return undefined;
+  const { kind, id } = whole;
+  return typeof kind === "string" && typeof id === "string" ?
+      { kind, id }
+    : undefined;
+}
+
+/**
+ * THE one place a caller-stated attachment object is read. Every surface —
+ * `create`, `bulkCreate`, both get-or-create entries, `reparent` — reaches
+ * the attachment through here, so:
+ *
+ * - only `whole.kind` and `whole.id` are ever taken from the whole. A whole
+ *   passed as a node object carries its own schema properties beside them,
+ *   and a property there called `via` or `props` must never be mistaken for
+ *   the attachment's;
+ * - a top-level key the surface does not accept is refused rather than
+ *   dropped — including the whole's `kind`/`id` stated beside `via` instead
+ *   of under `whole`, and `validFrom` / `validTo` on `reparent`, whose one
+ *   instant is `at` and which states no window;
+ * - a stated window is validated here, once, as the edge insert would validate
+ *   it (canonical bounds, ordered pair), so a path that ends up writing no
+ *   edge — an already-satisfied attachment — refuses a malformed or inverted
+ *   window exactly as a create does.
+ */
+function readStatedAttachment(
+  value: unknown,
+  surface: AttachmentSurface,
+  part: Readonly<{ kind: string; id?: string }>,
+): StatedCompositionAttachment {
+  const stated = isObject(value) ? value : {};
+  const whole = readWholeRef(stated["whole"]);
+  const unknownKeys = Object.keys(stated).filter(
+    (key) => !surface.keys.includes(key),
+  );
+  if (whole === undefined || unknownKeys.length > 0) {
+    const issues = [
+      ...unknownKeys.map((key) => ({
+        path: `${surface.path}.${key}`,
+        message: `Unknown key. Accepted keys: ${surface.keys.join(", ")}.`,
+      })),
+      ...(whole === undefined ?
+        [
+          {
+            path: `${surface.path}.whole`,
+            message:
+              "Expected the whole as a node or a { kind, id } reference with string kind and id.",
+          },
+        ]
+      : []),
+    ];
+    throw new ValidationError(
+      `Invalid composition attachment for ${part.kind}: ${issues.map((issue) => issue.path).join(", ")}`,
+      {
+        entityType: "node",
+        kind: part.kind,
+        ...(part.id === undefined ? {} : { id: part.id }),
+        issues,
+      },
+      {
+        suggestion: `Pass \`${surface.path}: { whole: { kind, id }, ... }\` with only these keys: ${surface.keys.join(", ")}.`,
+      },
+    );
+  }
+
+  const attachment = stated as Omit<CompositionAttachment, "whole">;
+  const validFrom = validateStatedValidityLowerBound(
+    attachment.validFrom,
+    `${surface.path}.validFrom`,
+  );
+  const validTo = validateOptionalCanonicalIsoDate(
+    attachment.validTo,
+    `${surface.path}.validTo`,
+  );
+  assertOrderedValidityWindow(
+    `the composition attachment of ${part.kind}${part.id === undefined ? "" : ` "${part.id}"`}`,
+    validFrom,
+    validTo,
+  );
+  return {
+    whole,
+    ...(attachment.via === undefined ?
+      {}
+    : { viaKind: compositionViaKind(attachment.via) }),
+    ...(attachment.props === undefined ? {} : { props: attachment.props }),
+    edgeWindow: {
+      ...(validFrom === undefined ? {} : { validFrom }),
+      ...(validTo === undefined ? {} : { validTo }),
+    },
+  };
+}
+
+/** Reads a `partOf` attachment. See {@link readStatedAttachment}. */
+export function readCompositionAttachment(
+  partOf: CompositionAttachment,
+  part: Readonly<{ kind: string; id?: string }>,
+): StatedCompositionAttachment {
+  return readStatedAttachment(partOf, PART_OF_SURFACE, part);
+}
+
+function readMoveInstant(at: string | undefined): string {
+  return at === undefined ? nowIso() : (
+      validateCanonicalIsoDate(at, `${REPARENT_SURFACE.path}.at`)
+    );
+}
+
+/**
+ * Reads `reparent`'s options: the destination attachment and the move
+ * instant, which is `at` or one clock read. The new edge's lower bound is
+ * that instant, never a separately stated `validFrom`.
+ */
+export function readReparentOptions(
+  options: NodeReparentOptions,
+  part: Readonly<{ kind: string; id: string }>,
+): Readonly<{ attachment: StatedCompositionAttachment; moveAt: string }> {
+  const attachment = readStatedAttachment(options, REPARENT_SURFACE, part);
+  return { attachment, moveAt: readMoveInstant(options.at) };
+}
+
+/**
+ * What one node create owes on the composition axis: the declared pair and
+ * the whole the caller named, plus the concrete part kind (which may be a
+ * subclass of `pair.partKind`) — everything {@link buildCompositionCreateEdgeInput}
+ * needs to build the `CreateEdgeInput` once the part's id is actually known.
+ *
+ * Deliberately carries no id and no `CreateEdgeInput`: a batch create only
+ * learns each item's real id from `finishNodeCreatePreparation` (a
+ * caller-supplied id is distinguished from a GENERATED one by whether
+ * `CreateNodeInput.id` was ever set — `draftNodeCreate`'s `idProvided`
+ * reads that field directly — so resolving one here and writing it back
+ * onto the input would corrupt that distinction for every batch member,
+ * regardless of composition). One node, one composition edge, one write
+ * plan still holds: the edge is built and issued inside the SAME frame,
+ * after the row's real id is known.
+ *
+ * `undefined` means this create owes no composition edge at all (an
+ * optional-existence kind with no `partOf`) — the common case, which every
+ * caller must be able to tell apart from "the edge is not built yet".
+ */
+export type CompositionCreateWork = Readonly<{
+  pair: CompositionPair;
+  whole: CompositionNodeRef;
+  /** The concrete part kind this create declared — `input.kind`, verbatim. */
+  partKind: string;
+  /**
+   * The realizing edge's own properties, as the caller stated them
+   * (`partOf.props`) or `{}`. Carried verbatim: validation against the edge
+   * kind's schema is `validateAndPrepareEdgeCreate`'s, exactly as it is for a
+   * caller's own `store.edges.<via>.create(...)` — a second Zod parse here
+   * would be a second spelling of that decision.
+   */
+  props: Record<string, unknown>;
+  /**
+   * The realizing edge's own window, copied from the attachment and never
+   * from the part node's `validFrom`/`validTo`. Empty means the edge insert's
+   * own default.
+   */
+  edgeWindow: Readonly<{ validFrom?: string | null; validTo?: string }>;
+}>;
+
+/**
+ * THE decision every attachment surface asks: given this part kind and the
+ * whole (and, optionally, the realizing edge) the caller named, WHICH
+ * declared composition pair does this attachment realize?
+ *
+ * The one owner of both `via` refusals — `create`, `bulkCreate`, both
+ * get-or-create entries, and `reparent` all reach it, so none of them can
+ * resolve an ambiguous attachment by sort order the way the removed
+ * `getCompositionEdge` did:
+ *
+ * - no declared pair at all between the two kinds — `ConfigurationError`
+ *   (`COMPOSITION_WHOLE_NOT_DECLARED`);
+ * - `via` named, but it realizes no declared pair between them —
+ *   `ConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`);
+ * - `via` omitted while more than one pair is declared between them —
+ *   `ConfigurationError` (`COMPOSITION_VIA_AMBIGUOUS`).
+ *
+ * Pure and synchronous — no I/O and no claim.
+ */
+function resolveCompositionAttachment(
+  registry: KindRegistry,
+  partKind: string,
+  attachment: StatedCompositionAttachment,
+): CompositionPair {
+  const wholeKind = attachment.whole.kind;
+  const declared = registry.compositionPairsBetween(partKind, wholeKind);
+  if (declared.length === 0) {
+    throw new ConfigurationError(
+      `Node kind "${partKind}" declares no composition pair to whole kind "${wholeKind}".`,
+      {
+        code: "COMPOSITION_WHOLE_NOT_DECLARED",
+        partKind,
+        wholeKind,
+      },
+      {
+        suggestion:
+          `Declare \`partOf(${partKind}, ${wholeKind}, { via: ... })\` (or the mirrored \`hasPart\`) in the ontology, ` +
+          `or pass \`partOf\` naming a whole kind this part is actually declared under.`,
+      },
+    );
+  }
+
+  const viaEdgeKinds = declared.map((pair) => pair.viaEdgeKind);
+  const viaKind = attachment.viaKind;
+  if (viaKind !== undefined) {
+    const pair = declared.find(
+      (candidate) => candidate.viaEdgeKind === viaKind,
+    );
+    if (pair === undefined) {
+      throw new ConfigurationError(
+        `Edge kind "${viaKind}" realizes no declared composition pair between "${partKind}" and "${wholeKind}".`,
+        {
+          code: "COMPOSITION_VIA_NOT_DECLARED",
+          partKind,
+          wholeKind,
+          via: viaKind,
+          declaredVia: viaEdgeKinds,
+        },
+        {
+          suggestion: `Pass \`via\` naming one of the declared realizing edges: ${viaEdgeKinds.join(", ")}.`,
+        },
+      );
+    }
+    return pair;
+  }
+
+  if (declared.length > 1) {
+    throw new ConfigurationError(
+      `Attaching "${partKind}" to "${wholeKind}" is ambiguous: ${declared.length} declared composition pairs realize it.`,
+      {
+        code: "COMPOSITION_VIA_AMBIGUOUS",
+        partKind,
+        wholeKind,
+        declaredVia: viaEdgeKinds,
+      },
+      {
+        suggestion: `Pass \`via\` naming the realizing edge: ${viaEdgeKinds.join(", ")}.`,
+      },
+    );
+  }
+
+  return requireDefined(
+    declared[0],
+    "compositionPairsBetween returned a non-empty list with no first pair",
+  );
+}
+
+/**
+ * Parts whose required existence a still-running write frame verifies itself,
+ * once its last row has landed, keyed by the frame's transaction target.
+ */
+const deferredExistenceFrames = new WeakMap<object, ReadonlySet<string>>();
+
+function deferredExistenceKey(part: CompositionNodeRef): string {
+  return encodeTupleKey([part.kind, part.id]);
+}
+
+/**
+ * Runs `write` with the required-existence rule deferred for exactly `parts`
+ * on `target`: inside it a named part may be created or restored before its
+ * composition edge exists, and may lose its attaching edge before the next one
+ * is written.
+ *
+ * For a caller replaying a complete, already-resolved write set whose rows
+ * satisfy the rule together and not one at a time (a graph merge's apply). The
+ * rule is postponed, never waived: the caller owes the same parts a check
+ * against the frame's final state on the same transaction, before it commits.
+ *
+ * Bound to the transaction target and to the parts by name, so a frame's
+ * deferral for one part licenses nothing for another part or another
+ * transaction, and it ends with `write`.
+ */
+export async function withDeferredCompositionExistence<Output>(
+  target: TransactionBackend,
+  parts: readonly CompositionNodeRef[],
+  write: () => Promise<Output>,
+): Promise<Output> {
+  if (parts.length === 0) return write();
+  if (deferredExistenceFrames.has(target)) {
+    throw new ConfigurationError(
+      "A composition existence deferral is already open on this transaction.",
+      { code: "COMPOSITION_EXISTENCE_DEFERRAL_NESTED" },
+    );
+  }
+  deferredExistenceFrames.set(
+    target,
+    new Set(parts.map((part) => deferredExistenceKey(part))),
+  );
+  try {
+    return await write();
+  } finally {
+    deferredExistenceFrames.delete(target);
+  }
+}
+
+/**
+ * Whether a frame open on `target` (or on the transaction it was derived
+ * from) has taken over the required-existence check for `part`. The one
+ * reader every existence refusal in this module consults.
+ */
+function compositionExistenceDeferred(
+  target: object,
+  part: CompositionNodeRef,
+): boolean {
+  const key = deferredExistenceKey(part);
+  return backendDerivationChain(target).some(
+    (link) => deferredExistenceFrames.get(link)?.has(key) === true,
+  );
+}
+
+/**
+ * THE decision every node-create path asks: given the declared existence of
+ * this kind and the caller's stated `partOf`, what composition edge does
+ * this create owe — and is the pair legal? Refuses; never returns a silent
+ * "nothing to do" for a required kind with no `partOf`, and never silently
+ * drops a `partOf` naming an undeclared or ambiguous pair.
+ *
+ * Pure and synchronous — no I/O, no claim, no endpoint-liveness read, and no
+ * id needed: the composition CLAIM and the whole's liveness are both the
+ * edge insert's own concern (`edgeInsertClaims`, `assertLiveEdgeEndpoints`),
+ * and re-checking either here would be a second spelling of that decision.
+ */
+export function resolveCompositionCreate(
+  registry: KindRegistry,
+  input: Pick<CreateNodeInput, "kind" | "id" | "partOf">,
+  target: object,
+): CompositionCreateWork | undefined {
+  if (
+    input.partOf === undefined &&
+    input.id !== undefined &&
+    compositionExistenceDeferred(target, { kind: input.kind, id: input.id })
+  ) {
+    return undefined;
+  }
+  return compositionCreateWork(
+    registry,
+    input,
+    input.partOf === undefined ?
+      undefined
+    : readCompositionAttachment(input.partOf, input),
+  );
+}
+
+function compositionCreateWork(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id?: string }>,
+  attachment: StatedCompositionAttachment | undefined,
+): CompositionCreateWork | undefined {
+  const partKind = part.kind;
+  if (attachment === undefined) {
+    if (registry.compositionExistence(partKind) === "required") {
+      throw new CompositionExistenceError({
+        partKind,
+        ...(part.id === undefined ? {} : { partId: part.id }),
+        situation: "create",
+      });
+    }
+    return undefined;
+  }
+
+  const pair = resolveCompositionAttachment(registry, partKind, attachment);
+  assertStatedWindowAttachesPart(registry, part, pair, attachment);
+  return {
+    pair,
+    whole: attachment.whole,
+    partKind,
+    props: attachment.props ?? {},
+    edgeWindow: attachment.edgeWindow,
+  };
+}
+
+/**
+ * Refuses a stated attachment whose realizing edge would be written already
+ * NOT attaching its part: a `validTo` on a `population: "oneActive"` pair,
+ * where only an open-ended row is a membership.
+ *
+ * `partOf` asks for an attachment, and an edge
+ * {@link compositionEdgeAttachesPart} does not count is not one: no later call
+ * could find it as the incumbent, so a repeated get-or-create would insert it
+ * again and a different whole would be accepted beside it; a required part
+ * would be written with no whole at all. Judged against the edge this request
+ * WOULD write, through the same predicate every reader of an attachment uses,
+ * and read-free — so it precedes the first statement on every surface.
+ */
+function assertStatedWindowAttachesPart(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id?: string }>,
+  pair: CompositionPair,
+  attachment: StatedCompositionAttachment,
+): void {
+  const { validTo } = attachment.edgeWindow;
+  if (
+    compositionEdgeAttachesPart(registry, part.kind, {
+      kind: pair.viaEdgeKind,
+      deleted_at: undefined,
+      valid_to: validTo,
+    })
+  ) {
+    return;
+  }
+  throw new ValidationError(
+    `Invalid composition attachment for ${part.kind}: a bounded window does not attach a part under a "${pair.population}" composition pair.`,
+    {
+      entityType: "node",
+      kind: part.kind,
+      ...(part.id === undefined ? {} : { id: part.id }),
+      issues: [
+        {
+          path: `${PART_OF_SURFACE.path}.validTo`,
+          code: COMPOSITION_ATTACHMENT_WINDOW_BOUNDED_CODE,
+          message: `"${pair.viaEdgeKind}" counts as a membership only while its window is open, so an attachment stated with validTo "${validTo}" would not attach the part.`,
+        },
+      ],
+    },
+    {
+      suggestion: `Omit \`${PART_OF_SURFACE.path}.validTo\` to attach the part. To record a bounded membership as history, write the edge itself with \`store.edges.${pair.viaEdgeKind}.create(...)\`.`,
+    },
+  );
+}
+
+/**
+ * Materializes {@link resolveCompositionCreate}'s work into a fully-formed
+ * `CreateEdgeInput` — oriented per `pair.partSide` — once the part's REAL id
+ * is known. The one place the from/to orientation is spelled; every
+ * attach-edge call site (single create, both batch shapes, the
+ * get-or-create resurrection leg) reaches it through here.
+ */
+export function buildCompositionCreateEdgeInput(
+  work: CompositionCreateWork,
+  partId: string,
+  temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
+): CreateEdgeInput {
+  const { pair, whole, partKind } = work;
+  const [fromKind, fromId, toKind, toId] =
+    pair.partSide === "from" ?
+      ([partKind, partId, whole.kind, whole.id] as const)
+    : ([whole.kind, whole.id, partKind, partId] as const);
+
+  return {
+    kind: pair.viaEdgeKind,
+    fromKind,
+    fromId,
+    toKind,
+    toId,
+    props: work.props,
+    ...(temporal.validFrom === undefined ?
+      {}
+    : { validFrom: temporal.validFrom }),
+    ...(temporal.validTo === undefined ? {} : { validTo: temporal.validTo }),
+  };
+}
+
+/**
+ * Whether `edgeKind` realizes a composition pair whose part kind is
+ * `existence: "required"` for ANY of its declared pairs. Used to decline a
+ * composition edge from a fused/read-free delete or update program: those
+ * commands cannot express {@link assertCompositionExistencePreserved}'s
+ * held-lock part read, so a kind this returns `true` for must take the
+ * portable path for its delete/end mutations.
+ */
+export function compositionEdgeHasRequiredExistencePart(
+  registry: KindRegistry,
+  edgeKind: string,
+): boolean {
+  if (!registry.isCompositionEdge(edgeKind)) return false;
+  return registry
+    .compositionRelation()
+    .pairs.some(
+      (pair) =>
+        pair.viaEdgeKind === edgeKind &&
+        registry.compositionExistence(pair.partKind) === "required",
+    );
+}
+
+/**
+ * THE answer to "does this composition edge row attach its part to a live
+ * whole AT THE CURRENT READ INSTANT" — ignoring `deleted_at`, valid-time is
+ * everything `assertCompositionExistencePreserved`, `findLiveCompositionWhole`
+ * (and, through it, the import assertion and `verifyConstraintFences`'s
+ * `compositionExistence` audit) share, so none of them re-spell it apart and
+ * drift. {@link assertStatedWindowAttachesPart} also reuses it ahead of the
+ * write, against the not-yet-persisted edge's own `kind`/`validTo` — the
+ * CREATE-time mirror of the same question, refusing a stated attachment whose
+ * composition edge would be born already unattaching.
+ *
+ * Reuses {@link compositionEdgeCounts} (`./composition-cascade.ts`), the one
+ * owner of "does a composition edge row still count as a live membership
+ * under its pair's declared whole-side population" — that predicate already
+ * IS the temporal notion this one needs: a `population: "one"` binding
+ * persists for the row's entire life (ended or not), while a
+ * `population: "oneActive"` binding ends the moment the window closes. This
+ * function adds only the `deleted_at` gate `compositionEdgeCounts`'s callers
+ * are each individually documented to apply themselves.
+ */
+export function compositionEdgeAttachesPart(
+  registry: KindRegistry,
+  partKind: string,
+  edge: Pick<EdgeRow, "kind" | "deleted_at" | "valid_to">,
+): boolean {
+  if (edge.deleted_at !== undefined) return false;
+  const partSide = registry.compositionPartSide(edge.kind);
+  if (partSide === undefined) return false;
+  const population = requireDefined(
+    registry.compositionPopulation(partKind),
+    `compositionPopulation(${partKind}) is undefined for a row on a known composition edge kind`,
+  );
+  return compositionEdgeCounts({ partSide, population }, edge);
+}
+
+/**
+ * THE refusal every path that would separate a live required part from its
+ * whole raises: ending a composition edge's open window, soft-deleting it,
+ * or hard-deleting it.
+ *
+ * Fast path first (no read at all) when `edge.kind` is not a composition
+ * edge, or its declared pair's existence is `"optional"`. Only then does it
+ * read the part row — under the held write lock, so a concurrent write
+ * cannot land between the read and this write's own row change — and
+ * refuses only when the part is LIVE. A part that is already retired
+ * (soft-deleted or gone) is not orphaned by losing its edge: refusing that
+ * would make a soft-deleted part's composition edge permanently
+ * undeletable-from.
+ *
+ * `lock: GraphWriteLock` in the parameter is compile-time evidence that this
+ * read cannot precede the per-graph write lock — the same device
+ * `planCompositionCascade` uses.
+ *
+ * `reattachedPart` names the ONE part whose composition edge this same write
+ * frame retires only to attach it to a new whole immediately afterwards
+ * (`reparent`, `node-operations.ts`). That part is not being detached at
+ * all: the frame's final state has it attached, so the invariant this
+ * refusal protects is preserved end-to-end even though its intermediate
+ * state is not. Stated as the part itself rather than as a "skip the check"
+ * flag, so the exemption is bound to the resource that earned it — a
+ * frame's reparent of part A can never quietly license a detach of part B.
+ */
+export async function assertCompositionExistencePreserved(
+  ctx: Readonly<{
+    graphId: string;
+    registry: KindRegistry;
+    lock: GraphWriteLock;
+    reattachedPart?: CompositionNodeRef;
+  }>,
+  edge: EdgeRow,
+  backend: GraphReadBackend,
+): Promise<void> {
+  // `compositionPartSide` is total per edge KIND (a second, contradicting
+  // orientation for one edge kind is itself refused at registry-build time,
+  // `ONTOLOGY_COMPOSITION_VIA_MIXED`) even for a heterogeneous composition
+  // edge kind realizing more than one `(partKind, wholeKind)` pair — so the
+  // part endpoint is resolved from the ROW's own concrete kinds, never from
+  // a pair looked up by edge kind alone, which could pick the wrong
+  // declared `partKind` for this row's actual part.
+  const partSide = ctx.registry.compositionPartSide(edge.kind);
+  if (partSide === undefined) return;
+
+  const { part } = compositionRowEndpoints(partSide, edge);
+
+  if (ctx.registry.compositionExistence(part.kind) !== "required") return;
+
+  const reattached = ctx.reattachedPart;
+  if (reattached?.kind === part.kind && reattached.id === part.id) {
+    return;
+  }
+  if (compositionExistenceDeferred(backend, part)) return;
+
+  // A row that no longer currently attaches (an already-ended
+  // `population: "oneActive"` window) has nothing left to detach: the
+  // moment of detachment already passed when the window closed, so this
+  // write — ending an already-ended window again, or soft-/hard-deleting a
+  // row that is no longer an attachment — cannot be what orphans the part.
+  // Reads the SAME predicate `findLiveCompositionWhole` reads, so a row this
+  // refusal protects is never invisible to `verifyConstraintFences`, and a
+  // row that audit already reports unattached is never refused here.
+  if (!compositionEdgeAttachesPart(ctx.registry, part.kind, edge)) return;
+
+  const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
+  if (!isEndpointRowLive(partRow)) return;
+
+  throw new CompositionExistenceError({
+    partKind: part.kind,
+    partId: part.id,
+    situation: "detach",
+    edgeKind: edge.kind,
+    edgeId: edge.id,
+  });
+}
+
+/**
+ * Whether a write stating `validTo` on an existing edge ENDS a currently OPEN
+ * window — `existing.valid_to === undefined` — rather than restating or
+ * tightening an end the row already carries. Only the former can detach a
+ * part: the moment of detachment already passed the first time the window
+ * closed, so re-touching an already-ended edge is not what orphans one.
+ *
+ * The gate in front of {@link assertCompositionExistencePreserved} for every
+ * write that can state a `validTo` on an existing edge — the store's edge
+ * update (`performEdgeUpdate`, `edge-operations.ts`) and interchange import's
+ * `onConflict: "update"` — one predicate, so neither can end a live required
+ * attachment the other refuses.
+ */
+export function edgeWriteEndsOpenWindow(
+  existing: Pick<EdgeRow, "valid_to">,
+  validTo: string | undefined,
+): boolean {
+  return validTo !== undefined && existing.valid_to === undefined;
+}
+
+/**
+ * The composition edge that currently attaches this part, together with the
+ * whole it attaches it to. `undefined` when `concreteKind` is not a
+ * composition part at all, or the part currently has no live whole.
+ *
+ * THE reader behind both "which whole does this part hold"
+ * ({@link findLiveCompositionWhole}) and "which edge row realizes that
+ * attachment right now" (`reparent`'s retire target,
+ * `node-operations.ts`) — one traversal, one orientation decision, one
+ * population predicate, so the mover and the reporter can never disagree
+ * about which edge is the incumbent.
+ *
+ * `excludeEdgeIds` (default none) skips a connected edge by id regardless of
+ * its own liveness — merge's plan-time preview
+ * (`unattachedRequiredPartOrphansAmong`, `src/graph-merge/merge.ts`) uses it
+ * to ask "does this part have a live whole AFTER this merge's own planned
+ * edge deletions land", against a backend that still shows those edges as
+ * live (nothing has been written yet at plan time), without a second,
+ * plan-aware spelling of this predicate.
+ */
+export async function findLiveCompositionAttachment(
+  registry: KindRegistry,
+  backend: Pick<GraphReadBackend, "findEdgesConnectedTo">,
+  graphId: string,
+  concreteKind: string,
+  concreteId: string,
+  excludeEdgeIds?: ReadonlySet<string>,
+): Promise<Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }> | undefined> {
+  if (!registry.isCompositionPart(concreteKind)) return undefined;
+  const connected = await backend.findEdgesConnectedTo({
+    graphId,
+    nodeKind: concreteKind,
+    nodeId: concreteId,
+  });
+  return selectLiveCompositionAttachment(
+    registry,
+    concreteKind,
+    concreteId,
+    connected,
+    excludeEdgeIds,
+  );
+}
+
+/**
+ * The in-memory half of {@link findLiveCompositionAttachment}: given the
+ * candidate edges incident to one part, the one that currently attaches it.
+ *
+ * Split out so a caller that already read a SET of parts' candidate edges in
+ * one statement ({@link readCompositionAttachmentsForPage}) reaches the
+ * identical verdict as the per-part reader, rather than re-spelling the
+ * orientation match and the population predicate over its own rows.
+ *
+ * Judges the EDGE alone, which is what the write path needs: a tombstoned
+ * whole still holds its part's attachment claim, so
+ * {@link decideCompositionIncumbent} must still see that incumbent. A caller
+ * that asks the stronger question — "does this part hang from a whole that is
+ * itself live" — composes this verdict with {@link readLiveCompositionWholes},
+ * the way {@link readCompositionUnattachedParts} does.
+ */
+function selectLiveCompositionAttachment(
+  registry: KindRegistry,
+  concreteKind: string,
+  concreteId: string,
+  candidateEdges: readonly EdgeRow[],
+  excludeEdgeIds?: ReadonlySet<string>,
+): Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }> | undefined {
+  for (const edge of candidateEdges) {
+    if (excludeEdgeIds?.has(edge.id) === true) continue;
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) continue;
+    const { part, whole } = compositionRowEndpoints(partSide, edge);
+    if (part.kind !== concreteKind || part.id !== concreteId) continue;
+    if (!compositionEdgeAttachesPart(registry, concreteKind, edge)) continue;
+    return { edge, whole };
+  }
+  return undefined;
+}
+
+/**
+ * What a stated attachment asks of an incumbent that already IS the requested
+ * attachment (same whole, same realizing edge) — the decision itself, not a
+ * boolean a caller re-derives the comparison from, so both consumers read the
+ * same verdict: {@link assertSatisfiedAttachmentHonored} (which turns a
+ * disagreement into the refusal) and the lock-free pre-check that decides
+ * whether an already-satisfied get-or-create can stay read-only
+ * ({@link incumbentSatisfiesRequestedAttachment}).
+ */
+type SatisfiedAttachmentVerdict =
+  | Readonly<{ honored: true }>
+  | Readonly<{
+      honored: false;
+      dimension: "props";
+      currentProps: Record<string, unknown>;
+      requestedProps: Record<string, unknown>;
+    }>
+  | Readonly<{
+      honored: false;
+      dimension: "window";
+      bound: "validFrom" | "validTo";
+      stated: string | null;
+      stored: string | undefined;
+    }>;
+
+/** The columns of an incumbent edge the satisfied verdict reads. */
+type SatisfiedAttachmentEdge = Pick<
+  EdgeRow,
+  "props" | "valid_from" | "valid_to"
+>;
+
+/**
+ * THE one place a stated attachment is compared against an incumbent that is
+ * ALREADY the requested attachment. The satisfied arm writes no edge, so every
+ * option the caller stated beyond the whole and the realizing edge is either
+ * verified equal to what the edge stores or reported as a disagreement —
+ * never dropped.
+ *
+ * `props` omitted: nothing stated, nothing to compare. `props` stated: run
+ * through {@link validateEdgeProps} against `pair.viaEdgeKind`'s own schema —
+ * the same owner `validateAndPrepareEdgeCreate` calls for a fresh attach, so
+ * an invalid value is refused here exactly as it would be on create, never
+ * silently accepted because the caller happens not to write. (That refusal is
+ * a property of the caller's own input, not of the row, which is why the
+ * lock-free pre-check may reach it too.) A valid value canonically
+ * (`canonicalEqual`, key order aside) identical to the edge's live stored
+ * props is honored; a valid value that DIFFERS is not.
+ *
+ * A stated `validFrom` / `validTo` is compared bound by bound through
+ * {@link statedBoundMatchesStored} — the one stated-versus-stored comparison
+ * every window write uses. An omitted bound states nothing; `validFrom: null`
+ * states "no lower bound" and matches only a row that has none.
+ */
+function judgeSatisfiedAttachment(
+  registry: KindRegistry,
+  attachment: StatedCompositionAttachment,
+  pair: CompositionPair,
+  currentEdge: SatisfiedAttachmentEdge,
+): SatisfiedAttachmentVerdict {
+  if (attachment.props !== undefined) {
+    const edgeType = requireDefined(
+      registry.getEdgeType(pair.viaEdgeKind),
+      `getEdgeType(${pair.viaEdgeKind}) is undefined for a resolved composition pair's own realizing edge kind`,
+    );
+    const validatedProps = validateEdgeProps(
+      edgeType.schema,
+      attachment.props,
+      { kind: pair.viaEdgeKind, operation: "create" },
+    );
+    const storedProps = rowPropsToObject(currentEdge.props);
+    if (!canonicalEqual(validatedProps, storedProps)) {
+      return {
+        honored: false,
+        dimension: "props",
+        currentProps: storedProps,
+        requestedProps: validatedProps,
+      };
+    }
+  }
+
+  const { validFrom, validTo } = attachment.edgeWindow;
+  if (
+    validFrom !== undefined &&
+    !statedBoundMatchesStored(validFrom, currentEdge.valid_from)
+  ) {
+    return {
+      honored: false,
+      dimension: "window",
+      bound: "validFrom",
+      stated: validFrom,
+      stored: currentEdge.valid_from,
+    };
+  }
+  if (
+    validTo !== undefined &&
+    !statedBoundMatchesStored(validTo, currentEdge.valid_to)
+  ) {
+    return {
+      honored: false,
+      dimension: "window",
+      bound: "validTo",
+      stated: validTo,
+      stored: currentEdge.valid_to,
+    };
+  }
+  return { honored: true };
+}
+
+/**
+ * The refusal {@link decideCompositionIncumbent}'s satisfied arm owes — every
+ * surface's no-write return (`reparent`'s no-op and the get-or-create
+ * postcondition's idempotent hit both resolve there). That arm performs no
+ * edge write, so without this call a stated `props` or window would be
+ * neither applied nor refused — an accepted option silently dropped, the same
+ * shape `situation: "existing"` refuses one dimension over (a differing
+ * whole, or a differing realizing edge).
+ *
+ * Disagreeing `props` refuse with `CompositionExistenceError`
+ * (`situation: "props"`) naming both sides. A disagreeing window bound
+ * refuses with `ValidationError` under `partOf.<bound>`, the shape an
+ * in-place edge write gives a lower bound it cannot apply. Neither is
+ * rewritten here: this call resolves an attachment, and changing the
+ * realizing edge is `store.edges.<via>.update(...)`'s.
+ */
+function assertSatisfiedAttachmentHonored(
+  registry: KindRegistry,
+  partKind: string,
+  partId: string,
+  attachment: StatedCompositionAttachment,
+  pair: CompositionPair,
+  currentEdge: Pick<EdgeRow, "id" | "kind"> & SatisfiedAttachmentEdge,
+): void {
+  const verdict = judgeSatisfiedAttachment(
+    registry,
+    attachment,
+    pair,
+    currentEdge,
+  );
+  if (verdict.honored) return;
+  if (verdict.dimension === "props") {
+    throw new CompositionExistenceError({
+      partKind,
+      partId,
+      situation: "props",
+      edgeKind: currentEdge.kind,
+      edgeId: currentEdge.id,
+      currentProps: verdict.currentProps,
+      requestedProps: verdict.requestedProps,
+    });
+  }
+  const path = `${PART_OF_SURFACE.path}.${verdict.bound}`;
+  const storedDescription =
+    verdict.stored === undefined ? "no such bound" : `"${verdict.stored}"`;
+  throw new ValidationError(
+    `Unappliable ${path} for ${partKind} "${partId}": it already holds this whole via "${currentEdge.kind}" (edge ${currentEdge.id}) with a different window.`,
+    {
+      entityType: "node",
+      kind: partKind,
+      id: partId,
+      issues: [
+        {
+          path,
+          code: COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE,
+          message: `Stated ${verdict.stated === null ? "no lower bound" : `"${verdict.stated}"`}, but the realizing edge stores ${storedDescription}.`,
+        },
+      ],
+    },
+    {
+      suggestion: `Omit \`${path}\` or restate the stored bound; an already-satisfied attachment only asserts placement. Change the window on the realizing edge with \`store.edges.${currentEdge.kind}.update(${JSON.stringify(currentEdge.id)}, ...)\`.`,
+    },
+  );
+}
+
+/**
+ * What a fenced attachment does with an incumbent whole it finds under the
+ * per-graph write lock — the ONE dimension that separates "move this part"
+ * from "make sure this part holds this whole":
+ *
+ * - `"replace"` — `nodes.<Kind>.reparent(...)`: retire the incumbent
+ *   attachment and write the requested one. Moving a part is what the caller
+ *   asked for.
+ * - `"refuse"` — every get-or-create path: an incumbent that is NOT the
+ *   requested attachment raises `CompositionExistenceError`
+ *   (`situation: "existing"`). A lookup never moves a part as a side effect,
+ *   so two racing callers that each ask for a different whole end with
+ *   exactly one attachment and one refusal.
+ *
+ * Stated as a disposition the write plan carries rather than as two
+ * code paths, because the verdict is only sound once the incumbent has been
+ * re-read under the lock: a lock-free read can be stale by the time the
+ * frame writes, and acting on its verdict is exactly how a refusing caller
+ * used to perform a silent move.
+ */
+export type CompositionIncumbentDisposition = "replace" | "refuse";
+
+/**
+ * One resolved attachment a write frame owes: the caller's stated
+ * `partOf` verbatim (needed to tell "no `props` stated" from `props: {}`),
+ * the resolved {@link CompositionCreateWork} the attach is built from, and
+ * what to do about an incumbent ({@link CompositionIncumbentDisposition}).
+ *
+ * Built BEFORE any row is read — `resolveCompositionAttachment`'s and
+ * `resolveCompositionCreate`'s refusals are synchronous and read-free — so a
+ * configuration defect of the call refuses without locking anything.
+ */
+export type CompositionAttachmentRequest = Readonly<{
+  attachment: StatedCompositionAttachment;
+  work: CompositionCreateWork;
+  onIncumbent: CompositionIncumbentDisposition;
+}>;
+
+/**
+ * THE resolution of one caller-stated `partOf` into the request a fenced
+ * attachment frame runs: `resolveCompositionCreate`'s read-free refusals (an
+ * undeclared pair, an unknown or ambiguous `via`, a required part with no
+ * `partOf`). `undefined` means this frame owes no attachment at all.
+ *
+ * Every surface that attaches a part against a row that ALREADY exists comes
+ * through here — `nodes.<Kind>.reparent(...)` with `"replace"`, every
+ * get-or-create leg with `"refuse"` — so no surface resolves a pair a caller
+ * above it already resolved, and this is the ONE place a
+ * {@link CompositionAttachmentRequest} is built, so no call site can assemble
+ * one whose `work` and `attachment` describe different wholes.
+ */
+export function resolveCompositionAttachmentRequest(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id: string }>,
+  attachment: StatedCompositionAttachment,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest;
+export function resolveCompositionAttachmentRequest(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id: string }>,
+  attachment: StatedCompositionAttachment | undefined,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest | undefined;
+export function resolveCompositionAttachmentRequest(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id: string }>,
+  attachment: StatedCompositionAttachment | undefined,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest | undefined {
+  const work = compositionCreateWork(registry, part, attachment);
+  if (work === undefined) return undefined;
+  return {
+    attachment: requireDefined(
+      attachment,
+      "compositionCreateWork returned composition work for a call that stated no attachment",
+    ),
+    work,
+    onIncumbent,
+  };
+}
+
+/**
+ * Whether `current` IS the requested attachment: the same whole, held
+ * through the resolved pair's realizing edge. Compared against the RESOLVED
+ * `pair.viaEdgeKind` rather than against `attachment.via`, so an omitted
+ * `via` means "the one declared pair", never "any realizing edge will do".
+ *
+ * The whole/via half of {@link incumbentSatisfiesRequestedAttachment}, which
+ * is what both the fenced verdict ({@link decideCompositionIncumbent}) and the
+ * lock-free pre-check that lets an already-satisfied get-or-create stay
+ * read-only (`applyExistingPartOfPostcondition`, `node-operations.ts`) read —
+ * one spelling, so the cheap skip and the authoritative verdict can never
+ * disagree about what "already holds" means.
+ */
+function incumbentHoldsRequestedAttachment(
+  request: CompositionAttachmentRequest,
+  current: Readonly<{
+    edge: Pick<EdgeRow, "kind">;
+    whole: CompositionNodeRef;
+  }>,
+): boolean {
+  const { attachment, work } = request;
+  return (
+    current.whole.kind === attachment.whole.kind &&
+    current.whole.id === attachment.whole.id &&
+    current.edge.kind === work.pair.viaEdgeKind
+  );
+}
+
+/**
+ * Whether this incumbent leaves the request with NOTHING to write: it is the
+ * requested attachment ({@link incumbentHoldsRequestedAttachment}) AND the
+ * realizing edge already carries the stated `props` and window
+ * ({@link judgeSatisfiedAttachment}) — the two conjuncts
+ * {@link decideCompositionIncumbent}'s satisfied arm is built from, in one
+ * predicate so the cheap skip and the authoritative verdict cannot disagree
+ * about what "nothing to do" means.
+ *
+ * Read twice, against the same row: once lock-free, to let an already-resolved
+ * get-or-create return without opening a write transaction at all
+ * (`applyExistingPartOfPostcondition`, `node-operations.ts` — including the
+ * idempotent ingest that restates the props every time, which would otherwise
+ * take the per-graph write fence for a no-op), and once under the fence, where
+ * the verdict is authoritative. Only the SKIP is ever taken from the lock-free
+ * read: anything else escalates to the fence, which is the one allowed to
+ * refuse or write.
+ *
+ * A `props` value that does not validate against the realizing edge's schema
+ * refuses from either read — that refusal reads the caller's input, never the
+ * row, so it cannot be stale.
+ */
+export function incumbentSatisfiesRequestedAttachment(
+  registry: KindRegistry,
+  request: CompositionAttachmentRequest,
+  current: Readonly<{
+    edge: Pick<EdgeRow, "kind"> & SatisfiedAttachmentEdge;
+    whole: CompositionNodeRef;
+  }>,
+): boolean {
+  return (
+    incumbentHoldsRequestedAttachment(request, current) &&
+    judgeSatisfiedAttachment(
+      registry,
+      request.attachment,
+      request.work.pair,
+      current.edge,
+    ).honored
+  );
+}
+
+/**
+ * What one fenced attachment frame does, decided from the incumbent the
+ * frame re-read UNDER THE LOCK:
+ *
+ * - `"satisfied"` — the part already holds exactly this attachment. No write
+ *   at all, which is what makes a repeated get-or-create (and a `reparent`
+ *   to the whole the part already holds) idempotent rather than a refusal.
+ *   A stated `props` or window is still honored here
+ *   ({@link assertSatisfiedAttachmentHonored}): this arm writes no edge, so
+ *   a differing value is refused rather than silently dropped.
+ * - `"attach"` — the part holds no live whole: write the attachment.
+ * - `"replace"` — a DIFFERENT incumbent under `onIncumbent: "replace"`:
+ *   retire it, then write the requested attachment.
+ *
+ * A different incumbent under `onIncumbent: "refuse"` throws
+ * `CompositionExistenceError` (`situation: "existing"`) naming both sides —
+ * the held whole (and realizing edge, when only the edge differs) and the
+ * requested one.
+ *
+ * Pure and synchronous: the read that produced `current` is the caller's, so
+ * this decision can be reached only from inside the fence that read it.
+ */
+function decideCompositionIncumbent(
+  registry: KindRegistry,
+  partId: string,
+  request: CompositionAttachmentRequest,
+  current:
+    | Readonly<{
+        edge: Pick<EdgeRow, "id" | "kind"> & SatisfiedAttachmentEdge;
+        whole: CompositionNodeRef;
+      }>
+    | undefined,
+): "satisfied" | "attach" | "replace" {
+  if (current === undefined) return "attach";
+
+  const { attachment, work, onIncumbent } = request;
+  const partKind = work.partKind;
+  if (incumbentHoldsRequestedAttachment(request, current)) {
+    assertSatisfiedAttachmentHonored(
+      registry,
+      partKind,
+      partId,
+      attachment,
+      work.pair,
+      current.edge,
+    );
+    return "satisfied";
+  }
+
+  if (onIncumbent === "replace") return "replace";
+
+  const wholeMatches =
+    current.whole.kind === attachment.whole.kind &&
+    current.whole.id === attachment.whole.id;
+  throw new CompositionExistenceError({
+    partKind,
+    partId,
+    situation: "existing",
+    currentWhole: current.whole,
+    ...(wholeMatches ? { currentVia: current.edge.kind } : {}),
+    requestedWhole: attachment.whole,
+    requestedVia: work.pair.viaEdgeKind,
+  });
+}
+
+/**
+ * One fenced attachment's DECISION: the disposition
+ * {@link decideCompositionIncumbent} reached, plus the incumbent it was
+ * reached from, so the write half never re-reads the row the verdict was
+ * judged against.
+ *
+ * The decision itself travels, not a flag a caller re-derives it from: a
+ * frame that holds one of these cannot spell a second, drifting version of
+ * "what does this incumbent mean".
+ */
+export type FencedCompositionAttachment = Readonly<{
+  request: CompositionAttachmentRequest;
+  disposition: "satisfied" | "attach" | "replace";
+  /** The incumbent the disposition was judged against; absent when none. */
+  incumbent?: Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>;
+}>;
+
+/**
+ * THE single owner of "does this edge endpoint row exist and count as live" —
+ * shared by two questions asked at two different times against the two
+ * different rows one composition attachment touches:
+ *
+ * - `assertLiveEdgeEndpoints` (`edge-operations.ts`) calls this for BOTH
+ *   endpoints inside the ordinary edge-create preparation every composition
+ *   edge goes through (`prepareCompositionCreateEdge`, `node-operations.ts`)
+ *   — the only place the PART endpoint is checked. The get-or-create
+ *   resurrection leg skips that read, since its part row is still a
+ *   tombstone until the property update later in the same frame restores it.
+ * - {@link decideCompositionAttachmentUnderFence} calls this for the WHOLE
+ *   endpoint, at DECIDE time, so the resurrection leg still refuses a dead
+ *   whole before its first statement — see that function's docblock.
+ *
+ * One spelling of the liveness verdict keeps the two calls from ever judging
+ * "is this row live" differently, the way a second copy of a decision drifts
+ * per this codebase's Contract Discipline rule.
+ */
+export function assertEndpointRowLive(
+  edgeKind: string,
+  endpoint: "from" | "to",
+  nodeKind: string,
+  nodeId: string,
+  row: NodeRow | undefined,
+): void {
+  if (!isEndpointRowLive(row)) {
+    throw new EndpointNotFoundError({ edgeKind, endpoint, nodeKind, nodeId });
+  }
+}
+
+/**
+ * THE endpoint-liveness predicate: a row an edge may point at is present and
+ * not tombstoned. Valid time is deliberately not part of it — a row whose
+ * window has closed is still a row an attachment may name.
+ *
+ * The verdict behind {@link assertEndpointRowLive}, and behind the readers in
+ * this module that need the same answer WITHOUT a refusal
+ * ({@link readLiveCompositionWholes}, which the `compositionExistence` audit and
+ * provenance's support computation read, and the detach refusal's own part-row
+ * check). One predicate, so a reporting path and a refusing path can never judge
+ * the same row differently. Module-private: every consumer of the decision is a
+ * function here, each exported in its own right.
+ */
+function isEndpointRowLive(row: NodeRow | undefined): row is LiveNodeRow {
+  return row !== undefined && isLiveNodeRow(row);
+}
+
+/**
+ * THE refusal an attachment owes for its WHOLE endpoint: the row this
+ * attachment's whole resolves to must exist and be live, reported on the side
+ * of the realizing edge the whole actually occupies.
+ *
+ * One owner for the two callers that check the whole ALONE — a part's own
+ * liveness being established some other way:
+ * {@link decideCompositionAttachmentUnderFence}, whose part row may still be
+ * a tombstone the frame's later update restores, and a node create's
+ * preparation (`prepareCompositionEdgeForCreate` and its batch twin,
+ * `node-operations.ts`), whose part row this same frame is about to write.
+ * Without one
+ * spelling, each would re-derive the side from `pair.partSide` itself, and
+ * the two could report a dead whole on different endpoints.
+ */
+export function assertCompositionWholeEndpointLive(
+  work: Pick<CompositionCreateWork, "pair" | "whole">,
+  row: NodeRow | undefined,
+): void {
+  assertEndpointRowLive(
+    work.pair.viaEdgeKind,
+    wholeSide(work.pair.partSide),
+    work.whole.kind,
+    work.whole.id,
+    row,
+  );
+}
+
+/**
+ * THE fenced DECIDE half of an attachment: re-read the incumbent on the
+ * frame's own transaction target — under the per-graph write lock the caller
+ * already holds — and judge it ({@link decideCompositionIncumbent}).
+ *
+ * Separated from the write half so a frame that owes OTHER statements can
+ * run every decision this one can reach before its first statement: the
+ * get-or-create `ifExists: "update"` / resurrection leg decides here,
+ * prepares the edge's own reads, then updates properties, then inserts. A
+ * refusal this function raises therefore precedes the property update, which
+ * is what keeps a caller that catches it inside an enclosing
+ * `store.transaction(...)` — where there is no nested frame to roll back —
+ * from committing an update whose attachment never applied.
+ *
+ * That is why this function also owns the WHOLE endpoint's liveness read:
+ * when the disposition is going to attach a new edge (`"attach"` or
+ * `"replace"`), a dead or missing whole is refused HERE, via
+ * {@link assertCompositionWholeEndpointLive}, before returning. The PART endpoint is
+ * deliberately NOT read here: on the resurrection leg the part row is still
+ * a tombstone until the update restores it, so a part-liveness read taken
+ * here would refuse every resurrection; the edge preparation reads it on the
+ * legs where it is live, and the restoring update is the proof on the leg
+ * where it is not. A `"satisfied"` disposition attaches nothing, so on a live
+ * part it owes no fresh liveness read. On the resurrection leg it does: the
+ * frame is about to restore the part under the attachment it already holds,
+ * and a part's tombstone can outlive its whole's with the edge between them
+ * still live, so the whole is read and a dead one refused exactly as on the
+ * attaching dispositions — the verdict every other restore entry reaches
+ * through {@link assertRestoredRequiredPartsAttached}.
+ *
+ * `target` is the frame's own transaction target, which is the only reason
+ * the verdict can be trusted: a verdict from a lock-free read is exactly what
+ * would let a refusing caller perform a silent move. `lock: GraphWriteLock`
+ * is compile-time evidence this read (like the incumbent re-read beside it)
+ * cannot precede the per-graph write lock — the same device
+ * `assertCompositionExistencePreserved` uses.
+ */
+export async function decideCompositionAttachmentUnderFence(
+  registry: KindRegistry,
+  target: GraphReadBackend,
+  graphId: string,
+  partId: string,
+  request: CompositionAttachmentRequest,
+  lock: GraphWriteLock,
+  frame: Readonly<{ partRowRestoredByUpdate: boolean }>,
+): Promise<FencedCompositionAttachment> {
+  void lock;
+  const incumbent = await findLiveCompositionAttachment(
+    registry,
+    target,
+    graphId,
+    request.work.partKind,
+    partId,
+  );
+  const disposition = decideCompositionIncumbent(
+    registry,
+    partId,
+    request,
+    incumbent,
+  );
+  if (disposition !== "satisfied" || frame.partRowRestoredByUpdate) {
+    const { whole } = request.work;
+    const wholeRow = await target.getNode(graphId, whole.kind, whole.id);
+    assertCompositionWholeEndpointLive(request.work, wholeRow);
+  }
+  return {
+    request,
+    disposition,
+    ...(incumbent === undefined ? {} : { incumbent }),
+  };
+}
+
+/**
+ * The live whole a composition part currently holds, if any — read to name
+ * it in `CompositionExistenceError`'s `situation: "existing"` message, and
+ * to decide whether a `getOrCreateByConstraint` postcondition is already
+ * satisfied. The whole-only projection of
+ * {@link findLiveCompositionAttachment}.
+ */
+export async function findLiveCompositionWhole(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  concreteKind: string,
+  concreteId: string,
+  excludeEdgeIds?: ReadonlySet<string>,
+): Promise<CompositionNodeRef | undefined> {
+  const attachment = await findLiveCompositionAttachment(
+    registry,
+    backend,
+    graphId,
+    concreteKind,
+    concreteId,
+    excludeEdgeIds,
+  );
+  return attachment?.whole;
+}
+
+/**
+ * THE refusal a node RESURRECTION owes that states no attachment: a tombstoned
+ * part of a required-existence kind may only come back holding a live whole.
+ *
+ * The restore-side twin of {@link resolveCompositionCreate}'s bare-create
+ * refusal, for the entries that revive a row without accepting a `partOf`
+ * (`upsertById`, `bulkUpsertById`, `bulkReplaceById`, and an update that
+ * clears a tombstone). Deleting a part removes its own composition edges, so
+ * the usual answer is that no attachment survives and the restore is refused;
+ * the read keeps the verdict honest for a tombstone whose edge does survive
+ * (rows written outside the store's write path), judged through the same
+ * readers the `compositionExistence` audit uses
+ * ({@link findLiveCompositionAttachment}, {@link readLiveCompositionWholes}).
+ *
+ * Called before the frame's first statement, for every candidate at once, so
+ * a caller that catches the refusal inside an enclosing `store.transaction`
+ * keeps nothing of the batch. A candidate whose row is live is not being
+ * restored and is skipped; a kind that requires no whole costs no read.
+ */
+export async function assertRestoredRequiredPartsAttached(
+  ctx: Readonly<{
+    graphId: string;
+    registry: KindRegistry;
+    lock: GraphWriteLock;
+  }>,
+  target: GraphReadBackend,
+  parts: readonly CompositionNodeRef[],
+): Promise<void> {
+  for (const part of parts) {
+    if (ctx.registry.compositionExistence(part.kind) !== "required") continue;
+    if (compositionExistenceDeferred(target, part)) continue;
+    const row = await target.getNode(ctx.graphId, part.kind, part.id);
+    if (isEndpointRowLive(row)) continue;
+    const attachment = await findLiveCompositionAttachment(
+      ctx.registry,
+      target,
+      ctx.graphId,
+      part.kind,
+      part.id,
+    );
+    const liveWholes =
+      attachment === undefined ?
+        []
+      : await readLiveCompositionWholes(target, ctx.graphId, [
+          attachment.whole,
+        ]);
+    if (liveWholes.length > 0) continue;
+    throw new CompositionExistenceError({
+      partKind: part.kind,
+      partId: part.id,
+      situation: "create",
+    });
+  }
+}
+
+/**
+ * Every concrete node kind the proposed/live registry declares a
+ * required-existence composition part — expanded through
+ * `expandSubClasses` so a SUBCLASS of a declared required part kind (which
+ * `resolveCompositionCreate` already refuses to create without a whole, via
+ * `isAssignableTo`) is scanned too. A pair's `partKind` names the kind the
+ * ontology was declared against; a live row of a subclass never declared
+ * directly is exactly as required-and-orphanable as one of the declared
+ * kind itself.
+ */
+export function requiredCompositionPartKinds(
+  registry: KindRegistry,
+): readonly string[] {
+  const partKinds = new Set<string>();
+  for (const pair of registry.compositionRelation().pairs) {
+    if (registry.compositionExistence(pair.partKind) === "required") {
+      for (const concreteKind of registry.expandSubClasses(pair.partKind)) {
+        partKinds.add(concreteKind);
+      }
+    }
+  }
+  return [...partKinds];
+}
+
+/**
+ * Whether the registry declares any required-existence composition part kind:
+ * a graph whose parts and their attaching composition edges must be written
+ * in ONE import transaction, since a part committed alone is an orphan.
+ */
+export function declaresRequiredCompositionParts(
+  registry: KindRegistry,
+): boolean {
+  return requiredCompositionPartKinds(registry).length > 0;
+}
+
+/**
+ * How many parts one attachment page resolves at a time — the `findNodesByKind`
+ * limit the audit pages on, and the chunk size every other consumer of
+ * {@link readCompositionAttachmentsForPage} (provenance's support computation)
+ * uses, so one page's candidate read stays one bounded statement per
+ * orientation on every caller.
+ */
+export const COMPOSITION_ATTACHMENT_PAGE_SIZE = 500;
+
+/**
+ * Every LIVE node of a required-existence part kind that currently has no
+ * live whole. Reused by `store.verifyConstraintFences()`'s
+ * `compositionExistence` family (graph-wide) and by
+ * `prepareSchemaTighteningPreflight`'s third composition check
+ * (delta-scoped to the part kinds a commit newly requires a whole for).
+ *
+ * A portable, non-pushdown scan — `findNodesByKind` paged, each row's verdict
+ * reached through {@link selectLiveCompositionAttachment}, the SAME predicate
+ * the write-path detach refusal reads — rather than a dedicated backend SQL
+ * audit member: a second, dialect-specific SQL implementation of "does this
+ * row have a live whole" would have to stay in step with
+ * `assertCompositionExistencePreserved`'s TypeScript one.
+ *
+ * The candidate edges of a whole PAGE of parts are read in one statement per
+ * orientation ({@link readPageAttachmentCandidateEdges}) instead of one read
+ * per row. A row the batched read finds no attachment for is confirmed
+ * through {@link findLiveCompositionWhole} before it is reported: no licensed
+ * rows is not evidence that none exist, and a wrong "unattached" here becomes
+ * a refusal at schema-commit time. Confirmation therefore costs one read per
+ * genuinely unattached row, never per attached one.
+ */
+/**
+ * One page of parts' candidate composition edges, keyed by part, read with
+ * `findEdgesByHeterogeneousEndpointSet` — one statement per orientation,
+ * since one call's `side` applies uniformly to every edge kind it names.
+ * `undefined` when the backend omits that optional port, which leaves the
+ * caller on its per-row reads.
+ *
+ * The port applies no temporal filter beyond `excludeDeleted`, exactly like
+ * the `findEdgesConnectedTo` read it stands in for, so the population
+ * decision remains {@link compositionEdgeAttachesPart}'s alone.
+ */
+async function readPageAttachmentCandidateEdges(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  parts: readonly CompositionNodeRef[],
+): Promise<ReadonlyMap<string, readonly EdgeRow[]> | undefined> {
+  const setRead = backend.findEdgesByHeterogeneousEndpointSet;
+  if (setRead === undefined) return undefined;
+  const edgeKinds = new Set(
+    parts.flatMap((part) => [...registry.compositionEdgeKindsOver(part.kind)]),
+  );
+  const partIsFromEdgeKinds = [...edgeKinds].filter(
+    (edgeKind) => registry.compositionPartSide(edgeKind) === "from",
+  );
+  const partIsToEdgeKinds = [...edgeKinds].filter(
+    (edgeKind) => registry.compositionPartSide(edgeKind) === "to",
+  );
+  const endpoints = parts.map((part) => ({ kind: part.kind, id: part.id }));
+  const [fromSideRows, toSideRows] = await Promise.all([
+    partIsFromEdgeKinds.length === 0 ?
+      Promise.resolve<readonly EdgeRow[]>([])
+    : setRead({
+        graphId,
+        side: "from",
+        endpoints,
+        edgeKinds: partIsFromEdgeKinds,
+        excludeDeleted: true,
+      }),
+    partIsToEdgeKinds.length === 0 ?
+      Promise.resolve<readonly EdgeRow[]>([])
+    : setRead({
+        graphId,
+        side: "to",
+        endpoints,
+        edgeKinds: partIsToEdgeKinds,
+        excludeDeleted: true,
+      }),
+  ]);
+  const byPart = new Map<string, EdgeRow[]>();
+  for (const edge of [...fromSideRows, ...toSideRows]) {
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) continue;
+    const { part } = compositionRowEndpoints(partSide, edge);
+    const key = encodeTupleKey([part.kind, part.id]);
+    const bucket = byPart.get(key) ?? [];
+    byPart.set(key, bucket);
+    bucket.push(edge);
+  }
+  return byPart;
+}
+
+/**
+ * THE page-scoped answer to "which whole does each of these parts currently
+ * hang from", keyed by part. A part with no entry has no current attachment,
+ * CONFIRMED by its own read — the batched candidate read is an optimization,
+ * never the evidence for a negative (see
+ * {@link readPageAttachmentCandidateEdges}: an absent port answers
+ * `undefined`, and a wrong "unattached" becomes a refusal at schema-commit
+ * time).
+ *
+ * One owner, two consumers: `verifyConstraintFences`' `compositionExistence`
+ * family ({@link readCompositionUnattachedParts}) and provenance's support
+ * computation (`src/provenance/index.ts`), which would otherwise re-spell the
+ * batched-then-confirmed shape over its own fact rows.
+ */
+export async function readCompositionAttachmentsForPage(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  parts: readonly CompositionNodeRef[],
+): Promise<
+  ReadonlyMap<string, Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>>
+> {
+  const candidateEdges = await readPageAttachmentCandidateEdges(
+    registry,
+    backend,
+    graphId,
+    parts,
+  );
+  const attachments = new Map<
+    string,
+    Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>
+  >();
+  for (const row of parts) {
+    const partKey = encodeTupleKey([row.kind, row.id]);
+    const batched = candidateEdges?.get(partKey);
+    const fromPage =
+      batched === undefined ? undefined : (
+        selectLiveCompositionAttachment(registry, row.kind, row.id, batched)
+      );
+    if (fromPage !== undefined) {
+      attachments.set(partKey, fromPage);
+      continue;
+    }
+    const confirmed = await findLiveCompositionAttachment(
+      registry,
+      backend,
+      graphId,
+      row.kind,
+      row.id,
+    );
+    if (confirmed !== undefined) attachments.set(partKey, confirmed);
+  }
+  return attachments;
+}
+
+/**
+ * The read surface a whole-row read needs: the point read every backend has,
+ * plus the batch extra when the port carries it. Narrow on purpose — a write
+ * frame's transaction target and a read-only audit backend both satisfy it.
+ */
+type CompositionWholeRowReader = Readonly<Pick<GraphBackend, "getNode">> &
+  Readonly<Partial<Pick<GraphBackend, "getNodes">>>;
+
+/**
+ * THE whole-row read: every `(kind, id)` these wholes name, deduplicated, read
+ * once per kind through the batch point read when the caller hands over the
+ * verdict that reaches `getNodes`, and through the per-id `getNode` the bundle
+ * declares as that extra's fallback when it does not. Keyed by the `(kind, id)`
+ * tuple key, with an explicit `undefined` for a whole that has no row at all,
+ * so a caller can tell "absent" from "not asked for".
+ *
+ * One owner, two consumers that would otherwise spell the same dedupe, the same
+ * binding and the same fallback twice: the node-create batch's attach loop
+ * (`prepareBatchCompositionCreateEdges`, `node-operations.ts`), which judges each
+ * row through {@link assertCompositionWholeEndpointLive} and carries it as the
+ * preparation's `"primedWhole"` evidence, and {@link readLiveCompositionWholes}
+ * below. The port is an optimization, never a requirement: the verdict a caller
+ * reaches must be identical either way.
+ */
+export async function readCompositionWholeRows(
+  port: CompositionWholeRowReader,
+  graphId: string,
+  wholes: readonly CompositionNodeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<ReadonlyMap<string, NodeRow | undefined>> {
+  const idsByKind = new Map<string, Set<string>>();
+  for (const whole of wholes) {
+    const ids = idsByKind.get(whole.kind) ?? new Set<string>();
+    ids.add(whole.id);
+    idsByKind.set(whole.kind, ids);
+  }
+  const boundGetNodes =
+    batchPointRead === undefined ? undefined : (
+      bindExtraIfReachable(
+        port,
+        batchPointRead.extras.getNodes,
+        BATCH_POINT_READ.id,
+      )
+    );
+
+  const rowsByWhole = new Map<string, NodeRow | undefined>();
+  for (const [kind, ids] of idsByKind) {
+    const orderedIds = [...ids];
+    if (boundGetNodes === undefined) {
+      for (const id of orderedIds) {
+        rowsByWhole.set(
+          encodeTupleKey([kind, id]),
+          await port.getNode(graphId, kind, id),
+        );
+      }
+      continue;
+    }
+    const rows = await boundGetNodes.getNodes(graphId, kind, orderedIds);
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    for (const id of orderedIds) {
+      rowsByWhole.set(encodeTupleKey([kind, id]), rowsById.get(id));
+    }
+  }
+  return rowsByWhole;
+}
+
+/**
+ * Which of these wholes are LIVE rows, as the whole-endpoint refusal judges
+ * liveness ({@link isEndpointRowLive}: present and not tombstoned — a tombstone
+ * is the whole of the question, valid time is not). The filtering projection of
+ * {@link readCompositionWholeRows}, so it shares that read's dedupe, binding and
+ * fallback rather than repeating them.
+ *
+ * Separate from {@link selectLiveCompositionAttachment} on purpose: the write
+ * path's incumbent decision must keep seeing a tombstoned whole's attachment,
+ * while a consumer asking "is this part still held up" composes the two.
+ */
+export async function readLiveCompositionWholes(
+  backend: GraphReadBackend,
+  graphId: string,
+  wholes: readonly CompositionNodeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<readonly CompositionNodeRef[]> {
+  const rowsByWhole = await readCompositionWholeRows(
+    backend,
+    graphId,
+    wholes,
+    batchPointRead,
+  );
+  const live: CompositionNodeRef[] = [];
+  for (const row of rowsByWhole.values()) {
+    if (!isEndpointRowLive(row)) continue;
+    live.push({ kind: row.kind, id: row.id });
+  }
+  return live;
+}
+
+/**
+ * One part and the LIVE whole it currently hangs from. `whole` is `undefined`
+ * when the part has no current composition edge OR the whole that edge names
+ * is not a live row. The second arm is what catches a part left hanging from
+ * a TOMBSTONED or absent whole — a state the delete cascade cannot produce
+ * but a direct backend write, a custom port, an import that skipped reference
+ * validation, or a belief-status close of a whole whose parts are optional
+ * can.
+ */
+export type CompositionPartStanding = Readonly<{
+  part: CompositionNodeRef;
+  whole: CompositionNodeRef | undefined;
+}>;
+
+/**
+ * THE page-scoped answer to "is each of these parts held up by a live whole",
+ * in input order: the current attachment
+ * ({@link readCompositionAttachmentsForPage}, so {@link compositionEdgeAttachesPart}
+ * decides which edge counts) composed with the whole's own liveness
+ * ({@link readLiveCompositionWholes}).
+ *
+ * One owner for the two consumers that must agree row for row: the
+ * `compositionExistence` audit ({@link readCompositionUnattachedParts}) and
+ * interchange import's end-of-import assertion, which refuses exactly the
+ * parts the audit would report.
+ */
+export async function readCompositionPartStandings(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  parts: readonly CompositionNodeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<readonly CompositionPartStanding[]> {
+  const attachments = await readCompositionAttachmentsForPage(
+    registry,
+    backend,
+    graphId,
+    parts,
+  );
+  const liveWholes = await readLiveCompositionWholes(
+    backend,
+    graphId,
+    [...attachments.values()].map((attachment) => attachment.whole),
+    batchPointRead,
+  );
+  const liveWholeKeys = new Set(
+    liveWholes.map((whole) => encodeTupleKey([whole.kind, whole.id])),
+  );
+  return parts.map((part) => {
+    const whole = attachments.get(encodeTupleKey([part.kind, part.id]))?.whole;
+    return {
+      part: { kind: part.kind, id: part.id },
+      whole:
+        (
+          whole !== undefined &&
+          liveWholeKeys.has(encodeTupleKey([whole.kind, whole.id]))
+        ) ?
+          whole
+        : undefined,
+    };
+  });
+}
+
+/**
+ * Every LIVE node of these part kinds that {@link readCompositionPartStandings}
+ * finds with no live whole, paged by id.
+ */
+export async function readCompositionUnattachedParts(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  partKinds: readonly string[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<readonly CompositionNodeRef[]> {
+  const unattached: CompositionNodeRef[] = [];
+  for (const partKind of partKinds) {
+    let after: string | undefined;
+    for (;;) {
+      const rows = await backend.findNodesByKind({
+        graphId,
+        kind: partKind,
+        excludeDeleted: true,
+        orderBy: "id",
+        limit: COMPOSITION_ATTACHMENT_PAGE_SIZE,
+        ...(after === undefined ? {} : { after }),
+      });
+      const standings = await readCompositionPartStandings(
+        registry,
+        backend,
+        graphId,
+        rows,
+        batchPointRead,
+      );
+      for (const standing of standings) {
+        if (standing.whole === undefined) unattached.push(standing.part);
+      }
+      if (rows.length < COMPOSITION_ATTACHMENT_PAGE_SIZE) break;
+      after = requireDefined(
+        rows.at(-1),
+        "findNodesByKind returned a full page with no last row",
+      ).id;
+    }
+  }
+  return unattached;
+}

@@ -26,7 +26,7 @@ function createSetOperationPlan(): LogicalPlan {
     },
     start: {
       alias: "p",
-      includeSubClasses: false,
+      expansion: "exact" as const,
       kinds: ["Person"],
     },
     temporalMode: { mode: "current" as const },
@@ -80,7 +80,7 @@ describe("emitSetOperationQuerySql", () => {
         },
         start: {
           alias: "p",
-          includeSubClasses: false,
+          expansion: "exact" as const,
           kinds: ["Person"],
         },
         temporalMode: { mode: "current" as const },
@@ -113,7 +113,7 @@ describe("emitSetOperationQuerySql", () => {
           },
         ],
       },
-      start: { alias: "p", includeSubClasses: false, kinds: ["Person"] },
+      start: { alias: "p", expansion: "exact" as const, kinds: ["Person"] },
       temporalMode: { mode: "current" as const },
       traversals: [],
     };
@@ -194,7 +194,7 @@ describe("emitSetOperationQuerySql", () => {
           },
         ],
       },
-      start: { alias: "p", includeSubClasses: false, kinds: ["Person"] },
+      start: { alias: "p", expansion: "exact" as const, kinds: ["Person"] },
       temporalMode: { mode: "current" as const },
       traversals: [],
     };

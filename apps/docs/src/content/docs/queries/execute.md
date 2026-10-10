@@ -236,7 +236,8 @@ bind-parameter budget.
 
 ### Pagination with Traversals
 
-Pagination works with graph traversals:
+Pagination works with graph traversals. Each matched row is one page entry, and the order may name
+the traversed alias:
 
 ```typescript
 const employeesPage = await store
@@ -655,9 +656,21 @@ Both `paginate()` and `stream()` require an `orderBy()` clause:
 
 ### Stable Ordering
 
-Cursor pagination and streaming automatically append missing start-node identity keys: `id ASC`
-for a single kind, or `kind ASC` and `id ASC` for a multi-kind source. Existing caller-specified
-identity ordering is preserved. Offset pagination needs an explicit total ordering.
+Cursor pagination and streaming automatically append the keys that identify one result row, so a
+sort that ties never skips or repeats a row at a page boundary. For the start node that is
+`id ASC`, or `kind ASC` and `id ASC` for a multi-kind source. Each traversal then adds the `id` of
+the edge it matched: one start node that fans out into several rows, two parallel edges
+between the same pair of nodes, and several rows that reach one intermediate node of a multi-hop
+traversal, page as distinct rows. Existing caller-specified identity ordering
+is preserved, and order keys may read any alias in the query: the start node, a traversed node, or
+an edge. Offset pagination needs an explicit total ordering.
+
+A cursor encodes the full key list, so a cursor saved from a traversal query before these edge keys
+were appended is refused; restart that pagination from the first page.
+
+A query with a recursive traversal (`recursive()`) has no single edge per row and keeps the
+start-node keys alone. Its pages are exact only while no start node's rows straddle a page
+boundary, so page such a query by a single start node at a time or read it with `execute()`.
 
 For deterministic offset pagination of one kind, include `id` in your ordering:
 

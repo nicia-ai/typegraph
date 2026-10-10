@@ -1,4 +1,5 @@
 /** Pure preparation for a schema evolution; database-dependent guards run at apply time. */
+import type { EdgeCardinalityDeclaration } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { classifyModifications } from "../graph-extension/classify";
@@ -9,6 +10,11 @@ import type { VectorSlot } from "../query/dialect/vector-strategy";
 import { freezeDeep } from "../utils/object";
 import { canonicalEqual } from "./canonical";
 import { prepareNewSchemaVersion } from "./new-schema-version";
+import type { OntologyChange } from "./ontology-change";
+import {
+  prepareSchemaTighteningPreflight,
+  type SchemaTighteningPreflight,
+} from "./tightening-preflight";
 import type { SchemaHash, SchemaIdentity, SerializedSchema } from "./types";
 
 /** A planned schema delta, database-dependent check, or provisioning requirement. */
@@ -30,6 +36,16 @@ export type EvolutionRequirement =
       fieldPath: string;
     }>
   | Readonly<{
+      /**
+       * Existing rows must satisfy an ontology axiom or edge cardinality this
+       * delta newly declares; apply refuses with the same `MigrationError`
+       * `Store.evolve()` raises when they do not.
+       */
+      kind: "ontology-tightening";
+      changes: readonly OntologyChange[];
+      edgeCardinalityAxes: readonly EdgeCardinalityDeclaration[];
+    }>
+  | Readonly<{
       kind: "identity";
       nodeKinds: readonly string[];
     }>;
@@ -49,6 +65,8 @@ export type EvolutionPlanRequirements = Readonly<{
     { kind: "vector-slot" }
   >[];
   identityAffectedKinds: readonly string[];
+  /** The data preflight the delta's ontology or edge-cardinality tightening owes. */
+  schemaTightening: SchemaTighteningPreflight | undefined;
 }>;
 
 declare const evolutionPlanBrand: unique symbol;
@@ -226,6 +244,15 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   const schemaDocument = freezeDeep(prepared.schemaDocument);
   const resultingHash = prepared.schemaHash;
   const addedKinds = newlyAddedKinds(existingExtension, extension);
+  // Derived from the exact before/after documents this plan commits, the
+  // same pair `Store.evolve()` hands the same preflight.
+  const schemaTightening = prepareSchemaTighteningPreflight({
+    graphId: baselineGraph.id,
+    fromVersion: baselineVersion,
+    toVersion: resultingVersion,
+    before: storedSchema,
+    after: schemaDocument,
+  });
   const groupedRequirements: EvolutionPlanRequirements = Object.freeze({
     requireEmpty: Object.freeze(
       classification.requireEmpty.map((entry) =>
@@ -241,11 +268,21 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     identityAffectedKinds: Object.freeze(
       identityKindsRequiringPreflight(baselineGraph, mergedGraph),
     ),
+    schemaTightening,
   });
   const requirements: EvolutionRequirements = Object.freeze([
     ...groupedRequirements.requireEmpty,
     ...groupedRequirements.addedKinds,
     ...groupedRequirements.vectorSlots,
+    ...(schemaTightening === undefined ?
+      []
+    : [
+        freezeDeep({
+          kind: "ontology-tightening" as const,
+          changes: schemaTightening.probedChanges,
+          edgeCardinalityAxes: schemaTightening.newlyConstrainedAxes,
+        }),
+      ]),
     ...(groupedRequirements.identityAffectedKinds.length > 0 ?
       [
         Object.freeze({

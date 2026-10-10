@@ -14,7 +14,7 @@ import {
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact, MergePlanTargetFence } from "./plan-schema";
-import { validateMergePlanArtifact } from "./plan-wire";
+import { readFormatVersion, validateMergePlanArtifact } from "./plan-wire";
 import { err, isErr, ok, type Result } from "./result";
 import {
   candidateReviewReferenceRows,
@@ -30,14 +30,16 @@ import {
   reviewOptionEvidence,
 } from "./review-evidence";
 import {
-  MERGE_REVIEW_FORMAT_VERSION_V1,
-  MERGE_REVIEW_FORMAT_VERSION_V2,
+  isSupportedMergeReviewFormatVersion,
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   type MergeReviewArtifact,
   mergeReviewArtifactSchema,
   type MergeReviewDifference,
   type MergeReviewPolicy,
   mergeReviewPolicySchema,
   type MergeReviewRevalidation,
+  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
 } from "./review-schema";
 import { canUseSparseCandidatePlanning } from "./sparse-candidate-branch";
 import type { GraphDef } from "./typegraph-internal";
@@ -46,7 +48,7 @@ export type PlanCandidateWriteSetReviewArgs<G extends GraphDef> =
   PlanCandidateWriteSetArgs<G> &
     Readonly<{
       policy: MergeReviewPolicy;
-      /** V2 is explicit opt-in and uses candidate-scoped identity evidence. */
+      /** Explicit opt-in to the format that uses candidate-scoped identity evidence. */
       reviewScope?: "candidate";
     }>;
 
@@ -111,15 +113,15 @@ export async function planCandidateWriteSetReview<G extends GraphDef>(
         )
       : baselineBeforePlan;
     if (baseline === undefined)
-      throw new MergeReviewError("Missing V1 review baseline.");
+      throw new MergeReviewError("Missing whole-target review baseline.");
     assertReviewPlanFence(startingFence, planned.data);
     await assertPlanningFenceUnchanged(args.target, startingFence);
     assertOptionsUnchanged(options, reviewOptionEvidence(args.options));
     const input = {
       formatVersion:
         candidateScope ?
-          MERGE_REVIEW_FORMAT_VERSION_V2
-        : MERGE_REVIEW_FORMAT_VERSION_V1,
+          MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED
+        : MERGE_REVIEW_FORMAT_VERSION,
       kind: "candidate-write-set" as const,
       writeSet,
       policy,
@@ -155,25 +157,22 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
     const review = await validateReview(args.review);
     const policy = mergeReviewPolicySchema.parse(args.policy);
     const options = reviewOptionEvidence(args.options);
-    const reviewedEvidenceMode =
-      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V1 ? "v1" : "v2";
+    const candidateScoped =
+      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED;
     if (
-      reviewedEvidenceMode === "v2" &&
+      candidateScoped &&
       args.target.graph.identity !== undefined &&
       review.baseline.identityReferences === undefined
     ) {
       throw new MergeReviewError(
-        "Identity-enabled V2 review evidence is missing its retained identity scope.",
+        "Identity-enabled candidate-scoped review evidence is missing its retained identity scope.",
         { details: { reason: "missing-identity-scope" } },
       );
     }
     const startingFence = await captureMergePlanTargetFence(args.target);
-    if (
-      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
-      startingFence.revision.revision === null
-    ) {
+    if (candidateScoped && startingFence.revision.revision === null) {
       throw new MergeReviewError(
-        "Candidate-scoped V2 review evidence requires revision tracking for exact revalidation.",
+        "Candidate-scoped review evidence requires revision tracking for exact revalidation.",
         { details: { reason: "revision-tracking-required" } },
       );
     }
@@ -222,14 +221,14 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
       );
     }
     const baseline =
-      reviewedEvidenceMode === "v1" ?
-        await captureReviewBaseline(args.target)
-      : await captureReferencedReviewBaseline(
+      candidateScoped ?
+        await captureReferencedReviewBaseline(
           args.target,
           review.baseline.rows,
           review.baseline.identityReferences,
           review.baseline.identityAssertionIds ?? [],
-        );
+        )
+      : await captureReviewBaseline(args.target);
     const completeBaseline = withReviewAbsences(
       baseline,
       review.writeSet,
@@ -281,10 +280,26 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
 }
 
 async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
+  const formatVersion = readFormatVersion(input);
+  if (!isSupportedMergeReviewFormatVersion(formatVersion)) {
+    throw new MergeReviewError(
+      "The stored merge review uses a format this library version cannot validate.",
+      {
+        details: {
+          reason: "unsupported-version",
+          received: formatVersion,
+          supported: SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
+        },
+        suggestion:
+          "Plan and review the candidate write set again with this library version.",
+      },
+    );
+  }
   const review = mergeReviewArtifactSchema.parse(input);
   if (
-    (review.formatVersion === 1 && review.baseline.scope !== undefined) ||
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
+      review.baseline.scope !== undefined) ||
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED &&
       review.baseline.scope !== "referenced")
   ) {
     throw new MergeReviewError(
@@ -345,11 +360,11 @@ async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
     );
   }
   if (
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED &&
       (review.baseline.scope !== "referenced" ||
         (review.baseline.identityReferences === undefined) !==
           (review.baseline.identityAssertionIds === undefined))) ||
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V1 &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
       (review.baseline.scope !== undefined ||
         review.baseline.identityReferences !== undefined ||
         review.baseline.identityAssertionIds !== undefined))

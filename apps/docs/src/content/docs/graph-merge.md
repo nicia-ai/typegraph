@@ -431,7 +431,7 @@ identity/context, and target baseline. You can persist this artifact and later
 approval records in the target before calling
 `revalidateCandidateWriteSetReview()` to compute a fresh execution plan.
 
-Both review versions support candidate write sets only. They do not rebase arbitrary artifacts
+Both review formats support candidate write sets only. They do not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
 Candidate planning on revision-tracked graphs reads existing candidate ids and
@@ -574,32 +574,62 @@ The V1 baseline is deliberately conservative:
   regenerated. There is no exemption for an “audit” kind.
 
 For an eligible revision-tracked graph, pass
-`reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
-candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
+`reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit
+candidate-scoped evidence (`formatVersion`
+`MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED`, 4). It fingerprints the
+candidate's node and edge ids,
 edge endpoints, resolved writes, and plan guards, including expected absences
 across kinds. On Operational Identity graphs it also records the reachable
 identity assertion and same-id peer closure, plus assertion-ID collision
 evidence. Revalidation expands that retained identity scope, rereads the
 referenced rows, and replans the candidate under a new target fence. An unrelated original row may change
-without invalidating V2 when it cannot affect the fresh resolved plan; V1
-would report that row change. Applications whose approval policy needs the
-V1 whole-graph rule should omit `reviewScope`. The review artifact records
-its version and scope, so revalidation applies the rule originally reviewed.
+without invalidating a candidate-scoped review when it cannot affect the
+fresh resolved plan; the default whole-target review (`formatVersion`
+`MERGE_REVIEW_FORMAT_VERSION`, 3) would report that row change. Applications
+whose approval policy needs the whole-graph rule should omit `reviewScope`.
+The review artifact records its format and scope, so revalidation applies the
+rule originally reviewed. A review stored under format 1 or 2 embeds a
+version-1 plan and is refused with `MergeReviewError`
+`details.reason: "unsupported-version"`; plan and review the candidate write
+set again.
 Candidate-scoped review refuses graphs outside those eligibility rules.
 On a `oneActive` graph, a custom backend must expose
 `findActiveEdgesBySourceV1` for candidate-scoped review; the complete-clone
-candidate planner and V1 review remain available when it does not.
+candidate planner and whole-target review remain available when it does not.
+A graph that declares a target-side cardinality, an `acyclic` edge or a
+composition pair is not eligible either: those constraints depend on rows
+outside the candidate's own scope.
 On an Operational Identity graph, a custom Store runtime must also expose
 endpoint-scoped and assertion-ID-scoped identity reads. Without both reads,
-ordinary candidate planning uses the complete working-copy clone and V1 review
-remains available; an explicit V2 candidate-scoped review request is refused.
+ordinary candidate planning uses the complete working-copy clone and
+whole-target review remains available; an explicit candidate-scoped review
+request is refused.
 
 Applicable store constraints still run during atomic application. Compatibility
 does not promise that apply will succeed: new rows may introduce constraint
 conflicts, and any write between revalidation and apply causes
 `StaleMergePlanError`. A failed application commits no partial candidate node,
 edge, or identity writes. Revalidate again after a stale refusal; require reapproval if
-the result changes.
+the result changes. This includes an `acyclic: true` edge kind: canonicalization
+and repointing can close a cycle out of edges that were individually fine in
+every branch. Every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`,
+`planMergeIncremental()`, `mergeIncremental()`) checks the resolved plan's
+projected edge writes for such a cycle at PLAN time, before anything is
+written — including a cycle formed entirely from edges the plan itself
+proposes, with nothing live on the target yet. Edges the same plan deletes
+are left out, so a branch that reverses an edge (`a → b` removed, `b → a`
+added) or re-roots a chain is judged by the DAG it produces and merges. A
+violation surfaces as the
+typed `AcyclicityMergeConflictError` (`code: "GRAPH_MERGE_ACYCLICITY_CONFLICT"`),
+naming the relation and every offending edge in `details`, so a `planMerge()`
+review sees it before deciding whether to apply. Only a cycle that arises from
+a write racing the plan-time check (which holds no per-graph lock, since
+planning does no write) escapes it, and is still caught by the unchanged
+apply-time write path: apply refuses with `MergeConstraintConflictError`
+wrapping the underlying `EdgeAcyclicityError` — the same generic
+declared-constraint translation cardinality, disjointness, and uniqueness
+conflicts already take, because apply writes every edge through the store's
+own collection API, which already enforces it.
 
 `policy.id` identifies your policy implementation; `policy.context` explicitly
 records every opaque dependency that can change its decision. Include callback
@@ -617,10 +647,10 @@ reuse approval. Enforce artifact immutability and access control in your storage
 or application. The review contains candidate data and an entire reviewed plan,
 so protect it with the same care as graph data.
 
-V1 review capture and revalidation read and fingerprint the complete target
+Whole-target review capture and revalidation read and fingerprint the complete target
 graph and archival identity ledger. The artifact stores one fingerprint per
 original row plus expected absences. Budget graph-sized reads and artifact
-storage for V1. V2 candidate-scoped review uses bounded point and identity
+storage for it. Candidate-scoped review uses bounded point and identity
 closure reads for its baseline on eligible graphs.
 
 The execution receipt above is a separate commit. If its write fails or the
@@ -746,9 +776,12 @@ fallback is acceptable.
 Turning revision tracking off does **not** turn off all serialization.
 *Constrained* writes now take the same per-graph mutual exclusion regardless of
 `revisionTracking` or `history`, because their check-then-write is only sound if
-nothing else writes the graph in between: edge cardinality (`one`, `unique`,
-`oneActive`, and the `getOrCreateByEndpoints` create and resurrect legs),
-node-kind disjointness on create, and a `kindWithSubClasses` uniqueness
+nothing else writes the graph in between: edge cardinality — both the
+source-side axis (`one`, `unique`, `oneActive`) and the independent
+[target-side axis](/core-concepts#target-cardinality) (`targetCardinality:
+"one" | "oneActive"`), including the `getOrCreateByEndpoints` create and
+resurrect legs on either axis — node-kind disjointness on create, and a
+`kindWithSubClasses` uniqueness
 constraint that actually expands to more than one kind — a scope covering a
 single kind probes exactly the row the uniques table's primary key then
 reserves, so that key is already its fence. Everything else — an unconstrained
@@ -917,6 +950,30 @@ const result = await merge(base, branches, {
 A `vector`/`hybrid` strategy with no embedder configured fails with a typed
 `SimilarityUnavailableError`, never a silent no-op.
 
+### Identity separation veto
+
+On a graph with `identity` enabled, a current `different` assertion between
+two nodes' identity classes vetoes a match **at plan time**, whichever source
+proposed it. There is no option to state: a `different` assertion is an
+integrity fact, so the veto runs for every identity-enabled merge. It honors
+an assertion the target already holds and one a branch being merged adds
+alike: a branch can record `assertDifferent(a, b)` to keep entity resolution
+from fusing two entities it stages.
+
+| Proposed match | Outcome |
+| --- | --- |
+| A **scored** candidate pair | Dropped. The merge continues, both entities land as staged, and the vetoed pair is reported on [`MergeReport.identityConflicts`](#identity-conflicts) |
+| A **definitional** match (a shared unique value, a `blockIndex` hit, an ontology retype) that survives the base and diameter guards | The plan fails with `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`, naming both entities, the separating assertion and the sources that proposed the match |
+| A **transitive** fusion — `a`–`b` and `b`–`c` each pass the threshold while `a` and `c` are held apart | The plan fails with `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`, naming the separated pair and the whole cluster |
+
+This converts what would otherwise be a commit-time database constraint
+violation into an upfront, attributed outcome.
+
+A `same` assertion is not a candidate source. Asserting `same` between two
+nodes records identity truth — a class, honored by every identity-aware read —
+and the merge carries that assertion across, but it never rewrites the two rows
+into one. Rows are fused only by [entity resolution](#entity-resolution).
+
 ## Conflicts
 
 When merged contributors disagree on a property value, Graph Merge **resolves by
@@ -951,6 +1008,40 @@ const result = await merge(base, branches, {
 });
 ```
 
+### Identity conflicts
+
+A merge carries each branch's identity assertions and retractions to the
+target, classifying every pair three ways against the target's current truth.
+The rules are fixed; there is no policy to choose.
+
+| Staged shape | Outcome |
+| --- | --- |
+| Branches assert the same pair under different assertion ids | One survivor is written: an id the target already holds wins, then the earliest `validFrom`, then the code-point-smallest id. Every other id is reported on `dropped` with reason `identity:duplicate-assertion` |
+| Branches end the same assertion at different instants | One retraction is written, at the **earliest** staged `validTo` — independent of branch order |
+| One branch retracts a pair and re-asserts it itself | Both are written: the base assertion ends at the staged instant and the replacement lands |
+| One branch retracts a pair while a **different** branch re-asserts it without retracting | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`, naming both assertions and both branches |
+| Branches assert `same` and `different` for one pair over overlapping validity windows | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`, naming both assertions |
+| A scored candidate match spans two identity classes held apart by a `different` assertion | The match is dropped and reported (see below); the merge continues |
+
+Every staged assertion and retraction therefore ends as a write, a `dropped`
+entry with a reason, or a refusal that names it — none disappears silently. A
+refusal writes nothing: reconcile the branches (retract one side, or re-assert
+on the branch that retracted) and merge again.
+
+`MergeReport.identityConflicts` — and `review.identityConflicts` inside the
+durable plan artifact — lists each scored match the
+[separation veto](#identity-separation-veto) dropped:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `"separation"` |
+| `a`, `b` | The two entities the candidate source proposed as one |
+| `assertionIds` | The `different` assertion holding their classes apart |
+| `source` | The recall path that proposed the match |
+
+A plan carrying an `identityConflicts` entry is still applicable: the vetoed
+match is simply not made.
+
 ### Delete / modify conflicts
 
 An inherited node or edge that one branch **deletes** while another **modifies**
@@ -968,6 +1059,59 @@ Independent edits to the *same* inherited row by different branches are
 that change with no conflict; only fields multiple branches changed to differing
 values become conflicts. This holds for node *and* edge properties, so disjoint
 edits compose instead of clobbering each other.
+
+### Composition orphans
+
+Two independent ways a merge can leave a required or optional composition
+part with no whole, both surfaced through the same
+`MergePlanReview.compositionOrphans` finding and the same
+`MergeCompositionOrphanError`:
+
+- **`cause: "deleted"`** — a branch deletes a composition whole (see
+  [Composition](/ontology#composition)) while a part attached to it on the
+  target *after* the branch point, or independently of it, survives — the
+  plan neither deletes that part nor moves it to another whole, so applying
+  the plan as trusted would leave it pointing at a whole that no longer
+  exists.
+- **`cause: "unattached"`** — a required-existence part (`existence:
+  "required"`, see [Composition existence](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
+  this merge writes, or whose composition edge this merge explicitly deletes
+  or ends, resolves to no live whole at all after canonicalization. There is
+  no whole to name for this cause, so `whole` is absent.
+
+`planMerge` and `planMergeIncremental` judge both against the state the plan
+would leave — the target's current rows with the plan's own writes laid over
+them — and report every finding in `MergePlanReview.compositionOrphans`. A
+part the plan deletes, a part it moves to another whole (a merged `reparent`)
+and a required part it creates together with its composition edge are not
+orphans and are not reported:
+
+```typescript
+type MergePlanCompositionOrphan = {
+  part: { kind: string; id: string };
+  whole?: { kind: string; id: string }; // absent for cause: "unattached"
+  viaEdgeKind: string; // the realizing composition edge
+  cause: "deleted" | "unattached";
+};
+```
+
+This is a best-effort, unlocked dry-run read, surfaced for an operator to act
+on before approving the plan. `applyMergePlan` re-verifies the same finding
+inside the apply transaction, under the per-graph write lock, and refuses with
+`MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
+if it still recurs there — so a plan-time report that comes back empty is not
+a guarantee against a concurrent attach racing the eventual apply. The
+`"unattached"` cause has its own residual blind spot: a composition edge
+silently dropped by canonicalization's endpoint-deleted repointing issues no
+write for any per-write guard to see — see
+[Limitations](/limitations#composition-existence-existence-required).
+
+A branch's composition writes merge as the unit they were written as. Apply
+replays a plan one row at a time, so it postpones the per-write
+required-existence rule for exactly the parts the plan touches and asserts it
+for those same parts once the plan's last edge has landed, inside the same
+transaction: a required part created with `partOf`, and a `reparent` under
+either cardinality, merge like any other edit.
 
 ## Edges follow their entities
 
@@ -1015,16 +1159,23 @@ contributes no claim and raises no conflict, whatever its branch's rank.
 ## Ontology type reconciliation
 
 With `reconcileTypes: "ontology"`, two staged nodes that share an id but carry
-subtype-compatible kinds (via the graph's `subClassOf` closure) are collapsed to
-the **most-specific** common type, recorded as a `TypeReconciliation`. A base
-`Doctor` and a branch `SpecialistDoctor` reconcile to `SpecialistDoctor` instead
-of being dropped as incompatible. The default `"off"` keeps identity strictly
-`(kind, id)`.
+subtype-compatible kinds (via the store's own validated `KindRegistry` — the
+same registry a query runs against, not a private closure the merge recomputes)
+are collapsed to the **most-specific** common type, recorded as a
+`TypeReconciliation`. A base `Doctor` and a branch `SpecialistDoctor` reconcile
+to `SpecialistDoctor` instead of being dropped as incompatible. The default
+`"off"` keeps identity strictly `(kind, id)`.
 
 ```typescript
 const graph = defineGraph({ /* ... */ ontology: [subClassOf(SpecialistDoctor, Doctor)] });
 const result = await merge(base, branches, { reconcileTypes: "ontology" });
 ```
+
+`equivalentTo` participates in "most specific" too, since it is mutual
+subsumption (see [Ontology & Reasoning](/ontology#equivalence)): a base
+`Doctor` and a branch `Physician` declared `equivalentTo` reconcile to whichever
+of the two sorts first in code-point order, deterministically, rather than
+being flagged incompatible.
 
 ## Choosing the survivor
 
@@ -1094,6 +1245,7 @@ type MergeReport = {
   warnings: string[]; // non-fatal advisories (ceiling skips, provenance-persist failures)
   candidateDiagnostics?: CandidateDiagnostics; // bounded, opt-in scored comparisons
   provenancePersisted?: { graphId: string; count: number }; // when persistProvenance ran
+  identityConflicts: IdentityUnresolvedConflict[]; // scored matches the separation veto dropped
 };
 ```
 
@@ -1112,6 +1264,10 @@ reconciliation.
 A same-id ontology retype remains a `TypeReconciliation`, rather than creating
 an id-merge resolution. Its optional `decisiveEdges` carries the accepted retype
 witness without changing the meaning of the existing resolution collection.
+When a retype cluster also spans several ids, the id-merge resolution it does
+produce names the **reconciled** kind in `EntityResolution.kind` — the kind the
+canonical row is written under, the same value `TypeReconciliation.toType`
+records — never the staged survivor's pre-retype kind.
 
 Each edge records every candidate source that proposed the pair in stable order.
 Definitional evidence names the trusted rule, such as a unique constraint, and
@@ -1139,8 +1295,8 @@ type MatchEvidence =
 ```
 
 Built-in source metadata distinguishes block, unique, base-unique, base-index,
-keyless, and ontology-retype proposals. Several sources proposing the same pair
-are all retained after deduplication. Strategy metadata describes `fulltext`,
+keyless, and ontology-retype proposals. Several
+sources proposing the same pair are all retained after deduplication. Strategy metadata describes `fulltext`,
 `vector`, `hybrid`, or `custom` configuration, never custom function source.
 Default evidence excludes the raw compared values and rejected pairs because
 those may contain PII and can make reports enormous.
@@ -1352,6 +1508,12 @@ Node and edge inserts, updates, and deletes are recorded by database triggers.
 Identity-only revisions and revisions whose write provenance is incomplete
 produce `{ kind: "unbounded" }` rather than an incomplete key list. Custom
 backends must provide their own lineage capability to get bounded results.
+`store.changesSince(anchor)` holds to the same rule on a history-capturing
+store: the keys name nodes and edges only, so a span in which an identity
+assertion was created, retracted or ended answers `unbounded` rather than a
+key list that omits it. The lineage source `resolveLineage(store)` returns is
+unchanged — a merge reads identity through its own path, and its pruned diff
+keeps a bounded node and edge delta across an identity write.
 Each trigger is attached to a whole physical node, edge, or identity table; it
 records every write to that table and uses `graph_id` to identify the affected
 graph. On shared tables this captures writes from every graph, not only graphs
@@ -1854,9 +2016,12 @@ read once through `Store.workingCopyOptions`, plus `history`/
 `revisionTrackingEnabled`. This is safe precisely because a fork is the SAME
 physical database as the base: a custom `schema` names relations the fork
 carries too, and an external `recordedRead` binding points at one. The clone
-strategy inherits only `revisionTracking` — its fresh backend is a distinct,
+strategy inherits `revisionTracking` and `queryDefaults` only — a query answers
+alike on the base and on its clone, but the clone's fresh backend is a distinct,
 empty database, so a schema naming the base's tables or a `recordedRead`
-binding populated nowhere on the clone would misdirect it.
+binding populated nowhere on the clone would misdirect it. Hooks, upsert
+coalescing, and the auto-refresh-statistics threshold are not carried to a
+clone.
 
 Because the fork's store reads and writes through the base's table names,
 `connect()`'s backend must bind those SAME names. `create()` compares the
@@ -2065,7 +2230,8 @@ the target Store transaction. The former native-merge callback was removed:
 it could commit outside the transaction that checked the target revision.
 A future native merge capability needs a host-native compare-and-swap on the
 actual target, plus proof that the full physical diff equals the approved
-TypeGraph writes, including schema, history, identity, and sidecars.
+TypeGraph writes, including schema, history, identity, composition, and
+sidecars.
 
 For a Doltgres strategy, pin each Store connection to the intended database
 branch. [Doltgres revision specifiers](https://www.doltgres.com/docs/reference/version-control/branches/)
@@ -2402,7 +2568,7 @@ keeps the complete graph schema and rejects the duplicate during staging,
 before entity resolution can review and collapse it. An ingestion branch
 materializes an honest working-copy schema with only node uniqueness deferred;
 schema validation, edge endpoint checks, disjointness, and edge cardinality
-still apply immediately.
+(both the source and target axis) still apply immediately.
 
 ```typescript
 import { asNodeId } from "@nicia-ai/typegraph";
@@ -2658,7 +2824,9 @@ TypeGraph does not publish it. `abort()` atomically removes the copied graph
 and operation marker while preserving unrelated namespaces, and refuses if the
 target has changed. A retry with the same operation key returns the same proof
 after checking the target digest and base token; a different key cannot reuse
-the populated target.
+the populated target. The proof survives a library upgrade: a graph relation a
+later release adds enters the digest only once it holds rows for the graph, so
+a fork taken before the upgrade stays retryable and abortable after it.
 
 This first-party copy supports the bundled PostgreSQL table layout, bundled
 `pgvector` embedding storage, and default `tsvector` fulltext storage.
@@ -2706,8 +2874,9 @@ commit after a partially applied failure:
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
-| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge).                                  |
-| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error, and its details expose the original constraint fields. No graph or provenance writes commit. |
+| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT` by default. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, opposing relations, and retract/reassert races — see [Identity conflicts](#identity-conflicts) and the [identity guide](/identity/#interchange-and-branch-merge). One related code on the same error class names a more specific cause: `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` (a definitional match or a transitive cluster crosses a class-lifted `different` assertion — see [Identity separation veto](#identity-separation-veto)). |
+| `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge. |
+| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as source- or target-side edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |

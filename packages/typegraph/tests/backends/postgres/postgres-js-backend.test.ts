@@ -35,6 +35,7 @@ import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
+import { TRUNCATE_RESETTABLE_TABLES_SQL } from "./managed-tables";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -109,25 +110,7 @@ async function clearTestData(): Promise<void> {
   // long-lived test database would let a marker outlive a dropped table, so a
   // later boot would trust the marker, skip the CREATE, and writes would hit a
   // missing relation.
-  await sharedSql.unsafe(
-    `TRUNCATE typegraph_index_materializations,
-              typegraph_contribution_materializations,
-              typegraph_kind_removals,
-              typegraph_reconciliation_markers,
-              typegraph_node_fulltext,
-              typegraph_revision_origins,
-              typegraph_recorded_clock,
-              typegraph_recorded_nodes,
-              typegraph_recorded_edges,
-              typegraph_recorded_identity_assertions,
-              typegraph_identity_closure,
-              typegraph_identity_assertions,
-              typegraph_nodes,
-              typegraph_edges,
-              typegraph_node_uniques,
-              typegraph_contribution_materializations,
-              typegraph_schema_versions CASCADE`,
-  );
+  await sharedSql.unsafe(TRUNCATE_RESETTABLE_TABLES_SQL);
   // Per-(kind, field) vector tables are materialized per field, so enumerate
   // and truncate any that exist (there is no single shared embeddings table).
   // createStoreWithSchema re-creates any that are missing (markers cleared).

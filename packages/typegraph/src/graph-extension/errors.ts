@@ -85,7 +85,20 @@ export const GRAPH_EXTENSION_ISSUE_CODES = [
   "ONTOLOGY_SELF_LOOP",
   "ONTOLOGY_DISJOINT_CONFLICT",
   "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
+  // NOTE: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS" is deliberately absent here.
+  // `validateGraphExtension`'s document-scoped `validateOntology` call has no
+  // kind classifier (an extension's ontology may reference base-graph kinds
+  // it cannot see on its own), so it can never emit that code — it only
+  // surfaces as a `ConfigurationError` when the MERGED graph's `KindRegistry`
+  // is built (see `detectInvalidEquivalenceClasses` in `ontology/validation.ts`).
+  // Listing an unreachable code here would force an exhaustive switch over
+  // `GraphExtensionIssueCode` to add a branch that validation can never
+  // produce.
   "DUPLICATE_ONTOLOGY_RELATION",
+  "ONTOLOGY_COMPOSITION_VIA_REQUIRED",
+  "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN",
+  "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
+  "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN",
   "INVALID_DOCUMENT_SHAPE",
   "UNKNOWN_DOCUMENT_KEY",
   "UNSUPPORTED_STRING_FORMAT",

@@ -1,10 +1,7 @@
 import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
 import { type TemporalMode } from "../../../core/types";
-import {
-  EDGE_CARDINALITY_SPECS,
-  type EdgeCardinalitySpec,
-} from "../../../store/claims/edge-claims";
+import { edgeCardinalitySpec } from "../../../store/claims/edge-claims";
 import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
@@ -270,7 +267,10 @@ export function buildFindActiveEdgesBySourceV1(
   params: FindActiveEdgesBySourceV1Params,
 ): SQL {
   const { edges } = tables;
-  const spec: EdgeCardinalitySpec = EDGE_CARDINALITY_SPECS.oneActive;
+  const spec = edgeCardinalitySpec({
+    direction: "source",
+    cardinality: "oneActive",
+  });
   const activeCondition =
     spec.holderLiveness === "liveAndActive" ?
       sql`AND ${edges.validTo} IS NULL`

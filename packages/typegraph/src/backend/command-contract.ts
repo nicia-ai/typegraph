@@ -133,6 +133,72 @@ export function graphCommandCoordinationIsolation(
 }
 
 /**
+ * Whether a session at this isolation observes writes committed while it
+ * waited for the per-graph write fence. `read_committed` takes a fresh
+ * snapshot per statement; `serializable` may read stale but aborts at commit
+ * on the rw-conflict; everything else — including `unknown` — fails closed.
+ *
+ * The `serializable` arm holds only between serializable transactions:
+ * PostgreSQL's serialization-failure detection does not arbitrate against a
+ * writer at a weaker isolation, so a serializable writer and a read-committed
+ * one can both commit a lock-only decision made on the serializable side's
+ * stale snapshot.
+ *
+ * THE one predicate every "must observe the fence winner" check consults:
+ * match-key convergence ({@link assertGraphCommandConvergenceIsolation}) and
+ * the lock-only reads of {@link assertFencedSnapshotIsFresh} both need "did
+ * this session's snapshot start after the fence it waited for released", and
+ * a second inline spelling of the isolation set is exactly the copy that
+ * drifts.
+ */
+export function observesPostFenceCommits(
+  isolation: GraphCommandIsolation,
+): boolean {
+  return isolation === "read_committed" || isolation === "serializable";
+}
+
+/**
+ * THE fresh-snapshot guard of a decision the per-graph write fence alone
+ * protects — a read with no claim row behind it, such as the edge-acyclicity
+ * probe or a whole delete's parts closure. Such a read is only as good as the
+ * snapshot it runs on, so the session that took the fence must observe what
+ * committed while it waited.
+ *
+ * `coordination` is `undefined` exactly when the store's write-fence plan is
+ * `engine-serialized` or `caller-serialized` (one writer at a time, nothing
+ * to observe). Every frame of a transaction that holds a keyed fence carries
+ * the coordination its acquisition minted, the nested and sibling frames
+ * included, so this cannot be skipped by where in the transaction it runs.
+ *
+ * @throws ConfigurationError carrying `refusal.code`
+ */
+export function assertFencedSnapshotIsFresh(
+  port: GraphCommandPort,
+  graphId: string,
+  coordination: GraphCommandCoordination | undefined,
+  refusal: Readonly<{ code: string; subject: string }>,
+): void {
+  if (coordination === undefined) return;
+  const isolation = graphCommandCoordinationIsolation(
+    port,
+    graphId,
+    coordination,
+  );
+  if (observesPostFenceCommits(isolation)) return;
+  throw new ConfigurationError(
+    `${refusal.subject} requires a transaction isolation that observes ` +
+      "writes committed while this session waited for the per-graph write fence.",
+    { code: refusal.code, graphId, isolation },
+    {
+      suggestion:
+        "Use read_committed transaction isolation, or configure a custom " +
+        "PostgreSQL graph-write fence to report the effective transaction " +
+        "isolation.",
+    },
+  );
+}
+
+/**
  * A match-key convergence must observe the winner after waiting for its graph
  * lock. Repeatable-read snapshots cannot do that; serializable can instead
  * force a database serialization retry. Adopted/custom transaction ports
@@ -144,7 +210,7 @@ export function assertGraphCommandConvergenceIsolation(
 ): void {
   const isolation =
     boundGraphCommandCoordination(port, coordination)?.isolation ?? "unknown";
-  if (isolation === "read_committed" || isolation === "serializable") return;
+  if (observesPostFenceCommits(isolation)) return;
   throw new ConfigurationError(
     "Match-key convergence requires read-committed or serializable transaction isolation.",
     {

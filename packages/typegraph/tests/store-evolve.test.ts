@@ -28,6 +28,7 @@ import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
 import { type NodeType } from "../src/core/types";
 import {
+  CardinalityError,
   ConfigurationError,
   KindNotFoundError,
   SchemaContentConflictError,
@@ -1023,5 +1024,78 @@ describe("Store.evolve — graph-extension-declared relational indexes", () => {
         }),
       ),
     ).rejects.toBeInstanceOf(GraphExtensionValidationError);
+  });
+});
+
+describe("Store.evolve — runtime-authored edge cardinality (issue #610)", () => {
+  it("enforces a runtime-declared targetCardinality on a live write", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+        edges: {
+          ownedBy: {
+            from: ["Tag"],
+            to: ["Person"],
+            properties: {},
+            targetCardinality: "one",
+          },
+        },
+      }),
+    );
+
+    const alice = await evolved.nodes.Person.create({ name: "alice" });
+    const bob = await evolved.nodes.Person.create({ name: "bob" });
+    const tagCol = requireDefined(evolved.getNodeCollection("Tag"));
+    const featured = (await tagCol.create({
+      label: "featured",
+    })) as unknown as ExtensionTag;
+    const important = (await tagCol.create({
+      label: "important",
+    })) as unknown as ExtensionTag;
+
+    const ownedBy = requireDefined(evolved.getEdgeCollection("ownedBy"));
+    await ownedBy.create(
+      { kind: "Tag", id: featured.id },
+      { kind: "Person", id: alice.id },
+      {},
+    );
+    await expect(
+      ownedBy.create(
+        { kind: "Tag", id: important.id },
+        { kind: "Person", id: alice.id },
+        {},
+      ),
+    ).rejects.toBeInstanceOf(CardinalityError);
+    // A different target still succeeds — the axis is scoped per target.
+    await expect(
+      ownedBy.create(
+        { kind: "Tag", id: important.id },
+        { kind: "Person", id: bob.id },
+        {},
+      ),
+    ).resolves.toBeDefined();
+  });
+  // MUTATION CHECK (verified): drop the
+  // `targetCardinality: document.targetCardinality` line from `compileEdge`
+  // (`src/graph-extension/compiler.ts`). `important`'s second create then
+  // wrongly succeeds instead of refusing.
+
+  it("refuses an unknown cardinality value in the extension document", () => {
+    expect(() =>
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+        edges: {
+          ownedBy: {
+            from: ["Tag"],
+            to: ["Person"],
+            properties: {},
+            // @ts-expect-error -- deliberately invalid for this test
+            targetCardinality: "atMostFive",
+          },
+        },
+      }),
+    ).toThrow(GraphExtensionValidationError);
   });
 });
