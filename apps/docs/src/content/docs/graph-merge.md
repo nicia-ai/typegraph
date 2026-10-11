@@ -596,10 +596,7 @@ The review artifact records its format and scope, so revalidation applies the
 rule originally reviewed. A review stored under format 1 or 2 embeds a
 version-1 plan and is refused with `MergeReviewError`
 `details.reason: "unsupported-version"`; plan and review the candidate write
-set again. `MERGE_REVIEW_FORMAT_VERSION_V1` and
-`MERGE_REVIEW_FORMAT_VERSION_V2` remain exported as deprecated historical
-constants (`1` and `2`) naming exactly those formats this release refuses as
-`unsupported-version`; neither is a supported format.
+set again.
 
 An explicitly requested candidate review scope (`reviewScope: "candidate"`) is
 refused with `details.reason: "candidate-scope-ineligible"` on a graph outside

@@ -209,11 +209,6 @@ export type {
 export {
   MERGE_REVIEW_FORMAT_VERSION,
   MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
-  // The deprecated historical constants are part of the released surface.
-  /* eslint-disable @typescript-eslint/no-deprecated */
-  MERGE_REVIEW_FORMAT_VERSION_V1,
-  MERGE_REVIEW_FORMAT_VERSION_V2,
-  /* eslint-enable @typescript-eslint/no-deprecated */
 } from "./review-schema";
 export type {
   BaseNodeLookup,

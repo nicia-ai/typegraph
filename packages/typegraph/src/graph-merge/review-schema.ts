@@ -24,22 +24,6 @@ export const MERGE_REVIEW_FORMAT_VERSION = 3 as const;
 /** The opt-in review format whose baseline covers the candidate's own scope. */
 export const MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED = 4 as const;
 
-/**
- * The whole-target review format of earlier releases.
- *
- * @deprecated Historical value, never remapped: this release refuses a review
- * stamped `1` as `unsupported-version`. Use `MERGE_REVIEW_FORMAT_VERSION`.
- */
-export const MERGE_REVIEW_FORMAT_VERSION_V1 = 1 as const;
-/**
- * The candidate-scoped review format of earlier releases.
- *
- * @deprecated Historical value, never remapped: this release refuses a review
- * stamped `2` as `unsupported-version`. Use
- * `MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED`.
- */
-export const MERGE_REVIEW_FORMAT_VERSION_V2 = 2 as const;
-
 /** Every review format this library version validates, in ascending order. */
 export const SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS = [
   MERGE_REVIEW_FORMAT_VERSION,
