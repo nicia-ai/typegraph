@@ -389,6 +389,7 @@ type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -398,6 +399,7 @@ type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -1261,7 +1263,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaGraphWriteFenceParams) => Promise<GraphWriteFenceAcquisition>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     setActiveVersionWithPreflight?: (this: void, params: SetActiveVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<void>;
@@ -1465,6 +1467,12 @@ type GraphTemplateRow = Readonly<{
     schema_hash: string;
     schema_doc: string;
     created_at: string;
+}>;
+
+// @public
+type GraphWriteFenceAcquisition = Readonly<{
+    isolation: GraphCommandIsolation;
+    fenceRow: "advanced" | "none";
 }>;
 
 // @public
@@ -2454,6 +2462,11 @@ export type SchemaDiff = Readonly<{
 }>;
 
 // @public
+type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
+    fenceRow: "advance" | "leave";
+}>;
+
+// @public
 export type SchemaHash = string;
 
 // @public
@@ -2882,6 +2895,20 @@ type UniqueConstraintPredicate = Readonly<{
 // @public
 type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> = Readonly<{
     [K in keyof z.infer<S>]-?: UniqueConstraintField;
+}>;
+
+// @public
+export type UniquenessClaimGate = Readonly<{
+    cause: "constraint-added" | "constraint-reshaped";
+    kind: string;
+    constraintName: string;
+    axis: string;
+}> | Readonly<{
+    cause: "claim-axis-moved";
+    kind: string;
+    constraintName: string;
+    axis: string;
+    lostKinds: readonly string[];
 }>;
 
 // @public

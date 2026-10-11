@@ -507,7 +507,7 @@ type CommonOperationStrategy = Readonly<{
     buildDisjointOverlapAudit: (graphId: string, kinds: readonly [string, string]) => SQL;
     buildMisassignedEdgeEndpointAudit: (graphId: string, edgeKind: string, now: string, allowedPairs: readonly (readonly [string, string])[]) => SQL;
     buildGetActiveSchema: (graphId: string) => SQL;
-    buildLockSchemaVersionAndGraphWrite?: (params: SchemaWriteFenceParams, advisoryLockNamespace: string, fenceSql: FenceSql) => SQL;
+    buildLockSchemaVersionAndGraphWrite?: (params: SchemaGraphWriteFenceParams, advisoryLockNamespace: string, fenceSql: FenceSql) => SQL;
     buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
     buildGetSchemaVersion: (graphId: string, version: number) => SQL;
     buildSetActiveSchema: (graphId: string, version: number) => Readonly<{
@@ -767,6 +767,7 @@ type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -776,6 +777,7 @@ type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public (undocumented)
@@ -8531,6 +8533,7 @@ type FenceSql = Readonly<{
 export type FenceStatements = FenceSql & Readonly<{
     acquireKeyed: (namespace: string, key: string | number) => SqlFragment;
     acquireKeyedWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyedSnapshotFence?: ((namespace: string, key: string | number) => SqlFragment) | undefined;
     isolationFact: () => SqlFragment;
 }>;
 
@@ -8782,7 +8785,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaGraphWriteFenceParams) => Promise<GraphWriteFenceAcquisition>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     setActiveVersionWithPreflight?: (this: void, params: SetActiveVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<void>;
@@ -8980,6 +8983,12 @@ type GraphTemplateTableNames = Readonly<{
     schemaVersions: string;
     graphTemplates: string;
     contributionMaterializations: string;
+}>;
+
+// @public
+type GraphWriteFenceAcquisition = Readonly<{
+    isolation: GraphCommandIsolation;
+    fenceRow: "advanced" | "none";
 }>;
 
 // @public
@@ -9787,6 +9796,11 @@ type RowProps = string | Readonly<Record<string, unknown>>;
 type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
     readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
+}>;
+
+// @public
+type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
+    fenceRow: "advance" | "leave";
 }>;
 
 // @public (undocumented)

@@ -981,6 +981,22 @@ function classifyExistenceChange(
 }
 
 /**
+ * The registry of the BEFORE document of a schema diff — THE one place a
+ * registry is built without the declaration rules.
+ *
+ * BEFORE is a delta input (disjointness, uniqueness groups and claim axes,
+ * endpoint allowances), never a registry a store reads or writes through:
+ * enforcing structural subsumption or the composition declaration rules on
+ * it would wedge the fix-forward migration that repairs a persisted document
+ * they refuse (see `StructuralSubsumptionMode`'s docblock).
+ */
+export function buildSchemaBaselineRegistry(
+  before: OntologySnapshot,
+): KindRegistry {
+  return buildRegistryFromSerializedSchema(before, "unenforced-baseline");
+}
+
+/**
  * Classifies every ontology change between two schema snapshots, with the
  * data probes a commit of a tightening change owes.
  *
@@ -1063,17 +1079,10 @@ export function classifyOntologyChanges(
   // commits) never pays for a registry build, and never risks surfacing an
   // incoherent legacy ontology's `ConfigurationError` on a commit that has
   // nothing to do with it.
-  // BEFORE is a delta input (disjointness, uniqueness groups, endpoint
-  // allowances), never a registry a store reads or writes through —
-  // enforcing structural subsumption or the composition declaration rules on
-  // it would wedge the fix-forward migration that repairs a persisted
-  // document they refuse (see `StructuralSubsumptionMode`'s docblock). AFTER stays enforced (the
-  // default): a proposal that INTRODUCES an incompatible hierarchy is
-  // exactly what the preflight requires this diff to catch before an upgrade.
-  const beforeRegistry = buildRegistryFromSerializedSchema(
-    before,
-    "unenforced-baseline",
-  );
+  // AFTER stays enforced (the default): a proposal that INTRODUCES an
+  // incompatible hierarchy is exactly what the preflight requires this diff
+  // to catch before an upgrade.
+  const beforeRegistry = buildSchemaBaselineRegistry(before);
   const afterRegistry = buildRegistryFromSerializedSchema(after);
 
   const removedKindNames = computeRemovedKindNames(before, after);

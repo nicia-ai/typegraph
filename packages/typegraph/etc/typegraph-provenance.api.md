@@ -1133,6 +1133,7 @@ type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -1142,6 +1143,7 @@ type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public (undocumented)
@@ -3025,7 +3027,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaGraphWriteFenceParams) => Promise<GraphWriteFenceAcquisition>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     setActiveVersionWithPreflight?: (this: void, params: SetActiveVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<void>;
@@ -3245,6 +3247,12 @@ type GraphTemplateRow = Readonly<{
     schema_hash: string;
     schema_doc: string;
     created_at: string;
+}>;
+
+// @public
+type GraphWriteFenceAcquisition = Readonly<{
+    isolation: GraphCommandIsolation;
+    fenceRow: "advanced" | "none";
 }>;
 
 // @public
@@ -5948,6 +5956,11 @@ type SchemaDiff = Readonly<{
 }>;
 
 // @public
+type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
+    fenceRow: "advance" | "leave";
+}>;
+
+// @public
 type SchemaHash = string;
 
 // @public
@@ -7729,6 +7742,7 @@ type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" |
 type VariableLengthSpec = Readonly<{
     minDepth: number;
     maxDepth: number;
+    exhaustive?: boolean;
     cyclePolicy: RecursiveCyclePolicy;
     pathAlias?: string;
     pathFormat?: "qualified";
@@ -7749,6 +7763,8 @@ interface VariableLengthState {
     depthEnabled: boolean;
     // (undocumented)
     enabled: boolean;
+    // (undocumented)
+    exhaustive?: boolean;
     // (undocumented)
     maxDepth: number;
     // (undocumented)

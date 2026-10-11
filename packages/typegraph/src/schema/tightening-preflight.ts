@@ -44,6 +44,7 @@ import {
   newlyConstrainedEdgeAxes,
 } from "./edge-cardinality-change";
 import {
+  buildSchemaBaselineRegistry,
   classifyOntologyChanges,
   type OntologyChange,
   type OntologyDataProbe,
@@ -353,14 +354,12 @@ export function prepareSchemaTighteningPreflight(
   // this cannot throw here for a reason the commit has not already surfaced.
   const proposedRegistry = buildRegistryFromSerializedSchema(params.after);
 
-  // BEFORE is read only for where its claims sit, never as a registry a
-  // store writes through, so it is held to the same relaxed rules the
-  // ontology classifier applies to a stored document.
+  // BEFORE is read only for where its claims sit.
   const gates =
     mayGateUniqueness ?
       uniquenessClaimGates(
         uniqueConstraints,
-        buildRegistryFromSerializedSchema(params.before, "unenforced-baseline"),
+        buildSchemaBaselineRegistry(params.before),
         proposedRegistry,
       )
     : [];

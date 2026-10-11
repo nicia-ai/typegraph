@@ -1598,6 +1598,7 @@ type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -1607,6 +1608,7 @@ type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public (undocumented)
@@ -4381,7 +4383,7 @@ export type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaGraphWriteFenceParams) => Promise<GraphWriteFenceAcquisition>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     setActiveVersionWithPreflight?: (this: void, params: SetActiveVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<void>;
@@ -4740,6 +4742,12 @@ type GraphTemplateRow = Readonly<{
     schema_hash: string;
     schema_doc: string;
     created_at: string;
+}>;
+
+// @public
+export type GraphWriteFenceAcquisition = Readonly<{
+    isolation: GraphCommandIsolation;
+    fenceRow: "advanced" | "none";
 }>;
 
 // @public
@@ -5185,7 +5193,7 @@ export type IdentityReplayStep<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-export type IdentityRestoreBaseline = Readonly<{
+type IdentityRestoreBaseline = Readonly<{
     hasOwnHistory: boolean;
     floorRevision: number;
 }>;
@@ -6341,7 +6349,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
-export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal", "edge-match-identity-rekey", "ontology-tightening-violated", "edge-cardinality-tightening-violated"];
+export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal", "edge-match-identity-rekey", "ontology-tightening-violated", "edge-cardinality-tightening-violated", "unique-constraint-requires-empty-kind"];
 
 // @public
 export class MigrationError extends TypeGraphError {
@@ -6379,6 +6387,12 @@ export type MigrationErrorDetails = Readonly<{
     toVersion: number;
     reason: "edge-match-identity-rekey";
     edgeKinds: readonly string[];
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "unique-constraint-requires-empty-kind";
+    constraints: readonly UniquenessClaimGate[];
 }> | Readonly<{
     graphId: string;
     fromVersion: number;
@@ -8450,6 +8464,11 @@ export type SchemaFenceTimeoutErrorDetails = Readonly<{
 }>;
 
 // @public
+type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
+    fenceRow: "advance" | "leave";
+}>;
+
+// @public
 export type SchemaHash = string;
 
 // @public
@@ -10401,6 +10420,20 @@ export type UniqueIntrospection = Readonly<{
 }>;
 
 // @public
+export type UniquenessClaimGate = Readonly<{
+    cause: "constraint-added" | "constraint-reshaped";
+    kind: string;
+    constraintName: string;
+    axis: string;
+}> | Readonly<{
+    cause: "claim-axis-moved";
+    kind: string;
+    constraintName: string;
+    axis: string;
+    lostKinds: readonly string[];
+}>;
+
+// @public
 export type UniquenessComponentProbeGroup = Readonly<{
     constraintName: string;
     coveredKinds: readonly string[];
@@ -10614,6 +10647,7 @@ type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" |
 type VariableLengthSpec = Readonly<{
     minDepth: number;
     maxDepth: number;
+    exhaustive?: boolean;
     cyclePolicy: RecursiveCyclePolicy;
     pathAlias?: string;
     pathFormat?: "qualified";
@@ -10634,6 +10668,8 @@ interface VariableLengthState {
     depthEnabled: boolean;
     // (undocumented)
     enabled: boolean;
+    // (undocumented)
+    exhaustive?: boolean;
     // (undocumented)
     maxDepth: number;
     // (undocumented)

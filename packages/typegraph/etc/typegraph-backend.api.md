@@ -1775,6 +1775,7 @@ export type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -1784,6 +1785,7 @@ export type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
 
 // @public
@@ -2464,6 +2466,7 @@ export type FenceSql = Readonly<{
 type FenceStatements = FenceSql & Readonly<{
     acquireKeyed: (namespace: string, key: string | number) => SqlFragment;
     acquireKeyedWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyedSnapshotFence?: ((namespace: string, key: string | number) => SqlFragment) | undefined;
     isolationFact: () => SqlFragment;
 }>;
 
@@ -2756,7 +2759,7 @@ export type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaGraphWriteFenceParams) => Promise<GraphWriteFenceAcquisition>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     setActiveVersionWithPreflight?: (this: void, params: SetActiveVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<void>;
@@ -2941,6 +2944,12 @@ type GraphTemplateRow = Readonly<{
     schema_hash: string;
     schema_doc: string;
     created_at: string;
+}>;
+
+// @public
+export type GraphWriteFenceAcquisition = Readonly<{
+    isolation: GraphCommandIsolation;
+    fenceRow: "advanced" | "none";
 }>;
 
 // @public
@@ -3505,7 +3514,7 @@ export function normalizeGraphCommandIsolation(value: unknown): GraphCommandIsol
 export type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
-export function observesPostFenceCommits(isolation: GraphCommandIsolation): boolean;
+export function observesPostFenceCommits(acquisition: GraphWriteFenceAcquisition): boolean;
 
 // @public
 export type OperationNames<D extends CapabilityBundleDefinition> = D["operations"][number]["operation"];
@@ -3875,6 +3884,11 @@ export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "co
 export type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
     readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
+}>;
+
+// @public
+type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
+    fenceRow: "advance" | "leave";
 }>;
 
 // @public (undocumented)

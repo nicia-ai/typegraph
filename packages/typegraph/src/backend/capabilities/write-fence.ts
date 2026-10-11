@@ -126,7 +126,7 @@ export type FenceStatements = FenceSql &
      * such a fence cannot advance a row, so its holder's evidence stays "no
      * fence row" and a snapshot isolation is refused on it.
      */
-    acquireKeyedSnapshotFence:
+    acquireKeyedSnapshotFence?:
       ((namespace: string, key: string | number) => SqlFragment) | undefined;
     /**
      * The bare session isolation-level read, with no acquisition. Yields no
