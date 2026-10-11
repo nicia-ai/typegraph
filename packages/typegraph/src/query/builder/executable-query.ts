@@ -95,7 +95,11 @@ import {
   type StreamOptions,
 } from "./types";
 import { type UnionableQuery } from "./unionable-query";
-import { validatePaginationOptions, validateQueryRange } from "./validation";
+import {
+  refuseRecursivePagination,
+  validatePaginationOptions,
+  validateQueryRange,
+} from "./validation";
 
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
@@ -1515,26 +1519,16 @@ export class ExecutableQuery<
 
   /**
    * Whether this query's keyset identifies, and is positioned against, the
-   * completed MATCH ROW rather than the start node alone: it has a traversal,
-   * and every traversal matches one edge per row.
-   *
-   * A recursive traversal has no single edge per row and its completed-match
-   * filter accepts database expressions only, so a query with one keeps the
-   * start-node keyset. That keyset does not distinguish the rows one start
-   * node fans out into; paging such a query is exact only while no start
-   * node's rows straddle a page boundary.
+   * completed MATCH ROW rather than the start node alone: it has a traversal.
+   * Pagination refuses a recursive traversal (`refuseRecursivePagination`), so
+   * every traversal that reaches here matches one edge per row.
    *
    * The one decision both halves of the keyset read: the tiebreaker
    * ({@link #paginationOrderBy}) and the cursor's placement
    * ({@link #cursorFilters}).
    */
   #keysetIdentifiesMatchRows(): boolean {
-    return (
-      this.#state.traversals.length > 0 &&
-      this.#state.traversals.every(
-        (traversal) => traversal.variableLength === undefined,
-      )
-    );
+    return this.#state.traversals.length > 0;
   }
 
   /**
@@ -1550,9 +1544,8 @@ export class ExecutableQuery<
    * two parallel edges between one pair of nodes are two rows. The start
    * node's identity is `(kind, id)` when the start alias spans more than one
    * kind and `id` alone otherwise. Each component the caller's order does not
-   * already name is appended after it, in traversal order. See
-   * {@link #keysetIdentifiesMatchRows} for the queries that keep the
-   * start-node identity alone.
+   * already name is appended after it, in traversal order. A query with no
+   * traversal keeps the start node's identity alone.
    *
    * The emitted sort, cursor predicate, cursor encoding, and cursor validation
    * all use this order, including the selective-field-optimized path.
@@ -1629,7 +1622,7 @@ export class ExecutableQuery<
    */
   async paginate(options: PaginateOptions): Promise<PaginatedResult<R>> {
     this.#refuseCheckedReadSurface("paginate");
-    validatePaginationOptions(this.#state, options);
+    validatePaginationOptions(this.#state, options, "paginate");
     if (this.#hasParameterReferences())
       throw new ConfigurationError(
         "Cursor pagination requires bound values, not param() references.",
@@ -1739,7 +1732,7 @@ export class ExecutableQuery<
     Required<Pick<OneStatementBatchableQuery<PaginatedResult<R>>, "execute">> {
     this.#refuseCheckedReadSurface("page");
     const pageOptions = { ...options };
-    validatePaginationOptions(this.#state, pageOptions);
+    validatePaginationOptions(this.#state, pageOptions, "page");
     if (this.#hasParameterReferences())
       throw new ConfigurationError(
         "Cursor pagination requires bound values, not param() references.",
@@ -1844,6 +1837,7 @@ export class ExecutableQuery<
    */
   stream(options?: StreamOptions): AsyncIterable<R> {
     this.#refuseCheckedReadSurface("stream");
+    refuseRecursivePagination(this.#state, "stream");
     // Validate ORDER BY is present
     if (this.#state.orderBy.length === 0) {
       throw new ValidationError(

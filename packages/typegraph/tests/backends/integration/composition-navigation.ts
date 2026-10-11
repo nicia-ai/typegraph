@@ -482,6 +482,53 @@ export function registerCompositionNavigationIntegrationTests(
       );
     });
 
+    it("refuses cursor pagination over parts() and wholes()", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { podcast, segment1 } = await seedCompositionFixtures(store);
+      const parts = store
+        .query()
+        .from("CnPodcast", "p")
+        .whereNode("p", (p) => p.id.eq(podcast.id))
+        .parts("x")
+        .orderBy("p", "title", "asc")
+        .select((ctx) => ctx.x.id);
+      const wholes = store
+        .query()
+        .from("CnSegment", "s")
+        .whereNode("s", (s) => s.id.eq(segment1.id))
+        .wholes("x")
+        .orderBy("s", "title", "asc")
+        .select((ctx) => ctx.x.id);
+
+      for (const query of [parts, wholes]) {
+        await expect(query.paginate({ first: 1 })).rejects.toThrow(
+          expect.objectContaining({
+            code: "CONFIGURATION_ERROR",
+            details: matchingObject({
+              code: "RECURSIVE_PAGINATION_UNSUPPORTED",
+              operation: "paginate",
+            }),
+          }),
+        );
+        expect(() => query.page({ first: 1 })).toThrow(
+          expect.objectContaining({
+            details: matchingObject({
+              code: "RECURSIVE_PAGINATION_UNSUPPORTED",
+              operation: "page",
+            }),
+          }),
+        );
+        expect(() => query.stream()).toThrow(
+          expect.objectContaining({
+            details: matchingObject({
+              code: "RECURSIVE_PAGINATION_UNSUPPORTED",
+              operation: "stream",
+            }),
+          }),
+        );
+      }
+    });
+
     it("wholes() returns the ancestor chain from a Segment", async () => {
       const store = await context.createStore(compositionNavigationGraph);
       const { segment1 } = await seedCompositionFixtures(store);

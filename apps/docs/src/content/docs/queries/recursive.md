@@ -477,6 +477,15 @@ const results = await store
 
 To get unique nodes, deduplicate in your application or use [set operations](/queries/combine).
 
+## Pagination
+
+A query with a recursive traversal cannot be paged with `paginate()`, `page()` or `stream()`: a
+cursor cannot position itself inside the rows one start node fans out into, so those calls refuse it
+with a `ConfigurationError` (`details.code` is `RECURSIVE_PAGINATION_UNSUPPORTED`) before running
+any statement. Read the walk with `execute()` and a `limit()` or `maxHops` you choose, or page the
+start nodes in a query without the recursive traversal and run the walk for each page. See
+[Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated).
+
 ## Depth Limits
 
 Two safety caps prevent runaway recursion:

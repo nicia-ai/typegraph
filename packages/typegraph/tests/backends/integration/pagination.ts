@@ -1,7 +1,19 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { count, expr, field } from "../../../src";
+import {
+  ConfigurationError,
+  count,
+  createStore,
+  expr,
+  field,
+} from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
+import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { seedProductsForCursorPagination } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -21,6 +33,22 @@ async function seedFanOut(context: IntegrationTestContext) {
       .traverse("knows", "edge")
       .to("Person", "neighbor");
   return { store, hub, names, fanOut };
+}
+
+function recursiveFanOut(
+  store: Pick<IntegrationStore, "query">,
+  hubId: string,
+  hops?: Readonly<{ maxHops: number }>,
+) {
+  return store
+    .query()
+    .from("Person", "source")
+    .whereNode("source", (source) => source.id.eq(hubId))
+    .traverse("knows", "edge")
+    .recursive(hops)
+    .to("Person", "neighbor")
+    .orderBy("source", "name", "asc")
+    .select((ctx) => ctx.neighbor.name);
 }
 
 /**
@@ -439,6 +467,163 @@ export function registerPaginationIntegrationTests(
       expect(forward.toSorted()).toEqual(names.filter((name) => name !== "n3"));
     });
   });
+  // A recursive traversal has no single edge per row, so the start-node keyset
+  // cannot position a cursor inside the rows one start node fans out into: the
+  // rows past a page boundary are lost. Pagination refuses such a query up
+  // front rather than returning pages that silently drop rows.
+  describe("Cursor pagination over a recursive traversal", () => {
+    const REFUSAL_CODE = "RECURSIVE_PAGINATION_UNSUPPORTED";
+
+    function expectRefusal(
+      attempt: () => unknown,
+      operation: "paginate" | "page" | "stream",
+    ): void {
+      let caught: unknown;
+      try {
+        attempt();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      const error = caught as ConfigurationError;
+      expect(error.details["code"]).toBe(REFUSAL_CODE);
+      expect(error.details["operation"]).toBe(operation);
+    }
+
+    it("refuses paginate() with a typed error before executing a statement", async () => {
+      const { store, hub } = await seedFanOut(context);
+      let statements = 0;
+      const base = store.backend;
+      const counted = deriveBackend(projectGraphBackend(base), {
+        execute: <T>(query: CompiledRowsSql) => {
+          statements += 1;
+          return base.execute<T>(query);
+        },
+        ...(base.executeRaw === undefined ?
+          {}
+        : {
+            executeRaw: <T>(sqlText: string, params: readonly unknown[]) => {
+              statements += 1;
+              return requireDefined(base.executeRaw)<T>(sqlText, params);
+            },
+          }),
+      });
+      const countedStore = createStore(integrationTestGraph, counted);
+
+      const caught = await recursiveFanOut(countedStore, hub.id)
+        .paginate({ first: 2 })
+        .catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      const error = caught as ConfigurationError;
+      expect(error.details["code"]).toBe(REFUSAL_CODE);
+      expect(error.details["operation"]).toBe("paginate");
+      expect(statements).toBe(0);
+    });
+
+    it("refuses page() and stream() when they are built", async () => {
+      const { store, hub } = await seedFanOut(context);
+      const query = recursiveFanOut(store, hub.id);
+
+      expectRefusal(() => query.page({ first: 2 }), "page");
+      expectRefusal(() => query.stream({ batchSize: 2 }), "stream");
+    });
+
+    it("refuses a recursive traversal whatever else the query holds", async () => {
+      const { store, hub } = await seedFanOut(context);
+      const boundedOneHop = recursiveFanOut(store, hub.id, { maxHops: 1 });
+      const afterFixedHop = store
+        .query()
+        .from("Person", "source")
+        .whereNode("source", (source) => source.id.eq(hub.id))
+        .traverse("knows", "first")
+        .to("Person", "middle")
+        .traverse("knows", "second")
+        .recursive()
+        .to("Person", "far")
+        .orderBy("source", "name", "asc")
+        .select((ctx) => ctx.far.name);
+
+      for (const query of [boundedOneHop, afterFixedHop]) {
+        expectRefusal(() => query.page({ first: 2 }), "page");
+      }
+    });
+
+    it("refuses a continuation cursor the same way", async () => {
+      const { store, hub } = await seedFanOut(context);
+      const nonRecursive = store
+        .query()
+        .from("Person", "source")
+        .whereNode("source", (source) => source.id.eq(hub.id))
+        .traverse("knows", "edge")
+        .to("Person", "neighbor")
+        .orderBy("source", "name", "asc")
+        .select((ctx) => ctx.neighbor.name);
+      const { nextCursor } = await nonRecursive.paginate({ first: 2 });
+
+      const caught = await recursiveFanOut(store, hub.id)
+        .paginate({ first: 2, after: requireDefined(nextCursor) })
+        .catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).details["code"]).toBe(REFUSAL_CODE);
+    });
+
+    it("still reads the whole recursive result through execute()", async () => {
+      const { store, hub, names } = await seedFanOut(context);
+
+      const rows = await recursiveFanOut(store, hub.id).execute();
+
+      expect([...new Set(rows)].toSorted()).toEqual(names);
+    });
+
+    it("pages the start nodes and runs the recursive walk per page", async () => {
+      const store = context.getStore();
+      const roots = [];
+      for (const name of ["r1", "r2", "r3"]) {
+        const root = await store.nodes.Person.create({ name });
+        for (const child of ["a", "b"]) {
+          const node = await store.nodes.Person.create({
+            name: `${name}-${child}`,
+          });
+          await store.edges.knows.create(root, node);
+        }
+        roots.push(root);
+      }
+      const rootIds = roots.map((root) => root.id);
+      const startNodes = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (root) => root.id.in(rootIds))
+        .orderBy("root", "name", "asc")
+        .select((ctx) => ctx.root.id);
+      const reached: string[] = [];
+
+      let after: string | undefined;
+      do {
+        const page = await startNodes.paginate({
+          first: 2,
+          ...(after === undefined ? {} : { after }),
+        });
+        const walked = await store
+          .query()
+          .from("Person", "source")
+          .whereNode("source", (source) => source.id.in(page.data))
+          .traverse("knows", "edge")
+          .recursive()
+          .to("Person", "neighbor")
+          .select((ctx) => ctx.neighbor.name)
+          .execute();
+        reached.push(...walked);
+        after = page.nextCursor;
+      } while (after !== undefined);
+
+      expect(reached.toSorted()).toEqual(
+        ["r1-a", "r1-b", "r2-a", "r2-b", "r3-a", "r3-b"].toSorted(),
+      );
+    });
+  });
+
   describe("Multi-hop traversal over a shared intermediate node", () => {
     it.each([1, 2, 3, 5])(
       "pages the rows execute() returns at page size %i",
