@@ -479,7 +479,11 @@ function tryLowerSingleHopRecursiveTraversal(
     return undefined;
   }
 
-  if (variableLength.minDepth !== 1 || variableLength.maxDepth !== 1) {
+  if (
+    variableLength.exhaustive === true ||
+    variableLength.minDepth !== 1 ||
+    variableLength.maxDepth !== 1
+  ) {
     return undefined;
   }
   if (

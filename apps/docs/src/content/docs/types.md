@@ -526,6 +526,7 @@ Configuration for variable-length (recursive) traversals.
 type VariableLengthSpec = Readonly<{
   minDepth: number;                   // Minimum hops (default: 1)
   maxDepth: number;                   // Maximum hops (-1 = unlimited)
+  exhaustive?: boolean;               // No hop ceiling; needs cyclePolicy "prevent" and maxDepth -1
   cyclePolicy: "prevent" | "allow";   // Cycle handling mode
   pathAlias?: string;                 // Column alias for projected path
   depthAlias?: string;                // Column alias for projected depth

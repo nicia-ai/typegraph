@@ -544,13 +544,28 @@ function compileRecursiveCte(
   // Max depth condition:
   // - unlimited traversals are capped at MAX_RECURSIVE_DEPTH
   // - explicit maxDepth traversals must not exceed MAX_EXPLICIT_RECURSIVE_DEPTH
+  // - exhaustive traversals carry no ceiling, so only the per-path cycle check
+  //   ends them
+  if (vl.exhaustive === true) {
+    if (!shouldEnforceCycleCheck) {
+      throw new UnsupportedPredicateError(
+        'An exhaustive recursive traversal requires cyclePolicy "prevent": without a hop ceiling, cycle prevention is its only termination guarantee',
+      );
+    }
+    if (vl.maxDepth > 0) {
+      throw new UnsupportedPredicateError(
+        `An exhaustive recursive traversal cannot also state maxDepth(${vl.maxDepth}); state one or the other`,
+      );
+    }
+  }
   if (vl.maxDepth > MAX_EXPLICIT_RECURSIVE_DEPTH) {
     throw new UnsupportedPredicateError(
       `Recursive traversal maxHops(${vl.maxDepth}) exceeds maximum explicit depth of ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
     );
   }
   const effectiveMaxDepth = vl.maxDepth > 0 ? vl.maxDepth : MAX_RECURSIVE_DEPTH;
-  const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
+  const maxDepthCondition =
+    vl.exhaustive === true ? undefined : sql`r.depth < ${effectiveMaxDepth}`;
 
   // Under identity folding two folded peers share an id but differ in kind, so
   // a bare-id path token treats a traversal that legitimately passes through
@@ -611,7 +626,7 @@ function compileRecursiveCte(
     nodeKindFilter,
     edgeTemporalFilter,
     nodeTemporalFilter,
-    maxDepthCondition,
+    ...(maxDepthCondition === undefined ? [] : [maxDepthCondition]),
     ...(stopExpression === undefined ?
       []
     : [

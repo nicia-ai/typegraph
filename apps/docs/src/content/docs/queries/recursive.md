@@ -592,8 +592,14 @@ no extra call.
 **Recursion is the default**, matching the value proposition over `traverse()`:
 `parts()`/`wholes()` reach the full transitive closure unless you pass
 `maxHops: 1` for the direct level only. Unlike a bare `.recursive()`, which
-stops at 10 hops unless told otherwise, an omitted `maxHops` here recurses to
-the deepest bound a recursive traversal accepts (1000 levels). `depth` and
+stops at 10 hops unless told otherwise, an omitted `maxHops` here applies no
+hop ceiling: the walk ends where the composition ends, so a chain of any
+length comes back whole, on every backend. A `maxHops` you state bounds the
+walk exactly as given (up to 1000, as for any recursive step). The unbounded
+walk tracks each row's path to prevent cycles, so on a chain thousands of
+levels deep its cost grows faster than that of
+`store.subgraph(id, { composition: true })`, which reads the owned unit with a
+set-semantics walk; the rows returned are complete either way. `depth` and
 `path` behave exactly as they do for `.recursive({ depth, path })`. Like any recursive step, they chain
 after earlier fixed or recursive traversals as a later stage (see
 [Chaining Fixed and Recursive Traversals](#chaining-fixed-and-recursive-traversals)).

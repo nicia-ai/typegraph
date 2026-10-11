@@ -44,7 +44,6 @@ import {
   type TraversalDirection,
   type TraversalExpansion,
 } from "../ast";
-import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../compiler";
 import { validateAggregateOperand } from "../compiler/aggregate-validation";
 import {
   createOuterReferenceExpression,
@@ -99,7 +98,10 @@ import {
 } from "./order-by-field";
 import { withRecursiveStopExpansion } from "./recursive-stop";
 import { executeQueryTerminal } from "./terminal-query";
-import { TraversalBuilder } from "./traversal-builder";
+import {
+  EXHAUSTIVE_VARIABLE_LENGTH_STATE,
+  TraversalBuilder,
+} from "./traversal-builder";
 import {
   type AliasMap,
   type AliasNodeType,
@@ -131,15 +133,6 @@ import {
   validateSqlIdentifier,
   validateTraversalOptions,
 } from "./validation";
-
-/**
- * How deep `parts()`/`wholes()` recurse when the caller states no `maxHops`.
- * A composition is a forest (each part holds one whole, and the realizing
- * edges are acyclic), so the closure is bounded by the stored rows rather than
- * by a branching factor, and the widest bound a recursive traversal accepts
- * costs nothing extra.
- */
-const COMPOSITION_CLOSURE_MAX_HOPS = MAX_EXPLICIT_RECURSIVE_DEPTH;
 
 function resolveAggregateFieldTypeInfo(
   introspector: SchemaIntrospector,
@@ -210,8 +203,8 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
   /** Alias to navigate from (defaults to current/last traversal target). */
   from?: keyof Aliases & string;
   /**
-   * Maximum recursion depth. `1` reaches only the direct level; omitted, the
-   * walk recurses to the deepest bound a recursive traversal accepts.
+   * Maximum recursion depth, applied exactly as stated (`1` reaches only the
+   * direct level). Omitted, the walk reaches the complete closure at any depth.
    */
   maxHops?: number;
   /**
@@ -1023,9 +1016,10 @@ export class QueryBuilder<
    * one) pays nothing extra to compile.
    *
    * Recurses by default — the difference from `traverse`, which reaches only
-   * the direct level — to the full transitive parts closure, up to the
-   * deepest bound a recursive traversal accepts rather than a bare
-   * `.recursive()`'s implicit cap; pass `maxHops: 1` for direct parts only.
+   * the direct level — to the full transitive parts closure at any depth,
+   * with no hop ceiling, rather than a bare `.recursive()`'s implicit cap;
+   * a stated `maxHops` bounds the walk exactly as given (`maxHops: 1` for
+   * direct parts only).
    * `via` narrows the walk to one realizing edge and to the kinds that edge
    * alone reaches. The result alias stays `DynamicNodeType`: a
    * realizing edge can admit more than one part kind, and a conditional node
@@ -1304,7 +1298,8 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       false,
-      undefined, // variableLength — default
+      // Exhaustive until `recursive()` is given a bound to apply.
+      EXHAUSTIVE_VARIABLE_LENGTH_STATE,
       undefined, // pendingEdgePredicates — default
       false,
     );
@@ -1324,7 +1319,9 @@ export class QueryBuilder<
     return (willRecurse ?
       traversalBuilder
         .recursive({
-          maxHops: options?.maxHops ?? COMPOSITION_CLOSURE_MAX_HOPS,
+          ...(options?.maxHops === undefined ?
+            {}
+          : { maxHops: options.maxHops }),
           ...(options?.depth === undefined ? {} : { depth: options.depth }),
           ...(options?.path === undefined ? {} : { path: options.path }),
         })

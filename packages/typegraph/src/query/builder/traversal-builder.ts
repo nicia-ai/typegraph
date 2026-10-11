@@ -109,6 +109,7 @@ interface VariableLengthState {
   enabled: boolean;
   minDepth: number;
   maxDepth: number;
+  exhaustive?: boolean;
   cyclePolicy: RecursiveCyclePolicy;
   pathEnabled: boolean;
   pathAlias?: string;
@@ -127,6 +128,17 @@ const DEFAULT_VARIABLE_LENGTH_STATE: VariableLengthState = {
   cyclePolicy: "prevent",
   pathEnabled: false,
   depthEnabled: false,
+};
+
+/**
+ * Variable-length state for a recursion that must reach the end of every path
+ * unless the caller bounds it (`parts()` / `wholes()`). `recursive()` is the
+ * only place that decides: a stated `maxHops` turns `exhaustive` off and applies
+ * that bound exactly.
+ */
+export const EXHAUSTIVE_VARIABLE_LENGTH_STATE: VariableLengthState = {
+  ...DEFAULT_VARIABLE_LENGTH_STATE,
+  exhaustive: true,
 };
 
 function validateMaxHops(max: number): void {
@@ -359,6 +371,9 @@ export class TraversalBuilder<
         enabled: true,
         minDepth,
         maxDepth,
+        exhaustive:
+          options?.maxHops === undefined &&
+          this.#variableLength.exhaustive === true,
         cyclePolicy,
         ...(pathOption === undefined ?
           {}
@@ -942,6 +957,9 @@ export class TraversalBuilder<
           variableLength: {
             minDepth: this.#variableLength.minDepth,
             maxDepth: this.#variableLength.maxDepth,
+            ...(this.#variableLength.exhaustive === true ?
+              { exhaustive: true }
+            : {}),
             cyclePolicy: this.#variableLength.cyclePolicy,
             ...(this.#variableLength.pathEnabled && {
               pathAlias: this.#variableLength.pathAlias ?? `${alias}_path`,
