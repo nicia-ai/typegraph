@@ -201,11 +201,9 @@ a `differentFrom` relation exactly like the always-safe row.
 - **Removing `subClassOf` or `equivalentTo`** can shrink an edge
   kind's admitted endpoint pairs. If a live edge's endpoints rely on the
   subsumption the relation provided, the commit refuses. It can also move a
-  `kindWithSubClasses` uniqueness axis: this is **not** checked, and claims
-  written under the wider hierarchy stop fencing new writes of a kind whose
-  axis moved. Run `store.verifyConstraintFences()` after removing a relation
-  from a populated hierarchy that declares such a constraint; it reports any
-  duplicate that results.
+  `kindWithSubClasses` uniqueness claim away from where existing rows hold
+  theirs, which is refused while the affected kind holds rows — see
+  [Unique constraints need an empty kind](#unique-constraints-need-an-empty-kind).
 - **Removing `disjointWith`** never invalidates anything — loosening a
   constraint cannot make an existing row wrong — so it stays safe and
   auto-migrates unconditionally.
@@ -336,6 +334,93 @@ schema change), then retry. This check has the same residual window as the
 ontology tightening check above: it takes no additional lock, so a writer
 committing under the previous schema version between the probe and the
 version compare-and-swap is invisible to it.
+
+## Unique constraints need an empty kind
+
+A unique constraint is enforced by claim rows written alongside each node
+write. A schema commit does not validate existing rows against a constraint
+and does not rebuild claims, so a commit that would leave a constraint
+unenforced over rows that already exist is refused. Two kinds of change are
+gated, on every path that publishes a version — `createStoreWithSchema()` /
+`ensureSchema()`, `migrateSchema()`, `Store.evolve()`,
+`Store.withEvolvedTransaction()`, `Store.removeKinds()` and
+`rollbackSchema()`:
+
+- **Adding or reshaping a unique constraint** on a kind that holds rows. A
+  constraint is reshaped when one of the same name changes its `fields`,
+  `scope`, `collation` or `where`. No existing row has a claim for the new
+  shape, so pre-existing duplicates would stay and a new node duplicating an
+  old value would be accepted. The rows do not have to contain a duplicate
+  for the commit to be refused. A kind the commit adds is probed too: rows a
+  previous drop left in the table (`migrateSchema()` with
+  `discardDroppedKindRows: true`) become live again under a re-added kind of
+  the same name, with no claim.
+- **Dropping a member from the subclass component of a
+  `kindWithSubClasses` constraint** a populated kind declares. Such a
+  constraint keeps each claim under one kind of the subclass hierarchy (the
+  first in code-point order when the claim was written, so the kind itself or
+  one that sorts before it) and reads the whole hierarchy. Merging two
+  hierarchies moves where new claims are written without moving the old ones,
+  so a kind's claims can sit under any earlier-sorting member its hierarchy
+  has had. Removing a `subClassOf` or `equivalentTo` relation — or removing a
+  kind of the hierarchy — that drops such a member leaves claims where the kind
+  no longer reads. Dropping only members that sort after the kind is not
+  gated. Adding a relation only widens what is read, so existing claims keep
+  fencing and the addition is checked for collisions instead (see above).
+
+The check is one existence probe (a count that stops at the first row) per
+affected kind, inside the schema-commit transaction. It looks at every row that
+is not deleted, including rows whose validity period has ended. A kind with no
+rows is unaffected, and removing a unique constraint is never gated.
+
+A refused commit throws `MigrationError`:
+
+```typescript
+try {
+  await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (
+    error instanceof MigrationError &&
+    error.details.reason === "unique-constraint-requires-empty-kind"
+  ) {
+    console.log(error.details.constraints);
+    // [{ cause: "constraint-added", kind: "Person",
+    //    constraintName: "person_email", axis: "Person" }]
+  }
+}
+```
+
+Each entry names the `kind` that must be empty, the `constraintName`, the
+`cause` (`"constraint-added"`, `"constraint-reshaped"` or
+`"claim-axis-moved"`) and the `axis` the proposed schema writes the
+constraint's claims at; a shrunken component also carries `lostKinds`, the
+members of the kind's subclass component that sort before it and that it no
+longer has.
+
+The supported paths are:
+
+- **Declare the constraint before the kind is populated**, along with the
+  subclass hierarchy a `kindWithSubClasses` constraint spans.
+- **Empty the kind first.** Export its rows, delete them (for a re-added kind,
+  run `store.materializeRemovals()` to reclaim the rows its removal left),
+  commit the schema, then write them back. The writes run under the new constraint, so a
+  duplicate is refused with `UniquenessError` where you can resolve it.
+- **Introduce a new kind.** Declare the constraint on a new kind and move
+  rows into it with the
+  [expand-contract pattern](#the-expand-contract-pattern).
+
+A post-migration `store.verifyConstraintFences()` is not a substitute: it
+reports rows that share a claim, but a row with no claim is invisible to it
+and stays unfenced.
+
+Like the other data checks, this one needs the backend's atomic
+preflight-commit primitive (`commitSchemaVersionWithPreflight`, or
+`setActiveVersionWithPreflight` for a rollback). A backend without it refuses
+a gated commit — even on an empty kind, and including a new kind that declares
+a unique constraint, because the probe cannot be bound to the commit it
+decides — with `ConfigurationError` code
+`UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND`; see
+[Schema-tightening and constraint-fence audit guard codes](/errors#schema-tightening-and-constraint-fence-audit-guard-codes).
 
 ## Structural subsumption is checked before you upgrade
 
@@ -822,7 +907,7 @@ console.log("Current version:", active?.version);
 | Add optional property          | Safe           | Yes            |
 | Add `broader`/`narrower`/`relatedTo` | Safe | Yes |
 | Add `disjointWith`, `subClassOf`, `equivalentTo`, `partOf`, `hasPart` | Warning (data-checked) | Yes, if the check passes |
-| Remove `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
+| Remove `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes and no populated kind's `kindWithSubClasses` component drops an earlier-sorting member |
 | Remove `disjointWith`          | Safe           | Yes            |
 | Add/remove `inverseOf`, `implies` | Breaking    | No             |
 | Remove `partOf`, `hasPart`     | Breaking       | No             |
@@ -833,7 +918,8 @@ console.log("Current version:", active?.version);
 | Rename node/edge type          | Breaking       | No             |
 | Change property type           | Breaking       | No             |
 | Change onDelete behavior       | Warning        | Yes            |
-| Change unique constraints      | Warning        | Yes            |
+| Add or reshape a unique constraint | Warning (refused while the kind holds rows, a re-added kind included) | Yes, if the kind is empty |
+| Remove a unique constraint     | Warning        | Yes            |
 | Change edge cardinality (source-side, `cardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
 | Change edge target cardinality (`targetCardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
 | Widen edge endpoint kinds      | Warning        | Yes            |
@@ -860,7 +946,11 @@ target version declares an ontology axiom or edge cardinality the active
 version does not (a `disjointWith`, `acyclic: true`, or a tighter
 `cardinality`, for example), existing rows are validated under the same schema
 fence as the switch, and a violation refuses the rollback with the same
-`MigrationError` a forward migration would raise.
+`MigrationError` a forward migration would raise. A target version that
+declares a unique constraint the active one lacks or shapes differently, or
+whose hierarchy drops an earlier-sorting member of a `kindWithSubClasses` component, is refused while the
+affected kind holds rows
+([Unique constraints need an empty kind](#unique-constraints-need-an-empty-kind)).
 
 ## Migration Hooks
 

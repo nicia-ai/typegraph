@@ -50,6 +50,13 @@ import {
   type OntologySnapshot,
   ontologyTighteningProbes,
 } from "./ontology-change";
+import {
+  assertUniquenessClaimGatesOpen,
+  declaredKindUniqueConstraints,
+  mayGateUniquenessClaims,
+  type UniquenessClaimGate,
+  uniquenessClaimGates,
+} from "./uniqueness-claim-gate";
 
 /**
  * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
@@ -95,6 +102,23 @@ const EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPrefl
     code: "EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically validate a newly-constrained edge cardinality against existing data as part of a schema transition.",
+    suggestion:
+      "Run this migration through a backend built by `createSqliteBackend` or " +
+      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+  };
+
+/**
+ * Thrown when a commit that changes where — or whether — existing rows hold
+ * uniqueness claims needs the atomic preflight-commit primitive and the
+ * backend does not implement it. The emptiness probe that decides the commit
+ * must run in the transaction that publishes it; a backend that cannot do
+ * that cannot make the decision at all.
+ */
+const UNIQUENESS_CLAIM_GATE_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically verify that a kind is empty while changing a uniqueness constraint that covers it as part of a schema transition.",
     suggestion:
       "Run this migration through a backend built by `createSqliteBackend` or " +
       "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
@@ -243,9 +267,17 @@ export type SchemaTighteningPreflight = Readonly<{
   /** The edge-cardinality axes this transition newly constrains. */
   newlyConstrainedAxes: readonly EdgeCardinalityDeclaration[];
   /**
+   * The uniqueness constraints this transition can only publish while the
+   * kind declaring them holds no rows: `run` refuses the commit when one
+   * does, before any other check.
+   */
+  uniquenessClaimGates: readonly UniquenessClaimGate[];
+  /**
    * {@link EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR}
    * when this commit newly constrains an edge cardinality — on either axis,
-   * including a brand-new kind — {@link
+   * including a brand-new kind — else {@link
+   * UNIQUENESS_CLAIM_GATE_ATOMIC_PREFLIGHT_CAPABILITY_ERROR} when it owes a
+   * uniqueness claim gate and no ontology probe, and {@link
    * ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR} otherwise. Decided
    * HERE, from the same `newlyConstrainedAxes` fold `run` above closes over,
    * so a caller names the axis this exact preflight is about instead of
@@ -258,8 +290,13 @@ export type SchemaTighteningPreflight = Readonly<{
 
 /**
  * The data preflight a schema tightening owes, or `undefined` when the
- * proposal tightens nothing on either the ontology or the edge-cardinality
- * axis. Its `run` step executes INSIDE the schema-commit transaction.
+ * proposal tightens nothing on the ontology or the edge-cardinality axis and
+ * strands no uniqueness claim. Its `run` step executes INSIDE the
+ * schema-commit transaction.
+ *
+ * The uniqueness claim gate runs first: it is one emptiness probe per gated
+ * kind, and a commit it refuses is not legal whatever the audits below would
+ * find.
  *
  * Takes NO advisory lock. Under the PREVIOUS schema the tightening's kinds
  * are not yet disjoint (or their uniqueness components have not yet merged,
@@ -292,7 +329,19 @@ export function prepareSchemaTighteningPreflight(
     params.before,
     params.after,
   );
-  if (probes.length === 0 && newlyConstrainedAxes.length === 0) {
+  const uniqueConstraints = declaredKindUniqueConstraints(
+    params.before,
+    params.after,
+  );
+  const mayGateUniqueness = mayGateUniquenessClaims(
+    uniqueConstraints,
+    changes.length > 0,
+  );
+  if (
+    probes.length === 0 &&
+    newlyConstrainedAxes.length === 0 &&
+    !mayGateUniqueness
+  ) {
     return undefined;
   }
   const probedChanges = changes.filter(
@@ -303,6 +352,25 @@ export function prepareSchemaTighteningPreflight(
   // `buildKindRegistry` on the target graph before reaching the preflight, so
   // this cannot throw here for a reason the commit has not already surfaced.
   const proposedRegistry = buildRegistryFromSerializedSchema(params.after);
+
+  // BEFORE is read only for where its claims sit, never as a registry a
+  // store writes through, so it is held to the same relaxed rules the
+  // ontology classifier applies to a stored document.
+  const gates =
+    mayGateUniqueness ?
+      uniquenessClaimGates(
+        uniqueConstraints,
+        buildRegistryFromSerializedSchema(params.before, "unenforced-baseline"),
+        proposedRegistry,
+      )
+    : [];
+  if (
+    probes.length === 0 &&
+    newlyConstrainedAxes.length === 0 &&
+    gates.length === 0
+  ) {
+    return undefined;
+  }
 
   const grouped = {
     disjointness: probeOfKind(probes, "nodeDisjointness"),
@@ -338,6 +406,8 @@ export function prepareSchemaTighteningPreflight(
       );
 
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
+    await assertUniquenessClaimGatesOpen(target, params, gates);
+
     const claimBackedViolations = await auditConstraintFences(target, {
       declarations: {
         graphId: params.graphId,
@@ -455,9 +525,12 @@ export function prepareSchemaTighteningPreflight(
     run,
     probedChanges,
     newlyConstrainedAxes,
+    uniquenessClaimGates: gates,
     capabilityError:
       newlyConstrainedAxes.length > 0 ?
         EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+      : gates.length > 0 && probes.length === 0 ?
+        UNIQUENESS_CLAIM_GATE_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
       : ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
   };
 }

@@ -26,6 +26,7 @@ import type { EdgeCardinalityDeclaration } from "../backend/types";
 import type { KindEntity } from "../core/types";
 import type { OntologyChange } from "../schema/migration";
 import type { SchemaDiff } from "../schema/migration";
+import type { UniquenessClaimGate } from "../schema/uniqueness-claim-gate";
 import type { EdgeCardinalityDirection } from "../store/claims/edge-claims";
 import type { ConstraintFenceViolation } from "../store/claims/verify";
 // Type-only imports: `materialize-indexes.ts` and `claims/verify.ts`
@@ -1556,6 +1557,15 @@ export const MIGRATION_FAILURE_REASONS = [
    * be resolved before retrying.
    */
   "edge-cardinality-tightening-violated",
+  /**
+   * The commit would leave a uniqueness constraint unenforced over existing
+   * rows: it adds or reshapes a unique constraint on a kind that holds rows,
+   * or moves a `kindWithSubClasses` claim axis away from where that kind's
+   * existing claims sit. A schema commit neither validates existing rows
+   * against a unique constraint nor rebuilds its claims, so the kind must be
+   * empty. Inspect `details.constraints`.
+   */
+  "unique-constraint-requires-empty-kind",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -1613,6 +1623,21 @@ export type MigrationErrorDetails =
       toVersion: number;
       reason: "edge-match-identity-rekey";
       edgeKinds: readonly string[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "unique-constraint-requires-empty-kind";
+      /**
+       * The uniqueness constraints the commit would leave unenforced over
+       * existing rows — added, reshaped, or left reading a subclass component
+       * that lost a member their claims may sit at — on a kind that still
+       * holds rows. A
+       * gated constraint whose kind is empty is permitted and does NOT appear
+       * here. Never empty.
+       */
+      constraints: readonly UniquenessClaimGate[];
     }>
   | Readonly<{
       graphId: string;

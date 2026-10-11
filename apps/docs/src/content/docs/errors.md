@@ -1592,6 +1592,33 @@ try {
 }
 ```
 
+The `details.reason` value `"unique-constraint-requires-empty-kind"` means the
+commit would leave a uniqueness constraint unenforced over rows that already
+exist: it adds or reshapes a unique constraint on a kind that holds rows
+(including a kind the commit re-adds over rows a discarded drop left behind),
+or drops a member that sorts before the kind from the subclass component of a
+populated kind's `kindWithSubClasses` constraint (a removed `subClassOf` /
+`equivalentTo`, or a removed kind). A schema
+commit neither validates existing rows against a unique constraint nor
+rebuilds its claims, so the kind must be empty. `details.constraints` names
+each blocked constraint — `kind`, `constraintName`, `cause`
+(`"constraint-added"`, `"constraint-reshaped"` or `"claim-axis-moved"`) and
+the claim `axis`, plus `lostKinds` for a component that dropped members. Declare the
+constraint before the kind is populated, or empty the kind, commit, and write
+the rows back. See
+[Unique constraints need an empty kind](/schema-evolution#unique-constraints-need-an-empty-kind).
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "unique-constraint-requires-empty-kind") {
+    console.log(error.details.constraints);
+    // [{ cause: "constraint-added", kind: "Person", constraintName: "person_email", axis: "Person" }]
+  }
+}
+```
+
 The `details.reason` value `"edge-cardinality-tightening-violated"` is the
 same shape for edge cardinality: newly declaring or tightening `cardinality`
 or `targetCardinality` on an edge kind is false against rows that already
@@ -1616,7 +1643,8 @@ try {
 
 #### Schema-tightening and constraint-fence audit guard codes
 
-Committing a schema tightening — ontology or edge cardinality — uses stable
+Committing a schema tightening — ontology, edge cardinality, or a gated
+unique-constraint change — uses stable
 `ConfigurationError` detail codes when the backend cannot run the required
 data check atomically:
 
@@ -1624,6 +1652,7 @@ data check atomically:
 | --- | --- |
 | `ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the ontology-tightening data check atomically with the schema-version compare-and-swap. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
 | `EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the edge-cardinality-tightening data check atomically with the schema-version compare-and-swap. Any commit that newly declares a constrained `cardinality` or `targetCardinality` on an edge kind — including declaring one on a brand-new kind — owes this same atomic check. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND` | The backend cannot verify that a kind is empty atomically with the schema-version compare-and-swap. A commit that adds or reshapes a unique constraint on an existing kind, or moves a `kindWithSubClasses` claim, owes that check even when the kind is empty. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
 | `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` | The backend does not implement `readConstraintFenceViolations` at all, so neither `store.verifyConstraintFences()` nor a schema-tightening preflight can run. |
 | `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED` | The backend ran the audit but did not answer the `edgeEndpointAssignability` family it was asked for (`misassignedEdgeEndpointRows` was left `undefined`). An empty report there would be indistinguishable from a clean database, so the audit refuses rather than reporting one. |
 

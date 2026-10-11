@@ -79,6 +79,14 @@ const SiblingB = defineNode("SiblingB", {
   schema: z.object({ email: z.string() }),
 });
 
+/** Re-pairing neighbours that sort after `SiblingA` / `SiblingB`. */
+const SiblingTailA = defineNode("SiblingTailA", {
+  schema: z.object({ email: z.string() }),
+});
+const SiblingTailB = defineNode("SiblingTailB", {
+  schema: z.object({ email: z.string() }),
+});
+
 async function activeVersion(
   context: IntegrationTestContext,
   id: string,
@@ -641,19 +649,22 @@ export function registerOntologyTighteningIntegrationTests(
       const nodes = {
         SiblingA: { type: SiblingA, unique: [SIBLING_EMAIL_UNIQUE] },
         SiblingB: { type: SiblingB, unique: [SIBLING_EMAIL_UNIQUE] },
-        Bystander: { type: Bystander },
-        OtherBystander: { type: OtherBystander },
+        SiblingTailA: { type: SiblingTailA },
+        SiblingTailB: { type: SiblingTailB },
       };
-      // Before: {SiblingA, Bystander} and {SiblingB, OtherBystander}. After:
+      // Before: {SiblingA, SiblingTailA} and {SiblingB, SiblingTailB}. After:
       // {SiblingA, SiblingB}. Neither sibling's component GREW as a set — each
       // swapped one neighbour for another — yet the two now share an axis.
+      // Each old neighbour sorts AFTER its sibling, so every existing claim
+      // sits at an axis the merged component still probes: the commit is
+      // decided by the collision probe, not refused as a stranded axis.
       const before = defineGraph({
         id,
         nodes,
         edges: {},
         ontology: [
-          subClassOf(SiblingA, Bystander),
-          subClassOf(SiblingB, OtherBystander),
+          subClassOf(SiblingA, SiblingTailA),
+          subClassOf(SiblingB, SiblingTailB),
         ],
       });
       const after = defineGraph({

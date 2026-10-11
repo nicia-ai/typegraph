@@ -70,7 +70,7 @@ import {
   POSTGRES_ROW_MAPPER_CONFIG,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../backend/row-mappers";
-import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
+import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -1320,10 +1320,10 @@ async function assertEvolvedSchemaRequiredKindsEmpty(
   graphId: string,
   classification: ReturnType<typeof classifyModifications>,
 ): Promise<void> {
-  const counts = await Promise.all(
+  const populated = await Promise.all(
     classification.requireEmpty.map(async (entry) => ({
       entry,
-      count: await countSchemaKindRows(backend, graphId, {
+      hasRows: await schemaKindHasRows(backend, graphId, {
         entity: entry.entity,
         kind: entry.kindName,
         rows: "nonDeleted",
@@ -1331,7 +1331,7 @@ async function assertEvolvedSchemaRequiredKindsEmpty(
     })),
   );
   const nonEmpty = new Set(
-    counts.filter(({ count }) => count > 0).map(({ entry }) => entry),
+    populated.filter(({ hasRows }) => hasRows).map(({ entry }) => entry),
   );
   const error = buildIncompatibleChangeError(classification, nonEmpty, graphId);
   if (error !== undefined) throw error;
@@ -7032,6 +7032,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {MigrationError} (`reason: "ontology-tightening-violated"`)
    *   when a surviving kind was assignable to an edge endpoint only through
    *   a removed kind and a live edge still relies on it.
+   * @throws {MigrationError} (`reason: "unique-constraint-requires-empty-kind"`)
+   *   when a removed kind that sorts before a surviving, populated kind
+   *   leaves its `kindWithSubClasses` subclass component, where its uniqueness
+   *   claims may sit.
    * @throws {StaleVersionError} on a CAS race with another writer.
    * @throws {SchemaContentConflictError} on a same-version content
    *   conflict.
