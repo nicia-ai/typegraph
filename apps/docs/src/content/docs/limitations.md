@@ -274,14 +274,19 @@ are not what happens:
   `store.transactionWithReceipt` receipt carries the same refs for every
   cascade in the transaction. `onOperationStart` never carries them — the
   cascade has not been planned when the operation begins.
-- **A PostgreSQL `REPEATABLE READ` transaction cannot delete a whole.** The
-  parts closure is read under the per-graph write fence with no claim row
-  behind it, so the session must see a part attached while it waited. A
-  `REPEATABLE READ` snapshot cannot, and the delete is refused with
-  `ConfigurationError` (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`) before
-  the closure is read. A `SERIALIZABLE` transaction is accepted, but is
-  arbitrated only against other `SERIALIZABLE` writers; delete wholes and
-  attach parts at one isolation level (`READ COMMITTED`, the default).
+- **A PostgreSQL `REPEATABLE READ` or `SERIALIZABLE` whole delete can fail
+  with a serialization failure.** The parts closure is read under the
+  per-graph write fence with no claim row behind it, so the session must see
+  a part attached while it waited. A snapshot taken before that attach
+  cannot, so the delete and the attach both advance the graph's row in
+  `typegraph_fences` and such a session fails on it (SQLSTATE `40001`) before
+  the closure is read, whatever isolation level the attaching writer ran at. A collection delete
+  TypeGraph opened the transaction for is replayed and then sees the part;
+  inside your own transaction it surfaces as `TransactionConflictError`, and
+  the whole transaction is yours to re-run. A custom backend whose fence is an advisory
+  lock with no fences relation cannot detect the stale snapshot and refuses
+  the delete at those levels with `ConfigurationError`
+  (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`).
 - **A property update racing a delete is not fenced, but cannot strand a
   unique key.** An ordinary node update takes no per-graph lock, so it can
   commit while a delete, direct or cascaded, is in flight. The delete
@@ -366,6 +371,67 @@ before the affected nodes can be deleted.
   from after the fact. The gap is caught after the fact by
   `store.verifyConstraintFences()`'s `compositionExistence` family run
   separately against the merged store.
+
+## Write Fence Row
+
+On PostgreSQL, a write that makes a decision only the per-graph write fence
+protects also advances one row per graph in `typegraph_fences`, behind the
+fence's advisory lock. Those writes are:
+
+- a write into an `acyclic: true` edge kind or a composition (`partOf` /
+  `hasPart`) relation, including the attach a part's create performs;
+- a delete of a composition whole;
+- a match-key convergence: `getOrCreateByEndpoints`,
+  `bulkGetOrCreateByEndpoints` or a coalescing upsert on a match key no
+  database key backs (a declared `matchIdentity` is backed by one).
+
+The row is what lets those decisions hold between a `REPEATABLE READ` or
+`SERIALIZABLE` session and a `READ COMMITTED` one (see
+[Acyclicity](/core-concepts#acyclicity)). Every other holder of the fence
+takes the lock alone: a history-capturing or revision-tracking write, a
+cardinality, uniqueness or disjointness write, `store.clear()`. A graph that
+declares no acyclic or composition relation and never converges on a match key
+never writes the row and issues no statement for it.
+
+Consequences of the row being a real write:
+
+- **A role that performs those writes needs `INSERT` and `UPDATE` on
+  `typegraph_fences`.** A role that only reads, or only performs the other
+  writes, does not.
+- **Reads write nothing.** A read that takes the fence to keep a
+  multi-statement view from tearing, such as a provenance capability's
+  `holding()`, takes the advisory lock alone, so it runs in a read-only
+  transaction or under a `SELECT`-only role.
+- **A long-lived snapshot slows those deciding writes.** The row is updated
+  once per deciding transaction (once per deciding write in a transaction you
+  adopted with `withTransaction`), and PostgreSQL cannot remove the dead
+  versions an open snapshot might still need. While any transaction holding
+  an older snapshot stays open (a long analytics query, `pg_dump`, an
+  idle-in-transaction session, or TypeGraph's own repeatable-read export, fork
+  and storage-inventory reads for as long as they run), each row update has
+  more dead versions to step over, and it runs while holding the graph's
+  advisory lock, so the cost is serialized into the throughput of every write
+  that waits on that lock. Measured with one client on PostgreSQL 18, issuing
+  the fence statement alone in its own transaction: 0.11 ms for the lock-only
+  form and 0.17 ms for the form that advances the row, with every update a
+  heap-only update and the table at 64 kB. With one `REPEATABLE READ`
+  transaction left open, the row-advancing form took 0.24 ms after 20,000
+  deciding transactions, 0.37 ms after 40,000, 0.50 ms after 60,000 and
+  0.63 ms after 80,000, still rising linearly, and the one-row table had grown
+  to 6 MB; the lock-only form stayed at 0.11 ms throughout. The growth stops
+  when the old snapshot closes and autovacuum (or a manual
+  `VACUUM typegraph_fences`) removes the dead versions. Watch `n_dead_tup` for
+  `typegraph_fences` in `pg_stat_user_tables` and the oldest `backend_xmin` in
+  `pg_stat_activity`; run dumps and long reports against a replica, and set
+  `idle_in_transaction_session_timeout`.
+- **A mixed deployment is as strong as its weakest decider.** The row detects
+  a stale snapshot only against writers that advance it. A custom backend
+  whose fence is an advisory lock with no fences relation advances nothing, so
+  it supports those decisions at `READ COMMITTED` only, and a
+  snapshot-isolation session on a bundled backend writing the same graph is
+  not protected from its writes.
+
+SQLite takes no fence row: its single writer slot is the fence.
 
 ## Connection Management
 

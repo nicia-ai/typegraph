@@ -27,7 +27,6 @@
  * {@link compositionAcyclicRelation}.
  */
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
-import { assertFencedSnapshotIsFresh } from "../backend/command-contract";
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError, EdgeAcyclicityError } from "../errors";
@@ -46,7 +45,10 @@ import {
   displayAcyclicRelationName,
 } from "./claims/axis";
 import { compositionCountsEndedRows } from "./claims/composition-claims";
-import { type GraphWriteLock } from "./recorded-capture/clock";
+import {
+  fenceLockOnlyDecision,
+  type GraphWriteLock,
+} from "./recorded-capture/clock";
 import {
   ACYCLICITY_SEED_ROW_PARAM_COUNT,
   ACYCLICITY_TARGET_ROW_PARAM_COUNT,
@@ -629,21 +631,19 @@ async function readViolatingOriginKeys(
 }
 
 /**
- * The acyclicity probe is a lock-only read, so it runs only on a session that
- * observes commits made while it waited for the fence.
+ * The acyclicity probe is a lock-only read: its frame advances the graph's
+ * fence row before it, and it runs only on a session that observes the
+ * deciders that held the fence before it.
  *
+ * @throws TransactionConflictError when another decider committed after this
+ *   session's snapshot
  * @throws ConfigurationError (`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`)
  */
-function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
-  assertFencedSnapshotIsFresh(
-    ctx.target.commands,
-    ctx.graphId,
-    ctx.lock.coordination,
-    {
-      code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
-      subject: "Edge-acyclicity",
-    },
-  );
+function fenceAcyclicityDecision(ctx: AcyclicityProbeContext): Promise<void> {
+  return fenceLockOnlyDecision(ctx.target, ctx.graphId, ctx.lock, {
+    code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+    subject: "Edge-acyclicity",
+  });
 }
 
 /**
@@ -679,7 +679,7 @@ export async function assertEdgeRelationsAcyclic(
   const probeable = selfLoopFreeAcyclicGroups(ctx, proposed);
   if (probeable.length === 0) return;
 
-  assertFreshSnapshot(ctx);
+  await fenceAcyclicityDecision(ctx);
 
   for (const { relation, edges } of probeable) {
     const violatingOriginKeys = await readProposedViolatingOriginKeys(
@@ -728,7 +728,7 @@ export async function assertUnwrittenEdgeRelationsAcyclic(
   const probeable = selfLoopFreeAcyclicGroups(ctx, proposed);
   if (probeable.length === 0) return;
 
-  assertFreshSnapshot(ctx);
+  await fenceAcyclicityDecision(ctx);
 
   for (const { relation, edges } of probeable) {
     const reaches = await readUnwrittenEdgeReaches(

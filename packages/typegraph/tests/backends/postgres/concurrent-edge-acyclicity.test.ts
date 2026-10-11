@@ -43,10 +43,10 @@
  * `execute` throws a recognized cut-short code, but it SIMULATES that
  * throw — it never actually asks a real engine to abandon a running
  * statement. This is the one test that does: `SET LOCAL statement_timeout
- * = '1ms'` inside the SAME transaction as an acyclic create over a
+ * = '50ms'` inside the SAME transaction as an acyclic create over a
  * 10^5-edge relation, so the reachability probe is genuinely still
  * walking when PostgreSQL cancels the statement (`57014
- * query_canceled`) — never "too small to notice a 1ms budget", which
+ * query_canceled`) — never "too small to notice a 50ms budget", which
  * would make this a test of statement-dispatch latency instead of the
  * probe itself. Asserts `EdgeAcyclicityIndeterminateError` and that no row
  * was written; `isStatementCutShortError` classifying `57014` is what
@@ -272,7 +272,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const live = requirePostgres();
 
         // A 10^5-edge chain: long enough that the reachability probe is
-        // genuinely still walking it when the 1ms budget expires (the walk
+        // genuinely still walking it when the 50ms budget expires (the walk
         // costs microseconds per hop), not just dispatching the statement.
         // Seeded with two set-based INSERTs straight into the store's tables
         // rather than through the store: a chain this long is the shape a
@@ -301,7 +301,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const setup = createStore(graph, createPostgresBackend(live.first));
 
         // The closing edge, attempted inside a caller-adopted transaction
-        // with a 1ms statement budget: `tail -> head` would walk the ENTIRE
+        // with a 50ms statement budget — room for the fence acquisition, which
+        // writes the graph's fence row, and a fraction of what the walk needs:
+        // `tail -> head` would walk the ENTIRE
         // chain to discover `head` already reaches `tail`.
         const head = { kind: "Task" as const, id: "chain-0" };
         const tail = {
@@ -314,7 +316,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
         await expect(
           db.transaction(async (sqlTx) => {
-            await sqlTx.execute(sql`SET LOCAL statement_timeout = '1ms'`);
+            await sqlTx.execute(sql`SET LOCAL statement_timeout = '50ms'`);
             const txStore = adapterStore.withTransaction(sqlTx);
             await txStore.edges.dependsOn.create(tail, head);
           }),

@@ -212,3 +212,9 @@ Use `holding()` when you only need the current well-founded believed facts:
 ```typescript
 const facts = await provenance.holding();
 ```
+
+`holding()` waits for a transition or history write in flight on the same
+graph, so its multi-statement read never sees half of one, and it writes
+nothing: on PostgreSQL it takes the graph's advisory lock and no row, so it
+runs in a read-only transaction or under a `SELECT`-only role. On a standby
+the lock excludes nothing, since the primary's writers do not hold it there.

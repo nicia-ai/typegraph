@@ -18,6 +18,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EdgeAcyclicityError,
   EdgeAcyclicityIndeterminateError,
 } from "../src";
 import { resolveRecursiveTraversal } from "../src/backend/capabilities/recursive-traversal";
@@ -48,6 +49,7 @@ import {
   buildEdgeAcyclicityProbe,
 } from "../src/store/recursive-cte";
 import { requireDefined } from "../src/utils/presence";
+import { advisoryOnlyBackend } from "./advisory-only-backend";
 import { createTestBackend, matchingObject } from "./test-utils";
 
 const Task = defineNode("Task", { schema: z.object({ name: z.string() }) });
@@ -447,7 +449,17 @@ describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a prop
   });
 });
 
-async function withRepeatableReadStore(
+const SNAPSHOT_ISOLATION_LEVELS = [
+  { setting: "repeatable read", isolation: "repeatable_read" },
+  { setting: "serializable", isolation: "serializable" },
+] as const;
+
+/**
+ * A store over a port whose graph-write fence is an advisory lock alone (see
+ * `advisoryOnlyBackend`): it advances no fence row, so nothing at the fence
+ * detects a stale snapshot.
+ */
+async function withAdvisoryOnlyStore(
   run: (
     store: ReturnType<typeof createStore<typeof fencedSiblingGraph>>,
     setIsolation: (level: string) => Promise<void>,
@@ -456,9 +468,9 @@ async function withRepeatableReadStore(
   const client = await PGlite.create();
   try {
     await client.exec(generateVectorlessPostgresMigrationSQL());
-    const backend = createPostgresBackend(drizzlePglite(client), {
-      vector: false,
-    });
+    const backend = advisoryOnlyBackend(
+      createPostgresBackend(drizzlePglite(client), { vector: false }),
+    );
     await run(createStore(fencedSiblingGraph, backend), async (level) => {
       await client.exec(`SET default_transaction_isolation = '${level}'`);
     });
@@ -468,32 +480,56 @@ async function withRepeatableReadStore(
 }
 
 describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal branch", () => {
-  it("refuses an acyclic edge create under a repeatable-read server default (PGlite, real PostgreSQL dialect)", async () => {
-    const client = await PGlite.create();
-    try {
-      await client.exec(generateVectorlessPostgresMigrationSQL());
-      await client.exec(
-        "SET default_transaction_isolation = 'repeatable read'",
-      );
-      const backend = createPostgresBackend(drizzlePglite(client), {
-        vector: false,
-      });
-      const store = createStore(graph, backend);
-      const a = await store.nodes.Task.create({ name: "a" });
-      const b = await store.nodes.Task.create({ name: "b" });
+  // MUTATION CHECK: answering `true` for a snapshot isolation whose
+  // acquisition advanced no fence row (`observesPostFenceCommits`) lets every
+  // refusal in this block resolve — verified and reverted.
+  it.each(SNAPSHOT_ISOLATION_LEVELS)(
+    "refuses an acyclic edge create at $isolation on a port whose fence advances no fence row",
+    async ({ setting, isolation }) => {
+      await withAdvisoryOnlyStore(async (store, setIsolation) => {
+        const a = await store.nodes.Task.create({ name: "a" });
+        const b = await store.nodes.Task.create({ name: "b" });
+        await setIsolation(setting);
 
-      const attempt = store.edges.dependsOn.create(a, b);
-      await expect(attempt).rejects.toBeInstanceOf(ConfigurationError);
-      await expect(attempt).rejects.toMatchObject({
-        details: {
-          code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
-          isolation: "repeatable_read",
-        },
+        const attempt = store.edges.dependsOn.create(a, b);
+        await expect(attempt).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(attempt).rejects.toMatchObject({
+          details: {
+            code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+            isolation,
+            fenceRow: "none",
+          },
+        });
+
+        await setIsolation("read committed");
+        await expect(store.edges.dependsOn.create(a, b)).resolves.toBeDefined();
       });
-    } finally {
-      await client.close();
-    }
-  });
+    },
+  );
+
+  it.each(SNAPSHOT_ISOLATION_LEVELS)(
+    "enforces acyclicity at $isolation on the bundled backend, whose fence advances the fence row",
+    async ({ setting }) => {
+      const client = await PGlite.create();
+      try {
+        await client.exec(generateVectorlessPostgresMigrationSQL());
+        await client.exec(`SET default_transaction_isolation = '${setting}'`);
+        const store = createStore(
+          graph,
+          createPostgresBackend(drizzlePglite(client), { vector: false }),
+        );
+        const a = await store.nodes.Task.create({ name: "a" });
+        const b = await store.nodes.Task.create({ name: "b" });
+
+        await expect(store.edges.dependsOn.create(a, b)).resolves.toBeDefined();
+        await expect(store.edges.dependsOn.create(b, a)).rejects.toBeInstanceOf(
+          EdgeAcyclicityError,
+        );
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   // The guard reads the isolation off the lock token, and a frame that does
   // not acquire the per-graph lock itself — a nested managed write, or a
@@ -504,7 +540,7 @@ describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal
   // `uncapturedGraphWriteLock()` again in `runInWriteTransactionAttempt` lets
   // each write resolve — verified and reverted.
   it("refuses a bulkGetOrCreateByEndpoints batch that only resurrects", async () => {
-    await withRepeatableReadStore(async (store, setIsolation) => {
+    await withAdvisoryOnlyStore(async (store, setIsolation) => {
       const a = await store.nodes.Task.create({ name: "a" });
       const b = await store.nodes.Task.create({ name: "b" });
       const retired = await store.edges.dependsOn.create(b, a);
@@ -525,7 +561,7 @@ describe("EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT: the isolation guard's refusal
   });
 
   it("refuses an acyclic create racing a sibling write that takes the fence first", async () => {
-    await withRepeatableReadStore(async (store, setIsolation) => {
+    await withAdvisoryOnlyStore(async (store, setIsolation) => {
       const a = await store.nodes.Task.create({ name: "a" });
       const b = await store.nodes.Task.create({ name: "b" });
       await setIsolation("repeatable read");

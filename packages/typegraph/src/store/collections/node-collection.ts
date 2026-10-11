@@ -40,6 +40,7 @@ import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
   runResolvedMutationSetConverging,
@@ -967,7 +968,7 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOptionallyInTransaction(backend, async (target) => {
+          runOwnedMutationSetTransaction(backend, async (target) => {
             const rows = await getNodeRowsByIds(
               target,
               batchPointRead,
@@ -1295,7 +1296,9 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
@@ -1429,15 +1432,12 @@ export function createNodeCollection<
         return results as NodeGetOrCreateByConstraintResult<N>[];
       };
 
-      if (
-        backend.capabilities.execution.interactiveTransactions &&
-        "transaction" in backend
-      ) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
-      return getOrCreateAll(backend);
+      // The legs are nested writes of the one transaction this opens, and a
+      // leg that attaches a composition part decides under the per-graph
+      // write fence: the store owns the transaction, so it replays it.
+      return runOwnedMutationSetTransaction(backend, (target) =>
+        getOrCreateAll(target),
+      );
     },
   };
 }

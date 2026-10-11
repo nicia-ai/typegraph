@@ -89,7 +89,7 @@ import {
   assertGraphCommandCoordination,
   assertGraphCommandExecutionContext,
   type GraphCommandExecutionContext,
-  normalizeGraphCommandIsolation,
+  readGraphWriteFenceAcquisition,
 } from "../command-contract";
 import {
   resolveEdgeEndpointIds,
@@ -153,6 +153,7 @@ import type {
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
   ResolvedNodeUpdateBatchParams,
+  SchemaGraphWriteFenceParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SchemaWriteFenceParams,
@@ -4206,7 +4207,9 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : {
-        async lockSchemaVersionAndGraphWrite(params: SchemaWriteFenceParams) {
+        async lockSchemaVersionAndGraphWrite(
+          params: SchemaGraphWriteFenceParams,
+        ) {
           const row = await execution.execGet<Record<string, unknown>>(
             buildLockSchemaVersionAndGraphWrite(
               params,
@@ -4214,9 +4217,7 @@ export function createCommonOperationBackend(
               schemaGraphWriteFenceSql,
             ),
           );
-          if (row !== undefined) {
-            return normalizeGraphCommandIsolation(row["transaction_isolation"]);
-          }
+          if (row !== undefined) return readGraphWriteFenceAcquisition(row);
 
           // A blocked `FOR SHARE` can recheck the old active row out of its
           // statement snapshot without substituting the winner's new row. As

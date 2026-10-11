@@ -329,7 +329,7 @@ describe("constrained writes take the per-graph write fence", () => {
     // would let that mutation live.
     const lockIndex = graphWriteLockIndex(statements);
     const probeIndex = firstIndexMatching(statements, "typegraph_nodes");
-    const insertIndex = firstIndexMatching(statements, "INSERT INTO");
+    const insertIndex = nodeInsertIndex(statements);
     expect(lockIndex).toBeGreaterThanOrEqual(0);
     expect(probeIndex).toBeGreaterThan(lockIndex);
     expect(insertIndex).toBeGreaterThan(probeIndex);

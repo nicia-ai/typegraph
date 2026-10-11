@@ -56,6 +56,7 @@ import type {
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   ResolvedNodeUpdateBatchParams,
+  SchemaGraphWriteFenceParams,
   SchemaWriteFenceParams,
   SqlDialect,
   UpdateEdgeParams,
@@ -656,7 +657,7 @@ export type CommonOperationStrategy = Readonly<{
    * key.
    */
   buildLockSchemaVersionAndGraphWrite?: (
-    params: SchemaWriteFenceParams,
+    params: SchemaGraphWriteFenceParams,
     advisoryLockNamespace: string,
     fenceSql: FenceSql,
   ) => SQL;

@@ -17,7 +17,6 @@ import {
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
-  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -39,6 +38,7 @@ import {
   type EdgeIdentityExpectation,
   edgeIdentityFromRow,
 } from "../operations/edge-identity";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
   runResolvedMutationSetConverging,
@@ -1143,8 +1143,9 @@ export function createEdgeCollection<
       // written it, never on an autocommit read taken before it (the defect
       // `upsertById` had on the node side).
       //
-      // `runOptionallyInTransaction` is the one owner of "open a transaction if
-      // this backend has one": already inside `store.transaction(...)` the
+      // `runOwnedMutationSetTransaction` opens a transaction if this backend
+      // has one (and replays it when the per-graph write fence refuses its
+      // snapshot): already inside `store.transaction(...)` the
       // target IS the caller's transaction and no nested one opens, and on a
       // backend without interactive transactions there is nothing to open, so
       // the decision is exactly as fenced as that backend's writes are — which
@@ -1153,7 +1154,9 @@ export function createEdgeCollection<
         "edge",
         backend,
         () =>
-          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real

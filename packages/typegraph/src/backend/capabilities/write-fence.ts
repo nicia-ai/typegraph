@@ -103,6 +103,32 @@ export type FenceStatements = FenceSql &
       key: string | number,
     ) => SqlFragment;
     /**
+     * The acquisition of a fence holder that goes on to make a decision
+     * nothing but the fence protects — on the per-graph write fence, an
+     * edge-acyclicity probe, a composition whole's parts closure, a match-key
+     * convergence. One statement that takes the keyed exclusion, reads the
+     * session's isolation-level fact, AND advances the key's row in the
+     * fences relation (reported as `generation`).
+     *
+     * The row write is what makes such a decision hold for a session at a
+     * snapshot isolation: a lock cannot refresh a snapshot taken before the
+     * wait, but a session whose snapshot predates another decider's commit
+     * cannot update a row that decider advanced, and fails on it with a
+     * serialization failure. Only deciders write the row; a holder that
+     * decides nothing takes
+     * {@link FenceStatements.acquireKeyedWithIsolation} and leaves it alone.
+     * Re-issuing this statement in a transaction that already holds the
+     * exclusion is how a holder that turns out to decide advances the row.
+     *
+     * Under `row` this is the acquisition itself. Under `advisory` the row
+     * write is taken after the lock, in the same statement, and the member is
+     * ABSENT when the target names no fences relation (`tableNames.fences`):
+     * such a fence cannot advance a row, so its holder's evidence stays "no
+     * fence row" and a snapshot isolation is refused on it.
+     */
+    acquireKeyedSnapshotFence:
+      ((namespace: string, key: string | number) => SqlFragment) | undefined;
+    /**
      * The bare session isolation-level read, with no acquisition. Yields no
      * row when the target supplies no `isolationFactExpression` — the same
      * "unknown fact" shape a real read produces for a value this fence
@@ -143,18 +169,19 @@ function fenceRowKey(namespace: string, key: string | number): string {
 }
 
 /**
- * The portable acquisition statement every `row`-mechanism keyed site
- * shares: an UPSERT that always advances the row's own stored generation
- * (never the literal `1` this statement inserts), so two acquirers of the
- * same key always observe a strictly increasing sequence regardless of
- * which one the engine admits first. `isolationFactExpression`, when
- * supplied, rides the same `RETURNING` clause the generation does, so the
- * fact is read on the exact statement that took the row.
+ * THE one spelling of a fence-row write: an UPSERT that always advances the
+ * row's own stored generation (never the literal `1` a first acquirer
+ * inserts), so two acquirers of the same key always observe a strictly
+ * increasing sequence regardless of which one the engine admits first.
+ * `proposedRow` is the row source — a `VALUES` list for a standalone
+ * acquisition, a `SELECT` over a preceding lock for one that must follow it.
+ * `isolationFactExpression`, when supplied, rides the same `RETURNING` clause
+ * the generation does, so the fact is read on the exact statement that took
+ * the row.
  */
-function fenceRowAcquireStatement(
+function fenceRowUpsertStatement(
   fencesTable: SqlFragment,
-  namespace: string,
-  key: string | number,
+  proposedRow: SqlFragment,
   isolationFactExpression?: FenceSql["isolationFactExpression"],
 ): SqlFragment {
   const isolationColumn =
@@ -163,9 +190,81 @@ function fenceRowAcquireStatement(
     : sql`, ${isolationFactExpression()} AS transaction_isolation`;
   return sql`
     INSERT INTO ${fencesTable} (key, generation)
-    VALUES (${fenceRowKey(namespace, key)}, 1)
+    ${proposedRow}
     ON CONFLICT (key) DO UPDATE SET generation = ${fencesTable}.generation + 1
     RETURNING generation${isolationColumn}
+  `;
+}
+
+/**
+ * The portable acquisition statement every `row`-mechanism keyed site
+ * shares: {@link fenceRowUpsertStatement} over the key's own literal row.
+ */
+function fenceRowAcquireStatement(
+  fencesTable: SqlFragment,
+  namespace: string,
+  key: string | number,
+  isolationFactExpression?: FenceSql["isolationFactExpression"],
+): SqlFragment {
+  return fenceRowUpsertStatement(
+    fencesTable,
+    sql`VALUES (${fenceRowKey(namespace, key)}, 1)`,
+    isolationFactExpression,
+  );
+}
+
+/**
+ * The fence-row write of an acquisition that takes another exclusion FIRST:
+ * the row is proposed once per row of `acquired`, so it is written only after
+ * — and only if — that relation produced its lock. Used by both statements
+ * that pair an advisory lock with the fence row: the standalone
+ * {@link FenceStatements.acquireKeyedSnapshotFence} below and PostgreSQL's
+ * fused schema + graph-write fence (`postgres-schema-write-fence.ts`), which
+ * embeds this as a data-modifying CTE. One owner, so the row key and the
+ * generation rule cannot differ between the two.
+ *
+ * The `WHERE TRUE` keeps `ON CONFLICT` from being parsed as a join
+ * constraint of the `SELECT` on an engine with that grammar ambiguity.
+ */
+export function fenceRowAdvanceAfter(
+  fencesTable: SqlFragment,
+  namespace: string,
+  key: string | number,
+  acquired: SqlFragment,
+  isolationFactExpression?: FenceSql["isolationFactExpression"],
+): SqlFragment {
+  return fenceRowUpsertStatement(
+    fencesTable,
+    sql`SELECT ${fenceRowKey(namespace, key)}, 1 FROM ${acquired} WHERE TRUE`,
+    isolationFactExpression,
+  );
+}
+
+const ADVISORY_FENCE_LOCK_RELATION = sql.raw('"fence_lock"');
+
+/**
+ * The advisory form of {@link FenceStatements.acquireKeyedSnapshotFence}: the
+ * lock is a `MATERIALIZED` CTE the row write reads from, so the engine must
+ * hold the lock before it proposes the row.
+ */
+function advisoryAcquireKeyedSnapshotFenceStatement(
+  advisoryLockExpression: NonNullable<FenceSql["advisoryLockExpression"]>,
+  isolationFactExpression: NonNullable<FenceSql["isolationFactExpression"]>,
+  fencesTable: SqlFragment,
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`
+    WITH ${ADVISORY_FENCE_LOCK_RELATION} AS MATERIALIZED (
+      SELECT ${advisoryLockExpression(namespace, key)} AS "lock_token"
+    )
+    ${fenceRowAdvanceAfter(
+      fencesTable,
+      namespace,
+      key,
+      ADVISORY_FENCE_LOCK_RELATION,
+      isolationFactExpression,
+    )}
   `;
 }
 
@@ -201,9 +300,16 @@ function isolationFactStatement(
  * renders identically under either derivation — so the default costs them
  * nothing.
  */
-type FenceStatementsStyle =
-  | Readonly<{ mechanism: "advisory" }>
-  | Readonly<{ mechanism: "row"; fencesTableName?: string | undefined }>;
+type FenceStatementsStyle = Readonly<{
+  mechanism: "advisory" | "row";
+  /**
+   * The physical name of the fences relation. Required to acquire under
+   * `row`; under `advisory` it is what lets
+   * {@link FenceStatements.acquireKeyedSnapshotFence} advance the fence row
+   * behind the lock, and its absence leaves that member undefined.
+   */
+  fencesTableName?: string | undefined;
+}>;
 
 const ADVISORY_FENCE_STATEMENTS_STYLE: FenceStatementsStyle = {
   mechanism: "advisory",
@@ -225,6 +331,7 @@ export function resolveFenceStatements(
   style: FenceStatementsStyle = ADVISORY_FENCE_STATEMENTS_STYLE,
 ): FenceStatements {
   const { isolationFactExpression } = fenceSql;
+  const { fencesTableName } = style;
   if (style.mechanism === "advisory") {
     // Resolved lazily, inside the two acquisition closures below, rather
     // than eagerly here: `guards.ts`'s session-fact read calls this with the
@@ -267,6 +374,17 @@ export function resolveFenceStatements(
           namespace,
           key,
         ),
+      acquireKeyedSnapshotFence:
+        fencesTableName === undefined ? undefined : (
+          (namespace: string, key: string | number) =>
+            advisoryAcquireKeyedSnapshotFenceStatement(
+              requiredAdvisoryLockExpression(),
+              requiredIsolationFactExpression(),
+              sql.identifier(fencesTableName),
+              namespace,
+              key,
+            )
+        ),
       isolationFact: () => isolationFactStatement(isolationFactExpression),
     };
   }
@@ -278,7 +396,6 @@ export function resolveFenceStatements(
   // therefore fires the first time one of those two is actually CALLED, not
   // when this function returns — `WriteFenceTarget.tableNames`' own doc
   // names this same deferral.
-  const { fencesTableName } = style;
   function requiredFencesTable(): SqlFragment {
     if (fencesTableName === undefined) {
       throw new ConfigurationError(
@@ -294,17 +411,23 @@ export function resolveFenceStatements(
     }
     return sql.identifier(fencesTableName);
   }
+  const acquireKeyedWithIsolation = (
+    namespace: string,
+    key: string | number,
+  ): SqlFragment =>
+    fenceRowAcquireStatement(
+      requiredFencesTable(),
+      namespace,
+      key,
+      isolationFactExpression,
+    );
   return {
     ...fenceSql,
     acquireKeyed: (namespace: string, key: string | number) =>
       fenceRowAcquireStatement(requiredFencesTable(), namespace, key),
-    acquireKeyedWithIsolation: (namespace: string, key: string | number) =>
-      fenceRowAcquireStatement(
-        requiredFencesTable(),
-        namespace,
-        key,
-        isolationFactExpression,
-      ),
+    acquireKeyedWithIsolation,
+    // A `row` acquisition IS the fence-row write.
+    acquireKeyedSnapshotFence: acquireKeyedWithIsolation,
     isolationFact: () => isolationFactStatement(isolationFactExpression),
   };
 }
@@ -315,7 +438,11 @@ export function resolveFenceStatements(
  *
  * `mechanism` is the exclusion primitive: `"advisory"` is a keyed
  * `pg_advisory_xact_lock`-style lock a caller takes explicitly (and needs
- * `fenceSql` to spell); `"row"` is a keyed exclusion spelled by TypeGraph
+ * `fenceSql` to spell) — a holder of the per-graph write fence that makes a
+ * decision the fence alone protects additionally advances the key's row in
+ * the fences relation behind that lock when the target names one
+ * (`tableNames.fences`), which is what admits a snapshot isolation to that
+ * decision; `"row"` is a keyed exclusion spelled by TypeGraph
  * itself against a never-dropped relation of fence rows, for an engine with
  * no advisory-lock primitive; `"engine-serialized"` is the engine's own
  * single writer slot (SQLite); `"caller-serialized"` is a promise the
@@ -1030,6 +1157,10 @@ function planFromWriteFenceDeclaration(
             target.fenceSql,
             "resolveWriteFencePlan: fenceSql was validated present above",
           ),
+          {
+            mechanism: "advisory",
+            fencesTableName: target.tableNames?.fences,
+          },
         ),
       };
     }

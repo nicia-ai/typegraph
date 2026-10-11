@@ -94,14 +94,17 @@ import {
   isPostgresFailedTransactionError,
   isSqliteStaleSnapshotError,
 } from "../../utils/sql-errors";
+import { CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY } from "../claims/backing";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
+  lockRecordedGraphDecision,
   lockRecordedGraphWrite,
   recordedTransactionControlTarget,
 } from "../recorded-capture";
 import {
   acquiredGraphWriteLockFromCombinedFence,
+  acquiringGraphWriteFence,
   type GraphWriteLock,
   memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
@@ -782,7 +785,10 @@ export function constraintFenceRefusal(
  * the wrapping. A nested unit (`transactionMode === "existing"`) never
  * retries here regardless of the tier: it cannot restart a transaction it
  * does not own, so its conflict propagates to the outermost owner. Under
- * `"interactive"` this function's behavior is unchanged: one attempt.
+ * `"interactive"` a unit takes one attempt unless it is one this store owns
+ * AND its graph-write fence can refuse a stale snapshot
+ * ({@link ownsSnapshotFencedUnit}); that unit is replayed through the same
+ * owner, with the same budget.
  */
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
@@ -808,7 +814,17 @@ export function runInWriteTransaction<T>(
   const attempt = (): Promise<T> =>
     runInWriteTransactionAttempt(ctx, backend, fn, options, transactionMode);
 
-  if (!requiresOptimisticRetryUnit(backend)) return attempt();
+  // Decided before the attempt, and rejected rather than thrown for the same
+  // reason the refusal above is.
+  let retried: boolean;
+  try {
+    retried =
+      requiresOptimisticRetryUnit(backend) ||
+      ownsSnapshotFencedUnit(backend, fenceReason);
+  } catch (error) {
+    return Promise.reject(asRejection(error));
+  }
+  if (!retried) return attempt();
   return runRetriedUnit(
     {
       operation: "runInWriteTransaction",
@@ -817,6 +833,124 @@ export function runInWriteTransaction<T>(
     },
     attempt,
   );
+}
+
+/**
+ * Whether this store needs the per-graph write fence for a write: it captures
+ * (history or revision tracking, whose clocks must serialize) or the write
+ * declared a constraint only the fence protects.
+ */
+function writeNeedsGraphWriteFence(
+  ctx: WriteTransactionContext,
+  fenceReason: ConstraintFenceReason | undefined,
+): boolean {
+  return (
+    ctx.historyEnabled ||
+    ctx.revisionTrackingEnabled ||
+    fenceReason !== undefined
+  );
+}
+
+/**
+ * Whether a write names a constraint whose verdict only the per-graph write
+ * fence protects ({@link CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY}): its
+ * frame takes the fence in its deciding form, which advances the graph's
+ * fence row. A frame that names any other reason, or none, leaves the row
+ * alone; if it reaches such a decision after all, the decision site advances
+ * the row itself (`fenceLockOnlyDecision`).
+ */
+function writeDecidesUnderLockOnly(
+  fenceReason: ConstraintFenceReason | undefined,
+): boolean {
+  return (
+    fenceReason !== undefined &&
+    CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY[fenceReason]
+  );
+}
+
+/**
+ * Whether a transaction the store opens on `backend` takes its per-graph
+ * write fence as a keyed acquisition (`lock` or `row`) — the one whose
+ * deciding form advances the graph's fence row, and therefore fails a session
+ * whose snapshot predates another decider's commit. A nested unit
+ * (`"existing"`) is the caller's transaction, and a serialized engine takes
+ * no keyed acquisition; neither answers `true`.
+ *
+ * THE one decision of "can the fence refuse a transaction the store opened
+ * for a stale snapshot", shared by every store-owned transaction that replays
+ * on it: {@link runInWriteTransaction} and
+ * {@link runOwnedMutationSetTransaction}.
+ */
+function opensKeyedFenceTransaction(
+  backend: GraphBackend | TransactionBackend,
+): boolean {
+  if (resolveWriteTransactionMode(backend) !== "opened") return false;
+  const plan = resolveWriteFencePlan(backend);
+  return plan.kind === "lock" || plan.kind === "row";
+}
+
+/**
+ * Whether this write is a unit the store OWNS whose graph-write fence can
+ * refuse it for a stale snapshot: it names a constraint — so it can reach a
+ * decision that advances the fence row, in its own frame or at the decision
+ * site — in a transaction the store opened itself, on a keyed fence
+ * ({@link opensKeyedFenceTransaction}). Such a unit is replayed whole by
+ * {@link runRetriedUnit}, exactly as an `"optimistic-retry"` unit is: the
+ * replay opens a new transaction and with it a snapshot that includes the
+ * winner.
+ *
+ * An unconstrained write decides nothing under the fence, never advances the
+ * fence row and so is never refused there: it takes one attempt, as it always
+ * has. A nested unit is the caller's transaction: it cannot be restarted from
+ * here, so the refusal propagates to whoever owns it.
+ */
+function ownsSnapshotFencedUnit(
+  backend: GraphBackend | TransactionBackend,
+  fenceReason: ConstraintFenceReason | undefined,
+): boolean {
+  return fenceReason !== undefined && opensKeyedFenceTransaction(backend);
+}
+
+/**
+ * The transaction a collection opens around a resolved mutation set — a bulk
+ * upsert's prefetch and the writes it elects, or a bulk get-or-create's legs,
+ * on one target.
+ *
+ * The writes inside are nested units of {@link runInWriteTransaction}: each
+ * runs in THIS transaction and cannot restart it, so a stale-snapshot refusal
+ * of a lock-only decision one of them makes under the per-graph write fence
+ * would otherwise surface from a transaction the caller never opened. The store owns it, so the store replays it — the whole
+ * callback, prefetch included, through the same {@link runRetriedUnit} owner
+ * and budget as every other store-owned unit. A caller's own transaction, a
+ * serialized engine and a backend without transactions run `fn` once, as
+ * {@link runOptionallyInTransaction} always has.
+ */
+export function runOwnedMutationSetTransaction<T>(
+  backend: GraphBackend | TransactionBackend,
+  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
+): Promise<T> {
+  const attempt = (): Promise<T> =>
+    runOptionallyInTransaction(backend, (target) => fn(target));
+  let replayed: boolean;
+  try {
+    replayed = opensKeyedFenceTransaction(backend);
+  } catch (error) {
+    return Promise.reject(asRejection(error));
+  }
+  if (!replayed) return attempt();
+  return runRetriedUnit(
+    {
+      operation: "runOwnedMutationSetTransaction",
+      attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+      target: backend,
+    },
+    attempt,
+  );
+}
+
+/** A thrown value, as the `Error` a promise-returning function rejects with. */
+function asRejection(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 /**
@@ -840,10 +974,8 @@ function runInWriteTransactionAttempt<T>(
 ): Promise<T> {
   const ownsWriteLock = transactionMode === "opened";
   const fenceReason = options?.fencesConstraintProbe;
-  const needsGraphWriteLock =
-    ctx.historyEnabled ||
-    ctx.revisionTrackingEnabled ||
-    fenceReason !== undefined;
+  const needsGraphWriteLock = writeNeedsGraphWriteFence(ctx, fenceReason);
+  const decidesUnderLockOnly = writeDecidesUnderLockOnly(fenceReason);
   return runOptionallyInTransaction(backend, async (target) => {
     await ensureAdoptedConstraintWriterSlot(
       ctx,
@@ -895,7 +1027,8 @@ function runInWriteTransactionAttempt<T>(
           params: {
             graphId: ctx.graphId,
             expectedVersion: expectedSchemaVersion,
-          },
+            fenceRow: decidesUnderLockOnly ? "advance" : "leave",
+          } as const,
         }
       : undefined;
     let lock: GraphWriteLock;
@@ -904,25 +1037,42 @@ function runInWriteTransactionAttempt<T>(
         if (!options?.schemaFenceInFirstWrite) {
           await lockSchemaVersionForStoreWrite(ctx, target);
         }
-        lock =
-          acquiresLock ?
-            await lockRecordedGraphWrite(target, ctx.graphId)
-          : (session?.lock ?? (await heldLock) ?? uncapturedGraphWriteLock());
+        if (!acquiresLock) {
+          const heldEvidence =
+            session?.lock ?? (await heldLock) ?? uncapturedGraphWriteLock();
+          // A frame that decides under evidence of the exclusion alone — a
+          // session or sibling that took the fence for a write that decided
+          // nothing — advances the fence row behind the lock it works under.
+          lock =
+            decidesUnderLockOnly ?
+              await lockRecordedGraphDecision(target, ctx.graphId, heldEvidence)
+            : heldEvidence;
+        } else if (decidesUnderLockOnly) {
+          lock = await lockRecordedGraphDecision(target, ctx.graphId);
+        } else {
+          lock = await lockRecordedGraphWrite(target, ctx.graphId);
+        }
       } else {
         // The optional strong member owns the same canonical order as the two
         // portable calls: schema row first, graph advisory lock second. It is
         // one statement only when THIS frame owes both acquisitions; a held
         // graph lock must never suppress the per-write schema fence.
-        const isolation = await combinedSchemaGraphFence.acquire(
-          combinedSchemaGraphFence.params,
+        const acquireCombinedFence = combinedSchemaGraphFence.acquire;
+        const fenceParams = combinedSchemaGraphFence.params;
+        const fenceAcquisition = await acquiringGraphWriteFence(target, () =>
+          acquireCombinedFence(fenceParams),
         );
-        memoizeAcquiredRecordedGraphWriteLock(target, ctx.graphId, isolation);
+        memoizeAcquiredRecordedGraphWriteLock(
+          target,
+          ctx.graphId,
+          fenceAcquisition,
+        );
         // The combined statement acquired the real advisory lock, so mint
         // graph/port-bound command coordination only after it returns.
         lock = acquiredGraphWriteLockFromCombinedFence(
           target,
           ctx.graphId,
-          isolation,
+          fenceAcquisition,
         );
       }
     } catch (error) {
