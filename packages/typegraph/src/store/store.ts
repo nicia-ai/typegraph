@@ -167,7 +167,6 @@ import {
   foldIdentityForCreatedNodes,
   type IdentityImportSummary,
   type IdentityRebuildContext,
-  type IdentityRestoreBaseline,
   type IdentityServiceContext,
   type IdentityTransferAssertion,
   type IdentityTransitionCursor,
@@ -196,6 +195,7 @@ import {
 import { type IdentityTarget } from "../identity/sql-target";
 import {
   type IdentityDecisionProvenance,
+  type IdentityRestoreBaseline,
   identityTransitionLogUnavailableError,
 } from "../identity/transition-log";
 import type {

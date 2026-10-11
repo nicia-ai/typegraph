@@ -20,7 +20,11 @@ import {
   reviewDigest,
   reviewOptionEvidence,
 } from "../../src/graph-merge/review-evidence";
-import type { MergeReviewArtifact } from "../../src/graph-merge/review-schema";
+import {
+  isSupportedMergeReviewFormatVersion,
+  type MergeReviewArtifact,
+  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
+} from "../../src/graph-merge/review-schema";
 import { storeBackend } from "../../src/store/runtime-port";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
@@ -139,8 +143,16 @@ describe("candidate review wire and coherent capture", () => {
     },
   );
 
-  // Formats 1 and 2 are the whole-target and candidate-scoped formats that
-  // embedded a version-1 plan.
+  it("supports exactly the whole-target and candidate-scoped formats", () => {
+    expect(MERGE_REVIEW_FORMAT_VERSION).toBe(3);
+    expect(MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED).toBe(4);
+    expect(SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS).toEqual([3, 4]);
+    for (const earlier of [1, 2])
+      expect(isSupportedMergeReviewFormatVersion(earlier)).toBe(false);
+    for (const supported of SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)
+      expect(isSupportedMergeReviewFormatVersion(supported)).toBe(true);
+  });
+
   it.each([1, 2])(
     "refuses a review stored under earlier format %d as an unsupported version, not as malformed",
     async (earlierFormat) => {
