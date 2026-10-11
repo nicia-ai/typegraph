@@ -161,6 +161,7 @@ import {
 import {
   applyIdentityChangesForContext,
   assertAffectedIdentityClassesConsistent,
+  assertIdentityFoldable,
   createIdentityFacade,
   createIdentityReadFacade,
   detachIdentityForNode,
@@ -7550,6 +7551,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 target,
                 references,
                 cause,
+              ),
+            assertFoldable: (
+              target: IdentityTarget,
+              references: readonly Readonly<{ kind: string; id: string }>[],
+            ) =>
+              assertIdentityFoldable(
+                {
+                  graphId: this.graphId,
+                  registry: this.#registry,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                references,
               ),
             detachDeleted: (
               target: IdentityTarget,

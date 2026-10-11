@@ -1060,8 +1060,8 @@ export type UniquenessUpdatePlan = readonly PendingUniqueMutation[];
  *
  * @throws UniquenessError if an updated value is already held by another node
  */
-export async function planNodeClaimUpdate(
-  ctx: UniquenessContext,
+async function planNodeClaimUpdate(
+  ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   oldProps: Record<string, unknown>,
@@ -1144,7 +1144,7 @@ export async function planNodeClaimUpdate(
  *   itself reports)
  */
 export async function planNodeClaimReinsert(
-  ctx: UniquenessContext,
+  ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   props: Record<string, unknown>,
@@ -1171,6 +1171,122 @@ export async function planNodeClaimReinsert(
     });
   }
   return pending;
+}
+
+/**
+ * One existing node row's claim transition: the props its live reservations
+ * were taken for, and the props it is about to hold.
+ *
+ * `heldProps` is `undefined` for a TOMBSTONE, which holds no reservation — the
+ * soft delete released them — and so cannot be diffed.
+ */
+export type NodeClaimTransition = Readonly<{
+  kind: string;
+  id: string;
+  heldProps: Record<string, unknown> | undefined;
+  props: Record<string, unknown>;
+  constraints: readonly UniqueConstraint[];
+}>;
+
+/**
+ * Decides one existing row's claim transition, writing nothing.
+ *
+ * Two shapes behind one seam. A live row diffs its old and new keys
+ * ({@link planNodeClaimUpdate}); a restored tombstone cannot, because the diff
+ * would skip an unchanged key and leave the revived node holding NO
+ * reservation, so it re-reserves every applying key
+ * ({@link planNodeClaimReinsert}). Both refuse a conflict before returning,
+ * and both hand the caller a plan only {@link withNodeClaimTransition} may
+ * carry out.
+ */
+export function planNodeClaimTransition(
+  ctx: UniquenessProbeContext,
+  transition: NodeClaimTransition,
+): Promise<UniquenessUpdatePlan> {
+  const { kind, id, heldProps, props, constraints } = transition;
+  return heldProps === undefined ?
+      planNodeClaimReinsert(ctx, kind, id, props, constraints)
+    : planNodeClaimUpdate(ctx, kind, id, heldProps, props, constraints);
+}
+
+/**
+ * The READ half of a SET of row updates' claim transitions: every uniqueness
+ * refusal any of them can reach, with nothing written — so a frame that
+ * updates several rows refuses before its first statement.
+ *
+ * The set is judged in order, as the state it produces rather than one row at
+ * a time against the stored claims alone: a later row's probe does not see a
+ * key an earlier row of the set gives up, and does see a key an earlier row
+ * takes. Each row's verdict is {@link planNodeClaimTransition}'s own, reached
+ * through a probe that reads the stored claims with the earlier rows'
+ * decided transitions laid over them.
+ *
+ * @throws UniquenessError when a row would hold a key that a node outside the
+ *   set, or an earlier row of it, holds
+ */
+export async function assertNodeClaimTransitionsAvailable(
+  ctx: UniquenessProbeContext,
+  transitions: readonly NodeClaimTransition[],
+): Promise<void> {
+  const released = new Set<string>();
+  const claimed = new Map<string, UniqueRow>();
+  const pendingContext: UniquenessProbeContext = {
+    ...ctx,
+    backend: {
+      checkUnique: async (params) => {
+        const pending = claimed.get(
+          encodeTupleKey([params.nodeKind, params.constraintName, params.key]),
+        );
+        if (pending !== undefined) return pending;
+        const stored = await ctx.backend.checkUnique(params);
+        if (stored === undefined) return;
+        // A release gives up every reservation its owner holds for the key,
+        // whatever axis the row sits on (see `releaseOwnedUniqueKeys`).
+        return (
+            released.has(
+              encodeTupleKey([
+                stored.constraint_name,
+                stored.key,
+                stored.concrete_kind,
+                stored.node_id,
+              ]),
+            )
+          ) ?
+            undefined
+          : stored;
+      },
+    },
+  };
+
+  for (const transition of transitions) {
+    const { kind, id } = transition;
+    for (const mutation of await planNodeClaimTransition(
+      pendingContext,
+      transition,
+    )) {
+      if (mutation.release !== undefined) {
+        released.add(
+          encodeTupleKey([mutation.constraintName, mutation.release, kind, id]),
+        );
+      }
+      // A disjointness claim's key is this row's own id at its pair's axis:
+      // registered like any other, it can only ever answer this row.
+      const claim = mutation.claim;
+      if (claim === undefined) continue;
+      claimed.set(
+        encodeTupleKey([claim.axis, claim.constraintName, claim.key]),
+        {
+          graph_id: ctx.graphId,
+          node_kind: claim.axis,
+          constraint_name: claim.constraintName,
+          key: claim.key,
+          node_id: id,
+          concrete_kind: kind,
+          deleted_at: undefined,
+        },
+      );
+    }
+  }
 }
 
 /** One reservation a release names. */

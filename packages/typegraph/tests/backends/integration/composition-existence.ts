@@ -1400,7 +1400,7 @@ export function registerCompositionExistenceIntegrationTests(
       const edges = await store.edges.eeKeyedSegmentOf.find({});
       expect(edges).toHaveLength(1);
     });
-    // MUTATION CHECK: in step 6's duplicate-resolution loop in
+    // MUTATION CHECK: in step 7's duplicate-resolution loop in
     // `executeNodeBulkGetOrCreateByConstraint`
     // (src/store/operations/node-operations.ts), copy the source's own action
     // (`action: sourceResult.action`) instead of `"found"` — the duplicate
@@ -1410,10 +1410,43 @@ export function registerCompositionExistenceIntegrationTests(
     // unconditionally here — is no longer performable: that function and its
     // blanket refusal are gone. `partOf` on a found node is now a
     // POSTCONDITION (`applyExistingPartOfPostcondition`, or the update leg's
-    // own write plan), discharged in steps 4/5, and re-running it for a
+    // own write plan), discharged in steps 5/6, and re-running it for a
     // duplicate of the row this same call just attached would be SATISFIED
-    // rather than a refusal. Step 6 deliberately
+    // rather than a refusal. Step 7 deliberately
     // does not re-run it; see the comment there.
+
+    it("bulkGetOrCreateByConstraint refuses a new required part with no partOf before updating a matched item", async () => {
+      const store = await context.createStore(buildKeyedGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const existing = await store.nodes.EeKeyedSegment.create(
+        { key: "existing" },
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+
+      // MUTATION CHECK: drop the `resolveBatchCompositionWorks` call that
+      // precedes the matched items in
+      // `executeNodeBulkGetOrCreateByConstraint`
+      // (src/store/operations/node-operations.ts) — "existing" is then
+      // updated (its version advances) before the create batch refuses
+      // "fresh", and the caught refusal leaves that update committed.
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.EeKeyedSegment.bulkGetOrCreateByConstraint(
+            "byKey",
+            [{ props: { key: "existing" } }, { props: { key: "fresh" } }],
+            { ifExists: "update" },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(CompositionExistenceError);
+      const after = await store.nodes.EeKeyedSegment.getById(existing.id);
+      expect(after?.meta.version).toBe(existing.meta.version);
+      expect(await store.nodes.EeKeyedSegment.find({})).toHaveLength(1);
+    });
   });
 }
 

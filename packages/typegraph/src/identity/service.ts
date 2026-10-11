@@ -27,6 +27,7 @@ export {
 export type { IdentityRebuildContext } from "./service-maintenance";
 export {
   assertAffectedIdentityClassesConsistent,
+  assertIdentityFoldable,
   combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
   detachIdentityForNode,

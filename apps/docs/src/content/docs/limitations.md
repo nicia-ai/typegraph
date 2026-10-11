@@ -633,6 +633,42 @@ and as `update` then `create` for edges, which have no single-item upsert. See
 [Data Sync](/data-sync#one-batch-cannot-hand-a-unique-value-from-one-row-to-another)
 for the worked example.
 
+### A bulk refusal caught inside `store.transaction` can keep earlier rows
+
+A bulk method called on the store runs in its own transaction, so a refused
+batch rolls back entirely. The same method called on `tx` runs on the
+caller's transaction and has no savepoint of its own: if the callback catches
+the refusal and the transaction commits, rows the batch wrote before the
+refused item can stay committed. `bulkUpsertById` is the plainest case: it
+writes its creates before its updates, so a node update that loses a unique
+key (`UniquenessError`), or an edge item that restores a deleted edge past
+the kind's cardinality (`CardinalityError`), is refused with the batch's new
+rows already in place.
+
+This is a stated limitation rather than a pending fix: store operations do
+not take a savepoint per bulk call. Let the refusal propagate so the
+transaction rolls back, or rethrow after handling it. See
+[Catching a bulk refusal inside a transaction](/performance/overview#catching-a-bulk-refusal-inside-a-transaction).
+
+Batches that attach composition parts through the **node collection** do not
+have this limit for the rows that already exist: `bulkCreate` / `bulkInsert`
+with `partOf`, `bulkReparent` and `bulkGetOrCreateByConstraint` decide every
+such item before writing any. `bulkGetOrCreateByConstraint` creates its
+unmatched items after its matched ones: it counts their attachments with the
+matched ones up front, but a refusal only a **new** row's own preparation can
+raise — a second unique key it loses, or a disjoint kind holding its id — is
+reached after the matched items wrote. See
+[`partOf` on get-or-create is a postcondition](/ontology#partof-on-get-or-create-is-a-postcondition).
+
+Writing a composition's **realizing edge** through the edge collection is an
+ordinary edge batch. `edges.<via>.bulkCreate` and `bulkInsert` decide every
+item before writing any, but `edges.<via>.bulkUpsertById` and
+`bulkGetOrCreateByEndpoints` do not decide the whole batch first, so an item
+refused for a second whole (`CompositionError`) can follow earlier edges of the
+same batch that are already written. Attach through
+`nodes.<Kind>.reparent` / `bulkReparent` or `partOf` when the batch must not
+leave a partial attachment.
+
 ## Graph Analytics Limits
 
 TypeGraph ships focused algorithms on `store.algorithms.*` — shortest path

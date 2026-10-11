@@ -58,8 +58,9 @@ import {
   deleteUniquenessEntries,
   hardDeleteClaimsByNodeIds,
   type NodeClaimContext,
+  type NodeClaimTransition,
   planNodeClaimReinsert,
-  planNodeClaimUpdate,
+  planNodeClaimTransition,
   type UniquenessUpdatePlan,
   withNodeClaimTransition,
   withNodeCreateClaimsBatch,
@@ -476,17 +477,11 @@ export type NodeUpdateTarget =
   | Readonly<{ existing: NodeRow; clearDeleted: true }>;
 
 /**
- * Decides a node update's uniqueness transition, writing nothing.
- *
- * Two shapes behind one seam. A live row diffs its old and new keys; a
- * resurrecting update (`clearDeleted` on a tombstoned row) cannot, because the
- * soft delete already removed its entries — the diff would skip an unchanged
- * key and leave the resurrected node holding NO reservation, so a later create
- * could silently duplicate the value. It re-reserves every applying key
- * instead. Both refuse a conflict before returning, and both hand the caller a
- * plan that only {@link withNodeClaimTransition} may carry out.
+ * Decides a node update's uniqueness transition, writing nothing: the row's
+ * own facts handed to {@link planNodeClaimTransition}, which owns the two
+ * shapes (a live row's diff, a restored tombstone's re-reservation).
  */
-async function planNodeUpdateUniqueness(
+function planNodeUpdateUniqueness(
   ctx: NodeWriteContext,
   args: Readonly<{
     existing: NodeRow;
@@ -495,26 +490,35 @@ async function planNodeUpdateUniqueness(
   }>,
   backend: Backend,
 ): Promise<UniquenessUpdatePlan> {
-  const { kind, id } = args.existing;
-
-  if (args.existing.deleted_at !== undefined) {
-    return planNodeClaimReinsert(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
+  return planNodeClaimTransition(
+    uniquenessContext(ctx, backend),
+    nodeClaimTransition(
+      args.existing,
       args.validatedProps,
       args.uniqueConstraints,
-    );
-  }
-
-  return planNodeClaimUpdate(
-    uniquenessContext(ctx, backend),
-    kind,
-    id,
-    parseRowProps(args.existing),
-    args.validatedProps,
-    args.uniqueConstraints,
+    ),
   );
+}
+
+/**
+ * THE claim transition one existing row's update owes, read off the row: a
+ * tombstone holds no reservation, a live row holds its current props'.
+ * Shared by the update itself and by a batch that judges several updates
+ * before writing any of them, so the two cannot read a row differently.
+ */
+export function nodeClaimTransition(
+  existing: NodeRow,
+  props: Record<string, unknown>,
+  constraints: readonly UniqueConstraint[],
+): NodeClaimTransition {
+  return {
+    kind: existing.kind,
+    id: existing.id,
+    heldProps:
+      existing.deleted_at === undefined ? parseRowProps(existing) : undefined,
+    props,
+    constraints,
+  };
 }
 
 /**

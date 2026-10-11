@@ -376,8 +376,8 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 
 ### Transaction wrapping
 
-On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
-chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
+On a transaction-capable backend, each bulk method call made on the store is atomic across all of
+its bind-budget chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
 eligible plain node `bulkDelete()` calls, and direct edge
 `bulkInsert()` / `bulkCreate()` / `bulkDelete()` calls also provide
 whole-call atomicity on bundled transactionless roots through one native
@@ -403,6 +403,62 @@ await store.transaction(async (tx) => {
 ```
 
 Without the wrapping transaction, a failure in a later bulk call leaves earlier calls committed.
+
+#### Catching a bulk refusal inside a transaction
+
+A bulk call's atomicity comes from the transaction it runs in, and that
+decides what a refused batch leaves behind:
+
+- **Called on the store**, the bulk method owns its transaction. A refusal
+  from any item rolls the whole call back: nothing of the batch is written.
+- **Called on `tx` inside `store.transaction(...)`**, the bulk method runs on
+  your transaction and opens none of its own. If the refusal propagates, the
+  transaction rolls back and nothing is written. If you **catch** it inside
+  the callback and let the transaction commit, rows the batch wrote before the
+  refused item can stay committed — the write layer has no savepoint to roll
+  one bulk call back to.
+
+```typescript
+await store.transaction(async (tx) => {
+  try {
+    await tx.nodes.Person.bulkUpsertById(items);
+  } catch (error) {
+    // Earlier items of `items` may already be written on `tx`.
+    // Rethrow to roll the transaction back, or treat the batch as
+    // partially applied.
+    throw error;
+  }
+});
+```
+
+`bulkUpsertById` shows it most plainly, because it writes a batch's creates
+before its updates: a node item whose update loses a unique key
+(`UniquenessError`), or an edge item that restores a deleted edge past the
+kind's cardinality (`CardinalityError`), is refused after the batch's new
+rows were written. Treat every bulk call the same way: do not catch a refusal and
+commit unless a partially applied batch is acceptable.
+
+Composition attachments made through the node collection are the exception,
+because a half-attached batch would leave ownership in a state no single call
+asked for. `bulkCreate` / `bulkInsert` with `partOf`, `bulkReparent`, and
+`bulkGetOrCreateByConstraint` reach every verdict their existing rows can
+raise before the first write, so a caught refusal leaves those rows untouched.
+Two things stay outside that: `bulkGetOrCreateByConstraint` creates its
+unmatched items after the matched ones, so a refusal only a **new** row's own
+preparation can reach (a second unique key it loses, a disjoint kind holding
+its id) can still follow the matched items' writes; and writing a realizing
+edge directly through `edges.<via>.bulkUpsertById` or
+`bulkGetOrCreateByEndpoints` is an ordinary edge batch, which keeps the rule
+above. See [Composition](/ontology#composition) and
+[`partOf` on get-or-create](/ontology#partof-on-get-or-create-is-a-postcondition)
+for the exact guarantee and what stays outside it.
+
+Deciding a batch's matched items before writing costs reads. A
+`bulkGetOrCreateByConstraint` batch with more than one item that owes a write
+(an update, a resurrection, or an attachment not already held), or one such
+item next to a new row that states an attachment, runs one extra fenced pass
+that reads each item once more before the per-item writes. A batch whose
+matched items all need nothing stays read-only.
 
 ### Choosing the right pattern
 
