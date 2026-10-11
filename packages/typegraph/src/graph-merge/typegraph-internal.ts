@@ -18,6 +18,7 @@ export {
   GRAPH_RELATIONS,
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
+export { REVISION_JOURNAL_ENTITY } from "../backend/revision-journal";
 export {
   sharesSerializedTransactionResource,
   snapshotExportContention,

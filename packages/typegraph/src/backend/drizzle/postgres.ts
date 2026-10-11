@@ -142,6 +142,7 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import { REVISION_JOURNAL_ENTITY } from "../revision-journal";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
@@ -455,9 +456,12 @@ const REVISION_CHANGE_FUNCTION = "typegraph_record_revision_change";
 
 function postgresRevisionChangeTargets(names: RevisionJournalTableNames) {
   return [
-    { entity: "node", table: names.nodes },
-    { entity: "edge", table: names.edges },
-    { entity: "identity", table: names.identityAssertions },
+    { entity: REVISION_JOURNAL_ENTITY.node, table: names.nodes },
+    { entity: REVISION_JOURNAL_ENTITY.edge, table: names.edges },
+    {
+      entity: REVISION_JOURNAL_ENTITY.identity,
+      table: names.identityAssertions,
+    },
   ] as const;
 }
 
