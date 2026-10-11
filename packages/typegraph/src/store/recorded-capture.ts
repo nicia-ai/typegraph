@@ -90,6 +90,7 @@ export {
   ensureRevisionOrigin,
   ensureRevisionOriginRow,
   ensureRevisionOriginsRelation,
+  lockRecordedGraphDecision,
   lockRecordedGraphWrite,
   readNextRecordedRevision,
   readRecordedClock,

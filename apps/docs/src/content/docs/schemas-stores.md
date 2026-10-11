@@ -727,9 +727,10 @@ writes still preserve endpoint and claim ordering. `getOrCreateByEndpoints`
 uses an outside read only for its no-write found fast path; every create,
 resurrection, or update makes its decision on the fenced transaction target.
 An adopted PostgreSQL transaction can therefore return an existing match at
-any isolation level. If the operation reaches the create leg, the graph-lock
-statement advances the graph's fence row, so a repeatable-read or serializable
-transaction whose snapshot predates another writer's commit fails there with
+any isolation level. A convergence on a match key no database key backs
+advances the graph's fence row behind the graph lock, so a repeatable-read or
+serializable transaction whose snapshot predates another converging writer's
+commit fails there with
 `TransactionConflictError` (SQLSTATE `40001`) rather than converging on a
 relation it can no longer see; retry the whole transaction. A custom backend
 whose fence advances no fence row refuses the create leg at those levels with

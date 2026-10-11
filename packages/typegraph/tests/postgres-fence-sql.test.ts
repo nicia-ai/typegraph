@@ -35,6 +35,10 @@ const fenceStatementsWithFenceRow = resolveFenceStatements(postgresFenceSql, {
   mechanism: "advisory",
   fencesTableName: "typegraph_fences",
 });
+const acquireKeyedSnapshotFence = requireDefined(
+  fenceStatementsWithFenceRow.acquireKeyedSnapshotFence,
+  "an advisory fence naming a fences relation supplies acquireKeyedSnapshotFence",
+);
 const SNAPSHOT_FENCE_SQL =
   "\n" +
   '    WITH "fence_lock" AS MATERIALIZED (\n' +
@@ -95,10 +99,7 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
 
   it("acquireKeyedSnapshotFence: the lock, then the fence-row advance, then the isolation fact, in one statement", () => {
     const rendered = renderPostgres(
-      fenceStatementsWithFenceRow.acquireKeyedSnapshotFence(
-        "typegraph:recorded-graph-write",
-        "graph-1",
-      ),
+      acquireKeyedSnapshotFence("typegraph:recorded-graph-write", "graph-1"),
     );
     expect(rendered.sql).toBe(SNAPSHOT_FENCE_SQL);
     expect(rendered.params).toEqual([
@@ -108,22 +109,8 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
     ]);
   });
 
-  it("acquireKeyedSnapshotFence: a target naming no fences relation gets the lock-only statement, which reports no generation", () => {
-    const rendered = renderPostgres(
-      fenceStatements.acquireKeyedSnapshotFence(
-        "typegraph:recorded-graph-write",
-        "graph-1",
-      ),
-    );
-    expect(rendered).toEqual(
-      renderPostgres(
-        fenceStatements.acquireKeyedWithIsolation(
-          "typegraph:recorded-graph-write",
-          "graph-1",
-        ),
-      ),
-    );
-    expect(rendered.sql).not.toContain("generation");
+  it("acquireKeyedSnapshotFence: absent for a target naming no fences relation, which cannot advance a fence row", () => {
+    expect(fenceStatements.acquireKeyedSnapshotFence).toBeUndefined();
   });
 
   it.each([
@@ -177,12 +164,30 @@ describe("resolveFenceStatements: the default (advisory) style's isolationFact()
  * statement ran; this proves which one.
  */
 describe("postgresFenceSql: every lock site's real call, pinned", () => {
-  it("store/recorded-capture/clock.ts lockRecordedGraphWrite: acquireKeyedSnapshotFence(typegraph:recorded-graph-write, graphId)", () => {
+  it("store/recorded-capture/clock.ts lockRecordedGraphWrite: acquireKeyedWithIsolation(typegraph:recorded-graph-write, graphId), with no fence-row write", () => {
     const rendered = renderPostgres(
-      fenceStatementsWithFenceRow.acquireKeyedSnapshotFence(
+      fenceStatementsWithFenceRow.acquireKeyedWithIsolation(
         "typegraph:recorded-graph-write",
         "graph-1",
       ),
+    );
+    expect(rendered.sql).toBe(
+      "\n" +
+        "    SELECT\n" +
+        "      pg_advisory_xact_lock(hashtext($1), hashtext($2)),\n" +
+        "      current_setting('transaction_isolation') AS transaction_isolation\n" +
+        "  ",
+    );
+    expect(rendered.sql).not.toContain("typegraph_fences");
+    expect(rendered.params).toEqual([
+      "typegraph:recorded-graph-write",
+      "graph-1",
+    ]);
+  });
+
+  it("store/recorded-capture/clock.ts lockRecordedGraphDecision: acquireKeyedSnapshotFence(typegraph:recorded-graph-write, graphId)", () => {
+    const rendered = renderPostgres(
+      acquireKeyedSnapshotFence("typegraph:recorded-graph-write", "graph-1"),
     );
     expect(rendered.sql).toBe(SNAPSHOT_FENCE_SQL);
     expect(rendered.params).toEqual([

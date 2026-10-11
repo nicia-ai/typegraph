@@ -163,7 +163,12 @@ export function graphCommandCoordinationIsolation(
     .isolation;
 }
 
-function graphCommandCoordinationAcquisition(
+/**
+ * What the acquisition behind `coordination` observed and did, when it was
+ * earned on this graph and transaction; an unobserved acquisition otherwise —
+ * coordination minted for another graph or session is evidence of nothing.
+ */
+export function graphCommandCoordinationAcquisition(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
   graphId?: string,
@@ -176,7 +181,27 @@ function graphCommandCoordinationAcquisition(
 
 /**
  * Whether a session that acquired the per-graph write fence this way reads
- * everything committed by the acquirers that held the fence before it.
+ * everything committed by EVERY earlier holder of the fence, whatever that
+ * holder did under it.
+ *
+ * Only an isolation that takes a fresh snapshot per statement does. The fence
+ * row is advanced by the holders that make a lock-only decision, not by every
+ * holder, so advancing it proves nothing about a holder that only captured
+ * history or advanced a revision: a snapshot isolation is never admitted
+ * here. A stricter question than {@link observesPostFenceCommits}, for a
+ * holder whose reads span the whole graph rather than one lock-only decision —
+ * a merge plan applied inside a caller's transaction.
+ */
+export function observesEveryEarlierFenceHolder(
+  acquisition: GraphWriteFenceAcquisition,
+): boolean {
+  return acquisition.isolation === "read_committed";
+}
+
+/**
+ * Whether a session that acquired the per-graph write fence this way reads
+ * every lock-only decision committed by the holders that had the fence before
+ * it.
  *
  * `read_committed` takes a fresh snapshot per statement, so every statement
  * after the acquisition sees what committed while it waited. A snapshot
@@ -186,18 +211,20 @@ function graphCommandCoordinationAcquisition(
  * arbitrates serializable transactions against each other only, so a
  * serializable session and a read-committed writer can both commit. What does
  * hold at those levels is first-updater-wins on a row both sessions write:
- * an acquisition that advanced the graph's fence row succeeds only when no
- * other acquirer committed after this session's snapshot, and fails with a
- * serialization failure otherwise. So a snapshot isolation observes the
- * winner exactly when its acquisition advanced the fence row. Everything
- * else — including `unknown` — fails closed.
+ * every holder that makes a lock-only decision advances the graph's fence row
+ * (`fenceLockOnlyDecision`), so an acquisition that advanced it succeeds only
+ * when no such holder committed after this session's snapshot, and fails with
+ * a serialization failure otherwise. So a snapshot isolation observes the
+ * earlier deciders exactly when its own acquisition advanced the fence row.
+ * Everything else — including `unknown` — fails closed.
  *
- * THE one predicate every "must observe the fence winner" check consults:
+ * THE one predicate every "must observe the earlier deciders" check consults:
  * match-key convergence ({@link assertGraphCommandConvergenceIsolation}) and
  * the lock-only reads of {@link assertFencedSnapshotIsFresh} both need "did
- * this session's snapshot start after the fence it waited for released", and
+ * this session's snapshot start after the last decision under the fence", and
  * a second inline spelling of the isolation set is exactly the copy that
- * drifts.
+ * drifts. A holder that must observe EVERY earlier holder asks
+ * {@link observesEveryEarlierFenceHolder} instead.
  */
 export function observesPostFenceCommits(
   acquisition: GraphWriteFenceAcquisition,

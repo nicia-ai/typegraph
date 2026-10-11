@@ -153,6 +153,7 @@ import type {
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
   ResolvedNodeUpdateBatchParams,
+  SchemaGraphWriteFenceParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SchemaWriteFenceParams,
@@ -4206,7 +4207,9 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : {
-        async lockSchemaVersionAndGraphWrite(params: SchemaWriteFenceParams) {
+        async lockSchemaVersionAndGraphWrite(
+          params: SchemaGraphWriteFenceParams,
+        ) {
           const row = await execution.execGet<Record<string, unknown>>(
             buildLockSchemaVersionAndGraphWrite(
               params,

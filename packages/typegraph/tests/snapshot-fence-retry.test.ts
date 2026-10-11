@@ -1,10 +1,10 @@
 /**
  * Who retries when the per-graph write fence refuses a stale snapshot.
  *
- * The fence acquisition advances the graph's fence row, so a session at a
- * snapshot isolation whose snapshot predates another acquirer's commit fails
- * there with a serialization failure. What happens next depends on who owns
- * the transaction:
+ * A write that makes a lock-only decision advances the graph's fence row, so
+ * a session at a snapshot isolation whose snapshot predates another decider's
+ * commit fails there with a serialization failure. What happens next depends
+ * on who owns the transaction:
  *
  * - a write the STORE opened is replayed whole through `runRetriedUnit` — a
  *   new transaction is a new snapshot — within `OPTIMISTIC_RETRY_ATTEMPTS`;
@@ -12,7 +12,9 @@
  *   reads are part of the unit, so the refusal propagates as a
  *   `TransactionConflictError` for the caller to re-run from the top;
  * - a serialized engine takes no keyed acquisition, so it is never a retried
- *   unit and pays nothing for one.
+ *   unit and pays nothing for one;
+ * - a write that names no constraint decides nothing under the fence and never
+ *   advances the fence row, so it is not a retried unit either.
  *
  * Two real connections cannot overlap in-process, so the refusal is injected
  * at the acquisition statement itself. `tests/backends/postgres/
@@ -20,10 +22,14 @@
  * stale snapshot on a server.
  *
  * MUTATION CHECK: answering `false` from `opensKeyedFenceTransaction` fails
- * the three store-owned cases (one transaction is opened and the conflict
+ * the four store-owned cases (one transaction is opened and the conflict
  * propagates) — verified and reverted. Rethrowing the driver error unchanged
  * from `acquiringGraphWriteFence` fails the caller-owned case's in-callback
- * assertion — verified and reverted.
+ * assertion — verified and reverted. Opening the bulk get-or-create's
+ * transaction with `backend.transaction` directly fails its case — verified
+ * and reverted. Dropping the `fenceReason !== undefined` term from
+ * `ownsSnapshotFencedUnit` fails the unconstrained case — verified and
+ * reverted.
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
@@ -36,6 +42,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  partOf,
   TransactionConflictError,
 } from "../src";
 import { OPTIMISTIC_RETRY_ATTEMPTS } from "../src/backend/capabilities/retried-unit";
@@ -56,6 +63,43 @@ const graph = defineGraph({
   edges: {
     dependsOn: { type: dependsOn, from: [Task], to: [Task], acyclic: true },
   },
+});
+
+const Assembly = defineNode("Assembly", {
+  schema: z.object({ name: z.string() }),
+});
+const Component = defineNode("Component", {
+  schema: z.object({ slug: z.string() }),
+});
+const containedIn = defineEdge("containedIn", { schema: z.object({}) });
+
+const compositionGraph = defineGraph({
+  id: "snapshot-fence-retry-composition",
+  nodes: {
+    Assembly: { type: Assembly },
+    Component: {
+      type: Component,
+      unique: [
+        {
+          name: "component_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {
+    containedIn: {
+      type: containedIn,
+      from: [Component],
+      to: [Assembly],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    partOf(Component, Assembly, { via: containedIn, partSide: "from" }),
+  ],
 });
 
 const SERIALIZATION_FAILURE_SQL_STATE = "40001";
@@ -168,6 +212,47 @@ describe("a stale-snapshot refusal at the per-graph write fence", () => {
 
     expect(instrumented.transactionsOpened() - openedBefore).toBe(2);
     expect(await store.edges.dependsOn.find({})).toHaveLength(1);
+  });
+
+  it("replays a bulk get-or-create whose leg attaches a composition part: the collection opened its transaction", async () => {
+    const backend = await postgresBackend();
+    const whole = await createStore(
+      compositionGraph,
+      backend,
+    ).nodes.Assembly.create({ name: "whole" });
+    const instrumented = refusing(backend, 1, isFenceAcquisition);
+    const store = createStore(compositionGraph, instrumented.backend);
+    const openedBefore = instrumented.transactionsOpened();
+
+    const results = await store.nodes.Component.bulkGetOrCreateByConstraint(
+      "component_slug",
+      [{ props: { slug: "bolt" } }],
+      { partOf: { whole: { kind: "Assembly", id: whole.id } } },
+    );
+
+    expect(results.map((result) => result.action)).toEqual(["created"]);
+    expect(instrumented.transactionsOpened() - openedBefore).toBe(2);
+    expect(await store.edges.containedIn.find({})).toHaveLength(1);
+  });
+
+  it("takes one attempt for a write that names no constraint: it decides nothing under the fence", async () => {
+    const instrumented = refusing(
+      await postgresBackend(),
+      1,
+      isFenceAcquisition,
+    );
+    // The store captures revisions, so the write takes the fence — for its
+    // clock, with no decision behind it and no fence-row write to be refused.
+    const store = createStore(graph, instrumented.backend, {
+      revisionTracking: true,
+    });
+    const openedBefore = instrumented.transactionsOpened();
+
+    await expect(store.nodes.Task.create({ name: "a" })).rejects.toMatchObject({
+      cause: { code: SERIALIZATION_FAILURE_SQL_STATE },
+    });
+
+    expect(instrumented.transactionsOpened() - openedBefore).toBe(1);
   });
 
   it("gives up on a store-owned write with one typed conflict once its attempts are spent", async () => {

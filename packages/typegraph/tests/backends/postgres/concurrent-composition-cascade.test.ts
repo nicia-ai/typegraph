@@ -7,8 +7,9 @@
  *
  * - **A stale plan.** A session whose snapshot predates its wait on the
  *   per-graph write fence does not see a part the fence holder just attached.
- *   The fence acquisition advances the graph's fence row, so such a session
- *   fails there with a serialization failure, before the closure is read.
+ *   The attach and the delete both advance the graph's fence row, so such a
+ *   session fails there with a serialization failure, before the closure is
+ *   read.
  * - **A stale pre-image.** An ordinary property update takes no per-graph
  *   lock, so it can commit between a delete's read of the row and its
  *   tombstone, for a cascade member and a directly deleted node alike. The

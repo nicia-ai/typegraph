@@ -1275,13 +1275,14 @@ export type GraphCommandIsolation =
  * session that took it.
  *
  * `fenceRow` is `"advanced"` when the acquiring statement also advanced the
- * graph's row in the fences relation. Every acquirer that can reach that
- * relation writes the same row, so a session whose snapshot predates another
- * acquirer's commit fails on the row with a serialization failure instead of
- * deciding on a graph it can no longer see. `"none"` is an acquisition that
- * took the keyed exclusion alone: nothing detects a stale snapshot there, so
- * only an isolation that takes a fresh snapshot per statement may make a
- * decision the fence alone protects.
+ * graph's row in the fences relation. Every holder that makes a decision only
+ * the fence protects advances that row, so a session whose snapshot predates
+ * another such holder's commit fails on the row with a serialization failure
+ * instead of deciding on a graph it can no longer see. `"none"` is an
+ * acquisition that took the keyed exclusion alone — a holder that decides
+ * nothing, or a fence that cannot reach a fences relation. Nothing detects a
+ * stale snapshot there, so only an isolation that takes a fresh snapshot per
+ * statement may make such a decision under it.
  */
 export type GraphWriteFenceAcquisition = Readonly<{
   isolation: GraphCommandIsolation;
@@ -2725,11 +2726,13 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
   /**
    * PostgreSQL/PGlite transaction-scoped fast path that takes the active
-   * schema `FOR SHARE` fence, the recorded graph advisory lock and the graph's
-   * fence-row advance in one SQL statement, in that order. The graph-lock CTE
-   * is reachable only through a matching schema row, so a stale Store never
-   * acquires the later lock. The result reports what the statement observed
-   * and did, exactly as the portable acquisition does.
+   * schema `FOR SHARE` fence and the recorded graph advisory lock in one SQL
+   * statement, in that order, and — when `params.fenceRow` is `"advance"` —
+   * the graph's fence-row advance after them. The graph-lock CTE is reachable
+   * only through a matching schema row, so a stale Store never acquires the
+   * later lock. The result reports what the statement observed and did,
+   * exactly as the portable acquisition does: `fenceRow: "advanced"` only
+   * when the statement wrote the row.
    *
    * Bundled PostgreSQL/PGlite transaction targets expose this member; their
    * root backends omit it so it cannot be used outside an already-open
@@ -2740,7 +2743,7 @@ export type GraphBackend = Readonly<{
    */
   lockSchemaVersionAndGraphWrite?: (
     this: void,
-    params: SchemaWriteFenceParams,
+    params: SchemaGraphWriteFenceParams,
   ) => Promise<GraphWriteFenceAcquisition>;
   /**
    * Internal schema-lifecycle seam for features whose data preflight must
@@ -4544,6 +4547,20 @@ export type LockSchemaVersionForWriteParams = Readonly<{
 
 /** Parameters shared by the ordinary and fused schema-write fences. */
 export type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+/**
+ * Parameters of the fused schema + graph write fence
+ * ({@link GraphBackend.lockSchemaVersionAndGraphWrite}).
+ *
+ * `fenceRow` states what the acquirer does under the graph fence. `"advance"`
+ * is a writer that goes on to make a decision only the fence protects (an
+ * edge-acyclicity probe, a composition whole's parts closure, a match-key
+ * convergence): the statement advances the graph's row in the fences
+ * relation, behind the lock. `"leave"` is every other holder: the statement
+ * takes the lock alone and writes no row.
+ */
+export type SchemaGraphWriteFenceParams = SchemaWriteFenceParams &
+  Readonly<{ fenceRow: "advance" | "leave" }>;
 
 /**
  * Optional schema-managed write identity for a trusted import. Supplying it

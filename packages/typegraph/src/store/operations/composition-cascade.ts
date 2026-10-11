@@ -9,7 +9,6 @@
  * and apply-time orphan checks — reads the closure through this module, never
  * by re-walking composition edges itself.
  */
-import { assertFencedSnapshotIsFresh } from "../../backend/command-contract";
 import {
   type EdgeRow,
   type GraphBackend,
@@ -25,7 +24,10 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStringTuples } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { compositionCountsEndedRows } from "../claims/composition-claims";
-import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  fenceLockOnlyDecision,
+  type GraphWriteLock,
+} from "../recorded-capture/clock";
 import { type CompositionNodeRef } from "../types";
 
 /**
@@ -451,7 +453,8 @@ export async function planCompositionCascade(
   }>,
   wholeKind: string,
   wholeId: string,
-  backend: GraphReadBackend & Pick<GraphBackend, "commands">,
+  backend: GraphReadBackend &
+    Pick<GraphBackend, "capabilities" | "commands" | "execute">,
 ): Promise<CompositionCascadePlan> {
   const edgeKinds = ctx.registry.compositionEdgeKindsUnder(wholeKind);
   if (edgeKinds.length === 0) return EMPTY_COMPOSITION_CASCADE_PLAN;
@@ -459,15 +462,10 @@ export async function planCompositionCascade(
   // The closure below is a lock-only read: no claim row records "this whole
   // has these parts", so a part attached while this session waited for the
   // fence is found only by a snapshot taken after the wait.
-  assertFencedSnapshotIsFresh(
-    backend.commands,
-    ctx.graphId,
-    ctx.lock.coordination,
-    {
-      code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
-      subject: "Deleting a composition whole",
-    },
-  );
+  await fenceLockOnlyDecision(backend, ctx.graphId, ctx.lock, {
+    code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
+    subject: "Deleting a composition whole",
+  });
 
   const root: CascadeNode = { kind: wholeKind, id: wholeId };
   const visited = new Set<string>([memberKey(root)]);

@@ -14,9 +14,10 @@
  * Every case here drives that exact sequence deterministically, with two real
  * connections and no timing: the stale session takes its snapshot, the
  * read-committed writer commits one half of a cycle, and only then does the
- * stale session attempt the other half. The fence acquisition writes the
- * graph's fence row, so the stale session fails there with a serialization
- * failure instead of deciding on the graph it can no longer see.
+ * stale session attempt the other half. Every writer that makes such a
+ * decision advances the graph's fence row, so the stale session fails on that
+ * row with a serialization failure instead of deciding on the graph it can no
+ * longer see.
  */
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -44,6 +45,7 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { branch } from "../../../src/graph-merge/branch";
+import { BaseVersionMismatchError } from "../../../src/graph-merge/errors";
 import { merge } from "../../../src/graph-merge/merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
 import { asBranchId } from "../../../src/graph-merge/types";
@@ -77,6 +79,35 @@ const acyclicGraph = defineGraph({
       from: [Task],
       to: [Task],
       cardinality: "many",
+      acyclic: true,
+    },
+  },
+});
+
+const assignedTo = defineEdge("assignedTo", { schema: z.object({}) });
+const blocks = defineEdge("blocks", { schema: z.object({}) });
+
+/**
+ * An acyclic relation beside constraints that name another fence reason:
+ * `assignedTo` is fenced for its cardinality alone and decides nothing under
+ * the lock, and `blocks` is acyclic but names its cardinality.
+ */
+const layeredGraph = defineGraph({
+  id: "mixed-isolation-layered",
+  nodes: { Task: { type: Task } },
+  edges: {
+    dependsOn: { type: dependsOn, from: [Task], to: [Task], acyclic: true },
+    assignedTo: {
+      type: assignedTo,
+      from: [Task],
+      to: [Task],
+      cardinality: "one",
+    },
+    blocks: {
+      type: blocks,
+      from: [Task],
+      to: [Task],
+      cardinality: "one",
       acyclic: true,
     },
   },
@@ -155,7 +186,9 @@ afterAll(async () => {
 beforeEach(async () => {
   if (stalePool === undefined) return;
   await stalePool.query(
-    "TRUNCATE typegraph_edges, typegraph_nodes, typegraph_node_uniques, typegraph_schema_versions",
+    `TRUNCATE typegraph_edges, typegraph_nodes, typegraph_node_uniques,
+              typegraph_schema_versions, typegraph_recorded_clock,
+              typegraph_revision_origins`,
   );
 });
 
@@ -282,6 +315,89 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
           expectStaleSnapshotConflict(error);
           expect(await writerStore.edges.dependsOn.find({})).toHaveLength(1);
+          expect(await cycleViolations(writerStore)).toEqual([]);
+        });
+
+        it("cannot close a cycle through an edge kind whose named constraint is its cardinality", async () => {
+          const live = requirePostgres();
+          // Neither frame names acyclicity, so neither takes the fence in its
+          // deciding form: the acyclicity probe itself advances the fence row
+          // on both sides.
+          const staleStore = createStore(
+            layeredGraph,
+            createPostgresBackend(live.stale),
+          );
+          const writerStore = createStore(
+            layeredGraph,
+            createPostgresBackend(live.writer),
+          );
+          const a = await writerStore.nodes.Task.create(
+            { name: "a" },
+            { id: "a" },
+          );
+          const b = await writerStore.nodes.Task.create(
+            { name: "b" },
+            { id: "b" },
+          );
+
+          const error = await rejection(
+            staleStore.transaction(
+              async (tx) => {
+                await tx.nodes.Task.getById(a.id);
+                await writerStore.edges.blocks.create(a, b);
+                await tx.edges.blocks.create(b, a);
+              },
+              { isolationLevel },
+            ),
+          );
+
+          expectStaleSnapshotConflict(error);
+          expect(await writerStore.edges.blocks.find({})).toHaveLength(1);
+          expect(await cycleViolations(writerStore)).toEqual([]);
+        });
+
+        it("cannot close a cycle when each transaction took the fence for a write that decided nothing", async () => {
+          const live = requirePostgres();
+          const staleStore = createStore(
+            layeredGraph,
+            createPostgresBackend(live.stale),
+          );
+          const writerStore = createStore(
+            layeredGraph,
+            createPostgresBackend(live.writer),
+          );
+          const a = await writerStore.nodes.Task.create(
+            { name: "a" },
+            { id: "a" },
+          );
+          const b = await writerStore.nodes.Task.create(
+            { name: "b" },
+            { id: "b" },
+          );
+
+          const error = await rejection(
+            staleStore.transaction(
+              async (tx) => {
+                await tx.nodes.Task.getById(a.id);
+                // The writer's fence is taken by its cardinality write, with
+                // no fence-row advance; its acyclic write advances the row
+                // behind the lock the transaction already holds.
+                await writerStore.transaction(async (writerTx) => {
+                  await writerTx.edges.assignedTo.create(a, b);
+                  await writerTx.edges.dependsOn.create(a, b);
+                });
+                // Likewise here: the cardinality write takes the fence and
+                // proceeds, and the acyclic write is the one refused.
+                await tx.edges.assignedTo.create(b, a);
+                await tx.edges.dependsOn.create(b, a);
+              },
+              { isolationLevel },
+            ),
+          );
+
+          expectStaleSnapshotConflict(error);
+          expect(await writerStore.edges.dependsOn.find({})).toHaveLength(1);
+          expect(await writerStore.edges.assignedTo.find({})).toHaveLength(1);
           expect(await cycleViolations(writerStore)).toEqual([]);
         });
 
@@ -458,15 +574,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
           // Takes the merge commit's snapshot, then lets the read-committed
           // writer commit before the merge reads or writes anything.
           let afterSnapshot: (() => Promise<void>) | undefined;
+          let commitsOpened = 0;
           const staleBackend = deriveBackend(targetBackend, {
-            transaction: (run, options) =>
-              targetBackend.transaction(
+            transaction: (run, options) => {
+              const isMergeCommit = options?.isolationLevel === "serializable";
+              if (isMergeCommit) commitsOpened += 1;
+              return targetBackend.transaction(
                 async (transaction) => {
                   const interleave = afterSnapshot;
-                  if (
-                    interleave !== undefined &&
-                    options?.isolationLevel === "serializable"
-                  ) {
+                  if (interleave !== undefined && isMergeCommit) {
                     afterSnapshot = undefined;
                     await transaction.execute(
                       asCompiledRowsSql(fragment`SELECT 1`),
@@ -476,7 +592,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
                   return run(transaction);
                 },
                 mergeCommitOptionsAt(isolationLevel, options),
-              ),
+              );
+            },
           });
           try {
             const [target] = await createStoreWithSchema(
@@ -505,10 +622,19 @@ describe.runIf(process.env["POSTGRES_URL"])(
             afterSnapshot = async () => {
               await writerStore.edges.dependsOn.create(a, b);
             };
+            const commitsBefore = commitsOpened;
             const merged = await merge(target, [source]);
 
             expect(afterSnapshot).toBeUndefined();
-            expect(isErr(merged)).toBe(true);
+            // The stale commit fails on the fence row and is replayed in a
+            // new transaction, which reads the writer's edge and refuses the
+            // plan as stale. A refusal that never took the fence — an
+            // isolation the fence does not support — opens one transaction
+            // and is not this error.
+            expect(commitsOpened - commitsBefore).toBe(2);
+            expect(isErr(merged) ? merged.error : undefined).toBeInstanceOf(
+              BaseVersionMismatchError,
+            );
             expect(await writerStore.edges.dependsOn.find({})).toHaveLength(1);
             expect(await cycleViolations(writerStore)).toEqual([]);
           } finally {

@@ -31,6 +31,7 @@ export const PGLITE_TEST_FILES = [
   "tests/engine-profile-derivation.test.ts",
   "tests/engine-profile-parity.test.ts",
   "tests/engine-profile-refusals.test.ts",
+  "tests/fence-row-scope.test.ts",
   "tests/fused-edge-endpoints.test.ts",
   "tests/graph-templates.test.ts",
   "tests/guarded-edge-cardinality-claim.test.ts",

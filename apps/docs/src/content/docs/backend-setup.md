@@ -691,15 +691,21 @@ transaction command may additionally carry a coordination token only after it
 has acquired the graph's advisory lock; the token is bound to that graph and
 transaction session and cannot authorize work on another connection.
 On PostgreSQL, the lock statement also observes the effective transaction
-isolation, advances the graph's row in `typegraph_fences`, and binds both
-facts to the same token. Every decision the fence alone protects — match-key
-convergence, edge acyclicity, a composition whole's parts closure — reads them
-from there, not from the caller-requested option or the server's assumed
-default: read committed always passes, and repeatable read or serializable
-pass only when the fence row was advanced, because that write is what fails a
-session whose snapshot predates another writer's commit. A custom backend that
-takes the advisory lock but names no fences relation (`tableNames.fences`) is
-refused at those two levels.
+isolation and binds it to the same token. A writer that goes on to make a
+decision the fence alone protects — match-key convergence, edge acyclicity, a
+composition whole's parts closure — additionally advances the graph's row in
+`typegraph_fences`, in that statement when the write names such a constraint
+up front and in a second statement behind the held lock otherwise, and the
+token records that too. Each such decision reads both facts from the token,
+not from the caller-requested option or the server's assumed default: read
+committed always passes, and repeatable read or serializable pass only when
+the fence row was advanced, because that write is what fails a session whose
+snapshot predates another decider's commit. A custom backend that takes the
+advisory lock but names no fences relation (`tableNames.fences`) is refused at
+those two levels. Every other holder of the fence — a history-capturing or
+revision-tracking write, a claim-backed constraint, a read — takes the lock
+alone and writes no row. See [Write Fence Row](/limitations#write-fence-row)
+for the privileges the row needs and how a long-lived snapshot affects it.
 
 `GraphBackend.commands` is a required member as of the authoritative command
 port release. Custom backends must expose `{ session, execute }` and implement
@@ -741,8 +747,10 @@ write paths use the command helper, which verifies that any coordination token
 belongs to the active graph and transaction session and carries a supported
 effective isolation before executing convergence. The portable PostgreSQL
 graph-lock path records that isolation automatically. A custom implementation
-of `lockSchemaVersionAndGraphWrite` must return the normalized
-`GraphCommandIsolation` observed by its combined lock statement. When
+of `lockSchemaVersionAndGraphWrite` must advance the graph's fence row exactly
+when `params.fenceRow` is `"advance"`, and return the
+`GraphWriteFenceAcquisition` its combined statement observed and did: the
+normalized isolation, and `fenceRow: "advanced"` only if it wrote the row. When
 decorating a first-party backend with `deriveBackend`, a same-session
 `commands` override retains the session identity. A wrapper that changes
 session or forwards to a different connection is a new command boundary and
@@ -1671,6 +1679,16 @@ its conflict propagates unchanged to the outermost store-owned write, or to
 `store.transaction` itself. This tier therefore changes behavior only for a
 transaction that opens its own top-level connection.
 
+An `"interactive"` backend whose write fence is a keyed acquisition (the
+bundled PostgreSQL backends) replays the same way where the per-graph write
+fence can refuse a stale snapshot, which is where a lock-only decision
+advances the graph's fence row: a store-owned write that names a constraint, a
+`bulkUpsertById` or `bulkGetOrCreateByConstraint` (the collection opens their
+transaction), and a merge commit are each replayed whole, up to the same three
+attempts. A write that names no constraint decides nothing under the fence and
+takes one attempt, as before. SQLite takes no keyed acquisition and replays
+nothing.
+
 An `"optimistic-retry"` backend requires `node:async_hooks`' `AsyncLocalStorage`
 to detect a retried unit nested inside another one; on a runtime where it is
 unavailable, the first retried unit `runRetriedUnit` opens is refused with
@@ -1864,14 +1882,16 @@ when `drain: "table-lock"`) plus the two composable, no-`SELECT` forms `advisory
 schema-write-fence discussion above) — the complete `FenceSql` bag. `resolveWriteFencePlan`'s `lock`
 arm derives the standalone-statement forms every ordinary lock site actually calls — `acquireKeyed`;
 `acquireKeyedWithIsolation` (the lock plus the session's isolation-level fact, read in the same
-statement it locks in); `acquireKeyedSnapshotFence` (the per-graph write fence: the lock, the
-isolation fact, and an advance of the key's row in the fences relation, in one statement); and
-`isolationFact` — from those two expressions, so a backend author never spells both forms
-separately. The fence-row advance is what lets a `REPEATABLE READ` or `SERIALIZABLE` session make a
-decision the fence alone protects: a lock cannot refresh a snapshot taken before the wait, but a
-session whose snapshot predates another writer's commit cannot update a row that writer advanced,
-and fails on it with a serialization failure. An `"advisory"` backend that names no fences relation
-(`tableNames.fences`) gets the lock-only statement instead, and TypeGraph refuses those two
+statement it locks in); `acquireKeyedSnapshotFence` (the per-graph write fence of a writer that makes a lock-only decision:
+the lock, the isolation fact, and an advance of the key's row in the fences relation, in one
+statement); and `isolationFact` — from those two expressions, so a backend author never spells both
+forms separately. The fence-row advance is what lets a `REPEATABLE READ` or `SERIALIZABLE` session
+make a decision the fence alone protects: a lock cannot refresh a snapshot taken before the wait,
+but a session whose snapshot predates another decider's commit cannot update a row that decider
+advanced, and fails on it with a serialization failure. Only deciders issue it; every other holder
+of the fence issues `acquireKeyedWithIsolation` and writes no row. An `"advisory"` backend that
+names no fences relation (`tableNames.fences`) has no `acquireKeyedSnapshotFence` at all, its
+deciders take the lock-only statement, and TypeGraph refuses those two
 isolation levels on it wherever such a decision is made. `mechanism: "row"` needs no `advisoryLockExpression` at all: TypeGraph
 spells its own `acquireKeyed` / `acquireKeyedWithIsolation` against the fences relation (see below),
 and a `fenceSql.isolationFactExpression` — when supplied — rides the SAME acquisition statement, so a

@@ -2794,10 +2794,10 @@ async function runMergeCommit<Output>(
  * {@link file://../backend/capabilities/retried-unit.ts runRetriedUnit} retries). SSI does
  * not arbitrate against a writer at a weaker isolation, so the decisions only
  * the per-graph write fence protects — edge acyclicity, a composition whole's
- * parts closure — do not rest on it: the fence acquisition advances the
- * graph's fence row, which fails this transaction with the same SQLSTATE
- * when ANY fenced writer committed after its snapshot, and the retry re-runs
- * the commit against the graph that writer left. SQLite and PGlite serialize
+ * parts closure — do not rest on it: making one advances the graph's fence
+ * row, which fails this transaction with the same SQLSTATE when ANY writer
+ * that made such a decision committed after its snapshot, and the retry
+ * re-runs the commit against the graph that writer left. SQLite and PGlite serialize
  * writers by construction, and the SQLite backend ignores the option.
  */
 const MERGE_COMMIT_TX_OPTIONS = {

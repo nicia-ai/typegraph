@@ -192,7 +192,7 @@ const CALL_SITES: readonly InventoryEntry[] = [
     line: "const plan = resolveWriteFencePlan(backend);",
     site: "J23",
     reason:
-      "A store-owned transaction replays on a stale-snapshot refusal only when its graph-write fence is a keyed acquisition that advances the fence row; a serialized engine takes none and never replays.",
+      "A store-owned transaction replays on a stale-snapshot refusal only when its graph-write fence is a keyed acquisition, whose deciding form advances the fence row; a serialized engine takes none and never replays.",
   },
   {
     file: "store/operations/write-transaction.ts",

@@ -1432,15 +1432,12 @@ export function createNodeCollection<
         return results as NodeGetOrCreateByConstraintResult<N>[];
       };
 
-      if (
-        backend.capabilities.execution.interactiveTransactions &&
-        "transaction" in backend
-      ) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
-      return getOrCreateAll(backend);
+      // The legs are nested writes of the one transaction this opens, and a
+      // leg that attaches a composition part decides under the per-graph
+      // write fence: the store owns the transaction, so it replays it.
+      return runOwnedMutationSetTransaction(backend, (target) =>
+        getOrCreateAll(target),
+      );
     },
   };
 }

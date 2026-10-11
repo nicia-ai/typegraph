@@ -8,6 +8,7 @@ import {
   graphCommandCoordinationIsolation,
   graphCommandExecutionContext,
   mintGraphCommandCoordination,
+  observesEveryEarlierFenceHolder,
   observesPostFenceCommits,
   readGraphWriteFenceAcquisition,
 } from "../src/backend/command-contract";
@@ -405,6 +406,20 @@ describe("a fenced decision observes the fence's previous holders", () => {
       }),
     );
   });
+});
+
+describe("a holder that reads the whole graph observes every earlier holder", () => {
+  // Only deciders advance the fence row, so it is evidence about deciders
+  // alone: a per-statement snapshot is the only thing that shows a session
+  // everything every earlier holder committed.
+  it.each(FENCE_ACQUISITIONS)(
+    "$acquisition.isolation with fence row $acquisition.fenceRow",
+    ({ acquisition }) => {
+      expect(observesEveryEarlierFenceHolder(acquisition)).toBe(
+        acquisition.isolation === "read_committed",
+      );
+    },
+  );
 });
 
 describe("readGraphWriteFenceAcquisition", () => {

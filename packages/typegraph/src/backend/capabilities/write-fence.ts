@@ -103,28 +103,31 @@ export type FenceStatements = FenceSql &
       key: string | number,
     ) => SqlFragment;
     /**
-     * THE acquisition of a fence whose holder goes on to make a decision
-     * nothing but the fence protects — the per-graph write fence. One
-     * statement that takes the keyed exclusion, reads the session's
-     * isolation-level fact, AND advances the key's row in the fences
-     * relation (reported as `generation`).
+     * The acquisition of a fence holder that goes on to make a decision
+     * nothing but the fence protects — on the per-graph write fence, an
+     * edge-acyclicity probe, a composition whole's parts closure, a match-key
+     * convergence. One statement that takes the keyed exclusion, reads the
+     * session's isolation-level fact, AND advances the key's row in the
+     * fences relation (reported as `generation`).
      *
-     * The row write is what makes the fence hold for a session at a snapshot
-     * isolation: a lock cannot refresh a snapshot taken before the wait, but
-     * a session whose snapshot predates another acquirer's commit cannot
-     * update a row that acquirer advanced, and fails on it with a
-     * serialization failure. Under `row` this is the acquisition itself;
-     * under `advisory` the row write is taken after the lock, in the same
-     * statement, whenever the target names a fences relation
-     * (`tableNames.fences`). An `advisory` target that names none yields the
-     * plain {@link FenceStatements.acquireKeyedWithIsolation} form with no
-     * `generation` column — evidence the consumer reads as "no fence row",
-     * and refuses a snapshot isolation on.
+     * The row write is what makes such a decision hold for a session at a
+     * snapshot isolation: a lock cannot refresh a snapshot taken before the
+     * wait, but a session whose snapshot predates another decider's commit
+     * cannot update a row that decider advanced, and fails on it with a
+     * serialization failure. Only deciders write the row; a holder that
+     * decides nothing takes
+     * {@link FenceStatements.acquireKeyedWithIsolation} and leaves it alone.
+     * Re-issuing this statement in a transaction that already holds the
+     * exclusion is how a holder that turns out to decide advances the row.
+     *
+     * Under `row` this is the acquisition itself. Under `advisory` the row
+     * write is taken after the lock, in the same statement, and the member is
+     * ABSENT when the target names no fences relation (`tableNames.fences`):
+     * such a fence cannot advance a row, so its holder's evidence stays "no
+     * fence row" and a snapshot isolation is refused on it.
      */
-    acquireKeyedSnapshotFence: (
-      namespace: string,
-      key: string | number,
-    ) => SqlFragment;
+    acquireKeyedSnapshotFence:
+      ((namespace: string, key: string | number) => SqlFragment) | undefined;
     /**
      * The bare session isolation-level read, with no acquisition. Yields no
      * row when the target supplies no `isolationFactExpression` — the same
@@ -303,7 +306,7 @@ type FenceStatementsStyle = Readonly<{
    * The physical name of the fences relation. Required to acquire under
    * `row`; under `advisory` it is what lets
    * {@link FenceStatements.acquireKeyedSnapshotFence} advance the fence row
-   * behind the lock, and its absence leaves that acquisition lock-only.
+   * behind the lock, and its absence leaves that member undefined.
    */
   fencesTableName?: string | undefined;
 }>;
@@ -328,6 +331,7 @@ export function resolveFenceStatements(
   style: FenceStatementsStyle = ADVISORY_FENCE_STATEMENTS_STYLE,
 ): FenceStatements {
   const { isolationFactExpression } = fenceSql;
+  const { fencesTableName } = style;
   if (style.mechanism === "advisory") {
     // Resolved lazily, inside the two acquisition closures below, rather
     // than eagerly here: `guards.ts`'s session-fact read calls this with the
@@ -370,21 +374,17 @@ export function resolveFenceStatements(
           namespace,
           key,
         ),
-      acquireKeyedSnapshotFence: (namespace: string, key: string | number) =>
-        style.fencesTableName === undefined ?
-          advisoryAcquireKeyedWithIsolationStatement(
-            requiredAdvisoryLockExpression(),
-            requiredIsolationFactExpression(),
-            namespace,
-            key,
-          )
-        : advisoryAcquireKeyedSnapshotFenceStatement(
-            requiredAdvisoryLockExpression(),
-            requiredIsolationFactExpression(),
-            sql.identifier(style.fencesTableName),
-            namespace,
-            key,
-          ),
+      acquireKeyedSnapshotFence:
+        fencesTableName === undefined ? undefined : (
+          (namespace: string, key: string | number) =>
+            advisoryAcquireKeyedSnapshotFenceStatement(
+              requiredAdvisoryLockExpression(),
+              requiredIsolationFactExpression(),
+              sql.identifier(fencesTableName),
+              namespace,
+              key,
+            )
+        ),
       isolationFact: () => isolationFactStatement(isolationFactExpression),
     };
   }
@@ -396,7 +396,6 @@ export function resolveFenceStatements(
   // therefore fires the first time one of those two is actually CALLED, not
   // when this function returns — `WriteFenceTarget.tableNames`' own doc
   // names this same deferral.
-  const { fencesTableName } = style;
   function requiredFencesTable(): SqlFragment {
     if (fencesTableName === undefined) {
       throw new ConfigurationError(
@@ -439,10 +438,11 @@ export function resolveFenceStatements(
  *
  * `mechanism` is the exclusion primitive: `"advisory"` is a keyed
  * `pg_advisory_xact_lock`-style lock a caller takes explicitly (and needs
- * `fenceSql` to spell) — the per-graph write fence additionally advances the
- * key's row in the fences relation behind that lock when the target names
- * one (`tableNames.fences`), which is what admits a snapshot isolation to a
- * decision the fence alone protects; `"row"` is a keyed exclusion spelled by TypeGraph
+ * `fenceSql` to spell) — a holder of the per-graph write fence that makes a
+ * decision the fence alone protects additionally advances the key's row in
+ * the fences relation behind that lock when the target names one
+ * (`tableNames.fences`), which is what admits a snapshot isolation to that
+ * decision; `"row"` is a keyed exclusion spelled by TypeGraph
  * itself against a never-dropped relation of fence rows, for an engine with
  * no advisory-lock primitive; `"engine-serialized"` is the engine's own
  * single writer slot (SQLite); `"caller-serialized"` is a promise the

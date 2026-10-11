@@ -3,12 +3,14 @@ import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind"
 import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
-  type FenceStatements,
   requireWriteFence,
   resolveFenceStatements,
   resolveWriteFencePlan,
+  type WriteFencePlan,
 } from "../../backend/capabilities/write-fence";
 import {
+  assertFencedSnapshotIsFresh,
+  graphCommandCoordinationAcquisition,
   mintGraphCommandCoordination,
   readGraphWriteFenceAcquisition,
 } from "../../backend/command-contract";
@@ -220,16 +222,16 @@ export function registerRecordedGraphLockMemo(
 const GRAPH_WRITE_FENCE_OPERATION = "per-graph write fence";
 
 /**
- * THE one owner of what a failed graph-write fence acquisition raises, shared
- * by the portable acquisition below and the fused schema + graph fence
+ * THE one owner of what a failed graph-write fence statement raises, shared by
+ * the portable acquisitions below and the fused schema + graph fence
  * (`write-transaction.ts`).
  *
- * The acquisition advances the graph's fence row, so a session at a snapshot
- * isolation whose snapshot predates another acquirer's commit is refused by
- * the engine with a serialization failure — on purpose: every decision that
- * session would go on to make reads a graph it can no longer see. That
- * refusal is reported as a {@link TransactionConflictError} carrying the
- * driver error as `cause`, so the owner of the transaction recognizes it
+ * A deciding acquisition advances the graph's fence row, so a session at a
+ * snapshot isolation whose snapshot predates another decider's commit is
+ * refused by the engine with a serialization failure — on purpose: the
+ * decision that session would go on to make reads a graph it can no longer
+ * see. That refusal is reported as a {@link TransactionConflictError} carrying
+ * the driver error as `cause`, so the owner of the transaction recognizes it
  * whichever driver raised it: `runRetriedUnit` re-runs a unit the library
  * owns, and a caller that owns the transaction re-runs it from the top. Any
  * other failure propagates unchanged.
@@ -249,72 +251,211 @@ export async function acquiringGraphWriteFence<T>(
   }
 }
 
-async function acquireRecordedGraphWriteLock(
+type GraphWriteFenceTarget = Pick<
+  GraphBackend,
+  "capabilities" | "commands" | "dialect" | "execute"
+>;
+
+type KeyedGraphWriteFence = Extract<WriteFencePlan, { kind: "lock" | "row" }>;
+
+async function executeGraphWriteFenceStatement(
   target: Pick<GraphBackend, "execute">,
-  fenceSql: FenceStatements,
-  graphId: string,
+  statement: SqlFragment,
 ): Promise<GraphWriteFenceAcquisition> {
   const rows = await acquiringGraphWriteFence(target, () =>
     target.execute<Readonly<Record<string, unknown>>>(
-      asCompiledRowsSql(
-        fenceSql.acquireKeyedSnapshotFence(
-          RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
-          graphId,
-        ),
-      ),
+      asCompiledRowsSql(statement),
     ),
   );
   return readGraphWriteFenceAcquisition(rows[0]);
 }
 
-export async function lockRecordedGraphWrite(
-  target: Pick<
-    GraphBackend,
-    "capabilities" | "commands" | "dialect" | "execute"
-  >,
-  graphId: string,
-  memo?: RecordedGraphLockMemo,
-): Promise<GraphWriteLock> {
+/**
+ * The keyed fence a recorded-graph acquisition takes on `target`, or
+ * `undefined` when nothing is taken: a writer slot — or, under
+ * `caller-serialized`, the deployment's own serialization promise — can
+ * serialize ordinary row work, but neither is an advisory acquisition bound to
+ * this graph/port, and it cannot authorize the PostgreSQL convergence command.
+ */
+function keyedRecordedGraphFence(
+  target: Pick<GraphBackend, "capabilities" | "dialect">,
+  operation: string,
+): KeyedGraphWriteFence | undefined {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(plan, "recorded graph write", "keyed");
+  const fence = requireWriteFence(plan, operation, "keyed");
   switch (fence.kind) {
     case "engine-serialized":
     case "caller-serialized": {
-      // A writer slot — or, under `caller-serialized`, the deployment's own
-      // serialization promise — can serialize ordinary row work, but
-      // neither is an advisory acquisition bound to this graph/port. It
-      // cannot authorize the PostgreSQL convergence command.
-      return uncapturedGraphWriteLock();
+      return undefined;
     }
     case "lock":
     case "row": {
-      break;
+      return fence;
     }
     default: {
-      fence satisfies never;
+      return fence satisfies never;
     }
   }
+}
+
+/**
+ * Takes the per-graph write fence: the keyed exclusion and the session's
+ * isolation fact, and nothing else. Under an advisory `lock` plan the graph's
+ * fence row is left alone — a holder that only captures history, advances a
+ * revision or writes a claim-backed constraint decides nothing the row could
+ * protect, so it pays for no row write. A holder that goes on to make a
+ * lock-only decision takes {@link lockRecordedGraphDecision} instead, or on
+ * top of this.
+ */
+export async function lockRecordedGraphWrite(
+  target: GraphWriteFenceTarget,
+  graphId: string,
+  memo?: RecordedGraphLockMemo,
+): Promise<GraphWriteLock> {
+  const fence = keyedRecordedGraphFence(target, "recorded graph write");
+  if (fence === undefined) return uncapturedGraphWriteLock();
+  const acquire = (): Promise<GraphWriteFenceAcquisition> =>
+    executeGraphWriteFenceStatement(
+      target,
+      fence.sql.acquireKeyedWithIsolation(
+        RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+        graphId,
+      ),
+    );
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
-    const acquisition = await acquireRecordedGraphWriteLock(
-      target,
-      fence.sql,
-      graphId,
-    );
-    return acquiredGraphWriteLock(target, graphId, acquisition);
+    return acquiredGraphWriteLock(target, graphId, await acquire());
   }
   let pending = effectiveMemo.get(graphId);
   if (pending === undefined) {
-    pending = acquireRecordedGraphWriteLock(target, fence.sql, graphId).catch(
-      (error: unknown) => {
-        effectiveMemo.delete(graphId);
-        throw error;
-      },
-    );
+    pending = acquire().catch((error: unknown) => {
+      effectiveMemo.delete(graphId);
+      throw error;
+    });
     effectiveMemo.set(graphId, pending);
   }
   const acquisition = await pending;
   return acquiredGraphWriteLock(target, graphId, acquisition);
+}
+
+function advancedFenceRow(
+  target: Pick<GraphBackend, "commands">,
+  graphId: string,
+  lock: GraphWriteLock,
+): boolean {
+  return (
+    lock.coordination !== undefined &&
+    graphCommandCoordinationAcquisition(
+      target.commands,
+      lock.coordination,
+      graphId,
+    ).fenceRow === "advanced"
+  );
+}
+
+/**
+ * The per-graph write fence of a holder about to make a LOCK-ONLY DECISION —
+ * an edge-acyclicity probe, a composition whole's parts closure, a match-key
+ * convergence: the keyed exclusion AND the advance of the graph's fence row.
+ *
+ * Every decider advances the row and only deciders do. That is what lets a
+ * decider at a snapshot isolation be trusted: its row write fails with a
+ * serialization failure when another decider committed after its snapshot.
+ * And it is why a decider at read committed must advance the row too — it is
+ * the "other decider" of someone else's stale snapshot.
+ *
+ * `held` is the fence evidence the caller already works under. Evidence that
+ * the row was advanced is returned as it is, at no statement. Evidence of the
+ * exclusion alone is upgraded by re-issuing the deciding acquisition, which
+ * re-enters the exclusion this transaction holds and advances the row behind
+ * it. With no `held`, this is the acquisition itself, in one statement.
+ *
+ * Two cases yield evidence with no advanced row: a serialized engine or
+ * deployment, which has no stale snapshot to detect, and an advisory fence
+ * naming no fences relation, on which
+ * {@link assertFencedSnapshotIsFresh} then refuses a snapshot isolation. A
+ * `held` lock carrying no coordination is a frame that holds no keyed fence —
+ * a serialized engine's, or a lock-free plan-time read; it is returned
+ * unchanged rather than fenced late, out of lock order.
+ */
+export async function lockRecordedGraphDecision(
+  target: GraphWriteFenceTarget,
+  graphId: string,
+  held?: GraphWriteLock,
+): Promise<GraphWriteLock> {
+  // Decided before the plan is resolved: evidence with no coordination is a
+  // frame that holds no keyed fence, whatever its target could take.
+  if (held !== undefined && held.coordination === undefined) return held;
+  const fence = keyedRecordedGraphFence(target, "recorded graph write");
+  if (fence === undefined) return held ?? uncapturedGraphWriteLock();
+  if (held !== undefined && advancedFenceRow(target, graphId, held)) {
+    return held;
+  }
+  const memo = recordedGraphLockMemos.get(target);
+  const memoized = memo?.get(graphId);
+  if (memoized !== undefined) {
+    const lock = acquiredGraphWriteLock(target, graphId, await memoized);
+    if (advancedFenceRow(target, graphId, lock)) return lock;
+  }
+  const { acquireKeyedSnapshotFence } = fence.sql;
+  if (acquireKeyedSnapshotFence === undefined) {
+    return held ?? lockRecordedGraphWrite(target, graphId);
+  }
+  const pending = executeGraphWriteFenceStatement(
+    target,
+    acquireKeyedSnapshotFence(
+      RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+      graphId,
+    ),
+  );
+  if (memo === undefined) {
+    return acquiredGraphWriteLock(target, graphId, await pending);
+  }
+  // The memo is what a later frame of this transaction reads, and what the
+  // recorded savepoint coordinator checkpoints: a rollback to a savepoint
+  // taken before this statement restores the entry it replaced, so the row
+  // advance that rollback undid is not remembered as done.
+  const memoizedPending = pending.catch((error: unknown) => {
+    if (memo.get(graphId) === memoizedPending) {
+      if (memoized === undefined) memo.delete(graphId);
+      else memo.set(graphId, memoized);
+    }
+    throw error;
+  });
+  memo.set(graphId, memoizedPending);
+  return acquiredGraphWriteLock(target, graphId, await memoizedPending);
+}
+
+/**
+ * THE gate of a decision the per-graph write fence alone protects — a read
+ * with no claim row behind it, such as the edge-acyclicity probe or a whole
+ * delete's parts closure. Called before that read, by every site that makes
+ * one.
+ *
+ * It does the two things such a decision needs, in order, so no site can do
+ * one without the other: advance the graph's fence row under `held`
+ * ({@link lockRecordedGraphDecision}), then require that this session observes
+ * the deciders that held the fence before it
+ * ({@link assertFencedSnapshotIsFresh}).
+ *
+ * @throws TransactionConflictError when another decider committed after this
+ *   session's snapshot
+ * @throws ConfigurationError carrying `refusal.code` when the fence cannot
+ *   show this session's snapshot to be fresh
+ */
+export async function fenceLockOnlyDecision(
+  target: GraphWriteFenceTarget,
+  graphId: string,
+  held: GraphWriteLock,
+  refusal: Readonly<{ code: string; subject: string }>,
+): Promise<void> {
+  const lock = await lockRecordedGraphDecision(target, graphId, held);
+  assertFencedSnapshotIsFresh(
+    target.commands,
+    graphId,
+    lock.coordination,
+    refusal,
+  );
 }
 
 function failInvalidClock(value: unknown, cause?: unknown): never {
