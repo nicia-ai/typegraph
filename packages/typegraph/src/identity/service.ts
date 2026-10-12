@@ -21,12 +21,17 @@ export {
   IDENTITY_IMPORT_FAILED_ASSERTION,
   IDENTITY_IMPORT_PROGRESS,
   importIdentityAssertionsIntoTarget,
+  importIdentityTransitionsIntoTarget,
+  readIdentityRestoreBaseline,
 } from "./service-interchange-write";
 export type { IdentityRebuildContext } from "./service-maintenance";
 export {
   assertAffectedIdentityClassesConsistent,
+  assertIdentityFoldable,
+  combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
   detachIdentityForNode,
+  fillLiveSingletons,
   foldIdentityForCreatedNodes,
   hasAssertionsTouchingKinds,
   liveNodeKindsSharingIds,
@@ -34,6 +39,7 @@ export {
   rebuildIdentityClosureForContext,
   removeIdentityKindsForContext,
   requireNodeValidityEndCompatible,
+  snapshotIdentityClosureClasses,
   validateIdentityForContext,
 } from "./service-maintenance";
 export { loadAssertionsByIds } from "./service-mutation";
@@ -49,3 +55,12 @@ export type {
   IdentityServiceContext,
   IdentityTransferAssertion,
 } from "./service-types";
+export type {
+  IdentityTransitionCursor,
+  IdentityTransitionTransfer,
+} from "./transition-log";
+export {
+  readIdentityTransitionPageForInterchange,
+  readTransitionRetentionDetails,
+  toTransitionTransfer,
+} from "./transition-log";

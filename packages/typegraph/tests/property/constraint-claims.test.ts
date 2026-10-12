@@ -293,11 +293,12 @@ async function assertConstraintsHold(
   for (const entry of staff.filter(
     (candidate) => candidate.kind === "FencedEmployee",
   )) {
-    const count = await backend.countEdgesFrom({
+    const count = await backend.countEdgesAtEndpoint({
       graphId: claimGraph.id,
       edgeKind: "fencedManages",
-      fromKind: "FencedEmployee",
-      fromId: entry.id,
+      endpoint: "from",
+      endpointKind: "FencedEmployee",
+      endpointId: entry.id,
       activeOnly: false,
     });
     expect(count, `live fencedManages edges from ${entry.id}`).toBeLessThan(2);

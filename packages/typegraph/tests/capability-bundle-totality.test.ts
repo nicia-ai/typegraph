@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 91 unbundled = 107, with no member counted twice", () => {
+  it("16 pilot + 92 unbundled = 108, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(91);
+    expect(unbundledNames.length).toBe(92);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(107);
+    expect(bundledSet.size + unbundledNames.length).toBe(108);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("41 reasoned entries sum to 125 accesses; 50 deferred entries sum to 243", () => {
+  it("42 reasoned entries sum to 131 accesses; 50 deferred entries sum to 245", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(41);
+    expect(reasoned.length).toBe(42);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -167,7 +167,12 @@ describe("capability bundle totality (T9)", () => {
     // add four accesses. The graph storage inventory resolves the
     // graph-relation names through one tableNames access and reads the session
     // isolation expression through one fenceSql access: 123 -> 125.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(125);
+    // `rollbackSchema` reads the optional preflight flip once to refuse a
+    // tightening on a backend without it, edge acyclicity adds three
+    // tableNames reads and composition tightening one more: 125 -> 130.
+    // The managed PostgreSQL copy's fixed-schema guard reads the optional
+    // preflight flip once to refuse it: 130 -> 131.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(131);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
@@ -179,6 +184,8 @@ describe("capability bundle totality (T9)", () => {
     // Vector lifecycle inventory adds one executeDdl, two upsertEmbedding,
     // and five vectorStrategy access sites: 233 -> 241. The graph storage
     // inventory and the namespace fork add one guarded strategy read each: 241 -> 243.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(243);
+    // The composition cascade and the unattached-part read each add one
+    // heterogeneous endpoint-set consumer: 243 -> 245.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(245);
   });
 });

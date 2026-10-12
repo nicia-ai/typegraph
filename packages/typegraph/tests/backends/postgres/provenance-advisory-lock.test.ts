@@ -232,6 +232,27 @@ async function acquireLock(
 // the only honest reason to skip a server suite; anything else — a refused
 // connection, a migration that no longer applies — is a failure of this lane,
 // and routing it through the same skip made the two indistinguishable.
+/** One source, one justification and the one fact they support. */
+async function seedLinearSupport(
+  store: Awaited<ReturnType<typeof createGraphStore>>,
+) {
+  const source = await store.nodes.Source.create(
+    { label: "source-a", retracted: false },
+    { id: "source-a" },
+  );
+  const fact = await store.nodes.Fact.create(
+    { label: "fact-a" },
+    { id: "fact-a" },
+  );
+  const justification = await store.nodes.Justification.create(
+    { label: "justification-a" },
+    { id: "justification-a" },
+  );
+  await store.edges.premiseOf.create(source, justification);
+  await store.edges.derives.create(justification, fact);
+  return { source, fact };
+}
+
 describe.runIf(process.env["POSTGRES_URL"])(
   "recorded graph-write advisory lock (Postgres)",
   () => {
@@ -368,6 +389,48 @@ describe.runIf(process.env["POSTGRES_URL"])(
       ).resolves.toMatchObject({
         label: "updated-inside-adopted-transaction",
       });
+    });
+
+    it("holding() reads on a read-only session: its exclusion writes nothing", async () => {
+      const targetPool = requirePostgres();
+      const { fact } = await seedLinearSupport(
+        await createGraphStore(targetPool),
+      );
+      // Every transaction of this pool is read-only, as under a role or
+      // database default: any INSERT or UPDATE is refused by the server.
+      const readOnlyPool = new Pool({
+        connectionString: TEST_DATABASE_URL,
+        connectionTimeoutMillis: 5000,
+        options: "-c default_transaction_read_only=on",
+      });
+      try {
+        const reader = await createGraphStore(readOnlyPool);
+
+        await expect(
+          createRetractionCapability(reader, config).holding(),
+        ).resolves.toEqual([{ kind: "Fact", id: fact.id }]);
+      } finally {
+        await readOnlyPool.end();
+      }
+    });
+
+    it("holding() still waits for a writer holding the graph-write lock", async () => {
+      const targetPool = requirePostgres();
+      const store = await createGraphStore(targetPool);
+      const { fact } = await seedLinearSupport(store);
+
+      const clientA = await targetPool.connect();
+      heldClients.push(clientA);
+      await clientA.query("BEGIN");
+      await acquireLock(clientA, recordedGraphWriteAdvisoryLockSql(graph.id));
+
+      const pendingRead = createRetractionCapability(store, config).holding();
+      expect(await raceTimeout(pendingRead, 500)).toBe(TIMEOUT_SENTINEL);
+
+      await clientA.query("COMMIT");
+      await expect(pendingRead).resolves.toEqual([
+        { kind: "Fact", id: fact.id },
+      ]);
     });
 
     it("resolves without deadlocking against a concurrent ordinary write to the retracted source", async () => {

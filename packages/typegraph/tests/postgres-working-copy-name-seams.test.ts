@@ -3,6 +3,12 @@ import { z } from "zod";
 
 import { defineNode } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  allocationNames,
+  allocationPhysicalPrefix,
+  allocationRelationSuffixes,
+} from "../src/backend/drizzle/postgres-working-copy-names";
+import { defaultPostgresTableNames } from "../src/backend/drizzle/schema/postgres";
 import type { GraphBackend } from "../src/backend/types";
 import { ConfigurationError } from "../src/errors";
 import { defineNodeIndex } from "../src/indexes";
@@ -143,6 +149,106 @@ describe("allocation vector table prefix", () => {
       );
     },
   );
+});
+
+/**
+ * Relations an allocation created by an earlier release already has on disk,
+ * named by the leading characters of their key. Renaming one would strand its
+ * rows on reopen.
+ */
+const RELEASED_RELATION_KEYS = [
+  "nodes",
+  "edges",
+  "recordedNodes",
+  "recordedEdges",
+  "recordedClock",
+  "revisionOrigins",
+  "revisionChanges",
+  "identityAssertions",
+  "recordedIdentityAssertions",
+  "identityClosure",
+  "identitySeparation",
+  "uniques",
+  "edgeClaims",
+  "baseSchemaVersions",
+  "schemaVersions",
+  "graphTemplates",
+  "fulltext",
+  "indexMaterializations",
+  "contributionMaterializations",
+  "kindRemovals",
+  "reconciliationMarkers",
+  "fences",
+] as const satisfies readonly (keyof typeof defaultPostgresTableNames)[];
+const RELEASED_SUFFIX_LENGTH = 15;
+
+describe("allocation relation names", () => {
+  it("gives every bundled relation its own physical name within the identifier limit", async () => {
+    const names = await allocationNames("allocation-under-test");
+    const physical = Object.values(names);
+    console.log("allocation relation names", names);
+
+    expect(Object.keys(names).toSorted()).toEqual(
+      Object.keys(defaultPostgresTableNames).toSorted(),
+    );
+    expect(new Set(physical).size).toBe(physical.length);
+    for (const name of physical) {
+      expect(name.length).toBeLessThanOrEqual(POSTGRES_IDENTIFIER_LIMIT);
+    }
+    expect(names.identityTransitions).not.toBe(
+      names.identityTransitionRetention,
+    );
+  });
+
+  it("recovers the ledger prefix every relation is named under", async () => {
+    const names = await allocationNames("allocation-under-test");
+    const prefix = allocationPhysicalPrefix(names);
+
+    expect(prefix).toMatch(/^tgw_[0-9a-f]{24}_$/u);
+    expect(() => allocationVectorTablePrefix(prefix)).not.toThrow();
+    for (const name of Object.values(names)) {
+      expect(name.startsWith(prefix)).toBe(true);
+    }
+    expect(
+      allocationPhysicalPrefix(await allocationNames("another-allocation")),
+    ).not.toBe(prefix);
+  });
+
+  it("keeps the names earlier releases gave their relations", async () => {
+    const names = await allocationNames("allocation-under-test");
+    const prefix = allocationPhysicalPrefix(names);
+    for (const key of RELEASED_RELATION_KEYS) {
+      expect(names[key]).toBe(
+        `${prefix}${key.slice(0, RELEASED_SUFFIX_LENGTH)}`,
+      );
+    }
+  });
+
+  it("tells apart keys that share their leading characters, whatever their order", () => {
+    const keys = [
+      "identityTransitions",
+      "identityTransitionRetention",
+      "identityTransitionRetentionWindow",
+      "nodes",
+    ] as const;
+    const forward = allocationRelationSuffixes(keys);
+    const backward = allocationRelationSuffixes(keys.toReversed());
+
+    expect(new Set(forward.values()).size).toBe(keys.length);
+    expect(forward.get("nodes")).toBe("nodes");
+    for (const key of keys) {
+      expect(backward.get(key)).toBe(forward.get(key));
+      expect(forward.get(key)?.length).toBeLessThanOrEqual(
+        RELEASED_SUFFIX_LENGTH,
+      );
+    }
+  });
+
+  it("refuses a key set it cannot name distinctly", () => {
+    expect(() => allocationRelationSuffixes(["nodes", "nodes"])).toThrow(
+      /resolve to the same physical suffix/u,
+    );
+  });
 });
 
 // Only object identity keys the binding; no backend behavior is exercised.

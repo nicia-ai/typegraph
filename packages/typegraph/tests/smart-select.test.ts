@@ -196,7 +196,7 @@ describe("createTrackingContext", () => {
     startAlias: "p",
     startKinds: ["Person"],
     currentAlias: "p",
-    includeSubClasses: false,
+    startExpansion: "exact",
     traversals: [],
     predicates: [],
     projection: [],

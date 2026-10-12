@@ -1307,6 +1307,10 @@ function buildPostgresEngineProfileInternal(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1931,6 +1935,13 @@ function buildPostgresEngineProfileInternal(
     revisionChangesIndexDdl: generatePgCreateIndexSQL(tables.revisionChanges),
     graphIdOrderIndexDdl: graphIdOrderIndexTables(tableNames).map(({ table }) =>
       generateGraphIdOrderIndexDDL(table),
+    ),
+    identityTransitionsTableDdl: [
+      generatePgCreateTableSQL(tables.identityTransitions),
+      ...generatePgCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
+      tables.identityTransitionRetention,
     ),
   };
 

@@ -1,7 +1,11 @@
 import type { EdgeRow } from "../backend/types";
 import type { GraphData } from "../interchange";
 import { validateImportProperties } from "../interchange/import";
-import { EDGE_CARDINALITY_SPECS } from "../store/claims/edge-claims";
+import { acyclicEdgeRelations } from "../store/acyclicity";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalitySpec,
+} from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import {
   type CandidateIdentityScope,
@@ -39,6 +43,12 @@ type EntityReference = Readonly<{ kind: string; id: string }>;
  * needs the optional active-only source read so ended history cannot make a
  * candidate lookup grow with the graph. Durable match identity requires an
  * exact keyed owner read. Ontology disjointness uses live same-id siblings.
+ *
+ * A target-side cardinality, an acyclic relation and composition (which is
+ * both a one-whole claim and an acyclic relation) each constrain rows the
+ * sparse base never reads: the holders at an edge's target endpoint, and the
+ * paths between its endpoints. A graph declaring any of them plans against
+ * the whole target instead.
  */
 export function canUseSparseCandidatePlanning<G extends GraphDef>(
   target: Store<G>,
@@ -47,10 +57,14 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
     storeBackend(target).findActiveEdgesBySourceV1 !== undefined;
   return (
     target.revisionTrackingEnabled &&
+    acyclicEdgeRelations(target.graph, target.registry).length === 0 &&
     (target.graph.identity === undefined ||
       hasScopedIdentityReads(storeRuntime(target))) &&
     Object.values(target.graph.edges).every(
       (edge) =>
+        edgeCardinalityAxisReferences(edge).every(
+          (axis) => axis.direction === "source",
+        ) &&
         (edge.cardinality !== "oneActive" || hasActiveSourceRead) &&
         (edge.matchIdentity === undefined ||
           storeBackend(target).findEdgesByMatchIdentity !== undefined),
@@ -189,7 +203,7 @@ async function sparseBaseDocument<G extends GraphDef>(
   for (const edge of writeSet.edges) {
     const cardinality = target.graph.edges[edge.kind]?.cardinality ?? "many";
     if (cardinality === "many") continue;
-    const spec = EDGE_CARDINALITY_SPECS[cardinality];
+    const spec = edgeCardinalitySpec({ direction: "source", cardinality });
     if (spec.holderLiveness === "liveAndActive") {
       addActiveRead(edge.kind, edge.from.kind, edge.from.id);
       continue;

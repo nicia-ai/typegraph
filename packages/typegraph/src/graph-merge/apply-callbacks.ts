@@ -56,6 +56,20 @@ export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
     tx: TransactionContext<G>,
     applied: MergePlanApplied,
   ) => Promise<void>;
+  /**
+   * The digest of the review artifact this plan was approved under
+   * (`MergeReviewArtifact.digest.value`), recorded on every identity transition
+   * the apply causes. The plan artifact alone does not name its review, so this
+   * is the only place the apply can learn it — omitted for a plan applied
+   * outside a review workflow.
+   */
+  reviewDigest?: string;
+  /**
+   * The candidate write set's `sourceId`, for a plan applied on the ingestion
+   * path. Recorded on the identity transitions so an incoming feed's identity
+   * effects stay attributable to the feed.
+   */
+  sourceId?: string;
 }>;
 
 function pickReadMethods<T, K extends keyof T>(

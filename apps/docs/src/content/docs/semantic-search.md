@@ -551,10 +551,18 @@ the silent half — the combination that cannot be served — is closed here.
 ### Scoped facade search: filters, pagination, subclasses
 
 `store.search.vector` (and `fulltext` / `hybrid`) accept a `where`
-predicate, an `offset`, and `includeSubClasses` — all compiled into the
+predicate, an `offset`, and `expansion` — all compiled into the
 search statement itself, so the engine ranks only eligible rows. A filter
 never costs you results: you get `limit` hits whenever `limit` matching
 nodes exist (on libSQL DiskANN, subject to the over-fetch bound above).
+
+`expansion` on the facade stays **opt-in** and defaults to
+`"exact"` — a deliberate asymmetry with the query builder's `from()`/`to()`,
+which default to `expansion: "subclasses"`. Searching across kinds also
+requires every expanded kind to share one declared metric (see below), so
+flipping the facade's default would need its own migration knob; see
+[Fulltext Search ▸ Options reference](/fulltext-search#options-reference)
+for the full rationale, which applies identically here.
 
 ```typescript
 // Top 10 most similar *published* documents, second page.
@@ -573,15 +581,21 @@ const acrossKinds = await store.search.vector("Content", {
   fieldPath: "embedding",
   queryEmbedding,
   limit: 10,
-  includeSubClasses: true,
+  expansion: "subclasses",
 });
 ```
+
+An expanded search types its hits like the `from()` alias it expands to:
+`acrossKinds[0].node` keeps `Content`'s properties, while its `kind` is
+`string` and its `NodeId` brand widens whenever the ontology can return
+another kind's row. See
+[Fulltext Search ▸ Options reference](/fulltext-search#options-reference).
 
 The `where` predicate is compiled by the same query compiler as
 `store.query()` — property predicates behave identically, use the same
 declared indexes, and apply the same current-read semantics (tombstoned
 nodes and nodes outside their validity window never rank). Kinds expanded
-via `includeSubClasses` must share one declared metric: scores from
+via `expansion: "subclasses"` must share one declared metric: scores from
 different metrics cannot merge into one ranking (and a per-call `metric`
 cannot bridge the gap — each kind's storage is validated against its
 declared metric), so mixed-metric expansions throw; search those kinds

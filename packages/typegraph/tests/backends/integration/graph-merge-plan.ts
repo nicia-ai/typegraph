@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   asNodeId,
   createAdapterStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   type Store,
@@ -56,6 +57,37 @@ const graph = defineGraph({
 });
 
 type TestStore = Store<typeof graph>;
+
+const Binder = defineNode("PlanBinder", { schema: z.object({}) });
+const Sheet = defineNode("PlanSheet", { schema: z.object({}) });
+const filedIn = defineEdge("planFiledIn", { schema: z.object({}) });
+/** No composition yet: the evolution below is what declares the pair. */
+const compositionEvolutionGraph = defineGraph({
+  id: "graph_merge_plan_composition_evolution",
+  nodes: {
+    PlanBinder: { type: Binder },
+    PlanSheet: { type: Sheet },
+  },
+  edges: {
+    planFiledIn: {
+      type: filedIn,
+      from: [Sheet],
+      to: [Binder],
+      cardinality: "one",
+    },
+  },
+});
+const requiredFilingExtension = defineGraphExtension({
+  ontology: [
+    {
+      metaEdge: "partOf",
+      from: "PlanSheet",
+      to: "PlanBinder",
+      via: "planFiledIn",
+      existence: "required",
+    },
+  ],
+});
 
 async function makeBranch(
   context: IntegrationTestContext,
@@ -526,6 +558,38 @@ export function registerGraphMergePlanIntegrationTests(
       expect(
         await target.nodes.Person.getById(asNodeId("stale-source-ada")),
       ).toBeUndefined();
+    });
+
+    it("reports composition orphans under the resulting schema's registry", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        compositionEvolutionGraph,
+        context.getBackend(),
+        { revisionTracking: true },
+      );
+      const binder = await target.nodes.PlanBinder.create({}, { id: "binder" });
+      const sheet = await target.nodes.PlanSheet.create({}, { id: "sheet" });
+      const filing = await target.edges.planFiledIn.create(sheet, binder, {});
+      const source = unwrap(
+        await branch(target, () => context.createIsolatedBackend(), {
+          id: asBranchId("drops-filing"),
+        }),
+      );
+      await source.store.edges.planFiledIn.delete(filing.id);
+      const evolutionPlan = await target.planEvolution(requiredFilingExtension);
+
+      const artifact = unwrap(
+        await planMergeForEvolution(target, evolutionPlan, [source]),
+      );
+
+      // Under the baseline registry the sheet owes no whole, so a merge that
+      // drops its only filing edge would report nothing here.
+      expect(artifact.review.compositionOrphans).toEqual([
+        {
+          part: { kind: "PlanSheet", id: "sheet" },
+          viaEdgeKind: "planFiledIn",
+          cause: "unattached",
+        },
+      ]);
     });
 
     it("preserves branch failures when forking a resulting-schema branch", async () => {

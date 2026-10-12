@@ -47,6 +47,12 @@ await store.nodes.Document.bulkUpsertById(items);
 await store.nodes.Document.bulkDelete(ids);
 ```
 
+Called on the store, a bulk method owns its transaction: a refused item rolls
+the whole call back. Called on `tx` inside `store.transaction(...)` it runs on
+your transaction, which has no savepoint, so a refusal you catch there can
+leave the rows the batch wrote before the refused item. See
+[A bulk refusal caught inside `store.transaction`](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows).
+
 ### upsertById
 
 Creates a node if it doesn't exist, or updates it if it does. This includes

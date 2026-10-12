@@ -4,9 +4,6 @@ export { defineNode, type DefineNodeOptions } from "./node";
 // Edge factory
 export { defineEdge, type DefineEdgeOptions } from "./edge";
 
-// Meta-edge factory
-export { metaEdge, type MetaEdgeOptions } from "./meta-edge";
-
 // Embedding type for vector search
 export {
   embedding,
@@ -108,6 +105,7 @@ export {
   type NodeRegistration,
   type NodeType,
   type NullCheckOp,
+  type TargetCardinality,
   type TemporalMode,
   type UniqueConstraint,
   type UniquenessScope,

@@ -32,6 +32,7 @@ import {
   lockRecordedGraphWrite,
 } from "../src/store/recorded-capture";
 import { requireDefined } from "../src/utils/presence";
+import { advisoryOnlyBackend } from "./advisory-only-backend";
 
 function convergenceCommand(
   id: string,
@@ -90,38 +91,84 @@ async function executeConvergence(
   });
 }
 
-describe("PostgreSQL edge convergence command", () => {
-  it("refuses convergence under a repeatable-read server default", async () => {
-    const client = await PGlite.create();
-    try {
-      await client.exec(generatePostgresDDL().join("\n\n"));
-      await client.exec(
-        "SET default_transaction_isolation = 'repeatable read'",
-      );
-      const backend = createPostgresBackend(drizzlePglite(client), {
-        vector: false,
-      });
-      const store = createAdapterStore(graph, backend);
-      const alice = await store.nodes.Person.create({ name: "Alice" });
-      const bob = await store.nodes.Person.create({ name: "Bob" });
+const SNAPSHOT_ISOLATION_LEVELS = [
+  { setting: "repeatable read", isolation: "repeatable_read" },
+  { setting: "serializable", isolation: "serializable" },
+] as const;
 
-      await expect(
-        store.edges.knows.getOrCreateByEndpoints(
+describe("PostgreSQL edge convergence command", () => {
+  // MUTATION CHECK: answering `true` for a snapshot isolation whose
+  // acquisition advanced no fence row (`observesPostFenceCommits`) lets both
+  // refusals below resolve — verified and reverted.
+  it.each(SNAPSHOT_ISOLATION_LEVELS)(
+    "refuses convergence at $isolation on a port whose fence advances no fence row",
+    async ({ setting, isolation }) => {
+      const client = await PGlite.create();
+      try {
+        await client.exec(generatePostgresDDL().join("\n\n"));
+        await client.exec(`SET default_transaction_isolation = '${setting}'`);
+        const backend = advisoryOnlyBackend(
+          createPostgresBackend(drizzlePglite(client), { vector: false }),
+        );
+        const store = createAdapterStore(graph, backend);
+        const alice = await store.nodes.Person.create({ name: "Alice" });
+        const bob = await store.nodes.Person.create({ name: "Bob" });
+
+        await expect(
+          store.edges.knows.getOrCreateByEndpoints(
+            alice,
+            bob,
+            { label: "unsafe-default" },
+            { matchOn: ["label"] },
+          ),
+        ).rejects.toMatchObject({
+          details: {
+            code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+            isolation,
+            fenceRow: "none",
+          },
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  it.each(SNAPSHOT_ISOLATION_LEVELS)(
+    "converges at $isolation on the bundled backend, whose fence advances the fence row",
+    async ({ setting }) => {
+      const client = await PGlite.create();
+      try {
+        await client.exec(generatePostgresDDL().join("\n\n"));
+        await client.exec(`SET default_transaction_isolation = '${setting}'`);
+        const backend = createPostgresBackend(drizzlePglite(client), {
+          vector: false,
+        });
+        const store = createAdapterStore(graph, backend);
+        const alice = await store.nodes.Person.create({ name: "Alice" });
+        const bob = await store.nodes.Person.create({ name: "Bob" });
+
+        const created = await store.edges.knows.getOrCreateByEndpoints(
           alice,
           bob,
-          { label: "unsafe-default" },
+          { label: "snapshot" },
           { matchOn: ["label"] },
-        ),
-      ).rejects.toMatchObject({
-        details: {
-          code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
-          isolation: "repeatable_read",
-        },
-      });
-    } finally {
-      await client.close();
-    }
-  });
+        );
+        const found = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { label: "snapshot" },
+          { matchOn: ["label"] },
+        );
+
+        expect(created.action).toBe("created");
+        expect(found.action).toBe("found");
+        expect(found.edge.id).toBe(created.edge.id);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   it("allows an adopted transaction to return an existing match", async () => {
     const client = await PGlite.create();
@@ -172,7 +219,7 @@ describe("PostgreSQL edge convergence command", () => {
     }
   });
 
-  it("refuses an adopted repeatable-read bulk create", async () => {
+  it("creates through an adopted repeatable-read transaction, whose fence advances the fence row", async () => {
     const client = await PGlite.create();
     try {
       await client.exec(generatePostgresDDL().join("\n\n"));
@@ -192,19 +239,14 @@ describe("PostgreSQL edge convergence command", () => {
                   {
                     from: alice,
                     to: bob,
-                    props: { label: "unsafe-bulk-create" },
+                    props: { label: "adopted-bulk-create" },
                   },
                 ],
                 { matchOn: ["label"] },
               ),
           { isolationLevel: "repeatable read" },
         ),
-      ).rejects.toMatchObject({
-        details: {
-          code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
-          isolation: "repeatable_read",
-        },
-      });
+      ).resolves.toMatchObject([{ action: "created" }]);
     } finally {
       await client.close();
     }
@@ -491,7 +533,7 @@ describe("PostgreSQL edge convergence command", () => {
             options,
           ),
       });
-      const store = createStore(graph, counted);
+      const store = createStore(graph, advisoryOnlyBackend(counted));
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
 

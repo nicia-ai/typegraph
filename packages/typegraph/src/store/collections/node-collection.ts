@@ -36,9 +36,11 @@ import {
   asCompiledSelectSql,
   type CompiledSelectSql,
 } from "../../query/sql-intent";
+import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
   runResolvedMutationSetConverging,
@@ -50,8 +52,11 @@ import {
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
+  type NodeCreateOptions,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
   type UpdateNodeInput,
   type ValidityEndMutation,
@@ -268,6 +273,17 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    options: NodeReparentOptions,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
@@ -323,23 +339,16 @@ export type NodeCollectionConfig = Readonly<{
 function buildCreateInput(
   kind: string,
   props: Record<string, unknown>,
-  options?: Readonly<{
-    id?: string;
-    validFrom?: string | null;
-    validTo?: string;
-  }>,
+  options?: NodeCreateOptions,
 ): CreateNodeInput {
-  const input: {
-    kind: string;
-    id?: string;
-    props: Record<string, unknown>;
-    validFrom?: string | null;
-    validTo?: string;
-  } = { kind, props };
-  if (options?.id !== undefined) input.id = options.id;
-  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
-  if (options?.validTo !== undefined) input.validTo = options.validTo;
-  return input;
+  return {
+    kind,
+    props,
+    ...(options?.id !== undefined && { id: options.id }),
+    ...(options?.validFrom !== undefined && { validFrom: options.validFrom }),
+    ...(options?.validTo !== undefined && { validTo: options.validTo }),
+    ...(options?.partOf !== undefined && { partOf: options.partOf }),
+  };
 }
 
 function buildUpdateInput(
@@ -392,12 +401,8 @@ function buildUpsertUpdateInput(
 
 function mapBulkNodeInputs(
   kind: string,
-  items: readonly Readonly<{
-    props: Record<string, unknown>;
-    id?: string;
-    validFrom?: string | null;
-    validTo?: string;
-  }>[],
+  items: readonly (Readonly<{ props: Record<string, unknown> }> &
+    NodeCreateOptions)[],
 ): CreateNodeInput[] {
   return items.map((item) => buildCreateInput(kind, item.props, item));
 }
@@ -427,6 +432,8 @@ export function createNodeCollection<
     executeResolvedMutationSet: executeNodeResolvedMutationSet,
     prepareReplacement,
     executeReplacementBatch: executeNodeReplacementBatch,
+    executeReparent: executeNodeReparent,
+    executeReparentBatch: executeNodeReparentBatch,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -442,22 +449,14 @@ export function createNodeCollection<
   return {
     async create(
       props: z.input<N["schema"]>,
-      options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       return this.createFromRecord(props, options);
     },
 
     async createFromRecord(
       data: Record<string, unknown>,
-      options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, options),
@@ -520,8 +519,11 @@ export function createNodeCollection<
       }
       const rootAlias = "compare_and_set_candidate";
       const candidateIdColumn = `${rootAlias}_id`;
+      // Root pins to exact kind (here and in updateWhere) are redundant with
+      // `executeNodeSetUpdate`'s `WHERE nodes.kind = <kind>` filter, which
+      // re-filters whatever these candidate subqueries widen to.
       const candidateIds = createQuery()
-        .fromDynamic(kind, rootAlias)
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
@@ -614,7 +616,7 @@ export function createNodeCollection<
       }
 
       let base = createQuery()
-        .fromDynamic(kind, rootAlias)
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .temporal("asOf", readInstant);
       const where = params.where;
       if (where !== undefined) {
@@ -626,7 +628,7 @@ export function createNodeCollection<
         const edgeAlias = `update_edge_${index}`;
         const relatedAlias = `update_related_${index}`;
         const relationRoot = createQuery()
-          .fromDynamic(kind, rootAlias)
+          .fromDynamic(kind, rootAlias, { expansion: "exact" })
           .temporal("asOf", readInstant);
         let traversal = relationRoot.traverseDynamic(
           relation.edgeKind,
@@ -639,7 +641,15 @@ export function createNodeCollection<
         if (relation.whereEdge !== undefined) {
           traversal = traversal.whereEdge(edgeAlias, relation.whereEdge);
         }
-        let related = traversal.toDynamic(relation.relatedKind, relatedAlias);
+        // Pinned exact-kind, load-bearing (unlike the root pins): this alias's kind gates whether the `exists` predicate is
+        // satisfied at all, and only `rootAlias`'s id is projected — the
+        // outer `WHERE nodes.kind = <kind>` fence never sees `relatedAlias`,
+        // so widening it here would let a subclass-only related row
+        // satisfy an `exists` check the caller declared against the exact
+        // parent kind.
+        let related = traversal.toDynamic(relation.relatedKind, relatedAlias, {
+          expansion: "exact",
+        });
         if (relation.whereRelated !== undefined) {
           related = related.whereNode(relatedAlias, relation.whereRelated);
         }
@@ -696,6 +706,32 @@ export function createNodeCollection<
       return result;
     },
 
+    async reparent<
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
+    >(
+      id: NodeId<N>,
+      options: NodeReparentOptions<Via>,
+    ): Promise<NodeReparentResult<Via>> {
+      return executeNodeReparent(kind, id, options, backend) as Promise<
+        NodeReparentResult<Via>
+      >;
+    },
+
+    async bulkReparent<
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
+    >(
+      items: readonly Readonly<{
+        id: NodeId<N>;
+        options: NodeReparentOptions<Via>;
+      }>[],
+    ): Promise<readonly NodeReparentResult<Via>[]> {
+      return executeNodeReparentBatch(kind, items, backend) as Promise<
+        readonly NodeReparentResult<Via>[]
+      >;
+    },
+
     async delete(id: NodeId<N>): Promise<void> {
       await executeNodeDelete(kind, id, backend);
     },
@@ -731,8 +767,12 @@ export function createNodeCollection<
           temporal,
           defaultTemporalMode,
         );
+        // Pinned exact-kind: the no-`where` branch just below goes straight
+        // to the backend find path, which is exact-kind by construction —
+        // this branch must return the identical row set (see the comment
+        // there), not a polymorphic-by-default one.
         let query = createQuery()
-          .from(kind, "_n")
+          .from(kind, "_n", { expansion: "exact" })
           .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
           .whereNode("_n", filter.where as never)
           .select((ctx: Record<string, unknown>) => ctx["_n"]);
@@ -879,12 +919,8 @@ export function createNodeCollection<
     },
 
     async bulkCreate(
-      items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>[],
+      items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+        NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
       const results = await executeNodeCreateBatch(batchInputs, backend);
@@ -932,7 +968,7 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOptionallyInTransaction(backend, async (target) => {
+          runOwnedMutationSetTransaction(backend, async (target) => {
             const rows = await getNodeRowsByIds(
               target,
               batchPointRead,
@@ -1260,7 +1296,9 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
@@ -1394,15 +1432,12 @@ export function createNodeCollection<
         return results as NodeGetOrCreateByConstraintResult<N>[];
       };
 
-      if (
-        backend.capabilities.execution.interactiveTransactions &&
-        "transaction" in backend
-      ) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
-      return getOrCreateAll(backend);
+      // The legs are nested writes of the one transaction this opens, and a
+      // leg that attaches a composition part decides under the per-graph
+      // write fence: the store owns the transaction, so it replays it.
+      return runOwnedMutationSetTransaction(backend, (target) =>
+        getOrCreateAll(target),
+      );
     },
   };
 }

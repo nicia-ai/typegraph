@@ -1,0 +1,276 @@
+/**
+ * `reparent` moves a part with ONE clock read, and the two halves of the move
+ * abut in valid time.
+ *
+ * The cross-backend suite (`tests/backends/integration/composition-attachment.ts`)
+ * asserts the abutment on a real engine, but it cannot PROVE the single read:
+ * two `nowIso()` calls a few statements apart usually land in the same
+ * millisecond, so a two-read implementation passes it by luck. This file
+ * removes the luck — the fake clock advances between the retire and the attach
+ * (a wrapper on the transaction target's edge insert), so a second read is
+ * guaranteed to sample a later instant and the hole becomes observable.
+ */
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  partOf,
+  ValidationError,
+} from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  type GraphBackend,
+  type InsertEdgeParams,
+  type TransactionBackend,
+} from "../src/backend/types";
+import { requireDefined } from "../src/utils/presence";
+import { createTestBackend } from "./test-utils";
+
+const Show = defineNode("RiShow", { schema: z.object({}) });
+const Clip = defineNode("RiClip", { schema: z.object({}) });
+const clipOf = defineEdge("riClipOf", { schema: z.object({}) });
+
+const CLOCK_START = "2026-03-01T00:00:00.000Z";
+/** Far larger than any plausible same-millisecond collision. */
+const ADVANCE_MS = 60_000;
+
+function buildGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { RiShow: { type: Show }, RiClip: { type: Clip } },
+    edges: {
+      riClipOf: {
+        type: clipOf,
+        from: [Clip],
+        to: [Show],
+        cardinality: "oneActive",
+      },
+    },
+    ontology: [partOf(Clip, Show, { via: clipOf, existence: "required" })],
+  });
+}
+
+function advanceClock(): void {
+  vi.setSystemTime(new Date(Date.now() + ADVANCE_MS));
+}
+
+/**
+ * Advances the fake clock immediately BEFORE every edge insert the write
+ * transaction issues. A reparent that samples its own instant for the attach
+ * therefore stamps a `valid_from` strictly later than the `valid_to` it just
+ * wrote on the incumbent; one that carries the move instant through cannot.
+ *
+ * The wrapper decorates the TRANSACTION TARGET (through `deriveBackend`, never
+ * a spread copy), because that is the object the attach's insert reaches.
+ */
+function clockAdvancingBackend(base: GraphBackend): GraphBackend {
+  function advancing(target: TransactionBackend): TransactionBackend {
+    return deriveBackend(target, {
+      insertEdge: async (params: InsertEdgeParams) => {
+        advanceClock();
+        return target.insertEdge(params);
+      },
+      ...(target.insertEdgeNoReturn === undefined ?
+        {}
+      : {
+          insertEdgeNoReturn: async (params: InsertEdgeParams) => {
+            advanceClock();
+            await requireDefined(target.insertEdgeNoReturn)(params);
+          },
+        }),
+    });
+  }
+  return deriveBackend(base, {
+    transaction: (run, options) =>
+      base.transaction((target) => run(advancing(target)), options),
+  });
+}
+
+describe("reparent's move instant", () => {
+  it("ends the incumbent window at the SAME instant the new window opens, with the clock advancing in between", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(CLOCK_START));
+      const backend = clockAdvancingBackend(createTestBackend());
+      const [store] = await createStoreWithSchema(
+        buildGraph("reparent_move_instant"),
+        backend,
+      );
+
+      const showA = await store.nodes.RiShow.create({});
+      const showB = await store.nodes.RiShow.create({});
+      const clip = await store.nodes.RiClip.create(
+        {},
+        { partOf: { whole: { kind: "RiShow", id: showA.id } } },
+      );
+
+      // MUTATION: give the two halves of the move their own clock reads —
+      // in `prepareCompositionAttachmentMoves`
+      // (src/store/operations/node-operations.ts), record `nowIso()` as the
+      // retire's `moveInstant` instead of the instant the replacement was
+      // prepared with. The two rows then carry instants a clock advance
+      // apart, and both assertions below fail.
+      await store.nodes.RiClip.reparent(clip.id, {
+        whole: { kind: "RiShow", id: showB.id },
+      });
+
+      const rows = await store.edges.riClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      expect(rows).toHaveLength(2);
+      const ended = requireDefined(
+        rows.find((edge) => edge.toId === showA.id),
+        "the retired attachment",
+      );
+      const open = requireDefined(
+        rows.find((edge) => edge.toId === showB.id),
+        "the new attachment",
+      );
+      const moveInstant = requireDefined(
+        ended.meta.validTo,
+        "the retired window's validTo",
+      );
+      expect(open.meta.validFrom).toBe(moveInstant);
+
+      // The windows are half-open `[from, to)`, so the move instant belongs to
+      // exactly one of them: this `existence: "required"` part holds one whole
+      // at every valid-time coordinate, never zero and never two.
+      const atMove = await store.asOf(moveInstant).edges.riClipOf.find({});
+      expect(atMove).toHaveLength(1);
+      expect(
+        requireDefined(atMove[0], "the attachment at the move instant").toId,
+      ).toBe(showB.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("takes at as its only move instant and refuses a stated validFrom", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("reparent_stated_at"),
+      createTestBackend(),
+    );
+    const showA = await store.nodes.RiShow.create({});
+    const showB = await store.nodes.RiShow.create({});
+    const clip = await store.nodes.RiClip.create(
+      {},
+      {
+        partOf: {
+          whole: { kind: "RiShow", id: showA.id },
+          validFrom: "2024-01-01T00:00:00.000Z",
+        },
+      },
+    );
+    const at = "2024-06-01T00:00:00.000Z";
+
+    // MUTATION: add "validFrom" to `REPARENT_OPTION_KEYS`
+    // (src/store/operations/composition-create.ts). The option is then
+    // accepted and dropped, the move goes through, and this rejects nothing.
+    const refusal = await store.nodes.RiClip.reparent(clip.id, {
+      whole: { kind: "RiShow", id: showB.id },
+      // @ts-expect-error reparent has one instant, `at`; it takes no validFrom
+      validFrom: at,
+    }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(ValidationError);
+    expect((refusal as ValidationError).details.issues).toEqual([
+      expect.objectContaining({ path: "options.validFrom" }),
+    ]);
+    const untouched = await store.edges.riClipOf.find({});
+    expect(untouched.map((edge) => edge.toId)).toEqual([showA.id]);
+
+    const moved = await store.nodes.RiClip.reparent(clip.id, {
+      whole: { kind: "RiShow", id: showB.id },
+      at,
+    });
+    expect(moved.moved).toBe(true);
+    expect(moved.edge.meta.validFrom).toBe(at);
+    expect(moved.edge.kind).toBe("riClipOf");
+
+    const history = await store.edges.riClipOf.find(
+      {},
+      { temporalMode: "includeEnded" },
+    );
+    const retired = requireDefined(
+      history.find((edge) => edge.toId === showA.id),
+      "the retired attachment",
+    );
+    expect(retired.meta.validTo).toBe(at);
+  });
+
+  it("refuses a stated validTo or a malformed at, each under its own option name", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("reparent_refused_options"),
+      createTestBackend(),
+    );
+    const showA = await store.nodes.RiShow.create({});
+    const showB = await store.nodes.RiShow.create({});
+    const clip = await store.nodes.RiClip.create(
+      {},
+      { partOf: { whole: { kind: "RiShow", id: showA.id } } },
+    );
+    const whole = { kind: "RiShow", id: showB.id } as const;
+
+    const issuePaths = async (
+      attempt: Promise<unknown>,
+    ): Promise<readonly string[]> => {
+      const refusal = await attempt.catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(ValidationError);
+      return (refusal as ValidationError).details.issues.map(
+        (issue) => issue.path,
+      );
+    };
+
+    // MUTATION: add "validTo" to `REPARENT_OPTION_KEYS`
+    // (src/store/operations/composition-create.ts). The bound is then
+    // accepted and applied, so the move goes through and nothing is refused.
+    expect(
+      await issuePaths(
+        store.nodes.RiClip.reparent(clip.id, {
+          whole,
+          // @ts-expect-error a move states no window; `at` is its only instant
+          validTo: "2999-01-01T00:00:00.000Z",
+        }),
+      ),
+    ).toEqual(["options.validTo"]);
+
+    // MUTATION: return `at` unchecked from `readMoveInstant`. The malformed
+    // value then reaches the edge insert and is refused under "validFrom".
+    expect(
+      await issuePaths(
+        // @ts-expect-error `at` is a string
+        store.nodes.RiClip.reparent(clip.id, { whole, at: 5 }),
+      ),
+    ).toEqual(["options.at"]);
+
+    const untouched = await store.edges.riClipOf.find({});
+    expect(untouched.map((edge) => edge.toId)).toEqual([showA.id]);
+  });
+
+  it("does not copy the part node's validity window onto the realizing edge", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("composition_edge_window"),
+      createTestBackend(),
+    );
+    const show = await store.nodes.RiShow.create({});
+    const nodeFrom = "2020-01-01T00:00:00.000Z";
+    const edgeFrom = "2021-01-01T00:00:00.000Z";
+    await store.nodes.RiClip.create(
+      {},
+      {
+        validFrom: nodeFrom,
+        partOf: { whole: { kind: "RiShow", id: show.id }, validFrom: edgeFrom },
+      },
+    );
+    const edges = await store.edges.riClipOf.find({});
+    expect(edges).toHaveLength(1);
+    expect(requireDefined(edges[0]).meta.validFrom).toBe(edgeFrom);
+    const clips = await store.nodes.RiClip.find({});
+    const clip = requireDefined(clips[0]);
+    expect(clip.meta.validFrom).toBe(nodeFrom);
+  });
+});

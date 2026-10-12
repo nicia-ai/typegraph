@@ -810,7 +810,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
   });
 
-  it("rejects a different assertion collapsed to one reconciled survivor", async () => {
+  it("keeps apart a scored pair the merged branch itself asserts different", async () => {
     const backend = await makeBackend();
     const [baseStore] = await createStoreWithSchema(patientGraph, backend);
     const branchA = unwrap(
@@ -838,9 +838,19 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       branchOrder: [BRANCH_A],
     });
 
-    expect(isErr(result)).toBe(true);
-    if (isOk(result)) throw new Error("Expected identity merge conflict");
-    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    // The branch's own `different` assertion vetoes the scored match: the
+    // pair is reported, both rows land, and the assertion lands with them.
+    if (isErr(result)) throw result.error;
+    expect(result.data.identityConflicts).toEqual([
+      expect.objectContaining({ kind: "separation" }),
+    ]);
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 0 });
+    const patients = await baseStore.nodes.Patient.find();
+    expect(patients.map((patient) => patient.id).toSorted()).toEqual([
+      "p-ana",
+      "p-anna",
+    ]);
+    expect(await baseStore.identity.areDifferent(anna, ana)).toBe(true);
   });
 
   it("drops a same assertion collapsed to one reconciled survivor (#5)", async () => {

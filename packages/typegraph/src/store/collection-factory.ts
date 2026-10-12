@@ -18,7 +18,10 @@ import type { CompiledSelectSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
-import { type EdgeUpsertUpdateBatchEntry } from "./collections/edge-collection";
+import {
+  type EdgeCreateBatchOptions,
+  type EdgeUpsertUpdateBatchEntry,
+} from "./collections/edge-collection";
 import {
   type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
@@ -37,6 +40,8 @@ import {
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
 } from "./types";
 
@@ -112,6 +117,17 @@ export type NodeOperations = Readonly<{
    * the other preconditions.
    */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    options: NodeReparentOptions,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
@@ -181,6 +197,7 @@ export type EdgeOperations = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],

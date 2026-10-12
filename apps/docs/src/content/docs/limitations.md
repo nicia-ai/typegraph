@@ -86,9 +86,14 @@ primary and sidecar writes when a later statement fails. An authoritative comman
 whose database statement returns the decision it made. It can provide a safe
 transactionless create/found path only when the backend has a durable arbiter.
 
-Operational Identity, single-edge claim/cardinality enforcement, and any
-undeclared dynamic `matchOn` convergence that may write still require an
-interactive transaction and fail closed on a backend that cannot provide one.
+Operational Identity, single-edge claim/cardinality enforcement, edge
+acyclicity (`acyclic: true`), and any undeclared dynamic `matchOn`
+convergence that may write still require an interactive transaction and
+fail closed on a backend that cannot provide one. No fused write program
+applies acyclicity — the axis has no database key that could back a claim
+inside a fused statement — so an `acyclic: true` edge kind always declines
+the fused single-row and bulk-create fast paths and takes the complete
+portable probe-then-insert path instead, whatever else is eligible for it.
 Outside the native durable-convergence envelope, an all-live
 `ifExists: "return"` endpoint batch is read-only and can return from its
 set-oriented root read without a transaction. Inside the native envelope, the
@@ -184,7 +189,9 @@ await store.transaction(async (tx) => {
 
 Variable-length traversals use two depth caps and an explicit cycle policy:
 
-1. Unbounded traversals (no `maxHops` option) are capped at 10 hops.
+1. Unbounded traversals (no `maxHops` option) are capped at 10 hops. The one
+   exception is composition navigation: `parts()` / `wholes()` without
+   `maxHops` apply no hop ceiling and return the complete closure.
 2. Explicit `maxHops` values are validated up to 1000 hops (`maxHops: >1000` throws).
 3. Cycle prevention is on by default. To skip cycle checks for speed, opt into
    `cyclePolicy: "allow"` (which may revisit nodes across hops).
@@ -223,6 +230,211 @@ The unbounded-traversal limit is defined as `MAX_RECURSIVE_DEPTH`:
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 10
 ```
+
+### Recursive traversals cannot be paginated
+
+`paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
+`parts()` or `wholes()`) with a `ConfigurationError` (`details.code` is
+`RECURSIVE_PAGINATION_UNSUPPORTED`), because a keyset cursor cannot position itself inside the rows
+one start node fans out into. Use `execute()` with an explicit `limit()` or `maxHops`, or page the
+start nodes in a non-recursive query and run the walk for each page. See
+[Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated).
+
+## Composition Cascade
+
+Deleting a [composition](/ontology#composition) whole cascades leaf-first
+through its live parts closure, each part going through its own node-delete
+pipeline in the same transaction. Several behaviors are easy to assume and
+are not what happens:
+
+- **Resurrecting a soft-deleted whole restores the whole alone.** Ownership
+  of its parts ended when the cascade ran; the parts stay deleted. There is
+  no opt-in to cascade a resurrection back onto them.
+- **Ending a whole's validity window is still not a cascade.** Closing an
+  `oneActive` composition edge's currency leaves the part node itself
+  untouched — it is not deleted, and a later reattach of the SAME part to a
+  different whole is a reparent, not a resurrection.
+- **A belief-status close DOES close the whole's required parts, and it is
+  not this cascade that does it.** A [provenance](/provenance) retraction
+  that closes a whole's currency closes its required parts in the same
+  transition because support treats a required part as dependent on its
+  whole, not because a delete cascade ran: no edge is touched, an optional
+  part is left believed, and reopening the whole reopens the parts that are
+  otherwise supported. Each closed part fires its own `delete` operation hook,
+  rather than folding into one event for the whole the way this cascade does.
+  See [Composition and retraction](/provenance#composition-and-retraction).
+- **The cascade emits one operation-hook event, for the whole.** Each
+  cascaded part delete runs through its own node-delete pipeline but is not
+  itself a caller-issued operation, so `onOperationEnd` fires exactly once —
+  for the whole's delete, not once per part. It does not leave you guessing
+  which parts went: that hook's context carries `cascadedParts` (`{ kind, id }`
+  refs taken from the plan the cascade executed, leaf-first and then ordered
+  deterministically by kind, then id, within one level of the closure, so the list
+  is the same on every run and every backend), and a
+  `store.transactionWithReceipt` receipt carries the same refs for every
+  cascade in the transaction. `onOperationStart` never carries them — the
+  cascade has not been planned when the operation begins.
+- **A PostgreSQL `REPEATABLE READ` or `SERIALIZABLE` whole delete can fail
+  with a serialization failure.** The parts closure is read under the
+  per-graph write fence with no claim row behind it, so the session must see
+  a part attached while it waited. A snapshot taken before that attach
+  cannot, so the delete and the attach both advance the graph's row in
+  `typegraph_fences` and such a session fails on it (SQLSTATE `40001`) before
+  the closure is read, whatever isolation level the attaching writer ran at. A collection delete
+  TypeGraph opened the transaction for is replayed and then sees the part;
+  inside your own transaction it surfaces as `TransactionConflictError`, and
+  the whole transaction is yours to re-run. A custom backend whose fence is an advisory
+  lock with no fences relation cannot detect the stale snapshot and refuses
+  the delete at those levels with `ConfigurationError`
+  (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`).
+- **A property update racing a delete is not fenced, but cannot strand a
+  unique key.** An ordinary node update takes no per-graph lock, so it can
+  commit while a delete, direct or cascaded, is in flight. The delete
+  releases the unique keys of the props the row holds once it is tombstoned,
+  so the key such an update moved the node to is released with it.
+- **There is no cascade PREVIEW API in this release.** `cascadedParts` reports
+  what a delete removed, after the fact. To decide *before* deleting, read
+  the closure yourself with
+  [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
+  which APPROXIMATES the closure — it is not the cascade's own verdict, and
+  it is narrower in one case. The subgraph walk runs in the read's temporal
+  mode (current, unless the read is pinned), so it does not follow a
+  `population: "one"` composition edge whose validity window was ENDED; the
+  cascade does, because a `one` binding holds for the row's whole life. An
+  optional part attached through such a row is therefore deleted by the
+  cascade without appearing in the preview. Gate a destructive action on the
+  preview only for pairs you know carry no ended `one` rows.
+
+The closure walk is bounded by its **visited set**, not a fixed depth: a kind
+may declare a reflexive composition pair (a `Section` that is `partOf`
+another `Section`, for example), so a kind-level depth bound cannot cap
+instance depth. The same holds for the `subgraph({ composition: true })`
+preview above: its composition closure has no hop ceiling and never returns a
+truncated unit — a part chain of any length comes back whole, and an engine
+that cuts the closure statement short refuses with a `ConfigurationError`
+(`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached
+(the read's temporal mode, described above, remains the one way the preview can
+be narrower than the cascade). The write path refuses an INSTANCE-level cycle (the
+composition union's acyclicity fence), so one only survives in rows written
+before the pair was declared, by trusted import, or by direct SQL; deleting
+any node in such a cycle throws `CompositionCycleError` (see
+[Errors](/errors#compositioncycleerror)) rather than looping. Break the cycle
+by hand (delete or reassign one of the composition edges that closes it)
+before the affected nodes can be deleted.
+
+## Composition Existence (`existence: "required"`)
+
+- **Type-level narrowing of `partOf`'s whole kind is conservative.** On
+  `store.nodes.<Kind>`, `partOf.whole.kind` is limited to the whole kinds the
+  ontology declares for that part kind, but only when that can be proven from
+  the ontology's declared tuple. A graph that also declares a `subClassOf`,
+  `equivalentTo` or `sameAs` relation, or whose ontology was built in a
+  variable annotated `readonly OntologyRelation[]`, accepts any node kind of
+  the graph at compile time. `via` is not narrowed from the ontology at all:
+  it takes any edge type or kind string. A composition pair added at runtime
+  through `store.evolve()` is invisible to the type; reach it through
+  `store.getNodeCollection(kind)`. The runtime check (`ConfigurationError`,
+  `COMPOSITION_WHOLE_NOT_DECLARED` / `COMPOSITION_VIA_NOT_DECLARED`) is
+  authoritative in every case.
+- **Trusted import refuses every declared composition pair, required or
+  optional** (`composition_unsupported`), not just required ones: it writes rows
+  without the store's validation, so it cannot honor either the one-whole claim
+  or the existence guarantee. There is no separate
+  `composition_existence_unsupported` reason — a graph with ANY `partOf`/
+  `hasPart` pair cannot use trusted import at all.
+- **Fused/read-free programs decline a required-existence kind or a stated
+  `partOf`.** The three node-create fused resolvers
+  (`resolveAtomicNodeBatchExecutor`, `resolveAtomicNodeReplacementBatchProgram`,
+  `resolveAtomicNodeResolvedMutationSetExecutor`) and the fused edge-delete-batch
+  resolver (`resolveAtomicEdgeDeleteBatchExecutor`, for a required-existence
+  composition edge kind) all return `undefined` in that case, so a
+  required-existence bulk create or delete always takes the portable path —
+  slower, never silently incomplete.
+- **No backfill tool.** Changing an existing pair's `existence` in place is a
+  schema-tightening commit like any other: it is refused for a dirty graph (a
+  live required part with no live whole) and ships no repair step.
+  `store.verifyConstraintFences()` reports the same finding on an already-live
+  graph but does not fix it.
+- **Graph merge's `existence: "required"` audit has one residual gap: a
+  composition edge silently DROPPED by canonicalization, with no explicit
+  write for anything to intercept.** Merge's composition-orphan check
+  (`compositionOrphansAmong` — a delete orphans a part the plan does not also
+  delete — plus its sibling `unattachedRequiredPartOrphansAmong`, reported at
+  plan time and re-verified at apply) catches a required part that this merge
+  writes, or whose composition edge this merge explicitly deletes or ends,
+  and resolves to no live whole at all. It does NOT catch a composition edge
+  removed from the write set entirely because canonicalization repointed it
+  onto a finally-deleted endpoint (`ENDPOINT_DELETED_DROP_REASON`,
+  `src/graph-merge/edge-repoint.ts`): that drop issues no delete or update
+  call for any per-write guard (`MergeCompositionOrphan` included) to see,
+  and `DroppedEdge` carries no endpoint data to recover the orphaned part
+  from after the fact. The gap is caught after the fact by
+  `store.verifyConstraintFences()`'s `compositionExistence` family run
+  separately against the merged store.
+
+## Write Fence Row
+
+On PostgreSQL, a write that makes a decision only the per-graph write fence
+protects also advances one row per graph in `typegraph_fences`, behind the
+fence's advisory lock. Those writes are:
+
+- a write into an `acyclic: true` edge kind or a composition (`partOf` /
+  `hasPart`) relation, including the attach a part's create performs;
+- a delete of a composition whole;
+- a match-key convergence: `getOrCreateByEndpoints`,
+  `bulkGetOrCreateByEndpoints` or a coalescing upsert on a match key no
+  database key backs (a declared `matchIdentity` is backed by one).
+
+The row is what lets those decisions hold between a `REPEATABLE READ` or
+`SERIALIZABLE` session and a `READ COMMITTED` one (see
+[Acyclicity](/core-concepts#acyclicity)). Every other holder of the fence
+takes the lock alone: a history-capturing or revision-tracking write, a
+cardinality, uniqueness or disjointness write, `store.clear()`. A graph that
+declares no acyclic or composition relation and never converges on a match key
+never writes the row and issues no statement for it.
+
+Consequences of the row being a real write:
+
+- **A role that performs those writes needs `INSERT` and `UPDATE` on
+  `typegraph_fences`.** A role that only reads, or only performs the other
+  writes, does not.
+- **Reads write nothing.** A read that takes the fence to keep a
+  multi-statement view from tearing, such as a provenance capability's
+  `holding()`, takes the advisory lock alone, so it runs in a read-only
+  transaction or under a `SELECT`-only role.
+- **A long-lived snapshot slows those deciding writes.** The row is updated
+  once per deciding transaction (once per deciding write in a transaction you
+  adopted with `withTransaction`, or in a `store.transaction` whose
+  `tx.sqlAvailability` is `"available"`: raw SQL can roll back to a savepoint
+  and undo both the lock and the row advance, so each fenced write there takes
+  the fence again), and PostgreSQL cannot remove the dead
+  versions an open snapshot might still need. While any transaction holding
+  an older snapshot stays open (a long analytics query, `pg_dump`, an
+  idle-in-transaction session, or TypeGraph's own repeatable-read export, fork
+  and storage-inventory reads for as long as they run), each row update has
+  more dead versions to step over, and it runs while holding the graph's
+  advisory lock, so the cost is serialized into the throughput of every write
+  that waits on that lock. Measured with one client on PostgreSQL 18, issuing
+  the fence statement alone in its own transaction: 0.11 ms for the lock-only
+  form and 0.17 ms for the form that advances the row, with every update a
+  heap-only update and the table at 64 kB. With one `REPEATABLE READ`
+  transaction left open, the row-advancing form took 0.24 ms after 20,000
+  deciding transactions, 0.37 ms after 40,000, 0.50 ms after 60,000 and
+  0.63 ms after 80,000, still rising linearly, and the one-row table had grown
+  to 6 MB; the lock-only form stayed at 0.11 ms throughout. The growth stops
+  when the old snapshot closes and autovacuum (or a manual
+  `VACUUM typegraph_fences`) removes the dead versions. Watch `n_dead_tup` for
+  `typegraph_fences` in `pg_stat_user_tables` and the oldest `backend_xmin` in
+  `pg_stat_activity`; run dumps and long reports against a replica, and set
+  `idle_in_transaction_session_timeout`.
+- **A mixed deployment is as strong as its weakest decider.** The row detects
+  a stale snapshot only against writers that advance it. A custom backend
+  whose fence is an advisory lock with no fences relation advances nothing, so
+  it supports those decisions at `READ COMMITTED` only, and a
+  snapshot-isolation session on a bundled backend writing the same graph is
+  not protected from its writes.
+
+SQLite takes no fence row: its single writer slot is the fence.
 
 ## Connection Management
 
@@ -489,6 +701,42 @@ conflicting items one at a time — as sequential `upsertById` calls for nodes,
 and as `update` then `create` for edges, which have no single-item upsert. See
 [Data Sync](/data-sync#one-batch-cannot-hand-a-unique-value-from-one-row-to-another)
 for the worked example.
+
+### A bulk refusal caught inside `store.transaction` can keep earlier rows
+
+A bulk method called on the store runs in its own transaction, so a refused
+batch rolls back entirely. The same method called on `tx` runs on the
+caller's transaction and has no savepoint of its own: if the callback catches
+the refusal and the transaction commits, rows the batch wrote before the
+refused item can stay committed. `bulkUpsertById` is the plainest case: it
+writes its creates before its updates, so a node update that loses a unique
+key (`UniquenessError`), or an edge item that restores a deleted edge past
+the kind's cardinality (`CardinalityError`), is refused with the batch's new
+rows already in place.
+
+This is a stated limitation rather than a pending fix: store operations do
+not take a savepoint per bulk call. Let the refusal propagate so the
+transaction rolls back, or rethrow after handling it. See
+[Catching a bulk refusal inside a transaction](/performance/overview#catching-a-bulk-refusal-inside-a-transaction).
+
+Batches that attach composition parts through the **node collection** do not
+have this limit for the rows that already exist: `bulkCreate` / `bulkInsert`
+with `partOf`, `bulkReparent` and `bulkGetOrCreateByConstraint` decide every
+such item before writing any. `bulkGetOrCreateByConstraint` creates its
+unmatched items after its matched ones: it counts their attachments with the
+matched ones up front, but a refusal only a **new** row's own preparation can
+raise — a second unique key it loses, or a disjoint kind holding its id — is
+reached after the matched items wrote. See
+[`partOf` on get-or-create is a postcondition](/ontology#partof-on-get-or-create-is-a-postcondition).
+
+Writing a composition's **realizing edge** through the edge collection is an
+ordinary edge batch. `edges.<via>.bulkCreate` and `bulkInsert` decide every
+item before writing any, but `edges.<via>.bulkUpsertById` and
+`bulkGetOrCreateByEndpoints` do not decide the whole batch first, so an item
+refused for a second whole (`CompositionError`) can follow earlier edges of the
+same batch that are already written. Attach through
+`nodes.<Kind>.reparent` / `bulkReparent` or `partOf` when the batch must not
+leave a partial attachment.
 
 ## Graph Analytics Limits
 

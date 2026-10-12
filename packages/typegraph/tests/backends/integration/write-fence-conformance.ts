@@ -589,7 +589,7 @@ export function registerWriteFenceConformanceIntegrationTests(
         const uncertified = mintGraphCommandCoordination(
           backend.commands,
           "write-fence-conformance-uncertified",
-          "unknown",
+          { isolation: "unknown", fenceRow: "advanced" },
         );
         expect(() => {
           assertGraphCommandConvergenceIsolation(backend.commands, uncertified);

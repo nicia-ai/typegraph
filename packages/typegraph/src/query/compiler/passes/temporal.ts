@@ -6,6 +6,7 @@ import {
   currentReadInstantFor,
   extractTemporalOptions,
   type ReadInstantMode,
+  RECORDED_TEMPORAL_COLUMNS,
 } from "../temporal";
 
 export type TemporalFilterPass = Readonly<{
@@ -18,6 +19,11 @@ export type TemporalFilterPass = Readonly<{
    * of resampling the clock, which would break the single-snapshot invariant.
    */
   currentInstant: SqlFragment;
+  /**
+   * {@link RECORDED_TEMPORAL_COLUMNS} when the read is recorded-pinned,
+   * otherwise empty: the extra columns {@link forAlias}'s filter references.
+   */
+  recordedColumns: readonly (typeof RECORDED_TEMPORAL_COLUMNS)[number][];
 }>;
 
 /**
@@ -35,6 +41,8 @@ export function createTemporalFilterPass(
   recordedReadBinding?: RecordedReadBinding,
 ): TemporalFilterPass {
   const currentTimestamp = currentReadInstantFor(readInstant);
+  const recordedColumns: TemporalFilterPass["recordedColumns"] =
+    ast.recordedAsOf === undefined ? [] : RECORDED_TEMPORAL_COLUMNS;
   return {
     forAlias(tableAlias?: string): SqlFragment {
       return compileTemporalFilter({
@@ -44,5 +52,6 @@ export function createTemporalFilterPass(
       });
     },
     currentInstant: currentTimestamp,
+    recordedColumns,
   };
 }

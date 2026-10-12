@@ -15,6 +15,7 @@
 import { z } from "zod";
 
 import { createDataKeyedBag } from "../utils/object";
+import { InvalidMergeOptionsError } from "./errors";
 import type { GraphDef } from "./typegraph-internal";
 import type {
   BranchId,
@@ -111,6 +112,47 @@ const mergeOptionsScalarSchema = z.object({
     .strict()
     .optional(),
 });
+
+/**
+ * Every key {@link MergeOptions} declares. The `satisfies` record is total over
+ * the type, so adding an option without listing it here fails to compile.
+ */
+const MERGE_OPTION_KEYS: ReadonlySet<string> = new Set(
+  Object.keys({
+    resolve: true,
+    reconcileTypes: true,
+    onPropertyConflict: true,
+    onBasePropertyConflict: true,
+    onDeleteModifyConflict: true,
+    onComparisonCeiling: true,
+    canonical: true,
+    provenance: true,
+    persistProvenance: true,
+    embedder: true,
+    target: true,
+    maxComparisonsPerKind: true,
+    candidateDiagnostics: true,
+    clusterMaxDiameter: true,
+    branchOrder: true,
+    provenanceWeights: true,
+  } satisfies Readonly<Record<keyof MergeOptions, true>>),
+);
+
+/**
+ * Refuses an option the merge does not declare. Normalization reads each known
+ * field by name, so an undeclared key would otherwise be dropped silently and
+ * the merge would run as though the caller had never stated it.
+ */
+function assertOnlyDeclaredOptions(options: object): void {
+  const unknownOption = Object.keys(options).find(
+    (key) => !MERGE_OPTION_KEYS.has(key),
+  );
+  if (unknownOption === undefined) return;
+  throw new InvalidMergeOptionsError(
+    `Unknown merge option "${unknownOption}".`,
+    { details: { option: unknownOption } },
+  );
+}
 
 /**
  * Fully-normalized merge options: every default resolved, the (validated)
@@ -240,12 +282,14 @@ function validateProvenanceWeights(
  * caller-boundary concern, surfaced as a thrown error per project conventions;
  * `merge()` converts it back to a typed `MergeError` at its own boundary.
  *
- * @throws if a threshold is outside `[0, 1]`, `maxComparisonsPerKind` is
- *   negative/non-integer, or `clusterMaxDiameter` is non-positive.
+ * @throws if an option is not one {@link MergeOptions} declares, a threshold is
+ *   outside `[0, 1]`, `maxComparisonsPerKind` is negative/non-integer, or
+ *   `clusterMaxDiameter` is non-positive.
  */
 export function normalizeMergeOptions<G extends GraphDef>(
   options: MergeOptions<G> = {},
 ): NormalizedMergeOptions<G> {
+  assertOnlyDeclaredOptions(options);
   const scalar = mergeOptionsScalarSchema.parse({
     reconcileTypes: options.reconcileTypes,
     onDeleteModifyConflict: options.onDeleteModifyConflict,

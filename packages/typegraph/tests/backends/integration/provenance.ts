@@ -68,6 +68,28 @@ const config = {
   derives: { kind: "derives" },
 } as const;
 
+// A fact kind folded into identity with a non-fact kind by shared id, and a
+// second fact asserted `same` with it: a belief close must take the fact out
+// of both classes exactly as a delete would, and a reopen must fold it back.
+const Mirror = defineNode("Mirror", {
+  schema: z.object({ label: z.string() }),
+});
+
+const identityProvenanceGraph = defineGraph({
+  id: "provenance_retraction_identity_integration",
+  nodes: {
+    Source: { type: Source },
+    Fact: { type: Fact },
+    Mirror: { type: Mirror },
+    Justification: { type: Justification },
+  },
+  edges: {
+    premiseOf: { type: premiseOf, from: [Source], to: [Justification] },
+    derives: { type: derives, from: [Justification], to: [Fact] },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 type ProvenanceStore = Awaited<ReturnType<typeof createHistoryStore>>;
 type SourceRef = Node<typeof Source>;
 type FactRef = Node<typeof Fact>;
@@ -290,6 +312,73 @@ export function registerProvenanceIntegrationTests(
       await expect(
         store.nodes.Decision.getById(decision.id),
       ).resolves.toBeUndefined();
+    });
+
+    // Load-bearing: a belief close/reopen runs through the transaction's own
+    // node delete/revive owners, which carry the identity detach and restore
+    // fold. Revert check: close with `applyNodeSoftDelete` and reopen with
+    // `applyNodeResurrect` directly (the pipeline steps without the identity
+    // hooks) and the closed fact stays in `Mirror:shared`'s class, with no
+    // `detach` or `restore` transition noted.
+    it("detaches a closed fact from its identity class and restores it on reopen", async () => {
+      const store = await context.createHistoryStore(identityProvenanceGraph);
+      const source = await store.nodes.Source.create(
+        { label: "source-a", retracted: false },
+        { id: "source-a" },
+      );
+      const peerSource = await store.nodes.Source.create(
+        { label: "source-b", retracted: false },
+        { id: "source-b" },
+      );
+      const fact = await store.nodes.Fact.create(
+        { label: "shared" },
+        { id: "shared" },
+      );
+      const peer = await store.nodes.Fact.create(
+        { label: "peer" },
+        { id: "peer" },
+      );
+      const mirror = await store.nodes.Mirror.create(
+        { label: "shared" },
+        { id: "shared" },
+      );
+      for (const [premise, derived] of [
+        [source, fact],
+        [peerSource, peer],
+      ] as const) {
+        const justification = await store.nodes.Justification.create(
+          { label: derived.id },
+          { id: `justification-${derived.id}` },
+        );
+        await store.edges.premiseOf.create(premise, justification);
+        await store.edges.derives.create(justification, derived);
+      }
+      await store.identity.assertSame(fact, peer);
+      const mirrorRef = { kind: "Mirror", id: mirror.id } as const;
+      const causes = async () => {
+        const history = await store.identity.transitionsOf(mirrorRef);
+        return history.transitions.map((transition) => transition.cause);
+      };
+      expect(sortedIds(await store.identity.membersOf(mirrorRef))).toEqual([
+        "peer",
+        "shared",
+        "shared",
+      ]);
+      expect(await causes()).not.toContain("detach");
+
+      const provenance = createRetractionCapability(store, config);
+      const report = await provenance.retract(source);
+
+      expect(report.died).toEqual([{ kind: "Fact", id: "shared" }]);
+      expect(await store.identity.membersOf(mirrorRef)).toEqual([mirrorRef]);
+      await expect(store.identity.areSame(fact, peer)).resolves.toBe(false);
+      expect(await causes()).toContain("detach");
+      expect(await causes()).not.toContain("restore");
+
+      await provenance.unRetract(source);
+
+      await expect(store.identity.areSame(fact, mirror)).resolves.toBe(true);
+      expect(await causes()).toContain("restore");
     });
   });
 }

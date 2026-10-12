@@ -1,0 +1,14 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+**`paginate()`, `page()` and `stream()` no longer skip or repeat rows of a traversal query.** A traversal that fans one start node out into several rows produced rows that tied on the whole keyset, so every sibling of a page's last row was skipped; and an order key on a traversed alias (`orderBy("p", "name")` after `.to("Person", "p")`, the shape the pagination guide shows) was compared against the start node's row, which repeated or dropped pages. The keyset now identifies the result row — the start node's identity plus the `id` of the edge each traversal matched, so two parallel edges between one pair of nodes page as two rows — and the cursor is positioned against the completed match, where an order key may read the start node, a traversed node or an edge. An edge-alias order key also works for a `page()` read inside `batchOnce()`, which previously failed to compile.
+
+**A multi-hop traversal returns each matched path once on every plan.** A query with two or more chained traversals whose intermediate node was reached by more than one row returned each of those rows once per row reaching it, whenever it also carried a completed-match `where()`, an optional traversal, a `groupBy()` or an aggregate; counts and sums over such a query were inflated the same way. A cursor is a completed-match filter, so every page after the first of such a query repeated rows too. Each traversal now expands an intermediate node once however many rows reach it.
+
+**Cursor pagination refuses a query with a recursive traversal.** `paginate()`, `page()` and `stream()` over `recursive()`, `parts()` or `wholes()` could skip rows: a recursive row has no single edge to extend the start-node keyset with, so the rows of one start node that straddle a page boundary were lost, and paging one start node at a time dropped them too. These calls now throw a `ConfigurationError` with `details.code` `RECURSIVE_PAGINATION_UNSUPPORTED` on every backend before any statement runs, including for a traversal bounded to one hop. To read a recursive walk in pieces, use `execute()` with an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the recursive walk for each page.
+
+### Breaking
+
+- A cursor saved from a traversal query is refused with the existing cursor-column `ValidationError`, because the keyset gained the edge keys. Restart that pagination from the first page. Cursors of queries with no traversal are unaffected.
+- `paginate()`, `page()` and `stream()` on a query with a recursive traversal (`recursive()`, `parts()`, `wholes()`) now throw `ConfigurationError` (`RECURSIVE_PAGINATION_UNSUPPORTED`) instead of returning pages that could silently drop rows. Replace them with `execute()` and an explicit `limit()`/`maxHops`, or page the start nodes in a non-recursive query and run the recursive walk per page.
