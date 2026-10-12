@@ -129,7 +129,21 @@ export type WriteTransactionContext = Readonly<{
   statementExecution?: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
 }>;
 
+/**
+ * Whether a transaction session may hand the fence evidence one managed write
+ * acquired to the writes after it.
+ *
+ * PostgreSQL releases a lock taken after a savepoint, and undoes a fence-row
+ * advance made after it, when the transaction rolls back to that savepoint.
+ * A callback holding a raw SQL handle can issue that rollback between two
+ * managed writes, so its session is `"per-write"`: every write that needs the
+ * fence takes it again. A callback with no such handle cannot, and its
+ * session is `"reusable"`.
+ */
+export type WriteTransactionFenceEvidence = "reusable" | "per-write";
+
 interface WriteTransactionSession {
+  fenceEvidence: WriteTransactionFenceEvidence;
   lock: GraphWriteLock | undefined;
   wrote: boolean;
   aborted?: Readonly<{ error: unknown }>;
@@ -438,9 +452,11 @@ async function ensureAdoptedConstraintWriterSlot(
 export async function withWriteTransactionSession<T>(
   target: TransactionBackend,
   ctx: WriteTransactionContext,
+  fenceEvidence: WriteTransactionFenceEvidence,
   fn: () => Promise<T>,
 ): Promise<T> {
   const session: WriteTransactionSession = {
+    fenceEvidence,
     lock: undefined,
     wrote: false,
   };
@@ -1083,7 +1099,7 @@ function runInWriteTransactionAttempt<T>(
       throw error;
     }
     acquisition?.resolve(lock);
-    if (session !== undefined) session.lock = lock;
+    if (session?.fenceEvidence === "reusable") session.lock = lock;
     const result = await (acquiresLock ?
       fn(target, lock, transactionMode).finally(() => held.delete(ctx.graphId))
     : fn(target, lock, transactionMode));

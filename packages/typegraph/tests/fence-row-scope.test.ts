@@ -39,11 +39,17 @@
  *   "advances the row … at the decision itself".
  * - The frame keeping the evidence it found instead of upgrading it fails both
  *   "advances the row behind the lock a transaction already holds" cases.
+ * - A transaction that exposes `tx.sql` keeping its fence evidence across
+ *   writes fails "takes the fence again … after the caller rolls back the
+ *   savepoint": the second decision then issues no fence statement and the
+ *   row is never advanced.
  */
+import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStore,
   createStore,
   createStoreWithSchema,
   defineEdge,
@@ -317,6 +323,37 @@ describe("the graph's fence row is written only by a lock-only decision", () => 
     });
 
     expect(await fenceRowGeneration(recorded.backend, acyclicGraph.id)).toBe(1);
+  });
+
+  it("takes the fence again and advances the row again after the caller rolls back the savepoint that held the first decision", async () => {
+    const recorded = await createRecordedPostgresStore(acyclicGraph);
+    const store = createAdapterStore(acyclicGraph, recorded.backend);
+    const a = await store.nodes.Task.create({ name: "a", slug: "a" });
+    const b = await store.nodes.Task.create({ name: "b", slug: "b" });
+    const c = await store.nodes.Task.create({ name: "c", slug: "c" });
+    // The standalone creates above decided nothing, so no row exists yet.
+    expect(
+      await fenceRowGeneration(recorded.backend, acyclicGraph.id),
+    ).toBeUndefined();
+
+    await store.transaction(async (tx) => {
+      if (tx.sqlAvailability !== "available") {
+        throw new Error("The adapter transaction did not expose SQL");
+      }
+      await tx.sql.execute(drizzleSql`SAVEPOINT first_decision`);
+      await tx.edges.dependsOn.create(a, b);
+      // Undoes the edge, the row advance and the advisory lock taken with it.
+      await tx.sql.execute(drizzleSql`ROLLBACK TO SAVEPOINT first_decision`);
+      recorded.reset();
+
+      await tx.edges.dependsOn.create(b, c);
+      const fenceStatements = fenceAcquisitions(recorded.statements);
+      expect(fenceStatements).toHaveLength(1);
+      expect(fenceRowWrites(recorded.statements)).toEqual(fenceStatements);
+    });
+
+    expect(await fenceRowGeneration(recorded.backend, acyclicGraph.id)).toBe(1);
+    expect(await store.edges.dependsOn.findFrom(a)).toEqual([]);
   });
 
   it("advances the row behind the lock at the decision itself when the frame named another constraint", async () => {

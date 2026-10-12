@@ -404,7 +404,10 @@ Consequences of the row being a real write:
   transaction or under a `SELECT`-only role.
 - **A long-lived snapshot slows those deciding writes.** The row is updated
   once per deciding transaction (once per deciding write in a transaction you
-  adopted with `withTransaction`), and PostgreSQL cannot remove the dead
+  adopted with `withTransaction`, or in a `store.transaction` whose
+  `tx.sqlAvailability` is `"available"`: raw SQL can roll back to a savepoint
+  and undo both the lock and the row advance, so each fenced write there takes
+  the fence again), and PostgreSQL cannot remove the dead
   versions an open snapshot might still need. While any transaction holding
   an older snapshot stays open (a long analytics query, `pg_dump`, an
   idle-in-transaction session, or TypeGraph's own repeatable-read export, fork

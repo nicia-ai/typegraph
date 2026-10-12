@@ -4461,6 +4461,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               revisionTrackingEnabled: this.#revisionTrackingEnabled,
               revisionSchema: this.#sqlSchema(),
             },
+            this.#exposedTransactionSql(nativeTransaction) === undefined ?
+              "reusable"
+            : "per-write",
             invokeWithSchemaFenceLease,
           );
           // Fires the pre-commit hook here, once the write session has advanced
@@ -5196,6 +5199,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * The raw SQL handle a transaction callback receives as `tx.sql`, or
+   * `undefined` when it receives none: history capture and revision tracking
+   * withhold the handle, and a backend without a native transaction has none
+   * to give. THE one owner of that decision — the context builder exposes
+   * exactly this handle, and the write session reuses fence evidence across
+   * writes only when it is absent.
+   */
+  #exposedTransactionSql(
+    sql: TNativeTransaction | undefined,
+  ): TNativeTransaction | undefined {
+    return this.#captureEnabled || this.#revisionTrackingEnabled ?
+        undefined
+      : sql;
+  }
+
+  /**
    * Builds the transaction context bound to a transaction-scoped backend.
    * Collections, fluent queries, and set-oriented reads all use that same
    * backend. Shared verbatim by {@link transaction}
@@ -5386,10 +5405,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       defineUnavailableSqlGuard(withSql, () =>
         throwRevisionTrackingUnsafeSqlAccess(),
       );
-    } else if (sql === undefined) {
-      withSql = { ...base, sqlAvailability: "unavailable" };
     } else {
-      withSql = { ...base, sql, sqlAvailability: "available" };
+      const exposedSql = this.#exposedTransactionSql(sql);
+      withSql =
+        exposedSql === undefined ?
+          { ...base, sqlAvailability: "unavailable" }
+        : { ...base, sql: exposedSql, sqlAvailability: "available" };
     }
     Object.defineProperty(withSql, TRANSACTION_RUNTIME, {
       configurable: false,
