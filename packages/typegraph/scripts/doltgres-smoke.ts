@@ -4,6 +4,16 @@
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 //
+// RE-MEASURED 2026-10-15 against 1.4.0 and doltgresql main 56750eaf.
+// #3545 (trigger variables, PR #3556) and #3546 (format, PR #3558) are fixed on main,
+// still unreleased. The probes now verify the trigger value and identifier quoting.
+// Revision tracking remains blocked: format('SELECT $1 FROM %I', TG_ARGV[0]) in a
+// trigger fails at "{"; removing $1 makes it work. This points to PL/pgSQL bind
+// substitution reaching the format string while binding TG_ARGV. The journal's revision lookup hits this
+// newly exposed gap. Both builds report 51 passed, 0 failed, 2 skipped.
+// A successful revision write must also leave the expected journal row.
+// The locking, fulltext, ANN-index and wire-error-metadata gaps remain unchanged.
+//
 // RE-MEASURED 2026-10-06 on TypeGraph main 1672a5e8 against BOTH the 1.4.0 release
 // (fbeef2fd, 2026-10-01) and a doltgresql main build at 3134f14d (43 commits later).
 // Deltas since 2026-09-30:
@@ -476,6 +486,7 @@ const FORMAT_ISSUE = "doltgresql#3546";
 const TG_ARGV_UNRESOLVED = 'column "tg_argv" could not be found';
 /** What the journal's `EXECUTE format(...)` raises once TG_ARGV resolves: it runs `0`. */
 const FORMAT_RETURNS_ZERO = 'at or near "0": syntax error';
+const FORMAT_BIND_SUBSTITUTION = 'at or near "{": syntax error';
 const TO_REGPROCEDURE_MISSING = "'to_regprocedure' not found";
 
 /** What a probe is pinned to produce. */
@@ -510,6 +521,7 @@ async function probe(
   statements: readonly (
     string | Readonly<{ text: string; values: unknown[] }>
   )[],
+  expectedRows?: readonly Readonly<Record<string, unknown>>[],
 ): Promise<void> {
   const client = new Client(DOLTGRES_CONNECTION);
   try {
@@ -524,9 +536,17 @@ async function probe(
     }
     let failure: unknown;
     try {
-      await (typeof subject === "string" ?
+      const response = await (typeof subject === "string" ?
         client.query(subject)
       : client.query(subject.text, subject.values));
+      if (
+        expectedRows !== undefined &&
+        JSON.stringify(response.rows) !== JSON.stringify(expectedRows)
+      ) {
+        throw new Error(
+          `unexpected probe rows: ${JSON.stringify(response.rows)}`,
+        );
+      }
     } catch (error) {
       failure = error;
     }
@@ -921,8 +941,8 @@ async function runDeviationBattery(): Promise<void> {
   // The two gaps the to_regprocedure fix unmasks. The journal's trigger function reads its
   // table names from TG_ARGV and splices them with format('%I').
   await probe(
-    "revision journal: TG_ARGV unresolved in a trigger function",
-    unsupported(TG_ARGV_UNRESOLVED, TG_ARGV_ISSUE),
+    "revision journal: TG_ARGV in a trigger function",
+    fixedUnreleased(TG_ARGV_UNRESOLVED, TG_ARGV_ISSUE),
     [
       `DROP TABLE IF EXISTS "probe_trigger"`,
       `DROP FUNCTION IF EXISTS probe_trigger_argv()`,
@@ -931,15 +951,22 @@ async function runDeviationBattery(): Promise<void> {
        BEGIN NEW."seen" := TG_ARGV[0]; RETURN NEW; END $probe$`,
       `CREATE TRIGGER "probe_trigger_argv" BEFORE INSERT ON "probe_trigger"
        FOR EACH ROW EXECUTE FUNCTION probe_trigger_argv('journal')`,
-      `INSERT INTO "probe_trigger" ("id") VALUES ('a')`,
+      `INSERT INTO "probe_trigger" ("id") VALUES ('a') RETURNING "seen"`,
     ],
+    [{ seen: "journal" }],
   );
-  // One argument is an arity error, which is what this pins. Two arguments do NOT error:
-  // `format('%I', 'x')` returns `'0'`, MySQL's FORMAT(X, D) applied to a non-number.
+  // Check both arity and identifier quoting: merely accepting a call would miss the
+  // old MySQL formatter silently returning zero for a PostgreSQL format string.
   await probe(
-    "revision journal: format() is the MySQL number formatter",
-    unsupported("function 'FORMAT' expected 2 or 3 arguments", FORMAT_ISSUE),
-    [`SELECT format('hello')`],
+    "revision journal: PostgreSQL format()",
+    fixedUnreleased(
+      "function 'FORMAT' expected 2 or 3 arguments",
+      FORMAT_ISSUE,
+    ),
+    [
+      `SELECT format('hello') AS greeting, format('%I', 'journal table') AS identifier`,
+    ],
+    [{ greeting: "hello", identifier: '"journal table"' }],
   );
   await probeFenceRowRace();
 
@@ -1131,7 +1158,7 @@ const REVISION_JOURNAL_GAPS: readonly Readonly<{
   {
     message: TG_ARGV_UNRESOLVED,
     reason:
-      `blocked at the first write (${TG_ARGV_ISSUE}): the journal installs, ` +
+      `blocked at the first write (${TG_ARGV_ISSUE}, fixed on main, unreleased): the journal installs, ` +
       "but its trigger function reads its table names from TG_ARGV, which Doltgres does " +
       "not bind (pg_trigger.tgargs is populated; TG_OP, NEW and OLD work). The store " +
       "bootstraps and then refuses every write.",
@@ -1139,9 +1166,17 @@ const REVISION_JOURNAL_GAPS: readonly Readonly<{
   {
     message: FORMAT_RETURNS_ZERO,
     reason:
-      `blocked at the first write (${FORMAT_ISSUE}): the journal's trigger ` +
+      `blocked at the first write (${FORMAT_ISSUE}, fixed on main, unreleased): the journal's trigger ` +
       "function splices table names with format('%I', ...), which Doltgres resolves to " +
       "MySQL's FORMAT(X, D) and returns '0', so the dynamic statement it executes is `0`.",
+  },
+  {
+    message: FORMAT_BIND_SUBSTITUTION,
+    reason:
+      "blocked at the first write on main: evaluating " +
+      "format('SELECT ... $1 ... %I', TG_ARGV[1]) raises " +
+      "a syntax error at '{'. Removing $1 makes it work. The trigger-variable and format fixes " +
+      "are present, but the journal's dynamic SQL still cannot run.",
   },
 ];
 
@@ -1206,11 +1241,35 @@ async function runPostureGates(
           backend,
           { revisionTracking: true },
         );
-        await revisionStore.nodes.Person.create({
+        const person = await revisionStore.nodes.Person.create({
           name: "Revision",
           email: "revision@example.com",
         });
-        return `schema ${validation.status}, journaled write accepted`;
+        const client = new Client(DOLTGRES_CONNECTION);
+        await client.connect();
+        try {
+          const journal = await client.query<{
+            entity: string;
+            kind: string;
+            id: string;
+          }>(
+            `SELECT entity, kind, id FROM typegraph_revision_changes
+             WHERE graph_id = $1 AND id = $2`,
+            ["doltgres-smoke-revision", person.id],
+          );
+          if (
+            journal.rows.length !== 1 ||
+            journal.rows[0]?.entity !== "node" ||
+            journal.rows[0].kind !== "Person"
+          ) {
+            throw new Error(
+              `unexpected revision journal rows: ${JSON.stringify(journal.rows)}`,
+            );
+          }
+        } finally {
+          await client.end();
+        }
+        return `schema ${validation.status}, journaled write verified`;
       } finally {
         await dropRevisionJournalTriggers();
       }
