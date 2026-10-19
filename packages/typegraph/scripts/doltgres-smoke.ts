@@ -4,6 +4,19 @@
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 //
+// RE-MEASURED 2026-10-18 against 1.4.0 and doltgresql main 9b2a3345.
+// Both builds report 52 passed, 0 failed, 2 skipped in both locking-option modes.
+// Added a value-checked scalar FOR query-target probe for #3409 / PR #3420:
+// 1.4.0 fails to find the unnamed row variable; main returns the expected total.
+// The revision-journal format-string binding gap, fence-row lost update, and missing
+// row/table locks, two-argument advisory lock, fulltext, ANN index and error fields
+// are unchanged. The typed branch/isolation/diff/merge walk still passes after the
+// multi-branch transaction dependency update (#3615).
+// Separate checks on this main build confirm #3434's SET LOCAL scope/warning and
+// DISCARD ALL transaction refusal. A two-branch dolt_commit_all advances both heads;
+// its PostgreSQL function result returns only one branch/hash row. These direct SQL
+// checks are described in the PR; the smoke's typed walk remains single-branch.
+//
 // RE-MEASURED 2026-10-15 against 1.4.0 and doltgresql main 56750eaf.
 // #3545 (trigger variables, PR #3556) and #3546 (format, PR #3558) are fixed on main,
 // still unreleased. The probes now verify the trigger value and identifier quoting.
@@ -967,6 +980,24 @@ async function runDeviationBattery(): Promise<void> {
       `SELECT format('hello') AS greeting, format('%I', 'journal table') AS identifier`,
     ],
     [{ greeting: "hello", identifier: '"journal table"' }],
+  );
+  // #3420 adds scalar FOR .. IN query targets; #3409 is still broken in 1.4.0.
+  await probe(
+    "PL/pgSQL: scalar FOR query target",
+    fixedUnreleased(
+      "record variable `(unnamed row)` could not be found",
+      "doltgresql#3409",
+    ),
+    [
+      `CREATE OR REPLACE FUNCTION probe_scalar_loop() RETURNS int LANGUAGE plpgsql AS $probe$
+       DECLARE value int; total int := 0;
+       BEGIN
+         FOR value IN SELECT 7 LOOP total := total + value; END LOOP;
+         RETURN total;
+       END $probe$`,
+      `SELECT probe_scalar_loop() AS total`,
+    ],
+    [{ total: 7 }],
   );
   await probeFenceRowRace();
 
