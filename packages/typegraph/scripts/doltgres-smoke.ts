@@ -4,6 +4,20 @@
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 //
+// RE-MEASURED 2026-10-20: main 9f8ea4c1 versus unmerged PR #3634 at 66f71f5b.
+// Both builds: 54 passed, 0 failed, 2 skipped in default and permissive-locking modes.
+// Main still silently loses fence-row increments. PR #3634 supplies a commit-time
+// fence: later COMMIT fails 40001, its payload rolls back, and a retry reads the
+// winning generation. The typed counter test stores 2 after three callback attempts
+// on the PR, versus 1 after two successful attempts on main.
+// Run the PR build with DOLTGRES_EXPECT_ROW_CONFLICT=commit-time pnpm smoke:doltgres.
+// This opts the walk into row/commit-time; its probes must verify that declaration.
+// The default remains main's deliberately unsound row/wait baseline.
+// The old race probe discarded Promise.allSettled's commit results. It now checks
+// both commit outcomes, rollback and retry for a new AND an existing fence row.
+// Wrong conflict expectations and disabling typed retry both turn the probes red.
+// Row locks, table-lock drain, journal, fulltext, ANN and error-field gaps remain.
+//
 // RE-MEASURED 2026-10-18 against 1.4.0 and doltgresql main 9b2a3345.
 // Both builds report 52 passed, 0 failed, 2 skipped in both locking-option modes.
 // Added a value-checked scalar FOR query-target probe for #3409 / PR #3420:
@@ -254,12 +268,19 @@ const DOLTGRES_CONNECTION = {
 } as const;
 const DEMO_BRANCH = "experiment";
 
-// The walk's declaration. `row` is TypeGraph's mechanism for an engine with no advisory
-// lock, so it is the honest thing to reach for here — but see the header and the race
-// probe: Doltgres accepts the fence-row UPSERT and does not enforce it. `caller-serialized`
-// is the only declaration whose exclusion TypeGraph actually enforces; it is measured in
-// the matrix rather than run here because the branch-pinned second backend would violate
-// its promise.
+// Only opt into this expectation for a build carrying doltgresql PR #3634.
+// A version string cannot prove that an unmerged change is installed.
+const ROW_CONFLICT_EXPECTATION = process.env["DOLTGRES_EXPECT_ROW_CONFLICT"];
+const EXPECT_COMMIT_TIME_CONFLICT = ROW_CONFLICT_EXPECTATION === "commit-time";
+if (ROW_CONFLICT_EXPECTATION !== undefined && !EXPECT_COMMIT_TIME_CONFLICT) {
+  throw new Error("DOLTGRES_EXPECT_ROW_CONFLICT must be unset or commit-time");
+}
+
+// Main's walk keeps the deliberately unsound row/wait baseline. The explicit
+// PR #3634 expectation switches the walk to row/commit-time and optimistic retry;
+// the race and typed-increment probes must prove that expectation on the server.
+// caller-serialized stays in the matrix because a second branch-pinned backend
+// would violate its single-backend deployment promise.
 const DOLTGRES_BACKEND_OPTIONS = {
   vector: false,
   // No `to_tsvector` and no GIN (doltgresql#3335), so fulltext is off. `fulltext: false`
@@ -269,7 +290,7 @@ const DOLTGRES_BACKEND_OPTIONS = {
     writeFence: {
       mechanism: "row",
       drain: "none",
-      conflict: "wait",
+      conflict: EXPECT_COMMIT_TIME_CONFLICT ? "commit-time" : "wait",
     },
   },
 } as const satisfies Parameters<typeof createPostgresBackend>[1];
@@ -325,6 +346,20 @@ function usesRowLocks(posture: Posture): boolean {
   return (
     posture.label.startsWith("omitted") || posture.label.startsWith("advisory")
   );
+}
+
+function observedFenceDetail(posture: Posture): string {
+  if (rowLocksInert && usesRowLocks(posture)) {
+    return " — UNSOUND: its row-locking clauses are accepted but inert";
+  }
+  const fence = posture.capabilities.writeFence;
+  if (fence?.mechanism !== "row") return "";
+  if (fence.conflict === "wait") {
+    return " — UNSOUND: fence acquisition did not block";
+  }
+  return EXPECT_COMMIT_TIME_CONFLICT ?
+      " — commit-time conflict, rollback and retry measured on this build"
+    : " — UNSOUND: both racing COMMITs succeeded";
 }
 
 const Person = defineNode("Person", {
@@ -782,15 +817,12 @@ async function probeRowLocking(): Promise<void> {
 }
 
 /**
- * A PIN on Doltgres's conflict semantics for one fence row. Two clients each open a
- * transaction and run the `row` mechanism's acquisition (`INSERT ... ON CONFLICT (key) DO
- * UPDATE ... RETURNING generation`). The step passes while the engine provides NO
- * exclusion — the second writer completes and both see generation `1` — and turns red the
- * day upstream makes it wait or detect a conflict, which is the signal to revisit the
- * `row` declaration's `conflict` value.
+ * Pin both acquisition AND commit outcomes. Main and 1.4.0 silently merge the two
+ * writes. PR #3634 should instead abort the second committer with 40001, roll back
+ * its unrelated payload, and allow a fresh attempt to acquire generation 2.
  */
-async function probeFenceRowRace(): Promise<void> {
-  const name = "write fence: fence-row acquisition is not an exclusion";
+async function probeFenceRowRace(seeded: boolean): Promise<void> {
+  const name = `write fence: ${seeded ? "existing" : "new"} fence row (commit outcomes + rollback)`;
   const first = new Client(DOLTGRES_CONNECTION);
   const second = new Client(DOLTGRES_CONNECTION);
   const upsert = `INSERT INTO "probe_race" ("key", "generation") VALUES ('k', 1)
@@ -800,69 +832,136 @@ async function probeFenceRowRace(): Promise<void> {
     await first.connect();
     await second.connect();
     await first.query(`DROP TABLE IF EXISTS "probe_race"`);
+    await first.query(`DROP TABLE IF EXISTS "probe_race_payload"`);
     await first.query(
       `CREATE TABLE "probe_race" ("key" TEXT PRIMARY KEY, "generation" BIGINT NOT NULL)`,
     );
+    await first.query(
+      `CREATE TABLE "probe_race_payload" ("writer" TEXT PRIMARY KEY)`,
+    );
+    if (seeded) await first.query(`INSERT INTO "probe_race" VALUES ('k', 0)`);
     await first.query(`BEGIN`);
     const firstResult = await first.query<{ generation: string }>(upsert);
+    await first.query(`INSERT INTO "probe_race_payload" VALUES ('first')`);
     await second.query(`BEGIN`);
-    let secondCompleted = false;
-    let secondGeneration: string | undefined;
-    try {
-      const secondResult = await Promise.race([
-        second.query<{ generation: string }>(upsert),
-        new Promise<undefined>((resolve) =>
-          setTimeout(() => {
-            resolve(undefined);
-          }, 1500),
-        ),
-      ]);
-      if (secondResult !== undefined) {
-        secondCompleted = true;
-        secondGeneration = secondResult.rows[0]?.generation;
-      }
-    } catch (error) {
-      results.push({
-        step: name,
-        outcome: "fail",
-        detail: describeError(error),
-      });
-      return;
+    const acquisition = second.query<{ generation: string }>(upsert);
+    const secondResult = await Promise.race([
+      acquisition,
+      new Promise<undefined>((resolve) =>
+        setTimeout(() => {
+          resolve(undefined);
+        }, 1500),
+      ),
+    ]);
+    // Deliberately commit in a fixed order: the second transaction must be the loser.
+    await first.query(`COMMIT`);
+    if (secondResult === undefined) {
+      await acquisition;
+      throw new Error(
+        "NOW AN EXCLUSION: the second acquisition blocked; remeasure the wait declaration",
+      );
     }
-    await Promise.allSettled([first.query(`COMMIT`), second.query(`COMMIT`)]);
+    await second.query(`INSERT INTO "probe_race_payload" VALUES ('second')`);
+    let commitFailure: unknown;
+    try {
+      await second.query(`COMMIT`);
+    } catch (error) {
+      commitFailure = error;
+      await second.query(`ROLLBACK`);
+    }
     const final = await first.query<{ generation: string }>(
       `SELECT "generation" FROM "probe_race" WHERE "key" = 'k'`,
     );
-    const finalGeneration = final.rows[0]?.generation;
-    if (!secondCompleted) {
+    const payload = await first.query<{ writer: string }>(
+      `SELECT "writer" FROM "probe_race_payload" ORDER BY "writer"`,
+    );
+    if (
+      firstResult.rows[0]?.generation !== "1" ||
+      secondResult.rows[0]?.generation !== "1" ||
+      final.rows[0]?.generation !== "1"
+    ) {
+      throw new Error(
+        `unexpected fence generations: ${JSON.stringify({ first: firstResult.rows, second: secondResult.rows, final: final.rows })}`,
+      );
+    }
+    if (EXPECT_COMMIT_TIME_CONFLICT) {
+      if (sqlState(commitFailure) !== "40001") {
+        throw new Error(
+          `expected second COMMIT to fail with 40001, got ${commitFailure === undefined ? "success" : describeError(commitFailure)}`,
+        );
+      }
+      if (
+        JSON.stringify(payload.rows) !== JSON.stringify([{ writer: "first" }])
+      ) {
+        throw new Error(
+          `loser's payload survived rollback: ${JSON.stringify(payload.rows)}`,
+        );
+      }
+      await second.query(`BEGIN`);
+      const retry = await second.query<{ generation: string }>(upsert);
+      await second.query(`INSERT INTO "probe_race_payload" VALUES ('second')`);
+      await second.query(`COMMIT`);
+      const afterRetry = await first.query<{ generation: string }>(
+        `SELECT "generation" FROM "probe_race" WHERE "key" = 'k'`,
+      );
+      const payloadAfterRetry = await first.query<{ writer: string }>(
+        `SELECT "writer" FROM "probe_race_payload" ORDER BY "writer"`,
+      );
+      if (
+        retry.rows[0]?.generation !== "2" ||
+        afterRetry.rows[0]?.generation !== "2" ||
+        JSON.stringify(payloadAfterRetry.rows) !==
+          JSON.stringify([{ writer: "first" }, { writer: "second" }])
+      ) {
+        throw new Error(
+          "retry did not observe the winner and commit exactly one payload",
+        );
+      }
       results.push({
         step: name,
-        outcome: "fail",
+        outcome: "pass",
         detail:
-          "NOW AN EXCLUSION — the second writer blocked; re-run the declaration matrix",
+          "both acquired generation 1; first COMMIT succeeded, second failed 40001; loser payload rolled back; fresh retry committed generation 2 (PR #3634)",
       });
-      return;
+    } else {
+      if (commitFailure !== undefined) {
+        throw new Error(
+          `NOW A COMMIT-TIME CONFLICT (${sqlState(commitFailure) ?? "unknown code"}): ${describeError(commitFailure)}; remeasure with DOLTGRES_EXPECT_ROW_CONFLICT=commit-time`,
+        );
+      }
+      if (
+        JSON.stringify(payload.rows) !==
+        JSON.stringify([{ writer: "first" }, { writer: "second" }])
+      ) {
+        throw new Error(
+          `unexpected committed payloads: ${JSON.stringify(payload.rows)}`,
+        );
+      }
+      results.push({
+        step: name,
+        outcome: "pass",
+        detail:
+          'both COMMITs succeeded, both payloads persisted, final generation 1: lost update; neither conflict "wait" nor "commit-time" is enforced',
+      });
     }
-    results.push({
-      step: name,
-      outcome: "pass",
-      detail:
-        `not enforced as pinned (doltgresql#2600): both acquirers returned ` +
-        `generation ${String(firstResult.rows[0]?.generation)}/${String(secondGeneration)}, ` +
-        `final ${String(finalGeneration)} — a lost update, so conflict "wait" and ` +
-        `"commit-time" are both false here`,
-    });
   } catch (error) {
     results.push({ step: name, outcome: "fail", detail: describeError(error) });
   } finally {
     for (const client of [first, second]) {
       try {
+        await client.query(`ROLLBACK`);
         await client.end();
       } catch {
-        // Intentionally ignored: a torn-down connection is not the probe's result.
+        // A failed connection is already closed.
       }
     }
   }
+}
+
+function sqlState(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  if ("code" in error && typeof error.code === "string") return error.code;
+  return error instanceof Error ? sqlState(error.cause) : undefined;
 }
 
 async function runDeviationBattery(): Promise<void> {
@@ -999,7 +1098,8 @@ async function runDeviationBattery(): Promise<void> {
     ],
     [{ total: 7 }],
   );
-  await probeFenceRowRace();
+  await probeFenceRowRace(false);
+  await probeFenceRowRace(true);
 
   // The two bootstrap writes this spike filed, now fixed and released in 1.3.1.
   await probe("bootstrap: ON CONFLICT ... DO UPDATE ... WHERE", SUPPORTED, [
@@ -1054,8 +1154,8 @@ async function runDeviationBattery(): Promise<void> {
  *
  * Each `capabilities.writeFence` posture gets its own backend and a mini-walk, so the
  * report says how far EACH gets rather than how far the one this file happened to pick
- * gets. It is the honest way to answer "can TypeGraph run on Doltgres": the answer depends
- * on the declaration, and two of the six that construct are unsound.
+ * gets. Construction and a single-writer walk are distinct from the conflict semantics
+ * measured by the concurrent probes; the report names the unsound declarations.
  */
 async function runDeclarationMatrix(pool: Pool): Promise<void> {
   for (const [index, posture] of POSTURES.entries()) {
@@ -1120,9 +1220,7 @@ async function runDeclarationMatrix(pool: Pool): Promise<void> {
         outcome: "pass",
         detail:
           `constructs and walks (schema ${validation.status}; ${String(rows.length)} rows)` +
-          (rowLocksInert && usesRowLocks(posture) ?
-            " — UNSOUND here: its row-locking clauses are accepted but inert"
-          : ""),
+          observedFenceDetail(posture),
       });
     } catch (error) {
       const detail = describeError(error);
@@ -1161,6 +1259,7 @@ const WALK_STEPS: readonly string[] = [
   "soft delete + visibility",
   "delete protection (connected edges refuse delete)",
   "system indexes: materialized (ADD COLUMN IF NOT EXISTS)",
+  "typed row/commit-time: concurrent increments + retry",
   "dolt: commit baseline on main",
   `dolt: create branch '${DEMO_BRANCH}'`,
   "dolt: TypeGraph store on branch-pinned connection",
@@ -1204,7 +1303,7 @@ const REVISION_JOURNAL_GAPS: readonly Readonly<{
   {
     message: FORMAT_BIND_SUBSTITUTION,
     reason:
-      "blocked at the first write on main: evaluating " +
+      "blocked at the first write on this build: evaluating " +
       "format('SELECT ... $1 ... %I', TG_ARGV[1]) raises " +
       "a syntax error at '{'. Removing $1 makes it work. The trigger-variable and format fixes " +
       "are present, but the journal's dynamic SQL still cannot run.",
@@ -1324,6 +1423,115 @@ async function runPostureGates(
     }
     throw new Error("identity should have been refused under drain: none");
   });
+}
+
+/** Exercise the declared optimistic tier through actual concurrent typed writes. */
+async function probeTypedCommitTimeRetry(pool: Pool): Promise<void> {
+  await step(
+    "typed row/commit-time: concurrent increments + retry",
+    async () => {
+      const Counter = defineNode("Counter", {
+        schema: z.object({ value: z.number() }),
+      });
+      const retryGraph = defineGraph({
+        id: "doltgres-smoke-retry",
+        nodes: { Counter: { type: Counter } },
+        edges: {},
+      });
+      const backend = createPostgresBackend(drizzle(pool), {
+        ...DOLTGRES_BACKEND_OPTIONS,
+        capabilities: {
+          writeFence: {
+            mechanism: "row",
+            drain: "none",
+            conflict: "commit-time",
+          },
+        },
+      });
+      if (backend.capabilities.execution.unitOfWork !== "optimistic-retry") {
+        throw new Error(
+          "row/commit-time did not derive the optimistic-retry tier",
+        );
+      }
+      const [store] = await createAdapterStoreWithSchema(
+        retryGraph,
+        backend,
+        {},
+      );
+      const initial = await store.nodes.Counter.create({ value: 0 });
+      let releaseBoth: (() => void) | undefined;
+      const bothRead = new Promise<void>((resolve) => {
+        releaseBoth = resolve;
+      });
+      let readers = 0;
+      const attempts = [0, 0];
+      const outcomes = await Promise.allSettled(
+        [0, 1].map((index) =>
+          store.transaction(
+            async (tx) => {
+              attempts[index] = (attempts[index] ?? 0) + 1;
+              const counter = await tx.nodes.Counter.getById(initial.id);
+              if (counter === undefined) throw new Error("counter disappeared");
+              if (attempts[index] === 1) {
+                readers += 1;
+                if (readers === 2) releaseBoth?.();
+                let timeout: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  await Promise.race([
+                    bothRead,
+                    new Promise<never>((_resolve, reject) => {
+                      timeout = setTimeout(() => {
+                        reject(
+                          new Error("concurrent readers did not rendezvous"),
+                        );
+                      }, 5000);
+                    }),
+                  ]);
+                } finally {
+                  clearTimeout(timeout);
+                }
+              }
+              await tx.nodes.Counter.update(initial.id, {
+                value: counter.value + 1,
+              });
+              await tx.nodes.Counter.create(
+                { value: index },
+                { id: `writer-${String(index)}` },
+              );
+            },
+            { retry: { attempts: 3 } },
+          ),
+        ),
+      );
+      const failure = outcomes.find((outcome) => outcome.status === "rejected");
+      if (failure?.status === "rejected") {
+        throw new Error(
+          `typed increment failed: ${describeError(failure.reason)}`,
+        );
+      }
+      const counter = await store.nodes.Counter.getById(initial.id);
+      const count = await store.nodes.Counter.count();
+      const totalAttempts = attempts.reduce(
+        (total, attempt) => total + attempt,
+        0,
+      );
+      const retried = counter?.value === 2 && totalAttempts === 3;
+      const lost = counter?.value === 1 && totalAttempts === 2;
+      // On main, differing metadata timestamps can incidentally cause a conflict.
+      // The raw same-value fence races, not this typed update alone, pin the fence.
+      if (
+        count !== 3 ||
+        (EXPECT_COMMIT_TIME_CONFLICT ? !retried : !retried && !lost)
+      ) {
+        throw new Error(
+          `unexpected typed retry result: ${JSON.stringify({ value: counter?.value, count, attempts })}`,
+        );
+      }
+      return retried ?
+          "two successful increments, value 2, three callback attempts, exactly two writer markers: loser retried on fresh state"
+        : "two successful increments, value 1, two callback attempts: the declared optimistic tier cannot repair an undetected conflict";
+    },
+  );
 }
 
 async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
@@ -1540,6 +1748,7 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
   );
 
   await runPostureGates(backend);
+  await probeTypedCommitTimeRetry(pool);
 
   // === Act 3: Dolt version control underneath TypeGraph ===
 
