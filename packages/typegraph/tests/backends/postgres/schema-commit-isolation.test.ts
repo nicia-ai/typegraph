@@ -15,7 +15,8 @@
  * Server PostgreSQL only: the race needs a second connection holding the
  * writer's transaction open while the commit waits.
  */
-import { drizzle } from "drizzle-orm/node-postgres";
+import { sql } from "drizzle-orm";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -29,7 +30,10 @@ import {
   MigrationError,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
-import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  createPostgresBackend,
+  createPostgresTransactionBackend,
+} from "../../../src/backend/postgres";
 import { requireDefined } from "../../../src/utils/presence";
 import { createGate } from "../../concurrency-utils";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
@@ -125,6 +129,26 @@ async function untilSessionWaitsOnLock(observer: Pool): Promise<void> {
   }
 }
 
+type SessionState = Readonly<{
+  lockTimeout: string;
+  advisoryLocks: number;
+}>;
+
+/** The caller-visible state a refused schema write must leave untouched. */
+async function readSessionState(
+  tx: Pick<NodePgDatabase, "execute">,
+): Promise<SessionState> {
+  const { rows } = await tx.execute(sql`
+    SELECT current_setting('lock_timeout') AS lock_timeout,
+      (SELECT count(*) FROM pg_locks
+        WHERE locktype = 'advisory' AND pid = pg_backend_pid()) AS advisory_locks
+  `);
+  return {
+    lockTimeout: String(rows[0]?.["lock_timeout"]),
+    advisoryLocks: Number(rows[0]?.["advisory_locks"]),
+  };
+}
+
 /** The error `work` rejects with; a resolved `work` fails the test. */
 async function rejection(work: Promise<unknown>): Promise<unknown> {
   try {
@@ -215,6 +239,84 @@ describe.runIf(process.env["POSTGRES_URL"])(
         code: "SCHEMA_WRITE_REQUIRES_READ_COMMITTED",
         isolation: "repeatable_read",
       });
+    });
+
+    it("leaves a caller's repeatable read transaction as it found it after refusing to fence a schema write", async () => {
+      const db = drizzle(requireDefined(writerPool));
+      const adopt = requireDefined(
+        createPostgresBackend(db).adoptSchemaWriteTransaction,
+      );
+
+      const { before, refusal, after } = await db.transaction(
+        async (tx) => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '30s'`);
+          const stateBefore = await readSessionState(tx);
+          const caught = await rejection(
+            adopt(tx, "schema-commit-isolation-adopted-residue", {
+              waitBudgetMs: 5000,
+            }),
+          );
+          return {
+            before: stateBefore,
+            refusal: caught,
+            after: await readSessionState(tx),
+          };
+        },
+        { isolationLevel: "repeatable read" },
+      );
+
+      expect(refusal).toBeInstanceOf(ConfigurationError);
+      expect((refusal as ConfigurationError).details).toMatchObject({
+        code: "SCHEMA_WRITE_REQUIRES_READ_COMMITTED",
+      });
+      expect(before).toEqual({ lockTimeout: "30s", advisoryLocks: 0 });
+      expect(after).toEqual(before);
+    });
+
+    it("refuses a schema write through a transaction-scoped backend on a caller's repeatable read transaction, holding no schema fence afterwards", async () => {
+      const db = drizzle(requireDefined(writerPool));
+      const graphId = "schema-commit-isolation-transaction-scoped";
+
+      const { refusal, after } = await db.transaction(
+        async (tx) => {
+          const caught = await rejection(
+            createStoreWithSchema(
+              taskGraph(graphId, false),
+              createPostgresTransactionBackend(tx),
+            ),
+          );
+          return { refusal: caught, after: await readSessionState(tx) };
+        },
+        { isolationLevel: "repeatable read" },
+      );
+
+      expect(refusal).toBeInstanceOf(ConfigurationError);
+      expect((refusal as ConfigurationError).details).toMatchObject({
+        code: "SCHEMA_WRITE_REQUIRES_READ_COMMITTED",
+        graphId,
+        isolation: "repeatable_read",
+      });
+      expect(after.advisoryLocks).toBe(0);
+      const active = await createPostgresBackend(db).getActiveSchema(graphId);
+      expect(active).toBeUndefined();
+    });
+
+    it("commits a schema write through a transaction-scoped backend on a caller's read committed transaction", async () => {
+      const db = drizzle(requireDefined(writerPool));
+      const graphId = "schema-commit-isolation-transaction-scoped-rc";
+
+      await db.transaction(
+        async (tx) => {
+          await createStoreWithSchema(
+            taskGraph(graphId, false),
+            createPostgresTransactionBackend(tx),
+          );
+        },
+        { isolationLevel: "read committed" },
+      );
+
+      const active = await createPostgresBackend(db).getActiveSchema(graphId);
+      expect(active?.version).toBe(1);
     });
   },
 );

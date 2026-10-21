@@ -171,7 +171,9 @@ document, and runs a data check inside the schema-commit transaction before
 publishing the new version. On PostgreSQL that transaction runs at
 `READ COMMITTED` whatever the server's `default_transaction_isolation` is, so
 the check sees every row a concurrent writer committed while the commit waited
-for it:
+for it. A schema write in a caller-owned `REPEATABLE READ` or `SERIALIZABLE`
+transaction, which TypeGraph cannot move to `READ COMMITTED`, is refused with
+`SCHEMA_WRITE_REQUIRES_READ_COMMITTED`:
 
 | Meta-edge / property                          | Added                                             | Removed                                           |
 | --------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |

@@ -2083,6 +2083,21 @@ function buildPostgresEngineProfileInternal(
     type SchemaCommitFence = ReturnType<typeof resolveSchemaCommitFence>;
 
     /**
+     * Where the advisory schema fence learns the session's isolation, which it
+     * must check before trusting the data checks that follow it.
+     *
+     * - `read-with-lock`: a transaction TypeGraph opened reads it in the lock
+     *   statement itself. A refusal there rolls that transaction (or, on a
+     *   transaction-scoped backend, its savepoint) back, and the lock with it.
+     * - `observed`: a caller's adopted transaction outlives a refusal, so its
+     *   isolation is read before anything is acquired or changed on it and the
+     *   fence refuses before its first statement.
+     */
+    type SchemaFenceIsolationSource =
+      | Readonly<{ kind: "read-with-lock" }>
+      | Readonly<{ kind: "observed"; acquisition: GraphWriteFenceAcquisition }>;
+
+    /**
      * The per-graph schema-commit fence.
      *
      * Resolves a {@link resolveWriteFencePlan} rather than emitting the lock
@@ -2115,12 +2130,19 @@ function buildPostgresEngineProfileInternal(
       tx: AnyPgTransaction,
       graphId: string,
       plan: SchemaCommitFence,
+      isolation: SchemaFenceIsolationSource,
       beforeAcquisition?: (
         phase: "schema-advisory" | "schema-row",
       ) => Promise<void>,
     ): Promise<void> {
       switch (plan.kind) {
         case "lock": {
+          if (isolation.kind === "observed") {
+            assertSchemaWriteObservesEarlierWriters(
+              graphId,
+              isolation.acquisition,
+            );
+          }
           await beforeAcquisition?.("schema-advisory");
           // Advisory lock: hashtext($graphId) is collision-tolerant for the
           // size of an active graph set; collisions just serialize unrelated
@@ -2144,29 +2166,39 @@ function buildPostgresEngineProfileInternal(
           // preceding statement in its own transaction — no advisory lock is
           // in play on either side.
           //
-          // The same statement reads the session's isolation: a managed
-          // writer holds this schema's row `FOR SHARE` without changing it, so
-          // a schema writer whose snapshot predates that writer's commit gets
-          // no serialization failure when its `FOR UPDATE` below is granted.
-          // Only a fresh snapshot per statement lets the checks that follow —
-          // a tightening preflight, an emptiness probe — see the rows that
-          // writer committed while this one waited.
-          const isolationFactExpression = requireDefined(
-            plan.sql.isolationFactExpression,
-            "acquireSchemaWriteFence: isolationFactExpression was validated present by the resolved advisory plan",
-          );
-          const [acquired] = await createPostgresExecutionAdapter(
-            tx,
-            adapterOptions,
-          ).execute<Record<string, unknown>>(
-            asCompiledRowsSql(
-              portableSql`SELECT ${advisoryLockSingleExpression(graphId)}, ${isolationFactExpression()} AS transaction_isolation`,
-            ),
-          );
-          assertSchemaWriteObservesEarlierWriters(
-            graphId,
-            readGraphWriteFenceAcquisition(acquired),
-          );
+          // The session's isolation is checked before the data checks that
+          // follow: a managed writer holds this schema's row `FOR SHARE`
+          // without changing it, so a schema writer whose snapshot predates
+          // that writer's commit gets no serialization failure when its
+          // `FOR UPDATE` below is granted. Only a fresh snapshot per statement
+          // lets those checks — a tightening preflight, an emptiness probe —
+          // see the rows that writer committed while this one waited. A
+          // transaction TypeGraph opened reads it in this same statement.
+          if (isolation.kind === "read-with-lock") {
+            const isolationFactExpression = requireDefined(
+              plan.sql.isolationFactExpression,
+              "acquireSchemaWriteFence: isolationFactExpression was validated present by the resolved advisory plan",
+            );
+            const [acquired] = await createPostgresExecutionAdapter(
+              tx,
+              adapterOptions,
+            ).execute<Record<string, unknown>>(
+              asCompiledRowsSql(
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}, ${isolationFactExpression()} AS transaction_isolation`,
+              ),
+            );
+            assertSchemaWriteObservesEarlierWriters(
+              graphId,
+              readGraphWriteFenceAcquisition(acquired),
+            );
+          } else {
+            await tx.execute(
+              toDrizzleSql(
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
+                "postgres",
+              ),
+            );
+          }
           await beforeAcquisition?.("schema-row");
           // Managed entity writers lock this row FOR SHARE. Locking it FOR
           // UPDATE before any emptiness probe makes a writer-first commit
@@ -2292,7 +2324,9 @@ function buildPostgresEngineProfileInternal(
         );
       const attempt = (): Promise<T> =>
         db.transaction(async (tx) => {
-          await acquireSchemaWriteFence(tx, graphId, fence);
+          await acquireSchemaWriteFence(tx, graphId, fence, {
+            kind: "read-with-lock",
+          });
           // Schema writes run DDL: over an allocation, where it lives.
           await bindSchemaWriteSessionToAllocation(tx);
           // The fence resolved above is held here, so the schema-write-capable
@@ -2594,10 +2628,25 @@ function buildPostgresEngineProfileInternal(
                     "Schema adoption",
                   );
                 }
-                const [setting] = await settingAdapter.execute<{
-                  value: string;
-                }>(sql`SELECT current_setting('lock_timeout') AS value`);
-                const previousTimeout = setting?.value;
+                // The caller's transaction outlives a refusal, so its
+                // isolation is read here — already fixed by the statements
+                // above, and before anything is acquired or changed on it —
+                // for the schema fence to refuse before its first statement.
+                const isolationFactExpression =
+                  schemaFencePlan.sql.isolationFactExpression;
+                const [setting] = await settingAdapter.execute<
+                  Record<string, unknown>
+                >(
+                  asCompiledRowsSql(
+                    isolationFactExpression === undefined ?
+                      portableSql`SELECT current_setting('lock_timeout') AS value`
+                    : portableSql`SELECT current_setting('lock_timeout') AS value, ${isolationFactExpression()} AS transaction_isolation`,
+                  ),
+                );
+                const previousTimeout =
+                  typeof setting?.["value"] === "string" ?
+                    setting["value"]
+                  : undefined;
                 const callerTimeout =
                   previousTimeout === undefined ? undefined : (
                     postgresLockTimeoutMilliseconds(previousTimeout)
@@ -2618,7 +2667,11 @@ function buildPostgresEngineProfileInternal(
                   await acquireSchemaWriteFence(
                     externalTx,
                     graphId,
-                    resolveSchemaCommitFence(),
+                    schemaFencePlan,
+                    {
+                      kind: "observed",
+                      acquisition: readGraphWriteFenceAcquisition(setting),
+                    },
                     async (acquisitionPhase) => {
                       phase = acquisitionPhase;
                       const remainingMs = deadline - performance.now();

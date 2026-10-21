@@ -820,8 +820,11 @@ adopt a caller-owned transaction:
   nested Drizzle `transaction()` around your own tables. Do not roll one back
   over TypeGraph writes: TypeGraph does not see that rollback, so the history
   it records and the per-graph write fence it took still count the writes the
-  rollback undid. Let the error propagate and roll back the whole transaction
-  instead.
+  rollback undid. The result is not only wrong history: a concurrent
+  `REPEATABLE READ` or `SERIALIZABLE` writer is then no longer stopped by the
+  fence, and the two transactions can both commit a constraint violation, such
+  as a cycle in an `acyclic` relation. Let the error propagate and roll back the
+  whole transaction instead.
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.
