@@ -98,6 +98,7 @@ export {
   // Vector-slot enumeration for manual provisioning (the boot step
   // createStoreWithSchema performs via backend.ensureVectorSlotContribution)
   resolveGraphVectorSlots,
+  type RestoredRecordedInstant,
   // Searchable type for fulltext search
   searchable,
   type SearchableMetadata,
@@ -145,8 +146,9 @@ export {
   type IdentityWriteSummary,
   pruneIdentityTransitions,
   rebuildIdentityClosure,
+  type RecordedIdentityTransition,
+  type RestoredIdentityTransition,
   type TransitionPageCursor,
-  transitionPageCursor,
 } from "./identity";
 
 // ============================================================

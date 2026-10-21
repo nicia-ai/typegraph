@@ -724,6 +724,11 @@ type ResolvedEmbeddingIndex = Readonly<{
 export function resolveGraphVectorSlots(graph: GraphDef): readonly VectorSlot[];
 
 // @public
+export type RestoredRecordedInstant = string & {
+    readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
+};
+
+// @public
 export function searchable(options?: SearchableOptions): SearchableSchema;
 
 // @public

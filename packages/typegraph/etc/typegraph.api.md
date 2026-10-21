@@ -5187,7 +5187,7 @@ export type IdentityReplayOptions = Readonly<{
 
 // @public
 export type IdentityReplayStep<G extends GraphDef> = Readonly<{
-    transition: IdentityTransition<G>;
+    transition: RecordedIdentityTransition<G>;
     before: readonly IdentityNodeReference<G>[];
     after: readonly IdentityNodeReference<G>[];
 }>;
@@ -5261,20 +5261,8 @@ type IdentityTableNames = Readonly<{
     identityTransitionRetention: string;
 }>;
 
-// @public (undocumented)
-export type IdentityTransition<G extends GraphDef> = Readonly<{
-    transitionId: string;
-    cause: IdentityTransitionCause;
-    recorded: RecordedInstant;
-    validAt: string;
-    class: IdentityNodeReference<G>;
-    priorClass?: IdentityNodeReference<G> | undefined;
-    assertionIds: readonly IdentityAssertionId[];
-    decision?: IdentityDecisionProvenance | undefined;
-    restored?: Readonly<{
-        at: string;
-    }> | undefined;
-}>;
+// @public
+export type IdentityTransition<G extends GraphDef> = RecordedIdentityTransition<G> | RestoredIdentityTransition<G>;
 
 // @public
 export type IdentityTransitionCause = "assert" | "retract" | "fold" | "detach" | "restore" | "window-end" | "kind-drop" | "schema-transition" | "reconcile";
@@ -7808,6 +7796,19 @@ export type RecordedHeterogeneousNodeWriteBatch<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+export type RecordedIdentityTransition<G extends GraphDef> = Readonly<{
+    transitionId: string;
+    cause: IdentityTransitionCause;
+    recorded: RecordedInstant;
+    validAt: string;
+    class: IdentityNodeReference<G>;
+    priorClass?: IdentityNodeReference<G> | undefined;
+    assertionIds: readonly IdentityAssertionId[];
+    decision?: IdentityDecisionProvenance | undefined;
+    restored?: undefined;
+}>;
+
+// @public
 export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
@@ -8290,6 +8291,19 @@ type ResolvePathFormat<PC> = PC extends QualifiedRecursivePathOption ? "qualifie
 
 // @public (undocumented)
 type ResolvePointerSegment<T, Segment extends string> = T extends readonly (infer U)[] ? Segment extends NonNegativeIntegerString ? U : unknown : T extends Record<string, unknown> ? Segment extends keyof T ? Segment extends NonNegativeIntegerString ? unknown : T[Segment] : unknown : unknown;
+
+// @public
+export type RestoredIdentityTransition<G extends GraphDef> = Omit<RecordedIdentityTransition<G>, "recorded" | "restored"> & Readonly<{
+    recorded: RestoredRecordedInstant;
+    restored: Readonly<{
+        at: string;
+    }>;
+}>;
+
+// @public
+export type RestoredRecordedInstant = string & {
+    readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
+};
 
 // @public
 export class RestrictedDeleteError extends TypeGraphError {
@@ -10036,9 +10050,6 @@ const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
 export type TransitionPageCursor = string & {
     readonly [TRANSITION_PAGE_CURSOR_BRAND]: "TransitionPageCursor";
 };
-
-// @public (undocumented)
-export function transitionPageCursor(instant: RecordedInstant): TransitionPageCursor;
 
 // @public
 type Traversal = Readonly<{

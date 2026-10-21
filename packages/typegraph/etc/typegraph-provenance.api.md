@@ -3561,7 +3561,7 @@ type IdentityReplayOptions = Readonly<{
 
 // @public
 type IdentityReplayStep<G extends GraphDef> = Readonly<{
-    transition: IdentityTransition<G>;
+    transition: RecordedIdentityTransition<G>;
     before: readonly IdentityNodeReference<G>[];
     after: readonly IdentityNodeReference<G>[];
 }>;
@@ -3610,20 +3610,8 @@ type IdentityTableNames = Readonly<{
     identityTransitionRetention: string;
 }>;
 
-// @public (undocumented)
-type IdentityTransition<G extends GraphDef> = Readonly<{
-    transitionId: string;
-    cause: IdentityTransitionCause;
-    recorded: RecordedInstant;
-    validAt: string;
-    class: IdentityNodeReference<G>;
-    priorClass?: IdentityNodeReference<G> | undefined;
-    assertionIds: readonly IdentityAssertionId[];
-    decision?: IdentityDecisionProvenance | undefined;
-    restored?: Readonly<{
-        at: string;
-    }> | undefined;
-}>;
+// @public
+type IdentityTransition<G extends GraphDef> = RecordedIdentityTransition<G> | RestoredIdentityTransition<G>;
 
 // @public
 type IdentityTransitionCause = "assert" | "retract" | "fold" | "detach" | "restore" | "window-end" | "kind-drop" | "schema-transition" | "reconcile";
@@ -5485,6 +5473,19 @@ type RecordedHeterogeneousNodeWriteBatch<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+type RecordedIdentityTransition<G extends GraphDef> = Readonly<{
+    transitionId: string;
+    cause: IdentityTransitionCause;
+    recorded: RecordedInstant;
+    validAt: string;
+    class: IdentityNodeReference<G>;
+    priorClass?: IdentityNodeReference<G> | undefined;
+    assertionIds: readonly IdentityAssertionId[];
+    decision?: IdentityDecisionProvenance | undefined;
+    restored?: undefined;
+}>;
+
+// @public
 type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
@@ -5858,6 +5859,19 @@ type ResolvePathAlias<PC, A extends string> = PC extends string ? PC : PC extend
 
 // @public (undocumented)
 type ResolvePathFormat<PC> = PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
+
+// @public
+type RestoredIdentityTransition<G extends GraphDef> = Omit<RecordedIdentityTransition<G>, "recorded" | "restored"> & Readonly<{
+    recorded: RestoredRecordedInstant;
+    restored: Readonly<{
+        at: string;
+    }>;
+}>;
+
+// @public
+type RestoredRecordedInstant = string & {
+    readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
+};
 
 // @public (undocumented)
 export type RetractionCapability<G extends GraphDef = GraphDef, SourceKind extends NodeKind<G> = NodeKind<G>, FactKind extends NodeKind<G> = NodeKind<G>, JustificationKind extends NodeKind<G> = NodeKind<G>> = Readonly<{

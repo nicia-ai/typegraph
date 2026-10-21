@@ -66,6 +66,19 @@ export type RecordedInstant = string & {
 };
 
 /**
+ * A recorded instant ANOTHER graph minted, carried into this one by an
+ * archival restore of its identity transitions: the source graph's revision
+ * and wall time, kept verbatim. It has a {@link RecordedInstant}'s string form
+ * but names a position on the source's recorded axis, so it carries a
+ * different brand value and `store.asOfRecorded` does not accept it — a read
+ * anchored on it would answer about this graph at a revision this graph never
+ * allocated for that event.
+ */
+export type RestoredRecordedInstant = string & {
+  readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
+};
+
+/**
  * The parsed halves of a TypeGraph-owned (`r1:`) recorded instant. Not
  * exported on its own — callers narrow {@link RecordedInstantParts} by
  * `kind` rather than naming either variant directly.

@@ -1001,6 +1001,49 @@ function historyMissingRecordedRelationsError(
   );
 }
 
+const IDENTITY_TRANSITION_RELATIONS_MISSING_CODE =
+  "IDENTITY_TRANSITION_RELATIONS_MISSING";
+
+/**
+ * Converts a missing-relation failure of a write to the identity transition
+ * log into an error that names the transition-log relations and the
+ * base-schema adoption that creates them. They are base-schema version 6
+ * relations, so a database adopted only through version 5 lacks them while
+ * every recorded-time relation exists; the generic recorded-relations error
+ * would send its reader after tables that are already there.
+ */
+export async function withIdentityTransitionRelationsPrecondition<T>(
+  promise: Promise<T>,
+  relations: readonly string[],
+  details: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await promise;
+  } catch (error) {
+    if (!isMissingTableError(error)) throw error;
+    throw new ConfigurationError(
+      `history: true on an identity graph requires the identity transition-log relations (${relations.join(", ")}), but one is missing.`,
+      {
+        ...details,
+        code: IDENTITY_TRANSITION_RELATIONS_MISSING_CODE,
+        relations,
+      },
+      {
+        cause: error,
+        suggestion:
+          "They are base-schema version 6 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker writes. Externally managed DDL applies the version-6 statements and advances the base-schema marker to 6.",
+      },
+    );
+  }
+}
+
+function isIdentityTransitionRelationsMissing(error: unknown): boolean {
+  return (
+    error instanceof ConfigurationError &&
+    error.details["code"] === IDENTITY_TRANSITION_RELATIONS_MISSING_CODE
+  );
+}
+
 /**
  * Converts missing recorded-relation failures into the actionable precondition
  * error used by construction-time history checks. Capture paths use this after
@@ -1015,7 +1058,11 @@ export async function withRecordedRelationsPrecondition<T>(
   try {
     return await promise;
   } catch (error) {
-    if (!isMissingTableError(error)) throw error;
+    if (
+      isIdentityTransitionRelationsMissing(error) ||
+      !isMissingTableError(error)
+    )
+      throw error;
     throw historyMissingRecordedRelationsError(
       { ...details, code: "RECORDED_RELATIONS_MISSING" },
       error,

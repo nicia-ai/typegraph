@@ -12,7 +12,7 @@
  * one per-row error — not a thrown abort — for anything left without a live
  * whole, removing that row's node in the same transaction.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -406,6 +406,43 @@ describe("validating import: required composition existence", () => {
   // `runtime.detachDeletedImportedIdentityNode(frame.target, ...)` call from
   // `assertImportedRequiredPartsAttached` (src/interchange/import.ts). The
   // `validateIdentity()` assertion above then rejects instead of resolving.
+
+  // Once the purge removed the row, its identity detach is owed: a failure
+  // there leaves a closure naming a deleted node, so it fails the import
+  // instead of being reported as that row's error with the row still counted.
+  it("fails the import when a purged part's identity detach fails", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildIdentityEnabledGraph(),
+        backend,
+      );
+      await store.nodes.CeiOther.create({}, { id: "shared-id" });
+      const detachFailure = new Error("identity detach failed");
+      vi.spyOn(
+        storeRuntime(store),
+        "detachDeletedImportedIdentityNode",
+      ).mockRejectedValue(detachFailure);
+
+      await expect(
+        importGraph(
+          store,
+          payload({
+            nodes: [{ kind: "CeiSegment", id: "shared-id", properties: {} }],
+            edges: [danglingSegmentOf("e-part", "shared-id")],
+          }),
+          { onConflict: "error", batchSize: 100, validateReferences: false },
+        ),
+      ).rejects.toBe(detachFailure);
+      expect(
+        await store.nodes.CeiSegment.getById("shared-id" as never),
+      ).toBeUndefined();
+      expect(await store.edges.ceiSegmentOf.count()).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+      await backend.close();
+    }
+  });
 });
 
 const CeiRoot = defineNode("CeiRoot", { schema: z.object({}) });
@@ -493,6 +530,46 @@ describe("validating import: an accepted composition edge is not evidence of att
         await store.nodes.CeiMid.getById("mid-1" as never),
       ).toBeUndefined();
       expect(await store.verifyConstraintFences()).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("reports a purged part with why the payload left it without a whole", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildNestedGraph("oneActive"),
+        backend,
+      );
+      const root = await store.nodes.CeiRoot.create({});
+      const result = await importGraph(
+        store,
+        payload({
+          nodes: [{ kind: "CeiMid", id: "mid-1", properties: {} }],
+          edges: [
+            {
+              kind: "ceiMidOf",
+              id: "e-mid-1",
+              from: { kind: "CeiMid", id: "mid-1" },
+              to: { kind: "CeiRoot", id: root.id },
+              properties: {},
+              validFrom: ENDED_FROM,
+              validTo: ENDED_TO,
+            },
+          ],
+        }),
+        { onConflict: "error" },
+      );
+
+      const partError = requireDefined(
+        result.errors.find((error) => error.entityType === "node"),
+      ).error;
+      // The payload did carry a composition edge for the part; it ended.
+      expect(partError).not.toMatch(/no `partOf` was given/u);
+      expect(partError).toMatch(
+        /CeiMid "mid-1" was removed: .*held no live whole/u,
+      );
     } finally {
       await backend.close();
     }

@@ -18,10 +18,12 @@ export {
 } from "./service-facade";
 export {
   applyIdentityChangesForContext,
+  assertIdentityTransitionsMonotone,
   IDENTITY_IMPORT_FAILED_ASSERTION,
   IDENTITY_IMPORT_PROGRESS,
   importIdentityAssertionsIntoTarget,
   importIdentityTransitionsIntoTarget,
+  isIdentityTransitionRestore,
   readIdentityRestoreBaseline,
 } from "./service-interchange-write";
 export type { IdentityRebuildContext } from "./service-maintenance";

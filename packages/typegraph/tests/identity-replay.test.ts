@@ -11,18 +11,22 @@
  * their transaction-facade counterparts, directly.
  */
 import { sql as drizzleSql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
+  type IdentityReplayStep,
+  type RestoredIdentityTransition,
   type TransitionPageCursor,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
+  asRecordedInstant,
   createRecordedInstant,
+  type RecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
 import { IdentityReplayError, ValidationError } from "../src/errors";
@@ -33,8 +37,10 @@ import {
   identityTransitionsOf,
 } from "../src/identity/replay";
 import { pruneIdentityTransitionsForContext } from "../src/identity/transition-log";
+import { exportGraph, importGraph } from "../src/interchange";
 import { storeRuntime } from "../src/store/runtime-port";
 import { nowIso } from "../src/utils/date";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -241,9 +247,9 @@ describe("identity replay", () => {
     // The window still narrows the ANSWER — discovery being unbounded must
     // not leak the later boundary back into the result.
     for (const transition of windowed) {
-      expect(recordedInstantRevision(transition.recorded)).toBeLessThanOrEqual(
-        firstMergeRevision,
-      );
+      expect(
+        recordedInstantRevision(asRecordedInstant(transition.recorded)),
+      ).toBeLessThanOrEqual(firstMergeRevision);
     }
     const { transitions: unbounded } = await identityTransitionsOf(ctx, b);
     expect(unbounded.length).toBeGreaterThan(windowed.length);
@@ -333,12 +339,18 @@ describe("identity replay", () => {
     const before = await identityReplay(ctx, a);
     expect(before.steps.length).toBeGreaterThanOrEqual(3);
 
-    // Hand-corrupt every transition row's class_kind/class_id to a bogus
-    // class that never existed. Written through the RAW drizzle handle, not
-    // the store's capture-guarded backend, which refuses raw statement
-    // execution while history capture is enabled.
+    // Hand-corrupt every transition row's class_kind/class_id to name `a`
+    // itself, so the log now claims every one of these transitions produced a
+    // class labelled `a` — including the retraction that actually left `b` and
+    // `c` together. The rows still name a member of `a`'s class, so they stay
+    // in `a`'s history; only what they say about the class changes. Written
+    // through the RAW drizzle handle, not the store's capture-guarded backend,
+    // which refuses raw statement execution while history capture is enabled.
+    expect(before.steps.some((step) => step.transition.class.id !== "a")).toBe(
+      true,
+    );
     db.run(
-      drizzleSql`UPDATE typegraph_identity_transitions SET class_kind = 'Bogus', class_id = 'nonexistent'`,
+      drizzleSql`UPDATE typegraph_identity_transitions SET class_kind = 'Person', class_id = 'a'`,
     );
 
     const after = await identityReplay(ctx, a);
@@ -347,7 +359,7 @@ describe("identity replay", () => {
       const originalStep = before.steps[index];
       if (originalStep === undefined) throw new Error("index mismatch");
       // The explanation changed (we corrupted it)...
-      expect(step.transition.class.kind).toBe("Bogus");
+      expect(step.transition.class).toEqual(a);
       // ...but membership before/after did NOT, because it is reconstructed
       // through historicalIdentityReconstructionCtes, never read off the row.
       expect(step.before.map((ref) => ref.id).toSorted()).toEqual(
@@ -423,6 +435,49 @@ describe("identity replay", () => {
   // `code`, drop the `ceiling` detail, or edit the suggestion string in
   // `identityReplayWalkIncompleteError` (replay.ts) and this test fails on
   // the exact field that changed.
+  it("types a restored transition's instant apart from this graph's recorded instants", async () => {
+    const source = await buildAbcStore();
+    await source.identity.assertSame(
+      { kind: "Person", id: "a" },
+      { kind: "Person", id: "b" },
+    );
+    const archive = await exportGraph(source, { identityMode: "archival" });
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const imported = await importGraph(target, archive, { onConflict: "skip" });
+    expect(imported.errors).toEqual([]);
+
+    const { transitions } = await target.identity.transitionsOf({
+      kind: "Person",
+      id: "a",
+    });
+    const restored = transitions.filter(
+      (transition): transition is RestoredIdentityTransition<typeof graph> =>
+        transition.restored !== undefined,
+    );
+    expect(restored.length).toBeGreaterThan(0);
+
+    // The source graph's instant has the same string form, but names a
+    // revision on the source's recorded axis, so it is not an anchor for a
+    // read of this graph.
+    expectTypeOf(
+      requireDefined(restored[0]).recorded,
+    ).not.toExtend<RecordedInstant>();
+    expectTypeOf<
+      IdentityReplayStep<typeof graph>["transition"]["recorded"]
+    >().toEqualTypeOf<RecordedInstant>();
+    function anchorOnRestored(
+      transition: RestoredIdentityTransition<typeof graph>,
+    ): void {
+      // @ts-expect-error a restored transition's instant is not this graph's recorded instant
+      target.asOfRecorded(transition.recorded);
+    }
+    void anchorOnRestored;
+  });
+
   it("identityReplayWalkIncompleteError names the safety ceiling that tripped it", () => {
     const error = identityReplayWalkIncompleteError(2_000_000);
     expect(error).toBeInstanceOf(IdentityReplayError);

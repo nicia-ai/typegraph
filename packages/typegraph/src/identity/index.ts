@@ -8,8 +8,9 @@ export {
   type IdentityReplayStep,
   type IdentityTransition,
   type IdentityTransitionHistory,
+  type RecordedIdentityTransition,
+  type RestoredIdentityTransition,
   type TransitionPageCursor,
-  transitionPageCursor,
 } from "./replay";
 export {
   type IdentityDecisionProvenance,

@@ -42,6 +42,7 @@ export {
   type RecordedInstant,
   recordedInstantRevision,
   recordedInstantWallTime,
+  type RestoredRecordedInstant,
 } from "./temporal";
 
 // Graph definition

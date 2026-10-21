@@ -20,8 +20,10 @@ import {
   IdentityReplayError,
   pruneIdentityTransitions,
   type TransitionPageCursor,
+  ValidationError,
 } from "../../../src";
 import {
+  asRecordedInstant,
   createRecordedInstant,
   recordedInstantRevision,
   recordedInstantWallTime,
@@ -263,7 +265,9 @@ export function registerIdentityReplayIntegrationTests(
       );
       const restoredRevisions = restoredHistory.transitions
         .filter((transition) => transition.restored !== undefined)
-        .map((transition) => recordedInstantRevision(transition.recorded));
+        .map((transition) =>
+          recordedInstantRevision(asRecordedInstant(transition.recorded)),
+        );
       const highestRestored = Math.max(...restoredRevisions);
       expect(highestRestored).toBeGreaterThanOrEqual(nextRevision);
 
@@ -485,6 +489,64 @@ export function registerIdentityReplayIntegrationTests(
         expect(replay.incompleteDiscovery).toBeUndefined();
       },
     );
+
+    it("stops a member's history where it left its class, though that class goes on changing", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageSourceGraph,
+      );
+      const [a, b, c, d] = ["left-a", "left-b", "left-c", "left-d"].map(
+        (id) => ({ kind: "Person" as const, id }),
+      ) as [
+        ReturnType<typeof personRef>,
+        ReturnType<typeof personRef>,
+        ReturnType<typeof personRef>,
+        ReturnType<typeof personRef>,
+      ];
+      for (const ref of [a, b, c, d]) {
+        await store.nodes.Person.create({}, { id: ref.id });
+      }
+      const joined = await store.identity.assertSame(a, b);
+      await store.identity.retractAssertion(joined.assertion.id);
+      const left = requireDefined(await store.recordedNow());
+      // `a` is alone from here on; the class it left keeps merging.
+      await store.identity.assertSame(b, c);
+      await store.identity.assertSame(c, d);
+
+      const history = await store.identity.transitionsOf(a);
+      const replay = await store.identity.replay(a);
+      expect(history.transitions.map((transition) => transition.cause)).toEqual(
+        ["assert", "retract", "retract"],
+      );
+      expect(
+        history.transitions.every(
+          (transition) =>
+            recordedInstantRevision(asRecordedInstant(transition.recorded)) <=
+            recordedInstantRevision(left),
+        ),
+      ).toBe(true);
+      expect(
+        replay.steps.map((step) => [
+          step.transition.cause,
+          memberKeys(step.before),
+          memberKeys(step.after),
+        ]),
+      ).toEqual([
+        ["assert", ["Person:left-a"], ["Person:left-a", "Person:left-b"]],
+        ["retract", ["Person:left-a", "Person:left-b"], ["Person:left-a"]],
+        ["retract", ["Person:left-a", "Person:left-b"], ["Person:left-a"]],
+      ]);
+      // Every step changed `a`'s class.
+      for (const step of replay.steps) {
+        expect(memberKeys(step.before)).not.toEqual(memberKeys(step.after));
+      }
+
+      // The class `a` left still reports its own later merges.
+      const remainingHistory = await store.identity.transitionsOf(b);
+      expect(
+        remainingHistory.transitions.map((transition) => transition.cause),
+      ).toEqual(["assert", "retract", "retract", "assert", "assert"]);
+    });
 
     it("keeps a departed same-id fold member's history discoverable when no assertion ever named it", async () => {
       const store = await provisionDepartedLineageStore(
@@ -889,6 +951,19 @@ export function registerIdentityReplayIntegrationTests(
             CURSOR_GIVEN_NON_CURSOR,
           );
         }
+      });
+
+      it("a cursor refuses a read of another reference's lineage", async () => {
+        const { store, cursor } = await provisionPagedLineage(context);
+        const other = personRef("cursor-b");
+        await expect(
+          store.identity.transitionsOf(other, { cursor }),
+        ).rejects.toThrow(
+          /pages the lineage of Person\/cursor-a, not Person\/cursor-b/,
+        );
+        await expect(store.identity.replay(other, { cursor })).rejects.toThrow(
+          ValidationError,
+        );
       });
 
       it("a cursor composes with the window by intersection", async () => {
