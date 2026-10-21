@@ -14,7 +14,10 @@ import {
   rebuildIdentityClosure,
   type TransactionBackend,
 } from "../src";
-import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import {
   type RecordedInstant,
   recordedInstantRevision,
@@ -571,6 +574,33 @@ describe("Operational Identity", () => {
   // preflight (`prepareRollbackPreflight`, src/schema/manager.ts) flips the
   // pointer onto an identity-enabled version whose closure was never
   // rebuilt, and this test fails.
+
+  it("names the identity refusal, not a capability gap, on a backend without setActiveVersionWithPreflight", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(graph, backend);
+    await migrateSchema(backend, disabledMigrationGraph, 1);
+    const restrictedBackend = projectBackendWithout(backend, [
+      "setActiveVersionWithPreflight",
+    ]);
+
+    // The refusal reads no data, so the missing atomic primitive is not
+    // why this rollback cannot run.
+    await expect(
+      rollbackSchema(restrictedBackend, graph.id, 1),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: matchingObject({
+        code: "IDENTITY_ROLLBACK_REQUIRES_MIGRATION",
+        fromVersion: 2,
+        toVersion: 1,
+      }),
+    });
+    const active = await backend.getActiveSchema(graph.id);
+    expect(active?.version).toBe(2);
+  });
+  // MUTATION CHECK: throwing the atomic-preflight capability error whenever
+  // `setActiveVersionWithPreflight` is missing (src/schema/manager.ts
+  // `rollbackSchema`) refuses with IDENTITY_REQUIRES_ATOMIC_BACKEND instead.
 
   it("rolls back an identity-enabled graph when identity-relevant schema is unchanged", async () => {
     const backend = createTestBackend();

@@ -1991,9 +1991,7 @@ export async function rollbackSchema(
     return;
   }
   const setActiveWithPreflight = backend.setActiveVersionWithPreflight;
-  if (setActiveWithPreflight === undefined) {
-    throw atomicPreflightUnsupportedError(graphId, preflight.capabilityError);
-  }
+  if (setActiveWithPreflight === undefined) throw preflight.unsupportedError;
   await setActiveWithPreflight(params, preflight.run);
 }
 
@@ -2023,7 +2021,13 @@ function prepareRollbackPreflight(
 ):
   | Readonly<{
       run: (target: SchemaCommitPreflightBackend) => Promise<void>;
-      capabilityError: AtomicPreflightCapabilityError;
+      /**
+       * What a backend without `setActiveVersionWithPreflight` is refused
+       * with. When the identity refusal is owed, that refusal itself: it
+       * reads no data and refuses the rollback on every backend, so the
+       * missing atomic primitive is not why the rollback cannot run.
+       */
+      unsupportedError: Error;
     }>
   | undefined {
   const before = parseSerializedSchema(active.schemaDoc);
@@ -2046,27 +2050,37 @@ function prepareRollbackPreflight(
           ),
         )
     : undefined;
+  const edgeMatchIdentity = prepareEdgeMatchIdentityCommitPreflight(
+    { id: graphId },
+    matchIdentityRekeyedEdgeKinds(
+      Object.entries(after.edges).map(
+        ([kind, edge]) => [kind, edge.matchIdentity] as const,
+      ),
+      before,
+    ),
+    { fromVersion: active.version, toVersion: target.version },
+  );
   const run = composeSchemaCommitPreflight({
     structural: undefined,
-    edgeMatchIdentity: prepareEdgeMatchIdentityCommitPreflight(
-      { id: graphId },
-      matchIdentityRekeyedEdgeKinds(
-        Object.entries(after.edges).map(
-          ([kind, edge]) => [kind, edge.matchIdentity] as const,
-        ),
-        before,
-      ),
-      { fromVersion: active.version, toVersion: target.version },
-    ),
+    edgeMatchIdentity,
     tightening,
     identity,
   });
   if (run === undefined) return undefined;
   return {
     run,
-    capabilityError:
-      schemaCommitCapabilityError(identity !== undefined, tightening) ??
-      IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+    unsupportedError:
+      identity === undefined ?
+        atomicPreflightUnsupportedError(
+          graphId,
+          schemaCommitCapabilityError(false, tightening) ??
+            IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+        )
+      : identityRollbackRequiresMigrationError(
+          graphId,
+          active.version,
+          target.version,
+        ),
   };
 }
 
