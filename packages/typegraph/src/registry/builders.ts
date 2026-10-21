@@ -94,7 +94,7 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
  * can't resolve to an inherited member instead of `undefined`.
  *
  * The serialized-schema sibling of this adapter is
- * `buildSerializedEdgeKindFacts` (`src/schema/deserializer.ts`): the two
+ * `buildSerializedEdgeKindFacts` (`./edge-kind-facts.ts`): the two
  * read genuinely different representations (a live `GraphDef` vs a persisted
  * document), so they stay separate, but both feed the one
  * `expandEdgeEndpointAllowance`.

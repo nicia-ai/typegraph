@@ -111,16 +111,14 @@ import {
   ontologyRelationIdentityKey,
 } from "../registry/composition-relation";
 import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
 import { type KindRegistry } from "../registry/kind-registry";
 import { requiredCompositionPartKinds } from "../store/operations/composition-create";
 import { compareStrings, compareStringTuples } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
-import {
-  buildRegistryFromSerializedSchema,
-  buildSerializedEdgeKindFacts,
-} from "./deserializer";
+import { buildRegistryFromSerializedSchema } from "./deserializer";
 import { type ChangeSeverity, type ChangeType } from "./migration";
 import {
   type SerializedOntologyRelation,

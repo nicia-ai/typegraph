@@ -251,6 +251,38 @@ export function inferCompositionPartSide(
 }
 
 /**
+ * THE `partSide` a composition relation is persisted and identified by: the
+ * declared side only when the realizing edge admits the pair in BOTH
+ * orientations, so the declaration is what decides it; `undefined` when the
+ * edge's endpoints decide the side, so a redundant `partSide` and an omitted
+ * one serialize, hash and diff identically. A declaration the inference
+ * refuses (an unknown via edge, endpoints admitting neither orientation, a
+ * contradicting or invalid side) is kept verbatim, so the registry built from
+ * the document refuses it exactly as it refuses the graph.
+ */
+export function canonicalCompositionPartSide(
+  relation: NamedOntologyRelation,
+  edgeFacts: ReadonlyMap<string, EdgeKindFacts>,
+  registry: KindRegistry,
+): CompositionPartSide | undefined {
+  const declared = relation.partSide;
+  if (declared === undefined || relation.via === undefined) return declared;
+  const facts = edgeFacts.get(relation.via);
+  if (facts === undefined) return declared;
+  const { partKind, wholeKind } = normalizePartWhole(relation);
+  const inference = inferCompositionPartSide(
+    { partKind, wholeKind, declared },
+    facts,
+    registry,
+  );
+  if ("code" in inference) return declared;
+  const ambiguous =
+    edgeAdmitsPair(partKind, wholeKind, facts, registry) &&
+    edgeAdmitsPair(wholeKind, partKind, facts, registry);
+  return ambiguous ? declared : undefined;
+}
+
+/**
  * THE side->direction mapping for composition navigation: which way a
  * realizing edge kind must be walked to move toward its `"parts"` (or
  * `"wholes"`) end, given which endpoint carries the part.

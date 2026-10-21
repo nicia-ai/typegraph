@@ -37,8 +37,15 @@ import {
   type OntologyRelation,
 } from "../ontology/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
-import { compositionRelationFields } from "../registry/composition-relation";
-import { computeClosuresFromNamedOntology } from "../registry/kind-registry";
+import {
+  canonicalCompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
+import {
+  computeClosuresFromNamedOntology,
+  KindRegistry,
+} from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { createDataKeyedBag } from "../utils/object";
@@ -73,7 +80,7 @@ export function serializeSchema<G extends GraphDef>(
 ): SerializedSchema {
   const nodes = serializeNodes(graph);
   const edges = serializeEdges(graph);
-  const ontology = serializeOntology(graph.ontology);
+  const ontology = serializeOntology(graph.ontology, edges);
   const indexes = serializeIndexes(graph.indexes);
   const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
@@ -558,6 +565,7 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
  */
 function serializeOntology(
   relations: readonly OntologyRelation[],
+  edges: Record<string, SerializedEdgeDef>,
 ): SerializedOntology {
   // Collect unique meta-edges
   const metaEdgeMap = new Map<string, MetaEdge>();
@@ -575,9 +583,9 @@ function serializeOntology(
     metaEdges[name] = serializeMetaEdge(metaEdge);
   }
 
-  // Serialize relations
-  const serializedRelations = relations.map((relation) =>
-    serializeOntologyRelation(relation),
+  const serializedRelations = withCanonicalPartSides(
+    relations.map((relation) => serializeOntologyRelation(relation)),
+    edges,
   );
 
   const closures = serializeClosures(serializedRelations);
@@ -611,6 +619,38 @@ function serializeOntologyRelation(
     to: getTypeName(relation.to),
     ...compositionRelationFields(relation),
   };
+}
+
+/**
+ * `relations` with each composition `partSide` reduced to
+ * `canonicalCompositionPartSide`: a side the realizing edge's endpoints
+ * already decide is omitted, so spelling it out does not change the document,
+ * its hash, or the relation's identity in a diff. A side the edge admits both
+ * ways is kept, since it is what decides the relation.
+ */
+function withCanonicalPartSides(
+  relations: readonly SerializedOntologyRelation[],
+  edges: Record<string, SerializedEdgeDef>,
+): readonly SerializedOntologyRelation[] {
+  if (!relations.some((relation) => relation.partSide !== undefined)) {
+    return relations;
+  }
+  const registry = new KindRegistry(
+    new Map(),
+    new Map(),
+    computeClosuresFromNamedOntology(relations),
+  );
+  const edgeFacts = buildSerializedEdgeKindFacts(edges);
+  return relations.map((relation) => {
+    if (relation.partSide === undefined) return relation;
+    const { partSide: _declared, ...rest } = relation;
+    const partSide = canonicalCompositionPartSide(
+      relation,
+      edgeFacts,
+      registry,
+    );
+    return partSide === undefined ? rest : { ...rest, partSide };
+  });
 }
 
 /**
