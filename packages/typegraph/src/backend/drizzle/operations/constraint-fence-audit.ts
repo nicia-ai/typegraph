@@ -24,7 +24,7 @@ import {
 } from "../../../store/claims/edge-claims";
 import type { CompositionClaimScope } from "../../types";
 import { claimHolderTerms, endpointTerms } from "./edge-claims";
-import { currentWindowPredicate, quotedColumn, type Tables } from "./shared";
+import { quotedColumn, type Tables } from "./shared";
 
 /** The alias the correlated subquery reads the same relation under. */
 const PEER = "peer";
@@ -43,6 +43,23 @@ function inList(values: readonly string[]): SQL {
     values.map((value) => sql`${value}`),
     sql`, `,
   );
+}
+
+/**
+ * THE population a row-shape audit family reads: every row that is not
+ * tombstoned, whatever its validity window. That is what the write path admits
+ * and keeps fencing — a write validates a future-dated or already-ended row
+ * like any other, and a later current read or an `asOf` read returns it — so an
+ * audit that read only the current window would pass a commit over a row that
+ * becomes a violation once the clock reaches it. A family whose declaration
+ * additionally retires ended rows (a `oneActive` axis) layers its own term on
+ * top of this one.
+ */
+function auditedRowTerm(
+  relation: string,
+  table: Readonly<{ deletedAt: Readonly<{ name: string }> }>,
+): SQL {
+  return sql`${qualified(relation, table.deletedAt)} IS NULL`;
 }
 
 /**
@@ -111,13 +128,13 @@ export function buildContendedUniqueRowAudit(
     FROM ${uniques}
     WHERE ${qualified(relation, uniques.graphId)} = ${graphId}
       AND ${qualified(relation, uniques.constraintName)} IN (${inList(constraintNames)})
-      AND ${qualified(relation, uniques.deletedAt)} IS NULL
+      AND ${auditedRowTerm(relation, uniques)}
       AND EXISTS (
         SELECT 1 FROM ${uniques} AS ${sql.raw(`"${PEER}"`)}
         WHERE ${qualified(PEER, uniques.graphId)} = ${qualified(relation, uniques.graphId)}
           AND ${qualified(PEER, uniques.constraintName)} = ${qualified(relation, uniques.constraintName)}
           AND ${qualified(PEER, uniques.key)} = ${qualified(relation, uniques.key)}
-          AND ${qualified(PEER, uniques.deletedAt)} IS NULL
+          AND ${auditedRowTerm(PEER, uniques)}
           AND ${qualified(PEER, uniques.nodeKind)} <> ${qualified(relation, uniques.nodeKind)}
       )
   `;
@@ -162,12 +179,12 @@ export function buildContendedEdgeRowAudit(
     FROM ${edges}
     WHERE ${qualified(relation, edges.graphId)} = ${graphId}
       AND ${qualified(relation, edges.kind)} IN (${inList(edgeKinds)})
-      AND ${qualified(relation, edges.deletedAt)} IS NULL${activeOnly}
+      AND ${auditedRowTerm(relation, edges)}${activeOnly}
       AND EXISTS (
         SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
         WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
           AND ${qualified(PEER, edges.kind)} = ${qualified(relation, edges.kind)}${peerEndpoints}
-          AND ${qualified(PEER, edges.deletedAt)} IS NULL${peerActiveOnly}
+          AND ${auditedRowTerm(PEER, edges)}${peerActiveOnly}
           AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
       )
   `;
@@ -263,7 +280,7 @@ export function buildDisjointOverlapAudit(
     FROM ${nodes}
     WHERE ${qualified(relation, nodes.graphId)} = ${graphId}
       AND ${qualified(relation, nodes.kind)} = ${kind}
-      AND ${qualified(relation, nodes.deletedAt)} IS NULL
+      AND ${auditedRowTerm(relation, nodes)}
   `;
   return sql`${liveIdsOfKind(kinds[0])} INTERSECT ${liveIdsOfKind(kinds[1])}`;
 }
@@ -293,19 +310,15 @@ export function buildDisjointOverlapAudit(
  * intersects the per-chunk results, because that budget (not expression
  * depth) is what an unbounded pair count can still exceed on every dialect.
  *
- * "Live" is {@link currentWindowPredicate} — the same window an ordinary
- * current read applies — not `valid_to IS NULL`. A currently-valid edge can
- * carry a bounded FUTURE `valid_to` (e.g. a term appointment); it is what
- * every current-coordinate read returns today, so it is exactly what this
- * audit must not miss. `now` is a parameter, not `nowIso()` sampled here, so
- * every chunk of every allowance in one audit call reads against the same
- * instant.
+ * "Live" is {@link auditedRowTerm}, the population every row-shape family
+ * reads: a future-dated edge becomes current once the clock reaches it, and an
+ * ended one is what an `asOf` read inside its window returns, so neither may
+ * sit on a pair the declaration no longer admits.
  */
 export function buildMisassignedEdgeEndpointAudit(
   tables: Tables,
   graphId: string,
   edgeKind: string,
-  now: string,
   allowedPairs: readonly (readonly [string, string])[],
 ): SQL {
   const { edges } = tables;
@@ -330,6 +343,6 @@ export function buildMisassignedEdgeEndpointAudit(
     FROM ${edges}
     WHERE ${qualified(relation, edges.graphId)} = ${graphId}
       AND ${qualified(relation, edges.kind)} = ${edgeKind}
-      AND ${currentWindowPredicate(relation, edges, now)}${admittedPredicate}
+      AND ${auditedRowTerm(relation, edges)}${admittedPredicate}
   `;
 }

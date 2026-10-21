@@ -645,7 +645,6 @@ export type CommonOperationStrategy = Readonly<{
   buildMisassignedEdgeEndpointAudit: (
     graphId: string,
     edgeKind: string,
-    now: string,
     allowedPairs: readonly (readonly [string, string])[],
   ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
@@ -1353,14 +1352,12 @@ function createCommonOperationStrategy(
     buildMisassignedEdgeEndpointAudit(
       graphId: string,
       edgeKind: string,
-      now: string,
       allowedPairs: readonly (readonly [string, string])[],
     ): SQL {
       return buildMisassignedEdgeEndpointAudit(
         tables,
         graphId,
         edgeKind,
-        now,
         allowedPairs,
       );
     },

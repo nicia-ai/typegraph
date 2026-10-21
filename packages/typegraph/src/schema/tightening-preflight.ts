@@ -16,6 +16,7 @@
  * `OntologySnapshot` already carries `edges`, so no input change was needed
  * to add the cardinality half.
  */
+import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { createSqlSchema } from "../query/compiler/schema";
@@ -37,6 +38,7 @@ import {
   requiredCompositionPartKinds,
 } from "../store/operations/composition-create";
 import { groupBy } from "../utils/array";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
@@ -44,6 +46,8 @@ import {
   newlyConstrainedEdgeAxes,
 } from "./edge-cardinality-change";
 import {
+  type AddedEdgeKindProbes,
+  addedEdgeKindProbes,
   buildSchemaBaselineRegistry,
   classifyOntologyChanges,
   type OntologyChange,
@@ -211,6 +215,36 @@ async function readCompositionUnattachedPartsForEdgeKinds(
   }));
 }
 
+/**
+ * The probes an added edge kind owes, narrowed to the kinds that hold rows: a
+ * kind with none (the ordinary case, a kind that never existed) has nothing
+ * either probe could find, and is settled by one emptiness read rather than
+ * by the audit families.
+ */
+async function populatedAddedEdgeKindProbes(
+  target: SchemaCommitPreflightBackend,
+  graphId: string,
+  probes: AddedEdgeKindProbes,
+): Promise<AddedEdgeKindProbes> {
+  const populated = new Set<string>();
+  for (const { edgeKind } of probes.endpointAllowances) {
+    const hasRows = await schemaKindHasRows(target, graphId, {
+      entity: "edge",
+      kind: edgeKind,
+      rows: "nonDeleted",
+    });
+    if (hasRows) populated.add(edgeKind);
+  }
+  return {
+    endpointAllowances: probes.endpointAllowances.filter((allowance) =>
+      populated.has(allowance.edgeKind),
+    ),
+    acyclicEdgeKinds: probes.acyclicEdgeKinds.filter((edgeKind) =>
+      populated.has(edgeKind),
+    ),
+  };
+}
+
 function buildOntologyTighteningViolatedError(
   params: SchemaTighteningPreflightParams,
   probedChanges: readonly OntologyChange[],
@@ -338,10 +372,14 @@ export function prepareSchemaTighteningPreflight(
     uniqueConstraints,
     changes.length > 0,
   );
+  const addsEdgeKind = Object.keys(params.after.edges).some(
+    (edgeKind) => !hasOwnKey(params.before.edges, edgeKind),
+  );
   if (
     probes.length === 0 &&
     newlyConstrainedAxes.length === 0 &&
-    !mayGateUniqueness
+    !mayGateUniqueness &&
+    !addsEdgeKind
   ) {
     return undefined;
   }
@@ -366,10 +404,16 @@ export function prepareSchemaTighteningPreflight(
   if (
     probes.length === 0 &&
     newlyConstrainedAxes.length === 0 &&
-    gates.length === 0
+    gates.length === 0 &&
+    !addsEdgeKind
   ) {
     return undefined;
   }
+  const addedEdgeKinds = addedEdgeKindProbes(
+    params.before,
+    params.after,
+    proposedRegistry,
+  );
 
   const grouped = {
     disjointness: probeOfKind(probes, "nodeDisjointness"),
@@ -406,6 +450,19 @@ export function prepareSchemaTighteningPreflight(
 
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
     await assertUniquenessClaimGatesOpen(target, params, gates);
+    const populatedAddedEdgeKinds = await populatedAddedEdgeKindProbes(
+      target,
+      params.graphId,
+      addedEdgeKinds,
+    );
+    const endpointAllowances = [
+      ...(grouped.endpoints?.allowances ?? []),
+      ...populatedAddedEdgeKinds.endpointAllowances,
+    ];
+    const acyclicEdgeKinds = [
+      ...(grouped.acyclicity?.edgeKinds ?? []),
+      ...populatedAddedEdgeKinds.acyclicEdgeKinds,
+    ];
 
     const claimBackedViolations = await auditConstraintFences(target, {
       declarations: {
@@ -422,7 +479,7 @@ export function prepareSchemaTighteningPreflight(
           ...newlyConstrainedAxes,
           ...compositionEdgeCardinalities,
         ],
-        edgeEndpointAllowances: grouped.endpoints?.allowances ?? [],
+        edgeEndpointAllowances: endpointAllowances,
       },
       uniquenessGroups,
       registry: proposedRegistry,
@@ -433,10 +490,11 @@ export function prepareSchemaTighteningPreflight(
     // other family above reads through): folding the recursive predicate
     // behind it would create a second implementation of "is there a cycle".
     // It runs `readEdgeAcyclicityViolations` directly, scoped to exactly the
-    // edge kinds THIS commit newly declares `acyclic: true` on — the same
-    // delta-scoping discipline as every family above.
+    // edge kinds THIS commit newly declares `acyclic: true` on, plus an added
+    // `acyclic: true` kind that already holds rows — the same delta-scoping
+    // discipline as every family above.
     const acyclicityViolations =
-      grouped.acyclicity === undefined ?
+      acyclicEdgeKinds.length === 0 ?
         []
       : await readEdgeAcyclicityViolations(
           {
@@ -447,7 +505,7 @@ export function prepareSchemaTighteningPreflight(
             target,
             operation: "schema-commit:acyclic-tightening",
           },
-          grouped.acyclicity.edgeKinds.map((edgeKind) =>
+          acyclicEdgeKinds.map((edgeKind) =>
             standaloneAcyclicRelation(edgeKind),
           ),
         );
@@ -528,7 +586,7 @@ export function prepareSchemaTighteningPreflight(
     capabilityError:
       newlyConstrainedAxes.length > 0 ?
         EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
-      : gates.length > 0 && probes.length === 0 ?
+      : gates.length > 0 && probes.length === 0 && !addsEdgeKind ?
         UNIQUENESS_CLAIM_GATE_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
       : ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
   };

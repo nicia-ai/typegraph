@@ -1085,10 +1085,9 @@ function pairAtomicMutationChunksWithIds<T>(
   });
 }
 
-// `graphId`, `edgeKind`, and `now` (bound twice, once per side of the
-// current-window predicate) are fixed per statement; each admitted pair
-// costs two more (`fromKind`, `toKind`).
-const MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT = 4;
+// `graphId` and `edgeKind` are fixed per statement; each admitted pair costs
+// two more (`fromKind`, `toKind`).
+const MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT = 2;
 const MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT = 2;
 
 /**
@@ -1161,7 +1160,6 @@ async function readMisassignedEdgeEndpointRows(
   operationStrategy: CommonOperationStrategy,
   graphId: string,
   allowance: EdgeEndpointAllowance,
-  now: string,
   pairChunkSize: number,
 ): Promise<readonly MisassignedEdgeEndpointRow[]> {
   const pairChunks =
@@ -1174,7 +1172,6 @@ async function readMisassignedEdgeEndpointRows(
       operationStrategy.buildMisassignedEdgeEndpointAudit(
         graphId,
         allowance.edgeKind,
-        now,
         pairChunk,
       ),
     );
@@ -1948,7 +1945,10 @@ export function createCommonOperationBackend(
         holder_edge_id: string;
       }>(lockQuery);
       const holderByTarget = new Map(
-        rows.map((row) => [claimTargetKey(row.axis, row.key), row.holder_edge_id]),
+        rows.map((row) => [
+          claimTargetKey(row.axis, row.key),
+          row.holder_edge_id,
+        ]),
       );
       const incumbentByTarget = await readClaimlessIncumbents(chunk);
       for (const entry of chunk) {
@@ -5354,7 +5354,7 @@ export function createCommonOperationBackend(
           }
           return edgeRows;
         },
-        }),
+      }),
 
     ...(buildFindEdgesAcrossKinds === undefined ?
       {}
@@ -5680,11 +5680,6 @@ export function createCommonOperationBackend(
       // meaningful.
       const misassignedEdgeEndpointRows: MisassignedEdgeEndpointRow[] = [];
       if (params.edgeEndpointAllowances !== undefined) {
-        // One instant for the whole family: every chunk of every allowance
-        // in this call reads against the same "current" window, exactly as
-        // `withPinnedReadInstant` pins one instant across the operands of a
-        // set operation (`src/query/compiler/temporal.ts`).
-        const now = nowIso();
         const pairChunkSize =
           misassignedEdgeEndpointPairChunkSize(maxBindParameters);
         for (const allowance of params.edgeEndpointAllowances) {
@@ -5693,7 +5688,6 @@ export function createCommonOperationBackend(
             operationStrategy,
             params.graphId,
             allowance,
-            now,
             pairChunkSize,
           )) {
             misassignedEdgeEndpointRows.push(row);
