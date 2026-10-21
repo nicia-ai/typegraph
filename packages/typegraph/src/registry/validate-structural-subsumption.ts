@@ -11,8 +11,17 @@
  * the three authoring routes (compile-time `GraphDef`, `evolve()`-authored
  * extension, or a deserialized persisted document) produced it.
  *
- * **The pair set is `subClassAncestors`, not the declared relations.** Item
- * B folds every `equivalentTo` class into `subClassAncestors` /
+ * For a live graph the projection compared is `structuralSubtypeProjection`
+ * (`src/schema/structural-subtype-projection.ts`), which also marks the Zod
+ * constraints the persisted projection drops (regex flags, refinements,
+ * strict objects, constraint-shaped `.meta()` keys), so a pair carrying one
+ * is `incomparable` rather than judged on a projection that lost it. A
+ * persisted document has no Zod schema and is compared on its projection
+ * alone; the live check, which every commit path builds first, is the
+ * stricter of the two.
+ *
+ * **The pair set is `subClassAncestors`, not the declared relations.** The
+ * registry folds every `equivalentTo` class into `subClassAncestors` /
  * `subClassDescendants` before the transitive closure
  * (`src/registry/kind-registry.ts`), so walking `subClassAncestors` alone
  * already covers:

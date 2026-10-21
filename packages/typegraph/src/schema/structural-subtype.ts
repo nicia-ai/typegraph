@@ -9,7 +9,11 @@
  * and brands (`.refine`, `.superRefine`, `.brand`, `.pipe`, `.lazy`,
  * `.toLowerCase()` all collapse to their base schema), this predicate is
  * necessarily blind to them too: a Zod-level narrowing with no JSON-Schema
- * trace cannot be judged.
+ * trace cannot be judged. A live graph's registry check therefore compares
+ * `structuralSubtypeProjection` (./structural-subtype-projection.ts), which
+ * marks where the projection dropped a regex flag, a refinement, a strict
+ * object, or read a `.meta()` key as a constraint, so such a pair answers
+ * `incomparable` (rule 3) instead of a guess.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -48,7 +52,14 @@
  *    reference is refused the same way. Rule 6 decides through the same test.
  * 3. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
- *    which is why recursion here cannot diverge.
+ *    which is why recursion here cannot diverge. So is a node carrying a
+ *    constraint its Zod source states and the projection cannot
+ *    ("unsupported-construct"): a regex flag or a constraint-shaped `.meta()`
+ *    key on either side ({@link ZOD_ONLY_CONSTRAINT_KEYWORD}), a refinement
+ *    or a strict object on the parent
+ *    ({@link ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD}). Only a live graph's
+ *    comparison projection carries these markers; a bare persisted
+ *    projection has lost the facts they record.
  * 4. Either side carrying a keyword this predicate recognizes as
  *    CONSTRAINING but does not model the semantics of — `not` (`z.never()`),
  *    `allOf` (`z.intersection`, whose subtyping is a named follow-up),
@@ -109,7 +120,8 @@
  *    drop optional properties (width subtyping — the parent's
  *    `additionalProperties: false` is NOT applied to the child's added
  *    keys, only an explicit non-`false` `additionalProperties` schema
- *    constrains them; and a parent-declared property the child leaves to its
+ *    constrains them — the projection writes `false` for every Zod object,
+ *    stripping or strict, and a strict parent is caught at rule 3; and a parent-declared property the child leaves to its
  *    own OPEN additional-properties schema is compared against that schema
  *    rather than skipped, since an open child does not actually omit the
  *    property — it just declares no NAMED constraint for it), arrays compare
@@ -427,6 +439,25 @@ export const KNOWN_IGNORED_KEYWORDS: ReadonlySet<string> = new Set([
   "readOnly",
 ]);
 
+/**
+ * Marks a schema node whose Zod source constrains values in a way the JSON
+ * Schema projection cannot state, on either side of a comparison: a regex
+ * flag, or a `.meta()` key spelled like a constraining keyword. Written only
+ * by `structuralSubtypeProjection` (`./structural-subtype-projection`), never
+ * into a persisted document.
+ */
+export const ZOD_ONLY_CONSTRAINT_KEYWORD = "x-typegraph-zod-only-constraint";
+
+/**
+ * Marks a schema node whose Zod source narrows values in a way the JSON
+ * Schema projection cannot state, but only in a direction that matters when
+ * the node is the PARENT: a refinement, or a strict object. On a child the
+ * narrowing only makes the child stricter, which a `subtype` verdict may
+ * ignore.
+ */
+export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
+  "x-typegraph-zod-only-parent-constraint";
+
 const SUBTYPE: StructuralSubtypeResult = { verdict: "subtype" };
 
 // ============================================================
@@ -661,6 +692,14 @@ function compareSchemas(
 
   if (hasOwnKey(child, "$ref") || hasOwnKey(parent, "$ref")) {
     return incomparable("schema-reference", path);
+  }
+
+  if (
+    hasOwnKey(child, ZOD_ONLY_CONSTRAINT_KEYWORD) ||
+    hasOwnKey(parent, ZOD_ONLY_CONSTRAINT_KEYWORD) ||
+    hasOwnKey(parent, ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD)
+  ) {
+    return incomparable("unsupported-construct", path);
   }
 
   const childUnmodeled = unmodeledConstruct(child, path);

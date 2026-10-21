@@ -17,7 +17,7 @@ import {
   type NodeType,
 } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
-import { serializeSchemaProperties } from "../schema/serializer";
+import { structuralSubtypeProjection } from "../schema/structural-subtype-projection";
 import { buildValidatedKindRegistry } from "./build-validated";
 import { compositionRelationFields } from "./composition-relation";
 import { type EdgeKindFacts } from "./edge-kind-facts";
@@ -70,14 +70,14 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
           ...compositionRelationFields(relation),
         })),
     edgeFacts: buildGraphEdgeKindFacts(graph.edges),
-    // Memoized by serializeSchemaProperties itself (keyed on the Zod schema
-    // reference), so this closure is called once per node kind per registry
-    // build, not once per closure pair — the structural-subsumption
+    // Memoized by structuralSubtypeProjection itself (keyed on the Zod
+    // schema reference), so this closure is called once per node kind per
+    // registry build, not once per closure pair — the structural-subsumption
     // check's schema source for a live, compile-time graph.
     nodePropertySchemas: (kind) => {
       const nodeType = nodeTypes.get(kind);
       return nodeType === undefined ? undefined : (
-          serializeSchemaProperties(nodeType.schema)
+          structuralSubtypeProjection(nodeType.schema)
         );
     },
     structuralSubsumption: "enforce",
