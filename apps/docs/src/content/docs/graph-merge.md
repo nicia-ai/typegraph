@@ -1115,12 +1115,14 @@ whole behind the target's back, all surfaced through the same
   or ends, resolves to no live whole at all after canonicalization. There is
   no whole to name for this cause, so `whole` is absent.
 
-`planMerge` and `planMergeIncremental` judge both against the state the plan
-would leave — the target's current rows with the plan's own writes laid over
-them — and report every finding in `MergePlanReview.compositionOrphans`. A
-part the plan deletes, a part it moves to another whole (a merged `reparent`)
-and a required part it creates together with its composition edge are not
-orphans and are not reported:
+`planMerge` and `planMergeIncremental` judge all three against the state the
+plan would leave — the target's current rows with the plan's own writes laid
+over them — and report every finding in `MergePlanReview.compositionOrphans`.
+A part the plan deletes or moves to another whole (a merged `reparent`) is not
+a `"deleted"` orphan, and a required part the plan creates together with its
+composition edge is not an `"unattached"` one. A part the plan deletes is
+still reported as `"moved"` when the target holds it under a live whole the
+plan keeps:
 
 ```typescript
 type MergePlanCompositionOrphan = {

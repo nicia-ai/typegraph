@@ -289,8 +289,8 @@ function compositionOrphanMessage(details: MergePlanCompositionOrphan): string {
     return (
       `Applying this merge plan would delete part "${details.part.kind}:${details.part.id}", ` +
       `which the target holds under live whole "${holder.kind}:${holder.id}" (via "${details.viaEdgeKind}") ` +
-      "that the plan neither deletes nor detaches it from. Recompute the merge plan against the " +
-      "target's current state, or reconcile the part's whole in the branch before merging."
+      "that the plan neither deletes nor detaches it from. Stop the branch from deleting the part, " +
+      "or detach the part from that whole on the target, before merging."
     );
   }
   if (details.cause === "unattached") {
