@@ -11,6 +11,10 @@
  * - ENFORCEMENT: the policy merge apply passes does not drop delete-behavior
  *   enforcement — a target node's own `restrict` edge still aborts the
  *   merge, and zero rows change on that refusal.
+ * - CONSUMED EDGES: an edge the plan itself deletes does not block its
+ *   `restrict` endpoint's delete. The branch had to delete the edge before
+ *   the node, and the apply must accept the plan that ordering produced,
+ *   through both the live merge and an applied plan artifact.
  * - ROUTING: the delete is bound to the SAME transaction merge apply is
  *   already running in — its buffered hook runner and attempt — not a
  *   freshly-built context off the outer Store. A delete inside a merge that
@@ -28,9 +32,16 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { branch } from "../../src/graph-merge/branch";
 import type { MergePlan } from "../../src/graph-merge/merge";
-import { commitPlan } from "../../src/graph-merge/merge";
+import {
+  applyMergePlan,
+  commitPlan,
+  merge,
+  planMerge,
+} from "../../src/graph-merge/merge";
 import { mergeKey } from "../../src/graph-merge/node-key";
+import { isErr, unwrap } from "../../src/graph-merge/result";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
@@ -129,6 +140,54 @@ describe.each(backendMatrix())(
       await expect(target.nodes.Part.getById(part.id)).resolves.toBeDefined();
       const survivingEdges = await target.edges.holds.findFrom(whole);
       expect(survivingEdges).toHaveLength(1);
+    });
+
+    async function storeWithRestrictedEdge() {
+      const [target] = await createStoreWithSchema(graph, await makeBackend(), {
+        revisionTracking: true,
+      });
+      const whole = await target.nodes.Whole.create({}, { id: "w1" });
+      const part = await target.nodes.Part.create({}, { id: "p1" });
+      const edge = await target.edges.holds.create(whole, part, {});
+      const source = unwrap(await branch(target, () => makeBackend()));
+      await source.store.edges.holds.delete(edge.id);
+      await source.store.nodes.Whole.delete(whole.id);
+      return { target, source, whole, part, edge };
+    }
+
+    it("merges a branch that deletes an edge and then its restrict endpoint", async () => {
+      cleanups = [];
+      const { target, source, whole, part } = await storeWithRestrictedEdge();
+
+      const result = await merge(target, [source]);
+      if (isErr(result)) {
+        console.info("merge refused", result.error.message, result.error.cause);
+        throw result.error;
+      }
+      console.info("merged", result.data.merged);
+      await expect(target.nodes.Whole.getById(whole.id)).resolves.toBe(
+        undefined,
+      );
+      await expect(target.nodes.Part.getById(part.id)).resolves.toBeDefined();
+      expect(await target.edges.holds.find()).toEqual([]);
+    });
+
+    it("applies a plan artifact that deletes an edge and then its restrict endpoint", async () => {
+      cleanups = [];
+      const { target, source, whole } = await storeWithRestrictedEdge();
+
+      const plan = unwrap(await planMerge(target, [source]));
+      expect(plan.writes.edgeDeletes).toHaveLength(1);
+      expect(plan.writes.nodeDeletes).toEqual([{ kind: "Whole", id: "w1" }]);
+      const applied = await applyMergePlan(target, plan);
+      if (isErr(applied)) {
+        console.info("apply refused", applied.error.message);
+        throw applied.error;
+      }
+      await expect(target.nodes.Whole.getById(whole.id)).resolves.toBe(
+        undefined,
+      );
+      expect(await target.edges.holds.find()).toEqual([]);
     });
 
     it("does not report a hook success for a delete the rolled-back merge never committed", async () => {

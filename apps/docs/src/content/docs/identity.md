@@ -782,9 +782,10 @@ as cascades. `merge()` detects identity conflicts at plan
 time and returns them as a typed `IdentityMergeConflictError` — direct
 opposing relations on one endpoint pair, transitive contradictions reached
 through a chain of `same` assertions no single branch wrote, retract/reassert
-races, and an assertion over a node another branch deleted. A branch that
-retracts a pair and also reasserts it itself (convergent, not racing) merges
-cleanly. This is mechanical truth propagation, not semantic entity
+races, and an assertion over a node another branch deleted. A retraction and a
+reassertion of one pair are convergent, and merge cleanly, only when every
+branch that retracts the pair also reasserts it; a branch that only retracts it
+while another retracts and reasserts it is a race. This is mechanical truth propagation, not semantic entity
 reconciliation. Plan time is the early surface, not the only one: any
 identity refusal that still escapes to the applier inside the commit
 transaction is translated into the same typed `IdentityMergeConflictError`,

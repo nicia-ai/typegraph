@@ -529,7 +529,11 @@ if (checked.reviewDigest.value !== decision.reviewDigest) {
 }
 
 // Keep this fresh execution plan ephemeral: another target write makes it stale.
-const applied = unwrap(await applyMergePlan(store, checked.plan));
+// Passing the revalidation records its review digest on the identity
+// transitions the apply causes; it is refused unless it names this plan.
+const applied = unwrap(
+  await applyMergePlan(store, checked.plan, { review: checked }),
+);
 
 // A separate commit AFTER successful apply; see the recovery boundary below.
 await store.nodes.Artifact.create({
@@ -710,6 +714,18 @@ if (!isOk(result)) throw result.error;
 Import `MergePlanApplyOptions`, `MergePlanReadContext`, and `MergePlanApplied`
 from `@nicia-ai/typegraph/graph-merge` to type reusable helpers. Callbacks are
 execution options: they are not stored in the artifact or covered by its digest.
+
+Beside the callbacks, `applyMergePlan()` accepts the provenance it records on
+every identity transition the apply causes (`MergePlanDecisionOptions`):
+`review`, the `compatible` result of `revalidateCandidateWriteSetReview()` the
+plan was approved under, and `sourceId`, the candidate write set's source. A
+`review` is evidence about one plan: the apply records its `reviewDigest` only
+when the revalidation's fresh `plan` is the plan being applied, and refuses
+with `InvalidMergeOptionsError` (`details.reason` `"plan-mismatch"` or
+`"not-compatible"`) before writing anything otherwise.
+`applyMergePlanInTransaction(target, tx, artifact, { review, sourceId })`
+accepts the same two. An apply option neither path declares is refused with
+`InvalidMergeOptionsError` naming it in `details.option`.
 
 The transaction acquires the schema fence before the graph write lock, validates
 schema, revision origin, and revision, and then calls `beforeApply`. This context
@@ -1076,8 +1092,8 @@ edits compose instead of clobbering each other.
 
 ### Composition orphans
 
-Two independent ways a merge can leave a required or optional composition
-part with no whole, both surfaced through the same
+Three independent ways a merge can separate a composition part from its
+whole behind the target's back, all surfaced through the same
 `MergePlanReview.compositionOrphans` finding and the same
 `MergeCompositionOrphanError`:
 
@@ -1087,6 +1103,12 @@ part with no whole, both surfaced through the same
   plan neither deletes that part nor moves it to another whole, so applying
   the plan as trusted would leave it pointing at a whole that no longer
   exists.
+- **`cause: "moved"`** — the mirror case. The plan deletes a part — because
+  the branch deleted it, or because the branch deleted its old whole and the
+  cascade took the part with it — that the target has meanwhile moved under,
+  or attached to, another live whole the plan neither deletes nor detaches it
+  from. Applying the plan would take the part away from a whole the branch
+  never touched; `whole` names that surviving whole.
 - **`cause: "unattached"`** — a required-existence part (`existence:
   "required"`, see [Composition existence](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
   this merge writes, or whose composition edge this merge explicitly deletes
@@ -1105,7 +1127,7 @@ type MergePlanCompositionOrphan = {
   part: { kind: string; id: string };
   whole?: { kind: string; id: string }; // absent for cause: "unattached"
   viaEdgeKind: string; // the realizing composition edge
-  cause: "deleted" | "unattached";
+  cause: "deleted" | "moved" | "unattached";
 };
 ```
 

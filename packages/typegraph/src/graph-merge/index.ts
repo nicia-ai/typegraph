@@ -1,6 +1,8 @@
 export type {
+  CompatibleMergeReview,
   MergePlanApplied,
   MergePlanApplyOptions,
+  MergePlanDecisionOptions,
   MergePlanReadContext,
 } from "./apply-callbacks";
 // Public barrel for @nicia-ai/typegraph/graph-merge.

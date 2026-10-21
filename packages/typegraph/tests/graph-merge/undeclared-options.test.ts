@@ -212,6 +212,104 @@ describe("an undeclared merge option is refused, never ignored", () => {
   });
 });
 
+describe("an undeclared key inside a resolve config is refused, never ignored", () => {
+  const SCORE_ALL = { kind: "custom", score: () => 1 } as const;
+
+  function refusalOf(options: MergeOptions<typeof graph>): unknown {
+    try {
+      normalizeMergeOptions(options);
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  }
+
+  it.each([
+    {
+      option: "resolve.Item.blok",
+      resolve: {
+        Item: { threshold: 0.5, blok: () => "all", similarity: SCORE_ALL },
+      },
+    },
+    {
+      option: "resolve.Item.keyless.windw",
+      resolve: {
+        Item: { threshold: 0.5, keyless: { windw: 2 }, similarity: SCORE_ALL },
+      },
+    },
+    {
+      option: "resolve.Item.similarity.field",
+      resolve: {
+        Item: {
+          threshold: 0.5,
+          similarity: { kind: "fulltext", field: "name" },
+        },
+      },
+    },
+    {
+      option: "resolve.Item.similarity.weights.text",
+      resolve: {
+        Item: {
+          threshold: 0.5,
+          similarity: {
+            kind: "hybrid",
+            fields: ["name"],
+            weights: { text: 1 },
+          },
+        },
+      },
+    },
+    {
+      option: "resolve.Item.similarity.kind",
+      resolve: {
+        Item: {
+          threshold: 0.5,
+          similarity: { kind: "fuzzy", fields: ["name"] },
+        },
+      },
+    },
+  ])("normalization refuses $option", ({ option, resolve }) => {
+    expectUndeclaredOptionRefusal(refusalOf(undeclared({ resolve })), option);
+  });
+
+  it("normalization accepts every declared resolve key", () => {
+    expect(
+      normalizeMergeOptions({
+        resolve: {
+          Item: {
+            block: () => "all",
+            blockIndex: "item_name",
+            keyless: { window: 2 },
+            threshold: 0.5,
+            similarity: {
+              kind: "hybrid",
+              fields: ["name"],
+              weights: { vector: 1, fulltext: 1 },
+            },
+          },
+        },
+      }).resolve,
+    ).toHaveProperty("Item");
+  });
+
+  it("merge() and planMerge() refuse a resolve config for a kind the graph does not declare, writing nothing", async () => {
+    const { target, source } = await targetWithBranch();
+    const typoKind = undeclared({
+      resolve: { Itme: { threshold: 0.5, similarity: SCORE_ALL } },
+    });
+    const merged = await merge(target, [source], typoKind);
+    expect(isErr(merged)).toBe(true);
+    if (!isErr(merged)) return;
+    expectUndeclaredOptionRefusal(merged.error, "resolve.Itme");
+    expect(await target.nodes.Item.find()).toEqual([]);
+
+    const planned = await planMerge(target, [source], typoKind);
+    expect(isErr(planned)).toBe(true);
+    if (!isErr(planned)) return;
+    expectUndeclaredOptionRefusal(planned.error, "resolve.Itme");
+  });
+});
+
 describe("stored review and plan artifacts stay compatible", () => {
   it("an options-free bag encodes to the frozen option evidence, field for field", () => {
     expect(reviewOptionEvidence({})).toEqual(OPTION_EVIDENCE_WITHOUT_OPTIONS);

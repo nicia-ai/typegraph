@@ -18,7 +18,12 @@
  *    plan's `nodeDeletions` even though the branch deletes the whole.
  *    `planMergeIncremental` reports it as a `compositionOrphans` entry;
  *    `applyMergePlan` refuses with `MergeCompositionOrphanError` (code
- *    `MERGE_COMPOSITION_ORPHAN`), and NOTHING changes on the target.
+ *    `GRAPH_MERGE_COMPOSITION_ORPHAN`), and NOTHING changes on the target.
+ *  - The mirror: the target MOVES a part to another whole after the fork
+ *    point, and the branch deletes the part's old whole, cascading its own
+ *    copy of the part. The plan deletes the part, which the target now holds
+ *    under a whole the plan leaves standing; it is reported with
+ *    `cause: "moved"` and refused the same way, through the live merge too.
  *  - The branch deletes the whole AND its part (the ordinary case: the
  *    branch's own runtime cascade already recorded the part's deletion in
  *    its local diff against the fork point, so the plan's `nodeDeletions`
@@ -40,6 +45,7 @@
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
+  asNodeId,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -53,9 +59,10 @@ import { branch } from "../../src/graph-merge/branch";
 import { MergeCompositionOrphanError } from "../../src/graph-merge/errors";
 import {
   applyMergePlan,
+  mergeIncremental,
   planMergeIncremental,
 } from "../../src/graph-merge/merge";
-import { isErr, isOk } from "../../src/graph-merge/result";
+import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../src/graph-merge/types";
 import { backendMatrix } from "./test-utils";
 
@@ -67,16 +74,7 @@ const graph = defineGraph({
   id: "composition-orphan-test",
   nodes: {
     Whole: { type: Whole },
-    // `disconnect`, not the default `restrict`: merge apply deletes nodes
-    // BEFORE edges (`applyNodeRows` runs, then `applyEdgeRows`), so when a
-    // plan deletes BOTH endpoints of one edge in the same apply, each
-    // endpoint's own delete-behavior enforcement still sees that edge as
-    // live and unconsumed (merge apply's per-delete policy carries no
-    // `consumedEdgeIds` — it is not itself a cascade). A `restrict` Part
-    // would refuse to delete under that ordering regardless of composition;
-    // this fixture is about the orphan conflict, not that separate,
-    // pre-existing node/edge apply-ordering characteristic.
-    Part: { type: Part, onDelete: "disconnect" },
+    Part: { type: Part },
   },
   edges: {
     holds: {
@@ -91,6 +89,7 @@ const graph = defineGraph({
 type G = typeof graph;
 
 const BRANCH_A = asBranchId("branch-a");
+const TARGET_CLONE = asBranchId("target-clone");
 
 describe.each(backendMatrix())(
   "composition orphan conflict [$name]",
@@ -180,7 +179,7 @@ describe.each(backendMatrix())(
       expect(isErr(applyResult)).toBe(true);
       if (!isErr(applyResult)) throw new Error("expected apply to be refused");
       expect(applyResult.error).toBeInstanceOf(MergeCompositionOrphanError);
-      expect(applyResult.error.code).toBe("MERGE_COMPOSITION_ORPHAN");
+      expect(applyResult.error.code).toBe("GRAPH_MERGE_COMPOSITION_ORPHAN");
 
       // Nothing changed: the refusal fires before any row work in this apply.
       await expect(
@@ -192,6 +191,108 @@ describe.each(backendMatrix())(
       await expect(
         target.nodes.Part.getById(lateAttachedPart.id),
       ).resolves.toBeDefined();
+    });
+
+    it("reports and refuses deleting a part the target moved to a whole the plan keeps", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      await forkPoint.nodes.Whole.create({}, { id: "w1" });
+      await forkPoint.nodes.Whole.create({}, { id: "w2" });
+      await forkPoint.nodes.Part.create(
+        {},
+        { id: "p1", partOf: { whole: { kind: "Whole", id: "w1" } } },
+      );
+
+      const branchA = await makeBranchOf(forkPoint, BRANCH_A);
+      // The branch deletes the whole; its cascade deletes the branch's own
+      // copy of the part.
+      await branchA.store.nodes.Whole.delete(asNodeId("w1"));
+      await expect(
+        branchA.store.nodes.Part.getById(asNodeId("p1")),
+      ).resolves.toBe(undefined);
+
+      // The target is a clone of the fork point that moves the part to the
+      // second whole — an edge the branch never saw.
+      const target = (await makeBranchOf(forkPoint, TARGET_CLONE)).store;
+      await target.nodes.Part.reparent(asNodeId("p1"), {
+        whole: { kind: "Whole", id: "w2" },
+      });
+
+      const artifact = unwrap(
+        await planMergeIncremental<G>({
+          forkPoint,
+          target,
+          branches: [branchA],
+        }),
+      );
+      console.info("composition orphans", artifact.review.compositionOrphans);
+      expect(artifact.review.compositionOrphans).toEqual([
+        {
+          part: { kind: "Part", id: "p1" },
+          whole: { kind: "Whole", id: "w2" },
+          viaEdgeKind: "holds",
+          cause: "moved",
+        },
+      ]);
+
+      const applyResult = await applyMergePlan(target, artifact);
+      if (!isErr(applyResult)) throw new Error("expected apply to be refused");
+      console.info("apply refusal", applyResult.error.message);
+      expect(applyResult.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(applyResult.error.code).toBe("GRAPH_MERGE_COMPOSITION_ORPHAN");
+      expect(applyResult.error.details).toEqual(
+        artifact.review.compositionOrphans[0],
+      );
+
+      const merged = await mergeIncremental<G>({
+        forkPoint,
+        target,
+        branches: [branchA],
+      });
+      if (!isErr(merged)) throw new Error("expected the merge to be refused");
+      expect(merged.error).toBeInstanceOf(MergeCompositionOrphanError);
+
+      // Nothing changed: both wholes, the part and its new edge survive.
+      await expect(
+        target.nodes.Whole.getById(asNodeId("w1")),
+      ).resolves.toBeDefined();
+      await expect(
+        target.nodes.Part.getById(asNodeId("p1")),
+      ).resolves.toBeDefined();
+      const edges = await target.edges.holds.find();
+      expect(edges.map((edge) => edge.toId)).toEqual(["w2"]);
+    });
+
+    it("applies a branch that deletes a part the target left under its whole", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      await forkPoint.nodes.Whole.create({}, { id: "w1" });
+      await forkPoint.nodes.Part.create(
+        {},
+        { id: "p1", partOf: { whole: { kind: "Whole", id: "w1" } } },
+      );
+
+      const branchA = await makeBranchOf(forkPoint, BRANCH_A);
+      await branchA.store.nodes.Part.delete(asNodeId("p1"));
+
+      const target = (await makeBranchOf(forkPoint, TARGET_CLONE)).store;
+
+      const artifact = unwrap(
+        await planMergeIncremental<G>({
+          forkPoint,
+          target,
+          branches: [branchA],
+        }),
+      );
+      expect(artifact.review.compositionOrphans).toEqual([]);
+      unwrap(await applyMergePlan(target, artifact));
+      await expect(target.nodes.Part.getById(asNodeId("p1"))).resolves.toBe(
+        undefined,
+      );
+      await expect(
+        target.nodes.Whole.getById(asNodeId("w1")),
+      ).resolves.toBeDefined();
+      expect(await target.edges.holds.find()).toEqual([]);
     });
 
     it("does not report an already-dead part (its composition edge survives its endpoint) as an orphan", async () => {
@@ -452,7 +553,7 @@ describe.each(backendMatrix())(
       expect(isErr(applyResult)).toBe(true);
       if (!isErr(applyResult)) throw new Error("expected apply to be refused");
       expect(applyResult.error).toBeInstanceOf(MergeCompositionOrphanError);
-      expect(applyResult.error.code).toBe("MERGE_COMPOSITION_ORPHAN");
+      expect(applyResult.error.code).toBe("GRAPH_MERGE_COMPOSITION_ORPHAN");
 
       // Nothing changed.
       await expect(

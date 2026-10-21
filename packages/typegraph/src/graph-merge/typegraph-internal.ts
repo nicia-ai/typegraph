@@ -33,6 +33,7 @@ export type {
   TransactionBackend,
   TransactionOptions,
 } from "../backend/types";
+export { isLiveNodeRow } from "../backend/types";
 export { computeUniqueKey } from "../constraints";
 export {
   defineInternalGraph,
@@ -107,6 +108,7 @@ export { planCompositionCascade } from "../store/operations/composition-cascade"
 export {
   compositionEdgeAttachesPart,
   declaresRequiredCompositionParts,
+  findLiveCompositionAttachment,
   findLiveCompositionWhole,
   withDeferredCompositionExistence,
 } from "../store/operations/composition-create";

@@ -8,10 +8,15 @@
  * but not which plan, review or branch produced it.
  *
  * Everything here is evidence ALREADY IN HAND at the apply site — the plan
- * artifact's own digest and the anchors it was built from. Nothing is read,
- * recomputed, or invented; a field the caller cannot evidence stays absent
- * rather than being guessed.
+ * artifact's own digest, the anchors it was built from, and the review
+ * revalidation that names that same plan. Nothing is read, recomputed, or
+ * invented; a field the caller cannot evidence stays absent rather than being
+ * guessed.
  */
+import {
+  type MergePlanDecisionOptions,
+  reviewDigestForPlan,
+} from "./apply-callbacks";
 import type { MergePlanAnchors, MergePlanArtifactV2 } from "./plan-schema";
 import type { IdentityDecisionProvenance } from "./typegraph-internal";
 
@@ -80,18 +85,21 @@ export function mergeIdentityDecision(
 
 /**
  * The decision an approved plan artifact evidences — its digest and anchors —
- * plus the review context only the caller holds. The one builder every
- * artifact apply site calls, so the transition log records the same decision
- * whichever entry point applied the plan.
+ * plus the review and source context only the caller holds. The one builder
+ * every artifact apply site calls, so the transition log records the same
+ * decision whichever entry point applied the plan.
+ *
+ * @throws {InvalidMergeOptionsError} when `context.review` is not a compatible
+ * revalidation of this very plan ({@link reviewDigestForPlan}).
  */
 export function mergeIdentityDecisionFromArtifact(
   artifact: MergePlanArtifactV2,
-  context: Readonly<{ reviewDigest?: string; sourceId?: string }> = {},
+  context: MergePlanDecisionOptions = {},
 ): IdentityDecisionProvenance {
   return mergeIdentityDecision({
     branchAncestry: branchAncestryFromAnchors(artifact.anchors),
     mergePlanDigest: artifact.digest.value,
-    reviewDigest: context.reviewDigest,
+    reviewDigest: reviewDigestForPlan(artifact, context.review),
     sourceId: context.sourceId,
   });
 }

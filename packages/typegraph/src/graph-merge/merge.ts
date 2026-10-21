@@ -9,7 +9,11 @@ import { requireDefined } from "../utils/presence";
 import { assertMergeTransactionPristine } from "./adopted-transaction";
 import {
   assertMergeCallbackResult,
+  assertOnlyDeclaredApplyOptions,
+  MERGE_PLAN_APPLY_OPTION_KEYS,
+  MERGE_PLAN_DECISION_OPTION_KEYS,
   type MergePlanApplyOptions,
+  type MergePlanDecisionOptions,
   mergePlanReadContext,
 } from "./apply-callbacks";
 /**
@@ -163,7 +167,7 @@ import {
   mergeKeyOf,
 } from "./node-key";
 import type { NormalizedMergeOptions } from "./options";
-import { normalizeMergeOptions } from "./options";
+import { normalizeMergeOptions, undeclaredResolveKindRefusal } from "./options";
 import type {
   MergePlanAnchors,
   MergePlanArtifact,
@@ -248,11 +252,13 @@ import {
   compositionEdgeAttachesPart,
   createSqlSchema,
   edgeKindIsInAcyclicRelation,
+  findLiveCompositionAttachment,
   findLiveCompositionWhole,
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
   getDialect,
   type GraphWriteLock,
+  isLiveNodeRow,
   lockRecordedGraphWrite,
   planCompositionCascade,
   readProposedEdgeAcyclicityViolations,
@@ -2285,6 +2291,7 @@ async function applyNodeRows<G extends GraphDef>(
   nodesApi: TxNodes,
   deletions: readonly MergePlanEntityRef[],
   upserts: readonly MechanicalNodeWrite[],
+  edgeDeletions: readonly MergePlanEntityRef[],
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
 ): Promise<number> {
   const afterImages = new Map<MergeKey, Readonly<Record<string, unknown>>>();
@@ -2341,9 +2348,16 @@ async function applyNodeRows<G extends GraphDef>(
       // enumerates every one a composition delete would cascade to
       // (`assertNoCompositionOrphans`, in `applyGraphRows`, verifies that
       // enumeration is COMPLETE before this loop runs at all).
+      //
+      // The plan's own edge deletions are CONSUMED: the edge phase deletes
+      // them after this loop, so a `restrict` endpoint whose only blocking
+      // edge the plan also deletes — the order the branch itself had to take —
+      // is not refused, and no `cascade` / `disconnect` removes an edge the
+      // edge phase still owns.
       const deletePolicy: NodeDeletePolicy = {
         enforceDeleteBehavior: true,
         cascadeComposition: false,
+        consumedEdgeIds: new Set(edgeDeletions.map((edge) => edge.id)),
       };
       for (const deletion of deletions) {
         await deleteNodeWithPolicy(
@@ -2464,6 +2478,7 @@ async function applyGraphRows<G extends GraphDef>(
         txBackend,
         nodesApi,
         rows.nodePhase,
+        rows.writes.edgeDeletes,
         deleteNodeWithPolicy,
         decision,
       );
@@ -2539,6 +2554,7 @@ async function applyNodeWritePhase<G extends GraphDef>(
   txBackend: TransactionBackend,
   nodesApi: TxNodes,
   phase: MergeNodeWritePhase,
+  edgeDeletions: readonly MergePlanEntityRef[],
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<Readonly<{ nodes: number; retracted: number }>> {
@@ -2565,6 +2581,7 @@ async function applyNodeWritePhase<G extends GraphDef>(
       nodesApi,
       phase.deletions,
       phase.upserts,
+      edgeDeletions,
       deleteNodeWithPolicy,
     );
   try {
@@ -3475,13 +3492,59 @@ async function compositionOrphansAmong(
 }
 
 /**
- * The plan-time composition-orphan REPORT: every finding from BOTH arms —
- * {@link compositionOrphansAmong} (`cause: "deleted"`) and
+ * THE "moved" composition finding, shared by the plan-time report and apply's
+ * authoritative re-verification: every part the write set deletes that the
+ * target still holds under a live whole the write set neither deletes nor
+ * detaches the part from.
+ *
+ * A branch deletes a part by deleting it or by deleting its whole (the
+ * cascade), and in both cases its own diff carries the composition edge it
+ * removed. A part the target has since moved under another whole — or
+ * attached to one — hangs from an edge the branch never saw, so the plan
+ * neither deletes nor detaches it. Applying the plan would take a part away
+ * from a whole that survives, a whole the branch never touched: the mirror of
+ * the "deleted" arm ({@link compositionOrphansAmong}), where a surviving part
+ * loses the whole the plan deletes.
+ */
+async function compositionMovedPartsAmong(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  backend: GraphReadBackend,
+  parts: readonly MergePlanEntityRef[],
+  planned: PlannedCompositionState,
+): Promise<readonly MergePlanCompositionOrphan[]> {
+  const moved: MergePlanCompositionOrphan[] = [];
+  for (const part of parts) {
+    const attachment = await findLiveCompositionAttachment(
+      ctx.registry,
+      backend,
+      ctx.graphId,
+      part.kind,
+      part.id,
+      planned.detachedEdgeIds,
+    );
+    if (attachment === undefined) continue;
+    const { whole } = attachment;
+    if (planned.deletedNodes.has(mergeKey(whole.kind, whole.id))) continue;
+    const wholeRow = await backend.getNode(ctx.graphId, whole.kind, whole.id);
+    if (wholeRow === undefined || !isLiveNodeRow(wholeRow)) continue;
+    moved.push({
+      part,
+      whole: { kind: whole.kind, id: whole.id },
+      viaEdgeKind: attachment.edge.kind,
+      cause: "moved",
+    });
+  }
+  return moved;
+}
+
+/**
+ * The plan-time composition-orphan REPORT: every finding from all three arms —
+ * {@link compositionOrphansAmong} (`cause: "deleted"`),
+ * {@link compositionMovedPartsAmong} (`cause: "moved"`) and
  * {@link unattachedRequiredPartOrphansAmong} (`cause: "unattached"`) — for the
- * plan's review payload. Both arms read the target's current state through
+ * plan's review payload. Every arm reads the target's current state through
  * the plan's own {@link PlannedCompositionState}, so the report describes the
- * graph the apply would leave, by the same two functions the apply refuses
- * with.
+ * graph the apply would leave, by the same functions the apply refuses with.
  *
  * Deliberately unlocked (`uncapturedGraphWriteLock`): plan time is a
  * best-effort, racy dry-run read over the target's CURRENT state, not a
@@ -3490,7 +3553,7 @@ async function compositionOrphansAmong(
  * broader plan-vs-target staleness question around this call. A concurrent
  * attach this read races past is not a correctness gap: `applyGraphRows`
  * re-runs these SAME checks, under a REAL lock, inside the apply transaction,
- * and refuses with `MergeCompositionOrphanError` if either recurs there.
+ * and refuses with `MergeCompositionOrphanError` if any recurs there.
  */
 async function planTimeCompositionOrphans<G extends GraphDef>(
   target: Store<G>,
@@ -3509,6 +3572,12 @@ async function planTimeCompositionOrphans<G extends GraphDef>(
     writes.nodeDeletes,
     planned,
   );
+  const moved = await compositionMovedPartsAmong(
+    ctx,
+    backend,
+    writes.nodeDeletes,
+    planned,
+  );
   const unattached = await unattachedRequiredPartOrphansAmong(
     ctx,
     backend,
@@ -3516,11 +3585,11 @@ async function planTimeCompositionOrphans<G extends GraphDef>(
     batchedNodeReader(target, backend),
     planned,
   );
-  return [...deleted, ...unattached];
+  return [...deleted, ...moved, ...unattached];
 }
 
 /**
- * Apply's AUTHORITATIVE re-verification of the "deleted" finding
+ * Apply's AUTHORITATIVE re-verification of the "deleted" and "moved" findings
  * {@link planTimeCompositionOrphans} reports at plan time: run inside the
  * apply transaction, under the per-graph write lock `lockRecordedGraphWrite`
  * reentrantly confirms (or newly takes, on a target that had not yet needed
@@ -3536,20 +3605,29 @@ async function assertNoCompositionOrphans<G extends GraphDef>(
 ): Promise<void> {
   const registry = target.registry;
   if (
-    !writes.nodeDeletes.some((deletion) =>
-      registry.isCompositionWhole(deletion.kind),
+    !writes.nodeDeletes.some(
+      (deletion) =>
+        registry.isCompositionWhole(deletion.kind) ||
+        registry.isCompositionPart(deletion.kind),
     )
   ) {
     return;
   }
-  await refuseFirstOrphan(target, txBackend, (ctx) =>
-    compositionOrphansAmong(
+  const planned = plannedCompositionState(registry, writes);
+  await refuseFirstOrphan(target, txBackend, async (ctx) => [
+    ...(await compositionOrphansAmong(
       ctx,
       txBackend,
       writes.nodeDeletes,
-      plannedCompositionState(registry, writes),
-    ),
-  );
+      planned,
+    )),
+    ...(await compositionMovedPartsAmong(
+      ctx,
+      txBackend,
+      writes.nodeDeletes,
+      planned,
+    )),
+  ]);
 }
 
 /**
@@ -4108,6 +4186,12 @@ async function resolveMerge<G extends GraphDef, Output>(
       targetBranchSeen = true;
     }
   }
+
+  const resolveKindRefusal = undeclaredResolveKindRefusal(
+    target.graph,
+    options.resolve,
+  );
+  if (resolveKindRefusal !== undefined) return err(resolveKindRefusal);
 
   // A branch must be a DATA fork. A schema operation on the branch's store
   // after forking (evolve, migrateSchema, removeKinds) mutates rows through
@@ -5622,8 +5706,15 @@ export async function applyMergePlan<G extends GraphDef>(
   options: MergePlanApplyOptions<NoInfer<G>> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
   let artifact: MergePlanArtifactV2;
+  let decision: IdentityDecisionProvenance;
   try {
+    assertOnlyDeclaredApplyOptions(options, MERGE_PLAN_APPLY_OPTION_KEYS);
     artifact = await validateMergePlanForTarget(target, input);
+    // Built from evidence already in hand — the artifact's own digest, the
+    // anchors it names, and the review revalidation that names this plan.
+    // Nothing here is read back or recomputed, and a field the apply cannot
+    // evidence stays absent.
+    decision = mergeIdentityDecisionFromArtifact(artifact, options);
   } catch (error) {
     return err(
       error instanceof MergeError ? error : (
@@ -5634,11 +5725,6 @@ export async function applyMergePlan<G extends GraphDef>(
       ),
     );
   }
-  // Built from evidence already in hand — the artifact's own digest, the
-  // anchors it names, and the review digest the caller reviewed it under.
-  // Nothing here is read back or recomputed, and a field the apply cannot
-  // evidence stays absent.
-  const decision = mergeIdentityDecisionFromArtifact(artifact, options);
   try {
     const { beforeApply, afterApply } = options;
     const composed = beforeApply !== undefined || afterApply !== undefined;
@@ -5726,13 +5812,19 @@ export async function applyMergePlan<G extends GraphDef>(
  * rejects rather than accidentally committing partial work. Plans requesting
  * persisted provenance are refused because the sidecar cannot yet be enlisted in
  * this caller-owned transaction.
+ *
+ * `options` carries the same decision provenance `applyMergePlan` records — the
+ * compatible review revalidation that names this plan, and the ingestion
+ * source — so a plan applied here records the same identity decision.
  */
 export async function applyMergePlanInTransaction<G extends GraphDef>(
   target: Store<G>,
   tx: TransactionContext<NoInfer<G>>,
   input: MergePlanArtifact,
+  options: MergePlanDecisionOptions = {},
 ): Promise<MergeReport<G>> {
   try {
+    assertOnlyDeclaredApplyOptions(options, MERGE_PLAN_DECISION_OPTION_KEYS);
     let effectiveTarget: Store<G>;
     try {
       effectiveTarget = resolveEvolvedTransactionStore(tx, target);
@@ -5756,7 +5848,7 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     }
     const txBackend = transactionBackend(tx);
     await assertMergeTransactionPristine(effectiveTarget, txBackend);
-    const decision = mergeIdentityDecisionFromArtifact(artifact);
+    const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await applyValidatedMergePlanInTransaction(
       effectiveTarget,
       tx,

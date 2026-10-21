@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 
-import { createDataKeyedBag } from "../utils/object";
+import { createDataKeyedBag, isPlainObject } from "../utils/object";
 import { InvalidMergeOptionsError } from "./errors";
 import type { GraphDef } from "./typegraph-internal";
 import type {
@@ -29,6 +29,7 @@ import type {
   ResolveConfig,
   ResolvedCluster,
   ResolveMap,
+  SimilarityStrategy,
 } from "./types";
 
 /**
@@ -138,19 +139,137 @@ const MERGE_OPTION_KEYS: ReadonlySet<string> = new Set(
   } satisfies Readonly<Record<keyof MergeOptions, true>>),
 );
 
+/** Every key a per-kind {@link ResolveConfig} declares. */
+const RESOLVE_CONFIG_KEYS: ReadonlySet<string> = new Set(
+  Object.keys({
+    block: true,
+    blockIndex: true,
+    keyless: true,
+    similarity: true,
+    threshold: true,
+  } satisfies Readonly<Record<keyof ResolveConfig, true>>),
+);
+
+/** Every key `ResolveConfig.keyless` declares. */
+const KEYLESS_KEYS: ReadonlySet<string> = new Set(
+  Object.keys({ window: true } satisfies Readonly<
+    Record<keyof NonNullable<ResolveConfig["keyless"]>, true>
+  >),
+);
+
 /**
- * Refuses an option the merge does not declare. Normalization reads each known
- * field by name, so an undeclared key would otherwise be dropped silently and
- * the merge would run as though the caller had never stated it.
+ * Every key each {@link SimilarityStrategy} arm declares, by its `kind`. The
+ * phantom `__graph` binding is never set at runtime, so it is not listed.
  */
+const SIMILARITY_STRATEGY_KEYS: Readonly<
+  Record<SimilarityStrategy["kind"], ReadonlySet<string>>
+> = {
+  hybrid: new Set(["kind", "fields", "weights"]),
+  vector: new Set(["kind", "field"]),
+  fulltext: new Set(["kind", "fields"]),
+  custom: new Set(["kind", "score"]),
+};
+
+/** Every key a hybrid strategy's `weights` declares. */
+const HYBRID_WEIGHT_KEYS: ReadonlySet<string> = new Set(
+  Object.keys({ vector: true, fulltext: true } satisfies Readonly<
+    Record<
+      keyof NonNullable<
+        Extract<SimilarityStrategy, Readonly<{ kind: "hybrid" }>>["weights"]
+      >,
+      true
+    >
+  >),
+);
+
+/**
+ * Refuses a key `declared` does not list. Normalization reads each known field
+ * by name, so an undeclared key would otherwise be dropped silently and the
+ * merge would run as though the caller had never stated it. `path` names the
+ * enclosing option, so the refusal names the exact key — `resolve.Person.blok`
+ * rather than `blok`.
+ */
+function assertOnlyDeclaredKeys(
+  value: object,
+  declared: ReadonlySet<string>,
+  path: string,
+): void {
+  const unknownKey = Object.keys(value).find((key) => !declared.has(key));
+  if (unknownKey === undefined) return;
+  const option = path === "" ? unknownKey : `${path}.${unknownKey}`;
+  throw new InvalidMergeOptionsError(`Unknown merge option "${option}".`, {
+    details: { option },
+  });
+}
+
+/** Refuses an option the merge does not declare, at the top level. */
 function assertOnlyDeclaredOptions(options: object): void {
-  const unknownOption = Object.keys(options).find(
-    (key) => !MERGE_OPTION_KEYS.has(key),
+  assertOnlyDeclaredKeys(options, MERGE_OPTION_KEYS, "");
+}
+
+/**
+ * Refuses an undeclared key anywhere in one kind's resolve config: the config
+ * itself, its `keyless` bag, its similarity strategy (whose declared keys
+ * depend on the strategy's `kind`, itself refused when unknown) and a hybrid
+ * strategy's `weights`.
+ */
+function assertResolveConfigDeclared(
+  kind: string,
+  config: Readonly<Record<string, unknown>>,
+): void {
+  const path = `resolve.${kind}`;
+  assertOnlyDeclaredKeys(config, RESOLVE_CONFIG_KEYS, path);
+  if (isPlainObject(config["keyless"])) {
+    assertOnlyDeclaredKeys(config["keyless"], KEYLESS_KEYS, `${path}.keyless`);
+  }
+  const similarity = config["similarity"];
+  if (!isPlainObject(similarity)) return;
+  const strategyKind = similarity["kind"];
+  const strategyKeys =
+    (
+      typeof strategyKind === "string" &&
+      Object.hasOwn(SIMILARITY_STRATEGY_KEYS, strategyKind)
+    ) ?
+      SIMILARITY_STRATEGY_KEYS[strategyKind as SimilarityStrategy["kind"]]
+    : undefined;
+  if (strategyKeys === undefined) {
+    const option = `${path}.similarity.kind`;
+    throw new InvalidMergeOptionsError(
+      `Unknown similarity strategy ${JSON.stringify(strategyKind)} for merge option "${path}.similarity": expected "hybrid", "vector", "fulltext", or "custom".`,
+      { details: { option, received: strategyKind } },
+    );
+  }
+  assertOnlyDeclaredKeys(similarity, strategyKeys, `${path}.similarity`);
+  if (isPlainObject(similarity["weights"])) {
+    assertOnlyDeclaredKeys(
+      similarity["weights"],
+      HYBRID_WEIGHT_KEYS,
+      `${path}.similarity.weights`,
+    );
+  }
+}
+
+/**
+ * The refusal a `resolve` entry for a node kind the graph does not declare
+ * earns, or `undefined` when every entry names a declared kind. A misspelled
+ * kind would otherwise resolve nothing, and the merge would match that kind by
+ * id only as though no resolve config had been stated.
+ *
+ * Separate from {@link normalizeMergeOptions}, which is graph-agnostic: the
+ * merge pipeline asks it against the graph it actually plans for.
+ */
+export function undeclaredResolveKindRefusal(
+  graph: GraphDef,
+  resolve: Readonly<Record<string, unknown>>,
+): InvalidMergeOptionsError | undefined {
+  const unknownKind = Object.keys(resolve).find(
+    (kind) => !Object.hasOwn(graph.nodes, kind),
   );
-  if (unknownOption === undefined) return;
-  throw new InvalidMergeOptionsError(
-    `Unknown merge option "${unknownOption}".`,
-    { details: { option: unknownOption } },
+  if (unknownKind === undefined) return undefined;
+  const option = `resolve.${unknownKind}`;
+  return new InvalidMergeOptionsError(
+    `Unknown merge option "${option}": graph "${graph.id}" declares no node kind "${unknownKind}".`,
+    { details: { option } },
   );
 }
 
@@ -223,6 +342,7 @@ function validateResolveMap<G extends GraphDef>(
   // Data-keyed: node kind names supplied by the caller's resolve map.
   const validated = createDataKeyedBag<ResolveConfig<G>>();
   for (const [kind, config] of Object.entries(configs)) {
+    assertResolveConfigDeclared(kind, config);
     const parsed = resolveConfigScalarSchema.safeParse({
       threshold: config.threshold,
     });

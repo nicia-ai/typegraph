@@ -185,7 +185,7 @@ export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor exten
 export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<MergeReport<G>, MergeError>>;
 
 // @public
-export function applyMergePlanInTransaction<G extends GraphDef>(target: Store<G>, tx: TransactionContext<NoInfer<G>>, input: MergePlanArtifact): Promise<MergeReport<G>>;
+export function applyMergePlanInTransaction<G extends GraphDef>(target: Store<G>, tx: TransactionContext<NoInfer<G>>, input: MergePlanArtifact, options?: MergePlanDecisionOptions): Promise<MergeReport<G>>;
 
 // @public (undocumented)
 type ArithmeticExpressionNode = Readonly<{
@@ -1139,6 +1139,11 @@ type ComparisonPredicate = Readonly<{
     left: FieldRef;
     right: FieldRef | LiteralValue | LiteralValue[] | ParameterRef;
 }>;
+
+// @public
+export type CompatibleMergeReview = Extract<MergeReviewRevalidation, Readonly<{
+    status: "compatible";
+}>>;
 
 // @public (undocumented)
 type CompatibleRelationProjection<Fields extends RelationProjection> = Readonly<{
@@ -5153,7 +5158,7 @@ export const MERGE_ERROR_CODES: {
     readonly operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED";
     readonly operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE";
     readonly operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED";
-    readonly compositionOrphan: "MERGE_COMPOSITION_ORPHAN";
+    readonly compositionOrphan: "GRAPH_MERGE_COMPOSITION_ORPHAN";
 };
 
 // @public
@@ -5186,7 +5191,7 @@ export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G
 export class MergeCompositionOrphanError extends MergeError {
     constructor(details: MergePlanCompositionOrphan);
     // (undocumented)
-    readonly code: "MERGE_COMPOSITION_ORPHAN";
+    readonly code: "GRAPH_MERGE_COMPOSITION_ORPHAN";
     // (undocumented)
     readonly details: MergePlanCompositionOrphan;
     // (undocumented)
@@ -5307,11 +5312,9 @@ export type MergePlanApplied = Readonly<{
 }>;
 
 // @public
-export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
+export type MergePlanApplyOptions<G extends GraphDef> = MergePlanDecisionOptions & Readonly<{
     beforeApply?: (reads: MergePlanReadContext<G>) => Promise<void>;
     afterApply?: (tx: TransactionContext<G>, applied: MergePlanApplied) => Promise<void>;
-    reviewDigest?: string;
-    sourceId?: string;
 }>;
 
 // @public
@@ -5371,7 +5374,13 @@ export type MergePlanCompositionOrphan = Readonly<{
     part: MergePlanEntityRef;
     whole?: MergePlanEntityRef;
     viaEdgeKind: string;
-    cause: "deleted" | "unattached";
+    cause: "deleted" | "moved" | "unattached";
+}>;
+
+// @public
+export type MergePlanDecisionOptions = Readonly<{
+    review?: CompatibleMergeReview;
+    sourceId?: string;
 }>;
 
 // @public (undocumented)

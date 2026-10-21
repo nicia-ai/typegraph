@@ -46,7 +46,7 @@ export const MERGE_ERROR_CODES = {
   operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED",
   operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE",
   operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED",
-  compositionOrphan: "MERGE_COMPOSITION_ORPHAN",
+  compositionOrphan: "GRAPH_MERGE_COMPOSITION_ORPHAN",
 } as const;
 
 /**
@@ -236,11 +236,14 @@ export function translateMergeCommitError(error: unknown): unknown {
 }
 
 /**
- * Raised at APPLY when a live composition part of a whole the plan deletes is
- * not itself among the plan's node deletions: the target gained that part
- * AFTER the branch point (or independently of it), and the branch's diff does
- * not carry its deletion — applying the plan as trusted would leave the part
- * pointing at a whole that no longer exists.
+ * Raised at APPLY when the plan would separate a composition part from its
+ * whole behind the target's back: a live part of a whole the plan deletes is
+ * not itself among the plan's node deletions (the target gained that part
+ * AFTER the branch point, or independently of it), or a part the plan
+ * deletes is held by the target under a live whole the plan leaves standing
+ * (the target moved it there after the branch point). Applying the plan as
+ * trusted would leave the part pointing at a whole that no longer exists, or
+ * take it from a whole that does.
  *
  * `planMerge`/`planMergeIncremental` surface the SAME finding, computed by the
  * same `planCompositionCascade` / `unattachedRequiredPartOrphansAmong` owners
@@ -258,9 +261,10 @@ export function translateMergeCommitError(error: unknown): unknown {
  * introduce between the dry-run report and the apply-time refusal.
  *
  * `details.cause` picks the message: `"deleted"` names the whole this plan
- * would delete; `"unattached"` has no whole to name at all — the
- * part's composition edge was dropped or collapsed by canonicalization while
- * the part itself survives.
+ * would delete; `"moved"` names the live whole the target holds a part under
+ * that this plan would delete; `"unattached"` has no whole to name at all —
+ * the part's composition edge was dropped or collapsed by canonicalization
+ * while the part itself survives.
  */
 export class MergeCompositionOrphanError extends MergeError {
   protected static override readonly errorCategory = "constraint";
@@ -273,8 +277,22 @@ export class MergeCompositionOrphanError extends MergeError {
   }
 }
 
-/** The two `MergeCompositionOrphanError` messages, one per `cause`. */
+/** The `MergeCompositionOrphanError` messages, one per `cause`. */
 function compositionOrphanMessage(details: MergePlanCompositionOrphan): string {
+  if (details.cause === "moved") {
+    // `cause: "moved"` always carries `whole` — the only producer,
+    // `compositionMovedPartsAmong` (`merge.ts`), sets both together.
+    const holder = requireDefined(
+      details.whole,
+      'MergePlanCompositionOrphan.whole for cause "moved"',
+    );
+    return (
+      `Applying this merge plan would delete part "${details.part.kind}:${details.part.id}", ` +
+      `which the target holds under live whole "${holder.kind}:${holder.id}" (via "${details.viaEdgeKind}") ` +
+      "that the plan neither deletes nor detaches it from. Recompute the merge plan against the " +
+      "target's current state, or reconcile the part's whole in the branch before merging."
+    );
+  }
   if (details.cause === "unattached") {
     return (
       `Applying this merge plan would leave part "${details.part.kind}:${details.part.id}" ` +

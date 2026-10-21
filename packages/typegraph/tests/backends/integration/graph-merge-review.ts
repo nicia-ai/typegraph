@@ -1274,7 +1274,9 @@ export function registerGraphMergeReviewIntegrationTests(
       expect(await captureMergePlanTargetFence(args.target)).toEqual(
         beforeRevalidation,
       );
-      unwrap(await applyMergePlan(args.target, result.plan));
+      unwrap(
+        await applyMergePlan(args.target, result.plan, { review: result }),
+      );
       expect(await args.target.nodes.Item.getById(proposed.id)).toMatchObject({
         status: "accepted",
       });
