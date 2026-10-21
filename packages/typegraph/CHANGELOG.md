@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.73.2
+
+### Patch Changes
+
+- [#785](https://github.com/nicia-ai/typegraph/pull/785) [`cb878a1`](https://github.com/nicia-ai/typegraph/commit/cb878a146b815007683825cec814562b68e19cf5) Thanks [@pdlug](https://github.com/pdlug)! - Upgrade a pre-marker merge-provenance sidecar on a database with the revision-change journal installed. The journal's triggers record every node write, so the sidecar's own `Provenance` rows left entries under its graph id and the upgrade refused them with `GRAPH_MERGE_PROVENANCE_ID_COLLISION` (`reason: "application-graph"`). A journal entry is now accepted when it records a `Provenance` node whose row is still stored and verifies; any other journal entry under that graph id still refuses.
+
 ## 0.73.1
 
 ### Highlights
