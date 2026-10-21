@@ -533,9 +533,16 @@ these keeps loading**, and reading `store.introspect()` on it still works:
   read. The serializer no longer emits them, but only the next commit that
   detects an actual semantic change rewrites the document — an upgrade with
   no accompanying ontology change leaves the old document, extra fields and
-  all, in place, and pays the slower parse-and-diff path on every boot
-  instead of the schema-hash fast path (`ensureSchema`,
-  `src/schema/manager.ts`) until a real change lands.
+  all, in place, together with the `schema_hash` the earlier release stored
+  for it. Every comparison of a stored version against your graph, or
+  against another stored version (boot, `registerGraphTemplate`,
+  `refreshSchema`, evolution plans, `branch()`, merge plans and reviews),
+  hashes the stored document as this release serializes it — the extra
+  fields dropped and the precomputed closures recomputed from the stored
+  relations — so the old document compares equal to the unchanged graph.
+  `store.reconciledSchema.hash` and `store.introspect().schemaHash` report
+  that recomputed hash, which differs from the stored `schema_hash` column
+  for such a version.
 - A relation naming `sameAs` keeps folding into the equivalence closure
   exactly like `equivalentTo` — `registry.areEquivalent(A, B)`,
   `isAssignableTo`, and every other equivalence-driven check are unaffected.

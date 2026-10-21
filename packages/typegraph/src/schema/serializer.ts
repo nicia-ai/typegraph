@@ -36,8 +36,9 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
+import { type NamedOntologyRelation } from "../ontology/validation";
 import { compositionRelationFields } from "../registry/composition-relation";
-import { computeClosuresFromOntology } from "../registry/kind-registry";
+import { computeClosuresFromNamedOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { createDataKeyedBag } from "../utils/object";
@@ -579,8 +580,7 @@ function serializeOntology(
     serializeOntologyRelation(relation),
   );
 
-  // Compute and serialize closures
-  const closures = serializeClosures(relations);
+  const closures = serializeClosures(serializedRelations);
 
   return {
     metaEdges: { ...metaEdges },
@@ -614,10 +614,13 @@ function serializeOntologyRelation(
 }
 
 /**
- * Serializes precomputed closures.
+ * Serializes the closures precomputed from a set of relations. Takes the
+ * relations by name, so a stored document's own relations recompute exactly
+ * the closures this release writes for them (see
+ * {@link canonicalStoredSchemaDocument}).
  */
 function serializeClosures(
-  relations: readonly OntologyRelation[],
+  relations: readonly NamedOntologyRelation[],
 ): SerializedClosures {
   if (relations.length === 0) {
     return {
@@ -636,7 +639,7 @@ function serializeClosures(
     };
   }
 
-  const computed = computeClosuresFromOntology(relations);
+  const computed = computeClosuresFromNamedOntology(relations);
 
   return {
     subClassAncestors: mapToRecord(computed.subClassAncestors),
@@ -821,6 +824,56 @@ export async function getGraphDefinitionHash(
   graph: GraphDef,
 ): Promise<SchemaHash> {
   return getSchemaHash(graph, DEFINITION_HASH_VERSION);
+}
+
+/**
+ * A stored schema document in the form this release's serializer writes for
+ * the schema it describes, so its {@link computeSchemaHash} is comparable with
+ * the hash of a graph serialized today.
+ *
+ * A document written by an earlier release, or read back through the parser,
+ * differs from that form only in derived or defaulted content, never in what
+ * the schema states:
+ *
+ * - `ontology.metaEdges` entries carried `transitive`/`symmetric`/`reflexive`/
+ *   `inverse`/`inference`, which this release no longer writes.
+ * - `ontology.closures` are derived from `ontology.relations`; an earlier
+ *   release derived some of them differently (the `equivalentTo` closures).
+ *   They are recomputed from the document's own relations.
+ * - The parser defaults an absent edge `targetCardinality` to `"many"`, which
+ *   the serializer omits.
+ *
+ * Everything else is kept verbatim, so a document that differs from today's
+ * serialization in anything the schema states still hashes differently.
+ */
+export function canonicalStoredSchemaDocument(
+  document: SerializedSchema,
+): SerializedSchema {
+  // Data-keyed: edge kind names and meta-edge names.
+  const edges = createDataKeyedBag<SerializedEdgeDef>();
+  for (const [kind, edge] of Object.entries(document.edges)) {
+    const { targetCardinality, ...rest } = edge;
+    edges[kind] =
+      targetCardinality === undefined || targetCardinality === "many" ?
+        rest
+      : edge;
+  }
+  const metaEdges = createDataKeyedBag<SerializedMetaEdge>();
+  for (const [name, metaEdge] of Object.entries(document.ontology.metaEdges)) {
+    metaEdges[name] = {
+      name: metaEdge.name,
+      description: metaEdge.description,
+    };
+  }
+  return {
+    ...document,
+    edges: { ...edges },
+    ontology: {
+      ...document.ontology,
+      metaEdges: { ...metaEdges },
+      closures: serializeClosures(document.ontology.relations),
+    },
+  };
 }
 
 /**

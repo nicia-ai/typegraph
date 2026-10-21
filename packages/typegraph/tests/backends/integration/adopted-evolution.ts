@@ -19,6 +19,7 @@ import {
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type {
   AdapterBackend,
+  GraphBackend,
   IdentityTableNames,
 } from "../../../src/backend/types";
 import {
@@ -272,6 +273,53 @@ function identityTablesForBackend(
       names.identityTransitionRetention,
     ),
   };
+}
+
+/**
+ * Replaces the stored document of `version` with one stating a different
+ * schema, as a concurrent writer committing other content at the same
+ * version would, and returns the original document to restore. A
+ * conflicting version is a different DOCUMENT: the stored `schema_hash`
+ * column is the writer's record, and comparisons hash the document itself.
+ */
+async function storeConflictingSchemaDocument(
+  backend: GraphBackend,
+  graphId: string,
+  version: number,
+): Promise<string> {
+  const execute = requireDefined(backend.executeStatement);
+  const row = requireDefined(await backend.getSchemaVersion(graphId, version));
+  const document = JSON.parse(row.schema_doc) as {
+    nodes: Record<string, { description?: string }>;
+  };
+  for (const node of Object.values(document.nodes)) {
+    node.description = "written by a conflicting writer";
+  }
+  const tableName =
+    backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
+  await execute(
+    asCompiledStatementSql(sql`
+      UPDATE ${sql.raw(tableName)} SET schema_doc = ${JSON.stringify(document)}
+      WHERE graph_id = ${graphId} AND version = ${version}
+    `),
+  );
+  return row.schema_doc;
+}
+
+async function restoreSchemaDocument(
+  backend: GraphBackend,
+  graphId: string,
+  version: number,
+  schemaDocument: string,
+): Promise<void> {
+  const tableName =
+    backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
+  await requireDefined(backend.executeStatement)(
+    asCompiledStatementSql(sql`
+      UPDATE ${sql.raw(tableName)} SET schema_doc = ${schemaDocument}
+      WHERE graph_id = ${graphId} AND version = ${version}
+    `),
+  );
 }
 
 export function registerAdoptedEvolutionIntegrationTests(
@@ -687,13 +735,10 @@ export function registerAdoptedEvolutionIntegrationTests(
         );
         return;
       }
-      const tableName =
-        backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
-      await backend.executeStatement(
-        asCompiledStatementSql(sql`
-          UPDATE ${sql.raw(tableName)} SET schema_hash = ${"0".repeat(64)}
-          WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-        `),
+      const originalDocument = await storeConflictingSchemaDocument(
+        backend,
+        graph.id,
+        plan.baseline.version,
       );
       try {
         await expect(
@@ -705,11 +750,11 @@ export function registerAdoptedEvolutionIntegrationTests(
         ).rejects.toThrow(SchemaContentConflictError);
         expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
       } finally {
-        await backend.executeStatement(
-          asCompiledStatementSql(sql`
-            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baseline.hash}
-            WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-          `),
+        await restoreSchemaDocument(
+          backend,
+          graph.id,
+          plan.baseline.version,
+          originalDocument,
         );
       }
     });
@@ -721,13 +766,10 @@ export function registerAdoptedEvolutionIntegrationTests(
       await store.evolve(extension);
       const plan = await store.planEvolution(extension);
       if (plan.status !== "noop") throw new Error("Expected no-op plan.");
-      const tableName =
-        backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
-      await backend.executeStatement(
-        asCompiledStatementSql(sql`
-          UPDATE ${sql.raw(tableName)} SET schema_hash = ${"0".repeat(64)}
-          WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-        `),
+      const originalDocument = await storeConflictingSchemaDocument(
+        backend,
+        graph.id,
+        plan.baseline.version,
       );
       try {
         await expect(
@@ -739,11 +781,11 @@ export function registerAdoptedEvolutionIntegrationTests(
         ).rejects.toThrow(SchemaContentConflictError);
         expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
       } finally {
-        await backend.executeStatement(
-          asCompiledStatementSql(sql`
-            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baseline.hash}
-            WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-          `),
+        await restoreSchemaDocument(
+          backend,
+          graph.id,
+          plan.baseline.version,
+          originalDocument,
         );
       }
     });

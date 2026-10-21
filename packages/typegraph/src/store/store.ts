@@ -253,6 +253,7 @@ import {
   prepareEvolutionPlan,
 } from "../schema/evolution-plan";
 import {
+  activeSchemaHash,
   applyDeprecatedKinds,
   commitNewSchemaVersion,
   commitNewSchemaVersionIfKindsEmpty,
@@ -5813,7 +5814,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
         target,
       );
-      assertEvolutionPlanBaseline(
+      await assertEvolutionPlanBaseline(
         plan,
         await target.getActiveSchema(this.graphId),
       );
@@ -5880,7 +5881,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await assertRecordedCaptureTransactionIsolation(ordinaryAdopt(externalTx));
     const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
     const active = adopted.activeSchema;
-    assertEvolutionPlanBaseline(plan, active);
+    await assertEvolutionPlanBaseline(plan, active);
     await this.#assertNoPendingRemovalFor(
       payload.mergedGraph,
       payload.baselineGraph,
@@ -5947,7 +5948,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ...outcome.receipt,
         schema: {
           version: committed.version,
-          hash: committed.schema_hash,
+          hash: await activeSchemaHash(committed),
         },
       },
     };
@@ -5999,7 +6000,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const plan = await prepareEvolutionPlan({
       baselineGraph: snapshot.baseline,
       baselineVersion: snapshot.activeRow.version,
-      baselineHash: snapshot.activeRow.schema_hash,
+      baselineHash: await activeSchemaHash(snapshot.activeRow),
       storedSchema: snapshot.storedSchema,
       extension,
     });
@@ -6049,7 +6050,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     if (
       active.version === this.#schemaMetadata.schemaVersion &&
-      active.schema_hash === this.#schemaMetadata.schemaHash
+      (await activeSchemaHash(active)) === this.#schemaMetadata.schemaHash
     ) {
       syncStoreReplacementRef(options?.ref, this);
       return this;
@@ -6058,7 +6059,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return this.#cloneWithGraph(
       this.#catchUpToStored(parseSerializedSchema(active.schema_doc)),
       options?.ref,
-      schemaMetadataFromRow(active),
+      await schemaMetadataFromRow(active),
     );
   }
 
@@ -6179,7 +6180,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const caughtUp = this.#cloneWithGraph(
         baseline,
         options?.ref,
-        schemaMetadataFromRow(activeRow),
+        await schemaMetadataFromRow(activeRow),
       );
       if (options?.eager !== undefined) {
         await this.#runEagerOrThrow(caughtUp, options.eager);
@@ -6322,7 +6323,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const evolved = this.#cloneWithGraph(
       merged,
       options?.ref,
-      schemaMetadataFromRow(committed),
+      await schemaMetadataFromRow(committed),
     );
     if (options?.eager !== undefined) {
       await this.#runEagerOrThrow(evolved, options.eager);
@@ -7087,7 +7088,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return this.#cloneWithGraph(
         baseline,
         options?.ref,
-        schemaMetadataFromRow(activeRow),
+        await schemaMetadataFromRow(activeRow),
       );
     }
 
@@ -7192,7 +7193,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const evolved = this.#cloneWithGraph(
       finalGraph,
       options?.ref,
-      schemaMetadataFromRow(committedRow),
+      await schemaMetadataFromRow(committedRow),
     );
     if (options?.eager !== undefined) {
       // Scope to just the kinds removed by THIS call (other pending
@@ -7312,7 +7313,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return this.#cloneWithGraph(
         baseline,
         options?.ref,
-        schemaMetadataFromRow(activeRow),
+        await schemaMetadataFromRow(activeRow),
       );
     }
 
@@ -7326,10 +7327,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // skipping the post-commit `getActiveSchema` round-trip. The
     // `unchanged` / `pending` / `breaking` branches don't write a new
     // version, so the existing `activeRow` metadata is still authoritative.
-    const metadata =
-      result.status === "migrated" || result.status === "initialized" ?
-        schemaMetadataFromRow(result.committedRow)
-      : schemaMetadataFromRow(activeRow);
+    const metadata = await schemaMetadataForResult(activeRow, result);
     return this.#cloneWithGraph(merged, options?.ref, metadata);
   }
 
@@ -8448,13 +8446,13 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
-function schemaMetadataFromRow(
+async function schemaMetadataFromRow(
   row: SchemaVersionRow | undefined,
-): StoreSchemaMetadata {
+): Promise<StoreSchemaMetadata> {
   if (row === undefined) return UNKNOWN_SCHEMA_METADATA;
   return Object.freeze({
     schemaVersion: row.version,
-    schemaHash: row.schema_hash,
+    schemaHash: await activeSchemaHash(row),
   });
 }
 
@@ -8484,7 +8482,7 @@ function stripReconciledOption<G extends GraphDef>(
 function schemaMetadataForResult(
   activeRow: SchemaVersionRow | undefined,
   result: SchemaValidationResult,
-): StoreSchemaMetadata {
+): Promise<StoreSchemaMetadata> {
   if (result.status === "initialized" || result.status === "migrated") {
     return schemaMetadataFromRow(result.committedRow);
   }
@@ -9008,7 +9006,7 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   return {
     graph: merged,
     result,
-    schemaMetadata: schemaMetadataForResult(activeRow, result),
+    schemaMetadata: await schemaMetadataForResult(activeRow, result),
   };
 }
 
@@ -9261,7 +9259,7 @@ async function prepareVerifiedStore<G extends GraphDef>(
   return {
     graph: merged,
     result,
-    schemaMetadata: schemaMetadataFromRow(activeRow),
+    schemaMetadata: await schemaMetadataFromRow(activeRow),
   };
 }
 

@@ -64,6 +64,7 @@ import {
 } from "./migration";
 import { prepareNewSchemaVersion } from "./new-schema-version";
 import {
+  canonicalStoredSchemaDocument,
   computeSchemaHash,
   getSchemaHash,
   serializeSchema,
@@ -75,6 +76,7 @@ import {
   type SchemaTighteningPreflight,
 } from "./tightening-preflight";
 import {
+  type SchemaHash,
   type SerializedEdgeDef,
   type SerializedSchema,
   serializedSchemaZod,
@@ -142,6 +144,58 @@ export function parseSerializedSchema(json: string): SerializedSchema {
   }
   PARSE_CACHE.set(json, validated);
   return validated;
+}
+
+/**
+ * Recomputed hashes, keyed on the parsed document `parseSerializedSchema`
+ * caches, so a document is hashed at most once while it stays cached.
+ */
+const ACTIVE_SCHEMA_HASH_CACHE = new WeakMap<SerializedSchema, SchemaHash>();
+
+/**
+ * THE hash of a stored schema version: its document, in the form this release
+ * serializes it ({@link canonicalStoredSchemaDocument}), hashed by
+ * `computeSchemaHash`.
+ *
+ * Every comparison of a stored version against a graph serialized today, or
+ * against another stored version, reads this rather than the row's
+ * `schema_hash` column. The column records the hash the WRITING release
+ * computed; a release that changes how a document is serialized without
+ * changing what it states (the meta-edge fields and `equivalentTo` closures
+ * this release dropped) leaves that column describing a serialization nobody
+ * produces any more, and a schema the diff calls unchanged would compare
+ * unequal to its own graph forever. Recomputing on read keeps the stored
+ * document and the column untouched, so a reader still running an earlier
+ * release is unaffected.
+ *
+ * For a document written by this release the result equals the column.
+ *
+ * @throws DatabaseOperationError when the stored document is not a valid
+ *   schema document.
+ */
+export async function activeSchemaHash(
+  row: Pick<SchemaVersionRow, "schema_doc">,
+): Promise<SchemaHash> {
+  const document = parseSerializedSchema(row.schema_doc);
+  const cached = ACTIVE_SCHEMA_HASH_CACHE.get(document);
+  if (cached !== undefined) return cached;
+  const hash = await computeSchemaHash(canonicalStoredSchemaDocument(document));
+  ACTIVE_SCHEMA_HASH_CACHE.set(document, hash);
+  return hash;
+}
+
+/**
+ * Whether the stored version hashes equal to `currentHash`. The column is
+ * checked first because it is equal whenever this release wrote the row.
+ */
+async function storedSchemaHashMatches(
+  row: SchemaVersionRow,
+  currentHash: SchemaHash,
+): Promise<boolean> {
+  return (
+    row.schema_hash === currentHash ||
+    (await activeSchemaHash(row)) === currentHash
+  );
 }
 
 // ============================================================
@@ -496,10 +550,9 @@ export async function ensureSchemaInternal<G extends GraphDef>(
   // SHA-256 walk. When the hash matches, we never need the
   // `currentSchema` or the `storedSchema` (no diff is computed), so
   // defer those allocations until they're actually needed.
-  const storedHash = activeSchema.schema_hash;
   const currentHash = await getSchemaHash(graph, activeSchema.version + 1);
 
-  if (storedHash === currentHash) {
+  if (await storedSchemaHashMatches(activeSchema, currentHash)) {
     return { status: "unchanged", version: activeSchema.version };
   }
 
@@ -688,9 +741,8 @@ export async function loadAndVerifyGraph<G extends GraphDef>(
   // Hash short-circuit avoids the serialize + diff walk on the steady-
   // state warm path. A semantic no-op (hash differs but `hasChanges` is
   // false) takes the same return path.
-  const storedHash = activeRow.schema_hash;
   const currentHash = await getSchemaHash(merged, activeRow.version + 1);
-  if (storedHash !== currentHash) {
+  if (!(await storedSchemaHashMatches(activeRow, currentHash))) {
     const currentSchema = serializeSchemaPreservingUnknownFields(
       merged,
       activeRow.version + 1,
