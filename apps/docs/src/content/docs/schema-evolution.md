@@ -168,7 +168,10 @@ slices follow the same rollout rule.
 Some ontology changes can invalidate rows that already exist. TypeGraph
 classifies these by what they do to your data, not just to the schema
 document, and runs a data check inside the schema-commit transaction before
-publishing the new version:
+publishing the new version. On PostgreSQL that transaction runs at
+`READ COMMITTED` whatever the server's `default_transaction_isolation` is, so
+the check sees every row a concurrent writer committed while the commit waited
+for it:
 
 | Meta-edge / property                          | Added                                             | Removed                                           |
 | --------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |

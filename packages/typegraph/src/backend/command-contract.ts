@@ -190,7 +190,9 @@ export function graphCommandCoordinationAcquisition(
  * history or advanced a revision: a snapshot isolation is never admitted
  * here. A stricter question than {@link observesPostFenceCommits}, for a
  * holder whose reads span the whole graph rather than one lock-only decision —
- * a merge plan applied inside a caller's transaction.
+ * a merge plan applied inside a caller's transaction, or a PostgreSQL schema
+ * write under the advisory schema fence, whose earlier holders lock the
+ * schema row `FOR SHARE` and advance nothing.
  */
 export function observesEveryEarlierFenceHolder(
   acquisition: GraphWriteFenceAcquisition,
