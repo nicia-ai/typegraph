@@ -471,12 +471,19 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
  * identity-fold, and edge processing, and returns it, so a rolled-back
  * attempt leaves nothing behind for a later one to read.
  *
+ * `importGraphData` reaches this function through `runWritePlan`, whose
+ * `runInWriteTransaction` replays the whole attempt through `runRetriedUnit`
+ * when the store owns a unit its fence can refuse — an import into a graph
+ * with an acyclic or composition relation (the frame's lock-only reason), in
+ * a transaction TypeGraph opened on a keyed fence — and for any import on an
+ * `"optimistic-retry"` backend. A replay calls
+ * this function again on the new transaction, which is why it never reuses
+ * state across attempts.
+ *
  * Exported for `tests/transaction-retry.test.ts` ONLY, which drives this
  * function directly through `runRetriedUnit` and a fault-injected backend to
- * prove attempt state is fresh every time. Import itself is NOT routed
- * through the retry owner in this stage: `importGraphData` still calls this
- * function exactly once, through its own single-attempt `runWritePlan`. No
- * published entrypoint re-exports it.
+ * prove attempt state is fresh every time. No published entrypoint
+ * re-exports it.
  */
 export async function runImportWritePlanAttempt<G extends GraphDef>(
   inputs: ImportAttemptInputs<G>,
@@ -685,8 +692,9 @@ async function importGraphData<G extends GraphDef>(
   // One transaction on a transactional backend; runs directly otherwise, with
   // the per-graph write lock taken before any row work — see runWritePlan and
   // the runInWriteTransaction contract underneath it, the shared
-  // lock-before-rows discipline every writer follows. A single, unretried
-  // attempt in this stage — see runImportWritePlanAttempt's doc comment.
+  // lock-before-rows discipline every writer follows. That contract may replay
+  // the attempt on a new transaction — see runImportWritePlanAttempt's doc
+  // comment.
   const { result, errors } = await runWritePlan(
     {
       graphId,

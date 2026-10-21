@@ -7256,7 +7256,7 @@ type TransactionOutcome<T> = Readonly<{
 }>;
 
 // @public
-type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend>;
+type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & SqlCompilationBackend>;
 
 // @public
 type TransactionReceipt = Readonly<{

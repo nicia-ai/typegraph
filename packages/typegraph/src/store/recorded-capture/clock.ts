@@ -172,8 +172,14 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  *
  * Keyed weakly by the backend object: the delegate is created per transaction,
  * so memo lifetime equals lock lifetime. The recorded savepoint coordinator
- * checkpoints and restores this memo with captured touches; manual savepoints
- * remain outside the capture contract.
+ * checkpoints and restores this memo with captured touches. No other
+ * savepoint can sit between two writes of a Store-owned history transaction:
+ * its callback holds no raw SQL handle (`tx.sql` is withheld under capture,
+ * and `tx.backend` executes no statements). A `withRecordedTransaction`
+ * callback can open one through the caller's own handle; rolling such a
+ * savepoint back over TypeGraph writes is outside the capture contract, as
+ * the limitations guide states, because it would undo writes and fence
+ * evidence this memo and the captured touches still remember.
  *
  * Single-flight per graph: the memo stores the IN-FLIGHT acquisition
  * promise, not just completed acquisitions, so concurrent same-transaction

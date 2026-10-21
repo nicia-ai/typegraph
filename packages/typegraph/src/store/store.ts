@@ -396,7 +396,6 @@ import {
   resolveBatchWriteVerdict,
   runInWriteTransaction,
   withPreAcquiredTransactionSchemaFenceLease,
-  withTransactionSchemaFenceLease,
   withWriteTransactionSession,
   type WriteTransactionContext,
 } from "./operations/write-transaction";
@@ -4340,13 +4339,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     //
     // A schema-version fence is acquired and validated at every managed write
     // when this Store came from schema reconciliation. A TypeGraph-owned Store
-    // transaction on a bundled backend is the narrow exception: its first
-    // managed write acquires the fence and leases that success to later
-    // managed writes. Such a callback has neither a nested transaction runner
-    // nor a native SQL handle, so no savepoint can predate that acquisition;
-    // adapter-native and caller-adopted transactions retain the per-write
-    // check because their raw SQL can roll back a savepoint and release a
-    // PostgreSQL row lock acquired after it.
+    // transaction on a bundled backend whose callback receives no `tx.sql` is
+    // the narrow exception: its first managed write acquires the fence and
+    // leases that success to later managed writes. Such a callback has
+    // neither a nested transaction runner nor a raw SQL handle, so no
+    // savepoint can predate that acquisition; a callback holding `tx.sql`, and
+    // a caller-adopted transaction, retain the per-write check because their
+    // raw SQL can roll back a savepoint and release a PostgreSQL row lock
+    // acquired after it.
     // Snapshot-isolated transactions retain their normal serialization-failure
     // semantics rather than validating a stale version after a concurrent
     // commit. The separate recorded graph lock is still taken at each write
@@ -4441,17 +4441,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               ),
               invoke,
             );
-          const invokeWithSchemaFenceLease = (): Promise<T> =>
-            this.#adapterBackend === undefined ?
-              withTransactionSchemaFenceLease(
-                {
-                  graphId: this.graphId,
-                  schemaVersion: this.#schemaMetadata.schemaVersion,
-                },
-                writeTarget,
-                invokeTransaction,
-              )
-            : invokeTransaction();
           const output = await withWriteTransactionSession(
             writeTarget,
             {
@@ -4464,7 +4453,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             this.#exposedTransactionSql(nativeTransaction) === undefined ?
               "reusable"
             : "per-write",
-            invokeWithSchemaFenceLease,
+            invokeTransaction,
           );
           // Fires the pre-commit hook here, once the write session has advanced
           // the revision clock, unless the recorded-capture backend claimed it
@@ -5204,7 +5193,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * withhold the handle, and a backend without a native transaction has none
    * to give. THE one owner of that decision — the context builder exposes
    * exactly this handle, and the write session reuses fence evidence across
-   * writes only when it is absent.
+   * writes (the per-graph write fence and the schema-fence lease) only when
+   * it is absent. A history store always withholds it, which is what lets its
+   * capture overlay's graph-lock memo reuse the same evidence. It is the only
+   * raw SQL a transaction context carries:
+   * `tx.backend` is a projection with no statement execution
+   * (`createTransactionReadBackend`), so no other handle can issue the
+   * `ROLLBACK TO SAVEPOINT` that would release evidence a later write reuses.
    */
   #exposedTransactionSql(
     sql: TNativeTransaction | undefined,
