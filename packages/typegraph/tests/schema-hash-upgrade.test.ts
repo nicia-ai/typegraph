@@ -13,8 +13,10 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  defineNodeIndex,
   equivalentTo,
   type GraphDef,
+  partOf,
   subClassOf,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -87,6 +89,55 @@ const changedEquivalenceGraph = defineGraph({
   ontology: [subClassOf(Dog, Animal), equivalentTo(Hound, Dog)],
 });
 
+/**
+ * A graph exercising every slice the stored-document parser defaults or the
+ * serializer conditionally omits: unique constraints with the scope and
+ * collation omitted and with them declared, an index, graph annotations, a
+ * composition pair, an acyclic edge kind and a target cardinality.
+ */
+const Folder = defineNode("UpgradeFolder", {
+  schema: z.object({ name: z.string(), slug: z.string() }),
+});
+const containsFolder = defineEdge("upgradeContainsFolder", {
+  schema: z.object({}),
+});
+const linksTo = defineEdge("upgradeLinksTo", { schema: z.object({}) });
+const representativeGraph = defineGraph({
+  id: "schema_hash_upgrade_representative",
+  annotations: { owner: "schema-hash-upgrade" },
+  nodes: {
+    UpgradeFolder: {
+      type: Folder,
+      unique: [
+        { name: "folder_name", fields: ["name"] },
+        {
+          name: "folder_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {
+    upgradeContainsFolder: {
+      type: containsFolder,
+      from: [Folder],
+      to: [Folder],
+      cardinality: "one",
+    },
+    upgradeLinksTo: {
+      type: linksTo,
+      from: [Folder],
+      to: [Folder],
+      acyclic: true,
+      targetCardinality: "oneActive",
+    },
+  },
+  ontology: [partOf(Folder, Folder, { via: containsFolder, partSide: "from" })],
+  indexes: [defineNodeIndex(Folder, { fields: ["slug"] })],
+});
+
 interface MutableDocument {
   ontology: {
     metaEdges: Record<string, Record<string, unknown>>;
@@ -154,13 +205,18 @@ async function storeEarlierReleaseRow(
 describe("activeSchemaHash", () => {
   it("equals the column for every row this release commits", async () => {
     const handle = sqliteHandle();
-    for (const graph of [subClassGraph, equivalenceGraph]) {
-      await createAdapterStoreWithSchema(graph, handle.backend);
+    for (const graph of [
+      subClassGraph,
+      equivalenceGraph,
+      representativeGraph,
+    ]) {
+      const [store] = await createAdapterStoreWithSchema(graph, handle.backend);
       const row = requireDefined(
         await handle.backend.getActiveSchema(graph.id),
       );
 
       expect(await activeSchemaHash(row)).toBe(row.schema_hash);
+      expect(store.reconciledSchema.hash).toBe(await getSchemaHash(graph, 1));
     }
   });
 
@@ -209,6 +265,62 @@ describe("activeSchemaHash", () => {
   // MUTATION CHECK: hashing the parsed document without
   // `canonicalStoredSchemaDocument` makes "same graph" report
   // `hashesEqual: false` while the diff still calls it unchanged.
+});
+
+describe("a schema version this release commits", () => {
+  it("registers a template on a graph declaring default-scope unique constraints", async () => {
+    const handle = sqliteHandle();
+    const [store] = await createAdapterStoreWithSchema(
+      representativeGraph,
+      handle.backend,
+    );
+
+    const template = await registerGraphTemplate(handle.backend, {
+      templateId: "schema-hash-representative-template",
+      reconciled: store.reconciledSchema,
+    });
+
+    expect(template.schemaHash).toBe(
+      await getSchemaHash(representativeGraph, 1),
+    );
+  });
+
+  it("revalidates a candidate review on a graph declaring default-scope unique constraints", async () => {
+    const handle = sqliteHandle();
+    const [store] = await createAdapterStoreWithSchema(
+      representativeGraph,
+      handle.backend,
+      { history: true },
+    );
+    const args = {
+      target: store,
+      makeBackend: () => Promise.resolve(createLocalSqliteBackend().backend),
+      writeSet: {
+        formatVersion: 1 as const,
+        sourceId: "source",
+        target: await captureCandidateWriteSetTarget(store),
+        nodes: [
+          {
+            kind: "UpgradeFolder",
+            id: "candidate",
+            properties: { name: "root", slug: "root" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        edges: [],
+      },
+      policy: { id: "schema-hash-representative-policy", context: {} },
+    };
+
+    const planned = await planCandidateWriteSetReview(args);
+    if (isErr(planned)) throw planned.error;
+    const revalidated = await revalidateCandidateWriteSetReview({
+      ...args,
+      review: planned.data,
+    });
+
+    expect(isErr(revalidated)).toBe(false);
+  });
 });
 
 describe("a schema version an earlier release committed", () => {

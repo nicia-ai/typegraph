@@ -65,6 +65,24 @@ describe("structural subsumption over constraints the JSON Schema projection dro
     });
   });
 
+  it("refuses a flagged pattern carried by a custom string format", () => {
+    const child = z.object({ code: z.stringFormat("vx-code", /^abc$/i) });
+    const parent = z.object({ code: z.stringFormat("vx-code", /^abc$/) });
+    expect(child.safeParse({ code: "ABC" }).success).toBe(true);
+    expect(parent.safeParse({ code: "ABC" }).success).toBe(false);
+
+    expectIncomparable(subclassRegistryError(child, parent));
+  });
+
+  it("refuses a flagged pattern overriding a built-in string format", () => {
+    const child = z.object({ mail: z.email({ pattern: /^[a-z]+@x\.y$/i }) });
+    const parent = z.object({ mail: z.email({ pattern: /^[a-z]+@x\.y$/ }) });
+    expect(child.safeParse({ mail: "ABC@x.y" }).success).toBe(true);
+    expect(parent.safeParse({ mail: "ABC@x.y" }).success).toBe(false);
+
+    expectIncomparable(subclassRegistryError(child, parent));
+  });
+
   it("refuses a flagged pattern on the parent side too", () => {
     expectIncomparable(
       subclassRegistryError(

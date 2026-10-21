@@ -880,8 +880,13 @@ export async function getGraphDefinitionHash(
  * - `ontology.closures` are derived from `ontology.relations`; an earlier
  *   release derived some of them differently (the `equivalentTo` closures).
  *   They are recomputed from the document's own relations.
- * - The parser defaults an absent edge `targetCardinality` to `"many"`, which
- *   the serializer omits.
+ * - An absent edge `targetCardinality` means `"many"`, which the serializer
+ *   omits.
+ *
+ * The document must be the stored JSON as written, not the output of the
+ * schema parser: the parser fills in keys the serializer omits (a unique
+ * constraint's `scope` and `collation`) and an explicit value cannot be told
+ * from a filled-in one afterwards.
  *
  * Everything else is kept verbatim, so a document that differs from today's
  * serialization in anything the schema states still hashes differently.

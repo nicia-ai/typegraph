@@ -7,8 +7,9 @@
  * `isStructuralSubtype` answer `subtype` for a pair whose child admits a value
  * its parent refuses:
  *
- * - A regex's flags. `/^abc$/i` and `/^abc$/` both project as
- *   `pattern: "^abc$"`. Only `g`, which `RegExp.prototype.test` semantics
+ * - A regex's flags, on whichever check carries the pattern (`.regex()`,
+ *   `z.stringFormat()`, `z.email({ pattern })`). `/^abc$/i` and `/^abc$/` both
+ *   project as `pattern: "^abc$"`. Only `g`, which `RegExp.prototype.test` semantics
  *   under Zod do not depend on, is harmless.
  * - A `.refine()` / `.superRefine()` / `.check()` refinement, which projects
  *   as its base schema. On a CHILD it only narrows, which the verdict may
@@ -67,6 +68,7 @@ type ZodCheckDef = Readonly<{
 
 type ZodNodeDef = Readonly<{
   type?: string;
+  pattern?: RegExp;
   checks?: readonly Readonly<{ _zod: Readonly<{ def: ZodCheckDef }> }>[];
   catchall?: Readonly<{ _zod: Readonly<{ def: Readonly<{ type?: string }> }> }>;
 }>;
@@ -92,6 +94,14 @@ function markOpaque(
     typeof existing === "string" ? `${existing} ${token}` : token;
 }
 
+function markSemanticRegexFlags(
+  jsonSchema: Record<string, unknown>,
+  pattern: RegExp | undefined,
+): void {
+  if (pattern === undefined || !hasSemanticRegexFlags(pattern)) return;
+  markOpaque(jsonSchema, ZOD_ONLY_CONSTRAINT_KEYWORD, `flags:${pattern.flags}`);
+}
+
 function markZodOnlyConstraints(
   context: Readonly<{
     zodSchema: z.core.$ZodTypes;
@@ -99,6 +109,9 @@ function markZodOnlyConstraints(
   }>,
 ): void {
   const def = context.zodSchema._zod.def as ZodNodeDef;
+  // A string-format schema (`z.email()`, `z.stringFormat()`) carries its
+  // pattern on its own definition rather than on a check.
+  markSemanticRegexFlags(context.jsonSchema, def.pattern);
   for (const check of def.checks ?? []) {
     const checkDef = check._zod.def;
     if (checkDef.check === "custom") {
@@ -108,17 +121,7 @@ function markZodOnlyConstraints(
         `refinement:${instanceToken(check)}`,
       );
     }
-    if (
-      checkDef.format === "regex" &&
-      checkDef.pattern !== undefined &&
-      hasSemanticRegexFlags(checkDef.pattern)
-    ) {
-      markOpaque(
-        context.jsonSchema,
-        ZOD_ONLY_CONSTRAINT_KEYWORD,
-        `flags:${checkDef.pattern.flags}`,
-      );
-    }
+    markSemanticRegexFlags(context.jsonSchema, checkDef.pattern);
   }
   if (def.type === "object" && def.catchall?._zod.def.type === "never") {
     markOpaque(

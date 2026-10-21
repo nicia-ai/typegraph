@@ -168,7 +168,12 @@ const ACTIVE_SCHEMA_HASH_CACHE = new WeakMap<SerializedSchema, SchemaHash>();
  * document and the column untouched, so a reader still running an earlier
  * release is unaffected.
  *
- * For a document written by this release the result equals the column.
+ * For a document written by this release the result equals the column. The
+ * hash is taken over the document as stored (validated by
+ * {@link parseSerializedSchema}, then read raw), never over the parsed form:
+ * the parser defaults keys the serializer omits (a unique constraint's
+ * `scope` and `collation`), and a defaulted key cannot be told from the same
+ * value written explicitly.
  *
  * @throws DatabaseOperationError when the stored document is not a valid
  *   schema document.
@@ -179,7 +184,10 @@ export async function activeSchemaHash(
   const document = parseSerializedSchema(row.schema_doc);
   const cached = ACTIVE_SCHEMA_HASH_CACHE.get(document);
   if (cached !== undefined) return cached;
-  const hash = await computeSchemaHash(canonicalStoredSchemaDocument(document));
+  const storedDocument = JSON.parse(row.schema_doc) as SerializedSchema;
+  const hash = await computeSchemaHash(
+    canonicalStoredSchemaDocument(storedDocument),
+  );
   ACTIVE_SCHEMA_HASH_CACHE.set(document, hash);
   return hash;
 }
