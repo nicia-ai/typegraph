@@ -721,12 +721,18 @@ function recordedNodeCollection<G extends GraphDef>(
         Method in (typeof RECORDED_POINT_READ_NAMES)[number]
       ]: RecordedStoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) =>
-      storeRuntime(store).recordedNodeGetById(kind, id, coordinate),
-    getByIds: (ids) =>
-      storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate),
-    scan: (options) =>
-      storeRuntime(store).recordedNodeScan(kind, coordinate, options),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return storeRuntime(store).recordedNodeGetById(kind, id, coordinate);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate);
+    },
+    scan: async (options) => {
+      assertNoStatedCoordinate("scan", options, coordinate);
+      return storeRuntime(store).recordedNodeScan(kind, coordinate, options);
+    },
   };
   return recordedCollectionProxy(reads, live, coordinate, "node");
 }
@@ -751,12 +757,18 @@ function recordedEdgeCollection<G extends GraphDef>(
         NodeType
       >[Method];
     }> = {
-    getById: (id) =>
-      storeRuntime(store).recordedEdgeGetById(kind, id, coordinate),
-    getByIds: (ids) =>
-      storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate),
-    scan: (options) =>
-      storeRuntime(store).recordedEdgeScan(kind, coordinate, options),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return storeRuntime(store).recordedEdgeGetById(kind, id, coordinate);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate);
+    },
+    scan: async (options) => {
+      assertNoStatedCoordinate("scan", options, coordinate);
+      return storeRuntime(store).recordedEdgeScan(kind, coordinate, options);
+    },
   };
   return recordedCollectionProxy(reads, live, coordinate, "edge");
 }

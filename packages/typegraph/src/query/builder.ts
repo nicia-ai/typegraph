@@ -25,7 +25,7 @@ import {
   type QueryBuilderInternalContext,
   registerQueryBuilderInternalContext,
 } from "./builder/internal-context";
-import { createSchemaIntrospector } from "./schema-introspector";
+import { schemaIntrospectorFor } from "./schema-introspector";
 
 // Re-export all classes
 export {
@@ -179,11 +179,7 @@ function createQueryBuilderWithContext<
   registry: KindRegistry,
   options?: InternalCreateQueryBuilderOptions,
 ): InitialQueryBuilder<G, CoordinateState> {
-  const schemaIntrospector = createSchemaIntrospector(
-    registry.nodeKinds,
-    registry.edgeKinds,
-    (childKind, parentKind) => registry.isAssignableTo(childKind, parentKind),
-  );
+  const schemaIntrospector = schemaIntrospectorFor(registry);
   if (options?.identityEnabled === true && registry.identity === undefined) {
     throw new ConfigurationError(
       "Identity-aware query compilation requires an identity-enabled graph registry.",

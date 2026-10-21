@@ -6666,6 +6666,14 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -6722,6 +6730,14 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -6778,6 +6794,14 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -6834,6 +6858,14 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -6890,6 +6922,14 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -6946,6 +6986,14 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -7002,6 +7050,14 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "SchemaIntrospector",
     "member": "hasSearchableField",
     "kind": "member-removed",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `hasSearchableField` is replaced by `kindsWithoutSearchableField`, which answers the same question and names the kinds lacking the field. Declared in .changeset/typed-subsumption.md.",
@@ -7053,6 +7109,14 @@
     "member": "kindsWithoutSearchableField",
     "kind": "required-member-added",
     "reason": "`SchemaIntrospector` is built by the library (`createSchemaIntrospector`) for the query builder and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsWithoutSearchableField` replaces `hasSearchableField` so a `$fulltext.matches()` refusal names the kinds that leave an alias without the searchable field. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaIntrospector",
+    "member": "kindsRedeclaringEmbeddingUntagged",
+    "kind": "required-member-added",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {

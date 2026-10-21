@@ -573,7 +573,9 @@ const store = createStore(graph, backend, {
 });
 ```
 
-Restore the earlier exact-kind query behavior (no subclass expansion) everywhere:
+Restore the earlier exact-kind query rows (no subclass expansion) everywhere. This
+changes which rows an alias returns, not its type: aliases over a kind the ontology
+can affect stay widened, and `{ expansion: "exact" }` on the call keeps the literal type:
 
 ```typescript
 const store = createStore(graph, backend, {

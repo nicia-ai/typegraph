@@ -465,6 +465,70 @@ describe("provenance composition existence", () => {
   // MUTATION CHECK: make `compositionExistenceSupported` return `false` for
   // every fact. The report closes too and `holding()` comes back empty.
 
+  it("leaves a required part alone while its whole stays supported through another source", async () => {
+    const { store } = await createCompositionStore(
+      "provenance_composition_surviving_whole",
+    );
+    const firstSource = await store.nodes.PcSource.create(
+      { label: "first", retracted: false },
+      { id: "source-1" },
+    );
+    const secondSource = await store.nodes.PcSource.create(
+      { label: "second", retracted: false },
+      { id: "source-2" },
+    );
+    const report = await store.nodes.PcReport.create({}, { id: "report-1" });
+    // A required part whose own justification is not linked yet: unsupported
+    // before and after, so no transition over the whole is its business.
+    const section = await store.nodes.PcSection.create(
+      {},
+      {
+        id: "section-1",
+        partOf: { whole: { kind: "PcReport", id: report.id } },
+      },
+    );
+    for (const [index, source] of [firstSource, secondSource].entries()) {
+      const justification = await store.nodes.PcJustification.create(
+        { label: `justification-${index}` },
+        { id: `justification-${index}` },
+      );
+      await store.edges.pcPremiseOf.create(source, justification);
+      await store.edges.pcDerives.create(justification, report);
+    }
+    const provenance = createRetractionCapability(store, config);
+
+    const { result: partial, closed: closedByPartial } =
+      await closedFactsDuring(store, () => provenance.retract(firstSource));
+    expect(partial.died).toEqual([]);
+    expect(partial.survivedVia.map(({ fact }) => fact.id)).toEqual([
+      "report-1",
+    ]);
+    expect(closedByPartial).toEqual([]);
+    await expect(
+      store.nodes.PcSection.getById(section.id),
+    ).resolves.toMatchObject({
+      id: "section-1",
+    });
+
+    // Once the whole's last source goes, its support does change and the part
+    // it holds up is carried into scope with it.
+    const { result: final, closed: closedByFinal } = await closedFactsDuring(
+      store,
+      () => provenance.retract(secondSource),
+    );
+    expect(final.died).toEqual([
+      { kind: "PcReport", id: "report-1" },
+      { kind: "PcSection", id: "section-1" },
+    ]);
+    expect(closedByFinal).toEqual(
+      final.died.map((fact) => `${fact.kind}/${fact.id}`).toSorted(),
+    );
+  });
+  // MUTATION CHECK: in `computeAffectedFactKeys`, drop the
+  // `supportedBefore.has(current) === supportedAfter.has(current)` guard so a
+  // reached whole always carries its required parts. The first retraction then
+  // closes the unjustified section while the report is still supported.
+
   it("holds a required part whose whole is a live node that carries no belief status", async () => {
     const { store } = await createCompositionStore(
       "provenance_composition_nonfact",

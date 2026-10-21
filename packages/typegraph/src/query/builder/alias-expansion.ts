@@ -113,6 +113,45 @@ export function assertPermittedExpansionAxis(
   );
 }
 
+const REMOVED_INCLUDE_SUBCLASSES_OPTION = "includeSubClasses";
+
+/**
+ * Refuses the removed `includeSubClasses` boolean, which `expansion` replaced.
+ *
+ * The option is gone from the types, so only JavaScript (or a cast) can still
+ * state it, and without this check it would be read as no option at all: a
+ * caller that wrote `{ includeSubClasses: false }` for an exact alias would
+ * silently get the polymorphic default. A stated option is applied or
+ * refused, never ignored.
+ *
+ * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_INVALID`) when `options`
+ *   states `includeSubClasses`.
+ */
+export function assertNoRemovedExpansionOption(
+  options: object | undefined,
+  surface: string,
+): void {
+  if (
+    options === undefined ||
+    (options as Readonly<Record<string, unknown>>)[
+      REMOVED_INCLUDE_SUBCLASSES_OPTION
+    ] === undefined
+  )
+    return;
+  throw new ConfigurationError(
+    `${surface} no longer accepts "${REMOVED_INCLUDE_SUBCLASSES_OPTION}"; the \`expansion\` option replaced it.`,
+    {
+      code: "QUERY_ALIAS_EXPANSION_INVALID",
+      option: REMOVED_INCLUDE_SUBCLASSES_OPTION,
+      surface,
+    },
+    {
+      suggestion:
+        'Pass expansion: "exact" where includeSubClasses was false, and expansion: "subclasses" where it was true.',
+    },
+  );
+}
+
 /**
  * Resolves the store-wide default a `Store` (`queryDefaults.expansion`) or a
  * standalone `createQueryBuilder` (`defaultExpansion`) was constructed with:
@@ -143,12 +182,14 @@ export function resolveDefaultAliasExpansion(
  *
  * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_INVALID`) when
  *   `expansion` names something outside the axis set — an alias offers all
- *   three, so only an out-of-domain value can fail here.
+ *   three, so only an out-of-domain value can fail here — or when the removed
+ *   `includeSubClasses` option is stated.
  */
 export function resolveAliasExpansion(
   options: AliasExpansionOptions | undefined,
   storeDefaultExpansion: DefaultAliasExpansionAxis,
 ): AliasExpansionAxis {
+  assertNoRemovedExpansionOption(options, "alias");
   const expansion = options?.expansion;
   if (expansion === undefined) return storeDefaultExpansion;
   assertPermittedExpansionAxis(expansion, ALIAS_EXPANSION_AXES, "alias");

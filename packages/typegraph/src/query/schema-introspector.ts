@@ -5,6 +5,7 @@ import {
   getSearchableMetadata,
   type SearchableMetadata,
 } from "../core/searchable";
+import { type KindRegistry } from "../registry/kind-registry";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type ValueType } from "./ast";
@@ -124,6 +125,17 @@ export type SchemaIntrospector = Readonly<{
    */
   kindsWithoutSearchableField: (
     kindNames: readonly string[],
+  ) => readonly string[];
+  /**
+   * The kinds of `kindNames` that declare `fieldName` as something other than
+   * an `embedding()` while another of them declares it as one. A subclass may
+   * legally redeclare an embedding field untagged (the tag is an annotation,
+   * not a constraint), and its rows then hold a vector that no index covers.
+   * A kind that omits the field holds no vector there and is not named.
+   */
+  kindsRedeclaringEmbeddingUntagged: (
+    kindNames: readonly string[],
+    fieldName: string,
   ) => readonly string[];
 }>;
 
@@ -419,6 +431,25 @@ export function createSchemaIntrospector(
     return result;
   }
 
+  function kindsRedeclaringEmbeddingUntagged(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): readonly string[] {
+    const declarations = kindNames.map((kindName) => ({
+      kindName,
+      info: getFieldTypeInfo(kindName, fieldName),
+    }));
+    const anyEmbedding = declarations.some(
+      ({ info }) => info?.valueType === "embedding",
+    );
+    if (!anyEmbedding) return [];
+    return declarations
+      .filter(
+        ({ info }) => info !== undefined && info.valueType !== "embedding",
+      )
+      .map(({ kindName }) => kindName);
+  }
+
   return {
     getFieldTypeInfo,
     getSharedFieldTypeInfo,
@@ -427,7 +458,30 @@ export function createSchemaIntrospector(
     hasDeclaredField,
     hasDeclaredEdgeField,
     kindsWithoutSearchableField,
+    kindsRedeclaringEmbeddingUntagged,
   };
+}
+
+const registryIntrospectors = new WeakMap<KindRegistry, SchemaIntrospector>();
+
+/**
+ * The schema introspector over a registry's kinds and assignability relation,
+ * built once per registry. The query builder and the `store.search()` facade
+ * both ask it, so a decision about a kind set — which kinds a text or vector
+ * index would miss — has one owner and one answer.
+ */
+export function schemaIntrospectorFor(
+  registry: KindRegistry,
+): SchemaIntrospector {
+  const cached = registryIntrospectors.get(registry);
+  if (cached !== undefined) return cached;
+  const introspector = createSchemaIntrospector(
+    registry.nodeKinds,
+    registry.edgeKinds,
+    (childKind, parentKind) => registry.isAssignableTo(childKind, parentKind),
+  );
+  registryIntrospectors.set(registry, introspector);
+  return introspector;
 }
 
 function keepsIndexingTags(

@@ -245,6 +245,23 @@ async function seedOptionalFieldStore(context: IntegrationTestContext) {
   return store;
 }
 
+const UNINDEXED_SEARCH_CODE = "SEARCH_EXPANSION_KIND_UNINDEXED";
+
+/** The error an awaited attempt rejects with, or `undefined` if it resolved. */
+async function rejectionOf(attempt: Promise<unknown>): Promise<unknown> {
+  try {
+    await attempt;
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+function expectConfigurationError(caught: unknown): ConfigurationError {
+  expect(caught).toBeInstanceOf(ConfigurationError);
+  return caught as ConfigurationError;
+}
+
 export function registerOntologyTypedSubsumptionIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -621,6 +638,217 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
           .from("TsSearchableDoc", "d")
           .whereNode("d", (d) => d.vector.similarTo([1, 0, 0], 5)),
       ).toThrow(ConfigurationError);
+    });
+  });
+
+  describe("Typed subsumption — search facade over kinds an index would miss", () => {
+    it(`refuses a fulltext expansion when a subclass redeclares the searchable field untagged, as the builder does`, async (ctx) => {
+      const store = await context.createStore(redeclaredTitleGraph);
+      if (store.backend.capabilities.fulltext?.supported !== true) {
+        ctx.skip();
+      }
+      await store.nodes.TsSearchableDoc.create({
+        title: "unique_ts_gap_marker",
+      });
+      await store.nodes.TsRedeclaredTitleMemo.create({
+        title: "unique_ts_gap_marker",
+        note: "n",
+      });
+
+      const exact = await store.search.fulltext("TsSearchableDoc", {
+        query: "unique_ts_gap_marker",
+        limit: 10,
+      });
+      expect(exact.map((hit) => hit.node.kind)).toEqual(["TsSearchableDoc"]);
+
+      const refusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.fulltext("TsSearchableDoc", {
+            query: "unique_ts_gap_marker",
+            limit: 10,
+            expansion: "subclasses",
+          }),
+        ),
+      );
+      expect(refusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "fulltext",
+        kinds: ["TsRedeclaredTitleMemo"],
+      });
+      expect(refusal.message).toContain('"TsRedeclaredTitleMemo"');
+    });
+
+    it(`refuses the fulltext leg of a hybrid expansion over the same kinds`, async (ctx) => {
+      const store = await context.createStore(redeclaredTitleGraph);
+      if (
+        store.backend.capabilities.fulltext?.supported !== true ||
+        store.backend.capabilities.vector?.supported !== true
+      ) {
+        ctx.skip();
+      }
+
+      const refusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.hybrid("TsSearchableDoc", {
+            vector: { fieldPath: "vector", queryEmbedding: [1, 0, 0] },
+            fulltext: { query: "anything" },
+            limit: 10,
+            expansion: "subclasses",
+          }),
+        ),
+      );
+      expect(refusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "fulltext",
+      });
+    });
+
+    it(`refuses a vector expansion when a subclass redeclares the embedding field untagged`, async (ctx) => {
+      const store = await context.createStore(redeclaredVectorGraph);
+      if (store.backend.capabilities.vector?.supported !== true) {
+        ctx.skip();
+      }
+      await store.nodes.TsSearchableDoc.create({ vector: [1, 0, 0] });
+      await store.nodes.TsRedeclaredVectorMemo.create({ vector: [1, 0, 0] });
+
+      const exact = await store.search.vector("TsSearchableDoc", {
+        fieldPath: "vector",
+        queryEmbedding: [1, 0, 0],
+        limit: 10,
+      });
+      expect(exact.map((hit) => hit.node.kind)).toEqual(["TsSearchableDoc"]);
+
+      const refusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.vector("TsSearchableDoc", {
+            fieldPath: "vector",
+            queryEmbedding: [1, 0, 0],
+            limit: 10,
+            expansion: "subclasses",
+          }),
+        ),
+      );
+      expect(refusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "vector",
+        kinds: ["TsRedeclaredVectorMemo"],
+      });
+    });
+
+    it(`still runs a fulltext expansion whose subclass omits the searchable field, which holds no text there`, async (ctx) => {
+      const store = await context.createStore(omittedSearchableGraph);
+      if (store.backend.capabilities.fulltext?.supported !== true) {
+        ctx.skip();
+      }
+      await store.nodes.TsSearchableDoc.create({
+        title: "unique_ts_omitted_marker",
+      });
+      await store.nodes.TsTitlelessMemo.create({
+        note: "unique_ts_omitted_marker",
+      });
+
+      const hits = await store.search.fulltext("TsSearchableDoc", {
+        query: "unique_ts_omitted_marker",
+        limit: 10,
+        expansion: "subclasses",
+      });
+      expect(hits.map((hit) => hit.node.kind)).toEqual(["TsSearchableDoc"]);
+    });
+
+    it(`still runs a vector expansion whose subclass omits the embedding field, which holds no vector there`, async (ctx) => {
+      const store = await context.createStore(omittedSearchableGraph);
+      if (store.backend.capabilities.vector?.supported !== true) {
+        ctx.skip();
+      }
+      await store.nodes.TsSearchableDoc.create({ vector: [1, 0, 0] });
+      await store.nodes.TsTitlelessMemo.create({ note: "no vector" });
+
+      const hits = await store.search.vector("TsSearchableDoc", {
+        fieldPath: "vector",
+        queryEmbedding: [1, 0, 0],
+        limit: 10,
+        expansion: "subclasses",
+      });
+      expect(hits.map((hit) => hit.node.kind)).toEqual(["TsSearchableDoc"]);
+    });
+  });
+
+  describe("Typed subsumption — the removed includeSubClasses option", () => {
+    it("is refused by every alias entry point and the search facade, naming expansion", async () => {
+      const store = await context.createStore(subsumptionGraph);
+      const stated = { includeSubClasses: false } as never;
+      const attempts: Readonly<Record<string, () => unknown>> = {
+        from: () => store.query().from("TsMedia", "m", stated),
+        fromDynamic: () => store.query().fromDynamic("TsMedia", "m", stated),
+        to: () =>
+          store
+            .query()
+            .from("TsMedia", "m")
+            .traverse("tsLinksTo", "e")
+            .to("TsMedia", "t", stated),
+        toDynamic: () =>
+          store
+            .query()
+            .from("TsMedia", "m")
+            .traverse("tsLinksTo", "e")
+            .toDynamic("TsMedia", "t", stated),
+      };
+      for (const attempt of Object.values(attempts)) {
+        const refusal = expectConfigurationError(
+          await rejectionOf(Promise.resolve().then(attempt)),
+        );
+        expect(refusal.details).toMatchObject({
+          code: "QUERY_ALIAS_EXPANSION_INVALID",
+          option: "includeSubClasses",
+        });
+        expect(refusal.message).toContain("expansion");
+      }
+    });
+
+    it("is refused by every search leg instead of searching exact-kind", async (ctx) => {
+      const store = await context.createStore(searchGraph);
+      const { fulltext, vector } = store.backend.capabilities;
+      const hasFulltext = fulltext?.supported === true;
+      const hasVector = vector?.supported === true;
+      if (!hasFulltext && !hasVector) ctx.skip();
+
+      const queryEmbedding = SEARCH_QUERY_EMBEDDING;
+      const attempts: Readonly<Record<string, () => Promise<unknown>>> = {
+        ...(hasFulltext && {
+          fulltext: () =>
+            store.search.fulltext("TsSearchMedia", {
+              query: "anything",
+              limit: 10,
+              includeSubClasses: true,
+            } as never),
+        }),
+        ...(hasVector && {
+          vector: () =>
+            store.search.vector("TsSearchMedia", {
+              fieldPath: "embedding",
+              queryEmbedding,
+              limit: 10,
+              includeSubClasses: true,
+            } as never),
+        }),
+        ...(hasFulltext &&
+          hasVector && {
+            hybrid: () =>
+              store.search.hybrid("TsSearchMedia", {
+                vector: { fieldPath: "embedding", queryEmbedding },
+                fulltext: { query: "anything" },
+                limit: 10,
+                includeSubClasses: true,
+              } as never),
+          }),
+      };
+      for (const attempt of Object.values(attempts)) {
+        const refusal = expectConfigurationError(await rejectionOf(attempt()));
+        expect(refusal.details).toMatchObject({
+          code: "QUERY_ALIAS_EXPANSION_INVALID",
+          option: "includeSubClasses",
+        });
+      }
     });
   });
 

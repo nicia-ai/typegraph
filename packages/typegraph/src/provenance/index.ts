@@ -218,6 +218,7 @@ type SupportSnapshot = Readonly<{
   firingJustificationKeysByFact: ReadonlyMap<string, readonly string[]>;
   affectedFactKeys: (
     sources: readonly ProvenanceNodeRef[],
+    supportedBefore: ReadonlySet<string>,
   ) => ReadonlySet<string>;
 }>;
 
@@ -843,12 +844,15 @@ function computeSupportSnapshot(
     firingJustificationKeysByFact,
     affectedFactKeys(
       targets: readonly ProvenanceNodeRef[],
+      supportedBefore: ReadonlySet<string>,
     ): ReadonlySet<string> {
       return computeAffectedFactKeys(
         targets,
         roles,
         supportEdges,
         compositionDependencies,
+        supportedBefore,
+        supported,
       );
     },
   };
@@ -915,6 +919,8 @@ function computeAffectedFactKeys(
   roles: ProvenanceRows,
   supportEdges: SupportEdges,
   compositionDependencies: CompositionExistenceDependencies,
+  supportedBefore: ReadonlySet<string>,
+  supportedAfter: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const affected = new Set<string>();
   // Seed the BFS with every source at once: the union of facts reachable from
@@ -940,13 +946,16 @@ function computeAffectedFactKeys(
       }
     }
 
-    // A whole whose own belief status this transition can change carries its
-    // required parts into scope — they cannot stay believed without it, and a
-    // part that is itself a whole folds out of the same walk. Only a fact
-    // whole propagates: a transition flips source properties, so a non-fact
-    // whole's liveness (and with it its parts' existence dependency) is the
-    // same before and after.
+    // A whole whose own support this transition changes carries its required
+    // parts into scope — they cannot stay supported without it, and a part
+    // that is itself a whole folds out of the same walk. A whole reached
+    // without a change in support (another of its justifications still
+    // fires) leaves its parts alone: their existence dependency has the same
+    // verdict before and after, so they are not this transition's business.
+    // Only a fact whole propagates: a transition flips source properties, so
+    // a non-fact whole's liveness is the same before and after.
     if (!roles.facts.has(current)) continue;
+    if (supportedBefore.has(current) === supportedAfter.has(current)) continue;
     const requiredParts =
       compositionDependencies.partKeysByWholeKey.get(current) ?? [];
     for (const partKey of requiredParts) {
@@ -1195,7 +1204,10 @@ async function runTransition<
       }
     }
     const after = computeSupportSnapshot(supportGraph, availableAfter);
-    const affected = after.affectedFactKeys(uniqueSources);
+    const affected = after.affectedFactKeys(
+      uniqueSources,
+      before.supportedFactKeys,
+    );
     const closing = closingFactRows(after, affected);
     await synchronizeFactCurrency(tx, after, affected, closing);
     return buildReport<G, FactKind, JustificationKind>(
