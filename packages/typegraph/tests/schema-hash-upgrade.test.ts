@@ -18,6 +18,7 @@ import {
   type GraphDef,
   partOf,
   subClassOf,
+  type UniqueConstraint,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
@@ -102,6 +103,17 @@ const containsFolder = defineEdge("upgradeContainsFolder", {
   schema: z.object({}),
 });
 const linksTo = defineEdge("upgradeLinksTo", { schema: z.object({}) });
+/**
+ * The types require `scope` and `collation`, but a JavaScript caller can omit
+ * them, and the serializer then omits them from the stored document.
+ */
+function uniqueWithoutScopeOrCollation(
+  name: string,
+  field: string,
+): UniqueConstraint {
+  return { name, fields: [field] } as unknown as UniqueConstraint;
+}
+
 const representativeGraph = defineGraph({
   id: "schema_hash_upgrade_representative",
   annotations: { owner: "schema-hash-upgrade" },
@@ -109,7 +121,7 @@ const representativeGraph = defineGraph({
     UpgradeFolder: {
       type: Folder,
       unique: [
-        { name: "folder_name", fields: ["name"] },
+        uniqueWithoutScopeOrCollation("folder_name", "name"),
         {
           name: "folder_slug",
           fields: ["slug"],
