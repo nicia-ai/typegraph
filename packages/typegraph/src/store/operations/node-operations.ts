@@ -119,7 +119,7 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
-import { refKey } from "../../identity/service";
+import { type IdentityFoldPlan, refKey } from "../../identity/service";
 import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
@@ -407,12 +407,23 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ) => Promise<void>;
     /**
      * The read-only half of {@link foldCreated}: refuses, writing nothing,
-     * what folding `references` would refuse, so a batch that restores several
-     * rows reaches that verdict before its first statement.
+     * what folding `references` would refuse, so a frame that creates or
+     * restores rows reaches that verdict before its first statement. Returns
+     * the fold it decided, for {@link applyFold}.
      */
     assertFoldable: (
       target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
+    ) => Promise<IdentityFoldPlan>;
+    /**
+     * The write half of {@link foldCreated}: folds what `assertFoldable`
+     * decided earlier in the same frame, once its rows are written, without
+     * reading the verdict again.
+     */
+    applyFold: (
+      target: IdentityTarget,
+      plan: IdentityFoldPlan,
+      cause: "fold" | "restore",
     ) => Promise<void>;
     detachDeleted: (
       target: IdentityTarget,
@@ -1550,6 +1561,33 @@ function foldReferences(
   return preparedCreates
     .filter((prepared) => prepared.idProvided)
     .map((prepared) => ({ kind: prepared.kind, id: prepared.id }));
+}
+
+/** The identity fold a create frame decided, written once its rows land. */
+type PreparedNodeCreateFold = (cause: "fold" | "restore") => Promise<void>;
+
+/**
+ * Decides, writing nothing, the identity fold a create frame owes its rows,
+ * before the frame's first write: a fold the identity rules refuse is raised
+ * here, so a refusal caught inside a caller's transaction leaves none of the
+ * frame's rows behind. Judged against the identity state as stored — a batch
+ * is one kind and two of its rows never share an id, so no row's fold depends
+ * on another's — and written as decided, with no second read, by the returned
+ * function once the rows are written. The cause is the row's: `"restore"` for
+ * a resurrected tombstone, `"fold"` for an insert.
+ */
+async function prepareNodeCreatesFold<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  preparedCreates: readonly NodeCreatePrepared[],
+): Promise<PreparedNodeCreateFold> {
+  const identity = ctx.identity;
+  if (identity === undefined) return () => Promise.resolve();
+  const plan = await identity.assertFoldable(
+    target,
+    foldReferences(preparedCreates),
+  );
+  return (cause) => identity.applyFold(target, plan, cause);
 }
 
 // ============================================================
@@ -4919,7 +4957,6 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
-    const identity = ctx.identity;
     const draft = draftNodeCreate(ctx, input, id, options);
     const claimPlan = planNodeCreateClaims(
       { graphId: ctx.graphId, registry: ctx.registry },
@@ -4972,6 +5009,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       preparationMode,
       claimPlan,
     );
+    const foldCreated = await prepareNodeCreatesFold(ctx, target, [prepared]);
     const projectionFusionEligible =
       compositionWork === undefined &&
       shouldReturnRow &&
@@ -5013,13 +5051,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         target,
         prepared,
       );
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences([prepared]),
-          "restore",
-        );
-      }
+      await foldCreated("restore");
       await attachCompositionEdge();
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
@@ -5099,13 +5131,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           await session.createNodeIfAbsent(nodeCreateWork(prepared))
         );
       if (inserted !== undefined) {
-        if (identity !== undefined) {
-          await identity.foldCreated(
-            target,
-            foldReferences([prepared]),
-            "fold",
-          );
-        }
+        await foldCreated("fold");
         await attachCompositionEdge();
         return shouldReturnRow ? rowToNode(inserted) : undefined;
       }
@@ -5150,13 +5176,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         target,
         prepared,
       );
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences([prepared]),
-          "restore",
-        );
-      }
+      await foldCreated("restore");
       await attachCompositionEdge();
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
@@ -5188,9 +5208,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       return;
     });
 
-    if (identity !== undefined) {
-      await identity.foldCreated(target, foldReferences([prepared]), "fold");
-    }
+    await foldCreated("fold");
 
     await attachCompositionEdge();
 
@@ -5334,8 +5352,18 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
+      const partition = partitionCreates(preparedCreates);
+      const foldInserts = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.inserts,
+      );
+      const foldResurrections = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.resurrections,
+      );
 
       // See `prepareBatchCompositionCreateEdges`'s docblock.
       const preparedCompositionEdges = await prepareBatchCompositionCreateEdges(
@@ -5347,7 +5375,6 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
         compositionWorks,
       );
 
-      const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
       //
       // The batch INSERT, its claim groups and its sidecar batch are ONE session
@@ -5369,18 +5396,8 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       for (const prepared of partition.resurrections) {
         await resurrectPreparedNode(ctx, session, target, prepared);
       }
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.inserts),
-          "fold",
-        );
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.resurrections),
-          "restore",
-        );
-      }
+      await foldInserts("fold");
+      await foldResurrections("restore");
       await insertPreparedCompositionEdges(
         ctx,
         session,
@@ -5499,12 +5516,22 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(
         ctx,
         inputs,
         target,
         options,
+      );
+      const partition = partitionCreates(preparedCreates);
+      const foldInserts = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.inserts,
+      );
+      const foldResurrections = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.resurrections,
       );
       if (pairedUpdates.length > 0) {
         await prepareNodeUpdateSet(ctx, pairedUpdates, target, lock, {
@@ -5529,7 +5556,6 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         compositionWorks,
       );
 
-      const partition = partitionCreates(preparedCreates);
       // One call for claims + row + sidecars, so the resurrections follow the
       // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
       const inserted = await withAlreadyExistsTranslation("node", () =>
@@ -5555,18 +5581,8 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           `Missing written row for ${prepared.kind} ${prepared.id}`,
         ),
       );
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.inserts),
-          "fold",
-        );
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.resurrections),
-          "restore",
-        );
-      }
+      await foldInserts("fold");
+      await foldResurrections("restore");
       await insertPreparedCompositionEdges(
         ctx,
         session,

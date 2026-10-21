@@ -713,11 +713,13 @@ properties, the validity window, unique keys, a restore's disjointness,
 composition and identity verdicts, an edge resurrection's or reopen's
 cardinality and composition claims) together with the creates they write
 first, and `bulkGetOrCreateByConstraint` and `bulkGetOrCreateByEndpoints`
-judge their matched items together with the rows they create. Each item is
-judged against the state the batch's earlier items leave, so a later item
-may take a key or an allowance an earlier one gives up and is refused one an
-earlier one takes. A refusal the callback catches therefore leaves none of
-the batch written.
+judge their matched items together with the rows they create. A created
+row's own identity fold, on a caller-chosen id, is read before the insert on
+every node create path, `create`, `bulkCreate` and `bulkInsert` included.
+Each item is judged against the state the batch's earlier items leave, so a
+later item may take a key or an allowance an earlier one gives up and is
+refused one an earlier one takes. A refusal the callback catches therefore
+leaves none of the batch written.
 
 What can still follow a write of the same batch:
 
@@ -731,6 +733,9 @@ What can still follow a write of the same batch:
   refusal reaches you rather than being applied twice; called on the store,
   where the refusal rolled the batch back, they re-run it once and converge
   on the winner's row.
+  When such a writer moves a row's stored window, the batch converges as a
+  single update does and prepares its remaining items again, after its
+  earlier items wrote, so a refusal reached there follows those writes.
 - **An identity fold that depends on another restored row of the same
   batch.** A restored row's fold is judged against the identity state as
   stored, so a contradiction that only appears once another row of the batch

@@ -75,6 +75,7 @@ const bvAssignedTo = defineEdge("bvAssignedTo", { schema: noteSchema });
 const NEW_ASSIGNMENT_ID = asEdgeId<typeof bvAssignedTo>("bv-new-edge");
 const CREATED_TAG_ID = asEdgeId<typeof bvTagged>("bv-created");
 const NEW_STAMP_ID = asNodeId<typeof BvStamp>("bv-new-stamp");
+const FOLDING_GHOST_ID = "bv-folding-ghost";
 
 const BV_STAMP_LABEL_UNIQUE = {
   name: "bv_stamp_label",
@@ -148,6 +149,27 @@ let graphIdCounter = 0;
 function nextGraphId(): string {
   graphIdCounter += 1;
   return `batch_write_verdicts_${graphIdCounter}`;
+}
+
+/**
+ * An identity graph where creating a BvGhost at `FOLDING_GHOST_ID` folds it
+ * with a live BvOther whose class holds a BvSpirit, which is disjoint with
+ * BvGhost: no read of the node rows at that id sees the conflict, only the
+ * identity fold does.
+ */
+async function createFoldConflictStore(context: IntegrationTestContext) {
+  const store = await context.createStore(buildIdentityGraph(nextGraphId()));
+  const other = await store.nodes.BvOther.create({}, { id: FOLDING_GHOST_ID });
+  const spirit = await store.nodes.BvSpirit.create({});
+  await store.identity.assertSame(other, spirit);
+  return store;
+}
+
+async function ghostIds(
+  store: Awaited<ReturnType<typeof createFoldConflictStore>>,
+): Promise<readonly string[]> {
+  const ghosts = await store.nodes.BvGhost.find();
+  return ghosts.map((ghost) => ghost.id).toSorted();
 }
 
 export function registerBatchWriteVerdictIntegrationTests(
@@ -309,6 +331,125 @@ export function registerBatchWriteVerdictIntegrationTests(
       const after = requireDefined(await store.nodes.BvGhost.getById(live.id));
       expect(after.note).toBe("before");
       expect(after.meta.version).toBe(live.meta.version);
+    });
+
+    // ========================================================
+    // A created row's own identity fold, on caller-chosen ids
+    // ========================================================
+    //
+    // MUTATION CHECK for every case below: in the create frame named in the
+    // case (src/store/operations/node-operations.ts), let the fold decide its
+    // verdict when it writes (`identity.foldCreated` after the insert) instead
+    // of in `prepareNodeCreatesFold` — the rows are then written before their
+    // fold refuses, and the caught refusal leaves them.
+
+    it("bulkUpsertById keeps no update or create when a create's own identity fold would contradict", async () => {
+      // Create frame: `executeNodeCreateBatch`.
+      const store = await createFoldConflictStore(context);
+      const live = await store.nodes.BvGhost.create({ note: "before" });
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvGhost.bulkUpsertById([
+            { id: live.id, props: { note: "changed" } },
+            { id: "bv-fresh-ghost", props: {} },
+            { id: FOLDING_GHOST_ID, props: {} },
+          ]);
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([live.id]);
+      const after = requireDefined(await store.nodes.BvGhost.getById(live.id));
+      expect(after.note).toBe("before");
+      expect(after.meta.version).toBe(live.meta.version);
+    });
+
+    it("bulkCreate creates nothing when a row's own identity fold would contradict", async () => {
+      // Create frame: `executeNodeCreateBatch`.
+      const store = await createFoldConflictStore(context);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvGhost.bulkCreate([
+            { props: {} },
+            { props: {}, id: FOLDING_GHOST_ID },
+          ]);
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([]);
+    });
+
+    it("bulkInsert creates nothing when a row's own identity fold would contradict", async () => {
+      // Create frame: `executeNodeCreateNoReturnBatch`.
+      const store = await createFoldConflictStore(context);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvGhost.bulkInsert([
+            { props: {}, id: "bv-fresh-ghost" },
+            { props: {}, id: FOLDING_GHOST_ID },
+          ]);
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([]);
+    });
+
+    it("create leaves no row when its own identity fold would contradict", async () => {
+      // Create frame: `executeNodeCreateInternal`.
+      const store = await createFoldConflictStore(context);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvGhost.create({}, { id: FOLDING_GHOST_ID });
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([]);
+    });
+
+    it("bulkCreate resurrects no tombstone when its own identity fold would contradict", async () => {
+      // Create frame: `executeNodeCreateBatch`, its resurrection leg.
+      const store = await context.createStore(
+        buildIdentityGraph(nextGraphId()),
+      );
+      const gone = await store.nodes.BvGhost.create({});
+      await store.nodes.BvGhost.delete(gone.id);
+      const other = await store.nodes.BvOther.create({}, { id: gone.id });
+      const spirit = await store.nodes.BvSpirit.create({});
+      await store.identity.assertSame(other, spirit);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvGhost.bulkCreate([
+            { props: {} },
+            { props: {}, id: gone.id },
+          ]);
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await store.nodes.BvGhost.find()).toEqual([]);
     });
 
     it("bulkUpsertById keeps no earlier update when a later window end would strand an identity assertion", async () => {

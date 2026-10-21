@@ -434,13 +434,15 @@ await store.transaction(async (tx) => {
 That covers `bulkUpsertById` and `bulkReplaceById`, whose updates are
 judged together with the creates they write first; `bulkGetOrCreateByConstraint`
 and `bulkGetOrCreateByEndpoints`, whose matched items are judged together
-with the rows they create; and the composition batches (`bulkCreate` /
-`bulkInsert` with `partOf`, `bulkReparent`). A batch is judged as the state
-it produces, in the order it writes, so a later item may take a unique key or
-a cardinality allowance an earlier item gives up and is refused one an
-earlier item takes. A concurrent writer that the per-graph write fence does
-not exclude can still claim a key or remove a row between a batch's reads and
-its writes; that refusal comes from the write, after earlier items wrote. See
+with the rows they create; the composition batches (`bulkCreate` /
+`bulkInsert` with `partOf`, `bulkReparent`); and, on an identity graph,
+every node create, whose identity fold on a caller-chosen id is read before
+the insert. A batch is judged as the state it produces, in the order it
+writes, so a later item may take a unique key or a cardinality allowance an
+earlier item gives up and is refused one an earlier item takes. A concurrent
+writer that the per-graph write fence does not exclude can still claim a key
+or remove a row between a batch's reads and its writes; that refusal comes
+from the write, after earlier items wrote. See
 [A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
 for what stays outside the guarantee.
 
