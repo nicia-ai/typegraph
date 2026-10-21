@@ -23,7 +23,8 @@ import {
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStringTuples } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { compositionCountsEndedRows } from "../claims/composition-claims";
+import { compositionRowMembership } from "../claims/composition-claims";
+import { membershipCountsRow } from "../claims/edge-claims";
 import {
   fenceLockOnlyDecision,
   type GraphWriteLock,
@@ -105,8 +106,8 @@ export function cascadedPartReferences(
  * Whether one composition edge row still counts as a live membership under
  * its pair's declared whole-side population.
  *
- * {@link compositionCountsEndedRows} owns the population rule; this applies
- * it to a row already known non-deleted (every reader of this predicate
+ * {@link membershipCountsRow} under {@link compositionRowMembership}'s rule,
+ * applied to a row already known non-deleted (every reader of this predicate
  * excludes deleted rows before calling it).
  *
  * `population: "one"` (`holderLiveness: "live"`) counts unconditionally: the
@@ -120,9 +121,9 @@ export function compositionEdgeCounts(
   pair: Pick<CompositionPair, "partSide" | "population">,
   row: Pick<EdgeRow, "valid_to">,
 ): boolean {
-  return (
-    compositionCountsEndedRows(pair.partSide, pair.population) ||
-    row.valid_to === undefined
+  return membershipCountsRow(
+    compositionRowMembership(pair.partSide, pair.population),
+    { validTo: row.valid_to },
   );
 }
 

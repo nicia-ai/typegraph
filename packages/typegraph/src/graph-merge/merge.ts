@@ -252,6 +252,7 @@ import {
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
   getDialect,
+  getEdgeRowsByIds,
   type GraphWriteLock,
   lockRecordedGraphWrite,
   planCompositionCascade,
@@ -3941,33 +3942,50 @@ async function resolvedMergeArtifact<G extends GraphDef>(
  * The resolved plan's edge writes, projected to the shape the shared
  * acyclicity predicate reads: FINAL `(kind, id)` endpoints — through
  * {@link finalEdgeEndpoint}, exactly as the commit itself resolves them
- * (`applyInternalMergePlan`, `applyWireMergeWrites`) — so the plan-time
- * preview and the eventual write can never disagree about what the plan
- * actually writes. An edge whose kind is in no acyclic relation is dropped;
+ * (`applyInternalMergePlan`, `applyWireMergeWrites`) — and the window END each
+ * write leaves on its row, so the plan-time preview and the eventual write can
+ * never disagree about what the plan actually writes. A write that states an
+ * end (`validTo` or `clearValidTo`) leaves that one; a write that states none
+ * keeps the stored row's, which is read here — the same rule
+ * {@link plannedEdgeUpsertAttachesPart} applies — and a row the target does
+ * not hold yet is born open. The shared predicate then drops a row its
+ * relation does not count in that state (an ended composition membership).
+ *
+ * An edge whose kind is in no acyclic relation is dropped here already;
  * {@link readProposedEdgeAcyclicityViolations} would drop it too, but
- * filtering here keeps the mapped list free of edges no relation cares
- * about.
+ * filtering here keeps the mapped list — and the stored-row read — free of
+ * edges no relation cares about.
  */
-function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
-  graph: GraphDef,
-  registry: KindRegistry,
+async function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
+  target: Store<G>,
   plan: MergePlan<G>,
-): readonly ProposedRelationEdge[] {
-  const proposed: ProposedRelationEdge[] = [];
-  for (const edge of plan.mergedEdges) {
-    if (!edgeKindIsInAcyclicRelation(graph, registry, edge.kind)) continue;
+): Promise<readonly ProposedRelationEdge[]> {
+  const relationEdges = plan.mergedEdges.filter((edge) =>
+    edgeKindIsInAcyclicRelation(target.graph, target.registry, edge.kind),
+  );
+  const keepsStoredEnd = (edge: MergedEdge): boolean =>
+    edge.validTo === undefined && edge.clearValidTo !== true;
+  const backend = storeBackend(target);
+  const storedRows = await getEdgeRowsByIds(
+    backend,
+    batchPointReadVerdict(backend),
+    target.graphId,
+    relationEdges.filter((edge) => keepsStoredEnd(edge)).map((edge) => edge.id),
+  );
+  return relationEdges.map((edge) => {
     const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
     const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
-    proposed.push({
+    return {
       edgeId: edge.id,
       edgeKind: edge.kind,
       fromKind: from.kind,
       fromId: from.id,
       toKind: to.kind,
       toId: to.id,
-    });
-  }
-  return proposed;
+      validTo:
+        keepsStoredEnd(edge) ? storedRows.get(edge.id)?.valid_to : edge.validTo,
+    };
+  });
 }
 
 /**
@@ -4039,11 +4057,7 @@ async function assertResolvedPlanEdgesAcyclic<G extends GraphDef>(
   plan: MergePlan<G>,
 ): Promise<void> {
   if (acyclicEdgeRelations(target.graph, target.registry).length === 0) return;
-  const proposed = resolvedPlanAcyclicityCandidates(
-    target.graph,
-    target.registry,
-    plan,
-  );
+  const proposed = await resolvedPlanAcyclicityCandidates(target, plan);
   if (proposed.length === 0) return;
 
   const backend = storeBackend(target);
@@ -4058,7 +4072,13 @@ async function assertResolvedPlanEdgesAcyclic<G extends GraphDef>(
     },
     target.graph,
     proposed,
-    [...plan.edgeDeletions.keys()].map((identity) => idOf(identity)),
+    // Every stored row the plan rewrites is replaced by its proposed state
+    // (or dropped, when that state is no member), and every row it deletes is
+    // gone: the walk judges the relation the plan produces.
+    [
+      ...[...plan.edgeDeletions.keys()].map((identity) => idOf(identity)),
+      ...proposed.map((edge) => edge.edgeId),
+    ],
   );
   if (violations.length === 0) return;
 

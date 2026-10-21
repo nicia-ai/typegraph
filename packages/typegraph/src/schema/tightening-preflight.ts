@@ -22,10 +22,11 @@ import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
-  compositionAcyclicRelation,
+  type AcyclicEdgeRelation,
+  declaredAcyclicEdgeRelations,
   readEdgeAcyclicityViolations,
-  standaloneAcyclicRelation,
 } from "../store/acyclicity";
+import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
 import { compositionEdgeCardinalityDeclarations } from "../store/claims/composition-claims";
 import {
   auditConstraintFences,
@@ -209,6 +210,81 @@ async function readCompositionUnattachedPartsForEdgeKinds(
     partKind,
     parts,
   }));
+}
+
+/** The edge kinds a schema snapshot declares `acyclic: true`. */
+function standaloneAcyclicEdgeKinds(
+  snapshot: OntologySnapshot,
+): readonly string[] {
+  return Object.entries(snapshot.edges)
+    .filter(([, edge]) => edge.acyclic === true)
+    .map(([edgeKind]) => edgeKind);
+}
+
+/**
+ * Whether the proposed composition relation holds a row the baseline's did
+ * not: a member edge kind it lacked, a member read in the other orientation,
+ * or a member whose ended rows now count (`"openRows"` → `"allRows"` — a
+ * `oneActive` realizing edge redeclared `one`, or declared `acyclic: true`).
+ * Such a commit can close a cycle out of rows that were legal under the
+ * baseline, so the proposed relation owes the probe.
+ */
+function compositionRelationWidened(
+  baseline: AcyclicEdgeRelation | undefined,
+  proposed: AcyclicEdgeRelation,
+): boolean {
+  const baselineMembers = new Map(
+    (baseline?.members ?? []).map((member) => [member.edgeKind, member]),
+  );
+  return proposed.members.some((member) => {
+    const prior = baselineMembers.get(member.edgeKind);
+    return (
+      prior?.reversed !== member.reversed ||
+      (prior.membership === "openRows" && member.membership === "allRows")
+    );
+  });
+}
+
+/**
+ * The acyclic relations this commit must probe, built by the one owner of the
+ * relation list ({@link declaredAcyclicEdgeRelations}) over the PROPOSED
+ * schema — the relations the write path enforces once this version is live:
+ *
+ * - each edge kind this commit newly declares `acyclic: true` on, as its own
+ *   standalone relation;
+ * - the composition relation, whole, when the commit adds a
+ *   `partOf`/`hasPart` pair or widens the relation's population
+ *   ({@link compositionRelationWidened}). Whole rather than delta-scoped: a
+ *   cycle can span a pre-existing pair and the changed one.
+ */
+function acyclicRelationsToProbe(
+  params: SchemaTighteningPreflightParams,
+  proposedRegistry: KindRegistry,
+  newlyAcyclicEdgeKinds: readonly string[],
+  addsCompositionPair: boolean,
+): readonly AcyclicEdgeRelation[] {
+  const proposed = declaredAcyclicEdgeRelations(
+    proposedRegistry,
+    standaloneAcyclicEdgeKinds(params.after),
+  );
+  const proposedComposition = proposed.find(
+    (relation) => relation.name === COMPOSITION_RELATION_NAME,
+  );
+  const probesComposition =
+    proposedComposition !== undefined &&
+    (addsCompositionPair ||
+      compositionRelationWidened(
+        declaredAcyclicEdgeRelations(
+          buildSchemaBaselineRegistry(params.before),
+          standaloneAcyclicEdgeKinds(params.before),
+        ).find((relation) => relation.name === COMPOSITION_RELATION_NAME),
+        proposedComposition,
+      ));
+  return proposed.filter((relation) =>
+    relation.name === COMPOSITION_RELATION_NAME ?
+      probesComposition
+    : newlyAcyclicEdgeKinds.includes(relation.name),
+  );
 }
 
 function buildOntologyTighteningViolatedError(
@@ -404,6 +480,13 @@ export function prepareSchemaTighteningPreflight(
           ),
       );
 
+  const probedAcyclicRelations = acyclicRelationsToProbe(
+    params,
+    proposedRegistry,
+    grouped.acyclicity?.edgeKinds ?? [],
+    grouped.composition !== undefined,
+  );
+
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
     await assertUniquenessClaimGatesOpen(target, params, gates);
 
@@ -432,11 +515,10 @@ export function prepareSchemaTighteningPreflight(
     // `readConstraintFenceViolations` (the non-recursive row-shape port every
     // other family above reads through): folding the recursive predicate
     // behind it would create a second implementation of "is there a cycle".
-    // It runs `readEdgeAcyclicityViolations` directly, scoped to exactly the
-    // edge kinds THIS commit newly declares `acyclic: true` on — the same
-    // delta-scoping discipline as every family above.
+    // It runs `readEdgeAcyclicityViolations` directly, over exactly the
+    // relations THIS commit can newly violate (`acyclicRelationsToProbe`).
     const acyclicityViolations =
-      grouped.acyclicity === undefined ?
+      probedAcyclicRelations.length === 0 ?
         []
       : await readEdgeAcyclicityViolations(
           {
@@ -447,34 +529,7 @@ export function prepareSchemaTighteningPreflight(
             target,
             operation: "schema-commit:acyclic-tightening",
           },
-          grouped.acyclicity.edgeKinds.map((edgeKind) =>
-            standaloneAcyclicRelation(edgeKind),
-          ),
-        );
-
-    // Composition acyclicity check, over the FULL proposed composition
-    // relation rather than delta-scoped: unlike the single-whole audit
-    // above, a cross-kind cycle can span a
-    // pre-existing pair and the one this commit adds, so checking only the
-    // new edge kind would miss exactly the cycle this check exists to
-    // catch. Triggered by the delta (`grouped.composition` is only set when
-    // this commit adds a pair) but checked against everything, matching
-    // `acyclicEdgeRelations`'s own population rule (every live edge of the
-    // relation counts, not just the ones a particular write touched).
-    const compositionRelation = compositionAcyclicRelation(proposedRegistry);
-    const compositionAcyclicityViolations =
-      grouped.composition === undefined || compositionRelation === undefined ?
-        []
-      : await readEdgeAcyclicityViolations(
-          {
-            graphId: params.graphId,
-            registry: proposedRegistry,
-            schema: createSqlSchema(target.tableNames),
-            dialect: getDialect(target.dialect),
-            target,
-            operation: "schema-commit:composition-tightening",
-          },
-          [compositionRelation],
+          probedAcyclicRelations,
         );
 
     // Third composition check: for every required-existence part
@@ -498,7 +553,6 @@ export function prepareSchemaTighteningPreflight(
     const violations = [
       ...claimBackedViolations,
       ...acyclicityViolations,
-      ...compositionAcyclicityViolations,
       ...compositionExistenceViolations,
     ];
     if (violations.length === 0) return;

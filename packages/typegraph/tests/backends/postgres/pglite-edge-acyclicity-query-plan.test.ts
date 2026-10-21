@@ -377,8 +377,8 @@ describe("edge-acyclicity probe (PostgreSQL dialect, PGlite): query plan", () =>
       await client.query("ANALYZE typegraph_edges");
 
       const members: readonly AcyclicRelationMember[] = [
-        { edgeKind: "dependsOn", reversed: false },
-        { edgeKind: "blockedBy", reversed: true },
+        { edgeKind: "dependsOn", reversed: false, membership: "allRows" },
+        { edgeKind: "blockedBy", reversed: true, membership: "allRows" },
       ];
       const fragment = buildEdgeAcyclicityProbe({
         graphId: "acyclicity-query-plan-pg",

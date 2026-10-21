@@ -222,8 +222,11 @@ export function registerCompositionFenceIntegrationTests(
         .create(chapter, anthology, {})
         .catch((error_: unknown) => error_);
       expectWholeOccupied(error, chapter.id);
-      expect((error as CompositionError).details.wholeId).toBe(anthology.id);
-      expect((error as CompositionError).details.edgeKind).toBe("cfIncludedIn");
+      expect((error as CompositionError).details).toMatchObject({
+        situation: "occupied",
+        wholeId: anthology.id,
+        edgeKind: "cfIncludedIn",
+      });
     });
     // MUTATION CHECK: drop the composition claim from `edgeInsertClaims`
     // (src/store/claims/composition-claims.ts) — both per-edge cardinality
@@ -392,9 +395,10 @@ export function registerCompositionFenceIntegrationTests(
         .catch((error_: unknown) => error_);
 
       expectWholeOccupied(error, part.id);
-      expect((error as CompositionError).details.incumbentEdgeId).toBe(
-        incumbent.id,
-      );
+      expect((error as CompositionError).details).toMatchObject({
+        situation: "occupied",
+        incumbentEdgeId: incumbent.id,
+      });
     });
 
     it("`oneActive` reparents once the incumbent's window ends, with no delete required", async () => {

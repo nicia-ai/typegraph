@@ -18,9 +18,10 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
+  axisRowMembership,
   type EdgeCardinalityAxisRef,
-  type EdgeCardinalitySpec,
   edgeCardinalitySpec,
+  type RowMembership,
 } from "../../../store/claims/edge-claims";
 import type { CompositionClaimScope } from "../../types";
 import { claimHolderTerms, endpointTerms } from "./edge-claims";
@@ -64,17 +65,18 @@ function edgeAuditProjection(edges: Tables["edges"]): SQL {
 }
 
 /**
- * What a member of a cardinality population must still BE, read off the axis's
- * {@link edgeCardinalitySpec}: `"liveAndActive"` additionally requires an open
- * validity window. Rendered for the outer row and for the correlated peer from
- * the same ternary, so the two sides of one statement cannot disagree.
+ * What a member of a cardinality population must still BE: the SQL rendering
+ * of `membershipCountsRow` under the axis's {@link axisRowMembership}
+ * rule — an `"openRows"` population additionally requires an open validity
+ * window. Rendered for the outer row and for the correlated peer from the
+ * same ternary, so the two sides of one statement cannot disagree.
  */
 function holderLivenessTerm(
-  holderLiveness: EdgeCardinalitySpec["holderLiveness"],
+  membership: RowMembership,
   relation: string,
   edges: Tables["edges"],
 ): SQL {
-  return holderLiveness === "liveAndActive" ?
+  return membership === "openRows" ?
       sql` AND ${qualified(relation, edges.validTo)} IS NULL`
     : sql.empty();
 }
@@ -144,8 +146,8 @@ export function buildContendedEdgeRowAudit(
   const { edges } = tables;
   const relation = getTableName(edges);
   const spec = edgeCardinalitySpec(ref);
-  const activeOnly = holderLivenessTerm(spec.holderLiveness, relation, edges);
-  const peerActiveOnly = holderLivenessTerm(spec.holderLiveness, PEER, edges);
+  const activeOnly = holderLivenessTerm(axisRowMembership(ref), relation, edges);
+  const peerActiveOnly = holderLivenessTerm(axisRowMembership(ref), PEER, edges);
   // The endpoint fold belongs to `endpointTerms` — the same renderer the
   // write-path fence reads it through — given the OUTER row's own qualified
   // columns in place of a write's bound literals, so the audit cannot key the
@@ -208,8 +210,8 @@ export function buildContendedCompositionEdgeRowAudit(
     spec.keyShape === "from" ? edges.fromKind : edges.toKind;
   const outerPartIdColumn =
     spec.keyShape === "from" ? edges.fromId : edges.toId;
-  const activeOnly = holderLivenessTerm(spec.holderLiveness, relation, edges);
-  const peerActiveOnly = holderLivenessTerm(spec.holderLiveness, PEER, edges);
+  const activeOnly = holderLivenessTerm(axisRowMembership(ref), relation, edges);
+  const peerActiveOnly = holderLivenessTerm(axisRowMembership(ref), PEER, edges);
 
   // The composition overload of `claimHolderTerms`: given a part identity in
   // place of a claim value source, it needs nothing beyond the axis ref and

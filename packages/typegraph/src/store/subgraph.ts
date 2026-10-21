@@ -791,10 +791,8 @@ export async function executeSubgraph<
   const plan = buildSubgraphPlan(params, "subgraph");
   const { ctx, reachableCte, includedIdsCte, nodeProjectionPlan, baseSchema } =
     plan;
-  const compositionEdgeKinds = await resolveSubgraphCompositionEdgeKinds(
-    params,
-    ctx,
-  );
+  const composition = await resolveSubgraphComposition(params, ctx);
+  const compositionEdgeKinds = composition?.edgeKinds ?? [];
   const readContext =
     compositionEdgeKinds.length === 0 ?
       ctx
@@ -826,7 +824,7 @@ export async function executeSubgraph<
   // whole->part realizing edges. Those are walked as their own closure and
   // the two id sets are unioned.
   let membership: SubgraphMembership;
-  if (compositionEdgeKinds.length > 0) {
+  if (composition !== undefined && compositionEdgeKinds.length > 0) {
     const baseIds = await fetchIncludedIds(ctx, reachableCte, includedIdsCte);
     const compositionIds = await fetchCompositionClosureIds(
       readContext,
@@ -834,7 +832,7 @@ export async function executeSubgraph<
         params,
         readContext,
         baseSchema,
-        compositionEdgeKinds,
+        composition,
       ),
       includedIdsCte,
     );
@@ -890,7 +888,19 @@ export async function executeSubgraph<
   );
 }
 
-async function resolveSubgraphCompositionEdgeKinds<
+/**
+ * What a `composition` subgraph walks: the root's own kind — the closure
+ * starts from `(rootKind, rootId)` and follows each edge from the `(kind, id)`
+ * it reached, never from another kind's node that happens to share an id —
+ * and the realizing edge kinds under it. `undefined` when the read asks for
+ * no composition, or the root is not visible at this coordinate.
+ */
+type SubgraphComposition = Readonly<{
+  rootKind: string;
+  edgeKinds: readonly string[];
+}>;
+
+async function resolveSubgraphComposition<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
@@ -899,8 +909,8 @@ async function resolveSubgraphCompositionEdgeKinds<
 >(
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
   ctx: SubgraphContext,
-): Promise<readonly string[]> {
-  if (!compositionRequested(params.options.composition)) return [];
+): Promise<SubgraphComposition | undefined> {
+  if (!compositionRequested(params.options.composition)) return undefined;
   if (params.registry.compositionEdgeKinds().length === 0) {
     throw new ConfigurationError(
       `subgraph({ composition: true }) requires the graph to declare at least one partOf/hasPart relation, but "${params.graphId}" declares none.`,
@@ -911,8 +921,7 @@ async function resolveSubgraphCompositionEdgeKinds<
       },
     );
   }
-  const compositionEdgeKinds = await fetchCompositionEdgeKindsForRoot({
-    registry: params.registry,
+  const rootKind = await fetchCompositionRootKind({
     backend: params.backend,
     schema: ctx.schema,
     graphId: params.graphId,
@@ -923,6 +932,10 @@ async function resolveSubgraphCompositionEdgeKinds<
     recordedAsOf: ctx.recordedAsOf,
     recordedReadBinding: ctx.recordedReadBinding,
   });
+  const compositionEdgeKinds =
+    rootKind === undefined ?
+      []
+    : params.registry.compositionEdgeKindsUnder(rootKind);
   const requestedVia = compositionViaOf(params.options.composition);
   if (
     requestedVia !== undefined &&
@@ -941,7 +954,12 @@ async function resolveSubgraphCompositionEdgeKinds<
       },
     );
   }
-  return requestedVia === undefined ? compositionEdgeKinds : [requestedVia];
+  if (rootKind === undefined) return undefined;
+  return {
+    rootKind,
+    edgeKinds:
+      requestedVia === undefined ? compositionEdgeKinds : [requestedVia],
+  };
 }
 
 function buildSubgraphCompositionReachableCte<
@@ -954,17 +972,18 @@ function buildSubgraphCompositionReachableCte<
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
   ctx: SubgraphContext,
   baseSchema: SqlSchema,
-  edgeKindsForTraversal: readonly string[],
+  composition: SubgraphComposition,
 ): SqlFragment {
   const { outEdgeKinds, inEdgeKinds } =
     partitionCompositionEdgeKindsByDirection(
       params.registry,
-      edgeKindsForTraversal,
+      composition.edgeKinds,
       "parts",
     );
   return buildExhaustiveDirectedReachableCte({
     graphId: ctx.graphId,
     sourceId: ctx.rootId,
+    sourceKind: composition.rootKind,
     outEdgeKinds,
     inEdgeKinds,
     temporalMode: ctx.temporalMode,
@@ -1494,14 +1513,12 @@ function idListMembership(
 /**
  * Resolves the root's actual kind (not knowable ahead of a read: `rootId` is
  * typed `NodeId<AllNodeTypes<G>>`, a union over every node kind the graph
- * declares) and returns the composition edge kinds transitively under it —
- * empty when the root does not exist, is not visible at this coordinate, or
- * its kind declares no composition parts. `subgraph({ composition: true })`
- * is set-level: a root kind with no parts
- * contributes nothing rather than failing the whole read.
+ * declares) — `undefined` when the root does not exist or is not visible at
+ * this coordinate. The caller reads the composition edge kinds under it; a
+ * root kind with no parts contributes nothing rather than failing the whole
+ * read, since `subgraph({ composition: true })` is set-level.
  */
-async function fetchCompositionEdgeKindsForRoot(input: {
-  registry: KindRegistry;
+async function fetchCompositionRootKind(input: {
   backend: GraphBackend;
   schema: SqlSchema;
   graphId: string;
@@ -1511,7 +1528,7 @@ async function fetchCompositionEdgeKindsForRoot(input: {
   asOf: string | undefined;
   recordedAsOf: RecordedInstant | undefined;
   recordedReadBinding: RecordedReadBinding | undefined;
-}): Promise<readonly string[]> {
+}): Promise<string | undefined> {
   const nodeTemporalFilter = compileTemporalFilter({
     mode: input.temporalMode,
     asOf: input.asOf,
@@ -1524,10 +1541,7 @@ async function fetchCompositionEdgeKindsForRoot(input: {
   const rows = await input.backend.execute<{ kind: string }>(
     asCompiledRowsSql(query),
   );
-  const rootKind = rows[0]?.kind;
-  return rootKind === undefined ?
-      []
-    : input.registry.compositionEdgeKindsUnder(rootKind);
+  return rows[0]?.kind;
 }
 
 /**

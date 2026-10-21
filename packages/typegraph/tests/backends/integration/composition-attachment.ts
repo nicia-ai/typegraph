@@ -21,6 +21,7 @@
  *   CaNest    --(caNestUnder,      partOf, part->whole, reflexive)-- CaNest
  *
  *   CaSlot    --(caSlotIn,         partOf, part->whole, one both ways)-- CaRack
+ *   CaEngine  --(caEngineOf,       partOf, part->whole, oneActive, whole holds one)-- CaCar
  *
  * CaNest carries a unique key, so a get-or-create batch can name one of its
  * own matched items as the batch's shared whole. CaStamp is no part at all:
@@ -43,6 +44,7 @@ import { z } from "zod";
 import {
   asNodeId,
   CardinalityError,
+  CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   createStore,
@@ -143,6 +145,13 @@ const CA_SLOT_SLUG_UNIQUE = {
   scope: "kind",
   collation: "binary",
 } as const;
+/**
+ * A required `oneActive` part whose whole holds at most one part row for the
+ * row's whole life (`targetCardinality: "one"`): a move ENDS the incumbent's
+ * window, and the ended row still occupies the whole's slot.
+ */
+const CaEngine = defineNode("CaEngine", { schema: z.object({}) });
+const CaCar = defineNode("CaCar", { schema: z.object({}) });
 /** Disjoint with CaSpirit: a ghost cannot share an id with a live spirit. */
 const CaGhost = defineNode("CaGhost", {
   schema: z.object({ slug: z.string(), note: z.string().optional() }),
@@ -182,6 +191,7 @@ const caRelicOf = defineEdge("caRelicOf", {
 const caReelOf = defineEdge("caReelOf", { schema: z.object({}) });
 const caSlotIn = defineEdge("caSlotIn", { schema: z.object({}) });
 const caNestUnder = defineEdge("caNestUnder", { schema: z.object({}) });
+const caEngineOf = defineEdge("caEngineOf", { schema: z.object({}) });
 
 function buildGraph(id: string) {
   return defineGraph({
@@ -205,6 +215,8 @@ function buildGraph(id: string) {
       CaNest: { type: CaNest, unique: [CA_NEST_SLUG_UNIQUE] },
       CaSlot: { type: CaSlot, unique: [CA_SLOT_SLUG_UNIQUE] },
       CaRack: { type: CaRack },
+      CaEngine: { type: CaEngine },
+      CaCar: { type: CaCar },
       CaGhost: { type: CaGhost, unique: [CA_GHOST_SLUG_UNIQUE] },
       CaSpirit: { type: CaSpirit },
       CaStamp: {
@@ -293,6 +305,13 @@ function buildGraph(id: string) {
         cardinality: "one",
         targetCardinality: "one",
       },
+      caEngineOf: {
+        type: caEngineOf,
+        from: [CaEngine],
+        to: [CaCar],
+        cardinality: "oneActive",
+        targetCardinality: "one",
+      },
     },
     ontology: [
       partOf(CaChapter, CaBook, { via: caChapterOf }),
@@ -311,6 +330,7 @@ function buildGraph(id: string) {
       partOf(CaReel, CaShow, { via: caReelOf }),
       partOf(CaNest, CaNest, { via: caNestUnder, partSide: "from" }),
       partOf(CaSlot, CaRack, { via: caSlotIn }),
+      partOf(CaEngine, CaCar, { via: caEngineOf, existence: "required" }),
       disjointWith(CaGhost, CaSpirit),
     ],
   });
@@ -742,8 +762,8 @@ export function registerCompositionAttachmentIntegrationTests(
       });
 
       // MUTATION CHECK: counting every non-deleted row of a `oneActive`
-      // realizing edge in `compositionAcyclicRelation` (dropping
-      // `openEndedOnly`) refuses this swap with EdgeAcyclicityError "already
+      // realizing edge in `compositionAcyclicRelation` (membership
+      // `"allRows"`) refuses this swap with EdgeAcyclicityError "already
       // reaches", through the ended row — verified and reverted.
       await store.nodes.CaUnit.reparent(former.id, {
         whole: { kind: "CaUnit", id: report.id },
@@ -789,6 +809,359 @@ export function registerCompositionAttachmentIntegrationTests(
           whole: { kind: "CaCell", id: report.id },
         }),
       ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses a composition window that starts or ends later than now on every write path, writing nothing", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const later = "2999-01-01T00:00:00.000Z";
+      const book = await store.nodes.CaBook.create({});
+      const show = await store.nodes.CaShow.create({});
+      const otherShow = await store.nodes.CaShow.create({});
+      const clip = await store.nodes.CaClip.create(
+        {},
+        { partOf: { whole: show } },
+      );
+      const [held] = await store.edges.caClipOf.find({});
+      if (held === undefined) throw new Error("expected the clip's edge");
+      const chapterOf = { whole: book, via: "caChapterOf" } as const;
+
+      // MUTATION CHECK: make `compositionWindowRefusal`
+      // (src/store/operations/composition-create.ts) return `undefined` —
+      // every write below then lands, leaving the clip with two current
+      // wholes behind a released claim, or a chapter whose attachment starts
+      // in the future, and the assertions after the loop fail.
+      const refused: readonly (readonly [string, () => Promise<unknown>])[] = [
+        [
+          "COMPOSITION_VALIDITY_FUTURE_START",
+          () =>
+            store.nodes.CaChapter.create(
+              { slug: "create" },
+              { partOf: { ...chapterOf, validFrom: later } },
+            ),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_START",
+          () =>
+            store.nodes.CaChapter.bulkCreate([
+              {
+                props: { slug: "bulk" },
+                partOf: { ...chapterOf, validFrom: later },
+              },
+            ]),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_START",
+          () =>
+            store.nodes.CaChapter.getOrCreateByConstraint(
+              "ca_chapter_slug",
+              { slug: "get-or-create" },
+              { partOf: { ...chapterOf, validFrom: later } },
+            ),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_END",
+          () =>
+            store.nodes.CaChapter.create(
+              { slug: "bounded" },
+              { partOf: { ...chapterOf, validTo: later } },
+            ),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_END",
+          () =>
+            store.edges.caClipOf.create(
+              clip,
+              otherShow,
+              {},
+              { validTo: later },
+            ),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_START",
+          () =>
+            store.edges.caClipOf.create(
+              clip,
+              otherShow,
+              {},
+              { validFrom: later },
+            ),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_END",
+          () =>
+            store.edges.caClipOf.bulkCreate([
+              { from: clip, to: otherShow, props: {}, validTo: later },
+            ]),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_END",
+          () => store.edges.caClipOf.update(held.id, {}, { validTo: later }),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_END",
+          () =>
+            store.edges.caClipOf.bulkUpsertById([
+              { id: held.id, from: clip, to: show, props: {}, validTo: later },
+            ]),
+        ],
+        [
+          "COMPOSITION_VALIDITY_FUTURE_END",
+          () =>
+            store.edges.caClipOf.getOrCreateByEndpoints(
+              clip,
+              show,
+              {},
+              { ifExists: "update", validTo: later },
+            ),
+        ],
+        [
+          "COMPOSITION_MOVE_FUTURE",
+          () =>
+            store.nodes.CaClip.reparent(clip.id, {
+              whole: otherShow,
+              at: later,
+            }),
+        ],
+        [
+          "COMPOSITION_MOVE_FUTURE",
+          () =>
+            store.nodes.CaClip.bulkReparent([
+              { id: clip.id, options: { whole: otherShow, at: later } },
+            ]),
+        ],
+      ];
+      for (const [code, write] of refused) {
+        const error = await write().catch((error_: unknown) => error_);
+        expect(error).toBeInstanceOf(CompositionError);
+        expect(error).toMatchObject({ code });
+      }
+
+      expect(await store.nodes.CaChapter.count()).toBe(0);
+      const rows = await store.edges.caClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      expect(rows.map((edge) => [edge.id, edge.meta.validTo])).toEqual([
+        [held.id, undefined],
+      ]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("judges an ended `oneActive` history row outside the composition relation on every write that proposes it", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const whole = await store.nodes.CaUnit.create({});
+      const part = await store.nodes.CaUnit.create({});
+      // `whole` under `part` is live; `part` under `whole` is history only.
+      await store.edges.caUnitUnder.create(whole, part, {});
+      const history = {
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2021-01-01T00:00:00.000Z",
+      };
+
+      // MUTATION CHECK: drop the `acyclicRelationCountsRow` filter from
+      // `groupProposedByAcyclicRelation` (src/store/acyclicity.ts) — each
+      // write below is then refused with EdgeAcyclicityError "would close a
+      // cycle in the composition relation", although none of them puts a
+      // member into the relation.
+      const created = await store.edges.caUnitUnder.create(
+        part,
+        whole,
+        {},
+        history,
+      );
+      await store.edges.caUnitUnder.bulkCreate([
+        { from: part, to: whole, props: {}, ...history },
+      ]);
+      await store.edges.caUnitUnder.delete(created.id);
+      const [revived] = await store.edges.caUnitUnder.bulkUpsertById([
+        { id: created.id, from: part, to: whole, props: {} },
+      ]);
+      expect(requireDefined(revived).meta.validTo).toBe(history.validTo);
+
+      const live = await store.edges.caUnitUnder.find({});
+      expect(live.map((edge) => `${edge.fromId}->${edge.toId}`)).toEqual([
+        `${whole.id}->${part.id}`,
+      ]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses reopening an ended `oneActive` history row that would close a composition cycle, on every reopen surface", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const whole = await store.nodes.CaUnit.create({});
+      const part = await store.nodes.CaUnit.create({});
+      const ended = await store.edges.caUnitUnder.create(
+        part,
+        whole,
+        {},
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+      await store.edges.caUnitUnder.create(whole, part, {});
+
+      // MUTATION CHECK: probe only resurrections in `prepareEdgeUpdate`
+      // (`edgeUpdateReentersAcyclicRelation` answering `false` for a reopen,
+      // src/store/operations/edge-operations.ts) — every reopen below then
+      // lands and the audit reports the cycle.
+      const reopens: readonly (() => Promise<unknown>)[] = [
+        () =>
+          store.edges.caUnitUnder.update(ended.id, {}, { clearValidTo: true }),
+        () =>
+          store.edges.caUnitUnder.bulkUpsertById([
+            {
+              id: ended.id,
+              from: part,
+              to: whole,
+              props: {},
+              clearValidTo: true,
+            },
+          ]),
+        () =>
+          store.edges.caUnitUnder.getOrCreateByEndpoints(
+            part,
+            whole,
+            {},
+            { ifExists: "update", clearValidTo: true },
+          ),
+      ];
+      for (const reopen of reopens) {
+        await expect(reopen()).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      }
+      const stillEnded = await store.edges.caUnitUnder.getById(ended.id, {
+        temporalMode: "includeEnded",
+      });
+      expect(stillEnded?.meta.validTo).toBe("2021-01-01T00:00:00.000Z");
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses two reopens that close a composition cycle together before either is written", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const left = await store.nodes.CaUnit.create({});
+      const right = await store.nodes.CaUnit.create({});
+      const history = {
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2021-01-01T00:00:00.000Z",
+      };
+      const leftUnderRight = await store.edges.caUnitUnder.create(
+        left,
+        right,
+        {},
+        history,
+      );
+      const rightUnderLeft = await store.edges.caUnitUnder.create(
+        right,
+        left,
+        {},
+        history,
+      );
+
+      // MUTATION CHECK: drop the reopen arm from
+      // `proposedRelationEdgesFromReentries`
+      // (src/store/operations/edge-operations.ts) — the batch then writes the
+      // first reopen before the second one's own probe refuses, and the
+      // caught transaction commits it.
+      await store.transaction(async (tx) => {
+        await expect(
+          tx.edges.caUnitUnder.bulkUpsertById([
+            {
+              id: leftUnderRight.id,
+              from: left,
+              to: right,
+              props: {},
+              clearValidTo: true,
+            },
+            {
+              id: rightUnderLeft.id,
+              from: right,
+              to: left,
+              props: {},
+              clearValidTo: true,
+            },
+          ]),
+        ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      });
+      expect(await store.edges.caUnitUnder.find({})).toEqual([]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("bulkReparent counts an ended incumbent against a whole-side `one` bound, refusing a swap before any write", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const carA = await store.nodes.CaCar.create({});
+      const carB = await store.nodes.CaCar.create({});
+      const engineX = await store.nodes.CaEngine.create(
+        {},
+        { partOf: { whole: carA } },
+      );
+      const engineY = await store.nodes.CaEngine.create(
+        {},
+        { partOf: { whole: carB } },
+      );
+      const openRows = async () => {
+        const open = await store.edges.caEngineOf.find({});
+        return new Set(open.map((edge) => `${edge.fromId}->${edge.toId}`));
+      };
+      const before = await openRows();
+
+      // A move ENDS the incumbent's window, and the ended row still occupies
+      // its car's one slot, so the single move is refused...
+      await expect(
+        store.nodes.CaEngine.reparent(engineX.id, { whole: carB }),
+      ).rejects.toBeInstanceOf(CardinalityError);
+
+      // ...and so is the swap, before it ends either window. MUTATION CHECK:
+      // subtract an `"endWindow"` retire from every count in
+      // `retireLeavesCount` (src/store/operations/edge-batch-validation.ts) —
+      // the swap then passes its preparation, ends both windows, and fails
+      // only at the insert's claim, so the caught transaction commits two
+      // required engines with no car.
+      await store.transaction(async (tx) => {
+        await expect(
+          tx.nodes.CaEngine.bulkReparent([
+            { id: engineX.id, options: { whole: carB } },
+            { id: engineY.id, options: { whole: carA } },
+          ]),
+        ).rejects.toBeInstanceOf(CardinalityError);
+      });
+      expect(await openRows()).toEqual(before);
+      expect(
+        await store.edges.caEngineOf.find({}, { temporalMode: "includeEnded" }),
+      ).toHaveLength(2);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("bulkReparent keeps an ended incumbent in an `acyclic: true` relation that counts it", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaCell.create({});
+      const former = await store.nodes.CaCell.create(
+        {},
+        { partOf: { whole: root } },
+      );
+      const report = await store.nodes.CaCell.create(
+        {},
+        { partOf: { whole: former } },
+      );
+
+      // `report` leaves `former` (its row is ended, and still counted by
+      // `caCellUnder`'s own `acyclic: true`) while `former` moves under
+      // `report`. MUTATION CHECK: exclude every retired incumbent from the
+      // probe in `prepareCompositionAttachmentMoves`
+      // (`retireRemovesFromAcyclicRelation` answering `true`,
+      // src/store/operations/node-operations.ts) — the batch then commits
+      // the cycle the sequential moves refuse, and the audit reports it.
+      await expect(
+        store.nodes.CaCell.bulkReparent([
+          { id: report.id, options: { whole: root } },
+          { id: former.id, options: { whole: report } },
+        ]),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      const live = await store.edges.caCellUnder.find({});
+      expect(
+        new Set(live.map((edge) => `${edge.fromId}->${edge.toId}`)),
+      ).toEqual(
+        new Set([`${former.id}->${root.id}`, `${report.id}->${former.id}`]),
+      );
       expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
@@ -1993,9 +2366,11 @@ export function registerCompositionAttachmentIntegrationTests(
     it("get-or-create states the attachment's window on every leg that writes the edge", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const book = await store.nodes.CaBook.create({});
+      // `caChapterOf` is `population: "one"`: a bounded window still attaches
+      // the part, for the row's whole life.
       const window = {
         validFrom: "2021-01-01T00:00:00.000Z",
-        validTo: "2998-01-01T00:00:00.000Z",
+        validTo: "2022-01-01T00:00:00.000Z",
       };
       const partOf = {
         whole: book,
@@ -2008,9 +2383,10 @@ export function registerCompositionAttachmentIntegrationTests(
           "ca_chapter_slug",
           { slug },
         );
-        const edges = await store.edges.caChapterOf.find({
-          from: requireDefined(chapter),
-        });
+        const edges = await store.edges.caChapterOf.find(
+          { from: requireDefined(chapter) },
+          { temporalMode: "includeEnded" },
+        );
         const edge = requireDefined(edges[0], `the edge of "${slug}"`);
         return {
           validFrom: edge.meta.validFrom,
@@ -2056,11 +2432,11 @@ export function registerCompositionAttachmentIntegrationTests(
     it("verifies a stated window against an already-satisfied attachment instead of dropping it", async () => {
       const stored = {
         validFrom: "2020-01-01T00:00:00.000Z",
-        validTo: "2090-01-01T00:00:00.000Z",
+        validTo: "2022-01-01T00:00:00.000Z",
       } as const;
       const conflicting = {
         validFrom: "2021-06-01T00:00:00.000Z",
-        validTo: "2095-06-01T00:00:00.000Z",
+        validTo: "2023-06-01T00:00:00.000Z",
       } as const;
       const held = { via: "caChapterOf", props: { order: 1 } } as const;
       const fields = ["validFrom", "validTo"] as const;
@@ -2227,7 +2603,7 @@ export function registerCompositionAttachmentIntegrationTests(
       // so the repeat inserts a second one and `other` is accepted beside it.
       for (const validTo of [
         "2022-01-01T00:00:00.000Z",
-        "2090-01-01T00:00:00.000Z",
+        "2023-06-01T00:00:00.000Z",
       ]) {
         const partOf = { whole: show, validTo };
         const calls: readonly (() => Promise<unknown>)[] = [

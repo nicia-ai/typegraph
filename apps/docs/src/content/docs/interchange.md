@@ -272,7 +272,7 @@ recorded as an `entityType: "identity"` entry in `result.errors`.
 | `nodeKinds` | `string[]` | all | Filter to specific node types |
 | `edgeKinds` | `string[]` | all | Filter to specific edge types |
 | `includeMeta` | `boolean` | `false` | Include version and timestamps |
-| `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
+| `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields. Always on for identity-enabled graphs and graphs with a `oneActive` cardinality (see the round-trip caveat below) |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
 | `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
 | `signal` | `AbortSignal` | none | Cancel the export: roll its snapshot transaction back and release the connection. See [Cancelling an export](#cancelling-an-export) |
@@ -292,10 +292,20 @@ from import time forward. Pass `includeTemporal: true` on export when the
 clone needs to match the source's `asOf` behavior exactly (this is what
 `branch()` does internally).
 
-Identity-enabled graphs are the exception: their exports default temporal
-fields on, because assertion windows cannot be validated against endpoints
-without the endpoint bounds. Explicit `includeTemporal: false` is refused for
-those graphs.
+Two kinds of graph are the exception: their exports default temporal fields
+on, and refuse an explicit `includeTemporal: false`.
+
+- **Identity-enabled graphs**, because assertion windows cannot be validated
+  against endpoints without the endpoint bounds
+  (`IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS`).
+- **Graphs with an active-only edge cardinality** — any edge kind whose
+  `cardinality` or `targetCardinality` is `"oneActive"`, which includes every
+  realizing edge of a `oneActive` [composition](/ontology#composition) pair.
+  Such a kind counts a row only while its window is open, so its ended rows
+  are history: the row a `reparent` leaves behind, an employment that ended.
+  Exported without its `validTo`, an ended row would re-import as current — a
+  part attached to its former whole again, or refused as a second active
+  edge (`ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS`).
 
 **Repair a legacy graph before exporting it.** A row an older library version
 stored with a backwards window (`valid_from > valid_to`) exports as it is stored
@@ -639,6 +649,19 @@ row is reported as the same per-row error rather than aborting the import.
 
 Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
 kind-scoped, so a cross-kind id collision simply reads as absent.
+
+#### A composition window that ends or starts later
+
+A composition edge's window may not start or end later than the write that
+states it — on import as on every [store write](/errors#compositionerror). A
+document row of a realizing edge whose `validFrom` or `validTo` lies after
+the import's clock is refused as a per-row error (`error` starts with
+`COMPOSITION_VALIDITY_FUTURE_START` or `COMPOSITION_VALIDITY_FUTURE_END`),
+whether it would insert the row or update an existing one. A past `validTo` is
+history and imports as such: an ended `oneActive` composition row is neither a
+second whole for its part nor a member of the composition relation's
+acyclicity check, so the history a `reparent` leaves behind re-imports in any
+row order.
 
 #### A required composition part with no whole
 

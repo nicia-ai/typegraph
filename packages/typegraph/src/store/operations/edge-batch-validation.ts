@@ -48,6 +48,7 @@ import {
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
   edgeCardinalitySpec,
+  membershipCountsRow,
 } from "../claims/edge-claims";
 import { type WriteTarget } from "./write-session";
 
@@ -343,7 +344,17 @@ export function createEdgeBatchValidationBackend(
  */
 function countEdgesAtEndpointIncludes(
   params: CountEdgesAtEndpointParams,
-  row: EdgeRow,
+  row: Pick<
+    EdgeRow,
+    | "graph_id"
+    | "kind"
+    | "from_kind"
+    | "from_id"
+    | "to_kind"
+    | "to_id"
+    | "deleted_at"
+    | "valid_to"
+  >,
 ): boolean {
   const [endpointKind, endpointId] =
     params.endpoint === "from" ?
@@ -355,14 +366,45 @@ function countEdgesAtEndpointIncludes(
     endpointKind === params.endpointKind &&
     endpointId === params.endpointId &&
     row.deleted_at === undefined &&
-    (params.activeOnly !== true || row.valid_to === undefined)
+    membershipCountsRow(params.activeOnly === true ? "openRows" : "allRows", {
+      validTo: row.valid_to,
+    })
   );
+}
+
+/**
+ * A row a frame retires before its inserts land, and how: soft-deleted
+ * (`"delete"`, a `population: "one"` incumbent), or its window ended at
+ * `validTo` (`"endWindow"`, a `population: "oneActive"` incumbent).
+ */
+export type RetiringEdge =
+  | Readonly<{ row: EdgeRow; retire: "delete" }>
+  | Readonly<{ row: EdgeRow; retire: "endWindow"; validTo: string }>;
+
+/**
+ * Whether `countEdgesAtEndpoint(params)` stops counting `retiring.row` once
+ * its retire lands: it counts the row now, and does not count the row's
+ * retired state. A deleted row leaves every count; an ended row leaves only
+ * a count that admits open rows alone (`activeOnly`) and stays in every
+ * other — it is still a live row of the edge kind.
+ */
+function retireLeavesCount(
+  params: CountEdgesAtEndpointParams,
+  retiring: RetiringEdge,
+): boolean {
+  if (!countEdgesAtEndpointIncludes(params, retiring.row)) return false;
+  if (retiring.retire === "delete") return true;
+  return !countEdgesAtEndpointIncludes(params, {
+    ...retiring.row,
+    valid_to: retiring.validTo,
+  });
 }
 
 /**
  * The frame's write target as a replacement edge's preparation must read it:
  * with `retiring` — the rows this same frame retires AFTER the preparation
- * and BEFORE the inserts — already gone from every endpoint count it holds.
+ * and BEFORE the inserts — already in their retired state in every endpoint
+ * count it holds.
  *
  * `reparent`'s replace arm (`prepareCompositionAttachmentMoves`,
  * `node-operations.ts`) is the caller, with the incumbent of every move in
@@ -372,12 +414,14 @@ function countEdgesAtEndpointIncludes(
  * detached when the caller catches it inside an enclosing transaction, and
  * preparing it against the raw count would refuse every move whose incumbent
  * realizes the same edge kind — the incumbent still counts against the
- * part's own cardinality until it is retired. Subtracting the rows the
- * frame retires yields exactly the count the inserts will see: a
- * `population: "one"` incumbent is soft-deleted (leaves a `live` count), a
- * `population: "oneActive"` incumbent has its window ended (leaves a
- * `liveAndActive` count), and the axis a pair's population names is the
- * one whose count it leaves.
+ * part's own cardinality until it is retired. Subtracting exactly the rows
+ * whose retire takes them out of a count ({@link retireLeavesCount}) yields
+ * the count the inserts and their claims will see: a `population: "one"`
+ * incumbent is soft-deleted and leaves every count; a `population:
+ * "oneActive"` incumbent has its window ended, so it leaves an active-only
+ * count but still occupies a count of every live row — a whole-side `one`
+ * bound on the same realizing edge, say — exactly as the claim taken at the
+ * insert will find it.
  *
  * `edgeExistsBetween` is deliberately not overlaid: an incumbent that shared
  * the replacement's `(kind, from, to)` would be the same attachment, which
@@ -385,7 +429,7 @@ function countEdgesAtEndpointIncludes(
  */
 export function createRetiringEdgeValidationBackend(
   target: WriteTarget,
-  retiring: readonly EdgeRow[],
+  retiring: readonly RetiringEdge[],
 ): WriteTarget {
   if (retiring.length === 0) return target;
   return deriveBackend(target, {
@@ -393,8 +437,8 @@ export function createRetiringEdgeValidationBackend(
       params: CountEdgesAtEndpointParams,
     ): Promise<number> => {
       const count = await target.countEdgesAtEndpoint(params);
-      const leaving = retiring.filter((row) =>
-        countEdgesAtEndpointIncludes(params, row),
+      const leaving = retiring.filter((edge) =>
+        retireLeavesCount(params, edge),
       );
       return count - leaving.length;
     },

@@ -44,10 +44,12 @@
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
+  asNodeId,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
+  partOf,
 } from "@nicia-ai/typegraph";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -378,6 +380,159 @@ describe.each(backendMatrix())(
 
       const stored = await target.edges.dependsOn.find({});
       expect(stored.map((edge) => edge.id).toSorted()).toEqual(["ab", "ca"]);
+    });
+  },
+);
+
+/**
+ * A reflexive `oneActive` composition: a move ENDS the incumbent's window,
+ * and the ended row is history, outside the composition relation. A branch,
+ * a clone and a merge must all judge it that way, or the documented "former
+ * ancestor under former descendant" move becomes unmergeable.
+ */
+const Folder = defineNode("Folder", { schema: z.object({}) });
+const inFolder = defineEdge("inFolder", {
+  schema: z.object({ note: z.string().optional() }),
+});
+const folderGraph = defineGraph({
+  id: "merge_composition_history_test",
+  nodes: { Folder: { type: Folder } },
+  edges: {
+    inFolder: {
+      type: inFolder,
+      from: [Folder],
+      to: [Folder],
+      cardinality: "oneActive",
+    },
+  },
+  ontology: [partOf(Folder, Folder, { via: inFolder, partSide: "from" })],
+});
+
+const folder = (id: string) => ({ kind: "Folder" as const, id });
+
+describe.each(backendMatrix())(
+  "merge planner: composition history is outside the composition relation [$name]",
+  (entry) => {
+    let cleanups: (() => Promise<void>)[] = [];
+
+    afterEach(async () => {
+      for (const cleanup of cleanups.reverse()) {
+        await cleanup();
+      }
+      cleanups = [];
+    });
+
+    async function makeBackend(): Promise<GraphBackend> {
+      const fixture = await entry.make();
+      cleanups.push(fixture.cleanup);
+      return fixture.backend;
+    }
+
+    /** `B` moved out of `A` (that row ended) and `A` then placed under `B`. */
+    async function storeWithHistory(): Promise<Store<typeof folderGraph>> {
+      const [store] = await createStoreWithSchema(
+        folderGraph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      await store.nodes.Folder.create({}, { id: "A" });
+      await store.nodes.Folder.create({}, { id: "C" });
+      await store.nodes.Folder.create(
+        {},
+        { id: "B", partOf: { whole: folder("A") } },
+      );
+      await store.nodes.Folder.reparent(asNodeId<typeof Folder>("B"), {
+        whole: folder("C"),
+      });
+      await store.edges.inFolder.create(folder("A"), folder("B"), {});
+      expect(await store.verifyConstraintFences()).toEqual([]);
+      return store;
+    }
+
+    async function liveLinks(
+      store: Store<typeof folderGraph>,
+    ): Promise<readonly string[]> {
+      return (await store.edges.inFolder.find({}))
+        .map((edge) => `${edge.fromId}->${edge.toId}`)
+        .toSorted();
+    }
+
+    it("(e) branches a store whose history placed a former whole under its part", async () => {
+      const source = await storeWithHistory();
+
+      // MUTATION CHECK: drop the `acyclicRelationCountsRow` filter from
+      // `groupProposedByAcyclicRelation` (src/store/acyclicity.ts) — the
+      // clone's import then refuses the ended `B -> A` row as closing a
+      // cycle, and `branch()` fails with a `BranchError`.
+      const cloned = unwrap(
+        await branch(source, () => makeBackend(), { id: asBranchId("copy") }),
+      );
+
+      expect(
+        await cloned.store.edges.inFolder.find(
+          {},
+          { temporalMode: "includeEnded" },
+        ),
+      ).toHaveLength(3);
+      expect(await liveLinks(cloned.store)).toEqual(await liveLinks(source));
+    });
+
+    it("(f) merges a branch that moves a part out and then places its former whole under it", async () => {
+      const [target] = await createStoreWithSchema(
+        folderGraph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      await target.nodes.Folder.create({}, { id: "A" });
+      await target.nodes.Folder.create({}, { id: "C" });
+      await target.nodes.Folder.create(
+        {},
+        { id: "B", partOf: { whole: folder("A") } },
+      );
+      const moves = unwrap(
+        await branch(target, () => makeBackend(), { id: asBranchId("moves") }),
+      );
+      await moves.store.nodes.Folder.reparent(asNodeId<typeof Folder>("B"), {
+        whole: folder("C"),
+      });
+      await moves.store.edges.inFolder.create(folder("A"), folder("B"), {});
+
+      // MUTATION CHECK: project `validTo: undefined` for every merged edge in
+      // `resolvedPlanAcyclicityCandidates` (src/graph-merge/merge.ts) — the
+      // preview then counts the ended `B -> A` as a member and refuses the
+      // plan with `AcyclicityMergeConflictError`.
+      const result = await merge(target, [moves]);
+      expect(isErr(result)).toBe(false);
+      expect(await liveLinks(target)).toEqual(["A->B", "B->C"]);
+      expect(await target.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("(g) merges a branch that edits an ended history row without restating its window", async () => {
+      const target = await storeWithHistory();
+      const ended = requireDefined(
+        (
+          await target.edges.inFolder.find({}, { temporalMode: "includeEnded" })
+        ).find((edge) => edge.meta.validTo !== undefined),
+      );
+      const edits = unwrap(
+        await branch(target, () => makeBackend(), { id: asBranchId("edits") }),
+      );
+      await edits.store.edges.inFolder.update(ended.id, { note: "moved" });
+
+      // MUTATION CHECK: read no stored row in
+      // `resolvedPlanAcyclicityCandidates` (src/graph-merge/merge.ts),
+      // treating a write that states no window end as open — the preview then
+      // proposes the ended row as a live member and refuses the plan.
+      const result = await merge(target, [edits]);
+      expect(isErr(result)).toBe(false);
+      const edited = requireDefined(
+        await target.edges.inFolder.getById(ended.id, {
+          temporalMode: "includeEnded",
+        }),
+      );
+      expect(edited.note).toBe("moved");
+      expect(edited.meta.validTo).toBe(ended.meta.validTo);
+      expect(await target.verifyConstraintFences()).toEqual([]);
     });
   },
 );
