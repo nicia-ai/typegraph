@@ -174,6 +174,22 @@ function invalidCursorError(message: string): ValidationError {
   );
 }
 
+function decodeCursorReference(
+  encodedKind: string,
+  encodedId: string,
+): PlainNodeRef {
+  try {
+    return {
+      kind: decodeURIComponent(encodedKind),
+      id: decodeURIComponent(encodedId),
+    };
+  } catch (error) {
+    if (error instanceof URIError)
+      throw invalidCursorError("Malformed transition page cursor.");
+    throw error;
+  }
+}
+
 /**
  * The revision a cursor names, for a read of `reference`'s lineage. Refuses
  * anything that was not minted as a cursor, and a cursor minted for another
@@ -192,10 +208,10 @@ function requireCursorRevision(
   const idEnd = body.indexOf(TRANSITION_PAGE_CURSOR_SEPARATOR, kindEnd + 1);
   if (kindEnd === -1 || idEnd === -1)
     throw invalidCursorError("Malformed transition page cursor.");
-  const cursorReference = {
-    kind: decodeURIComponent(body.slice(0, kindEnd)),
-    id: decodeURIComponent(body.slice(kindEnd + 1, idEnd)),
-  };
+  const cursorReference = decodeCursorReference(
+    body.slice(0, kindEnd),
+    body.slice(kindEnd + 1, idEnd),
+  );
   if (refKey(cursorReference) !== refKey(reference))
     throw invalidCursorError(
       `This cursor pages the lineage of ${cursorReference.kind}/${cursorReference.id}, not ${reference.kind}/${reference.id}.`,
@@ -556,6 +572,26 @@ async function walkClassLineage<G extends GraphDef>(
 }
 
 /**
+ * How a reconstruction reads identity: under which same-id profile and over
+ * which node kinds. The graph's CURRENT reading is what a recorded view uses;
+ * {@link membershipReadings} adds the readings an earlier schema could have
+ * used.
+ */
+type IdentityReading = Readonly<{
+  sameIdAcrossKinds: "fold" | "ignore";
+  kinds: ReadonlySet<string>;
+}>;
+
+function currentReading<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+): IdentityReading {
+  return {
+    sameIdAcrossKinds: ctx.sameIdAcrossKinds,
+    kinds: identityActiveKinds(ctx.registry),
+  };
+}
+
+/**
  * Reconstructs the visible class membership of `seed` at `recordedAsOf`, on
  * the diagonal `store.asOfRecorded` reads: the anchor's revision, seen from
  * the valid instant the anchor carries. That shared coordinate
@@ -565,15 +601,17 @@ async function walkClassLineage<G extends GraphDef>(
  * open when the step was recorded stays open in the step, however long after
  * it lapses the replay is asked for.
  *
- * The class is read under the graph's CURRENT identity profile and node
- * kinds, exactly as a recorded view is. A step recorded before a
- * `sameIdAcrossKinds` flip or a kind removal is therefore shown as the
- * current schema reads that revision, not as the schema then in force did.
+ * Unless a `reading` is given, the class is read under the graph's CURRENT
+ * identity profile and node kinds, exactly as a recorded view is. A step
+ * recorded before a `sameIdAcrossKinds` flip or a kind removal is therefore
+ * shown as the current schema reads that revision, not as the schema then in
+ * force did.
  */
 async function reconstructAt<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
   recordedAsOf: RecordedInstant,
+  reading: IdentityReading = currentReading(ctx),
 ): Promise<HistoricalClass> {
   const classes = await loadHistoricalClasses(
     ctx.backend,
@@ -581,8 +619,8 @@ async function reconstructAt<G extends GraphDef>(
     ctx.graphId,
     [seed],
     recordedDiagonalCoordinate(recordedAsOf),
-    ctx.sameIdAcrossKinds,
-    identityActiveKinds(ctx.registry),
+    reading.sameIdAcrossKinds,
+    reading.kinds,
   );
   return requireDefined(classes.get(refKey(seed)));
 }
@@ -603,6 +641,7 @@ async function reconstructBefore<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
   boundary: RecordedInstant,
+  reading?: IdentityReading,
 ): Promise<HistoricalClass> {
   const priorRevision = recordedInstantRevision(boundary) - 1;
   if (priorRevision < RECORDED_FIRST_REVISION) return NO_HISTORICAL_CLASS;
@@ -610,6 +649,7 @@ async function reconstructBefore<G extends GraphDef>(
     ctx,
     seed,
     createRecordedInstant(priorRevision, recordedInstantWallTime(boundary)),
+    reading,
   );
 }
 
@@ -620,9 +660,48 @@ type BoundaryClasses = Readonly<{
 }>;
 
 /**
+ * The readings a row's membership is judged under, current reading first.
+ *
+ * A note names a class under the schema in force when it was written, and a
+ * kind drop or a same-id profile change is exactly what makes today's reading
+ * unable to see that class: the dropped kind's members are not in it, and a
+ * cross-kind pair is no longer one class. Judging such a note by today's
+ * reading alone would discard the history that explains how the member got
+ * where it is. The log itself says which schema changes touched this lineage,
+ * so the readings are widened by exactly that: every kind a note names (not
+ * only the registered ones), and, when a schema transition was noted, the
+ * other same-id profile.
+ */
+function membershipReadings<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  lineage: readonly IdentityTransitionRow[],
+): readonly IdentityReading[] {
+  const current = currentReading(ctx);
+  const namedKinds = new Set(current.kinds);
+  for (const row of lineage) {
+    namedKinds.add(row.class_kind);
+    if (row.prior_class_kind !== undefined)
+      namedKinds.add(row.prior_class_kind);
+  }
+  const profiles: readonly ("fold" | "ignore")[] =
+    lineage.some((row) => row.cause === "schema-transition") ?
+      ["fold", "ignore"]
+    : [current.sameIdAcrossKinds];
+  const widened = profiles
+    .map((sameIdAcrossKinds) => ({ sameIdAcrossKinds, kinds: namedKinds }))
+    .filter(
+      (reading) =>
+        reading.sameIdAcrossKinds !== current.sameIdAcrossKinds ||
+        reading.kinds.size !== current.kinds.size,
+    );
+  return [current, ...widened];
+}
+
+/**
  * Whether a native transition row explains a change to the class `seed`
  * belonged to on either side of its boundary: its `class` or `priorClass`
- * canonical is a member of that class just before or at the boundary.
+ * canonical is a member of that class just before or at the boundary, under
+ * any of the {@link membershipReadings}.
  *
  * The lineage walk reaches every class `seed`'s evidence ever touched,
  * including classes it has since left, so a row it finds is about `seed` only
@@ -633,18 +712,27 @@ type BoundaryClasses = Readonly<{
  */
 function namesBoundaryClass(
   row: IdentityTransitionRow,
-  classes: BoundaryClasses,
+  members: ReadonlySet<string>,
 ): boolean {
-  const members = new Set(
-    [...classes.before.structural, ...classes.after.structural].map((member) =>
-      refKey(member),
-    ),
-  );
   const priorClassRef = transitionPriorClassRef(row);
   return (
     members.has(refKey(transitionClassRef(row))) ||
     (priorClassRef !== undefined && members.has(refKey(priorClassRef)))
   );
+}
+
+/** Every reference `seed`'s class held on either side of a boundary under `reading`. */
+async function structuralMembersAround<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  seed: PlainNodeRef,
+  recordedAsOf: RecordedInstant,
+  reading: IdentityReading,
+): Promise<readonly PlainNodeRef[]> {
+  const [before, after] = [
+    await reconstructBefore(ctx, seed, recordedAsOf, reading),
+    await reconstructAt(ctx, seed, recordedAsOf, reading),
+  ];
+  return [...before.structural, ...after.structural];
 }
 
 function invalidReplayLimitError(
@@ -760,6 +848,7 @@ type MemberBoundaryPage = Readonly<{
 async function memberBoundary<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
+  readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
 ): Promise<MemberBoundary> {
   const firstNative = rows.find((row) => !isRestoredTransitionRow(row));
@@ -774,8 +863,22 @@ async function memberBoundary<G extends GraphDef>(
     before: await reconstructBefore(ctx, seed, recordedAsOf),
     after: await reconstructAt(ctx, seed, recordedAsOf),
   };
+  const members = new Set(
+    [...classes.before.structural, ...classes.after.structural].map((member) =>
+      refKey(member),
+    ),
+  );
+  for (const reading of readings.slice(1)) {
+    for (const member of await structuralMembersAround(
+      ctx,
+      seed,
+      recordedAsOf,
+      reading,
+    ))
+      members.add(refKey(member));
+  }
   const kept = rows.filter(
-    (row) => isRestoredTransitionRow(row) || namesBoundaryClass(row, classes),
+    (row) => isRestoredTransitionRow(row) || namesBoundaryClass(row, members),
   );
   return {
     rows: kept,
@@ -803,12 +906,13 @@ async function memberBoundary<G extends GraphDef>(
 async function pageMemberBoundaries<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
+  readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
   limit: number,
 ): Promise<MemberBoundaryPage> {
   const boundaries: MemberBoundary[] = [];
   for (const group of groupByBoundary(rows)) {
-    const boundary = await memberBoundary(ctx, seed, group);
+    const boundary = await memberBoundary(ctx, seed, readings, group);
     const first = boundary.rows[0];
     if (first === undefined) continue;
     if (boundaries.length === limit) {
@@ -897,6 +1001,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
   const page = await pageMemberBoundaries(
     ctx,
     seed,
+    membershipReadings(ctx, discovered),
     windowedRows(discovered, fromRevision, toRevision),
     limit,
   );

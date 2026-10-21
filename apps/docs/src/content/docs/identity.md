@@ -319,7 +319,10 @@ retraction, a same-ID fold, a delete or restore, a validity-window end, a kind
 drop, a schema transition, or an identity change a graph merge applied. A
 transition is `ref`'s when `ref` was a member of the class it names just before
 or at the revision it was recorded at. A class `ref` has left keeps a history of
-its own, and none of that later history is reported for `ref`. A page covers
+its own, and none of that later history is reported for `ref`. Membership is
+judged against the kinds the log names and, once a schema transition was
+recorded, under both same-ID settings, so the history that put `ref` in a class
+survives a later kind drop or a change to `sameIdAcrossKinds`. A page covers
 at most `limit` recorded boundaries (default 200), and one boundary can hold
 several transitions, so a page's `transitions` can be longer than `limit`;
 when the lineage has more boundaries, the page carries `nextCursor`, and

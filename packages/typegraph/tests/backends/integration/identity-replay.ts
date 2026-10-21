@@ -16,6 +16,7 @@ import {
   asNodeId,
   createStoreWithSchema,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   IdentityReplayError,
   pruneIdentityTransitions,
@@ -571,6 +572,73 @@ export function registerIdentityReplayIntegrationTests(
       ]);
     });
 
+    it("keeps the history that put a member in a class after the class's kind is dropped", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_replay_kind_drop"),
+      );
+      const evolved = await store.evolve(
+        defineGraphExtension({
+          nodes: { Alias: { properties: { label: { type: "string" } } } },
+        }),
+      );
+      const person = personRef("dropped-p");
+      await evolved.nodes.Person.create({}, { id: person.id });
+      const alias = await evolved
+        .getNodeCollectionOrThrow("Alias")
+        .create({ label: "alias" }, { id: "dropped-a" });
+      await evolved.identity.assertSame(person, alias);
+      const removed = await evolved.removeKinds(["Alias"]);
+
+      const history = await removed.identity.transitionsOf(person);
+      expect(history.transitions.map((transition) => transition.cause)).toEqual(
+        ["assert", "kind-drop"],
+      );
+      const replay = await removed.identity.replay(person);
+      expect(replay.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+        "kind-drop",
+      ]);
+    });
+
+    it("keeps the history that put a member in a class after same-id folding is switched off", async () => {
+      const backend = context.getStore().backend;
+      const foldGraph = departedLineageGraph(
+        "identity_replay_fold_switched_off",
+      );
+      const ignoreGraph = defineGraph({
+        id: foldGraph.id,
+        nodes: { Person: { type: DepartedPerson }, Org: { type: DepartedOrg } },
+        edges: {},
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const [foldStore] = await createStoreWithSchema(foldGraph, backend, {
+        history: true,
+      });
+      const shared = personRef("switched-off");
+      await foldStore.nodes.Person.create({}, { id: shared.id });
+      await foldStore.nodes.Org.create({}, { id: shared.id });
+      const active = requireDefined(
+        await getActiveSchema(backend, foldGraph.id),
+      );
+      await migrateSchema(backend, ignoreGraph, active.version);
+      const [ignoreStore] = await createStoreWithSchema(ignoreGraph, backend, {
+        history: true,
+      });
+
+      const history = await ignoreStore.identity.transitionsOf(shared);
+      const causes = history.transitions.map((transition) => transition.cause);
+      expect(causes).toEqual([
+        "fold",
+        "schema-transition",
+        "schema-transition",
+      ]);
+      const replay = await ignoreStore.identity.replay(shared);
+      expect(replay.steps.map((step) => step.transition.transitionId)).toEqual(
+        history.transitions.map((transition) => transition.transitionId),
+      );
+    });
+
     it("reports restored transitions it can neither attribute nor rule out, instead of a silent short page", async () => {
       const source = await provisionDepartedLineageStore(
         context,
@@ -964,6 +1032,18 @@ export function registerIdentityReplayIntegrationTests(
         await expect(store.identity.replay(other, { cursor })).rejects.toThrow(
           ValidationError,
         );
+      });
+
+      it("cursor refuses text that looks like a cursor but cannot be decoded", async () => {
+        const { store, a, cursor } = await provisionPagedLineage(context);
+        const revision = requireDefined(cursor.split(":").at(-1));
+        const undecodable = `tpc1:%:x:${revision}` as TransitionPageCursor;
+        await expect(
+          store.identity.transitionsOf(a, { cursor: undecodable }),
+        ).rejects.toThrow(ValidationError);
+        await expect(
+          store.identity.replay(a, { cursor: undecodable }),
+        ).rejects.toThrow(/Malformed transition page cursor/);
       });
 
       it("a cursor composes with the window by intersection", async () => {

@@ -1875,7 +1875,9 @@ tables that removal never finds.
   no schema. They resolve through the session that removes them and reopen
   without binding, and follow the same removal rule: relations found in a schema
   other than the removing session's refuse removal and name that schema. `control` adds the column to an
-  existing ledger the first time it runs.
+  existing ledger the first time it runs. Reopening such an allocation also
+  adopts any missing base-schema steps unqualified, under the pooled
+  connection's `search_path`, exactly as its other statements resolve.
 
 The connection must still be able to *resolve* the allocation's tables, so its
 `search_path` must include the schema, typically `public`. A per-role `"$user"`
