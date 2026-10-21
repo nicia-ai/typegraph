@@ -31,8 +31,11 @@ import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
-import { uniquenessClaimAxis } from "../store/claims/axis";
-import { compareCodePoints, compareStrings } from "../utils/compare";
+import {
+  compareUniquenessAxisKinds,
+  uniquenessClaimAxis,
+} from "../store/claims/axis";
+import { compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { type OntologySnapshot } from "./ontology-change";
 import { type SerializedUniqueConstraint } from "./types";
@@ -152,7 +155,7 @@ export function uniquenessClaimGates(
         .getSubClassComponent(kind)
         .filter(
           (member) =>
-            compareCodePoints(member, kind) < 0 &&
+            compareUniquenessAxisKinds(member, kind) < 0 &&
             !proposedComponent.includes(member),
         );
       if (lostKinds.length === 0) return [];

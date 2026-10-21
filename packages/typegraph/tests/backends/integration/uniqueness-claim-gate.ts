@@ -180,6 +180,44 @@ function chainGraph(
   });
 }
 
+/**
+ * Two kinds whose names order differently by UTF-16 code unit and by code
+ * point: the astral `U+1F600` is stored as the surrogate pair `D83D DE00`,
+ * which sorts below `U+FF22` by code unit and above it by code point. The
+ * claim axis is the code-point minimum, so it is `GATE_BMP_KIND`.
+ */
+const GATE_ASTRAL_KIND = "\u{1F600}GateAstral";
+const GATE_BMP_KIND = "\uFF22GateBmp";
+const AstralKind = defineNode(GATE_ASTRAL_KIND, {
+  schema: z.object({ email: z.string() }),
+});
+const BmpKind = defineNode(GATE_BMP_KIND, {
+  schema: z.object({ email: z.string() }),
+});
+function codePointOrderGraph(id: string, related: boolean) {
+  return defineGraph({
+    id,
+    nodes: {
+      [GATE_ASTRAL_KIND]: {
+        type: AstralKind,
+        unique: [HIERARCHY_EMAIL_UNIQUE],
+      },
+      [GATE_BMP_KIND]: { type: BmpKind, unique: [HIERARCHY_EMAIL_UNIQUE] },
+      GateBystander: { type: Bystander },
+      GateOtherBystander: { type: OtherBystander },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(Bystander, OtherBystander),
+      ...(related ? [subClassOf(BmpKind, AstralKind)] : []),
+    ],
+  });
+}
+type EmailCollections = Record<
+  string,
+  Readonly<{ create: (props: { email: string }) => Promise<unknown> }>
+>;
+
 /** A kind a graph can drop with its rows left in the table, then re-add. */
 const Revenant = defineNode("GateRevenant", {
   schema: z.object({ email: z.string() }),
@@ -500,6 +538,36 @@ export function registerUniquenessClaimGateIntegrationTests(
         store.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
       ).rejects.toBeInstanceOf(UniquenessError);
     });
+
+    it("orders the claim axis and the split gate by the same code-point order", async () => {
+      const id = "uniqueness_gate_axis_code_point_order";
+      const before = await context.createStore(codePointOrderGraph(id, true));
+      const beforeNodes = before.nodes as unknown as EmailCollections;
+      await requireDefined(beforeNodes[GATE_BMP_KIND]).create({
+        email: DUPLICATE_EMAIL,
+      });
+
+      const [store] = await createAdapterStoreWithSchema(
+        codePointOrderGraph(id, false),
+        context.getBackend(),
+      );
+      const nodes = store.nodes as unknown as EmailCollections;
+
+      // The BMP kind wrote at its own axis and keeps probing it; the lost
+      // member sorts after it by code point, so the split commits ungated.
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        requireDefined(nodes[GATE_BMP_KIND]).create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      await expect(
+        requireDefined(nodes[GATE_ASTRAL_KIND]).create({
+          email: DUPLICATE_EMAIL,
+        }),
+      ).resolves.toBeDefined();
+    });
+    // MUTATION CHECK: folding `uniquenessAxisOfKinds` by UTF-16 code unit
+    // writes the BMP row at the astral axis, so after the split the BMP
+    // duplicate is accepted and the astral row is refused.
 
     it("removes a subClassOf relation while the hierarchy holds no rows", async () => {
       const id = "uniqueness_gate_axis_split_empty";
