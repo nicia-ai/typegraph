@@ -221,6 +221,30 @@ const redeclaredVectorGraph = defineGraph({
   ],
 });
 
+// The reverse divergence: the parent declares the vector field as a plain
+// number array and the subclass tags it embedding(), so the subclass's rows are
+// indexed and the parent's are not.
+const PlainVectorDocument = defineNode("TsPlainVectorDoc", {
+  schema: z.object({ vector: z.array(z.number()).optional() }),
+});
+const TaggedVectorMemo = defineNode("TsTaggedVectorMemo", {
+  schema: z.object({ vector: embedding(3).optional() }),
+});
+const taggedSubclassGraph = defineGraph({
+  id: "typed_subsumption_tagged_subclass_integration",
+  nodes: {
+    TsPlainVectorDoc: { type: PlainVectorDocument },
+    TsTaggedVectorMemo: { type: TaggedVectorMemo },
+  },
+  edges: {},
+  ontology: [
+    // The compile-time filter reads the branded `EmbeddingValue` on the child
+    // against the plain array on the parent; the registry accepts it.
+    // @ts-expect-error a branded embedding is not a plain number array to the filter
+    subClassOf(TaggedVectorMemo, PlainVectorDocument),
+  ],
+});
+
 async function seedOptionalFieldStore(context: IntegrationTestContext) {
   const store = await context.createStore(optionalFieldGraph);
   await store.nodes.TsOptionalMedia.create({
@@ -735,6 +759,114 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       });
     });
 
+    it(`refuses an exact fulltext search of a kind the builder refuses, rather than returning nothing`, async (ctx) => {
+      const store = await context.createStore(redeclaredTitleGraph);
+      if (store.backend.capabilities.fulltext?.supported !== true) {
+        ctx.skip();
+      }
+      await store.nodes.TsRedeclaredTitleMemo.create({
+        title: "unique_ts_exact_marker",
+        note: "n",
+      });
+
+      expect(() =>
+        store
+          .query()
+          .from("TsRedeclaredTitleMemo", "m", { expansion: "exact" })
+          .whereNode("m", (m) => m.$fulltext.matches("unique_ts_exact_marker")),
+      ).toThrow(UnsupportedPredicateError);
+
+      const refusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.fulltext("TsRedeclaredTitleMemo", {
+            query: "unique_ts_exact_marker",
+            limit: 10,
+          }),
+        ),
+      );
+      expect(refusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "fulltext",
+        kinds: ["TsRedeclaredTitleMemo"],
+      });
+    });
+
+    it(`refuses an exact fulltext search of a kind with no searchable field, in a hybrid leg too`, async (ctx) => {
+      const store = await context.createStore(omittedSearchableGraph);
+      if (
+        store.backend.capabilities.fulltext?.supported !== true ||
+        store.backend.capabilities.vector?.supported !== true
+      ) {
+        ctx.skip();
+      }
+
+      const fulltextRefusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.fulltext("TsTitlelessMemo", {
+            query: "anything",
+            limit: 10,
+          }),
+        ),
+      );
+      expect(fulltextRefusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "fulltext",
+        kinds: ["TsTitlelessMemo"],
+      });
+
+      const hybridRefusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.hybrid("TsTitlelessMemo", {
+            vector: { fieldPath: "vector", queryEmbedding: [1, 0, 0] },
+            fulltext: { query: "anything" },
+            limit: 10,
+          }),
+        ),
+      );
+      expect(hybridRefusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "fulltext",
+      });
+    });
+
+    it(`refuses a vector expansion whose subclass tags a field the parent declares plain, as the builder does`, async (ctx) => {
+      const store = await context.createStore(taggedSubclassGraph);
+      if (store.backend.capabilities.vector?.supported !== true) {
+        ctx.skip();
+      }
+
+      expect(() =>
+        store
+          .query()
+          .from("TsPlainVectorDoc", "d")
+          .whereNode("d", (d) =>
+            // The parent declares a plain array, so the typed accessor has no
+            // `similarTo`; the runtime accessor is what the builder decides on.
+            (
+              d.vector as unknown as Readonly<{
+                similarTo: (query: readonly number[], limit: number) => never;
+              }>
+            ).similarTo([1, 0, 0], 5),
+          ),
+      ).toThrow(ConfigurationError);
+
+      const refusal = expectConfigurationError(
+        await rejectionOf(
+          store.search.vector("TsPlainVectorDoc", {
+            fieldPath: "vector",
+            queryEmbedding: [1, 0, 0],
+            limit: 10,
+            expansion: "subclasses",
+          }),
+        ),
+      );
+      expect(refusal.details).toMatchObject({
+        code: UNINDEXED_SEARCH_CODE,
+        capability: "vector",
+        kinds: ["TsTaggedVectorMemo"],
+      });
+    });
+
     it(`still runs a fulltext expansion whose subclass omits the searchable field, which holds no text there`, async (ctx) => {
       const store = await context.createStore(omittedSearchableGraph);
       if (store.backend.capabilities.fulltext?.supported !== true) {
@@ -774,7 +906,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
   });
 
   describe("Typed subsumption — the removed includeSubClasses option", () => {
-    it("is refused by every alias entry point and the search facade, naming expansion", async () => {
+    it("is refused by every alias entry point, naming expansion", async () => {
       const store = await context.createStore(subsumptionGraph);
       const stated = { includeSubClasses: false } as never;
       const attempts: Readonly<Record<string, () => unknown>> = {
@@ -803,6 +935,24 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         });
         expect(refusal.message).toContain("expansion");
       }
+    });
+
+    it("leaves a null options argument from untyped code as no options", async () => {
+      const store = await context.createStore(subsumptionGraph);
+      await store.nodes.TsMedia.create({ title: "plain" });
+      await store.nodes.TsPodcast.create({
+        title: "cast",
+        rssUrl: "https://x",
+      });
+
+      const rows = await store
+        .query()
+        // eslint-disable-next-line unicorn/no-null -- Validate invalid JavaScript input.
+        .from("TsMedia", "m", null as never)
+        .select((ctx) => ctx.m.kind)
+        .execute();
+
+      expect(rows.toSorted()).toEqual(["TsMedia", "TsPodcast"]);
     });
 
     it("is refused by every search leg instead of searching exact-kind", async (ctx) => {

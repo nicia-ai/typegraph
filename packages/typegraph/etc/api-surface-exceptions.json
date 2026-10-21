@@ -6666,9 +6666,9 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -6730,9 +6730,9 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -6794,9 +6794,9 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -6858,9 +6858,9 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -6922,9 +6922,9 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -6986,9 +6986,9 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7050,9 +7050,9 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7114,9 +7114,9 @@
   {
     "entrypoint": "typegraph.api.md",
     "declaration": "SchemaIntrospector",
-    "member": "kindsRedeclaringEmbeddingUntagged",
+    "member": "kindsDivergingFromSubsumingDeclaration",
     "kind": "required-member-added",
-    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsRedeclaringEmbeddingUntagged` names the kinds that redeclare an `embedding()` field untagged, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`SchemaIntrospector` is built by the library (`schemaIntrospectorFor` / `createSchemaIntrospector`) for the query builder and the `store.search()` facade and is not exported from any entrypoint, so no external consumer implements, constructs or reads one; `kindsDivergingFromSubsumingDeclaration` names the kinds whose `searchable()` / `embedding()` tag differs from the subsuming kind's declaration, so a vector expansion refuses them instead of silently skipping their unindexed vectors. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {

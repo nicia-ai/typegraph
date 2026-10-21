@@ -529,6 +529,125 @@ describe("provenance composition existence", () => {
   // reached whole always carries its required parts. The first retraction then
   // closes the unjustified section while the report is still supported.
 
+  it("closes the required parts of a whole it closes although the whole was already unsupported", async () => {
+    const { store } = await createCompositionStore(
+      "provenance_composition_stale_whole",
+    );
+    const staleSource = await store.nodes.PcSource.create(
+      { label: "stale", retracted: true },
+      { id: "stale-source" },
+    );
+    const liveSource = await store.nodes.PcSource.create(
+      { label: "live", retracted: false },
+      { id: "live-source" },
+    );
+    const partSource = await store.nodes.PcSource.create(
+      { label: "part", retracted: false },
+      { id: "part-source" },
+    );
+    const report = await store.nodes.PcReport.create({}, { id: "report-1" });
+    const section = await store.nodes.PcSection.create(
+      {},
+      {
+        id: "section-1",
+        partOf: { whole: { kind: "PcReport", id: report.id } },
+      },
+    );
+    // The report is live although its only justification needs a retracted
+    // source: unsupported before and after the transition below.
+    const reportJustification = await store.nodes.PcJustification.create(
+      { label: "report" },
+      { id: "report-justification" },
+    );
+    await store.edges.pcPremiseOf.create(staleSource, reportJustification);
+    await store.edges.pcPremiseOf.create(liveSource, reportJustification);
+    await store.edges.pcDerives.create(reportJustification, report);
+    const partJustification = await store.nodes.PcJustification.create(
+      { label: "part" },
+      { id: "part-justification" },
+    );
+    await store.edges.pcPremiseOf.create(partSource, partJustification);
+    await store.edges.pcDerives.create(partJustification, section);
+    const provenance = createRetractionCapability(store, config);
+
+    const { result: transition, closed } = await closedFactsDuring(store, () =>
+      provenance.retract(liveSource),
+    );
+
+    // The close policy turns the composition cascade off on the promise that a
+    // closed whole's required parts close in the same transition, so a whole
+    // closed without a support change must still bring its parts along.
+    expect(transition.died).toEqual([
+      { kind: "PcReport", id: "report-1" },
+      { kind: "PcSection", id: "section-1" },
+    ]);
+    expect(closed).toEqual(["PcReport/report-1", "PcSection/section-1"]);
+  });
+  // MUTATION CHECK: in `computeAffectedFactKeys`, skip a reached whole whose
+  // support verdict is unchanged without also asking `currencyMovesWithSupport`.
+  // The report closes and the section stays live under it.
+
+  it("reopens the required parts of a supported whole it reopens without a support change", async () => {
+    const { store, backend } = await createCompositionStore(
+      "provenance_composition_tombstoned_supported_whole",
+    );
+    const firstSource = await store.nodes.PcSource.create(
+      { label: "first", retracted: false },
+      { id: "source-1" },
+    );
+    const secondSource = await store.nodes.PcSource.create(
+      { label: "second", retracted: false },
+      { id: "source-2" },
+    );
+    const partSource = await store.nodes.PcSource.create(
+      { label: "part", retracted: false },
+      { id: "part-source" },
+    );
+    const report = await store.nodes.PcReport.create({}, { id: "report-1" });
+    const section = await store.nodes.PcSection.create(
+      {},
+      {
+        id: "section-1",
+        partOf: { whole: { kind: "PcReport", id: report.id } },
+      },
+    );
+    for (const [index, source] of [firstSource, secondSource].entries()) {
+      const justification = await store.nodes.PcJustification.create(
+        { label: `report-${index}` },
+        { id: `report-justification-${index}` },
+      );
+      await store.edges.pcPremiseOf.create(source, justification);
+      await store.edges.pcDerives.create(justification, report);
+    }
+    const partJustification = await store.nodes.PcJustification.create(
+      { label: "part" },
+      { id: "part-justification" },
+    );
+    await store.edges.pcPremiseOf.create(partSource, partJustification);
+    await store.edges.pcDerives.create(partJustification, section);
+    // Both die outside the store's own paths, leaving a supported but
+    // tombstoned whole and part.
+    for (const fact of [report, section]) {
+      await backend.deleteNode({
+        graphId: store.graphId,
+        kind: fact.kind,
+        id: fact.id,
+      });
+    }
+    const provenance = createRetractionCapability(store, config);
+
+    await provenance.retract(firstSource);
+
+    await expect(
+      store.nodes.PcReport.getById(report.id),
+    ).resolves.toMatchObject({ id: "report-1" });
+    await expect(
+      store.nodes.PcSection.getById(section.id),
+    ).resolves.toMatchObject({ id: "section-1" });
+  });
+  // MUTATION CHECK: as above, dropping the `currencyMovesWithSupport` leg
+  // reopens the report and leaves the section tombstoned under it.
+
   it("holds a required part whose whole is a live node that carries no belief status", async () => {
     const { store } = await createCompositionStore(
       "provenance_composition_nonfact",

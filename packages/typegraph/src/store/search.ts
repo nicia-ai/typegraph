@@ -118,13 +118,14 @@ export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
    * kind alone; `"subclasses"` expands to its `subClassOf`/`equivalentTo`
    * descendants. Vector legs search each declaring kind's storage and merge
    * by score; kinds that omit the embedding field hold no vector there and
-   * are skipped. A kind that redeclares the field untagged, or a fulltext
-   * expansion in which a kind would leave searchable text unindexed, is
-   * refused rather than silently under-returned — the same kinds the query
+   * are skipped. A search is refused rather than silently under-returned when
+   * a searched kind would leave its text unindexed (no `searchable()` field,
+   * or one redeclared untagged) or declares the embedding field with a tag
+   * that differs from the subsuming declaration — the same kinds the query
    * builder refuses, decided by the same schema introspector.
-   * `"subclasses"` requires a query-capable store. `"narrower"` is not an axis this facade offers. The facade types
-   * each hit by the axis stated here, as a `from()` alias over the kind
-   * would be.
+   * `"subclasses"` requires a query-capable store. `"narrower"` is not an
+   * axis this facade offers. The facade types each hit by the axis stated
+   * here, as a `from()` alias over the kind would be.
    */
   expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
@@ -341,24 +342,24 @@ function resolveSearchKinds(
 }
 
 /**
- * Refuses a fulltext expansion in which some kind would leave searchable text
+ * Refuses a fulltext search in which some searched kind would leave its text
  * unindexed, exactly as `$fulltext.matches()` refuses the same alias. The
- * decision is the schema introspector's (`kindsWithoutSearchableField`), so
- * the facade and the builder cannot drift. An exact search names one kind and
- * silently drops nothing, so only an expansion is checked.
+ * decision is the schema introspector's (`kindsWithoutSearchableField`), asked
+ * of every resolved kind list — an exact search included, since a kind with no
+ * `searchable()` field returns nothing from the index whatever it holds — so
+ * the facade and the builder cannot drift.
  */
 function assertFulltextKindsCoverRows(
   ctx: StoreSearchContext,
   nodeKind: string,
   kinds: readonly string[],
 ): void {
-  if (kinds.length < 2) return;
   const lackingKinds = schemaIntrospectorFor(
     ctx.registry,
   ).kindsWithoutSearchableField(kinds);
   if (lackingKinds.length === 0) return;
   throw new ConfigurationError(
-    `fulltext search expanded from "${nodeKind}" would silently miss rows ` +
+    `fulltext search over "${nodeKind}" would silently miss rows ` +
       `of ${formatKindList(lackingKinds)}: ` +
       `${lackingKinds.length === 1 ? "it has" : "they have"} no field ` +
       `declared with searchable() that the index covers (an untagged ` +
@@ -371,7 +372,7 @@ function assertFulltextKindsCoverRows(
     },
     {
       suggestion:
-        'Search the kinds separately, or declare the field with searchable() on the listed kinds, or pass expansion: "exact".',
+        'Declare the field with searchable() on the listed kinds, search the kinds separately, or pass expansion: "exact" for a kind that declares one.',
     },
   );
 }
@@ -731,10 +732,13 @@ export async function executeVectorSearch<N = Node>(
 }
 
 /**
- * Refuses a vector expansion in which a kind redeclares the embedding field
- * untagged: its rows hold a vector no index covers, so skipping it would
- * silently under-return. A kind that omits the field holds no vector there
- * and is skipped.
+ * Refuses a vector expansion in which a kind declares the embedding field with
+ * a different `embedding()` tag than the kind it subsumes under: its rows hold
+ * a vector no index covers (or an index the others do not share), so skipping
+ * it would silently under-return. The decision is the schema introspector's
+ * (`kindsDivergingFromSubsumingDeclaration`), the one the query builder makes
+ * before it trusts a subsuming declaration. A kind that omits the field holds
+ * no vector there and is skipped.
  */
 function assertVectorKindsCoverRows(
   ctx: StoreSearchContext,
@@ -743,25 +747,25 @@ function assertVectorKindsCoverRows(
   fieldPath: string,
   label: string,
 ): void {
-  if (kinds.length < 2) return;
-  const redeclaringKinds = schemaIntrospectorFor(
+  const divergingKinds = schemaIntrospectorFor(
     ctx.registry,
-  ).kindsRedeclaringEmbeddingUntagged(kinds, fieldPath);
-  if (redeclaringKinds.length === 0) return;
+  ).kindsDivergingFromSubsumingDeclaration(kinds, fieldPath);
+  if (divergingKinds.length === 0) return;
   throw new ConfigurationError(
-    `${label}: ${formatKindList(redeclaringKinds)} expanded from ` +
-      `"${nodeKind}" redeclare${redeclaringKinds.length === 1 ? "s" : ""} ` +
-      `"${fieldPath}" without embedding(), so their vectors are not indexed ` +
-      `and the search would silently miss them.`,
+    `${label}: ${formatKindList(divergingKinds)} expanded from ` +
+      `"${nodeKind}" declare${divergingKinds.length === 1 ? "s" : ""} ` +
+      `"${fieldPath}" with an embedding() tag that differs from the ` +
+      `subsuming declaration, so their vectors are not indexed with the ` +
+      `rest and the search would silently miss them.`,
     {
       code: "SEARCH_EXPANSION_KIND_UNINDEXED",
       capability: "vector",
       graphId: ctx.graphId,
-      kinds: redeclaringKinds,
+      kinds: divergingKinds,
     },
     {
       suggestion:
-        'Declare the field with embedding() on the listed kinds, or pass expansion: "exact".',
+        'Declare the field identically on the listed kinds (embedding() on each), or pass expansion: "exact".',
     },
   );
 }
@@ -772,11 +776,11 @@ type VectorSearchKind = Readonly<{ kind: string; slot: ResolvedSearchSlot }>;
 /**
  * Resolves the kinds a vector search spans, keeping only kinds that
  * declare the embedding field (a kind that omits it holds no vector there,
- * and has no table to reference). Enforces one shared declared metric across the expansion:
- * scores from different metrics cannot be merged into one ranking, and a
- * per-call metric override cannot bridge the gap either (each kind's
- * storage is built for — and validated against — its declared metric), so
- * mixed declared metrics are unsupported for cross-kind ranking.
+ * and has no table to reference). Enforces one shared declared metric across
+ * the expansion: scores from different metrics cannot be merged into one
+ * ranking, and a per-call metric override cannot bridge the gap either (each
+ * kind's storage is built for — and validated against — its declared metric),
+ * so mixed declared metrics are unsupported for cross-kind ranking.
  */
 function resolveVectorSearchKinds(
   ctx: StoreSearchContext,

@@ -497,8 +497,11 @@ An expansion that would silently miss rows is refused rather than
 under-returned, exactly where `$fulltext.matches()` refuses the same alias: if
 a subclass redeclares a `searchable()` field without `searchable()`, its text
 is not in the index, so `expansion: "subclasses"` throws `ConfigurationError`
-(`SEARCH_EXPANSION_KIND_UNINDEXED`) naming the kind. A subclass that merely
-omits the field holds no text there and is searched as usual. Passing the
+(`SEARCH_EXPANSION_KIND_UNINDEXED`) naming the kind. The same holds for an
+exact search of a kind that declares no `searchable()` field at all: it is
+refused rather than returning nothing, as `$fulltext.matches()` refuses the
+same alias. A subclass that merely omits the field holds no text there and is
+searched as usual. Passing the
 removed `includeSubClasses` option from untyped code is refused
 (`QUERY_ALIAS_EXPANSION_INVALID`) rather than ignored.
 

@@ -576,9 +576,10 @@ const hits = await store.search.vector("Document", {
 
 // Search a kind and all of its subClassOf descendants; per-kind results
 // merge into one globally ordered ranking. Kinds that omit the embedding
-// field hold no vector there and are skipped; a kind that redeclares it
-// without embedding() is refused (SEARCH_EXPANSION_KIND_UNINDEXED), because
-// its vectors are not indexed and the search would silently miss them.
+// field hold no vector there and are skipped; a kind that declares it with
+// an embedding() tag that differs from its parent's is refused
+// (SEARCH_EXPANSION_KIND_UNINDEXED), because its vectors are not indexed
+// with the rest and the search would silently miss them.
 const acrossKinds = await store.search.vector("Content", {
   fieldPath: "embedding",
   queryEmbedding,

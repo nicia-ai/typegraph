@@ -127,13 +127,17 @@ export type SchemaIntrospector = Readonly<{
     kindNames: readonly string[],
   ) => readonly string[];
   /**
-   * The kinds of `kindNames` that declare `fieldName` as something other than
-   * an `embedding()` while another of them declares it as one. A subclass may
-   * legally redeclare an embedding field untagged (the tag is an annotation,
-   * not a constraint), and its rows then hold a vector that no index covers.
-   * A kind that omits the field holds no vector there and is not named.
+   * The kinds of `kindNames` whose declaration of `fieldName` loses an
+   * indexing tag (`searchable()` / `embedding()`) the subsuming kind's
+   * declaration carries, or carries one it lacks. A subclass may legally
+   * redeclare such a field differently (the tags are annotations, not
+   * constraints), and its rows then reach no index the subsuming-kind accessor
+   * reads. This is the very decision the shared-field accessor makes before it
+   * trusts the subsuming declaration, so the query builder and `store.search()`
+   * refuse the same kinds. A kind that omits the field holds no value there
+   * and is not named.
    */
-  kindsRedeclaringEmbeddingUntagged: (
+  kindsDivergingFromSubsumingDeclaration: (
     kindNames: readonly string[],
     fieldName: string,
   ) => readonly string[];
@@ -209,28 +213,61 @@ export function createSchemaIntrospector(
   }
 
   /**
+   * The kinds whose declaration of the field differs in its indexing tags from
+   * the subsuming kinds' declaration — and that declaration itself, when the
+   * subsuming kinds agree on one. The structural contract does not see the
+   * tags (`searchable()` and `embedding()` are annotations, not constraints),
+   * so a subclass may legally redeclare a tagged field untagged (or tag an
+   * untagged one) — and its rows then never reach the fulltext or vector index
+   * the parent-typed accessor reads. When the subsuming kinds disagree among
+   * themselves, each of their declarations is the reference a kind is held to.
+   */
+  function subsumingDeclaration(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): Readonly<{
+    resolved: FieldTypeInfo | undefined;
+    divergingKinds: readonly string[];
+  }> {
+    const subsuming = subsumingKinds(kindNames);
+    const resolved = mergeDeclaredFieldTypeInfos(subsuming, fieldName);
+    const references =
+      resolved === undefined ?
+        subsuming
+          .map((kindName) => getFieldTypeInfo(kindName, fieldName))
+          .filter((info): info is FieldTypeInfo => info !== undefined)
+      : [resolved];
+    const divergingKinds = kindNames.filter((kindName) => {
+      const info = getFieldTypeInfo(kindName, fieldName);
+      return (
+        info !== undefined &&
+        references.some((reference) => !keepsIndexingTags(reference, info))
+      );
+    });
+    return { resolved, divergingKinds };
+  }
+
+  /**
    * The field as the kind subsuming the others declares it, unless a kind
-   * redeclares it without the indexing tag the subsuming declaration carries.
-   * The structural contract does not see that tag (`searchable()` and
-   * `embedding()` are annotations, not constraints), so a subclass may legally
-   * redeclare a tagged field untagged — and its rows then never reach the
-   * fulltext or vector index the parent-typed accessor reads. Those aliases
-   * fall back to the strict all-kinds merge rather than silently omit rows.
+   * diverges from that declaration's indexing tags. Those aliases fall back to
+   * the strict all-kinds merge rather than silently omit rows.
    */
   function resolveFromSubsumingKinds(
     kindNames: readonly string[],
     fieldName: string,
   ): FieldTypeInfo | undefined {
-    const resolved = mergeDeclaredFieldTypeInfos(
-      subsumingKinds(kindNames),
+    const { resolved, divergingKinds } = subsumingDeclaration(
+      kindNames,
       fieldName,
     );
-    if (resolved === undefined) return undefined;
-    const everyKindKeepsIndexingTags = kindNames.every((kindName) => {
-      const info = getFieldTypeInfo(kindName, fieldName);
-      return info === undefined || keepsIndexingTags(resolved, info);
-    });
-    return everyKindKeepsIndexingTags ? resolved : undefined;
+    return divergingKinds.length === 0 ? resolved : undefined;
+  }
+
+  function kindsDivergingFromSubsumingDeclaration(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): readonly string[] {
+    return subsumingDeclaration(kindNames, fieldName).divergingKinds;
   }
 
   function getSharedFieldTypeInfo(
@@ -431,25 +468,6 @@ export function createSchemaIntrospector(
     return result;
   }
 
-  function kindsRedeclaringEmbeddingUntagged(
-    kindNames: readonly string[],
-    fieldName: string,
-  ): readonly string[] {
-    const declarations = kindNames.map((kindName) => ({
-      kindName,
-      info: getFieldTypeInfo(kindName, fieldName),
-    }));
-    const anyEmbedding = declarations.some(
-      ({ info }) => info?.valueType === "embedding",
-    );
-    if (!anyEmbedding) return [];
-    return declarations
-      .filter(
-        ({ info }) => info !== undefined && info.valueType !== "embedding",
-      )
-      .map(({ kindName }) => kindName);
-  }
-
   return {
     getFieldTypeInfo,
     getSharedFieldTypeInfo,
@@ -458,7 +476,7 @@ export function createSchemaIntrospector(
     hasDeclaredField,
     hasDeclaredEdgeField,
     kindsWithoutSearchableField,
-    kindsRedeclaringEmbeddingUntagged,
+    kindsDivergingFromSubsumingDeclaration,
   };
 }
 

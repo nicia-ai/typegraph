@@ -128,11 +128,11 @@ const REMOVED_INCLUDE_SUBCLASSES_OPTION = "includeSubClasses";
  *   states `includeSubClasses`.
  */
 export function assertNoRemovedExpansionOption(
-  options: object | undefined,
+  options: unknown,
   surface: string,
 ): void {
+  if (typeof options !== "object" || options === null) return;
   if (
-    options === undefined ||
     (options as Readonly<Record<string, unknown>>)[
       REMOVED_INCLUDE_SUBCLASSES_OPTION
     ] === undefined
