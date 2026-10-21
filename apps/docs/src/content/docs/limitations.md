@@ -706,37 +706,39 @@ for the worked example.
 
 A bulk method called on the store runs in its own transaction, so a refused
 batch rolls back entirely. The same method called on `tx` runs on the
-caller's transaction and has no savepoint of its own: if the callback catches
-the refusal and the transaction commits, rows the batch wrote before the
-refused item can stay committed. `bulkUpsertById` is the plainest case: it
-writes its creates before its updates, so a node update that loses a unique
-key (`UniquenessError`), or an edge item that restores a deleted edge past
-the kind's cardinality (`CardinalityError`), is refused with the batch's new
-rows already in place.
+caller's transaction and has no savepoint of its own, so it reaches every
+verdict its items can raise by reading before its first write instead:
+`bulkUpsertById` and `bulkReplaceById` judge the update half (merged
+properties, the validity window, unique keys, a restore's disjointness,
+composition and identity verdicts, an edge resurrection's or reopen's
+cardinality and composition claims) together with the creates they write
+first, and `bulkGetOrCreateByConstraint` and `bulkGetOrCreateByEndpoints`
+judge their matched items together with the rows they create. Each item is
+judged against the state the batch's earlier items leave, so a later item
+may take a key or an allowance an earlier one gives up and is refused one an
+earlier one takes. A refusal the callback catches therefore leaves none of
+the batch written.
 
-This is a stated limitation rather than a pending fix: store operations do
-not take a savepoint per bulk call. Let the refusal propagate so the
-transaction rolls back, or rethrow after handling it. See
+What can still follow a write of the same batch:
+
+- **A concurrent writer the fence does not exclude.** A node kind whose
+  unique keys are enforced by the key itself takes no per-graph write fence,
+  so another transaction can claim a key, or remove a row, between the
+  batch's reads and its writes. That surfaces as the same typed error
+  (`UniquenessError`, `NodeNotFoundError`, `CardinalityError`) from the
+  write. Inside `store.transaction(...)` the get-or-create methods do not
+  re-run a batch that has already written on your transaction, so the
+  refusal reaches you rather than being applied twice; called on the store,
+  where the refusal rolled the batch back, they re-run it once and converge
+  on the winner's row.
+- **An identity fold that depends on another restored row of the same
+  batch.** A restored row's fold is judged against the identity state as
+  stored, so a contradiction that only appears once another row of the batch
+  has been restored is raised when that restore lands.
+
+Let the refusal propagate so the transaction rolls back, or rethrow after
+handling it. See
 [Catching a bulk refusal inside a transaction](/performance/overview#catching-a-bulk-refusal-inside-a-transaction).
-
-Batches that attach composition parts through the **node collection** do not
-have this limit for the rows that already exist: `bulkCreate` / `bulkInsert`
-with `partOf`, `bulkReparent` and `bulkGetOrCreateByConstraint` decide every
-such item before writing any. `bulkGetOrCreateByConstraint` creates its
-unmatched items after its matched ones: it counts their attachments with the
-matched ones up front, but a refusal only a **new** row's own preparation can
-raise — a second unique key it loses, or a disjoint kind holding its id — is
-reached after the matched items wrote. See
-[`partOf` on get-or-create is a postcondition](/ontology#partof-on-get-or-create-is-a-postcondition).
-
-Writing a composition's **realizing edge** through the edge collection is an
-ordinary edge batch. `edges.<via>.bulkCreate` and `bulkInsert` decide every
-item before writing any, but `edges.<via>.bulkUpsertById` and
-`bulkGetOrCreateByEndpoints` do not decide the whole batch first, so an item
-refused for a second whole (`CompositionError`) can follow earlier edges of the
-same batch that are already written. Attach through
-`nodes.<Kind>.reparent` / `bulkReparent` or `partOf` when the batch must not
-leave a partial attachment.
 
 ## Graph Analytics Limits
 

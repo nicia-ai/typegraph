@@ -612,25 +612,25 @@ matched an existing node, each verdict a read can decide:
   and an identity contradiction (`sameIdAcrossKinds: "fold"`) the restored
   row's fold would raise, judged against the identity state as stored;
 - for the items it will create, the refusals that need no read at all (a
-  required part with no `partOf`, an undeclared or ambiguous pair).
+  required part with no `partOf`, an undeclared or ambiguous pair), and
+  their unique keys — every key of the new rows, not only the one the lookup
+  read, probed after the matched items' in the order the batch writes, so a
+  matched update that gives up a key lets a new row take it and one that
+  takes a key refuses the new row that asks for it.
 
-A refusal from any of them therefore leaves no item attached, updated or
-resurrected, including when you catch it on `tx` inside
+A refusal from any of them therefore leaves no item attached, updated,
+resurrected or created, including when you catch it on `tx` inside
 `store.transaction(...)`. What remains outside that guarantee:
 
-- **A new row's own non-attachment refusals.** The unmatched items are
-  created after the matched ones are written. What only a new row's own
-  preparation decides — a second unique key it loses, or a disjoint kind
-  holding its id — is raised then, and caught inside an enclosing
-  transaction it leaves the matched items' writes in place. These are not
-  decided up front because they can depend on the batch's own order: a
-  matched update that gives up a key is what lets a new row take it.
 - **A concurrent writer the fence does not exclude.** A node kind whose
   unique keys are enforced by the key itself takes no per-graph write fence,
   so another transaction can claim a key, or remove a matched row, between
   the batch's reads and its write. That surfaces as the same typed error
   (`UniquenessError`, `NodeNotFoundError`) from the write, after earlier
-  items wrote.
+  items wrote. The batch is not re-run on your transaction once a leg has
+  written, so the refusal reaches you instead of an update applied twice;
+  called on the store, where the refusal rolled the batch back, it is re-run
+  once and converges on the winner's row.
 - **An identity fold that depends on another restored row of the same
   batch.** Each restored row's fold is judged against the identity state as
   stored, so a contradiction that only appears once another row of the
@@ -639,17 +639,19 @@ resurrected, including when you catch it on `tx` inside
 The up-front verdicts cost one extra fenced read pass over the batch, paid
 only by a batch with more than one item that owes a write (an item that
 already satisfies the stated attachment owes none), or one such item next
-to a new row that states an attachment. A batch that finds everything
-satisfied stays read-only and reads each part's attachment once.
+to a new row. A batch that finds everything satisfied stays read-only and
+reads each part's attachment once.
 
-Writing a realizing edge directly is a different surface. `edges.<via>.bulkCreate`
-and `bulkInsert` decide every item before writing any, but
-`edges.<via>.bulkUpsertById` and `bulkGetOrCreateByEndpoints` are ordinary edge
-batches that do not decide the whole batch first: an item refused for a second
-whole (`CompositionError`) can follow earlier edges of the batch that were
-already written, and a caller who catches it inside an enclosing transaction
-keeps them. See
-[A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows).
+Writing a realizing edge directly decides the whole batch first too.
+`edges.<via>.bulkCreate` and `bulkInsert` decide every item before writing any,
+and `edges.<via>.bulkUpsertById` and `bulkGetOrCreateByEndpoints` decide every
+update, resurrection and reopen — its composition claim, cardinality and
+window, counting the edges the batch creates — before the batch's first
+write, so an item refused for a second whole (`CompositionError`) or a
+detached required part (`CompositionExistenceError`) leaves none of the batch
+written. See
+[A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
+for what stays outside that.
 
 #### `existence`: a part that cannot exist without a whole
 

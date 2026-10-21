@@ -49,8 +49,10 @@ await store.nodes.Document.bulkDelete(ids);
 
 Called on the store, a bulk method owns its transaction: a refused item rolls
 the whole call back. Called on `tx` inside `store.transaction(...)` it runs on
-your transaction, which has no savepoint, so a refusal you catch there can
-leave the rows the batch wrote before the refused item. See
+your transaction, which has no savepoint, so it decides every item before its
+first write and a refusal you catch there leaves none of the batch written —
+unless a concurrent writer raced the batch between its reads and its writes.
+See
 [A bulk refusal caught inside `store.transaction`](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows).
 
 ### upsertById

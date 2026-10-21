@@ -34,6 +34,7 @@ import {
   registerAggregateIntegrationTests,
   registerAlgorithmIntegrationTests,
   registerBackendProvenanceIntegrationTests,
+  registerBatchWriteVerdictIntegrationTests,
   registerBulkFindByIndexIntegrationTests,
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
@@ -410,6 +411,7 @@ export function createIntegrationTestSuite<
     registerEdgeAcyclicityIntegrationTests(context);
     registerEdgeClaimSelfHealIntegrationTests(context);
     registerEdgeTargetCardinalityIntegrationTests(context);
+    registerBatchWriteVerdictIntegrationTests(context);
     registerEdgeTargetCardinalityTemporalIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerDurableEdgeMatchIdentityIntegrationTests(context);

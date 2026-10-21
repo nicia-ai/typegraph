@@ -289,10 +289,12 @@ export type UpsertUpdateEdgeInput = EdgeUpdateInput &
 export type EdgeCreateBatchOptions = Readonly<{
   /**
    * The updates the caller writes right after this batch, inside the same
-   * frame. The ones that resurrect re-admit their edge to the live relation
-   * this batch is probed against, so they join this batch's one acyclicity
-   * probe: a refusal then precedes every write of the combined set, instead
-   * of surfacing at a resurrection after this batch's rows are stored.
+   * transaction. Every one of them is prepared before this batch's first
+   * insert, against the state the inserts leave — re-entry cardinality and
+   * composition claims counting this batch's rows, merged props, the window
+   * verdict — and the ones that resurrect join this batch's one acyclicity
+   * probe. A refusal any of them reaches then precedes every write of the
+   * combined set, instead of surfacing after this batch's rows are stored.
    */
   pairedUpdates?: readonly EdgeUpsertUpdateBatchEntry[];
 }>;

@@ -412,53 +412,51 @@ decides what a refused batch leaves behind:
 - **Called on the store**, the bulk method owns its transaction. A refusal
   from any item rolls the whole call back: nothing of the batch is written.
 - **Called on `tx` inside `store.transaction(...)`**, the bulk method runs on
-  your transaction and opens none of its own. If the refusal propagates, the
-  transaction rolls back and nothing is written. If you **catch** it inside
-  the callback and let the transaction commit, rows the batch wrote before the
-  refused item can stay committed — the write layer has no savepoint to roll
-  one bulk call back to.
+  your transaction and opens none of its own. The write layer has no
+  savepoint to roll one bulk call back to, so the bulk methods reach every
+  verdict their items can raise by reading before their first write: a
+  refusal you catch inside the callback leaves none of the batch written,
+  and the transaction can commit.
 
 ```typescript
 await store.transaction(async (tx) => {
   try {
     await tx.nodes.Person.bulkUpsertById(items);
   } catch (error) {
-    // Earlier items of `items` may already be written on `tx`.
-    // Rethrow to roll the transaction back, or treat the batch as
-    // partially applied.
+    // Nothing of `items` was written on `tx` by the refused call, unless a
+    // concurrent writer raced it: rethrow to roll the transaction back
+    // when that must not be left to chance.
     throw error;
   }
 });
 ```
 
-`bulkUpsertById` shows it most plainly, because it writes a batch's creates
-before its updates: a node item whose update loses a unique key
-(`UniquenessError`), or an edge item that restores a deleted edge past the
-kind's cardinality (`CardinalityError`), is refused after the batch's new
-rows were written. Treat every bulk call the same way: do not catch a refusal and
-commit unless a partially applied batch is acceptable.
+That covers `bulkUpsertById` and `bulkReplaceById`, whose updates are
+judged together with the creates they write first; `bulkGetOrCreateByConstraint`
+and `bulkGetOrCreateByEndpoints`, whose matched items are judged together
+with the rows they create; and the composition batches (`bulkCreate` /
+`bulkInsert` with `partOf`, `bulkReparent`). A batch is judged as the state
+it produces, in the order it writes, so a later item may take a unique key or
+a cardinality allowance an earlier item gives up and is refused one an
+earlier item takes. A concurrent writer that the per-graph write fence does
+not exclude can still claim a key or remove a row between a batch's reads and
+its writes; that refusal comes from the write, after earlier items wrote. See
+[A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
+for what stays outside the guarantee.
 
-Composition attachments made through the node collection are the exception,
-because a half-attached batch would leave ownership in a state no single call
-asked for. `bulkCreate` / `bulkInsert` with `partOf`, `bulkReparent`, and
-`bulkGetOrCreateByConstraint` reach every verdict their existing rows can
-raise before the first write, so a caught refusal leaves those rows untouched.
-Two things stay outside that: `bulkGetOrCreateByConstraint` creates its
-unmatched items after the matched ones, so a refusal only a **new** row's own
-preparation can reach (a second unique key it loses, a disjoint kind holding
-its id) can still follow the matched items' writes; and writing a realizing
-edge directly through `edges.<via>.bulkUpsertById` or
-`bulkGetOrCreateByEndpoints` is an ordinary edge batch, which keeps the rule
-above. See [Composition](/ontology#composition) and
-[`partOf` on get-or-create](/ontology#partof-on-get-or-create-is-a-postcondition)
-for the exact guarantee and what stays outside it.
-
-Deciding a batch's matched items before writing costs reads. A
-`bulkGetOrCreateByConstraint` batch with more than one item that owes a write
-(an update, a resurrection, or an attachment not already held), or one such
-item next to a new row that states an attachment, runs one extra fenced pass
-that reads each item once more before the per-item writes. A batch whose
-matched items all need nothing stays read-only.
+Deciding a batch before writing costs reads. A batch that writes its rows one
+at a time (an update half, resurrections, the matched items of a
+get-or-create) prepares every row before the first write, against the rows
+read inside the transaction, and probes the batch's unique keys and
+cardinality claims once more as a set. A `bulkGetOrCreateByConstraint` batch
+with more than one item that owes a write (an update, a resurrection, or an
+attachment not already held), or one such item next to a new row, runs one
+extra fenced pass that reads each item once more before the per-item writes;
+a batch whose matched items all need nothing stays read-only. A
+`bulkUpsertById`, `bulkReplaceById` or `bulkGetOrCreateByEndpoints` batch
+that both creates and updates, and does not run as one native statement,
+writes its creates through the portable create path rather than the native
+batch create program, so they are decided together with the updates.
 
 ### Choosing the right pattern
 
