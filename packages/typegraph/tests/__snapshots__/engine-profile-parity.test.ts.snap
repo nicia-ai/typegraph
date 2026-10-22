@@ -1709,10 +1709,14 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "-- BEGIN (native transaction) --",
   },
   {
+    "params": [],
+    "sql": "set transaction isolation level read committed",
+  },
+  {
     "params": [
       "engine_profile_parity_script",
     ],
-    "sql": "SELECT pg_advisory_xact_lock(hashtext($1))",
+    "sql": "SELECT pg_advisory_xact_lock(hashtext($1)), current_setting('transaction_isolation') AS transaction_isolation",
   },
   {
     "params": [
@@ -2976,10 +2980,14 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "-- BEGIN (native transaction) --",
   },
   {
+    "params": [],
+    "sql": "set transaction isolation level read committed",
+  },
+  {
     "params": [
       "engine_profile_parity_template_source",
     ],
-    "sql": "SELECT pg_advisory_xact_lock(hashtext($1))",
+    "sql": "SELECT pg_advisory_xact_lock(hashtext($1)), current_setting('transaction_isolation') AS transaction_isolation",
   },
   {
     "params": [

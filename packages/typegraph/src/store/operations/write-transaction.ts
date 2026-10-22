@@ -131,14 +131,16 @@ export type WriteTransactionContext = Readonly<{
 
 /**
  * Whether a transaction session may hand the fence evidence one managed write
- * acquired to the writes after it.
+ * acquired to the writes after it: the per-graph write fence and the schema
+ * fence alike.
  *
  * PostgreSQL releases a lock taken after a savepoint, and undoes a fence-row
  * advance made after it, when the transaction rolls back to that savepoint.
  * A callback holding a raw SQL handle can issue that rollback between two
- * managed writes, so its session is `"per-write"`: every write that needs the
+ * managed writes, so its session is `"per-write"`: every write that needs a
  * fence takes it again. A callback with no such handle cannot, and its
- * session is `"reusable"`.
+ * session is `"reusable"`. The Store decides which from the one raw handle a
+ * transaction context can carry, `tx.sql`.
  */
 export type WriteTransactionFenceEvidence = "reusable" | "per-write";
 
@@ -164,9 +166,10 @@ export function markWriteTransactionAborted(
 /**
  * Schema fences deliberately do not normally memoize: PostgreSQL releases a
  * lock acquired after a savepoint when a caller rolls back to that savepoint.
- * The one safe exception is a TypeGraph-owned Store transaction whose public
- * surface has no native SQL handle. Its first managed write therefore cannot
- * follow a caller-controlled savepoint; once that write acquires the fence,
+ * The one safe exception is a TypeGraph-owned Store transaction whose session
+ * is `"reusable"` ({@link WriteTransactionFenceEvidence}): its callback holds
+ * no raw SQL handle, so its first managed write cannot follow a
+ * caller-controlled savepoint, and once that write acquires the fence,
  * subsequent managed writes can reuse it until the outer transaction ends.
  *
  * The key includes the expected version rather than only the graph id. A
@@ -208,15 +211,16 @@ export function memoizeLeasedSchemaFence(
 }
 
 /**
- * Marks a TypeGraph-owned transaction as eligible for lazy schema-fence
- * leasing. The first managed write acquires the fence; read-only transactions
- * pay nothing and retain their existing visibility/locking behavior.
+ * Marks a `"reusable"` TypeGraph-owned transaction session as eligible for
+ * lazy schema-fence leasing. The first managed write acquires the fence;
+ * read-only transactions pay nothing and retain their existing
+ * visibility/locking behavior.
  *
  * Custom transaction backends deliberately take the callback unchanged: their
  * savepoint/connection lifetime has not been audited by TypeGraph, so their
  * managed writes retain the conservative per-call fence behavior.
  */
-export async function withTransactionSchemaFenceLease<T>(
+async function withTransactionSchemaFenceLease<T>(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
   target: TransactionBackend,
   fn: () => Promise<T>,
@@ -447,7 +451,10 @@ async function ensureAdoptedConstraintWriterSlot(
 
 /**
  * Binds nested typed mutations to one caller-owned transaction commit so a
- * multi-operation `store.transaction(...)` advances its durable revision once.
+ * multi-operation `store.transaction(...)` advances its durable revision once,
+ * and owns every reuse of fence evidence across those mutations:
+ * `fenceEvidence` decides both whether the session remembers the per-graph
+ * write fence and whether it leases the schema fence.
  */
 export async function withWriteTransactionSession<T>(
   target: TransactionBackend,
@@ -462,7 +469,9 @@ export async function withWriteTransactionSession<T>(
   };
   writeTransactionSessions.set(target, session);
   try {
-    const result = await fn();
+    const result = await (fenceEvidence === "reusable" ?
+      withTransactionSchemaFenceLease(ctx, target, fn)
+    : fn());
     if (session.aborted !== undefined) {
       // A caller with tx.sql may have rolled back a native savepoint after
       // catching the error. Check the pinned session itself: 25P02 means the
@@ -929,8 +938,8 @@ function ownsSnapshotFencedUnit(
 
 /**
  * The transaction a collection opens around a resolved mutation set — a bulk
- * upsert's prefetch and the writes it elects, or a bulk get-or-create's legs,
- * on one target.
+ * upsert's or bulk replace's prefetch and the writes it elects, or a bulk
+ * get-or-create's legs, on one target.
  *
  * The writes inside are nested units of {@link runInWriteTransaction}: each
  * runs in THIS transaction and cannot restart it, so a stale-snapshot refusal

@@ -43,6 +43,9 @@
  *   writes fails "takes the fence again … after the caller rolls back the
  *   savepoint": the second decision then issues no fence statement and the
  *   row is never advanced.
+ * - The write session leasing the schema fence whatever its fence evidence
+ *   fails "takes the schema fence again after the caller rolls back the
+ *   savepoint"; it never leasing fails "takes the schema fence once".
  */
 import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -50,6 +53,7 @@ import { z } from "zod";
 
 import {
   createAdapterStore,
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
   defineEdge,
@@ -407,5 +411,56 @@ describe("the graph's fence row is written only by a lock-only decision", () => 
     expect(await fenceRowGeneration(recorded.backend, undeclaredGraph.id)).toBe(
       1,
     );
+  });
+});
+
+/** The statements that take the schema fence: a share lock on the active row. */
+function schemaFenceAcquisitions(
+  statements: readonly LoggedStatement[],
+): readonly LoggedStatement[] {
+  return statements.filter(
+    (statement) =>
+      statement.query.includes('"typegraph_schema_versions"') &&
+      statement.query.includes("FOR SHARE"),
+  );
+}
+
+describe("a transaction reuses the schema fence only when its callback holds no raw SQL", () => {
+  it("takes the schema fence once for the writes of a transaction with no tx.sql", async () => {
+    const recorded = await createRecordedPostgresStore(undeclaredGraph);
+    const [store] = await createStoreWithSchema(
+      undeclaredGraph,
+      recorded.backend,
+    );
+    recorded.reset();
+
+    await store.transaction(async (tx) => {
+      await tx.nodes.Task.create({ name: "a", slug: "a" });
+      await tx.nodes.Task.create({ name: "b", slug: "b" });
+    });
+
+    expect(schemaFenceAcquisitions(recorded.statements)).toHaveLength(1);
+  });
+
+  it("takes the schema fence again after the caller rolls back the savepoint that held the first write", async () => {
+    const recorded = await createRecordedPostgresStore(undeclaredGraph);
+    const [store] = await createAdapterStoreWithSchema(
+      undeclaredGraph,
+      recorded.backend,
+    );
+
+    await store.transaction(async (tx) => {
+      if (tx.sqlAvailability !== "available") {
+        throw new Error("The adapter transaction did not expose SQL");
+      }
+      await tx.sql.execute(drizzleSql`SAVEPOINT first_write`);
+      await tx.nodes.Task.create({ name: "a", slug: "a" });
+      // Releases the share lock the first write took on the schema row.
+      await tx.sql.execute(drizzleSql`ROLLBACK TO SAVEPOINT first_write`);
+      recorded.reset();
+
+      await tx.nodes.Task.create({ name: "b", slug: "b" });
+      expect(schemaFenceAcquisitions(recorded.statements)).toHaveLength(1);
+    });
   });
 });

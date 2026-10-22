@@ -815,6 +815,16 @@ adopt a caller-owned transaction:
   `AdapterHistoryStore`, raw `tx.sql` is disabled under `history: true`; adopt
   external transactions with `store.withRecordedTransaction(...)` instead of
   `store.withTransaction(...)` (which is a compile error on a history store).
+- **No partial rollback of TypeGraph writes inside `withRecordedTransaction`.**
+  Your own handle can open a savepoint inside the callback, for example a
+  nested Drizzle `transaction()` around your own tables. Do not roll one back
+  over TypeGraph writes: TypeGraph does not see that rollback, so the history
+  it records and the per-graph write fence it took still count the writes the
+  rollback undid. The result is not only wrong history: a concurrent
+  `REPEATABLE READ` or `SERIALIZABLE` writer is then no longer stopped by the
+  fence, and the two transactions can both commit a constraint violation, such
+  as a cycle in an `acyclic` relation. Let the error propagate and roll back the
+  whole transaction instead.
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

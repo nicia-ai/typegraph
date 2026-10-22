@@ -3948,15 +3948,22 @@ export type BackendLifecycle = Pick<GraphBackend, "close">;
 
 /**
  * Read-oriented transaction projection exposed by portable transaction
- * contexts. It preserves snapshot-aware graph reads and TypeGraph-compiled
- * row queries while excluding graph writes, arbitrary raw SQL, DDL,
- * transaction adoption, and lifecycle control.
+ * contexts. It preserves snapshot-aware graph reads and SQL rendering while
+ * excluding graph writes, statement execution, DDL, transaction adoption, and
+ * lifecycle control.
+ *
+ * Statement execution (`execute`) is absent on purpose. Its compiled-query
+ * brand is a type, not a runtime check, so on a transaction it would run any
+ * SQL on the pinned session — including a `ROLLBACK TO SAVEPOINT` that
+ * releases a fence lock a later TypeGraph write in the same transaction still
+ * relies on. A transaction runs TypeGraph queries through `tx.query()`; raw
+ * SQL goes through an adapter transaction's `tx.sql`, the one raw handle a
+ * transaction context carries.
  */
 export type TransactionReadBackend = Readonly<
   BackendIdentity &
     GraphEntityReadBackend &
     SchemaReadBackend &
-    QueryExecutionBackend &
     SqlCompilationBackend
 >;
 
@@ -4051,8 +4058,8 @@ export type SchemaCommitPreflightBackend = TransactionBackend &
 /**
  * Builds the actual runtime projection exposed as `TransactionContext.backend`.
  * This is an explicit object rather than a type-only narrowing so portable
- * callers cannot discover write or arbitrary-SQL methods on the underlying
- * transaction backend at runtime.
+ * callers cannot discover write or statement-execution methods on the
+ * underlying transaction backend at runtime.
  *
  * @internal
  */
@@ -4120,7 +4127,6 @@ export function createTransactionReadBackend(
     getActiveSchema: (graphId) => backend.getActiveSchema(graphId),
     getSchemaVersion: (graphId, version) =>
       backend.getSchemaVersion(graphId, version),
-    execute: <T>(query: CompiledRowsSql) => backend.execute<T>(query),
     ...(compileSql === undefined ?
       {}
     : { compileSql: (query: SqlFragment) => compileSql(query) }),

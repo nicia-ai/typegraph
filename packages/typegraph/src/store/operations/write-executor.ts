@@ -228,12 +228,12 @@ function planTransactionOptions<K extends RowWorkKind, T>(
 /**
  * Runs one managed write under its plan.
  *
- * Retrying under the `"optimistic-retry"` tier is `runInWriteTransaction`'s
- * own concern (`write-transaction.ts`), not re-spelled here: that function
- * wraps its whole attempt — opening the transaction, taking the locks, and
- * calling `rowWork` — in `runRetriedUnit` whenever `backend`'s tier requires
- * it, so a retried attempt re-enters this call from the top with brand-new
- * everything.
+ * Retrying is `runInWriteTransaction`'s own concern (`write-transaction.ts`),
+ * not re-spelled here: that function wraps its whole attempt — opening the
+ * transaction, taking the locks, and calling `rowWork` — in `runRetriedUnit`
+ * whenever `backend`'s tier is `"optimistic-retry"` or the store owns a unit
+ * its keyed fence can refuse for a stale snapshot, so a retried attempt
+ * re-enters this call from the top with brand-new everything.
  */
 export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,

@@ -10002,7 +10002,7 @@ export type TransactionOutcome<T> = Readonly<{
 }>;
 
 // @public
-export type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend>;
+export type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & SqlCompilationBackend>;
 
 // @public
 export type TransactionReceipt = Readonly<{
