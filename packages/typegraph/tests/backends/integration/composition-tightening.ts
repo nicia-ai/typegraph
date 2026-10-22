@@ -610,6 +610,88 @@ export function registerCompositionTighteningIntegrationTests(
       expect(await activeVersion(context, id)).toBe(1);
     });
 
+    it("refuses redeclaring oneActive realizing edges `one` when a part's ended row under one edge kind and open row under another would make two wholes", async () => {
+      const id = "composition_tightening_population_widened_occupancy";
+      const store = await context.createStore(
+        buildCellGraph(id, { cardinality: "oneActive", acyclic: false }),
+      );
+      const part = await store.nodes.CtCell.create({});
+      const formerWhole = await store.nodes.CtCell.create({});
+      const currentWhole = await store.nodes.CtCell.create({});
+      const endedEdge = await store.edges.ctCellUnder.create(
+        part,
+        formerWhole,
+        {},
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+      const openEdge = await store.edges.ctCellIn.create(
+        part,
+        currentWhole,
+        {},
+      );
+      expect(await store.verifyConstraintFences()).toEqual([]);
+
+      // MUTATION CHECK: audit composition occupancy only for the edge kinds
+      // of pairs the commit adds (drop the widened-membership arm of
+      // `compositionDeclarationsToAudit`, src/schema/tightening-preflight.ts).
+      // Each edge kind holds one row per part, so the per-kind cardinality
+      // probe stays clean, the commit lands, and the audit then reports the
+      // part holding two wholes.
+      const error = await createAdapterStoreWithSchema(
+        buildCellGraph(id, { cardinality: "one", acyclic: false }),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      const compositionViolation = details.violations.find(
+        (violation) => violation.family === "composition",
+      );
+      if (compositionViolation?.family !== "composition") {
+        throw new Error(
+          `expected a composition violation, got ${JSON.stringify(details.violations)}`,
+        );
+      }
+      expect(compositionViolation.edgeIds.toSorted()).toEqual(
+        [endedEdge.id, openEdge.id].toSorted(),
+      );
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("auto-migrates the same redeclaration when the part's ended row is its only whole", async () => {
+      const id = "composition_tightening_population_widened_clean";
+      const store = await context.createStore(
+        buildCellGraph(id, { cardinality: "oneActive", acyclic: false }),
+      );
+      const part = await store.nodes.CtCell.create({});
+      const formerWhole = await store.nodes.CtCell.create({});
+      await store.edges.ctCellUnder.create(
+        part,
+        formerWhole,
+        {},
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+
+      const [upgradedStore, result] = await createAdapterStoreWithSchema(
+        buildCellGraph(id, { cardinality: "one", acyclic: false }),
+        context.getBackend(),
+      );
+
+      expect(result.status).toBe("migrated");
+      expect(await upgradedStore.verifyConstraintFences()).toEqual([]);
+    });
+
     it("auto-migrates the same subClassOf addition when no row of the new part kind exists", async () => {
       const id = "composition_tightening_inherited_required_clean";
       await context.createStore(buildInheritedPartGraph(id, false));

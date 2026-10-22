@@ -315,8 +315,9 @@ are not what happens:
   follows each edge from the `(kind, id)` it reached, exactly as the cascade
   does, but `subgraph()` returns one node per id: where a node of the unit
   shares its id with a node of another kind, the result holds only one of
-  the two, and a root id held by two kinds names either. Give composition
-  parts ids that are unique across kinds when you rely on the preview.
+  the two, and a root id held by two kinds walks the unit of the kind that
+  sorts first by code point. Give composition parts ids that are unique
+  across kinds when you rely on the preview.
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`

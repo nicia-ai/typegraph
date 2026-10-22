@@ -29,6 +29,10 @@ import {
 import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
 import { compositionEdgeCardinalityDeclarations } from "../store/claims/composition-claims";
 import {
+  axisRowMembership,
+  rowMembershipWidens,
+} from "../store/claims/edge-claims";
+import {
   auditConstraintFences,
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
@@ -38,7 +42,6 @@ import {
   requiredCompositionPartKinds,
 } from "../store/operations/composition-create";
 import { groupBy } from "../utils/array";
-import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   type EdgeCardinalityDeclaration,
@@ -240,9 +243,49 @@ function compositionRelationWidened(
     const prior = baselineMembers.get(member.edgeKind);
     return (
       prior?.reversed !== member.reversed ||
-      (prior.membership === "openRows" && member.membership === "allRows")
+      rowMembershipWidens(prior.membership, member.membership)
     );
   });
+}
+
+/**
+ * The composition occupancy declarations this commit must audit, built by
+ * the one owner of the per-edge-kind declaration list
+ * ({@link compositionEdgeCardinalityDeclarations}) over the PROPOSED schema.
+ *
+ * Delta-scoped: a declaration is audited only when its edge kind realizes a
+ * `partOf`/`hasPart` pair THIS commit adds (`addedPairEdgeKinds`, the
+ * `composition` probe's edge kinds) or when its row membership widens from
+ * the baseline's ({@link rowMembershipWidens}: a `oneActive` realizing edge
+ * redeclared `one`, whose ended rows start holding the part). A pre-existing,
+ * unchanged pair's data is never re-walked by an unrelated commit, the same
+ * discipline `edgeCardinalities`/`disjointKindPairs` honor. The delta only
+ * selects which edge kinds' rows are the OUTER (reported) rows: each
+ * declaration's `scope.holders` is still the whole graph's composition
+ * holder list, so a changed edge kind's row is found contending against an
+ * unchanged edge kind's live row — two wholes held through two realizing
+ * edges.
+ */
+function compositionDeclarationsToAudit(
+  baselineRegistry: KindRegistry,
+  proposedRegistry: KindRegistry,
+  addedPairEdgeKinds: readonly string[],
+): readonly EdgeCardinalityDeclaration[] {
+  const baselineMembership = new Map(
+    compositionEdgeCardinalityDeclarations(baselineRegistry).map(
+      (declaration) => [declaration.edgeKind, axisRowMembership(declaration)],
+    ),
+  );
+  return compositionEdgeCardinalityDeclarations(proposedRegistry).filter(
+    (declaration) => {
+      if (addedPairEdgeKinds.includes(declaration.edgeKind)) return true;
+      const prior = baselineMembership.get(declaration.edgeKind);
+      return (
+        prior !== undefined &&
+        rowMembershipWidens(prior, axisRowMembership(declaration))
+      );
+    },
+  );
 }
 
 /**
@@ -259,6 +302,7 @@ function compositionRelationWidened(
  */
 function acyclicRelationsToProbe(
   params: SchemaTighteningPreflightParams,
+  baselineRegistry: KindRegistry,
   proposedRegistry: KindRegistry,
   newlyAcyclicEdgeKinds: readonly string[],
   addsCompositionPair: boolean,
@@ -275,7 +319,7 @@ function acyclicRelationsToProbe(
     (addsCompositionPair ||
       compositionRelationWidened(
         declaredAcyclicEdgeRelations(
-          buildSchemaBaselineRegistry(params.before),
+          baselineRegistry,
           standaloneAcyclicEdgeKinds(params.before),
         ).find((relation) => relation.name === COMPOSITION_RELATION_NAME),
         proposedComposition,
@@ -430,12 +474,14 @@ export function prepareSchemaTighteningPreflight(
   // this cannot throw here for a reason the commit has not already surfaced.
   const proposedRegistry = buildRegistryFromSerializedSchema(params.after);
 
-  // BEFORE is read only for where its claims sit.
+  // BEFORE is read only for where its claims sit and which rows its
+  // populations count.
+  const baselineRegistry = buildSchemaBaselineRegistry(params.before);
   const gates =
     mayGateUniqueness ?
       uniquenessClaimGates(
         uniqueConstraints,
-        buildSchemaBaselineRegistry(params.before),
+        baselineRegistry,
         proposedRegistry,
       )
     : [];
@@ -459,29 +505,15 @@ export function prepareSchemaTighteningPreflight(
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
   );
 
-  // Composition declarations, delta-scoped to exactly the
-  // `partOf`/`hasPart` pairs THIS commit adds (`grouped.composition.edgeKinds`)
-  // — a pre-existing, already-tightened pair's data is never re-walked by an
-  // unrelated commit, the same discipline `edgeCardinalities`/
-  // `disjointKindPairs` above already honor. That delta-scoping is only
-  // which edge kinds' rows are the OUTER (reported) rows: each declaration's
-  // own `scope.holders` — the oriented holder list — is still the WHOLE
-  // graph's composition holders, from `compositionEdgeCardinalityDeclarations`,
-  // because a delta-scoped edge kind can still be found contending against a
-  // pre-existing, unrelated composition edge kind's live row (the holder list is one
-  // relation-wide invariant, not one per pair).
-  const compositionEdgeCardinalities =
-    grouped.composition === undefined ?
-      []
-    : compositionEdgeCardinalityDeclarations(proposedRegistry).filter(
-        (declaration) =>
-          requireDefined(grouped.composition).edgeKinds.includes(
-            declaration.edgeKind,
-          ),
-      );
+  const compositionEdgeCardinalities = compositionDeclarationsToAudit(
+    baselineRegistry,
+    proposedRegistry,
+    grouped.composition?.edgeKinds ?? [],
+  );
 
   const probedAcyclicRelations = acyclicRelationsToProbe(
     params,
+    baselineRegistry,
     proposedRegistry,
     grouped.acyclicity?.edgeKinds ?? [],
     grouped.composition !== undefined,

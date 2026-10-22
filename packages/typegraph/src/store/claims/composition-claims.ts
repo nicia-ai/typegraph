@@ -28,7 +28,6 @@ import {
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
   type EdgeCardinalityDeclarations,
-  edgeCardinalitySpec,
   type EdgeClaimSubject,
   type RowMembership,
   sortedByClaimTarget,
@@ -197,7 +196,7 @@ export function compositionReentryClaim(
   const claim = compositionClaim(registry, subject);
   if (claim === undefined || !axisCountsRow(claim, subject)) return undefined;
   if (reentersLivePopulation) return claim;
-  return edgeCardinalitySpec(claim).claimsWhenBornEnded ? undefined : claim;
+  return axisRowMembership(claim) === "openRows" ? claim : undefined;
 }
 
 /**

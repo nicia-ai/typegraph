@@ -234,23 +234,23 @@ export function readCompositionAttachment(
   return readStatedAttachment(partOf, PART_OF_SURFACE, part);
 }
 
-function readMoveInstant(at: string | undefined): string {
-  return at === undefined ? nowIso() : (
-      validateCanonicalIsoDate(at, `${REPARENT_SURFACE.path}.at`)
-    );
-}
-
 /**
  * Reads `reparent`'s options: the destination attachment and the move
  * instant, which is `at` or one clock read. The new edge's lower bound is
- * that instant, never a separately stated `validFrom`.
+ * that instant, never a separately stated `validFrom`. Only a stated `at` is
+ * judged against the clock: a defaulted one IS the clock read, and comparing
+ * it against a second read could refuse it across a backward clock step.
  */
 export function readReparentOptions(
   options: NodeReparentOptions,
   part: Readonly<{ kind: string; id: string }>,
 ): Readonly<{ attachment: StatedCompositionAttachment; moveAt: string }> {
   const attachment = readStatedAttachment(options, REPARENT_SURFACE, part);
-  const moveAt = readMoveInstant(options.at);
+  if (options.at === undefined) return { attachment, moveAt: nowIso() };
+  const moveAt = validateCanonicalIsoDate(
+    options.at,
+    `${REPARENT_SURFACE.path}.at`,
+  );
   assertCompositionMoveCurrent(part, attachment.whole, moveAt, nowIso());
   return { attachment, moveAt };
 }

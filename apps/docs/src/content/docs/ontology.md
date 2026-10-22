@@ -764,7 +764,10 @@ Tier 1 is enforced, in full, at write time:
   and at every later instant, and an ended row is history for good: the
   claim, the cascade, the acyclicity check and every current read agree on
   which whole a part holds, without any of them choosing an instant. Record a
-  change when it happens.
+  change when it happens. "Later" is judged against the clock of the process
+  running the store, so a client whose clock runs ahead of it is refused
+  when it states its own `new Date()` as a bound: omit `validFrom` or `at`
+  to take the store's clock instead.
 - **Leaf-first cascade.** Deleting a whole deletes its live parts closure
   leaf-first, in the same transaction, each part through its own node-delete
   pipeline. See

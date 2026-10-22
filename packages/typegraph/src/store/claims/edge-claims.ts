@@ -305,7 +305,7 @@ export function activeOnlyAxisReferences(
   declarations: EdgeCardinalityDeclarations,
 ): readonly EdgeCardinalityAxisRef[] {
   return edgeCardinalityAxisReferences(declarations).filter(
-    (ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded,
+    (ref) => axisRowMembership(ref) === "openRows",
   );
 }
 
@@ -369,6 +369,20 @@ export function membershipCountsRow(
   row: Readonly<{ validTo?: string | undefined }>,
 ): boolean {
   return membership === "allRows" || row.validTo === undefined;
+}
+
+/**
+ * Whether moving a population from rule `prior` to rule `next` admits rows
+ * the prior rule left out: ended rows that start counting when an
+ * open-rows population becomes an all-rows one. A schema commit that widens
+ * a population this way can turn rows that were legal under `prior` into a
+ * violation, so it owes a data check over the population.
+ */
+export function rowMembershipWidens(
+  prior: RowMembership,
+  next: RowMembership,
+): boolean {
+  return prior === "openRows" && next === "allRows";
 }
 
 /**

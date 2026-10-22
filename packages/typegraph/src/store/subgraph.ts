@@ -65,6 +65,7 @@ import {
   partitionCompositionEdgeKindsByDirection,
 } from "../registry/composition-relation";
 import type { KindRegistry } from "../registry/kind-registry";
+import { compareCodePoints } from "../utils/compare";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey, isPlainObject } from "../utils/object";
@@ -1517,6 +1518,9 @@ function idListMembership(
  * this coordinate. The caller reads the composition edge kinds under it; a
  * root kind with no parts contributes nothing rather than failing the whole
  * read, since `subgraph({ composition: true })` is set-level.
+ *
+ * Where two kinds hold the root id, the kind first in code-point order wins,
+ * so the choice is the same on every backend and every call.
  */
 async function fetchCompositionRootKind(input: {
   backend: GraphBackend;
@@ -1541,7 +1545,9 @@ async function fetchCompositionRootKind(input: {
   const rows = await input.backend.execute<{ kind: string }>(
     asCompiledRowsSql(query),
   );
-  return rows[0]?.kind;
+  return rows
+    .map((row) => row.kind)
+    .toSorted((left, right) => compareCodePoints(left, right))[0];
 }
 
 /**

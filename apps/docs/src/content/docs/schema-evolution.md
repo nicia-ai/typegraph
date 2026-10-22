@@ -220,6 +220,12 @@ a `differentFrom` relation exactly like the always-safe row.
   also refuses when a live part has no live whole (`compositionExistence`);
   flipping an existing pair from optional to required is checked the same way,
   and required to optional is safe.
+- **Making a realizing edge's ended rows count** is checked the same way.
+  Redeclaring a `oneActive` realizing edge `one` refuses the commit when a
+  part's ended row would become a second whole beside its live row under
+  another realizing edge (`composition`), or would close a cycle
+  (`edgeAcyclicity`). Declaring `acyclic: true` on a `oneActive` realizing
+  edge refuses it when an ended row would close a cycle.
 - **Removing `partOf` or `hasPart`** changes what `parts()` and `wholes()`
   resolve to and stops parts from being deleted with their whole — a
   read/write-semantics change, not a data-validity one — so it is `breaking`

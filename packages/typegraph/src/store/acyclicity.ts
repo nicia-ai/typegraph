@@ -98,9 +98,7 @@ export type AcyclicEdgeRelation = Readonly<{
  * kinds — builds the identical shape {@link acyclicEdgeRelations} does,
  * rather than hand-spelling the member literal a second time.
  */
-export function standaloneAcyclicRelation(
-  edgeKind: string,
-): AcyclicEdgeRelation {
+function standaloneAcyclicRelation(edgeKind: string): AcyclicEdgeRelation {
   return {
     name: edgeKind,
     members: [{ edgeKind, reversed: false, membership: "allRows" }],
@@ -149,7 +147,7 @@ export function standaloneAcyclicRelation(
  * error or audit field reads it through {@link displayAcyclicRelationName}
  * first, so the separator itself is never something a caller sees.
  */
-export function compositionAcyclicRelation(
+function compositionAcyclicRelation(
   registry: KindRegistry,
   standaloneAcyclicEdgeKinds: ReadonlySet<string> = new Set(),
 ): AcyclicEdgeRelation | undefined {

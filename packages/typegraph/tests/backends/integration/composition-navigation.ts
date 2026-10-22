@@ -1296,6 +1296,16 @@ export function registerCompositionNavigationIntegrationTests(
       });
       expect(result.nodes.has(trackNote.id)).toBe(true);
       expect(result.nodes.has(videoNote.id)).toBe(false);
+
+      // MUTATION CHECK: pick the LAST kind in code-point order in
+      // `fetchCompositionRootKind` (src/store/subgraph.ts) — a root id held by
+      // `CnTrack` and `CnVideo` then walks the video's unit instead.
+      const sharedRoot = await store.subgraph(track.id, {
+        edges: [],
+        composition: true,
+      });
+      expect(sharedRoot.nodes.has(trackNote.id)).toBe(true);
+      expect(sharedRoot.nodes.has(videoNote.id)).toBe(false);
     });
 
     it("subgraph({ composition: true }) reads every statement at one current instant", async () => {
