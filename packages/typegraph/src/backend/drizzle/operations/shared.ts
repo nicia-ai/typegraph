@@ -141,7 +141,7 @@ export function quotedColumn(column: { name: string }): SQL {
  * and miss others. `now` stays a bound parameter, so every statement a caller
  * renders from one sample reads against the same instant.
  */
-export function currentWindowPredicate(
+function currentWindowPredicate(
   relation: string,
   columns: Pick<Tables["nodes"], "deletedAt" | "validFrom" | "validTo">,
   now: string,
