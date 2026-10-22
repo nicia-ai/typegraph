@@ -27,7 +27,10 @@ import {
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
 } from "../src/graph-merge";
-import { registerGraphTemplate } from "../src/schema/graph-templates";
+import {
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../src/schema/graph-templates";
 import { activeSchemaHash, parseSerializedSchema } from "../src/schema/manager";
 import { computeSchemaDiff } from "../src/schema/migration";
 import {
@@ -36,7 +39,10 @@ import {
   serializeSchema,
 } from "../src/schema/serializer";
 import { type SerializedSchema } from "../src/schema/types";
-import { createAdapterStoreWithSchema } from "../src/store/store";
+import {
+  createAdapterStoreWithSchema,
+  createVerifiedAdapterStore,
+} from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 
 const Animal = defineNode("UpgradeAnimal", {
@@ -411,4 +417,163 @@ describe("a schema version an earlier release committed", () => {
   // MUTATION CHECK: reading `activeSchema.schema_hash` in
   // `captureMergePlanTargetFence` (merge.ts) makes revalidation refuse with
   // `incompatible-plan`.
+});
+
+/** Rewrites a registered template to what an earlier release registered. */
+async function storeEarlierReleaseTemplate(
+  handle: SqliteHandle,
+  templateId: string,
+  graph: GraphDef,
+): Promise<Readonly<{ schemaDoc: string; schemaHash: string }>> {
+  const document = earlierReleaseDocument(serializeSchema(graph, 1));
+  const schemaDocument = JSON.stringify(document);
+  const schemaHash = await computeSchemaHash(document);
+  handle.client
+    .prepare(
+      "UPDATE typegraph_graph_templates SET schema_doc = ?, schema_hash = ? WHERE template_id = ?",
+    )
+    .run(schemaDocument, schemaHash, templateId);
+  return { schemaDoc: schemaDocument, schemaHash };
+}
+
+function storedTemplateRow(
+  handle: SqliteHandle,
+  templateId: string,
+): Readonly<{ schema_doc: string; schema_hash: string }> {
+  return handle.client
+    .prepare(
+      "SELECT schema_doc, schema_hash FROM typegraph_graph_templates WHERE template_id = ?",
+    )
+    .get(templateId) as Readonly<{ schema_doc: string; schema_hash: string }>;
+}
+
+describe("a graph template an earlier release registered", () => {
+  it("registers again under its stored key without rewriting it, and instantiates a target", async () => {
+    const handle = sqliteHandle();
+    const [source] = await createAdapterStoreWithSchema(
+      equivalenceGraph,
+      handle.backend,
+    );
+    await registerGraphTemplate(handle.backend, {
+      templateId: "earlier-release-template",
+      reconciled: source.reconciledSchema,
+    });
+    const earlier = await storeEarlierReleaseTemplate(
+      handle,
+      "earlier-release-template",
+      equivalenceGraph,
+    );
+
+    const template = await registerGraphTemplate(handle.backend, {
+      templateId: "earlier-release-template",
+      reconciled: source.reconciledSchema,
+    });
+    const instantiated = await instantiateGraphTemplate(handle.backend, {
+      template,
+      graphId: "earlier-release-tenant",
+    });
+    const targetGraph = { ...equivalenceGraph, id: "earlier-release-tenant" };
+    const [target] = await createVerifiedAdapterStore(
+      targetGraph,
+      handle.backend,
+    );
+
+    expect(storedTemplateRow(handle, "earlier-release-template")).toEqual({
+      schema_doc: earlier.schemaDoc,
+      schema_hash: earlier.schemaHash,
+    });
+    expect(template.schemaHash).toBe(source.reconciledSchema.hash);
+    expect(template.registryHash).toBe(earlier.schemaHash);
+    expect(instantiated.reconciled.hash).toBe(
+      await getSchemaHash(targetGraph, 1),
+    );
+    expect(target.reconciledSchema.hash).toBe(instantiated.reconciled.hash);
+  });
+
+  it("still refuses registering different content under the same template id", async () => {
+    const handle = sqliteHandle();
+    const [source] = await createAdapterStoreWithSchema(
+      equivalenceGraph,
+      handle.backend,
+    );
+    await registerGraphTemplate(handle.backend, {
+      templateId: "earlier-release-conflict",
+      reconciled: source.reconciledSchema,
+    });
+    await storeEarlierReleaseTemplate(
+      handle,
+      "earlier-release-conflict",
+      changedEquivalenceGraph,
+    );
+
+    await expect(
+      registerGraphTemplate(handle.backend, {
+        templateId: "earlier-release-conflict",
+        reconciled: source.reconciledSchema,
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "GRAPH_TEMPLATE_CONTENT_CONFLICT" },
+    });
+  });
+
+  it("instantiates idempotently onto a target an earlier release instantiated, leaving its row as written", async () => {
+    const handle = sqliteHandle();
+    const [source] = await createAdapterStoreWithSchema(
+      equivalenceGraph,
+      handle.backend,
+    );
+    const template = await registerGraphTemplate(handle.backend, {
+      templateId: "earlier-release-target-template",
+      reconciled: source.reconciledSchema,
+    });
+    const targetGraph = { ...equivalenceGraph, id: "earlier-release-target" };
+    await instantiateGraphTemplate(handle.backend, {
+      template,
+      graphId: targetGraph.id,
+    });
+    const earlier = await storeEarlierReleaseRow(handle, targetGraph);
+
+    const again = await instantiateGraphTemplate(handle.backend, {
+      template,
+      graphId: targetGraph.id,
+    });
+    const row = requireDefined(
+      await handle.backend.getActiveSchema(targetGraph.id),
+    );
+
+    expect(again.reconciled.hash).toBe(await getSchemaHash(targetGraph, 1));
+    expect(again.schema.schema_hash).toBe(earlier.schemaHash);
+    expect(row.schema_doc).toBe(earlier.schemaDoc);
+    expect(row.schema_hash).toBe(earlier.schemaHash);
+  });
+
+  it("refuses instantiating onto a target holding a different schema", async () => {
+    const handle = sqliteHandle();
+    const [source] = await createAdapterStoreWithSchema(
+      equivalenceGraph,
+      handle.backend,
+    );
+    const template = await registerGraphTemplate(handle.backend, {
+      templateId: "earlier-release-other-target-template",
+      reconciled: source.reconciledSchema,
+    });
+    const targetGraph = { ...equivalenceGraph, id: "earlier-release-other" };
+    await instantiateGraphTemplate(handle.backend, {
+      template,
+      graphId: targetGraph.id,
+    });
+    await storeEarlierReleaseRow(handle, {
+      ...changedEquivalenceGraph,
+      id: targetGraph.id,
+    });
+
+    await expect(
+      instantiateGraphTemplate(handle.backend, {
+        template,
+        graphId: targetGraph.id,
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "GRAPH_TEMPLATE_INSTANTIATION_REFUSED" },
+    });
+  });
 });

@@ -4753,6 +4753,7 @@ export type GraphTemplate<G extends GraphDef> = Readonly<{
     id: string;
     reconciled: ReconciledSchema<G>;
     schemaHash: string;
+    registryHash?: string;
 }>;
 
 // @public

@@ -547,6 +547,7 @@ these keeps loading**, and reading `store.introspect()` on it still works:
   all, in place, together with the `schema_hash` the earlier release stored
   for it. Every comparison of a stored version against your graph, or
   against another stored version (boot, `registerGraphTemplate`,
+  `instantiateGraph` onto a target an earlier release instantiated,
   `refreshSchema`, evolution plans, `branch()`, merge plans and reviews),
   hashes the stored document as this release serializes it — the extra
   fields dropped and the precomputed closures recomputed from the stored

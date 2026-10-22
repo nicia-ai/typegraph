@@ -2793,7 +2793,12 @@ export type GraphBackend = Readonly<{
     preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   ) => Promise<void>;
 
-  /** Register an immutable materialized schema template. */
+  /**
+   * Register an immutable materialized schema template: insert it when no
+   * template holds `templateId`, then return the row stored under that id,
+   * whichever release wrote it. The caller judges whether the stored row
+   * holds the same schema; a member does not refuse a differing row itself.
+   */
   registerGraphTemplate?: (
     this: void,
     params: Readonly<{

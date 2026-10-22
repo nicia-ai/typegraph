@@ -555,7 +555,6 @@ export function prepareSchemaTighteningPreflight(
     grouped.composition?.edgeKinds ?? [],
   );
 
-
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
     await assertUniquenessClaimGatesOpen(target, params, gates);
     const populatedAddedEdgeKinds = await populatedAddedEdgeKindProbes(
