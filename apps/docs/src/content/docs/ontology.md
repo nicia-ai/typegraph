@@ -154,6 +154,17 @@ unaffected and stay exact-kind. See
 `queryDefaults.expansion` in [Schemas & Stores](/schemas-stores) for
 the store-wide migration knob.
 
+**Known limitation — typed edge collections keep the declared endpoint kinds.**
+An edge declared `to: [Person]` admits an `Employee` (a `subClassOf` descendant,
+or an `equivalentTo` kind) at runtime, but `store.edges.<kind>` types the edge's
+`toKind` and `toId` by the declared kind, not by the kinds it can hold, and its
+typed `create` refuses a subclass endpoint at compile time. Reading such an edge
+through `findFrom` can therefore give a `toKind` typed `"Person"` that is
+`"Employee"` at runtime, and `store.nodes.Person.getById(edge.toId)` typechecks
+and returns `undefined` for it. Check `edge.toKind` at runtime before choosing
+the collection, or read the endpoint through a query, whose aliases widen.
+Create an edge to a subclass row with a cast at the call site.
+
 **Changing this on a populated graph**: adding a `subClassOf` relation is
 checked against existing data before it commits — it can merge two
 uniqueness components or propagate a `disjointWith` down to a new

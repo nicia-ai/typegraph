@@ -550,7 +550,7 @@ describe("scalars", () => {
       expected: { reason: "type-token-mismatch" },
     },
     {
-      name: "z.int() subtype z.number() (D3: integer narrows number)",
+      name: "z.int() subtype z.number() (integer narrows number)",
       child: z.int(),
       parent: z.number(),
       expected: "subtype",

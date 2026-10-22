@@ -271,6 +271,19 @@ describe("alias typing under the polymorphic axis", () => {
     expectTypeOf<Row["kind"]>().toEqualTypeOf<"MediaAliasTest">();
   });
 
+  it('a store-wide default of "exact" changes the rows, not the alias type', () => {
+    const query = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      affectedRegistry,
+      { defaultExpansion: "exact" },
+    )
+      .from("MediaAliasTest", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+  });
+
   it("refuses passing a polymorphic alias's row.id to the exact-kind collection's update()", () => {
     // A polymorphic-affected alias's `id` is widened so an exact `NodeId`
     // is assignable TO it but not FROM it — the row may be a subclass, so `store.nodes.<K>.update(row.id)`

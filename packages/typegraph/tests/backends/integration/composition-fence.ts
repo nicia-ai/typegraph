@@ -61,8 +61,8 @@ const CfOneWhole = defineNode("CfOneWhole", { schema: z.object({}) });
 /**
  * DualPart -> DualWhole, part `from`, declaring BOTH `cardinality: "one"`
  * (composition's own population axis) AND an orthogonal `targetCardinality:
- * "one"` — the shape that exposed E2/E3: a per-row re-derivation of "is this
- * a composition row" folded a composition edge kind's ORDINARY axis
+ * "one"` — the shape that exposes a per-row re-derivation of "is this a
+ * composition row": it folds a composition edge kind's ORDINARY axis
  * violations onto the reserved composition axis too, regardless of which
  * declaration's query actually produced the row.
  */
@@ -604,7 +604,7 @@ export function registerCompositionFenceIntegrationTests(
     // `one:cfIncludedIn`), each with exactly one holder, and this test finds
     // a clean graph instead of the violation.
 
-    it("verifyConstraintFences still reports a composition edge kind's OWN orthogonal axis violation (E2/E3)", async () => {
+    it("verifyConstraintFences still reports a composition edge kind's OWN orthogonal axis violation", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const backend = store.backend;
       const partA = await store.nodes.CfDualPart.create({});
@@ -650,7 +650,7 @@ export function registerCompositionFenceIntegrationTests(
         ["cf-dual-row-a", "cf-dual-row-b"].toSorted(),
       );
       // No composition violation: each part still holds exactly one
-      // whole, and no `edgeIds` entry repeats (E3's double-count).
+      // whole, and no `edgeIds` entry repeats (a double-count of one violation).
       expect(
         violations.some((violation) => violation.family === "composition"),
       ).toBe(false);

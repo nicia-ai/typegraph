@@ -493,6 +493,18 @@ applies (search across multiple kinds must agree on one declared metric; see
 this asymmetry surprises you, that's the intended signal that it's worth
 double-checking whether your search call should opt in explicitly.
 
+An expansion that would silently miss rows is refused rather than
+under-returned, exactly where `$fulltext.matches()` refuses the same alias: if
+a subclass redeclares a `searchable()` field without `searchable()`, its text
+is not in the index, so `expansion: "subclasses"` throws `ConfigurationError`
+(`SEARCH_EXPANSION_KIND_UNINDEXED`) naming the kind. The same holds for an
+exact search of a kind that declares no `searchable()` field at all: it is
+refused rather than returning nothing, as `$fulltext.matches()` refuses the
+same alias. A subclass that merely omits the field holds no text there and is
+searched as usual. Passing the
+removed `includeSubClasses` option from untyped code is refused
+(`QUERY_ALIAS_EXPANSION_INVALID`) rather than ignored.
+
 A hit's type follows the stated axis. With `"exact"` (stated or omitted),
 `hit.node` is the searched kind exactly. With `expansion: "subclasses"` on a
 kind the ontology can affect — one another kind declares itself a subclass

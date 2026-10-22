@@ -31,6 +31,7 @@ import {
   type HybridFusionOptions,
 } from "../query/ast";
 import {
+  assertNoRemovedExpansionOption,
   assertPermittedExpansionAxis,
   DEFAULT_ALIAS_EXPANSION_AXES,
   type DefaultAliasExpansionAxis,
@@ -43,6 +44,7 @@ import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
 import { type Predicate } from "../query/predicates";
+import { schemaIntrospectorFor } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
@@ -115,11 +117,15 @@ export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
    * builder, `search()` is not polymorphic by default) searches the named
    * kind alone; `"subclasses"` expands to its `subClassOf`/`equivalentTo`
    * descendants. Vector legs search each declaring kind's storage and merge
-   * by score; kinds that don't declare the embedding field are skipped
-   * (mirroring the query builder). `"subclasses"` requires a query-capable
-   * store. `"narrower"` is not an axis this facade offers. The facade types
-   * each hit by the axis stated here, as a `from()` alias over the kind
-   * would be.
+   * by score; kinds that omit the embedding field hold no vector there and
+   * are skipped. A search is refused rather than silently under-returned when
+   * a searched kind would leave its text unindexed (no `searchable()` field,
+   * or one redeclared untagged) or declares the embedding field with a tag
+   * that differs from the subsuming declaration — the same kinds the query
+   * builder refuses, decided by the same schema introspector.
+   * `"subclasses"` requires a query-capable store. `"narrower"` is not an
+   * axis this facade offers. The facade types each hit by the axis stated
+   * here, as a `from()` alias over the kind would be.
    */
   expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
@@ -313,15 +319,18 @@ function buildKindCandidates(
  * Refuses a value outside this facade's axis set through the vocabulary's own
  * owner, so a stated axis `search()` cannot honor — `"narrower"`, or a
  * misspelling a JavaScript caller reached — is named rather than coerced to
- * `"exact"`. The query builder refuses the identical value; one predicate,
- * one owner. The axis-to-kind-list mapping itself is likewise the shared
- * owner's (`expandKindsForAxis`), not re-spelled here.
+ * `"exact"`. The same owner refuses the removed `includeSubClasses` option.
+ * The query builder refuses the identical values; one predicate, one owner.
+ * The axis-to-kind-list mapping itself is likewise the shared owner's
+ * (`expandKindsForAxis`), not re-spelled here.
  */
 function resolveSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
-  axis: DefaultAliasExpansionAxis = SEARCH_EXPANSION_DEFAULT,
+  options: SearchScopeOptions,
 ): readonly string[] {
+  assertNoRemovedExpansionOption(options, "search");
+  const axis = options.expansion ?? SEARCH_EXPANSION_DEFAULT;
   assertPermittedExpansionAxis(axis, DEFAULT_ALIAS_EXPANSION_AXES, "search");
   if (axis === "subclasses" && ctx.createQuery === undefined) {
     throw new ConfigurationError(
@@ -330,6 +339,56 @@ function resolveSearchKinds(
     );
   }
   return expandKindsForAxis(axis, nodeKind, ctx.registry);
+}
+
+/**
+ * Refuses a fulltext search in which some searched kind would leave its text
+ * unindexed, exactly as `$fulltext.matches()` refuses the same alias. The
+ * decision is the schema introspector's (`kindsWithoutSearchableField`), asked
+ * of every resolved kind list — an exact search included, since a kind with no
+ * `searchable()` field returns nothing from the index whatever it holds — so
+ * the facade and the builder cannot drift.
+ */
+function assertFulltextKindsCoverRows(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  kinds: readonly string[],
+): void {
+  const lackingKinds = schemaIntrospectorFor(
+    ctx.registry,
+  ).kindsWithoutSearchableField(kinds);
+  if (lackingKinds.length === 0) return;
+  throw new ConfigurationError(
+    `fulltext search over "${nodeKind}" would silently miss rows ` +
+      `of ${formatKindList(lackingKinds)}: ` +
+      `${lackingKinds.length === 1 ? "it has" : "they have"} no field ` +
+      `declared with searchable() that the index covers (an untagged ` +
+      `redeclaration of a searchable field does not count).`,
+    {
+      code: "SEARCH_EXPANSION_KIND_UNINDEXED",
+      capability: "fulltext",
+      graphId: ctx.graphId,
+      kinds: lackingKinds,
+    },
+    {
+      suggestion:
+        'Declare the field with searchable() on the listed kinds, search the kinds separately, or pass expansion: "exact" for a kind that declares one.',
+    },
+  );
+}
+
+function formatKindList(kinds: readonly string[]): string {
+  return kinds.map((kind) => `"${kind}"`).join(", ");
+}
+
+function resolveFulltextKinds(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  options: SearchScopeOptions,
+): readonly string[] {
+  const kinds = resolveSearchKinds(ctx, nodeKind, options);
+  assertFulltextKindsCoverRows(ctx, nodeKind, kinds);
+  return kinds;
 }
 
 function assertSearchOffset(offset: number | undefined, label: string): void {
@@ -492,7 +551,7 @@ export async function executeFulltextSearch<N = Node>(
     language: options.language,
   });
 
-  const kinds = resolveSearchKinds(ctx, nodeKind, options.expansion);
+  const kinds = resolveFulltextKinds(ctx, nodeKind, options);
   const offset = options.offset ?? 0;
   const singleKind = kinds.length === 1;
 
@@ -588,7 +647,7 @@ export async function executeVectorSearch<N = Node>(
     ctx,
     nodeKind,
     options.fieldPath,
-    options.expansion,
+    options,
     "vectorSearch",
   );
   for (const { slot } of searchKinds) {
@@ -672,27 +731,66 @@ export async function executeVectorSearch<N = Node>(
   return hits;
 }
 
+/**
+ * Refuses a vector expansion in which a kind declares the embedding field with
+ * a different `embedding()` tag than the kind it subsumes under: its rows hold
+ * a vector no index covers (or an index the others do not share), so skipping
+ * it would silently under-return. The decision is the schema introspector's
+ * (`kindsDivergingFromSubsumingDeclaration`), the one the query builder makes
+ * before it trusts a subsuming declaration. A kind that omits the field holds
+ * no vector there and is skipped.
+ */
+function assertVectorKindsCoverRows(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  kinds: readonly string[],
+  fieldPath: string,
+  label: string,
+): void {
+  const divergingKinds = schemaIntrospectorFor(
+    ctx.registry,
+  ).kindsDivergingFromSubsumingDeclaration(kinds, fieldPath);
+  if (divergingKinds.length === 0) return;
+  throw new ConfigurationError(
+    `${label}: ${formatKindList(divergingKinds)} expanded from ` +
+      `"${nodeKind}" declare${divergingKinds.length === 1 ? "s" : ""} ` +
+      `"${fieldPath}" with an embedding() tag that differs from the ` +
+      `subsuming declaration, so their vectors are not indexed with the ` +
+      `rest and the search would silently miss them.`,
+    {
+      code: "SEARCH_EXPANSION_KIND_UNINDEXED",
+      capability: "vector",
+      graphId: ctx.graphId,
+      kinds: divergingKinds,
+    },
+    {
+      suggestion:
+        'Declare the field identically on the listed kinds (embedding() on each), or pass expansion: "exact".',
+    },
+  );
+}
+
 /** One vector-search target: a kind and its resolved embedding slot. */
 type VectorSearchKind = Readonly<{ kind: string; slot: ResolvedSearchSlot }>;
 
 /**
  * Resolves the kinds a vector search spans, keeping only kinds that
- * declare the embedding field (mirroring the query builder, which skips
- * non-declaring kinds instead of referencing a table that was never
- * created). Enforces one shared declared metric across the expansion:
- * scores from different metrics cannot be merged into one ranking, and a
- * per-call metric override cannot bridge the gap either (each kind's
- * storage is built for — and validated against — its declared metric), so
- * mixed declared metrics are unsupported for cross-kind ranking.
+ * declare the embedding field (a kind that omits it holds no vector there,
+ * and has no table to reference). Enforces one shared declared metric across
+ * the expansion: scores from different metrics cannot be merged into one
+ * ranking, and a per-call metric override cannot bridge the gap either (each
+ * kind's storage is built for — and validated against — its declared metric),
+ * so mixed declared metrics are unsupported for cross-kind ranking.
  */
 function resolveVectorSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
   fieldPath: string,
-  expansion: DefaultAliasExpansionAxis | undefined,
+  options: SearchScopeOptions,
   label: string,
 ): readonly VectorSearchKind[] {
-  const kinds = resolveSearchKinds(ctx, nodeKind, expansion);
+  const kinds = resolveSearchKinds(ctx, nodeKind, options);
+  assertVectorKindsCoverRows(ctx, nodeKind, kinds, fieldPath, label);
   const resolved: VectorSearchKind[] = [];
   for (const kind of kinds) {
     const slot = tryResolveSearchSlot(ctx, kind, fieldPath);
@@ -807,14 +905,13 @@ export async function executeHybridSearch<N = Node>(
   const fulltextK = options.fulltext.k ?? pageLimit * overFetchMultiplier;
 
   // The fulltext half spans every expanded kind; the vector half only the
-  // kinds that declare the embedding field (mirroring the query builder's
-  // treatment of non-declaring kinds).
-  const fulltextKinds = resolveSearchKinds(ctx, nodeKind, options.expansion);
+  // kinds that declare the embedding field.
+  const fulltextKinds = resolveFulltextKinds(ctx, nodeKind, options);
   const vectorKinds = resolveVectorSearchKinds(
     ctx,
     nodeKind,
     options.vector.fieldPath,
-    options.expansion,
+    options,
     "hybridSearch.vector",
   );
   for (const { slot } of vectorKinds) {

@@ -218,6 +218,7 @@ type SupportSnapshot = Readonly<{
   firingJustificationKeysByFact: ReadonlyMap<string, readonly string[]>;
   affectedFactKeys: (
     sources: readonly ProvenanceNodeRef[],
+    supportedBefore: ReadonlySet<string>,
   ) => ReadonlySet<string>;
 }>;
 
@@ -843,12 +844,15 @@ function computeSupportSnapshot(
     firingJustificationKeysByFact,
     affectedFactKeys(
       targets: readonly ProvenanceNodeRef[],
+      supportedBefore: ReadonlySet<string>,
     ): ReadonlySet<string> {
       return computeAffectedFactKeys(
         targets,
         roles,
         supportEdges,
         compositionDependencies,
+        supportedBefore,
+        supported,
       );
     },
   };
@@ -910,11 +914,24 @@ function compositionExistenceSupported(
   return dependencies.liveWholeKeys.has(wholeKey);
 }
 
+/**
+ * Whether bringing this fact row in line with its post-transition support
+ * writes it: a live row that is unsupported closes, a tombstoned row that is
+ * supported reopens. The one statement of "this row's currency moves", shared
+ * by the walk that scopes a whole's parts. The close and reopen passes select
+ * exactly these rows from the scope that walk builds.
+ */
+function currencyMovesWithSupport(row: NodeRow, supported: boolean): boolean {
+  return supported ? isTombstonedNodeRow(row) : isLiveNodeRow(row);
+}
+
 function computeAffectedFactKeys(
   sources: readonly ProvenanceNodeRef[],
   roles: ProvenanceRows,
   supportEdges: SupportEdges,
   compositionDependencies: CompositionExistenceDependencies,
+  supportedBefore: ReadonlySet<string>,
+  supportedAfter: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const affected = new Set<string>();
   // Seed the BFS with every source at once: the union of facts reachable from
@@ -940,13 +957,26 @@ function computeAffectedFactKeys(
       }
     }
 
-    // A whole whose own belief status this transition can change carries its
-    // required parts into scope — they cannot stay believed without it, and a
-    // part that is itself a whole folds out of the same walk. Only a fact
-    // whole propagates: a transition flips source properties, so a non-fact
-    // whole's liveness (and with it its parts' existence dependency) is the
-    // same before and after.
-    if (!roles.facts.has(current)) continue;
+    // A whole carries its required parts into scope when this transition
+    // moves the whole: its support changes, or its currency does (a live whole
+    // that is unsupported after is about to close, a tombstoned whole that is
+    // supported after is about to reopen — even when its support verdict did
+    // not change, as for a fact reached while already unsupported). Either
+    // way its parts cannot stay as they are, and a part that is itself a
+    // whole folds out of the same walk. A whole reached with neither change
+    // (another of its justifications still fires and its row is in step)
+    // leaves its parts alone: their existence dependency has the same
+    // verdict before and after. Only a fact whole propagates: a transition
+    // flips source properties, so a non-fact whole's liveness is the same
+    // before and after.
+    const wholeRow = roles.facts.get(current);
+    if (wholeRow === undefined) continue;
+    if (
+      supportedBefore.has(current) === supportedAfter.has(current) &&
+      !currencyMovesWithSupport(wholeRow, supportedAfter.has(current))
+    ) {
+      continue;
+    }
     const requiredParts =
       compositionDependencies.partKeysByWholeKey.get(current) ?? [];
     for (const partKey of requiredParts) {
@@ -1195,7 +1225,10 @@ async function runTransition<
       }
     }
     const after = computeSupportSnapshot(supportGraph, availableAfter);
-    const affected = after.affectedFactKeys(uniqueSources);
+    const affected = after.affectedFactKeys(
+      uniqueSources,
+      before.supportedFactKeys,
+    );
     const closing = closingFactRows(after, affected);
     await synchronizeFactCurrency(tx, after, affected, closing);
     return buildReport<G, FactKind, JustificationKind>(

@@ -12,4 +12,5 @@ A standalone schema commit (`migrateSchema`, `initializeSchema` or `ensureSchema
 
 - `bulkUpsertById` items that set `validTo` are refused with `IdentityEndpointValidityError` when an open identity assertion would outlive the end, where they previously committed. End the assertion first or drop the `validTo`.
 - `importGraph` with `onConflict: "update"` reports a node `validTo` an open identity assertion would outlive as a per-row error and leaves the row unchanged, where it previously stored the end.
+- The internal `TransactionRuntime` port loses `runNodeOperationHooks` and gains `deleteNodeWithPolicy`: the provenance fact close and reopen path now deletes and revives through the transaction's own node operations under its buffered hooks. The port is symbol-keyed and not exported from any entrypoint, so only code that reaches into the transaction runtime directly is affected.
 - `store.changesSince(anchor)` on a history-capturing store answers `unbounded` for a span holding an identity write, where it previously returned an exact key list that omitted the identity change. A consumer that read that list as a complete delta must handle `unbounded`.

@@ -190,7 +190,10 @@ silently match nothing. Use `fromDynamic()` (always polymorphically typed) or
 
 Pass `{ expansion: "exact" }` to narrow one alias back to the exact
 kind, or set `queryDefaults.expansion: "exact"` on `createStore(...)` to
-restore the exact-kind behavior everywhere. `search()`, the collection
+restore the exact-kind rows everywhere. The store default changes which rows
+come back, not how an alias is typed: an alias over an affected kind keeps the
+widened `kind` and `NodeId` types whatever the default, so state
+`{ expansion: "exact" }` on the call to keep the literal alias type. `search()`, the collection
 APIs (`find`, `count`, `updateWhere`, `compareAndSet`), and
 `subgraph({ includeKinds })` are unaffected by this default and stay
 exact-kind. An `updateWhere()` `candidates` query is an ordinary query, though:

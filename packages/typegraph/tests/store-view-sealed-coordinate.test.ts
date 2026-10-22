@@ -244,4 +244,68 @@ describe("a StoreView read refuses a caller-stated coordinate", () => {
     ).toBeDefined();
     expect(await before.edges.knows.findFrom(seeded.alice)).toHaveLength(0);
   });
+
+  describe("on a recorded view's point reads", () => {
+    it.each(Object.entries(STATED_COORDINATES))(
+      "refuses every recorded read that states %s",
+      async (_label, stated) => {
+        const [store] = await createStoreWithSchema(
+          graph,
+          createTestBackend(),
+          { history: true },
+        );
+        const alice = await store.nodes.Person.create({ name: "alice" });
+        const bob = await store.nodes.Person.create({ name: "bob" });
+        const edge = await store.edges.knows.create(alice, bob, {});
+        const pin = requireDefined(await store.recordedNow());
+        const view = store.asOfRecorded(pin);
+        const people: Reader = view.nodes.Person as never;
+        const knowsEdges: Reader = view.edges.knows as never;
+
+        const reads = {
+          "nodes.getById": () => call(people, "getById", alice.id, stated),
+          "nodes.getByIds": () => call(people, "getByIds", [alice.id], stated),
+          "nodes.scan": () => call(people, "scan", { limit: 10, ...stated }),
+          "edges.getById": () => call(knowsEdges, "getById", edge.id, stated),
+          "edges.getByIds": () =>
+            call(knowsEdges, "getByIds", [edge.id], stated),
+          "edges.scan": () =>
+            call(knowsEdges, "scan", { limit: 10, ...stated }),
+          degree: () =>
+            view.degree(alice, { edges: ["knows"], ...stated } as never),
+        };
+
+        expect(await refusalCodes(reads)).toEqual(
+          Object.fromEntries(
+            Object.keys(reads).map((name) => [
+              name,
+              "STORE_VIEW_SEALED_COORDINATE",
+            ]),
+          ),
+        );
+      },
+    );
+
+    it("answers at the pin when no coordinate is stated", async () => {
+      const [store] = await createStoreWithSchema(graph, createTestBackend(), {
+        history: true,
+      });
+      const alice = await store.nodes.Person.create({ name: "alice" });
+      const bob = await store.nodes.Person.create({ name: "bob" });
+      const edge = await store.edges.knows.create(alice, bob, {});
+      const view = store.asOfRecorded(
+        requireDefined(await store.recordedNow()),
+      );
+
+      const aliceAtPin = await view.nodes.Person.getById(alice.id);
+      const peopleAtPin = await view.nodes.Person.getByIds([alice.id, bob.id]);
+      const edgeAtPin = await view.edges.knows.getById(edge.id);
+      const scanAtPin = await view.nodes.Person.scan({ limit: 10 });
+
+      expect(aliceAtPin?.name).toBe("alice");
+      expect(peopleAtPin).toHaveLength(2);
+      expect(edgeAtPin?.id).toBe(edge.id);
+      expect(scanAtPin.data).toHaveLength(2);
+    });
+  });
 });

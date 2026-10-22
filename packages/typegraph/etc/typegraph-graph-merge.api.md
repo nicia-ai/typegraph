@@ -7613,6 +7613,7 @@ type SchemaIntrospector = Readonly<{
     hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
     hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
     kindsWithoutSearchableField: (kindNames: readonly string[]) => readonly string[];
+    kindsDivergingFromSubsumingDeclaration: (kindNames: readonly string[], fieldName: string) => readonly string[];
 }>;
 
 // @public (undocumented)
