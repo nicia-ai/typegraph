@@ -687,8 +687,18 @@ budget will not shrink.
 
 ### `CompositionError`
 
-Thrown when a `partOf`/`hasPart` write would give a part a second whole. A
-part holds exactly one whole across **every** declared composition pair,
+Thrown when a `partOf`/`hasPart` write breaks one of the rules that keep a
+part's attachment a fact of its row. `details.situation` names which one, and
+`code` says the same thing:
+
+| `situation` | `code` | Meaning |
+| --- | --- | --- |
+| `"occupied"` | `COMPOSITION_WHOLE_OCCUPIED` | The write would give a part a second whole |
+| `"futureStart"` | `COMPOSITION_VALIDITY_FUTURE_START` | A composition edge write states a `validFrom` later than the operation clock |
+| `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
+| `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
+
+A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
 kinds (or two orientations of one part kind) contend for the same row.
 
@@ -703,9 +713,9 @@ try {
   if (error instanceof CompositionError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { partKind: "Chapter", partId: "<chapter-id>", wholeKind: "Anthology",
-    //   wholeId: "<anthology-id>", edgeKind: "includedIn",
-    //   incumbentEdgeId: "<the chapterOf edge's id>" }
+    // { situation: "occupied", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", incumbentEdgeId: "<the chapterOf edge's id>" }
     console.log(error.suggestion);
     // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
     //  move the part — it retires the incumbent attachment and creates the
@@ -731,6 +741,22 @@ own `CardinalityError`. `incumbentEdgeId` is absent only when the incumbent
 is an earlier row of the same batch, which has no stored edge to name. Run `store.verifyConstraintFences()` (the
 `family: "composition"` entries) to find every part already holding more
 than one whole.
+
+**A composition window never starts or ends later than its write.** A row
+with no `validTo` is the part's current attachment and an ended row is
+history, for good — which is what lets the claim, the delete cascade, the
+acyclicity check and every current-time read agree on which whole a part
+holds. A window scheduled to open or close later would make the same row a
+membership at one read instant and history at another, so every write of a
+realizing edge refuses one: `partOf` on every create and get-or-create
+entry, `store.edges.<via>` creates, updates, upserts and their batch forms,
+import (as a per-row error carrying the code) and a graph merge's apply. The
+`"futureStart"` / `"futureEnd"` details carry the stated `bound` and the
+`operationInstant` it was judged against, plus `edgeId` when the edge
+exists already; `partId` is absent while a `partOf` create has not assigned
+the part its id yet. `"futureMove"` carries `at` instead. Record a change
+when it happens: a past `validTo` writes history, and `reparent` moves a part
+now (or at a past `at`).
 
 The composition claim rides `typegraph_edge_claims`, the same relation
 `CardinalityError`'s claims do. A deployment initialized before that
@@ -1241,6 +1267,15 @@ check is for untyped callers:
 | `details.code` | Raised when |
 | --- | --- |
 | `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
+
+#### Export temporal-field codes
+
+`exportGraph` / `exportGraphStream` refuse to drop valid-time fields a graph's
+rows cannot be read without:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An export explicitly set `includeTemporal: false` on a graph with an edge kind whose `cardinality` or `targetCardinality` is `"oneActive"` (a `oneActive` composition pair included). Those kinds count a row only while its window is open, so an ended row exported without its `validTo` would re-import as current. `details.edgeKinds` lists them. Remove `includeTemporal` (such exports default it to `true`) or set it to `true`. |
 
 #### Durable edge match identity guard codes
 
@@ -1967,6 +2002,9 @@ try {
 | `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
 | `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
 | `COMPOSITION_WHOLE_OCCUPIED` | `CompositionError` | constraint | A `partOf`/`hasPart` write would give a part a second whole |
+| `COMPOSITION_VALIDITY_FUTURE_START` | `CompositionError` | constraint | A composition edge write states a `validFrom` later than the operation clock |
+| `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
+| `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
 | `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |

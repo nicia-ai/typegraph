@@ -24,7 +24,11 @@
  * of the edge relation, not of an instant, so honoring `validTo` would let a
  * future-dated edge close a cycle no write ever probed. The composition
  * relation takes its population from composition instead — see
- * {@link compositionAcyclicRelation}.
+ * {@link compositionAcyclicRelation}. Either way a member's rule is a
+ * {@link RowMembership}, and {@link acyclicRelationCountsRow} is the one
+ * reader that applies it to a row a write proposes, resurrects, reopens or
+ * retires; the walk over stored rows renders the same rule in SQL
+ * (`relationWindowFilters`, `src/store/recursive-cte.ts`).
  */
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import { type GraphBackend } from "../backend/types";
@@ -44,7 +48,8 @@ import {
   COMPOSITION_RELATION_NAME,
   displayAcyclicRelationName,
 } from "./claims/axis";
-import { compositionCountsEndedRows } from "./claims/composition-claims";
+import { compositionRowMembership } from "./claims/composition-claims";
+import { membershipCountsRow, type RowMembership } from "./claims/edge-claims";
 import {
   fenceLockOnlyDecision,
   type GraphWriteLock,
@@ -69,12 +74,11 @@ export type AcyclicRelationMember = Readonly<{
   edgeKind: string;
   reversed: boolean;
   /**
-   * Set when only rows whose validity window is still open are in the
-   * relation. Absent for every standalone `acyclic: true` kind, whose
-   * non-deleted rows all count; set for a composition kind whose ended rows
-   * are history rather than memberships.
+   * Which of this kind's non-deleted rows are in the relation:
+   * `"allRows"` for every standalone `acyclic: true` kind, `"openRows"` for
+   * a composition kind whose ended rows are history rather than memberships.
    */
-  openEndedOnly?: true;
+  membership: RowMembership;
 }>;
 
 /** One acyclic relation: a name, and the oriented edge kinds that form it. */
@@ -94,10 +98,11 @@ export type AcyclicEdgeRelation = Readonly<{
  * kinds — builds the identical shape {@link acyclicEdgeRelations} does,
  * rather than hand-spelling the member literal a second time.
  */
-export function standaloneAcyclicRelation(
-  edgeKind: string,
-): AcyclicEdgeRelation {
-  return { name: edgeKind, members: [{ edgeKind, reversed: false }] };
+function standaloneAcyclicRelation(edgeKind: string): AcyclicEdgeRelation {
+  return {
+    name: edgeKind,
+    members: [{ edgeKind, reversed: false, membership: "allRows" }],
+  };
 }
 
 /**
@@ -116,7 +121,7 @@ export function standaloneAcyclicRelation(
  * neither edge kind is acyclic alone.
  *
  * Membership follows the composition relation's own population rule
- * ({@link compositionCountsEndedRows}), not the standalone one: an ended row
+ * ({@link compositionRowMembership}), not the standalone one: an ended row
  * of a `oneActive` realizing edge is the history a reparent leaves and is not
  * in the relation, exactly as the composition claim, the cascade's closure
  * and the attachment reader treat it. Counting it would make every move a
@@ -142,7 +147,7 @@ export function standaloneAcyclicRelation(
  * error or audit field reads it through {@link displayAcyclicRelationName}
  * first, so the separator itself is never something a caller sees.
  */
-export function compositionAcyclicRelation(
+function compositionAcyclicRelation(
   registry: KindRegistry,
   standaloneAcyclicEdgeKinds: ReadonlySet<string> = new Set(),
 ): AcyclicEdgeRelation | undefined {
@@ -158,12 +163,10 @@ export function compositionAcyclicRelation(
       return {
         edgeKind,
         reversed: partSide === "to",
-        ...((
-          compositionCountsEndedRows(partSide, population) ||
-          standaloneAcyclicEdgeKinds.has(edgeKind)
-        ) ?
-          {}
-        : { openEndedOnly: true as const }),
+        membership:
+          standaloneAcyclicEdgeKinds.has(edgeKind) ? "allRows" : (
+            compositionRowMembership(partSide, population)
+          ),
       };
     }),
   };
@@ -197,21 +200,41 @@ export function acyclicEdgeRelations(
   const byRegistry = acyclicEdgeRelationsCache.get(graph);
   const cached = byRegistry?.get(registry);
   if (cached !== undefined) return cached;
-  const standalone = Object.entries(graph.edges)
-    .filter(([, registration]) => registration.acyclic === true)
-    .map(([edgeKind]) => standaloneAcyclicRelation(edgeKind));
-  const composition = compositionAcyclicRelation(
+  const relations = declaredAcyclicEdgeRelations(
     registry,
-    new Set(standalone.map((relation) => relation.name)),
+    Object.entries(graph.edges)
+      .filter(([, registration]) => registration.acyclic === true)
+      .map(([edgeKind]) => edgeKind),
   );
-  const relations = [
-    ...standalone,
-    ...(composition === undefined ? [] : [composition]),
-  ].toSorted((left, right) => compareStrings(left.name, right.name));
   const registryCache = byRegistry ?? new WeakMap();
   registryCache.set(registry, relations);
   acyclicEdgeRelationsCache.set(graph, registryCache);
   return relations;
+}
+
+/**
+ * {@link acyclicEdgeRelations} from its two inputs rather than a runtime
+ * {@link GraphDef}: the registry the composition relation is read from, and
+ * the edge kinds declared `acyclic: true`. The one constructor of the
+ * relation list, so a caller that holds a SERIALIZED schema — the
+ * schema-tightening preflight, judging a proposed version — builds exactly
+ * the relations the write path will enforce once that version is live.
+ */
+export function declaredAcyclicEdgeRelations(
+  registry: KindRegistry,
+  standaloneAcyclicEdgeKinds: readonly string[],
+): readonly AcyclicEdgeRelation[] {
+  const standalone = standaloneAcyclicEdgeKinds.map((edgeKind) =>
+    standaloneAcyclicRelation(edgeKind),
+  );
+  const composition = compositionAcyclicRelation(
+    registry,
+    new Set(standaloneAcyclicEdgeKinds),
+  );
+  return [
+    ...standalone,
+    ...(composition === undefined ? [] : [composition]),
+  ].toSorted((left, right) => compareStrings(left.name, right.name));
 }
 
 /**
@@ -246,6 +269,49 @@ export function acyclicRelationForEdgeKind(
     matches.find((relation) => relation.name === COMPOSITION_RELATION_NAME) ??
     matches[0]
   );
+}
+
+/**
+ * The membership rule an edge of this kind is judged under in the relation
+ * its writes are probed against ({@link acyclicRelationForEdgeKind}), or
+ * `undefined` when the kind is in no acyclic relation.
+ *
+ * A static fact of the kind: a window reopen re-admits one of its rows to the
+ * relation exactly when this is `"openRows"`, which is what a write that
+ * clears `validTo` reads to decide whether it owes the acyclicity probe and
+ * fence before it has read any row.
+ */
+export function acyclicRelationMembership(
+  graph: GraphDef,
+  registry: KindRegistry,
+  edgeKind: string,
+): RowMembership | undefined {
+  return acyclicRelationForEdgeKind(graph, registry, edgeKind)?.members.find(
+    (member) => member.edgeKind === edgeKind,
+  )?.membership;
+}
+
+/**
+ * THE acyclicity-relation membership of one row: whether a non-deleted row of
+ * `edgeKind` whose window ends at `validTo` is in the relation its kind's
+ * writes are probed against. `false` for a kind in no acyclic relation.
+ *
+ * {@link membershipCountsRow} under the relation member's own rule, so a
+ * composition kind's ended row is outside the composition union while the
+ * same row of a kind also declared `acyclic: true` stays in it. Every write
+ * that hands the probe a row it has not stored in its final state calls
+ * this: the rows a create, resurrection or reopen proposes (dropped from the
+ * probe when they are not members, {@link groupProposedByAcyclicRelation}),
+ * and the rows a move retires (`bulkReparent`, which excludes an incumbent
+ * only when its retirement takes it out of the relation).
+ */
+export function acyclicRelationCountsRow(
+  graph: GraphDef,
+  registry: KindRegistry,
+  row: Readonly<{ edgeKind: string; validTo: string | undefined }>,
+): boolean {
+  const membership = acyclicRelationMembership(graph, registry, row.edgeKind);
+  return membership !== undefined && membershipCountsRow(membership, row);
 }
 
 /**
@@ -284,7 +350,12 @@ export function edgeKindIsInAcyclicRelation(
   return acyclicRelationForEdgeKind(graph, registry, edgeKind) !== undefined;
 }
 
-/** An edge a writer proposes to have in the relation when the frame commits. */
+/**
+ * An edge a writer proposes to have in the relation when the frame commits,
+ * in the state it will have then. `validTo` is the row's end after the write
+ * (`undefined` for an open window): a row the relation does not count in that
+ * state ({@link acyclicRelationCountsRow}) is no member and is not probed.
+ */
 export type ProposedRelationEdge = Readonly<{
   edgeId: string;
   edgeKind: string;
@@ -292,6 +363,7 @@ export type ProposedRelationEdge = Readonly<{
   fromId: string;
   toKind: string;
   toId: string;
+  validTo: string | undefined;
 }>;
 
 /**
@@ -313,9 +385,12 @@ type ProposedAcyclicGroup = Readonly<{
 
 /**
  * The classification that decides WHAT gets probed, owned once: proposed
- * edges whose kind is in no acyclic relation are dropped, the rest are
- * bucketed by relation in code-point order by name, and the self-loops are
- * separated out. `firstSelfLoop` is the earliest self-loop in `proposed`
+ * edges the relation of their kind does not count
+ * ({@link acyclicRelationCountsRow} — a kind in no acyclic relation, or a
+ * composition row that will be ended) are dropped, the rest are bucketed by
+ * relation in code-point order by name, and the self-loops are separated
+ * out. A dropped row is never a self-loop refusal either: an ended history
+ * row closes no cycle. `firstSelfLoop` is the earliest self-loop in `proposed`
  * order, so the write path can refuse exactly the row its caller listed first
  * while the plan-time preview collects every relation's self-loops.
  */
@@ -338,8 +413,10 @@ function groupProposedByAcyclicRelation(
     }
   >();
   for (const edge of proposed) {
-    const relation = acyclicRelationForEdgeKind(graph, registry, edge.edgeKind);
-    if (relation === undefined) continue;
+    if (!acyclicRelationCountsRow(graph, registry, edge)) continue;
+    const relation = requireDefined(
+      acyclicRelationForEdgeKind(graph, registry, edge.edgeKind),
+    );
     const entry = byRelationName.get(relation.name) ?? {
       relation,
       edges: [],
@@ -355,8 +432,10 @@ function groupProposedByAcyclicRelation(
   const selfLoopIds = new Set(
     groups.flatMap((group) => [...group.selfLoopEdgeIds]),
   );
-  const firstSelfLoopEdge = proposed.find((edge) =>
-    selfLoopIds.has(edge.edgeId),
+  const firstSelfLoopEdge = proposed.find(
+    (edge) =>
+      selfLoopIds.has(edge.edgeId) &&
+      acyclicRelationCountsRow(graph, registry, edge),
   );
   return {
     groups,

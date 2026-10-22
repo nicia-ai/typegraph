@@ -305,7 +305,7 @@ export function activeOnlyAxisReferences(
   declarations: EdgeCardinalityDeclarations,
 ): readonly EdgeCardinalityAxisRef[] {
   return edgeCardinalityAxisReferences(declarations).filter(
-    (ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded,
+    (ref) => axisRowMembership(ref) === "openRows",
   );
 }
 
@@ -325,6 +325,67 @@ export function sortedByClaimTarget(
 }
 
 /**
+ * Which of a population's non-deleted rows are its members: every one
+ * (`"allRows"`), or only a row whose validity window is still open
+ * (`"openRows"`, no `validTo`).
+ *
+ * A static property of a row, never of an instant: composition refuses a
+ * window that ends or starts later than its write
+ * (`assertCompositionWindowCurrent`,
+ * `src/store/operations/composition-create.ts`), so an open-ended
+ * composition row is current and an ended one is history, for good. That is
+ * what lets one predicate, {@link membershipCountsRow}, decide membership for
+ * a claim, the audit, the cascade and the acyclicity relation alike.
+ */
+export type RowMembership = "allRows" | "openRows";
+
+/**
+ * The membership rule of one cardinality axis, read off
+ * {@link edgeCardinalitySpec}'s `holderLiveness`: an active-only axis
+ * (`oneActive`) counts open rows, every other axis counts a row for its
+ * whole life. The claim takeover SQL and the fence audit render the same
+ * `holderLiveness` fact.
+ */
+export function axisRowMembership(ref: EdgeCardinalityAxisRef): RowMembership {
+  return edgeCardinalitySpec(ref).holderLiveness === "liveAndActive" ?
+      "openRows"
+    : "allRows";
+}
+
+/**
+ * THE membership predicate: whether a non-deleted row with this `validTo` is
+ * a member of a population whose rule is `membership`.
+ *
+ * Every consumer that decides membership in JavaScript calls this with the
+ * rule of the population it asks about: the claim set
+ * ({@link axisCountsRow}), the composition cascade's closure
+ * (`compositionEdgeCounts`), the acyclicity relations' proposed and retired
+ * rows (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`). The two SQL
+ * renderings — the acyclicity walk's window filter and the fence audit's
+ * holder term — render the same rule as `valid_to IS NULL`.
+ */
+export function membershipCountsRow(
+  membership: RowMembership,
+  row: Readonly<{ validTo?: string | undefined }>,
+): boolean {
+  return membership === "allRows" || row.validTo === undefined;
+}
+
+/**
+ * Whether moving a population from rule `prior` to rule `next` admits rows
+ * the prior rule left out: ended rows that start counting when an
+ * open-rows population becomes an all-rows one. A schema commit that widens
+ * a population this way can turn rows that were legal under `prior` into a
+ * violation, so it owes a data check over the population.
+ */
+export function rowMembershipWidens(
+  prior: RowMembership,
+  next: RowMembership,
+): boolean {
+  return prior === "openRows" && next === "allRows";
+}
+
+/**
  * Whether a row with this validity window joins the population `ref` counts.
  *
  * A row born already ended joins no ACTIVE population, so an active-only axis
@@ -333,15 +394,14 @@ export function sortedByClaimTarget(
  * claim-issuing path reads — ordinary axes, the composition axis, a create
  * and a re-entry alike — so "probed but unclaimed" (a silent hole) and
  * "claimed but unprobed" (a refusal with no matching state) cannot arise from
- * two paths spelling it differently.
+ * two paths spelling it differently. {@link membershipCountsRow} applied to
+ * the axis's own rule.
  */
 export function axisCountsRow(
   ref: EdgeCardinalityAxisRef,
   row: Readonly<{ validTo?: string | undefined }>,
 ): boolean {
-  return (
-    edgeCardinalitySpec(ref).claimsWhenBornEnded || row.validTo === undefined
-  );
+  return membershipCountsRow(axisRowMembership(ref), row);
 }
 
 /**
@@ -475,6 +535,7 @@ function compositionClaimRefusal(
 ): CompositionError {
   const { part, whole } = compositionClaimEndpoints(params);
   return new CompositionError({
+    situation: "occupied",
     partKind: part.kind,
     partId: part.id,
     wholeKind: whole.kind,

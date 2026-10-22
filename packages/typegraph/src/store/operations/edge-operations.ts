@@ -144,6 +144,8 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
   type AcyclicityProbeContext,
+  acyclicRelationCountsRow,
+  acyclicRelationMembership,
   assertEdgeRelationsAcyclic,
   assertUnwrittenEdgeRelationsAcyclic,
   edgeKindIsInAcyclicRelation,
@@ -231,7 +233,9 @@ import {
 } from "./autocommit-single-statement";
 import {
   assertCompositionExistencePreserved,
+  assertCompositionWindowCurrent,
   assertEndpointRowLive,
+  compositionWindowSubject,
   edgeWriteEndsOpenWindow,
 } from "./composition-create";
 import {
@@ -507,6 +511,11 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   // for this layer to judge. Both create paths (single and batch) prepare
   // through here, so this is the only insert-side check needed.
   assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
+  assertCompositionEdgeWindowCurrent(
+    ctx,
+    { kind, id, fromKind, fromId: input.fromId, toKind, toId: input.toId },
+    { validFrom, validTo },
+  );
 
   // Check cardinality constraints
   const declarations: EdgeCardinalityDeclarations = registration;
@@ -554,6 +563,7 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
           fromId: input.fromId,
           toKind,
           toId: input.toId,
+          validTo,
         },
       ],
     );
@@ -634,6 +644,76 @@ function edgeAcyclic<G extends GraphDef>(
   kind: string,
 ): boolean {
   return edgeKindIsInAcyclicRelation(ctx.graph, ctx.registry, kind);
+}
+
+/**
+ * Refuses a composition edge window that starts or ends later than now —
+ * `assertCompositionWindowCurrent`'s rule, applied to an edge write of any
+ * kind (a non-composition kind passes untouched). Read-free, so every create
+ * and update reaches it before the frame's first statement.
+ */
+function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  edge: Readonly<{
+    kind: string;
+    id: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+  }>,
+  window: Readonly<{
+    validFrom?: string | null | undefined;
+    validTo?: string | undefined;
+  }>,
+): void {
+  const subject = compositionWindowSubject(ctx.registry, edge);
+  if (subject === undefined) return;
+  assertCompositionWindowCurrent(subject, window, nowIso());
+}
+
+/**
+ * Whether clearing an ended row's `validTo` puts an edge of this kind back
+ * into the acyclic relation its writes are probed against: true exactly when
+ * that relation counts only open rows of the kind (a composition kind's
+ * ended rows are history). A static fact of the kind, so a write plan can
+ * state its fence dimension before it reads any row; the row-level verdict
+ * the probe acts on is {@link edgeUpdateReentersAcyclicRelation}.
+ */
+function windowReopenReentersAcyclicRelation<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+): boolean {
+  return (
+    acyclicRelationMembership(ctx.graph, ctx.registry, kind) === "openRows"
+  );
+}
+
+/**
+ * Whether an edge update moves its row from outside its acyclic relation to
+ * inside it — a resurrection, or a reopened window of an `"openRows"`
+ * member — and so owes the acyclicity probe and fence a create owes. Judged
+ * through `acyclicRelationCountsRow` on the stored and the resulting state,
+ * so a resurrection that leaves the row ended re-admits nothing.
+ */
+function edgeUpdateReentersAcyclicRelation<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  existing: Pick<BackendEdgeRow, "kind" | "deleted_at" | "valid_to">,
+  effectiveValidTo: string | undefined,
+): boolean {
+  const wasMember =
+    existing.deleted_at === undefined &&
+    acyclicRelationCountsRow(ctx.graph, ctx.registry, {
+      edgeKind: existing.kind,
+      validTo: existing.valid_to,
+    });
+  return (
+    !wasMember &&
+    acyclicRelationCountsRow(ctx.graph, ctx.registry, {
+      edgeKind: existing.kind,
+      validTo: effectiveValidTo,
+    })
+  );
 }
 
 /**
@@ -2068,6 +2148,7 @@ function proposedRelationEdgeFromInsertParams(
     fromId: params.fromId,
     toKind: params.toKind,
     toId: params.toId,
+    validTo: params.validTo,
   };
 }
 
@@ -2114,29 +2195,57 @@ export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
 }
 
 /**
- * The edges a set of upsert updates re-admits to the live relation: the ones
- * that resurrect a tombstoned row. A plain update never changes the relation's
- * membership, so it proposes nothing.
+ * The edges a set of upsert updates re-admits to an acyclic relation, in the
+ * state each update leaves them: a resurrection of a tombstoned row, and a
+ * reopened window of a kind whose relation counts only open rows
+ * ({@link edgeUpdateReentersAcyclicRelation}). A plain update never changes
+ * the relation's membership, so it proposes nothing.
+ *
+ * Judged from the row each entry carries. A resurrection always carries it
+ * (it is the first occurrence of its id in the batch); a reopen that repeats
+ * an id carries none, and its own write's probe (`prepareEdgeUpdate`), which
+ * sees every earlier row of the batch, remains the check for it.
  */
-function proposedRelationEdgesFromResurrections(
+function proposedRelationEdgesFromReentries<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
   entries: readonly EdgeUpsertUpdateBatchEntry[],
 ): readonly ProposedRelationEdge[] {
-  return entries
-    .filter((entry) => entry.clearDeleted)
-    .map((entry) => {
-      const tombstone = requireDefined(
-        entry.existing,
-        "a resurrecting edge update reached the acyclicity probe without its stored row",
-      );
-      return {
-        edgeId: tombstone.id,
-        edgeKind: entry.input.identity.kind,
-        fromKind: tombstone.from_kind,
-        fromId: tombstone.from_id,
-        toKind: tombstone.to_kind,
-        toId: tombstone.to_id,
-      };
-    });
+  return entries.flatMap((entry) => {
+    const existing =
+      entry.clearDeleted ?
+        requireDefined(
+          entry.existing,
+          "a resurrecting edge update reached the acyclicity probe without its stored row",
+        )
+      : entry.existing;
+    // A plain update of a tombstone is refused by its own write; it
+    // re-admits nothing to probe.
+    if (
+      existing === undefined ||
+      (!entry.clearDeleted && existing.deleted_at !== undefined)
+    ) {
+      return [];
+    }
+    const { effectiveValidTo } = resolveEdgeUpdateWindow(
+      entry.input,
+      existing.valid_to,
+      entry.clearDeleted,
+    );
+    if (!edgeUpdateReentersAcyclicRelation(ctx, existing, effectiveValidTo)) {
+      return [];
+    }
+    return [
+      {
+        edgeId: existing.id,
+        edgeKind: existing.kind,
+        fromKind: existing.from_kind,
+        fromId: existing.from_id,
+        toKind: existing.to_kind,
+        toId: existing.to_id,
+        validTo: effectiveValidTo,
+      },
+    ];
+  });
 }
 
 /**
@@ -2161,18 +2270,18 @@ async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
     acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
     [
       ...proposedRelationEdgesFromInsertWork(batchInsertWork),
-      ...proposedRelationEdgesFromResurrections(pairedUpdates),
+      ...proposedRelationEdgesFromReentries(ctx, pairedUpdates),
     ],
   );
 }
 
 /**
- * The acyclicity probe for a set of resurrecting updates a caller writes one
- * row at a time: the whole set as one overlay, run before the first of them
- * is written. Each row's own probe (`performEdgeUpdate`) sees only stored
- * state, so on its own a refusal at the Nth resurrection would follow N-1
- * stored ones, and two resurrections closing a cycle through each other
- * would pass both probes.
+ * The acyclicity probe for a set of re-admitting updates (resurrections and
+ * reopened windows) a caller writes one row at a time: the whole set as one
+ * overlay, run before the first of them is written. Each row's own probe
+ * (`performEdgeUpdate`) sees only stored state, so on its own a refusal at
+ * the Nth re-admission would follow N-1 stored ones, and two re-admissions
+ * closing a cycle through each other would pass both probes.
  */
 async function assertResurrectionsAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -2182,7 +2291,7 @@ async function assertResurrectionsAcyclic<G extends GraphDef>(
 ): Promise<void> {
   await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, "edges.resurrect"),
-    proposedRelationEdgesFromResurrections(entries),
+    proposedRelationEdgesFromReentries(ctx, entries),
   );
 }
 
@@ -2266,6 +2375,49 @@ export function edgeUpsertDirtyCheck<G extends GraphDef>(
 }
 
 /**
+ * The window one edge update states, and the end it leaves on its row: the
+ * lower bound the write applies (only a resurrection, or an in-place update
+ * that refuses rather than preserves a differing bound, applies one), the
+ * stated `validTo`, and the row's `validTo` after the write. A resurrection
+ * that names a lower bound rewrites both bounds, so its end is exactly the
+ * stated one; every other update keeps the stored end unless it states or
+ * clears one.
+ *
+ * The one owner of that arithmetic: the update's own preparation and the
+ * batch acyclicity overlay ({@link proposedRelationEdgesFromReentries}) read
+ * the same resulting end, so the overlay probes the row the update writes.
+ */
+function resolveEdgeUpdateWindow(
+  input: UpsertUpdateEdgeInput,
+  existingValidTo: string | undefined,
+  clearDeleted: boolean,
+): Readonly<{
+  appliedValidFrom: string | null | undefined;
+  validTo: string | undefined;
+  effectiveValidTo: string | undefined;
+}> {
+  const statedValidFrom = validateStatedValidityLowerBound(
+    input.validFrom,
+    "validFrom",
+  );
+  const preservesLiveLowerBound =
+    !clearDeleted && preservesImmutableLowerBound(input.onImmutableLowerBound);
+  const appliedValidFrom =
+    preservesLiveLowerBound ? undefined : statedValidFrom;
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  const effectiveValidTo =
+    clearDeleted && appliedValidFrom !== undefined ?
+      validTo
+    : validityEndAfterMutation(
+        input.clearValidTo === true ? { clearValidTo: true }
+        : validTo === undefined ? {}
+        : { validTo },
+        existingValidTo,
+      );
+  return { appliedValidFrom, validTo, effectiveValidTo };
+}
+
+/**
  * Shared edge-update body: re-reads the edge inside the transaction, merges
  * and validates props, and writes. A plain update requires a live edge; a
  * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
@@ -2332,25 +2484,24 @@ async function prepareEdgeUpdate<G extends GraphDef>(
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
-  const statedValidFrom = validateStatedValidityLowerBound(
-    input.validFrom,
-    "validFrom",
+  const { appliedValidFrom, validTo, effectiveValidTo } =
+    resolveEdgeUpdateWindow(
+      input,
+      existing.valid_to,
+      options?.clearDeleted === true,
+    );
+  assertCompositionEdgeWindowCurrent(
+    ctx,
+    {
+      kind: existing.kind,
+      id,
+      fromKind: existing.from_kind,
+      fromId: existing.from_id,
+      toKind: existing.to_kind,
+      toId: existing.to_id,
+    },
+    { validFrom: appliedValidFrom, validTo },
   );
-  const preservesLiveLowerBound =
-    options?.clearDeleted !== true &&
-    preservesImmutableLowerBound(input.onImmutableLowerBound);
-  const appliedValidFrom =
-    preservesLiveLowerBound ? undefined : statedValidFrom;
-  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  const effectiveValidTo =
-    options?.clearDeleted === true && appliedValidFrom !== undefined ?
-      validTo
-    : validityEndAfterMutation(
-        input.clearValidTo === true ? { clearValidTo: true }
-        : validTo === undefined ? {}
-        : { validTo },
-        existing.valid_to,
-      );
   const declarations = edgeCardinalityDeclarations(ctx, input.identity.kind);
   const reentersLivePopulation =
     options?.clearDeleted === true && existing.deleted_at !== undefined;
@@ -2431,35 +2582,40 @@ async function prepareEdgeUpdate<G extends GraphDef>(
       },
       reentryClaims,
     );
-    // Acyclicity's population is soft-delete-only: a resurrection
-    // (`clearDeleted`) re-admits the edge and is checked; reopening an
-    // `oneActive` window alone (`reentersActivePopulation` with no
-    // `clearDeleted`) never removed the edge from the acyclicity
-    // population in the first place, so it is deliberately NOT checked
-    // here — checking it would over-fence a path that must stay free.
-    if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
-      await assertEdgeRelationsAcyclic(
-        acyclicityProbeContext(
-          ctx,
-          target,
-          requireDefined(
-            lock,
-            "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
-          ),
-          "edges.resurrect",
+  }
+  // An acyclic relation re-admits this row when the update moves it from
+  // outside the relation to inside it: a resurrection that leaves it a
+  // member, or — for a relation that counts only open rows, the composition
+  // union's `oneActive` kinds — a reopened window. A reopen of a kind whose
+  // relation counts every row never left it, so it owes nothing here.
+  const reentersAcyclicRelation = edgeUpdateReentersAcyclicRelation(
+    ctx,
+    existing,
+    effectiveValidTo,
+  );
+  if (reentersAcyclicRelation) {
+    await assertEdgeRelationsAcyclic(
+      acyclicityProbeContext(
+        ctx,
+        target,
+        requireDefined(
+          lock,
+          "an edge update re-admitting a row to an acyclic relation reached performEdgeUpdate with no write lock",
         ),
-        [
-          {
-            edgeId: id,
-            edgeKind: input.identity.kind,
-            fromKind: existing.from_kind,
-            fromId: existing.from_id,
-            toKind: existing.to_kind,
-            toId: existing.to_id,
-          },
-        ],
-      );
-    }
+        options?.clearDeleted === true ? "edges.resurrect" : "edges.update",
+      ),
+      [
+        {
+          edgeId: id,
+          edgeKind: existing.kind,
+          fromKind: existing.from_kind,
+          fromId: existing.from_id,
+          toKind: existing.to_kind,
+          toId: existing.to_id,
+          validTo: effectiveValidTo,
+        },
+      ],
+    );
   }
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the
@@ -2518,7 +2674,10 @@ async function prepareEdgeUpdate<G extends GraphDef>(
   const fences: EdgeUpdateFences = {
     validityLowerBound: windowVerdict.storedLowerBoundFence,
     validityUpperBound:
-      reentersActivePopulation && existing.valid_to !== undefined ?
+      (
+        (reentersActivePopulation || reentersAcyclicRelation) &&
+        existing.valid_to !== undefined
+      ) ?
         { expectedValidTo: existing.valid_to }
       : {},
     edgeIdentity: input.identity,
@@ -3052,20 +3211,21 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     ctx,
     opContext,
     // An in-place props update on a live edge re-derives no constraint verdict.
-    // Clearing an active-only-tracking axis's end DOES: it re-admits the row
-    // to that axis's counted active population, on either side.
+    // Clearing an end DOES when it re-admits the row to a counted population:
+    // an active-only cardinality axis's, on either side, or an acyclic
+    // relation that counts only open rows (a composition kind's).
     edgeWritePlan(
       (
         input.clearValidTo === true &&
-          activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
-            .length > 0
+          (activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
+            .length > 0 ||
+            windowReopenReentersAcyclicRelation(ctx, gate.kind))
       ) ?
-        // `clearValidTo` alone never re-admits an edge to the acyclicity
-        // population, so the acyclicity dimension is stated `false`; the
-        // axis-presence guard above already proves an active-only cardinality
-        // axis is declared, so this fold reports `"edgeCardinality"` (or, for
-        // a composition edge kind, `"edgeComposition"`) regardless.
-        edgeWriteFenceReason(ctx, gate.kind, false)
+        edgeWriteFenceReason(
+          ctx,
+          gate.kind,
+          windowReopenReentersAcyclicRelation(ctx, gate.kind),
+        )
       : undefined,
     ),
     backend,
@@ -3122,13 +3282,14 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     edgeWritePlan(
       options?.coalesceUnchanged === true ? "edgeMatchKeyConvergence"
       : input.clearValidTo === true || options?.clearDeleted === true ?
-        // Only a resurrection re-admits to the acyclicity population;
-        // `clearValidTo` alone must not take this fence for that reason.
+        // A resurrection re-admits the row to its acyclic relation; a cleared
+        // end does so only for a relation that counts open rows alone.
         edgeWriteFenceReason(
           ctx,
           input.identity.kind,
-          options?.clearDeleted === true &&
-            edgeAcyclic(ctx, input.identity.kind),
+          options?.clearDeleted === true ?
+            edgeAcyclic(ctx, input.identity.kind)
+          : windowReopenReentersAcyclicRelation(ctx, input.identity.kind),
         )
       : undefined,
     ),
@@ -3379,9 +3540,11 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
   const needsConstraintFence = entries.some(
     (entry) => entry.clearDeleted || entry.input.clearValidTo === true,
   );
-  const needsAcyclicityFence = entries.some(
-    (entry) =>
-      entry.clearDeleted && edgeAcyclic(ctx, entry.input.identity.kind),
+  const needsAcyclicityFence = entries.some((entry) =>
+    entry.clearDeleted ?
+      edgeAcyclic(ctx, entry.input.identity.kind)
+    : entry.input.clearValidTo === true &&
+      windowReopenReentersAcyclicRelation(ctx, entry.input.identity.kind),
   );
   return runWritePlan(
     ctx,
@@ -5064,7 +5227,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           // own that reaches only its own verdicts before its statement, and
           // probes acyclicity against stored state only: decide them as one
           // set before the first (the create batch already did, when step 4
-          // ran), and probe their resurrections as one set.
+          // ran), and probe their resurrections and reopens as one set.
           if (toCreate.length === 0 && owedUpdates.length > 1) {
             await prepareEdgeUpdateSet(ctx, owedUpdates, target, lock, {
               storedRows: storedRowsOfUpdateEntries(owedUpdates),
@@ -5074,7 +5237,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             ctx,
             target,
             lock,
-            updateEntries.filter((entry) => entry.clearDeleted),
+            updateEntries.filter(
+              (entry) => entry.clearDeleted || ifExists === "update",
+            ),
           );
           for (const [entryIndex, entry] of toFetch.entries()) {
             const input = requireDefined(updateEntries[entryIndex]).input;

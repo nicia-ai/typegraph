@@ -296,14 +296,28 @@ are not what happens:
   what a delete removed, after the fact. To decide *before* deleting, read
   the closure yourself with
   [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
-  which APPROXIMATES the closure — it is not the cascade's own verdict, and
-  it is narrower in one case. The subgraph walk runs in the read's temporal
-  mode (current, unless the read is pinned), so it does not follow a
-  `population: "one"` composition edge whose validity window was ENDED; the
+  which APPROXIMATES the closure — it is not the cascade's own verdict. A
+  composition row's window never starts or ends later than its write, so an
+  open-ended row is a membership for both and the two differ only in how
+  they read ENDED rows. The subgraph walk runs in the read's temporal mode
+  (current, unless the read is pinned), so a current read does not follow a
+  `population: "one"` composition edge whose validity window was ended; the
   cascade does, because a `one` binding holds for the row's whole life. An
   optional part attached through such a row is therefore deleted by the
-  cascade without appearing in the preview. Gate a destructive action on the
-  preview only for pairs you know carry no ended `one` rows.
+  cascade without appearing in the preview. Reading with
+  `temporalMode: "includeEnded"` follows those rows, and then also follows an
+  ended `population: "oneActive"` row — the history a `reparent` leaves
+  behind, which the cascade does not follow — so that preview can be wider
+  instead. Gate a destructive action on a current preview only for pairs you
+  know carry no ended `one` rows, and on an `includeEnded` preview only for
+  pairs with no `oneActive` history.
+- **A subgraph result is keyed by node id.** The preview's closure walk
+  follows each edge from the `(kind, id)` it reached, exactly as the cascade
+  does, but `subgraph()` returns one node per id: where a node of the unit
+  shares its id with a node of another kind, the result holds only one of
+  the two, and a root id held by two kinds walks the unit of the kind that
+  sorts first by code point. Give composition parts ids that are unique
+  across kinds when you rely on the preview.
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`
@@ -313,8 +327,8 @@ preview above: its composition closure has no hop ceiling and never returns a
 truncated unit — a part chain of any length comes back whole, and an engine
 that cuts the closure statement short refuses with a `ConfigurationError`
 (`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached
-(the read's temporal mode, described above, remains the one way the preview can
-be narrower than the cascade). The write path refuses an INSTANCE-level cycle (the
+(the read's temporal mode, described above, is what separates the preview from
+the cascade). The write path refuses an INSTANCE-level cycle (the
 composition union's acyclicity fence), so one only survives in rows written
 before the pair was declared, by trusted import, or by direct SQL; deleting
 any node in such a cycle throws `CompositionCycleError` (see

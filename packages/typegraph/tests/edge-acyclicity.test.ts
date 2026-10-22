@@ -109,11 +109,15 @@ describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
     expect(acyclicEdgeRelations(graph, registry)).toEqual([
       {
         name: "blockedBy",
-        members: [{ edgeKind: "blockedBy", reversed: false }],
+        members: [
+          { edgeKind: "blockedBy", reversed: false, membership: "allRows" },
+        ],
       },
       {
         name: "dependsOn",
-        members: [{ edgeKind: "dependsOn", reversed: false }],
+        members: [
+          { edgeKind: "dependsOn", reversed: false, membership: "allRows" },
+        ],
       },
     ]);
   });
@@ -197,7 +201,13 @@ describe("edgeWriteNeedsConstraintFence: fence-reason precedence", () => {
 describe("buildEdgeAcyclicityProbe: compiled-SQL pin", () => {
   const relation = {
     name: "dependsOn",
-    members: [{ edgeKind: "dependsOn", reversed: false }],
+    members: [
+      {
+        edgeKind: "dependsOn",
+        reversed: false,
+        membership: "allRows" as const,
+      },
+    ],
   };
   const recursiveTraversal = resolveRecursiveTraversal(
     createTestBackend().capabilities,
@@ -217,6 +227,7 @@ describe("buildEdgeAcyclicityProbe: compiled-SQL pin", () => {
             fromId: "a",
             toKind: "Task",
             toId: "b",
+            validTo: undefined,
           },
         ],
       },
@@ -255,6 +266,7 @@ describe("buildEdgeAcyclicityProbe: compiled-SQL pin", () => {
       fromId: `a${String(index)}`,
       toKind: "Task",
       toId: `b${String(index)}`,
+      validTo: undefined,
     }));
     const fragment = buildEdgeAcyclicityProbe({
       graphId: "g",
@@ -308,6 +320,7 @@ describe("recursiveTraversal: { supported: false } refuses both the write and th
             fromId: "a",
             toKind: "Task",
             toId: "b",
+            validTo: undefined,
           },
         ],
       ),
@@ -405,6 +418,7 @@ describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a prop
     fromId: "a",
     toKind: "Task",
     toId: "b",
+    validTo: undefined,
   };
 
   // PostgreSQL query_canceled / program_limit_exceeded, and SQLite's
@@ -594,8 +608,8 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
   const relation: AcyclicEdgeRelation = {
     name: "mixed-orientation",
     members: [
-      { edgeKind: "dependsOn", reversed: false },
-      { edgeKind: "blockedBy", reversed: true },
+      { edgeKind: "dependsOn", reversed: false, membership: "allRows" },
+      { edgeKind: "blockedBy", reversed: true, membership: "allRows" },
     ],
   };
   const recursiveTraversal = resolveRecursiveTraversal(
@@ -626,6 +640,7 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
             fromId: "x",
             toKind: "Task",
             toId: "y",
+            validTo: undefined,
           },
         ],
       }),
@@ -768,6 +783,7 @@ function threeEdgeCycle(nodes: Readonly<{ a: string; b: string; c: string }>) {
       fromId: nodes.a,
       toKind: "Task",
       toId: nodes.b,
+      validTo: undefined,
     },
     {
       edgeId: "bc",
@@ -776,6 +792,7 @@ function threeEdgeCycle(nodes: Readonly<{ a: string; b: string; c: string }>) {
       fromId: nodes.b,
       toKind: "Task",
       toId: nodes.c,
+      validTo: undefined,
     },
     {
       edgeId: "ca",
@@ -784,6 +801,7 @@ function threeEdgeCycle(nodes: Readonly<{ a: string; b: string; c: string }>) {
       fromId: nodes.c,
       toKind: "Task",
       toId: nodes.a,
+      validTo: undefined,
     },
   ];
 }
@@ -913,6 +931,7 @@ describe('the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERT
             fromId: nodes.a,
             toKind: "Task",
             toId: nodes.a,
+            validTo: undefined,
           },
         ],
       );
@@ -987,6 +1006,7 @@ describe("assertUnwrittenEdgeRelationsAcyclic: a batch probed before its insert"
       fromId: outside.id,
       toKind: "Task",
       toId: nodes.a,
+      validTo: undefined,
     };
 
     await expect(
@@ -1033,6 +1053,7 @@ function ringEdges(nodeIds: readonly string[]): ProposedRelationEdge[] {
     fromId,
     toKind: "Task",
     toId: requireDefined(nodeIds[(index + 1) % nodeIds.length]),
+    validTo: undefined,
   }));
 }
 

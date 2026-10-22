@@ -1186,50 +1186,136 @@ export class CompositionCycleError extends TypeGraphError {
 }
 
 /**
- * Details for CompositionError.
+ * Details for CompositionError, one shape per `situation`.
  *
- * `incumbentEdgeId` is omitted only when a caller builds this error with no
- * claim outcome in hand at all; every claim-issuing call site has one and
- * supplies it. It names the EDGE that already holds the axis — the one fact
- * the claim statement's `holder_edge_id` actually reports — never the
- * incumbent whole's own kind/id, which would need a second read this refusal
- * path does not make.
+ * - `"occupied"` (`COMPOSITION_WHOLE_OCCUPIED`): the write would give the part
+ *   a second whole. `incumbentEdgeId` is omitted only when a caller builds
+ *   this error with no claim outcome in hand at all; every claim-issuing call
+ *   site has one and supplies it. It names the EDGE that already holds the
+ *   axis — the one fact the claim statement's `holder_edge_id` actually
+ *   reports — never the incumbent whole's own kind/id, which would need a
+ *   second read this refusal path does not make.
+ * - `"futureStart"` (`COMPOSITION_VALIDITY_FUTURE_START`) and `"futureEnd"`
+ *   (`COMPOSITION_VALIDITY_FUTURE_END`): a composition edge write states a
+ *   `validFrom` or `validTo` later than the operation clock. `bound` is the
+ *   stated value. `partId` is absent when the part is being created with a
+ *   generated id (`partOf` on a create), `edgeId` when the edge does not
+ *   exist yet.
+ * - `"futureMove"` (`COMPOSITION_MOVE_FUTURE`): `reparent`/`bulkReparent`
+ *   names an `at` later than the operation clock.
+ *
+ * Composition membership is a fact of a row, not of an instant: a row with
+ * no `validTo` is the part's current attachment and an ended row is history,
+ * which is what lets one claim row, the cascade and the acyclicity relation
+ * agree on it. A window scheduled to start or end later would make a row
+ * current at one read instant and history at another, so it is refused on
+ * every write path rather than half-honored.
  */
-export type CompositionErrorDetails = Readonly<{
-  partKind: string;
-  partId: string;
-  wholeKind: string;
-  wholeId: string;
-  edgeKind: string;
-  incumbentEdgeId?: string;
-}>;
+export type CompositionErrorDetails =
+  | Readonly<{
+      situation: "occupied";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      incumbentEdgeId?: string;
+    }>
+  | Readonly<{
+      situation: "futureStart" | "futureEnd";
+      partKind: string;
+      partId?: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      edgeId?: string;
+      bound: string;
+      operationInstant: string;
+    }>
+  | Readonly<{
+      situation: "futureMove";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      at: string;
+      operationInstant: string;
+    }>;
 
 /**
- * Thrown when a composition edge (`partOf`/`hasPart`) would give a part a
- * second whole. A part holds exactly one whole across every declared
- * composition relation, enforced by one claim row per part
- * (`typegraph_edge_claims`, the reserved composition axis).
+ * What one {@link CompositionErrorDetails} situation reads as: its code, its
+ * message, and the way out — one switch, so a code never drifts from the
+ * message it is raised with.
+ */
+function describeCompositionRefusal(
+  details: CompositionErrorDetails,
+): Readonly<{ code: string; message: string; suggestion: string }> {
+  const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+  const wholeLabel = `${details.wholeKind}/${details.wholeId}`;
+  switch (details.situation) {
+    case "occupied": {
+      return {
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        message:
+          `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}": ` +
+          `it already has a whole${
+            details.incumbentEdgeId === undefined ?
+              ""
+            : ` (held by edge ${details.incumbentEdgeId})`
+          }, and composition allows exactly one.`,
+        suggestion:
+          "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
+      };
+    }
+    case "futureStart":
+    case "futureEnd": {
+      const field =
+        details.situation === "futureStart" ? "validFrom" : "validTo";
+      return {
+        code:
+          details.situation === "futureStart" ?
+            "COMPOSITION_VALIDITY_FUTURE_START"
+          : "COMPOSITION_VALIDITY_FUTURE_END",
+        message: `Cannot write composition edge "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` ${details.edgeId}`
+        } between ${partLabel} and ${wholeLabel}: ${field} "${details.bound}" is later than the operation clock "${details.operationInstant}".`,
+        suggestion: `Use a ${field} at or before the current time. A composition attachment is current while its window is open and history once it ends; scheduling either transition for later is not supported — make the change when it happens, with \`reparent\` to move a part.`,
+      };
+    }
+    case "futureMove": {
+      return {
+        code: "COMPOSITION_MOVE_FUTURE",
+        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": the move instant is later than the operation clock "${details.operationInstant}".`,
+        suggestion:
+          "Omit `at` to move the part now, or pass an instant at or before the current time. A move cannot be scheduled for later.",
+      };
+    }
+  }
+}
+
+/**
+ * Thrown when a composition edge (`partOf`/`hasPart`) write breaks one of the
+ * rules that keep a part's attachment a fact of the row: a part holds exactly
+ * one whole across every declared composition relation (enforced by one
+ * claim row per part — `typegraph_edge_claims`, the reserved composition
+ * axis), and an attachment's window never starts or ends later than the
+ * write that states it.
+ *
+ * One class, one code per situation ({@link CompositionErrorDetails}), so a
+ * caller that routes on `code` can tell a second whole from a scheduled
+ * window.
  */
 export class CompositionError extends TypeGraphError {
   declare readonly details: CompositionErrorDetails;
 
   constructor(details: CompositionErrorDetails, options?: { cause?: unknown }) {
-    super(
-      `Cannot attach ${details.partKind}/${details.partId} to ${details.wholeKind}/${details.wholeId} via "${details.edgeKind}": ` +
-        `it already has a whole${
-          details.incumbentEdgeId === undefined ?
-            ""
-          : ` (held by edge ${details.incumbentEdgeId})`
-        }, and composition allows exactly one.`,
-      "COMPOSITION_WHOLE_OCCUPIED",
-      {
-        details,
-        category: "constraint",
-        suggestion:
-          "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
-        cause: options?.cause,
-      },
-    );
+    const refusal = describeCompositionRefusal(details);
+    super(refusal.message, refusal.code, {
+      details,
+      category: "constraint",
+      suggestion: refusal.suggestion,
+      cause: options?.cause,
+    });
     this.name = "CompositionError";
   }
 }

@@ -23,12 +23,13 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import {
   axisCountsRow,
+  axisRowMembership,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
   type EdgeCardinalityDeclarations,
-  edgeCardinalitySpec,
   type EdgeClaimSubject,
+  type RowMembership,
   sortedByClaimTarget,
 } from "./edge-claims";
 
@@ -62,8 +63,8 @@ function compositionHolders(
  * `holderLiveness` with no new table: `edgeCardinalitySpec` already answers
  * both for every `(direction, cardinality)` pair, composition or not.
  *
- * The one owner of that mapping: {@link compositionCountsEndedRows} reads its
- * spec through this function rather than re-spelling the orientation fold.
+ * The one owner of that mapping: {@link compositionRowMembership} reads its
+ * rule through this function rather than re-spelling the orientation fold.
  */
 function compositionAxisRef(
   partSide: CompositionPartSide,
@@ -75,24 +76,22 @@ function compositionAxisRef(
 }
 
 /**
- * Whether a composition row whose validity window has ENDED is still a
- * membership under this orientation and population.
+ * The membership rule of a composition row under this orientation and
+ * population, for {@link membershipCountsRow}.
  *
  * `population: "one"` binds part and whole for the row's whole life, ended or
- * not. `population: "oneActive"` holds only while the window is open: an
- * ended row is the history a reparent leaves behind and attaches nothing.
- * Read off {@link edgeCardinalitySpec}'s `holderLiveness` rather than
- * re-spelled, so the claim, the cascade's closure and the acyclicity relation
- * agree on which rows are in the composition relation.
+ * not (`"allRows"`). `population: "oneActive"` holds only while the window is
+ * open (`"openRows"`): an ended row is the history a reparent leaves behind
+ * and attaches nothing. Read off the composition axis's own
+ * {@link axisRowMembership} rather than re-spelled, so the claim, the
+ * cascade's closure and the acyclicity relation agree on which rows are in
+ * the composition relation.
  */
-export function compositionCountsEndedRows(
+export function compositionRowMembership(
   partSide: CompositionPartSide,
   population: "one" | "oneActive",
-): boolean {
-  return (
-    edgeCardinalitySpec(compositionAxisRef(partSide, population))
-      .holderLiveness !== "liveAndActive"
-  );
+): RowMembership {
+  return axisRowMembership(compositionAxisRef(partSide, population));
 }
 
 /**
@@ -197,7 +196,7 @@ export function compositionReentryClaim(
   const claim = compositionClaim(registry, subject);
   if (claim === undefined || !axisCountsRow(claim, subject)) return undefined;
   if (reentersLivePopulation) return claim;
-  return edgeCardinalitySpec(claim).claimsWhenBornEnded ? undefined : claim;
+  return axisRowMembership(claim) === "openRows" ? claim : undefined;
 }
 
 /**

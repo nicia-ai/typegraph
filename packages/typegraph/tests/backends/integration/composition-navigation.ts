@@ -136,6 +136,46 @@ const compositionNavigationGraph = defineGraph({
   ],
 });
 
+/**
+ * One realizing edge kind (`cnNoteOf`) attaching a note to a track OR to a
+ * video, so a note on a video that shares a track's id is one hop away from
+ * that track's id — but no part of the track's album.
+ */
+const CnAlbum = defineNode("CnAlbum", { schema: z.object({}) });
+const CnTrack = defineNode("CnTrack", { schema: z.object({}) });
+const CnVideo = defineNode("CnVideo", { schema: z.object({}) });
+const CnNote = defineNode("CnNote", { schema: z.object({}) });
+const cnAlbumHasTrack = defineEdge("cnAlbumHasTrack", { schema: z.object({}) });
+const cnNoteOf = defineEdge("cnNoteOf", { schema: z.object({}) });
+const sharedIdCompositionGraph = defineGraph({
+  id: "composition_navigation_shared_id",
+  nodes: {
+    CnAlbum: { type: CnAlbum },
+    CnTrack: { type: CnTrack },
+    CnVideo: { type: CnVideo },
+    CnNote: { type: CnNote },
+  },
+  edges: {
+    cnAlbumHasTrack: {
+      type: cnAlbumHasTrack,
+      from: [CnAlbum],
+      to: [CnTrack],
+      targetCardinality: "one",
+    },
+    cnNoteOf: {
+      type: cnNoteOf,
+      from: [CnNote],
+      to: [CnTrack, CnVideo],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    hasPart(CnAlbum, CnTrack, { via: cnAlbumHasTrack }),
+    partOf(CnNote, CnTrack, { via: cnNoteOf }),
+    partOf(CnNote, CnVideo, { via: cnNoteOf }),
+  ],
+});
+
 /** No `partOf`/`hasPart` declared anywhere — the set-level subgraph refusal. */
 const noCompositionGraph = defineGraph({
   id: "composition_navigation_none",
@@ -1217,6 +1257,57 @@ export function registerCompositionNavigationIntegrationTests(
       expect(pilotEdge).not.toHaveProperty("meta");
     });
 
+    it("subgraph({ composition: true }) walks the root's own (kind, id), never another kind's node that shares an id", async () => {
+      const store = await context.createStore(sharedIdCompositionGraph);
+      const album = await store.nodes.CnAlbum.create({});
+      const track = await store.nodes.CnTrack.create({}, { id: "shared" });
+      await store.edges.cnAlbumHasTrack.create(album, track, {});
+      const trackNote = await store.nodes.CnNote.create(
+        {},
+        { partOf: { whole: track } },
+      );
+      // A video under the SAME id, owning a note of its own: no part of the
+      // album's unit, which `parts()` and the cascade both key on kind.
+      const video = await store.nodes.CnVideo.create({}, { id: track.id });
+      const videoNote = await store.nodes.CnNote.create(
+        {},
+        { partOf: { whole: video } },
+      );
+
+      const parts = await store
+        .query()
+        .from("CnAlbum", "album")
+        .whereNode("album", (node) => node.id.eq(album.id))
+        .parts("part")
+        .select((ctx) => ({ kind: ctx.part.kind, id: ctx.part.id }))
+        .execute();
+      expect(new Set(parts.map((part) => `${part.kind}/${part.id}`))).toEqual(
+        new Set([`CnTrack/${track.id}`, `CnNote/${trackNote.id}`]),
+      );
+
+      // MUTATION CHECK: drop the `e.from_kind = r.kind` / `e.to_kind =
+      // r.kind` terms from `buildDirectedGroupsBranch`
+      // (src/store/recursive-cte.ts) — the walk then follows the video's
+      // note edge from the track's id and pulls that note into the album's
+      // unit.
+      const result = await store.subgraph(album.id, {
+        edges: [],
+        composition: true,
+      });
+      expect(result.nodes.has(trackNote.id)).toBe(true);
+      expect(result.nodes.has(videoNote.id)).toBe(false);
+
+      // MUTATION CHECK: pick the LAST kind in code-point order in
+      // `fetchCompositionRootKind` (src/store/subgraph.ts) — a root id held by
+      // `CnTrack` and `CnVideo` then walks the video's unit instead.
+      const sharedRoot = await store.subgraph(track.id, {
+        edges: [],
+        composition: true,
+      });
+      expect(sharedRoot.nodes.has(trackNote.id)).toBe(true);
+      expect(sharedRoot.nodes.has(videoNote.id)).toBe(false);
+    });
+
     it("subgraph({ composition: true }) reads every statement at one current instant", async () => {
       const readStart = new Date("2099-01-01T00:00:00.000Z");
       const afterEpisodeEnds = new Date("2099-01-01T00:02:00.000Z");
@@ -1234,15 +1325,17 @@ export function registerCompositionNavigationIntegrationTests(
       try {
         vi.setSystemTime(readStart);
         const podcast = await store.nodes.CnPodcast.create({ title: "Pod" });
-        const episode = await store.nodes.CnEpisode.create({ title: "Ep" });
-        await store.edges.cnEpisodeOf.create(
-          episode,
-          podcast,
-          {},
+        // The PART's own window ends a minute after the read starts. (A
+        // composition edge cannot: its window never ends later than its
+        // write, so its membership does not move with the clock — the node's
+        // window is what a mid-read clock change can still disagree about.)
+        const episode = await store.nodes.CnEpisode.create(
+          { title: "Ep" },
           { validTo: "2099-01-01T00:01:00.000Z" },
         );
+        await store.edges.cnEpisodeOf.create(episode, podcast, {});
 
-        // The clock moves past the episode edge's end while the read is in
+        // The clock moves past the episode's end while the read is in
         // flight, after its first statement. Every statement of one read must
         // still evaluate "current" at the instant the read started. The
         // transaction-bound read runs the same executor through the hooked

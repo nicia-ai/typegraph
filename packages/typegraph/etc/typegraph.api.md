@@ -1095,12 +1095,31 @@ export class CompositionError extends TypeGraphError {
 
 // @public
 export type CompositionErrorDetails = Readonly<{
+    situation: "occupied";
     partKind: string;
     partId: string;
     wholeKind: string;
     wholeId: string;
     edgeKind: string;
     incumbentEdgeId?: string;
+}> | Readonly<{
+    situation: "futureStart" | "futureEnd";
+    partKind: string;
+    partId?: string;
+    wholeKind: string;
+    wholeId: string;
+    edgeKind: string;
+    edgeId?: string;
+    bound: string;
+    operationInstant: string;
+}> | Readonly<{
+    situation: "futureMove";
+    partKind: string;
+    partId: string;
+    wholeKind: string;
+    wholeId: string;
+    at: string;
+    operationInstant: string;
 }>;
 
 // @public

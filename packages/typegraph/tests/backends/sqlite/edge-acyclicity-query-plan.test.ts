@@ -200,8 +200,8 @@ describe("edge-acyclicity probe: query plan", () => {
     await store.refreshStatistics();
 
     const members: readonly AcyclicRelationMember[] = [
-      { edgeKind: "dependsOn", reversed: false },
-      { edgeKind: "blockedBy", reversed: true },
+      { edgeKind: "dependsOn", reversed: false, membership: "allRows" },
+      { edgeKind: "blockedBy", reversed: true, membership: "allRows" },
     ];
     const fragment = buildEdgeAcyclicityProbe({
       graphId: "acyclicity-query-plan",

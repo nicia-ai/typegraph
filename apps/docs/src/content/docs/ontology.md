@@ -497,8 +497,13 @@ leaves nothing of the refused create behind.
   On a `population: "oneActive"` pair only an open-ended edge is a
   membership, so stating `validTo` there is refused (issue path
   `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`): the edge
-  it would write attaches nothing. Record a bounded membership as history
-  with `store.edges.<via>.create(...)` instead.
+  it would write attaches nothing. Record a past membership as history with
+  `store.edges.<via>.create(...)` and a `validTo` at or before now instead.
+  No composition window may start or end later than the write that states
+  it (see [Choosing a containment tier](#choosing-a-containment-tier)): a
+  later `validFrom` or `validTo` refuses with `CompositionError`
+  (`COMPOSITION_VALIDITY_FUTURE_START` / `COMPOSITION_VALIDITY_FUTURE_END`),
+  here and on every write of a realizing edge.
 - **`props`** are the realizing edge's own properties, validated against that
   edge kind's schema exactly as `store.edges.<via>.create(...)` would
   validate them. A realizing edge with required schema fields therefore needs
@@ -535,7 +540,10 @@ takes no `validFrom` or `validTo` — stating either is a compile error and a
 `ValidationError` at runtime (issue path `options.validFrom` or
 `options.validTo`). A move opens the new attachment; bounding a membership is
 a window edit on the realizing edge. A malformed `at` is refused under
-`options.at`.
+`options.at`, and an `at` later than now with `CompositionError`
+(`COMPOSITION_MOVE_FUTURE`): a move happens when it is made, never scheduled.
+Like every other batch method, `bulkReparent` fires no operation hooks;
+`reparent` fires one `update` operation for the part it moves.
 
 Moving a part is a first-class operation because neither half is legal on its
 own: the new attachment refuses while the old edge still holds the part's
@@ -757,7 +765,22 @@ Tier 1 is enforced, in full, at write time:
   membership, so earlier moves never stop a part from later moving under one
   of its former descendants. A realizing edge kind that is also declared
   `acyclic: true` keeps that declaration's rule: every non-deleted row of the
-  kind counts, ended or not.
+  kind counts, ended or not. Every write is judged on the row it leaves: a
+  history row created, imported or restored still ended is no member and
+  closes no cycle, while reopening an ended row (`clearValidTo`) puts it back
+  and is probed like a create.
+- **One row, one fact.** A composition edge's window never starts or ends
+  later than the write that states it — every write path refuses one with
+  `CompositionError` (`COMPOSITION_VALIDITY_FUTURE_START`,
+  `COMPOSITION_VALIDITY_FUTURE_END`, `COMPOSITION_MOVE_FUTURE` for a
+  `reparent` `at`). So a row with no `validTo` is the part's attachment now
+  and at every later instant, and an ended row is history for good: the
+  claim, the cascade, the acyclicity check and every current read agree on
+  which whole a part holds, without any of them choosing an instant. Record a
+  change when it happens. "Later" is judged against the clock of the process
+  running the store, so a client whose clock runs ahead of it is refused
+  when it states its own `new Date()` as a bound: omit `validFrom` or `at`
+  to take the store's clock instead.
 - **Leaf-first cascade.** Deleting a whole deletes its live parts closure
   leaf-first, in the same transaction, each part through its own node-delete
   pipeline. See

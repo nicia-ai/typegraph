@@ -23,11 +23,16 @@ import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
-  compositionAcyclicRelation,
+  type AcyclicEdgeRelation,
+  declaredAcyclicEdgeRelations,
   readEdgeAcyclicityViolations,
-  standaloneAcyclicRelation,
 } from "../store/acyclicity";
+import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
 import { compositionEdgeCardinalityDeclarations } from "../store/claims/composition-claims";
+import {
+  axisRowMembership,
+  rowMembershipWidens,
+} from "../store/claims/edge-claims";
 import {
   auditConstraintFences,
   type ConstraintFenceViolation,
@@ -39,7 +44,6 @@ import {
 } from "../store/operations/composition-create";
 import { groupBy } from "../utils/array";
 import { hasOwnKey } from "../utils/object";
-import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   type EdgeCardinalityDeclaration,
@@ -245,6 +249,122 @@ async function populatedAddedEdgeKindProbes(
   };
 }
 
+/** The edge kinds a schema snapshot declares `acyclic: true`. */
+function standaloneAcyclicEdgeKinds(
+  snapshot: OntologySnapshot,
+): readonly string[] {
+  return Object.entries(snapshot.edges)
+    .filter(([, edge]) => edge.acyclic === true)
+    .map(([edgeKind]) => edgeKind);
+}
+
+/**
+ * Whether the proposed composition relation holds a row the baseline's did
+ * not: a member edge kind it lacked, a member read in the other orientation,
+ * or a member whose ended rows now count (`"openRows"` → `"allRows"` — a
+ * `oneActive` realizing edge redeclared `one`, or declared `acyclic: true`).
+ * Such a commit can close a cycle out of rows that were legal under the
+ * baseline, so the proposed relation owes the probe.
+ */
+function compositionRelationWidened(
+  baseline: AcyclicEdgeRelation | undefined,
+  proposed: AcyclicEdgeRelation,
+): boolean {
+  const baselineMembers = new Map(
+    (baseline?.members ?? []).map((member) => [member.edgeKind, member]),
+  );
+  return proposed.members.some((member) => {
+    const prior = baselineMembers.get(member.edgeKind);
+    return (
+      prior?.reversed !== member.reversed ||
+      rowMembershipWidens(prior.membership, member.membership)
+    );
+  });
+}
+
+/**
+ * The composition occupancy declarations this commit must audit, built by
+ * the one owner of the per-edge-kind declaration list
+ * ({@link compositionEdgeCardinalityDeclarations}) over the PROPOSED schema.
+ *
+ * Delta-scoped: a declaration is audited only when its edge kind realizes a
+ * `partOf`/`hasPart` pair THIS commit adds (`addedPairEdgeKinds`, the
+ * `composition` probe's edge kinds) or when its row membership widens from
+ * the baseline's ({@link rowMembershipWidens}: a `oneActive` realizing edge
+ * redeclared `one`, whose ended rows start holding the part). A pre-existing,
+ * unchanged pair's data is never re-walked by an unrelated commit, the same
+ * discipline `edgeCardinalities`/`disjointKindPairs` honor. The delta only
+ * selects which edge kinds' rows are the OUTER (reported) rows: each
+ * declaration's `scope.holders` is still the whole graph's composition
+ * holder list, so a changed edge kind's row is found contending against an
+ * unchanged edge kind's live row — two wholes held through two realizing
+ * edges.
+ */
+function compositionDeclarationsToAudit(
+  baselineRegistry: KindRegistry,
+  proposedRegistry: KindRegistry,
+  addedPairEdgeKinds: readonly string[],
+): readonly EdgeCardinalityDeclaration[] {
+  const baselineMembership = new Map(
+    compositionEdgeCardinalityDeclarations(baselineRegistry).map(
+      (declaration) => [declaration.edgeKind, axisRowMembership(declaration)],
+    ),
+  );
+  return compositionEdgeCardinalityDeclarations(proposedRegistry).filter(
+    (declaration) => {
+      if (addedPairEdgeKinds.includes(declaration.edgeKind)) return true;
+      const prior = baselineMembership.get(declaration.edgeKind);
+      return (
+        prior !== undefined &&
+        rowMembershipWidens(prior, axisRowMembership(declaration))
+      );
+    },
+  );
+}
+
+/**
+ * The acyclic relations this commit must probe, built by the one owner of the
+ * relation list ({@link declaredAcyclicEdgeRelations}) over the PROPOSED
+ * schema — the relations the write path enforces once this version is live:
+ *
+ * - each edge kind this commit newly declares `acyclic: true` on, as its own
+ *   standalone relation;
+ * - the composition relation, whole, when the commit adds a
+ *   `partOf`/`hasPart` pair or widens the relation's population
+ *   ({@link compositionRelationWidened}). Whole rather than delta-scoped: a
+ *   cycle can span a pre-existing pair and the changed one.
+ */
+function acyclicRelationsToProbe(
+  params: SchemaTighteningPreflightParams,
+  baselineRegistry: KindRegistry,
+  proposedRegistry: KindRegistry,
+  newlyAcyclicEdgeKinds: readonly string[],
+  addsCompositionPair: boolean,
+): readonly AcyclicEdgeRelation[] {
+  const proposed = declaredAcyclicEdgeRelations(
+    proposedRegistry,
+    standaloneAcyclicEdgeKinds(params.after),
+  );
+  const proposedComposition = proposed.find(
+    (relation) => relation.name === COMPOSITION_RELATION_NAME,
+  );
+  const probesComposition =
+    proposedComposition !== undefined &&
+    (addsCompositionPair ||
+      compositionRelationWidened(
+        declaredAcyclicEdgeRelations(
+          baselineRegistry,
+          standaloneAcyclicEdgeKinds(params.before),
+        ).find((relation) => relation.name === COMPOSITION_RELATION_NAME),
+        proposedComposition,
+      ));
+  return proposed.filter((relation) =>
+    relation.name === COMPOSITION_RELATION_NAME ?
+      probesComposition
+    : newlyAcyclicEdgeKinds.includes(relation.name),
+  );
+}
+
 function buildOntologyTighteningViolatedError(
   params: SchemaTighteningPreflightParams,
   probedChanges: readonly OntologyChange[],
@@ -392,12 +512,14 @@ export function prepareSchemaTighteningPreflight(
   // this cannot throw here for a reason the commit has not already surfaced.
   const proposedRegistry = buildRegistryFromSerializedSchema(params.after);
 
-  // BEFORE is read only for where its claims sit.
+  // BEFORE is read only for where its claims sit and which rows its
+  // populations count.
+  const baselineRegistry = buildSchemaBaselineRegistry(params.before);
   const gates =
     mayGateUniqueness ?
       uniquenessClaimGates(
         uniqueConstraints,
-        buildSchemaBaselineRegistry(params.before),
+        baselineRegistry,
         proposedRegistry,
       )
     : [];
@@ -427,26 +549,12 @@ export function prepareSchemaTighteningPreflight(
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
   );
 
-  // Composition declarations, delta-scoped to exactly the
-  // `partOf`/`hasPart` pairs THIS commit adds (`grouped.composition.edgeKinds`)
-  // — a pre-existing, already-tightened pair's data is never re-walked by an
-  // unrelated commit, the same discipline `edgeCardinalities`/
-  // `disjointKindPairs` above already honor. That delta-scoping is only
-  // which edge kinds' rows are the OUTER (reported) rows: each declaration's
-  // own `scope.holders` — the oriented holder list — is still the WHOLE
-  // graph's composition holders, from `compositionEdgeCardinalityDeclarations`,
-  // because a delta-scoped edge kind can still be found contending against a
-  // pre-existing, unrelated composition edge kind's live row (the holder list is one
-  // relation-wide invariant, not one per pair).
-  const compositionEdgeCardinalities =
-    grouped.composition === undefined ?
-      []
-    : compositionEdgeCardinalityDeclarations(proposedRegistry).filter(
-        (declaration) =>
-          requireDefined(grouped.composition).edgeKinds.includes(
-            declaration.edgeKind,
-          ),
-      );
+  const compositionEdgeCardinalities = compositionDeclarationsToAudit(
+    baselineRegistry,
+    proposedRegistry,
+    grouped.composition?.edgeKinds ?? [],
+  );
+
 
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
     await assertUniquenessClaimGatesOpen(target, params, gates);
@@ -463,6 +571,13 @@ export function prepareSchemaTighteningPreflight(
       ...(grouped.acyclicity?.edgeKinds ?? []),
       ...populatedAddedEdgeKinds.acyclicEdgeKinds,
     ];
+    const probedAcyclicRelations = acyclicRelationsToProbe(
+      params,
+      baselineRegistry,
+      proposedRegistry,
+      acyclicEdgeKinds,
+      grouped.composition !== undefined,
+    );
 
     const claimBackedViolations = await auditConstraintFences(target, {
       declarations: {
@@ -489,12 +604,11 @@ export function prepareSchemaTighteningPreflight(
     // `readConstraintFenceViolations` (the non-recursive row-shape port every
     // other family above reads through): folding the recursive predicate
     // behind it would create a second implementation of "is there a cycle".
-    // It runs `readEdgeAcyclicityViolations` directly, scoped to exactly the
-    // edge kinds THIS commit newly declares `acyclic: true` on, plus an added
-    // `acyclic: true` kind that already holds rows — the same delta-scoping
-    // discipline as every family above.
+    // It runs `readEdgeAcyclicityViolations` directly, over exactly the
+    // relations THIS commit can newly violate (`acyclicRelationsToProbe`),
+    // which include an added `acyclic: true` kind that already holds rows.
     const acyclicityViolations =
-      acyclicEdgeKinds.length === 0 ?
+      probedAcyclicRelations.length === 0 ?
         []
       : await readEdgeAcyclicityViolations(
           {
@@ -505,34 +619,7 @@ export function prepareSchemaTighteningPreflight(
             target,
             operation: "schema-commit:acyclic-tightening",
           },
-          acyclicEdgeKinds.map((edgeKind) =>
-            standaloneAcyclicRelation(edgeKind),
-          ),
-        );
-
-    // Composition acyclicity check, over the FULL proposed composition
-    // relation rather than delta-scoped: unlike the single-whole audit
-    // above, a cross-kind cycle can span a
-    // pre-existing pair and the one this commit adds, so checking only the
-    // new edge kind would miss exactly the cycle this check exists to
-    // catch. Triggered by the delta (`grouped.composition` is only set when
-    // this commit adds a pair) but checked against everything, matching
-    // `acyclicEdgeRelations`'s own population rule (every live edge of the
-    // relation counts, not just the ones a particular write touched).
-    const compositionRelation = compositionAcyclicRelation(proposedRegistry);
-    const compositionAcyclicityViolations =
-      grouped.composition === undefined || compositionRelation === undefined ?
-        []
-      : await readEdgeAcyclicityViolations(
-          {
-            graphId: params.graphId,
-            registry: proposedRegistry,
-            schema: createSqlSchema(target.tableNames),
-            dialect: getDialect(target.dialect),
-            target,
-            operation: "schema-commit:composition-tightening",
-          },
-          [compositionRelation],
+          probedAcyclicRelations,
         );
 
     // Third composition check: for every required-existence part
@@ -556,7 +643,6 @@ export function prepareSchemaTighteningPreflight(
     const violations = [
       ...claimBackedViolations,
       ...acyclicityViolations,
-      ...compositionAcyclicityViolations,
       ...compositionExistenceViolations,
     ];
     if (violations.length === 0) return;

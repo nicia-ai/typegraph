@@ -146,6 +146,8 @@ import {
 import {
   assertCompositionExistencePreserved,
   COMPOSITION_ATTACHMENT_PAGE_SIZE,
+  compositionWindowRefusal,
+  compositionWindowSubject,
   declaresRequiredCompositionParts,
   edgeWriteEndsOpenWindow,
   readCompositionAttachmentsForPage,
@@ -183,6 +185,7 @@ import { type Store } from "../store/store";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
+  nowIso,
   validateOptionalCanonicalIsoDate,
   type ValidityLowerBoundFence,
 } from "../utils/date";
@@ -3022,6 +3025,36 @@ function validateValidityWindow(
 }
 
 /**
+ * The composition window rule (`assertCompositionWindowCurrent`) for one
+ * document edge, as the per-row error import reports: a composition edge may
+ * not start or end later than the import's own clock. Judged on the
+ * document's stated bounds, so it covers the insert and both update legs
+ * alike — neither applies a bound the document does not state.
+ */
+function importedCompositionWindowError(
+  registry: KindRegistry,
+  edge: InterchangeEdge,
+): string | undefined {
+  const subject = compositionWindowSubject(registry, {
+    kind: edge.kind,
+    id: edge.id,
+    fromKind: edge.from.kind,
+    fromId: edge.from.id,
+    toKind: edge.to.kind,
+    toId: edge.to.id,
+  });
+  if (subject === undefined) return undefined;
+  const refusal = compositionWindowRefusal(
+    subject,
+    { validFrom: edge.validFrom, validTo: edge.validTo },
+    nowIso(),
+  );
+  return refusal === undefined ? undefined : (
+      `${refusal.code}: ${refusal.message}`
+    );
+}
+
+/**
  * The UPDATE-shaped half, for `onConflict: "update"` against a row that already
  * exists. All four update legs — batched and sequential, nodes and edges — send
  * the document's `validTo` to an in-place update of a LIVE row while its stored
@@ -3792,7 +3825,9 @@ async function processEdgeSlice(
       record(edge, { status: "error", error: propsResult.error });
       continue;
     }
-    const validityError = validateValidityWindow(edge);
+    const validityError =
+      validateValidityWindow(edge) ??
+      importedCompositionWindowError(registry, edge);
     if (validityError !== undefined) {
       record(edge, { status: "error", error: validityError });
       continue;
@@ -4375,7 +4410,9 @@ async function processEdge(
     return { status: "error", error: propsResult.error };
   }
 
-  const validityError = validateValidityWindow(edge);
+  const validityError =
+    validateValidityWindow(edge) ??
+    importedCompositionWindowError(registry, edge);
   if (validityError !== undefined) {
     return { status: "error", error: validityError };
   }
@@ -4495,6 +4532,7 @@ async function processEdge(
               fromId: params.fromId,
               toKind: params.toKind,
               toId: params.toId,
+              validTo: params.validTo,
             },
           ],
         );

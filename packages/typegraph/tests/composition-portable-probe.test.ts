@@ -235,9 +235,10 @@ describe.each(Object.entries(BACKEND_SHAPES))(
       );
 
       expect(refusal).toBeInstanceOf(CompositionError);
-      expect((refusal as CompositionError).details.incumbentEdgeId).toBe(
-        replacement.id,
-      );
+      expect((refusal as CompositionError).details).toMatchObject({
+        situation: "occupied",
+        incumbentEdgeId: replacement.id,
+      });
       expect(await store.edges.inWholeA.find({})).toEqual([]);
       expect(await store.verifyConstraintFences()).toEqual([]);
     });

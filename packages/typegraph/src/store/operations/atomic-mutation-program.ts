@@ -339,8 +339,9 @@ export function resolveAtomicEdgeBatchExecutor(
         // database key to claim through (`CONSTRAINT_FENCE_BACKING.
         // edgeAcyclicity === "lockOnly"`), which this fused program's claim
         // rows cannot express. Any acyclic kind in the batch sends the WHOLE
-        // batch through the portable path, which probes the combined insert
-        // once, after it lands.
+        // batch through the portable path, which probes the combined set
+        // once, as an overlay on the stored relation, before its first
+        // insert.
         // This ALREADY excludes every composition edge kind, with no
         // separate check needed: `compositionAcyclicRelation`
         // (`src/store/acyclicity.ts`) folds every composition-realizing edge

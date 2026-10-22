@@ -493,7 +493,14 @@ export const ExportOptionsSchema = z.object({
   nodeKinds: z.array(z.string()).optional(),
   /** Filter to specific edge kinds (undefined = all) */
   edgeKinds: z.array(z.string()).optional(),
-  /** Include temporal fields (validFrom, validTo) */
+  /**
+   * Include temporal fields (validFrom, validTo). Always included for a graph
+   * with Operational Identity or with an edge kind whose `cardinality` or
+   * `targetCardinality` is `"oneActive"` (a `oneActive` composition pair
+   * included): those exports default to `true` and refuse an explicit
+   * `false`, since an ended row exported without its `validTo` would
+   * re-import as current.
+   */
   includeTemporal: z.boolean().default(false),
   /** Include metadata (version, timestamps) */
   includeMeta: z.boolean().default(false),

@@ -23,8 +23,10 @@ import {
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,
 } from "../identity/transition-log";
+import { activeOnlyAxisReferences } from "../store/claims/edge-claims";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { compareStrings } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { serializedStreamRefusal } from "./import";
@@ -196,24 +198,32 @@ export function exportGraphStream<G extends GraphDef>(
   );
 }
 
-async function* exportGraphStreamFromBackend<G extends GraphDef>(
-  store: Store<G>,
-  backend: GraphBackend,
-  options?: ExportStreamOptionsInput,
-): AsyncIterable<GraphInterchangeChunk> {
-  const parsed = ExportStreamOptionsSchema.parse(options ?? {});
-  // Identity rows carry their effective-time windows unconditionally. Their
-  // endpoint rows must therefore carry temporal bounds too, or the store's own
-  // export could not prove on re-import that each endpoint existed throughout
-  // an assertion's window.
-  const exportsIdentity = store.graph.identity !== undefined;
-  const explicitlyDisabledTemporalFields = options?.includeTemporal === false;
-  if (exportsIdentity && explicitlyDisabledTemporalFields) {
-    throw new ConfigurationError(
+/**
+ * Why this graph's export must carry temporal fields, as the refusal an
+ * explicit `includeTemporal: false` earns — or `undefined` when the caller's
+ * choice stands. A graph that requires them exports them by default.
+ *
+ * - Identity rows carry their effective-time windows unconditionally. Their
+ *   endpoint rows must therefore carry temporal bounds too, or the store's
+ *   own export could not prove on re-import that each endpoint existed
+ *   throughout an assertion's window.
+ * - An active-only cardinality axis (`cardinality` or `targetCardinality`
+ *   `"oneActive"` — which is also how a `oneActive` composition pair's
+ *   population is declared) counts a row only while its window is open. An
+ *   ended row exported without its `validTo` would re-import as current:
+ *   a reparented part attached to its former whole again, or a second
+ *   active edge refused against the first.
+ */
+function requiredTemporalFieldsRefusal(
+  graph: GraphDef,
+  identityMode: string,
+): ConfigurationError | undefined {
+  if (graph.identity !== undefined) {
+    return new ConfigurationError(
       "Identity export requires temporal endpoint fields.",
       {
         code: "IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
-        identityMode: parsed.identityMode,
+        identityMode,
         includeTemporal: false,
       },
       {
@@ -222,8 +232,46 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       },
     );
   }
+  const activeOnlyEdgeKinds = Object.entries(graph.edges)
+    .filter(
+      ([, registration]) => activeOnlyAxisReferences(registration).length > 0,
+    )
+    .map(([edgeKind]) => edgeKind)
+    .toSorted(compareStrings);
+  if (activeOnlyEdgeKinds.length === 0) return undefined;
+  return new ConfigurationError(
+    "Export of a graph with an active-only edge cardinality requires temporal fields.",
+    {
+      code: "ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+      edgeKinds: activeOnlyEdgeKinds,
+      includeTemporal: false,
+    },
+    {
+      suggestion: `Remove includeTemporal or set it to true: ${activeOnlyEdgeKinds.map((edgeKind) => `"${edgeKind}"`).join(", ")} count a row only while its window is open, so an ended row exported without its validTo would re-import as current.`,
+    },
+  );
+}
+
+async function* exportGraphStreamFromBackend<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend,
+  options?: ExportStreamOptionsInput,
+): AsyncIterable<GraphInterchangeChunk> {
+  const parsed = ExportStreamOptionsSchema.parse(options ?? {});
+  const temporalFieldsRequirement = requiredTemporalFieldsRefusal(
+    store.graph,
+    parsed.identityMode,
+  );
+  if (
+    temporalFieldsRequirement !== undefined &&
+    options?.includeTemporal === false
+  ) {
+    throw temporalFieldsRequirement;
+  }
   const resolved =
-    exportsIdentity ? { ...parsed, includeTemporal: true } : parsed;
+    temporalFieldsRequirement === undefined ? parsed : (
+      { ...parsed, includeTemporal: true }
+    );
   const signal = resolved.signal;
   const idleTimeoutMs = resolved.idleTimeoutMs;
   const channel = createRendezvousChannel<GraphInterchangeChunk>();

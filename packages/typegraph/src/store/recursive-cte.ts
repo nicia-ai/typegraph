@@ -261,7 +261,7 @@ function prepareExhaustiveReachableCte(
   } = prepareReachableFilters(options, edgeKindsForFilter);
 
   return {
-    baseCase: sql`SELECT n.id, n.kind FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`,
+    baseCase: sql`SELECT n.id, n.kind FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND n.kind = ${options.sourceKind} AND ${nodeTemporalFilter}`,
     recursiveColumns: [sql`n.id`, sql`n.kind`],
     recursiveWhere: [...edgeWhere, nodeTemporalFilter],
     edgeWhere,
@@ -318,6 +318,13 @@ export function buildReachableCte(
 type BuildExhaustiveDirectedReachableCteOptions = ReachableCteFiltersCore &
   Readonly<{
     sourceId: string;
+    /**
+     * The source node's kind. The walk is keyed by `(kind, id)` end to end —
+     * seeded from this node, and each hop following an edge from the frontier
+     * row's own `(kind, id)` — so a node of another kind that shares an id is
+     * never mistaken for a member of the closure.
+     */
+    sourceKind: string;
     /** Edge kinds walked in the "out" direction (`e.from_id = r.id`). */
     outEdgeKinds: readonly string[];
     /** Edge kinds walked in the "in" direction (`e.to_id = r.id`). */
@@ -560,10 +567,14 @@ type DirectedGroupsBranchOptions = Readonly<{
 
 /**
  * The directed-groups counterpart of {@link buildBidirectionalBranch}: an
- * edge row matches this frontier row either by starting from it (`e.from_id
- * = r.id`), restricted to `outEdgeKinds`, or by ending at it (`e.to_id =
- * r.id`), restricted to `inEdgeKinds` — never both regardless of kind, which
- * is what `buildBidirectionalBranch` does instead. An edge kind present in
+ * edge row matches this frontier row either by starting from it (`e.from_kind
+ * = r.kind AND e.from_id = r.id`), restricted to `outEdgeKinds`, or by ending
+ * at it (`e.to_kind = r.kind AND e.to_id = r.id`), restricted to
+ * `inEdgeKinds` — never both regardless of kind, which is what
+ * `buildBidirectionalBranch` does instead. Both arms match the frontier
+ * row's KIND as well as its id: node ids are unique per kind only, and the
+ * composition closure this serves is keyed by `(kind, id)` like `parts()` and
+ * the cascade. An edge kind present in
  * neither group can never match (`compileKindFilter([])` compiles to
  * `1 = 0`), so a caller may pass one empty group for a uniform-orientation
  * relation and get exactly the single-direction shape.
@@ -580,8 +591,8 @@ function buildDirectedGroupsBranch(
     sql.raw("e.kind"),
     options.inEdgeKinds,
   );
-  const joinCondition = sql`((e.from_id = r.id AND (${outKindFilter})) OR (e.to_id = r.id AND (${inKindFilter})))`;
-  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.from_id = r.id AND (${outKindFilter}) AND n.id = e.to_id AND n.kind = e.to_kind) OR (e.to_id = r.id AND (${inKindFilter}) AND n.id = e.from_id AND n.kind = e.from_kind))`;
+  const joinCondition = sql`((e.from_id = r.id AND e.from_kind = r.kind AND (${outKindFilter})) OR (e.to_id = r.id AND e.to_kind = r.kind AND (${inKindFilter})))`;
+  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.from_id = r.id AND e.from_kind = r.kind AND (${outKindFilter}) AND n.id = e.to_id AND n.kind = e.to_kind) OR (e.to_id = r.id AND e.to_kind = r.kind AND (${inKindFilter}) AND n.id = e.from_id AND n.kind = e.from_kind))`;
 
   return recursiveFrontierBranch({
     selectClause,
@@ -657,25 +668,31 @@ function kindKeys(members: readonly AcyclicRelationMember[]): {
 
 /**
  * The window predicate a relation's stored rows must also satisfy to be in
- * it: empty when every non-deleted row counts — every standalone relation,
- * so those statements stay byte-identical. The one spelling every reader of
- * stored rows below appends, so the seed and the walk cannot disagree about
- * which rows are in the relation.
+ * it: the SQL rendering of `membershipCountsRow`
+ * (`src/store/claims/edge-claims.ts`) under each member's own
+ * `membership` rule — an `"openRows"` member's row counts only while
+ * `valid_to IS NULL`. Empty when every member counts all rows — every
+ * standalone relation, so those statements stay byte-identical. The one
+ * spelling every reader of stored rows below appends, so the seed and the
+ * walk cannot disagree about which rows are in the relation. Rows the caller
+ * supplies (`proposedSeedRow`, `buildAcyclicityTargets`) were already judged
+ * by the same rule (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`)
+ * before they reach a statement.
  */
 function relationWindowFilters(
   members: readonly AcyclicRelationMember[],
   alias: string,
 ): readonly SqlFragment[] {
-  const openEndedOnly = members
-    .filter((member) => member.openEndedOnly === true)
+  const openRowsOnly = members
+    .filter((member) => member.membership === "openRows")
     .map((member) => member.edgeKind);
-  if (openEndedOnly.length === 0) return [];
-  const isOpenEndedOnlyRow = compileKindFilter(
+  if (openRowsOnly.length === 0) return [];
+  const isOpenRowsOnlyRow = compileKindFilter(
     sql.raw(`${alias}.kind`),
-    openEndedOnly,
+    openRowsOnly,
   );
   return [
-    sql`(NOT (${isOpenEndedOnlyRow}) OR ${sql.raw(`${alias}.valid_to`)} IS NULL)`,
+    sql`(NOT (${isOpenRowsOnlyRow}) OR ${sql.raw(`${alias}.valid_to`)} IS NULL)`,
   ];
 }
 

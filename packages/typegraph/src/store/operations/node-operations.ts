@@ -156,6 +156,7 @@ import { generateId } from "../../utils/id";
 import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import { acyclicRelationCountsRow } from "../acyclicity";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
 import {
   assertNodeClaimTransitionsAvailable,
@@ -278,6 +279,7 @@ import {
 import {
   createEdgeBatchValidationBackend,
   createRetiringEdgeValidationBackend,
+  type RetiringEdge,
 } from "./edge-batch-validation";
 import {
   assertCompositionEdgeWindowEndable,
@@ -305,6 +307,7 @@ import {
   runHookedWritePlan,
   runWritePlan,
   writeResultAlwaysChanges,
+  type WriteRowWork,
 } from "./write-executor";
 import { type NodeUpdateFences } from "./write-fences";
 import {
@@ -3739,39 +3742,36 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
   operation: string,
   moves: readonly DecidedAttachmentMove[],
 ): Promise<readonly PreparedAttachmentMove[]> {
-  const retiring = moves.flatMap(({ decided }) =>
-    decided.disposition === "replace" ?
-      [
-        requireDefined(
-          decided.incumbent,
-          'decideCompositionIncumbent answered "replace" with no incumbent read',
-        ).edge,
-      ]
-    : [],
-  );
+  const retires = moves.map((move) => incumbentRetire(ctx, move));
   const { backend: validationTarget, registerPendingEdgeForCardinality } =
     createEdgeBatchValidationBackend(
-      createRetiringEdgeValidationBackend(target, retiring),
+      createRetiringEdgeValidationBackend(
+        target,
+        retires.flatMap((retire) =>
+          retire === undefined ? [] : [retiringEdgeOf(retire)],
+        ),
+      ),
     );
 
   const prepared: PreparedAttachmentMove[] = [];
-  for (const { partId, decided, moveAt, endpoints } of moves) {
+  for (const [
+    index,
+    { partId, decided, moveAt, endpoints },
+  ] of moves.entries()) {
     if (decided.disposition === "satisfied") {
       prepared.push({ partId, decided });
       continue;
     }
     const { work } = decided.request;
     const part = { kind: work.partKind, id: partId };
-    const incumbent =
-      decided.disposition === "replace" ? decided.incumbent : undefined;
-    const moveInstant = incumbent === undefined ? moveAt : (moveAt ?? nowIso());
+    const retire = retires[index];
     const replacement = await prepareCompositionCreateEdge(
       ctx,
       validationTarget,
       lock,
       work,
       partId,
-      attachmentWindow(work, moveInstant),
+      attachmentWindow(work, retire?.moveInstant ?? moveAt),
       {
         endpoints,
         validateAcyclicity: false,
@@ -3781,24 +3781,16 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
       replacement.insertParams,
       replacement.declarations,
     );
-    if (incumbent === undefined || moveInstant === undefined) {
+    if (retire === undefined) {
       prepared.push({ partId, decided, replacement });
       continue;
     }
-    // How the incumbent retires follows the population declared on ITS OWN
-    // pair, resolved through the realizing edge that holds the attachment.
-    const { population } = requireCompositionPairVia(
-      ctx.registry,
-      work.partKind,
-      incumbent.whole.kind,
-      incumbent.edge.kind,
-    );
-    if (population === "oneActive") {
+    if (retire.population === "oneActive") {
       await assertCompositionEdgeWindowEndable(
         ctx,
-        incumbent.edge,
+        retire.incumbent,
         part,
-        moveInstant,
+        retire.moveInstant,
         target,
         lock,
       );
@@ -3815,16 +3807,11 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
           lock,
           reattachedPart: part,
         },
-        incumbent.edge,
+        retire.incumbent,
         target,
       );
     }
-    prepared.push({
-      partId,
-      decided,
-      replacement,
-      retire: { incumbent: incumbent.edge, population, moveInstant },
-    });
+    prepared.push({ partId, decided, replacement, retire });
   }
 
   await assertPreparedEdgeCreatesAcyclic(
@@ -3835,9 +3822,78 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     prepared.flatMap((move) =>
       move.replacement === undefined ? [] : [move.replacement],
     ),
-    retiring.map((edge) => edge.id),
+    retires.flatMap((retire) =>
+      retire !== undefined && retireRemovesFromAcyclicRelation(ctx, retire) ?
+        [retire.incumbent.id]
+      : [],
+    ),
   );
   return prepared;
+}
+
+/** How one `"replace"` decision retires its incumbent. */
+type IncumbentRetire = NonNullable<PreparedAttachmentMove["retire"]>;
+
+/**
+ * How a decided move retires its incumbent, or `undefined` for a decision
+ * that retires nothing. The population is the one declared on the
+ * incumbent's OWN pair, resolved through the realizing edge that holds the
+ * attachment: a `one` incumbent is deleted, a `oneActive` one has its window
+ * ended at the move instant — one clock read, shared by the ended window and
+ * the new one.
+ */
+function incumbentRetire<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  { decided, moveAt }: DecidedAttachmentMove,
+): IncumbentRetire | undefined {
+  if (decided.disposition !== "replace") return undefined;
+  const incumbent = requireDefined(
+    decided.incumbent,
+    'decideCompositionIncumbent answered "replace" with no incumbent read',
+  );
+  const { population } = requireCompositionPairVia(
+    ctx.registry,
+    decided.request.work.partKind,
+    incumbent.whole.kind,
+    incumbent.edge.kind,
+  );
+  return {
+    incumbent: incumbent.edge,
+    population,
+    moveInstant: moveAt ?? nowIso(),
+  };
+}
+
+/** The incumbent's row and the state its retire leaves it in. */
+function retiringEdgeOf(retire: IncumbentRetire): RetiringEdge {
+  return retire.population === "oneActive" ?
+      {
+        row: retire.incumbent,
+        retire: "endWindow",
+        validTo: retire.moveInstant,
+      }
+    : { row: retire.incumbent, retire: "delete" };
+}
+
+/**
+ * Whether retiring the incumbent takes it out of the acyclic relation its kind
+ * is probed against. A delete always does. A window end does only when that
+ * relation counts open rows alone ({@link acyclicRelationCountsRow}): an
+ * ended row of a composition kind is history, but the same row of a kind
+ * also declared `acyclic: true` stays in the relation, so the probe must
+ * still walk it.
+ */
+function retireRemovesFromAcyclicRelation<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  retire: IncumbentRetire,
+): boolean {
+  return (
+    retire.population === "one" ||
+    !acyclicRelationCountsRow(ctx.graph, ctx.registry, {
+      edgeKind: retire.incumbent.kind,
+      validTo: retire.moveInstant,
+    })
+  );
 }
 
 /**
@@ -4672,25 +4728,52 @@ export async function executeNodeReparent<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
 ): Promise<NodeReparentResult> {
-  const [result] = await executeNodeReparentBatch(
+  const [result] = await reparentParts(
     ctx,
     kind,
     [{ id, options }],
     backend,
     disposition,
+    { kind: "single", id },
   );
   return requireDefined(
     result,
-    "executeNodeReparentBatch returned no result for a single reparent",
+    "reparentParts returned no result for a single reparent",
   );
 }
 
+/**
+ * `bulkReparent`: every move decided and prepared before the first write,
+ * in one frame. Like every other batch method it fires no operation hooks —
+ * a hook names one entity, and a batch is not one — so a caller observing
+ * each move calls `reparent` per part.
+ */
 export async function executeNodeReparentBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
   backend: GraphBackend | TransactionBackend,
   disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
+): Promise<readonly NodeReparentResult[]> {
+  return reparentParts(ctx, kind, items, backend, disposition, {
+    kind: "batch",
+  });
+}
+
+/**
+ * Which surface a reparent frame serves, and so whether it fires operation
+ * hooks: the single-part `reparent` does, for its one part; a batch does not.
+ */
+type ReparentSurface =
+  Readonly<{ kind: "single"; id: string }> | Readonly<{ kind: "batch" }>;
+
+async function reparentParts<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+  backend: GraphBackend | TransactionBackend,
+  disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
+  surface: ReparentSurface,
 ): Promise<readonly NodeReparentResult[]> {
   if (items.length === 0) return [];
   if (!ctx.registry.isCompositionPart(kind)) {
@@ -4744,64 +4827,83 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
       throw new NodeNotFoundError(kind, item.id);
   }
   const first = requireDefined(resolved[0]);
-  return runHookedWritePlan(
-    nodeWritePlanContext(ctx),
-    ctx.createOperationContext("update", "node", kind, first.id),
-    mixedWritePlan(
-      compositionEdgeConstraintFence(ctx, first.request.work),
-      false,
-    ),
-    backend,
-    async (session, target, _overlaidSession, lock) => {
-      // Every item is decided, then every move prepared, before the first
-      // write: see `prepareCompositionAttachmentMoves`.
-      const decisions: DecidedAttachmentMove[] = [];
-      for (const item of resolved) {
-        // Re-read under the lock: the gate above is lock-free, and a
-        // concurrent delete between the two must not leave this frame
-        // attaching a tombstoned part to a live whole.
-        const part = await target.getNode(ctx.graphId, kind, item.id);
-        if (!part || !isLiveNodeRow(part)) {
-          throw new NodeNotFoundError(kind, item.id);
-        }
-        decisions.push({
-          partId: item.id,
-          moveAt: item.moveAt,
-          endpoints: { source: "read" },
-          decided: await decideCompositionAttachmentUnderFence(
-            ctx.registry,
-            target,
-            ctx.graphId,
-            item.id,
-            item.request,
-            lock,
-            { partRowRestoredByUpdate: false },
-          ),
-        });
+  const plan = mixedWritePlan(
+    compositionEdgeConstraintFence(ctx, first.request.work),
+    false,
+  );
+  const rowWork: WriteRowWork<"mixed", readonly NodeReparentResult[]> = async (
+    session,
+    target,
+    _overlaidSession,
+    lock,
+  ) => {
+    // Every item is decided, then every move prepared, before the first
+    // write: see `prepareCompositionAttachmentMoves`.
+    const decisions: DecidedAttachmentMove[] = [];
+    for (const item of resolved) {
+      // Re-read under the lock: the gate above is lock-free, and a
+      // concurrent delete between the two must not leave this frame
+      // attaching a tombstoned part to a live whole.
+      const part = await target.getNode(ctx.graphId, kind, item.id);
+      if (!part || !isLiveNodeRow(part)) {
+        throw new NodeNotFoundError(kind, item.id);
       }
-      const applied = await writeCompositionAttachmentMoves(
+      decisions.push({
+        partId: item.id,
+        moveAt: item.moveAt,
+        endpoints: { source: "read" },
+        decided: await decideCompositionAttachmentUnderFence(
+          ctx.registry,
+          target,
+          ctx.graphId,
+          item.id,
+          item.request,
+          lock,
+          { partRowRestoredByUpdate: false },
+        ),
+      });
+    }
+    const applied = await writeCompositionAttachmentMoves(
+      ctx,
+      session,
+      target,
+      lock,
+      await prepareCompositionAttachmentMoves(
         ctx,
-        session,
         target,
         lock,
-        await prepareCompositionAttachmentMoves(
-          ctx,
-          target,
-          lock,
-          "nodes.reparent",
-          decisions,
-        ),
+        "nodes.reparent",
+        decisions,
+      ),
+    );
+    return applied.map((result) => ({
+      moved: result.wrote,
+      edge: requireDefined(
+        result.edge,
+        "a reparent that did not refuse produced no holding edge",
+      ),
+    }));
+  };
+  const planOptions = {
+    didWrite: (results: readonly NodeReparentResult[]) =>
+      results.some((result) => result.moved),
+  };
+  return surface.kind === "single" ?
+      runHookedWritePlan(
+        nodeWritePlanContext(ctx),
+        ctx.createOperationContext("update", "node", kind, surface.id),
+        plan,
+        backend,
+        rowWork,
+        planOptions,
+      )
+    : runWritePlan(
+        nodeWritePlanContext(ctx),
+        plan,
+        backend,
+        rowWork,
+        planOptions,
       );
-      return applied.map((result) => ({
-        moved: result.wrote,
-        edge: requireDefined(
-          result.edge,
-          "a reparent that did not refuse produced no holding edge",
-        ),
-      }));
-    },
-    { didWrite: (results) => results.some((result) => result.moved) },
-  );
 }
 
 /**

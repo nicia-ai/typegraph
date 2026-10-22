@@ -52,6 +52,7 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import {
+  CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   EndpointNotFoundError,
@@ -64,6 +65,7 @@ import {
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
+import { compareCodePoints } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   nowIso,
@@ -232,23 +234,168 @@ export function readCompositionAttachment(
   return readStatedAttachment(partOf, PART_OF_SURFACE, part);
 }
 
-function readMoveInstant(at: string | undefined): string {
-  return at === undefined ? nowIso() : (
-      validateCanonicalIsoDate(at, `${REPARENT_SURFACE.path}.at`)
-    );
-}
-
 /**
  * Reads `reparent`'s options: the destination attachment and the move
  * instant, which is `at` or one clock read. The new edge's lower bound is
- * that instant, never a separately stated `validFrom`.
+ * that instant, never a separately stated `validFrom`. Only a stated `at` is
+ * judged against the clock: a defaulted one IS the clock read, and comparing
+ * it against a second read could refuse it across a backward clock step.
  */
 export function readReparentOptions(
   options: NodeReparentOptions,
   part: Readonly<{ kind: string; id: string }>,
 ): Readonly<{ attachment: StatedCompositionAttachment; moveAt: string }> {
   const attachment = readStatedAttachment(options, REPARENT_SURFACE, part);
-  return { attachment, moveAt: readMoveInstant(options.at) };
+  if (options.at === undefined) return { attachment, moveAt: nowIso() };
+  const moveAt = validateCanonicalIsoDate(
+    options.at,
+    `${REPARENT_SURFACE.path}.at`,
+  );
+  assertCompositionMoveCurrent(part, attachment.whole, moveAt, nowIso());
+  return { attachment, moveAt };
+}
+
+/**
+ * Refuses a move instant later than the operation clock
+ * (`COMPOSITION_MOVE_FUTURE`): a move ends the incumbent attachment and
+ * starts the new one at `at`, so a later `at` would schedule both
+ * transitions — see {@link assertCompositionWindowCurrent}. Read-free, so it
+ * precedes the frame's first statement on `reparent` and `bulkReparent`.
+ */
+function assertCompositionMoveCurrent(
+  part: Readonly<{ kind: string; id: string }>,
+  whole: CompositionNodeRef,
+  at: string,
+  operationInstant: string,
+): void {
+  if (compareCodePoints(at, operationInstant) <= 0) return;
+  throw new CompositionError({
+    situation: "futureMove",
+    partKind: part.kind,
+    partId: part.id,
+    wholeKind: whole.kind,
+    wholeId: whole.id,
+    at,
+    operationInstant,
+  });
+}
+
+/**
+ * The composition edge a window bound is judged for: its kind and, when it
+ * exists already, its id, with the endpoints named by the role each plays.
+ * `part.id` is absent while the part itself is being created under a
+ * generated id.
+ */
+type CompositionWindowSubject = Readonly<{
+  edgeKind: string;
+  edgeId?: string;
+  part: Readonly<{ kind: string; id?: string }>;
+  whole: CompositionNodeRef;
+}>;
+
+/** The bounds a composition edge write states; omitted or `undefined` states none. */
+type CompositionWindow = Readonly<{
+  validFrom?: string | null | undefined;
+  validTo?: string | undefined;
+}>;
+
+/**
+ * THE no-future-windows rule of composition: a composition edge write may not
+ * state a `validFrom` (`COMPOSITION_VALIDITY_FUTURE_START`) or a `validTo`
+ * (`COMPOSITION_VALIDITY_FUTURE_END`) later than the operation clock.
+ *
+ * This is what makes composition membership a fact of the ROW: with no window
+ * scheduled to open or close later, a row with no `validTo` is the part's
+ * attachment now and at every later instant, and an ended row is history for
+ * good — so `membershipCountsRow` (`src/store/claims/edge-claims.ts`) can
+ * decide membership statically for the claim, the cascade, the audit and the
+ * acyclicity relation, and every current-time read agrees with them. A
+ * future end would leave a part holding two current wholes behind a released
+ * claim; a future start a required part with no current whole.
+ *
+ * Read-free. Every surface that writes a composition edge's window reaches
+ * it before its first statement: `partOf` on every node create
+ * ({@link compositionCreateWork}), every store edge create and update
+ * (`validateAndPrepareEdgeCreate` / `prepareEdgeUpdate`,
+ * `edge-operations.ts` — which a graph merge's apply writes through), and
+ * import ({@link compositionWindowRefusal}, as a per-row error). `reparent`'s
+ * one instant is refused by `assertCompositionMoveCurrent` instead, under its
+ * own code.
+ */
+export function assertCompositionWindowCurrent(
+  subject: CompositionWindowSubject,
+  window: CompositionWindow,
+  operationInstant: string,
+): void {
+  const refusal = compositionWindowRefusal(subject, window, operationInstant);
+  if (refusal !== undefined) throw refusal;
+}
+
+/**
+ * {@link assertCompositionWindowCurrent}'s verdict as a value, for a caller
+ * that reports a refusal per row instead of throwing it (import).
+ */
+export function compositionWindowRefusal(
+  subject: CompositionWindowSubject,
+  window: CompositionWindow,
+  operationInstant: string,
+): CompositionError | undefined {
+  const [situation, bound] =
+    (
+      typeof window.validFrom === "string" &&
+      compareCodePoints(window.validFrom, operationInstant) > 0
+    ) ?
+      (["futureStart", window.validFrom] as const)
+    : (
+      window.validTo !== undefined &&
+      compareCodePoints(window.validTo, operationInstant) > 0
+    ) ?
+      (["futureEnd", window.validTo] as const)
+    : [undefined, undefined];
+  if (situation === undefined) return undefined;
+  return new CompositionError({
+    situation,
+    partKind: subject.part.kind,
+    ...(subject.part.id === undefined ? {} : { partId: subject.part.id }),
+    wholeKind: subject.whole.kind,
+    wholeId: subject.whole.id,
+    edgeKind: subject.edgeKind,
+    ...(subject.edgeId === undefined ? {} : { edgeId: subject.edgeId }),
+    bound,
+    operationInstant,
+  });
+}
+
+/**
+ * The {@link CompositionWindowSubject} of an edge of `edgeKind` between these
+ * endpoints, or `undefined` when `edgeKind` realizes no composition pair and
+ * the window rule does not apply.
+ */
+export function compositionWindowSubject(
+  registry: KindRegistry,
+  edge: Readonly<{
+    kind: string;
+    id?: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+  }>,
+): CompositionWindowSubject | undefined {
+  const partSide = registry.compositionPartSide(edge.kind);
+  if (partSide === undefined) return undefined;
+  const { part, whole } = compositionRowEndpoints(partSide, {
+    from_kind: edge.fromKind,
+    from_id: edge.fromId,
+    to_kind: edge.toKind,
+    to_id: edge.toId,
+  });
+  return {
+    edgeKind: edge.kind,
+    ...(edge.id === undefined ? {} : { edgeId: edge.id }),
+    part,
+    whole,
+  };
 }
 
 /**
@@ -493,6 +640,15 @@ function compositionCreateWork(
   }
 
   const pair = resolveCompositionAttachment(registry, partKind, attachment);
+  assertCompositionWindowCurrent(
+    {
+      edgeKind: pair.viaEdgeKind,
+      part,
+      whole: attachment.whole,
+    },
+    attachment.edgeWindow,
+    nowIso(),
+  );
   assertStatedWindowAttachesPart(registry, part, pair, attachment);
   return {
     pair,
@@ -608,7 +764,9 @@ export function compositionEdgeHasRequiredExistencePart(
 
 /**
  * THE answer to "does this composition edge row attach its part to a live
- * whole AT THE CURRENT READ INSTANT" — ignoring `deleted_at`, valid-time is
+ * whole" — a fact of the row, which is also its answer at the current read
+ * instant because no composition window starts or ends later than its write
+ * ({@link assertCompositionWindowCurrent}). Ignoring `deleted_at`, valid-time is
  * everything `assertCompositionExistencePreserved`, `findLiveCompositionWhole`
  * (and, through it, the import assertion and `verifyConstraintFences`'s
  * `compositionExistence` audit) share, so none of them re-spell it apart and
