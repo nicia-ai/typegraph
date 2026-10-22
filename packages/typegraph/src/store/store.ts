@@ -160,12 +160,14 @@ import {
 } from "../identity/schema-transition";
 import {
   applyIdentityChangesForContext,
+  applyIdentityFold,
   assertAffectedIdentityClassesConsistent,
   assertIdentityFoldable,
   createIdentityFacade,
   createIdentityReadFacade,
   detachIdentityForNode,
   foldIdentityForCreatedNodes,
+  type IdentityFoldPlan,
   type IdentityImportSummary,
   type IdentityRebuildContext,
   type IdentityServiceContext,
@@ -7582,6 +7584,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 },
                 target,
                 references,
+              ),
+            applyFold: (
+              target: IdentityTarget,
+              plan: IdentityFoldPlan,
+              cause: "fold" | "restore",
+            ) =>
+              applyIdentityFold(
+                {
+                  graphId: this.graphId,
+                  registry: this.#registry,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                plan,
+                cause,
               ),
             detachDeleted: (
               target: IdentityTarget,

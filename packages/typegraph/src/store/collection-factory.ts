@@ -23,6 +23,7 @@ import {
   type EdgeUpsertUpdateBatchEntry,
 } from "./collections/edge-collection";
 import {
+  type NodeCreateBatchOptions,
   type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
@@ -65,7 +66,7 @@ export type NodeOperations = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ propsPreValidated?: true }>,
+    options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],

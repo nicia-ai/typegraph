@@ -131,7 +131,10 @@ import { chunk } from "../../utils/array";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
+  nowIso,
   preservesImmutableLowerBound,
+  resolveStampedValidityLowerBound,
+  resolveStatedValidityLowerBound,
   validateOptionalCanonicalIsoDate,
   validateStatedValidityLowerBound,
 } from "../../utils/date";
@@ -231,7 +234,10 @@ import {
   assertEndpointRowLive,
   edgeWriteEndsOpenWindow,
 } from "./composition-create";
-import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
+import {
+  createEdgeBatchValidationBackend,
+  createEdgeTransitionValidationBackend,
+} from "./edge-batch-validation";
 import {
   assertEdgeIdentityMatches,
   type EdgeIdentityExpectation,
@@ -1898,15 +1904,22 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
     return [];
   }
 
-  const atomicExecutor = resolveAtomicEdgeBatchExecutor({
-    backend,
-    graph: ctx.graph,
-    registry: ctx.registry,
-    inputs,
-    schemaVersion: ctx.schemaVersion,
-    historyEnabled: ctx.historyEnabled,
-    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-  });
+  const pairedUpdates = options?.pairedUpdates ?? [];
+  // The native program issues its inserts in the statement that decides
+  // them, leaving no point at which the paired updates could be decided
+  // first, so a batch that has any takes the portable frame.
+  const atomicExecutor =
+    pairedUpdates.length > 0 ?
+      undefined
+    : resolveAtomicEdgeBatchExecutor({
+        backend,
+        graph: ctx.graph,
+        registry: ctx.registry,
+        inputs,
+        schemaVersion: ctx.schemaVersion,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+      });
   if (atomicExecutor !== undefined) {
     const preparation = await prepareAtomicEdgeBatchCreates(
       ctx,
@@ -1926,7 +1939,14 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 
   return runWritePlan(
     ctx,
-    edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
+    // The paired updates are decided under this frame's fence, so it fences
+    // for their kinds as a create of each would.
+    edgeWritePlan(
+      batchFencesConstraintProbe(ctx, [
+        ...inputs,
+        ...pairedUpdates.map((entry) => ({ kind: entry.input.identity.kind })),
+      ]),
+    ),
     backend,
     async (session, target, _overlaidSession, lock) => {
       const { batchInsertWork } = await prepareEdgeBatchCreates(
@@ -1934,6 +1954,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
         inputs,
         target,
       );
+      if (pairedUpdates.length > 0) {
+        await prepareEdgeUpdateSet(ctx, pairedUpdates, target, lock, {
+          storedRows: storedRowsOfUpdateEntries(pairedUpdates),
+          pendingCreates: batchInsertWork.map((work) => work.params),
+        });
+      }
 
       const durableWork = batchInsertWork.filter(
         (item) => item.params.matchIdentity !== undefined,
@@ -2013,7 +2039,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
  */
 function batchFencesConstraintProbe<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  inputs: readonly CreateEdgeInput[],
+  inputs: readonly Readonly<{ kind: string }>[],
 ): ConstraintFenceReason | undefined {
   for (const input of inputs) {
     const reason = edgeWriteFenceReason(
@@ -2252,10 +2278,18 @@ type EdgeUpdateOptions = Readonly<{
   reattachedPart?: CompositionNodeRef;
 }>;
 
-/** One edge update with every verdict reached and no statement issued. */
+/**
+ * One edge update with every verdict reached and no statement issued.
+ *
+ * `rowAfter` is the row as the write leaves it — the merged props, the
+ * effective window and liveness the verdicts above were reached for — which a
+ * frame preparing several writes judges the next one against
+ * ({@link prepareEdgeUpdateSet}).
+ */
 type EdgeUpdatePrepared = Readonly<{
   work: EdgeUpdateWork;
   fences: EdgeUpdateFences;
+  rowAfter: BackendEdgeRow;
 }>;
 
 /**
@@ -2523,7 +2557,21 @@ async function prepareEdgeUpdate<G extends GraphDef>(
     );
   }
 
-  return { work, fences };
+  // A resurrection that names a lower bound restates the window; every other
+  // update keeps the stored bound (see `buildUpdateEdge`).
+  const rowAfter: BackendEdgeRow = {
+    ...existing,
+    props: validatedProps,
+    valid_from:
+      options?.clearDeleted === true && appliedValidFrom !== undefined ?
+        resolveStatedValidityLowerBound(appliedValidFrom)
+      : existing.valid_from,
+    valid_to: effectiveValidTo,
+    deleted_at:
+      options?.clearDeleted === true ? undefined : existing.deleted_at,
+  };
+
+  return { work, fences, rowAfter };
 }
 
 async function performEdgeUpdate<G extends GraphDef>(
@@ -2535,7 +2583,7 @@ async function performEdgeUpdate<G extends GraphDef>(
   resolvedExisting?: BackendEdgeRow,
   lock?: GraphWriteLock,
 ): Promise<Edge> {
-  const { work, fences } = await prepareEdgeUpdate(
+  const prepared = await prepareEdgeUpdate(
     ctx,
     input,
     target,
@@ -2543,6 +2591,17 @@ async function performEdgeUpdate<G extends GraphDef>(
     resolvedExisting,
     lock,
   );
+  return writePreparedEdgeUpdate(ctx, input, prepared, session, target);
+}
+
+/** The WRITE half of {@link performEdgeUpdate}: one prepared update's statement. */
+async function writePreparedEdgeUpdate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: UpsertUpdateEdgeInput,
+  { work, fences }: EdgeUpdatePrepared,
+  session: EdgeWriteSession,
+  target: WriteTarget,
+): Promise<Edge> {
   const row = await withUnmatchedEdgeUpdateRefusal(
     ctx.graphId,
     target,
@@ -2605,16 +2664,227 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
     } catch (error) {
       if (!(error instanceof EdgeUpdateTargetMoved)) throw error;
       if (attempt === EDGE_UPDATE_ATTEMPTS) {
-        throw new DatabaseOperationError(
-          `Edge update for "${input.id}" could not be applied to a stable row after ${EDGE_UPDATE_ATTEMPTS} attempts: the row was replaced between each read and its write. A concurrent writer is replacing this edge faster than it can be read; serialize the writers, or retry.`,
-          { operation: "update", entity: "edge" },
-          { cause: error },
-        );
+        throw unstableEdgeUpdateTargetError(input.id, error);
       }
     }
   }
   // Unreachable: the loop either returns or throws on its last attempt.
   throw new EdgeNotFoundError(input.identity.kind, input.id);
+}
+
+/** The refusal an update whose row kept moving under it ends with. */
+function unstableEdgeUpdateTargetError(
+  id: string,
+  cause: EdgeUpdateTargetMoved,
+): DatabaseOperationError {
+  return new DatabaseOperationError(
+    `Edge update for "${id}" could not be applied to a stable row after ${EDGE_UPDATE_ATTEMPTS} attempts: the row was replaced between each read and its write. A concurrent writer is replacing this edge faster than it can be read; serialize the writers, or retry.`,
+    { operation: "update", entity: "edge" },
+    { cause },
+  );
+}
+
+/** The update options one batch entry carries into the shared update body. */
+function edgeUpdateBatchEntryOptions(
+  entry: EdgeUpsertUpdateBatchEntry,
+): EdgeUpdateOptions | undefined {
+  return entry.clearDeleted ? { clearDeleted: true } : undefined;
+}
+
+/**
+ * One entry of a prepared update set: its prepared write, and whether it was
+ * prepared against the row as STORED. An entry prepared against a row an
+ * earlier write of the same frame leaves (a repeated id, or a row the frame
+ * inserts first) was judged on that projection, so its write re-prepares
+ * against the row actually there by then rather than carrying fences read off
+ * the projection.
+ */
+type EdgeUpdateSetEntry = Readonly<{
+  prepared: EdgeUpdatePrepared;
+  preparedAgainstStoredRow: boolean;
+}>;
+
+/**
+ * The stored rows a set of update entries already carries — each read inside
+ * the transaction that writes it, by the caller that resolved the entry.
+ */
+function storedRowsOfUpdateEntries(
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+): ReadonlyMap<string, BackendEdgeRow> {
+  return new Map(
+    entries.flatMap((entry) =>
+      entry.existing === undefined ? [] : [[entry.input.id, entry.existing]],
+    ),
+  );
+}
+
+/**
+ * The row an insert this frame is about to issue will leave, as the update
+ * set's projections read it. The lower bound is the one the insert stamps
+ * ({@link resolveStampedValidityLowerBound}), taken at this frame's clock — an
+ * instant the insert's own stamp can only follow.
+ */
+function edgeRowOfPendingInsert(params: InsertEdgeParams): BackendEdgeRow {
+  const instant = nowIso();
+  return {
+    graph_id: params.graphId,
+    id: params.id,
+    kind: params.kind,
+    from_kind: params.fromKind,
+    from_id: params.fromId,
+    to_kind: params.toKind,
+    to_id: params.toId,
+    props: params.props,
+    ...(params.matchIdentity !== undefined && {
+      match_identity_name: params.matchIdentity.name,
+      match_identity_key: params.matchIdentity.key,
+    }),
+    valid_from: resolveStampedValidityLowerBound(
+      params.validFrom,
+      params.validTo,
+      instant,
+    ),
+    valid_to: params.validTo,
+    created_at: instant,
+    updated_at: instant,
+    deleted_at: undefined,
+  };
+}
+
+/**
+ * The READ half of a SET of edge updates a frame writes one row at a time:
+ * every entry prepared ({@link prepareEdgeUpdate}) before the first is
+ * written, so a refusal any entry reaches precedes the frame's first
+ * statement. A caller that catches it inside an enclosing
+ * `store.transaction(...)`, where there is no nested frame to roll back, is
+ * left with none of the set's writes.
+ *
+ * The set is judged as the state it produces, in write order. Each entry is
+ * prepared against the row the earlier writes leave: its stored row, the
+ * `rowAfter` of the last earlier entry for the same id, or the row one of
+ * `pendingCreates` (inserts this frame issues BEFORE the updates) will write.
+ * Its cardinality and composition probes read counts that already reflect
+ * every earlier entry and every pending insert
+ * ({@link createEdgeTransitionValidationBackend}). Acyclicity stays the set's
+ * own probe over every resurrection ({@link assertResurrectionsAcyclic}, or
+ * the create batch's `pairedUpdates`): an entry's own probe reads stored
+ * state only.
+ *
+ * `storedRows` are rows read inside this frame's transaction; an entry whose
+ * id has none is read from `target`.
+ */
+async function prepareEdgeUpdateSet<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  sources: Readonly<{
+    storedRows?: ReadonlyMap<string, BackendEdgeRow>;
+    pendingCreates?: readonly InsertEdgeParams[];
+  }> = {},
+): Promise<readonly EdgeUpdateSetEntry[]> {
+  const { backend: validationTarget, registerEdgeTransition } =
+    createEdgeTransitionValidationBackend(target);
+  const projected = new Map<string, BackendEdgeRow>();
+  for (const params of sources.pendingCreates ?? []) {
+    const row = edgeRowOfPendingInsert(params);
+    registerEdgeTransition(undefined, row);
+    projected.set(row.id, row);
+  }
+
+  const prepared: EdgeUpdateSetEntry[] = [];
+  for (const entry of entries) {
+    const id = entry.input.id;
+    const projection = projected.get(id);
+    const stored =
+      projection === undefined ?
+        (sources.storedRows?.get(id) ?? (await target.getEdge(ctx.graphId, id)))
+      : undefined;
+    const update = await prepareEdgeUpdate(
+      ctx,
+      entry.input,
+      validationTarget,
+      edgeUpdateBatchEntryOptions(entry),
+      projection ?? stored,
+      lock,
+    );
+    registerEdgeTransition(stored, update.rowAfter);
+    projected.set(id, update.rowAfter);
+    prepared.push({
+      prepared: update,
+      preparedAgainstStoredRow: projection === undefined,
+    });
+  }
+  return prepared;
+}
+
+/**
+ * Writes a set of edge updates, every one of them prepared before the first
+ * is written ({@link prepareEdgeUpdateSet}), and CONVERGES as
+ * {@link performEdgeUpdateConverging} does for one: when a row's asserted
+ * window stopped matching, the entries not yet written are prepared again —
+ * all of them, before the next write — against the rows actually there, and
+ * the set carries on from the moved entry. Each entry gets the one retry the
+ * single-row path gives it.
+ */
+async function writeEdgeUpdateSet<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+  session: EdgeWriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  storedRows: ReadonlyMap<string, BackendEdgeRow> | undefined,
+): Promise<readonly Edge[]> {
+  const edges: Edge[] = [];
+  const movedEntries = new Set<number>();
+  // `let` earns its place: once a row moved, the rows read before the first
+  // write no longer describe the entries still to be written.
+  let rows = storedRows;
+  while (edges.length < entries.length) {
+    const written = edges.length;
+    const remaining = entries.slice(written);
+    const prepared = await prepareEdgeUpdateSet(ctx, remaining, target, lock, {
+      ...(rows === undefined ? {} : { storedRows: rows }),
+    });
+    try {
+      for (const [offset, entry] of remaining.entries()) {
+        const { prepared: update, preparedAgainstStoredRow } = requireDefined(
+          prepared[offset],
+        );
+        edges.push(
+          preparedAgainstStoredRow ?
+            await writePreparedEdgeUpdate(
+              ctx,
+              entry.input,
+              update,
+              session,
+              target,
+            )
+          : await performEdgeUpdate(
+              ctx,
+              entry.input,
+              session,
+              target,
+              edgeUpdateBatchEntryOptions(entry),
+              undefined,
+              lock,
+            ),
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof EdgeUpdateTargetMoved)) throw error;
+      const movedIndex = edges.length;
+      if (movedEntries.has(movedIndex)) {
+        throw unstableEdgeUpdateTargetError(
+          requireDefined(entries[movedIndex]).input.id,
+          error,
+        );
+      }
+      movedEntries.add(movedIndex);
+      rows = undefined;
+    }
+  }
+  return edges;
 }
 
 /**
@@ -2883,15 +3153,7 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
           ) {
             assertEdgeMatchKey(existing, options.matchOn, options.matchProps);
           }
-          const runDirtyCheck = () =>
-            edgeUpsertDirtyCheck(
-              ctx,
-              existing.kind,
-              existing.id,
-              rowPropsToObject(existing.props),
-              input.props,
-            );
-          if (shouldCoalesceUpsert(existing, input, runDirtyCheck)) {
+          if (edgeUpsertCoalesces(ctx, existing, input)) {
             return { edge: rowToEdge(existing), wrote: false };
           }
         }
@@ -2911,6 +3173,28 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     {
       didWrite: (outcome) => outcome.wrote,
     },
+  );
+}
+
+/**
+ * Whether a coalescing upsert of `input` over the live row `existing` writes
+ * nothing: the props it would persist equal the stored ones and it states no
+ * window change. Read by the upsert itself and by a batch that decides, before
+ * its first write, which of its upserts will write at all.
+ */
+function edgeUpsertCoalesces<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  existing: BackendEdgeRow,
+  input: UpsertUpdateEdgeInput,
+): boolean {
+  return shouldCoalesceUpsert(existing, input, () =>
+    edgeUpsertDirtyCheck(
+      ctx,
+      existing.kind,
+      existing.id,
+      rowPropsToObject(existing.props),
+      input.props,
+    ),
   );
 }
 
@@ -3122,21 +3406,14 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
           ])
         : undefined;
       await assertResurrectionsAcyclic(ctx, target, lock, entries);
-      const edges: Edge[] = [];
-      for (const entry of entries) {
-        edges.push(
-          await performEdgeUpdateConverging(
-            ctx,
-            entry.input,
-            session,
-            target,
-            entry.clearDeleted ? { clearDeleted: true } : undefined,
-            resolvedRows?.get(entry.input.id),
-            lock,
-          ),
-        );
-      }
-      return edges;
+      return writeEdgeUpdateSet(
+        ctx,
+        entries,
+        session,
+        target,
+        lock,
+        resolvedRows,
+      );
     },
     { didWrite: writeResultAlwaysChanges },
   );
@@ -4649,9 +4926,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
   // under one per-graph mutual exclusion — the bulk analogue of the single-item
   // path's `convergeOn` guard, and the reason the bulk path needs no in-loop
   // race handling of its own.
-  function runBatch(): Promise<
-    Readonly<{ results: Result[]; writes: number }>
-  > {
+  function runBatch(
+    progress: BulkGetOrCreateProgress,
+  ): Promise<Readonly<{ results: Result[]; writes: number }>> {
     return runWritePlan(
       ctx,
       // A bulk getOrCreate always converges on a match key no database key
@@ -4659,7 +4936,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       // fences unconditionally.
       edgeWritePlan("edgeMatchKeyConvergence"),
       backend,
-      async (session, target, _overlaidSession, lock) => {
+      async (session, target, _overlaidSession, lock, transactionMode) => {
+        progress.transactionMode = transactionMode;
         // ## The one widening the migration cannot remove
         //
         // The nested legs are whole managed writes of their own: each opens its
@@ -4677,6 +4955,41 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         );
         const results: Result[] = Array.from({ length: items.length });
         let writes = 0;
+
+        // The update legs of step 5, decided here because step 4 hands them
+        // to the create batch, which decides them before its first insert.
+        // The batch helper owns the same update/resurrection semantics as the
+        // single entry path, including validity-window checks and cardinality
+        // fencing. It can also select the native resolved-update program for a
+        // live, no-window batch. Coalescing is intentionally kept on the
+        // outcome path: the batch helper has no per-entry dirty-check
+        // candidate, so routing that shape through it would turn a found
+        // replay into an update.
+        const updateEntries = toFetch.map((entry) => updateEntryFor(entry));
+        const batchEntryIndexes =
+          ifExists === "update" ?
+            toFetch.map((_entry, index) => index)
+          : toFetch.flatMap((entry, index) => (entry.isDeleted ? [index] : []));
+        const canBatchUpdates =
+          !ctx.coalesceUnchangedUpsertsEnabled && batchEntryIndexes.length > 0;
+        // Every update leg that will write: a coalescing leg whose upsert
+        // changes nothing writes nothing, and owes no verdict.
+        const owedUpdates =
+          canBatchUpdates ?
+            batchEntryIndexes.map((index) =>
+              requireDefined(updateEntries[index]),
+            )
+          : toFetch.flatMap((entry, index) => {
+              const update = requireDefined(updateEntries[index]);
+              if (entry.isDeleted) return [update];
+              if (ifExists !== "update") return [];
+              return (
+                  ctx.coalesceUnchangedUpsertsEnabled &&
+                    edgeUpsertCoalesces(ctx, entry.row, update.input)
+                ) ?
+                  []
+                : [update];
+            });
 
         // Step 4: Execute creates in batch
         if (toCreate.length > 0) {
@@ -4696,11 +5009,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             ctx,
             createInputs,
             rawTarget,
-            {
-              pairedUpdates: toFetch
-                .filter((entry) => entry.isDeleted)
-                .map((entry) => updateEntryFor(entry)),
-            },
+            { pairedUpdates: owedUpdates },
           );
           for (const [batchIndex, entry] of toCreate.entries()) {
             results[entry.index] = {
@@ -4709,24 +5018,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             };
           }
           writes += toCreate.length;
+          progress.wrote = true;
         }
 
-        // Step 5: Handle existing edges (update/skip/resurrect). The batch
-        // helper owns the same update/resurrection semantics as the single
-        // entry path, including validity-window checks and cardinality
-        // fencing. It can also select the native resolved-update program for
-        // a live, no-window batch. Coalescing is intentionally kept on the
-        // outcome path below: the batch helper has no per-entry dirty-check
-        // candidate, so routing that shape through it would turn a found
-        // replay into an update.
-        const updateEntries = toFetch.map((entry) => updateEntryFor(entry));
-
-        const batchEntryIndexes =
-          ifExists === "update" ?
-            toFetch.map((_entry, index) => index)
-          : toFetch.flatMap((entry, index) => (entry.isDeleted ? [index] : []));
-        const canBatchUpdates =
-          !ctx.coalesceUnchangedUpsertsEnabled && batchEntryIndexes.length > 0;
+        // Step 5: Handle existing edges (update/skip/resurrect). The update
+        // half writes row by row, so once it starts a refusal can follow a
+        // row it wrote.
+        if (owedUpdates.length > 0) progress.wrote = true;
         if (canBatchUpdates) {
           const updated = await executeEdgeUpsertUpdateBatch(
             ctx,
@@ -4762,8 +5060,16 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             }
           }
         } else {
-          // These legs write one resurrection at a time, each probed against
-          // stored state only: probe them as one set before the first.
+          // These legs write one row at a time, each in a write plan of its
+          // own that reaches only its own verdicts before its statement, and
+          // probes acyclicity against stored state only: decide them as one
+          // set before the first (the create batch already did, when step 4
+          // ran), and probe their resurrections as one set.
+          if (toCreate.length === 0 && owedUpdates.length > 1) {
+            await prepareEdgeUpdateSet(ctx, owedUpdates, target, lock, {
+              storedRows: storedRowsOfUpdateEntries(owedUpdates),
+            });
+          }
           await assertResurrectionsAcyclic(
             ctx,
             target,
@@ -4832,8 +5138,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     );
   }
 
-  async function runBatchResults(): Promise<Result[]> {
-    const outcome = await runBatch();
+  async function runBatchResults(
+    progress: BulkGetOrCreateProgress,
+  ): Promise<Result[]> {
+    const outcome = await runBatch(progress);
     return outcome.results;
   }
 
@@ -4843,10 +5151,32 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
   // the paths the fence cannot cover (a non-transactional backend, or a
   // competitor that is not a `getOrCreateByEndpoints`) — one retry, matching
   // the single-item path rather than inventing a second policy.
+  //
+  // The retry re-runs the whole batch, so it runs only where nothing the
+  // failed attempt wrote survives it: the frame opened its own transaction
+  // (the refusal rolled it back), or the attempt wrote nothing. Inside a
+  // caller's transaction, or on a backend without one, an attempt refused
+  // after a leg wrote keeps that write, and re-running would apply it twice.
+  const progress: BulkGetOrCreateProgress = {
+    transactionMode: undefined,
+    wrote: false,
+  };
   try {
-    return await runBatchResults();
+    return await runBatchResults(progress);
   } catch (error) {
     if (!(error instanceof CardinalityError)) throw error;
-    return runBatchResults();
+    if (progress.wrote && progress.transactionMode !== "opened") throw error;
+    return runBatchResults({ transactionMode: undefined, wrote: false });
   }
+}
+
+/**
+ * What one attempt of a bulk `getOrCreateByEndpoints` has done so far, read by
+ * its convergence retry: the transaction boundary its frame ran in, and
+ * whether a write of the attempt may have landed — the create batch returned
+ * (it writes all of its rows or none), or the row-by-row update half began.
+ */
+interface BulkGetOrCreateProgress {
+  transactionMode: WriteTransactionMode | undefined;
+  wrote: boolean;
 }

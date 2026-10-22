@@ -609,12 +609,14 @@ describe("generated node ids avoid identity lock round trips", () => {
     );
     const callerSuppliedIdentityLocks = countAdvisoryLocks(IDENTITY_NAMESPACE);
 
-    // The caller-supplied path acquires the write-frame lock and the identity
-    // fold helper's lock. Generated ids cannot collide across kinds, so it
-    // needs neither. This is the measured RTT reduction for the common
-    // generated-id create path, not a statement-count estimate.
+    // The caller-supplied path acquires the write-frame lock, under which its
+    // identity fold is decided before the insert; no live node of another
+    // kind shares the id, so the fold writes nothing and takes no lock of its
+    // own. Generated ids cannot collide across kinds, so they need neither.
+    // This is the measured RTT reduction for the common generated-id create
+    // path, not a statement-count estimate.
     expect(generatedIdentityLocks).toBe(0);
-    expect(callerSuppliedIdentityLocks).toBe(2);
+    expect(callerSuppliedIdentityLocks).toBe(1);
   });
 });
 

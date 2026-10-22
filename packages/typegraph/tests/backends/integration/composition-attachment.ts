@@ -1947,6 +1947,87 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(results[0]?.node.id).toBe(first.id);
     });
 
+    it('bulkGetOrCreateByConstraint with ifExists "update" updates no matched item when a new row loses a second unique key', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const first = await store.nodes.CaStamp.create({
+        code: "a",
+        label: "one",
+      });
+      const holder = await store.nodes.CaStamp.create({
+        code: "b",
+        label: "taken",
+      });
+
+      // The lookup reads `code`; the new row loses on `label`, which only its
+      // own claims decide.
+      //
+      // MUTATION CHECK: leave the rows to create out of the claim transitions
+      // `assertGetOrCreateBatchApplicable` judges (`newRowClaimTransitions`,
+      // src/store/operations/node-operations.ts) — "a" is then updated before
+      // the create batch refuses "new", and keeps the new label after the
+      // caught refusal.
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.CaStamp.bulkGetOrCreateByConstraint(
+            "ca_stamp_code",
+            [
+              { props: { code: "a", label: "renamed" } },
+              { props: { code: "new", label: "taken" } },
+            ],
+            { ifExists: "update" },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(UniquenessError);
+      expect((caught as UniquenessError).details.existingId).toBe(holder.id);
+      const after = requireDefined(await store.nodes.CaStamp.getById(first.id));
+      expect(after.label).toBe("one");
+      expect(after.meta.version).toBe(first.meta.version);
+      const stamps = await store.nodes.CaStamp.find({});
+      expect(stamps.map((stamp) => stamp.code).toSorted()).toEqual(["a", "b"]);
+    });
+
+    it('bulkGetOrCreateByConstraint with ifExists "update" refuses a new row a key a matched item of the batch takes, updating nothing', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const first = await store.nodes.CaStamp.create({
+        code: "a",
+        label: "one",
+      });
+
+      // The matched update takes "fresh" first, so the new row that asks for
+      // it after loses — judged in the order the batch writes, before either.
+      //
+      // MUTATION CHECK: as above, leave the rows to create out of the claim
+      // transitions `assertGetOrCreateBatchApplicable` judges — "a" is then
+      // updated before the create batch refuses "new".
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.CaStamp.bulkGetOrCreateByConstraint(
+            "ca_stamp_code",
+            [
+              { props: { code: "a", label: "fresh" } },
+              { props: { code: "new", label: "fresh" } },
+            ],
+            { ifExists: "update" },
+          );
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(UniquenessError);
+      expect((caught as UniquenessError).details.existingId).toBe(first.id);
+      const after = requireDefined(await store.nodes.CaStamp.getById(first.id));
+      expect(after.label).toBe("one");
+      expect(after.meta.version).toBe(first.meta.version);
+      expect(await store.nodes.CaStamp.find({})).toHaveLength(1);
+    });
+
     // ========================================================
     // The attachment object itself: `whole`, and nothing unstated
     // ========================================================

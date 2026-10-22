@@ -3,6 +3,7 @@ export { registerAdoptedEvolutionConcurrencyTests } from "./adopted-evolution-co
 export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerBackendProvenanceIntegrationTests } from "./backend-provenance";
+export { registerBatchWriteVerdictIntegrationTests } from "./batch-write-verdicts";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
 export { registerBulkFindEndpointIntegrationTests } from "./bulk-find-endpoints";
 export { registerBulkFindHeterogeneousIntegrationTests } from "./bulk-find-heterogeneous";

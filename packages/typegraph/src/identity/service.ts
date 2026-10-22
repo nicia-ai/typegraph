@@ -26,8 +26,12 @@ export {
   isIdentityTransitionRestore,
   readIdentityRestoreBaseline,
 } from "./service-interchange-write";
-export type { IdentityRebuildContext } from "./service-maintenance";
+export type {
+  IdentityFoldPlan,
+  IdentityRebuildContext,
+} from "./service-maintenance";
 export {
+  applyIdentityFold,
   assertAffectedIdentityClassesConsistent,
   assertIdentityFoldable,
   combineSnapshotMembers,

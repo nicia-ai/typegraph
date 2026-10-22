@@ -207,6 +207,24 @@ export type NodeUpsertUpdateBatchEntry = Readonly<{
 }>;
 
 /**
+ * What a batch create states beyond its own rows.
+ */
+export type NodeCreateBatchOptions = Readonly<{
+  /** Every input's `props` is already the output of its kind's schema. */
+  propsPreValidated?: true;
+  /**
+   * The updates the caller writes right after this batch, inside the same
+   * transaction. Every one of them is decided before this batch's first
+   * write, against the state the creates leave — merged props, the window
+   * verdict, uniqueness counting this batch's keys, the composition and
+   * identity verdicts of a restore — so a refusal any of them reaches
+   * precedes every write of the combined set, instead of surfacing after
+   * this batch's rows are stored.
+   */
+  pairedUpdates?: readonly NodeUpsertUpdateBatchEntry[];
+}>;
+
+/**
  * Config for creating a NodeCollection.
  */
 export type NodeCollectionConfig = Readonly<{
@@ -231,7 +249,7 @@ export type NodeCollectionConfig = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ propsPreValidated?: true }>,
+    options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
@@ -978,29 +996,31 @@ export function createNodeCollection<
             );
             const results = new Map<string, Node<N>>();
             const creates = prepared.filter((item) => !rows.has(item.id));
-            const updates = prepared.filter((item) => rows.has(item.id));
+            const updateEntries = prepared
+              .filter((item) => rows.has(item.id))
+              .map((item) => {
+                const existing = requireDefined(rows.get(item.id));
+                return {
+                  input: buildUpsertUpdateInput(kind, item.id, item.props),
+                  clearDeleted: existing.deleted_at !== undefined,
+                  existing,
+                  replacementProps: item.props,
+                };
+              });
             if (creates.length > 0) {
               const created = await executeNodeCreateBatch(
                 creates.map((item) =>
                   buildCreateInput(kind, item.props, { id: item.id }),
                 ),
                 target,
-                { propsPreValidated: true },
+                { propsPreValidated: true, pairedUpdates: updateEntries },
               );
               for (const row of created)
                 results.set(row.id, narrowNode<N>(row));
             }
-            if (updates.length > 0) {
+            if (updateEntries.length > 0) {
               const updated = await executeNodeUpsertUpdateBatch(
-                updates.map((item) => {
-                  const existing = requireDefined(rows.get(item.id));
-                  return {
-                    input: buildUpsertUpdateInput(kind, item.id, item.props),
-                    clearDeleted: existing.deleted_at !== undefined,
-                    existing,
-                    replacementProps: item.props,
-                  };
-                }),
+                updateEntries,
                 target,
               );
               for (const row of updated)
@@ -1250,7 +1270,9 @@ export function createNodeCollection<
         );
         if (mutationAttempt.outcome === "unsupported") {
           if (toCreate.length > 0) {
-            const created = await executeNodeCreateBatch(createInputs, target);
+            const created = await executeNodeCreateBatch(createInputs, target, {
+              pairedUpdates: updateEntries,
+            });
             for (const [index, entry] of toCreate.entries()) {
               results[entry.index] = narrowNode<N>(
                 requireDefined(created[index]),
@@ -1419,25 +1441,16 @@ export function createNodeCollection<
         props: item.props,
       }));
 
-      const getOrCreateAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<NodeGetOrCreateByConstraintResult<N>[]> => {
-        const results = await executeBulkGetOrCreateByConstraint(
-          kind,
-          constraintName,
-          mappedItems,
-          target,
-          options,
-        );
-        return results as NodeGetOrCreateByConstraintResult<N>[];
-      };
-
-      // The legs are nested writes of the one transaction this opens, and a
-      // leg that attaches a composition part decides under the per-graph
-      // write fence: the store owns the transaction, so it replays it.
-      return runOwnedMutationSetTransaction(backend, (target) =>
-        getOrCreateAll(target),
+      // The operation owns its transaction boundary, which its convergence
+      // retry reads: see `executeNodeBulkGetOrCreateByConstraint`.
+      const results = await executeBulkGetOrCreateByConstraint(
+        kind,
+        constraintName,
+        mappedItems,
+        backend,
+        options,
       );
+      return results as NodeGetOrCreateByConstraintResult<N>[];
     },
   };
 }

@@ -119,7 +119,7 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
-import { refKey } from "../../identity/service";
+import { type IdentityFoldPlan, refKey } from "../../identity/service";
 import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
@@ -177,6 +177,7 @@ import {
 } from "../claims/resolved-node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
+  type NodeCreateBatchOptions,
   type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
@@ -231,6 +232,7 @@ import {
 import {
   assertClearValidToSupported,
   assertValidityEndMutation,
+  validityEndAfterMutation,
 } from "../validity-end";
 import {
   createAlreadyExistsError,
@@ -322,6 +324,8 @@ import {
   hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
   memoizeLeasedSchemaFence,
+  resolveWriteTransactionMode,
+  runOwnedMutationSetTransaction,
   type WriteTransactionMode,
 } from "./write-transaction";
 
@@ -403,12 +407,23 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ) => Promise<void>;
     /**
      * The read-only half of {@link foldCreated}: refuses, writing nothing,
-     * what folding `references` would refuse, so a batch that restores several
-     * rows reaches that verdict before its first statement.
+     * what folding `references` would refuse, so a frame that creates or
+     * restores rows reaches that verdict before its first statement. Returns
+     * the fold it decided, for {@link applyFold}.
      */
     assertFoldable: (
       target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
+    ) => Promise<IdentityFoldPlan>;
+    /**
+     * The write half of {@link foldCreated}: folds what `assertFoldable`
+     * decided earlier in the same frame, once its rows are written, without
+     * reading the verdict again.
+     */
+    applyFold: (
+      target: IdentityTarget,
+      plan: IdentityFoldPlan,
+      cause: "fold" | "restore",
     ) => Promise<void>;
     detachDeleted: (
       target: IdentityTarget,
@@ -1548,6 +1563,33 @@ function foldReferences(
     .map((prepared) => ({ kind: prepared.kind, id: prepared.id }));
 }
 
+/** The identity fold a create frame decided, written once its rows land. */
+type PreparedNodeCreateFold = (cause: "fold" | "restore") => Promise<void>;
+
+/**
+ * Decides, writing nothing, the identity fold a create frame owes its rows,
+ * before the frame's first write: a fold the identity rules refuse is raised
+ * here, so a refusal caught inside a caller's transaction leaves none of the
+ * frame's rows behind. Judged against the identity state as stored — a batch
+ * is one kind and two of its rows never share an id, so no row's fold depends
+ * on another's — and written as decided, with no second read, by the returned
+ * function once the rows are written. The cause is the row's: `"restore"` for
+ * a resurrected tombstone, `"fold"` for an insert.
+ */
+async function prepareNodeCreatesFold<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  preparedCreates: readonly NodeCreatePrepared[],
+): Promise<PreparedNodeCreateFold> {
+  const identity = ctx.identity;
+  if (identity === undefined) return () => Promise.resolve();
+  const plan = await identity.assertFoldable(
+    target,
+    foldReferences(preparedCreates),
+  );
+  return (cause) => identity.applyFold(target, plan, cause);
+}
+
 // ============================================================
 // Shared Update Pipeline
 //
@@ -1634,6 +1676,24 @@ type NodeUpdateExecutionOptions = Readonly<{
   replacementProps?: Record<string, unknown>;
 }>;
 
+/**
+ * One node update with every verdict its own preparation reaches and no
+ * statement issued: the row's presence, the merged props, the window verdict
+ * and the fence it hands the statement. The uniqueness transition is not
+ * judged here — the write plans it ({@link nodeClaimTransition}, the same
+ * owner `claimTransition` is read from) — so a frame preparing several
+ * updates judges their transitions together.
+ *
+ * `rowAfter` is the row as the write leaves it, which a frame preparing
+ * several writes judges the next one against ({@link prepareNodeUpdateSet}).
+ */
+type NodeUpdatePrepared = Readonly<{
+  work: Parameters<NodeWriteSession["reviseNode"]>[0];
+  fences: NodeUpdateFences;
+  claimTransition: NodeClaimTransition;
+  rowAfter: BackendNodeRow;
+}>;
+
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
@@ -1642,6 +1702,32 @@ async function performNodeUpdate<G extends GraphDef>(
   options?: NodeUpdateExecutionOptions,
   resolvedExisting?: BackendNodeRow,
 ): Promise<Node> {
+  const prepared = await prepareNodeUpdate(
+    ctx,
+    input,
+    target,
+    options,
+    resolvedExisting,
+  );
+  return writePreparedNodeUpdate(session, prepared);
+}
+
+/** The WRITE half of {@link performNodeUpdate}: one prepared update's statement. */
+async function writePreparedNodeUpdate(
+  session: NodeWriteSession,
+  { work, fences }: NodeUpdatePrepared,
+): Promise<Node> {
+  return rowToNode(await session.reviseNode(work, fences));
+}
+
+/** The READ half of {@link performNodeUpdate}; see {@link NodeUpdatePrepared}. */
+async function prepareNodeUpdate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: UpsertUpdateNodeInput,
+  target: WriteTarget,
+  options?: NodeUpdateExecutionOptions,
+  resolvedExisting?: BackendNodeRow,
+): Promise<NodeUpdatePrepared> {
   const { kind, id } = input;
 
   assertValidityEndMutation(input, { entityType: "node", kind, id });
@@ -1742,6 +1828,33 @@ async function performNodeUpdate<G extends GraphDef>(
   const fences: NodeUpdateFences = {
     validityLowerBound: windowVerdict.storedLowerBoundFence,
   };
+  const claimTransition = nodeClaimTransition(
+    existing,
+    validatedProps,
+    shared.uniqueConstraints,
+  );
+  const validToAfter =
+    resurrectionInstant === undefined ?
+      validityEndAfterMutation(
+        input.clearValidTo === true ? { clearValidTo: true }
+        : validTo === undefined ? {}
+        : { validTo },
+        existing.valid_to,
+      )
+    : validTo;
+  // The row this write leaves: a resurrection rewrites the whole window and
+  // brings the row back; an in-place update keeps its stored lower bound.
+  const rowAfter: BackendNodeRow = {
+    ...existing,
+    props: validatedProps,
+    valid_from:
+      resurrectionInstant === undefined ?
+        existing.valid_from
+      : resurrectionBound,
+    valid_to: validToAfter,
+    deleted_at:
+      resurrectionInstant === undefined ? existing.deleted_at : undefined,
+  };
 
   // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain
   // update must prove the row live — see NodeUpdateTarget.
@@ -1768,23 +1881,34 @@ async function performNodeUpdate<G extends GraphDef>(
         validFrom !== undefined && { validFrom }
         // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "decide for me", and this path has already decided. See UpdateNodeParams.validFrom.
       : { validFrom: resurrectionBound ?? null };
-    const row = await session.reviseNode(
-      { ...shared, existing, clearDeleted: true, ...resurrectionLowerBound },
+    return {
+      work: {
+        ...shared,
+        existing,
+        clearDeleted: true,
+        ...resurrectionLowerBound,
+      },
       fences,
-    );
-    return rowToNode(row);
+      claimTransition,
+      rowAfter,
+    };
   }
 
   if (!isLiveNodeRow(existing)) throw new NodeNotFoundError(kind, id);
-  const row = await session.reviseNode(
+  return {
     // An in-place update must not rewrite the stored bound, so it keeps the
     // conditional spread: `buildUpdateNode` ignores `validFrom` off the
     // resurrection leg, and stating one here would claim a rewrite that no
     // statement performs.
-    { ...shared, existing, ...(validFrom !== undefined && { validFrom }) },
+    work: {
+      ...shared,
+      existing,
+      ...(validFrom !== undefined && { validFrom }),
+    },
     fences,
-  );
-  return rowToNode(row);
+    claimTransition,
+    rowAfter,
+  };
 }
 
 /**
@@ -1864,6 +1988,249 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   }
   // Unreachable: the loop either returns or throws on its last attempt.
   throw new NodeNotFoundError(input.kind, input.id);
+}
+
+/** The update options one batch entry carries into the shared update body. */
+function nodeUpdateBatchEntryOptions(
+  entry: NodeUpsertUpdateBatchEntry,
+): NodeUpdateExecutionOptions | undefined {
+  return entry.clearDeleted || entry.replacementProps !== undefined ?
+      {
+        ...(entry.clearDeleted ? { clearDeleted: true } : {}),
+        ...(entry.replacementProps === undefined ?
+          {}
+        : { replacementProps: entry.replacementProps }),
+      }
+    : undefined;
+}
+
+/**
+ * One entry of a prepared node update set: its prepared write, and whether it
+ * was prepared against the row as STORED — see {@link EdgeUpdateSetEntry}'s
+ * edge counterpart (`edge-operations.ts`) for why a write re-prepares an entry
+ * judged on a projection.
+ */
+type NodeUpdateSetEntry = Readonly<{
+  prepared: NodeUpdatePrepared;
+  preparedAgainstStoredRow: boolean;
+}>;
+
+/**
+ * The row a create this frame is about to issue will leave, as the update
+ * set's projections read it. The lower bound is the one the insert stamps
+ * ({@link resolveStampedValidityLowerBound}), taken at this frame's clock — an
+ * instant the insert's own stamp can only follow.
+ */
+function nodeRowOfPendingCreate(prepared: NodeCreatePrepared): BackendNodeRow {
+  const instant = nowIso();
+  const params = prepared.insertParams;
+  return {
+    graph_id: params.graphId,
+    kind: params.kind,
+    id: params.id,
+    props: params.props,
+    version: 1,
+    valid_from: resolveStampedValidityLowerBound(
+      params.validFrom,
+      params.validTo,
+      instant,
+    ),
+    valid_to: params.validTo,
+    created_at: instant,
+    updated_at: instant,
+    deleted_at: undefined,
+  };
+}
+
+/**
+ * The READ half of a SET of node updates a frame writes one row at a time:
+ * every refusal any entry can reach by reading, reached before the first is
+ * written, so a caller that catches it inside an enclosing
+ * `store.transaction(...)` is left with none of the set's writes.
+ *
+ * The set is judged as the state it produces, in write order — the rows of
+ * `pendingCreates` (creates this frame writes BEFORE the updates) first:
+ *
+ * - each entry is prepared ({@link prepareNodeUpdate}: presence, merged
+ *   props, window verdict) against the row the earlier writes leave — its
+ *   stored row, the `rowAfter` of the last earlier entry for the same node, or
+ *   a pending create's row;
+ * - every uniqueness transition is probed in order, a later row seeing the
+ *   keys an earlier row or a pending create gives up or takes
+ *   ({@link assertNodeClaimTransitionsAvailable});
+ * - a restoring entry may not bring back a row whose id a disjoint kind now
+ *   holds ({@link checkDisjointnessConstraint}), nor a required part with no
+ *   live whole ({@link assertRestoredRequiredPartsAttached}), nor one its
+ *   identity fold would refuse (the identity hook `assertFoldable`);
+ * - an entry that moves its window end is judged by the identity hook the
+ *   write runs ({@link applyIdentityWindowEnd}), its note withdrawn — the write
+ *   notes it again when it lands.
+ *
+ * `storedRows` are rows read inside this frame's transaction; an entry whose
+ * node has none is read from `target`.
+ */
+async function prepareNodeUpdateSet<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  entries: readonly NodeUpsertUpdateBatchEntry[],
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  sources: Readonly<{
+    storedRows?: ReadonlyMap<string, BackendNodeRow>;
+    pendingCreates?: readonly NodeCreatePrepared[];
+  }> = {},
+): Promise<readonly NodeUpdateSetEntry[]> {
+  const projected = new Map<string, BackendNodeRow>();
+  const transitions: NodeClaimTransition[] = [];
+  for (const created of sources.pendingCreates ?? []) {
+    projected.set(refKey(created), nodeRowOfPendingCreate(created));
+    transitions.push({
+      kind: created.kind,
+      id: created.id,
+      heldProps: undefined,
+      props: created.validatedProps,
+      constraints: created.uniqueConstraints,
+    });
+  }
+
+  const restored: CompositionNodeRef[] = [];
+  const prepared: NodeUpdateSetEntry[] = [];
+  for (const entry of entries) {
+    const ref = { kind: entry.input.kind, id: entry.input.id };
+    const projection = projected.get(refKey(ref));
+    const stored =
+      projection === undefined ?
+        (sources.storedRows?.get(ref.id) ??
+        (await target.getNode(ctx.graphId, ref.kind, ref.id)))
+      : undefined;
+    const update = await prepareNodeUpdate(
+      ctx,
+      entry.input,
+      target,
+      nodeUpdateBatchEntryOptions(entry),
+      projection ?? stored,
+    );
+    if (entry.clearDeleted) {
+      restored.push(ref);
+      if ((projection ?? stored)?.deleted_at !== undefined) {
+        await checkDisjointnessConstraint(
+          { graphId: ctx.graphId, registry: ctx.registry, backend: target },
+          ref.kind,
+          ref.id,
+        );
+      }
+    }
+    if (nodeWriteMovesWindowEnd(entry.input)) {
+      const withdrawWindowEndNote =
+        await collectRecordedIdentityTransitionNotes(target, () =>
+          applyIdentityWindowEnd(ctx, target, entry.input),
+        );
+      withdrawWindowEndNote();
+    }
+    transitions.push(update.claimTransition);
+    projected.set(refKey(ref), update.rowAfter);
+    prepared.push({
+      prepared: update,
+      preparedAgainstStoredRow: projection === undefined,
+    });
+  }
+
+  await assertRestoredRequiredPartsAttached(
+    { graphId: ctx.graphId, registry: ctx.registry, lock },
+    target,
+    restored,
+  );
+  await ctx.identity?.assertFoldable(target, restored);
+  await assertNodeClaimTransitionsAvailable(
+    createUniquenessContext(
+      ctx.graphId,
+      ctx.registry,
+      target,
+      ctx.uniqueSidecarBatch,
+    ),
+    transitions,
+  );
+  return prepared;
+}
+
+/**
+ * Writes a set of node updates, every one of them prepared before the first
+ * is written ({@link prepareNodeUpdateSet}), and CONVERGES as
+ * {@link performNodeUpdateWithResurrectionRecovery} does for one: when an
+ * entry's predicated UPDATE matched nothing and its row is still live, the
+ * entries not yet written are prepared again — all of them, before the next
+ * write — against the rows actually there, the moved entry as an ordinary
+ * update (only a first attempt may resurrect), and the set carries on from
+ * it. Each entry gets the one retry the single-row path gives it.
+ */
+async function writeNodeUpdateSet<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  entries: readonly NodeUpsertUpdateBatchEntry[],
+  session: NodeWriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  storedRows: ReadonlyMap<string, BackendNodeRow> | undefined,
+): Promise<readonly Node[]> {
+  const nodes: Node[] = [];
+  const retriedEntries = new Set<number>();
+  // `let` earns its place: once a row moved, the rows read before the first
+  // write no longer describe the entries still to be written.
+  let rows = storedRows;
+  while (nodes.length < entries.length) {
+    const written = nodes.length;
+    const remaining = entries
+      .slice(written)
+      .map((entry, offset) =>
+        retriedEntries.has(written + offset) ?
+          { ...entry, clearDeleted: false }
+        : entry,
+      );
+    const prepared = await prepareNodeUpdateSet(ctx, remaining, target, lock, {
+      ...(rows === undefined ? {} : { storedRows: rows }),
+    });
+    try {
+      for (const [offset, entry] of remaining.entries()) {
+        const { prepared: update, preparedAgainstStoredRow } = requireDefined(
+          prepared[offset],
+        );
+        nodes.push(
+          await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
+            preparedAgainstStoredRow ?
+              writePreparedNodeUpdate(session, update)
+            : performNodeUpdate(
+                ctx,
+                entry.input,
+                session,
+                target,
+                nodeUpdateBatchEntryOptions(entry),
+              ),
+          ),
+        );
+        if (
+          requireDefined(entries[written + offset]).clearDeleted &&
+          ctx.identity !== undefined
+        ) {
+          await ctx.identity.foldCreated(
+            target,
+            [{ kind: entry.input.kind, id: entry.input.id }],
+            "restore",
+          );
+        }
+      }
+    } catch (error) {
+      if (!isNodeUpdateNoRowError(error)) throw error;
+      const movedIndex = nodes.length;
+      const moved = requireDefined(entries[movedIndex]).input;
+      if (retriedEntries.has(movedIndex))
+        throw nodeUpdateRaceError(moved, error);
+      const current = await target.getNode(ctx.graphId, moved.kind, moved.id);
+      if (current === undefined || current.deleted_at !== undefined) {
+        throw new NodeNotFoundError(moved.kind, moved.id);
+      }
+      retriedEntries.add(movedIndex);
+      rows = undefined;
+    }
+  }
+  return nodes;
 }
 
 /**
@@ -3976,16 +4343,18 @@ async function partitionExistingGetOrCreateLegs<
 /**
  * Whether a batch of get-or-create items must have its verdicts reached before
  * its first write: at least one matched item owes a write that something else
- * in the batch could still refuse after — another owed matched item, or the
- * attachment of a row the batch is about to create. With exactly one owed leg
- * and no such row, that leg's own write plan already reaches every verdict
- * before its first statement, and the batch needs no frame of its own.
+ * in the batch could still refuse after — another owed matched item, or a row
+ * the batch creates after the matched items are written (its unique keys, its
+ * attachment). With exactly one owed leg and no create, that leg's own write
+ * plan already reaches every verdict before its first statement, and the
+ * batch needs no frame of its own; with no owed leg, the create batch is the
+ * only write and its own plan does the same.
  */
 function getOrCreateBatchDecidesBeforeWriting(
   owedCount: number,
-  attachingCreateCount: number,
+  createCount: number,
 ): boolean {
-  return owedCount > 0 && (owedCount > 1 || attachingCreateCount > 0);
+  return owedCount > 0 && (owedCount > 1 || createCount > 0);
 }
 
 /**
@@ -4023,31 +4392,33 @@ function getOrCreateBatchDecidesBeforeWriting(
  * - every property update is validated against the row it will merge over
  *   ({@link resolveNodeUpdateProps}) and its uniqueness claims probed in
  *   order, a later row seeing the keys an earlier row gives up or takes
- *   ({@link assertNodeClaimTransitionsAvailable});
+ *   ({@link assertNodeClaimTransitionsAvailable}) — the rows the batch is
+ *   about to CREATE among them, after the matched ones as the batch writes
+ *   them ({@link newRowClaimTransitions}), so a new row's key that a matched
+ *   update hands it is free and one an earlier row holds or takes is refused
+ *   here, not when the create batch prepares it after the matched items wrote;
  * - a restoring leg's identity fold is read too (the identity hook
  *   `assertFoldable`), against the identity state as stored.
  *
  * What stays with the write: a peer that is not excluded by the fence (a kind
  * whose unique keys are enforced by the claim row's primary key alone takes
  * none) can still claim a key, or remove a row, between this frame and a
- * leg's statement; an identity refusal that depends on another row this same
- * batch restores is judged when the restore lands; and a NEW row's own
- * non-attachment refusals (a unique key it loses, a disjoint kind holding its
- * id) are judged when the create batch prepares it, because a matched update
- * of the same batch may hand it a key — which only the write, in order,
- * resolves.
+ * leg's statement; and an identity refusal that depends on another row this
+ * same batch restores is judged when the restore lands. A new row's id is
+ * generated, so no disjoint kind can hold it.
  */
 async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   backend: GraphBackend | TransactionBackend,
   batch: Readonly<{
     owed: readonly ExistingGetOrCreateMatch[];
+    creates: readonly CreateNodeInput[];
     attachingCreates: readonly CreateNodeInput[];
     createWorks: readonly (CompositionCreateWork | undefined)[];
     partOf: CompositionAttachment | undefined;
   }>,
 ): Promise<void> {
-  const { owed, attachingCreates, createWorks, partOf } = batch;
+  const { owed, creates, attachingCreates, createWorks, partOf } = batch;
   const revisions = owed.flatMap((match) =>
     match.leg.leg === "revise" ? [{ ...match, leg: match.leg }] : [],
   );
@@ -4063,6 +4434,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
             undefined
           : compositionEdgeConstraintFence(ctx, leg.request.work),
         ),
+        ...nodeBatchConstraintProbes(ctx, creates, "create"),
         ...compositionBatchConstraintProbes(ctx, createWorks),
       ],
       revisions.some(({ leg }) => leg.restoresRow) &&
@@ -4145,11 +4517,33 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
           target,
           ctx.uniqueSidecarBatch,
         ),
-        transitions,
+        [...transitions, ...newRowClaimTransitions(ctx, creates)],
       );
     },
     { didWrite: () => false },
   );
+}
+
+/**
+ * The claim transitions of the rows a batch is about to create, judged after
+ * the matched items' ({@link assertNodeClaimTransitionsAvailable}). A row that
+ * does not exist yet holds no reservation going in and re-reserves every key
+ * it owes — the shape {@link nodeClaimTransition} gives a restored tombstone,
+ * which holds none either. The id is a stand-in, as in
+ * {@link newRowAttachmentMoves}: the create batch assigns the real one, and
+ * no other node can own a freshly generated id.
+ */
+function newRowClaimTransitions<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  creates: readonly CreateNodeInput[],
+): readonly NodeClaimTransition[] {
+  return creates.map((input) => ({
+    kind: input.kind,
+    id: generateId(),
+    heldProps: undefined,
+    props: input.props,
+    constraints: getNodeRegistration(ctx.graph, input.kind).unique ?? [],
+  }));
 }
 
 /**
@@ -4563,7 +4957,6 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
-    const identity = ctx.identity;
     const draft = draftNodeCreate(ctx, input, id, options);
     const claimPlan = planNodeCreateClaims(
       { graphId: ctx.graphId, registry: ctx.registry },
@@ -4616,6 +5009,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       preparationMode,
       claimPlan,
     );
+    const foldCreated = await prepareNodeCreatesFold(ctx, target, [prepared]);
     const projectionFusionEligible =
       compositionWork === undefined &&
       shouldReturnRow &&
@@ -4657,13 +5051,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         target,
         prepared,
       );
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences([prepared]),
-          "restore",
-        );
-      }
+      await foldCreated("restore");
       await attachCompositionEdge();
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
@@ -4743,13 +5131,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           await session.createNodeIfAbsent(nodeCreateWork(prepared))
         );
       if (inserted !== undefined) {
-        if (identity !== undefined) {
-          await identity.foldCreated(
-            target,
-            foldReferences([prepared]),
-            "fold",
-          );
-        }
+        await foldCreated("fold");
         await attachCompositionEdge();
         return shouldReturnRow ? rowToNode(inserted) : undefined;
       }
@@ -4794,13 +5176,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         target,
         prepared,
       );
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences([prepared]),
-          "restore",
-        );
-      }
+      await foldCreated("restore");
       await attachCompositionEdge();
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
@@ -4832,9 +5208,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       return;
     });
 
-    if (identity !== undefined) {
-      await identity.foldCreated(target, foldReferences([prepared]), "fold");
-    }
+    await foldCreated("fold");
 
     await attachCompositionEdge();
 
@@ -4978,8 +5352,18 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
+      const partition = partitionCreates(preparedCreates);
+      const foldInserts = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.inserts,
+      );
+      const foldResurrections = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.resurrections,
+      );
 
       // See `prepareBatchCompositionCreateEdges`'s docblock.
       const preparedCompositionEdges = await prepareBatchCompositionCreateEdges(
@@ -4991,7 +5375,6 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
         compositionWorks,
       );
 
-      const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
       //
       // The batch INSERT, its claim groups and its sidecar batch are ONE session
@@ -5013,18 +5396,8 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       for (const prepared of partition.resurrections) {
         await resurrectPreparedNode(ctx, session, target, prepared);
       }
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.inserts),
-          "fold",
-        );
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.resurrections),
-          "restore",
-        );
-      }
+      await foldInserts("fold");
+      await foldResurrections("restore");
       await insertPreparedCompositionEdges(
         ctx,
         session,
@@ -5048,23 +5421,30 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
   backend: GraphBackend | TransactionBackend,
-  options?: NodeCreateInternalOptions,
+  options?: NodeCreateBatchOptions,
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
   // See `executeNodeCreateNoReturnBatch`'s identical preamble.
   const compositionWorks = resolveBatchCompositionWorks(ctx, inputs, backend);
 
-  const atomicExecutor = resolveAtomicNodeBatchExecutor({
-    backend,
-    graph: ctx.graph,
-    registry: ctx.registry,
-    inputs,
-    schemaVersion: ctx.schemaVersion,
-    identityEnabled: ctx.identity !== undefined,
-    historyEnabled: ctx.historyEnabled,
-    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-  });
+  const pairedUpdates = options?.pairedUpdates ?? [];
+  // The native program issues its inserts in the statement that decides
+  // them, leaving no point at which the paired updates could be decided
+  // first, so a batch that has any takes the portable frame.
+  const atomicExecutor =
+    pairedUpdates.length > 0 ?
+      undefined
+    : resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: ctx.graph,
+        registry: ctx.registry,
+        inputs,
+        schemaVersion: ctx.schemaVersion,
+        identityEnabled: ctx.identity !== undefined,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+      });
 
   if (atomicExecutor !== undefined) {
     const preparedCreates = await prepareAtomicBatchCreates(
@@ -5125,18 +5505,46 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       [
         ...nodeBatchConstraintProbes(ctx, inputs, "create"),
         ...compositionBatchConstraintProbes(ctx, compositionWorks),
+        // The paired updates are decided under this frame's fence.
+        ...nodeBatchConstraintProbes(
+          ctx,
+          pairedUpdates.map((entry) => entry.input),
+          "update",
+        ),
       ],
       nodeRequiresIdentityLock(ctx),
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(
         ctx,
         inputs,
         target,
         options,
       );
+      const partition = partitionCreates(preparedCreates);
+      const foldInserts = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.inserts,
+      );
+      const foldResurrections = await prepareNodeCreatesFold(
+        ctx,
+        target,
+        partition.resurrections,
+      );
+      if (pairedUpdates.length > 0) {
+        await prepareNodeUpdateSet(ctx, pairedUpdates, target, lock, {
+          storedRows: new Map(
+            pairedUpdates.flatMap((entry) =>
+              entry.existing === undefined ?
+                []
+              : [[entry.input.id, entry.existing]],
+            ),
+          ),
+          pendingCreates: preparedCreates,
+        });
+      }
 
       // See `prepareBatchCompositionCreateEdges`'s docblock.
       const preparedCompositionEdges = await prepareBatchCompositionCreateEdges(
@@ -5148,7 +5556,6 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         compositionWorks,
       );
 
-      const partition = partitionCreates(preparedCreates);
       // One call for claims + row + sidecars, so the resurrections follow the
       // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
       const inserted = await withAlreadyExistsTranslation("node", () =>
@@ -5174,18 +5581,8 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           `Missing written row for ${prepared.kind} ${prepared.id}`,
         ),
       );
-      if (identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.inserts),
-          "fold",
-        );
-        await identity.foldCreated(
-          target,
-          foldReferences(partition.resurrections),
-          "restore",
-        );
-      }
+      await foldInserts("fold");
+      await foldResurrections("restore");
       await insertPreparedCompositionEdges(
         ctx,
         session,
@@ -5980,13 +6377,9 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      await assertRestoredRequiredPartsAttached(
-        { graphId: ctx.graphId, registry: ctx.registry, lock },
-        target,
-        entries
-          .filter((entry) => entry.clearDeleted)
-          .map((entry) => ({ kind: entry.input.kind, id: entry.input.id })),
-      );
+      // A restoring entry never takes the resolved batch statement below; the
+      // row-by-row writer judges it, with every other entry, before its
+      // first write (`prepareNodeUpdateSet`).
       const resolvedRows =
         (
           target.capabilities.execution.interactiveTransactions &&
@@ -6075,36 +6468,14 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       // from the rows that are CURRENT now: carrying the old preimage would
       // turn a partial upsert into a stale full replacement.
       const fallbackRows = batchMissed ? undefined : resolvedRows;
-      const nodes: Node[] = [];
-      for (const entry of entries) {
-        nodes.push(
-          await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
-            performNodeUpdateWithResurrectionRecovery(
-              ctx,
-              entry.input,
-              session,
-              target,
-              entry.clearDeleted || entry.replacementProps !== undefined ?
-                {
-                  ...(entry.clearDeleted ? { clearDeleted: true } : {}),
-                  ...(entry.replacementProps === undefined ?
-                    {}
-                  : { replacementProps: entry.replacementProps }),
-                }
-              : undefined,
-              fallbackRows?.get(entry.input.id),
-            ),
-          ),
-        );
-        if (entry.clearDeleted && ctx.identity !== undefined) {
-          await ctx.identity.foldCreated(
-            target,
-            [{ kind: entry.input.kind, id: entry.input.id }],
-            "restore",
-          );
-        }
-      }
-      return nodes;
+      return writeNodeUpdateSet(
+        ctx,
+        entries,
+        session,
+        target,
+        lock,
+        fallbackRows,
+      );
     },
     { didWrite: writeResultAlwaysChanges },
   );
@@ -7452,18 +7823,37 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
   type Result = Readonly<{ node: Node; action: GetOrCreateAction }>;
 
-  // Steps 2-7 are one convergence attempt: the batch probe runs outside any
-  // transaction and each write leg opens its own, so a concurrent create can
-  // reserve a key between them. The uniques primary key catches that and raises
-  // `UniquenessError`; re-running the whole attempt converges on the winner's
-  // row. Without this the single-item path retried and the batch failed
-  // outright, which is the asymmetry #428 called out.
-  async function attempt(): Promise<Result[]> {
+  // Steps 2-7 are one convergence attempt, in one transaction: the legs are
+  // nested writes of it, and a leg that attaches a composition part decides
+  // under the per-graph write fence, so a transaction the store opens here
+  // it also replays (`runOwnedMutationSetTransaction`). A concurrent create
+  // the fence does not exclude can still reserve a key between the batch
+  // probe and a leg; the uniques primary key catches that and raises
+  // `UniquenessError`, and re-running the whole attempt converges on the
+  // winner's row. Without this the single-item path retried and the batch
+  // failed outright, which is the asymmetry #428 called out.
+  //
+  // Every verdict the batch can reach by reading precedes its first write
+  // (step 5), so a refusal after a leg wrote is such a race, and the retry
+  // runs only where nothing the failed attempt wrote survives it: the
+  // attempt opened its own transaction (the refusal rolled it back), or it
+  // wrote nothing (`progress`). Inside a caller's transaction, or on a
+  // backend without one, re-running would apply the written legs a second
+  // time.
+  const transactionMode = resolveWriteTransactionMode(backend);
+  const runAttempt = (progress: { wrote: boolean }): Promise<Result[]> =>
+    runOwnedMutationSetTransaction(backend, (target) =>
+      attempt(target, progress),
+    );
+  async function attempt(
+    target: GraphBackend | TransactionBackend,
+    progress: { wrote: boolean },
+  ): Promise<Result[]> {
     // Step 2: Batch-check existing keys
     const existingByKey =
       uniqueKeys.length > 0 ?
         await batchCheckUniqueAcrossKinds(
-          backend,
+          target,
           ctx.uniqueSidecarBatch,
           ctx.graphId,
           constraint.name,
@@ -7534,7 +7924,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // A match whose node row is gone joins the creates.
     const matches: (ExistingGetOrCreateMatch & { index: number })[] = [];
     for (const { index, concreteKind, validatedProps, nodeId } of toFetch) {
-      const existing = await backend.getNode(ctx.graphId, concreteKind, nodeId);
+      const existing = await target.getNode(ctx.graphId, concreteKind, nodeId);
       if (existing === undefined) {
         toCreate.push({
           index,
@@ -7553,11 +7943,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // The creates' read-free refusals (a required part with no `partOf`, an
     // undeclared or ambiguous pair) are reached here, before any matched item
     // writes, rather than when the create batch runs in step 6.
-    const createWorks = resolveBatchCompositionWorks(
-      ctx,
-      createInputs,
-      backend,
-    );
+    const createWorks = resolveBatchCompositionWorks(ctx, createInputs, target);
     const attachingCreates = createInputs.filter(
       (_input, position) => createWorks[position] !== undefined,
     );
@@ -7567,14 +7953,15 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // `assertGetOrCreateBatchApplicable` for why those precede the first write.
     const { owed, held } = await partitionExistingGetOrCreateLegs(
       ctx,
-      backend,
+      target,
       matches,
     );
     if (
-      getOrCreateBatchDecidesBeforeWriting(owed.length, attachingCreates.length)
+      getOrCreateBatchDecidesBeforeWriting(owed.length, createInputs.length)
     ) {
-      await assertGetOrCreateBatchApplicable(ctx, backend, {
+      await assertGetOrCreateBatchApplicable(ctx, target, {
         owed,
+        creates: createInputs,
         attachingCreates,
         createWorks,
         partOf,
@@ -7589,25 +7976,24 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     for (const match of owed) {
       results[match.index] = await writeOwedExistingGetOrCreateLeg(
         ctx,
-        backend,
+        target,
         match,
       );
+      progress.wrote = true;
     }
 
     // Step 6: Execute creates
     //
-    // After the matched items on purpose: a matched item's refusal must
-    // precede the first row this call writes, or a caller catching it inside
-    // an enclosing `store.transaction(...)` keeps the created parts of a batch
-    // that threw. The converse is the batch frame's job above for the
-    // attachments of these rows; what only their own preparation can refuse
-    // (a second unique key, a disjoint kind) is raised here, after the
-    // matched items wrote, because a matched update may hand them a key.
+    // After the matched items, the order the batch frame above judged them
+    // in: a matched update may hand a new row a unique key, and the frame
+    // already reached every refusal these rows' preparation can (their unique
+    // keys, their attachments), so none of them is raised here after the
+    // matched items wrote.
     if (createInputs.length > 0) {
       const createdNodes = await executeNodeCreateBatch(
         ctx,
         createInputs,
-        backend,
+        target,
         { propsPreValidated: true },
       );
       for (const [batchIndex, entry] of toCreate.entries()) {
@@ -7638,10 +8024,12 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     return results;
   }
 
+  const progress = { wrote: false };
   try {
-    return await attempt();
+    return await runAttempt(progress);
   } catch (error) {
     if (!(error instanceof UniquenessError)) throw error;
-    return attempt();
+    if (progress.wrote && transactionMode !== "opened") throw error;
+    return runAttempt({ wrote: false });
   }
 }

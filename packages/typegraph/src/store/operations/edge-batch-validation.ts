@@ -400,3 +400,87 @@ export function createRetiringEdgeValidationBackend(
     },
   } satisfies Partial<WriteTarget>);
 }
+
+/**
+ * The frame's write target as a SET of edge row writes is judged against
+ * before any of them lands: a frame that prepares every write first and issues
+ * them afterwards registers each row's transition as soon as that row is
+ * prepared, so the next row's cardinality and composition probes count the
+ * population the earlier writes will leave, not the stored one.
+ *
+ * A registered transition takes the row's STORED state out of every endpoint
+ * count it was in and puts its state after the write into every count that
+ * state is in — through {@link countEdgesAtEndpointIncludes}, the row-level
+ * rendering of the read itself, so the overlay cannot count a row the read
+ * would not. A row the frame is about to INSERT registers with no stored
+ * state, and a row written twice keeps its stored state and only its latest
+ * one. `edgeExistsBetween` counts live rows, which an update can only add to
+ * (no update soft-deletes), so it answers the stored read or any live row a
+ * transition leaves on the pair.
+ *
+ * This generalizes {@link createRetiringEdgeValidationBackend} (a transition
+ * whose later state counts nowhere) and the pending inserts of
+ * {@link createEdgeBatchValidationBackend} (a transition with no stored state)
+ * to the writes that do both: a resurrection or window reopen enters a count,
+ * a window end leaves one.
+ */
+export function createEdgeTransitionValidationBackend(
+  target: WriteTarget,
+): Readonly<{
+  backend: WriteTarget;
+  registerEdgeTransition: (stored: EdgeRow | undefined, after: EdgeRow) => void;
+}> {
+  const transitions = new Map<
+    string,
+    Readonly<{ stored: EdgeRow | undefined; after: EdgeRow }>
+  >();
+
+  function registerEdgeTransition(
+    stored: EdgeRow | undefined,
+    after: EdgeRow,
+  ): void {
+    const earlier = transitions.get(after.id);
+    transitions.set(after.id, {
+      stored: earlier === undefined ? stored : earlier.stored,
+      after,
+    });
+  }
+
+  const backend = deriveBackend(target, {
+    countEdgesAtEndpoint: async (
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> => {
+      const storedCount = await target.countEdgesAtEndpoint(params);
+      const pendingDelta = [...transitions.values()].reduce(
+        (delta, { stored, after }) =>
+          delta -
+          ((
+            stored !== undefined && countEdgesAtEndpointIncludes(params, stored)
+          ) ?
+            1
+          : 0) +
+          (countEdgesAtEndpointIncludes(params, after) ? 1 : 0),
+        0,
+      );
+      return storedCount + pendingDelta;
+    },
+    edgeExistsBetween: async (params): Promise<boolean> => {
+      for (const { after } of transitions.values()) {
+        if (
+          after.graph_id === params.graphId &&
+          after.kind === params.edgeKind &&
+          after.from_kind === params.fromKind &&
+          after.from_id === params.fromId &&
+          after.to_kind === params.toKind &&
+          after.to_id === params.toId &&
+          after.deleted_at === undefined
+        ) {
+          return true;
+        }
+      }
+      return target.edgeExistsBetween(params);
+    },
+  } satisfies Partial<WriteTarget>);
+
+  return { backend, registerEdgeTransition };
+}

@@ -862,23 +862,58 @@ async function validateFoldPeers(
 }
 
 /**
+ * The fold a set of created or restored node references owes, as
+ * {@link assertIdentityFoldable} decided it: the references the closure is
+ * materialized over, each folding reference with its live same-id peers.
+ * Empty when nothing folds.
+ */
+export type IdentityFoldPlan = Readonly<{
+  closureReferences: readonly PlainNodeRef[];
+}>;
+
+const NO_IDENTITY_FOLD: IdentityFoldPlan = { closureReferences: [] };
+
+/**
  * Whether folding `references` into identity would be refused, answered by
  * reading alone: raises the `IdentityContradictionError` the fold would, and
- * writes nothing. A frame that restores several rows calls it for all of them
- * before its first statement, so a refusal the fold can only reach after a row
- * is written is not left to the write. The references are judged against the
- * identity state as stored, with the frame's own earlier restores not yet
- * folded.
+ * writes nothing. A frame that creates or restores rows calls it before its
+ * first statement, so a refusal the fold can only reach after a row is written
+ * is not left to the write. The references are judged against the identity
+ * state as stored, with the frame's own earlier restores not yet folded.
+ *
+ * Returns the fold it decided. {@link applyIdentityFold} writes that plan once
+ * the rows have landed, without reading the verdict a second time: the
+ * created row's own write changes neither its live same-id peers nor any
+ * class, so the plan still holds while the frame keeps the identity lock it
+ * was decided under.
  */
 export async function assertIdentityFoldable(
   ctx: FoldContext,
   target: Backend,
   references: readonly PlainNodeRef[],
+): Promise<IdentityFoldPlan> {
+  if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") {
+    return NO_IDENTITY_FOLD;
+  }
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => ({
+    closureReferences: await validateFoldPeers(ctx, rawTarget, references),
+  }));
+}
+
+/**
+ * Writes the fold {@link assertIdentityFoldable} decided, after the rows it
+ * folds have been written.
+ */
+export async function applyIdentityFold(
+  ctx: FoldContext,
+  target: Backend,
+  plan: IdentityFoldPlan,
+  // See {@link foldIdentityForCreatedNodes} for how the call site decides it.
+  cause: "fold" | "restore",
 ): Promise<void> {
-  if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
-  await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    await validateFoldPeers(ctx, rawTarget, references);
-  });
+  if (plan.closureReferences.length === 0) return;
+  await lockIdentityGraph(target, ctx.graphId);
+  await writeIdentityFold(ctx, target, plan, cause);
 }
 
 export async function foldIdentityForCreatedNodes(
@@ -902,20 +937,25 @@ export async function foldIdentityForCreatedNodes(
 ): Promise<void> {
   if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
   await lockIdentityGraph(target, ctx.graphId);
+  const plan = await assertIdentityFoldable(ctx, target, references);
+  await writeIdentityFold(ctx, target, plan, cause);
+}
+
+async function writeIdentityFold(
+  ctx: FoldContext,
+  target: Backend,
+  plan: IdentityFoldPlan,
+  cause: "fold" | "restore",
+): Promise<void> {
+  if (plan.closureReferences.length === 0) return;
   await withRecordedIdentityMutationTarget(
     target,
     async (rawTarget, _touch, noteTransition) => {
-      const closureReferences = await validateFoldPeers(
-        ctx,
-        rawTarget,
-        references,
-      );
-      if (closureReferences.length === 0) return;
       const transitions = await replaceAffectedClosure(
         rawTarget,
         ctx.schema,
         ctx.graphId,
-        closureReferences,
+        plan.closureReferences,
         ctx.sameIdAcrossKinds,
       );
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
