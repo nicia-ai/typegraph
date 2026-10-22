@@ -61,6 +61,7 @@ import {
   hasRevisionAnchor,
   isLegacyBaseVersion,
   LEGACY_BASE_VERSION_REFUSAL,
+  optionalActiveSchemaHash,
   readActiveSchemaVersion,
   revisionAnchorOf,
   revisionOriginOf,
@@ -240,6 +241,7 @@ import type {
 } from "./typegraph-internal";
 import type { IdentityDecisionProvenance } from "./typegraph-internal";
 import {
+  activeSchemaHash,
   acyclicEdgeRelations,
   advanceRevisionClock,
   BATCH_POINT_READ,
@@ -3172,7 +3174,10 @@ export async function captureMergePlanTargetFence<G extends GraphDef>(
     schema: {
       managed: activeSchema !== undefined,
       version: activeSchema?.version ?? 1,
-      hash: activeSchema?.schema_hash ?? schemaHash,
+      hash:
+        activeSchema === undefined ? schemaHash : (
+          await activeSchemaHash(activeSchema)
+        ),
     },
     revision: { origin, revision: revision ?? null },
   };
@@ -4132,12 +4137,14 @@ async function resolveMerge<G extends GraphDef, Output>(
         anchor === undefined ?
           branchSchemaRow !== undefined
         : branchSchemaRow?.version !== anchor.version ||
-          branchSchemaRow.schema_hash !== anchor.hash;
+          (await activeSchemaHash(branchSchemaRow)) !== anchor.hash;
     } else {
       const sourceSchemaRow = await storeBackend(store).getActiveSchema(
         store.graphId,
       );
-      drifted = branchSchemaRow?.schema_hash !== sourceSchemaRow?.schema_hash;
+      drifted =
+        (await optionalActiveSchemaHash(branchSchemaRow)) !==
+        (await optionalActiveSchemaHash(sourceSchemaRow));
     }
     if (drifted) {
       return err(
@@ -4147,7 +4154,7 @@ async function resolveMerge<G extends GraphDef, Output>(
             details: {
               branchId: branch.id,
               branchSchemaVersion: branchSchemaRow?.version,
-              branchSchemaHash: branchSchemaRow?.schema_hash,
+              branchSchemaHash: await optionalActiveSchemaHash(branchSchemaRow),
               anchor: "schemaAnchor" in branch ? branch.schemaAnchor : "absent",
             },
           },
@@ -4926,7 +4933,10 @@ async function planMergeIncrementalWithPruning<G extends GraphDef>(
       schema: {
         managed: forkActiveSchema !== undefined,
         version: forkActiveSchema?.version ?? 1,
-        hash: forkActiveSchema?.schema_hash ?? forkSchema,
+        hash:
+          forkActiveSchema === undefined ? forkSchema : (
+            await activeSchemaHash(forkActiveSchema)
+          ),
       },
     },
     // `validateForkPointVersions` established exact equality for every
@@ -5332,7 +5342,10 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   const liveSchema = {
     managed: activeSchema !== undefined,
     version: activeSchema?.version ?? 1,
-    hash: activeSchema?.schema_hash ?? (await computeSchemaComponent(target)),
+    hash:
+      activeSchema === undefined ?
+        await computeSchemaComponent(target)
+      : await activeSchemaHash(activeSchema),
   };
   if (
     liveSchema.managed !== artifact.target.schema.managed ||

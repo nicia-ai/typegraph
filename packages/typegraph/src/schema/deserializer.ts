@@ -12,7 +12,7 @@ import {
   type StructuralSubsumptionMode,
 } from "../registry/build-validated";
 import { compositionRelationFields } from "../registry/composition-relation";
-import { type EdgeKindFacts } from "../registry/edge-kind-facts";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
 import type { KindRegistry } from "../registry/kind-registry";
 import { hasOwnKey } from "../utils/object";
 import {
@@ -99,7 +99,7 @@ export function deserializeSchema(
     version: schema.version,
     generatedAt: schema.generatedAt,
 
-    // Own-key reads, for the same reason {@link buildSerializedEdgeKindFacts} below
+    // Own-key reads, for the same reason `buildSerializedEdgeKindFacts` (`src/registry/edge-kind-facts.ts`)
     // uses a `Map`: `schema` is parsed out of a stored JSON document and the
     // caller supplies the name, so a raw read hands back an `Object.prototype`
     // member typed as a definition for any name no kind is registered under.
@@ -192,48 +192,4 @@ export function buildRegistryFromSerializedSchema(
     structuralSubsumption,
     ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
-}
-
-/**
- * Maps each edge kind's serialized definition to its domain/range kind
- * names and cardinalities, for `validateImpliesEndpointCompatibility`, for
- * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`),
- * and for `buildCompositionRelation`
- * (`src/registry/composition-relation.ts`). A `Map` (rather than the plain
- * `schema.edges` object) so a lookup for an edge kind literally named
- * "toString" or another `Object.prototype` member can't resolve to an
- * inherited member instead of `undefined`.
- */
-export function buildSerializedEdgeKindFacts(
-  edges: Record<string, SerializedEdgeDef>,
-): ReadonlyMap<string, EdgeKindFacts> {
-  const result = new Map<string, EdgeKindFacts>();
-  for (const [kind, def] of Object.entries(edges)) {
-    const pairs: { from: string; to: string }[] = [];
-    if (def.targetKindsBySource === undefined) {
-      for (const fromKind of def.fromKinds) {
-        for (const toKind of def.toKinds) {
-          pairs.push({ from: fromKind, to: toKind });
-        }
-      }
-    } else {
-      for (const [sourceKind, targetKinds] of Object.entries(
-        def.targetKindsBySource,
-      )) {
-        for (const targetKind of targetKinds) {
-          pairs.push({ from: sourceKind, to: targetKind });
-        }
-      }
-    }
-    result.set(kind, {
-      from: def.fromKinds,
-      to: def.toKinds,
-      pairs,
-      cardinality: def.cardinality,
-      // Absent in documents stored before the option existed (the serializer
-      // omits the default so untouched graphs keep their hash).
-      targetCardinality: def.targetCardinality ?? "many",
-    });
-  }
-  return result;
 }

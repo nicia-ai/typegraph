@@ -111,16 +111,14 @@ import {
   ontologyRelationIdentityKey,
 } from "../registry/composition-relation";
 import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
 import { type KindRegistry } from "../registry/kind-registry";
 import { requiredCompositionPartKinds } from "../store/operations/composition-create";
 import { compareStrings, compareStringTuples } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
-import {
-  buildRegistryFromSerializedSchema,
-  buildSerializedEdgeKindFacts,
-} from "./deserializer";
+import { buildRegistryFromSerializedSchema } from "./deserializer";
 import { type ChangeSeverity, type ChangeType } from "./migration";
 import {
   type SerializedOntologyRelation,
@@ -634,10 +632,54 @@ function edgeEndpointAdmissionLosses(
 }
 
 /**
+ * The data checks an edge kind THIS commit adds owes, which are not changes
+ * the diff reports: a kind absent from `before` has no declaration to compare,
+ * yet it may still own rows a previous removal left in the table
+ * (`discardDroppedKindRows`), and those rows become live under the re-added
+ * declaration. So an added kind is probed as if its previous declaration had
+ * admitted every endpoint pair and declared no acyclicity — the same reading
+ * `newlyConstrainedEdgeAxes` (`./edge-cardinality-change`) gives an added
+ * kind's cardinality and `declaredKindUniqueConstraints`
+ * (`./uniqueness-claim-gate`) gives an added kind's unique constraints. A kind
+ * with no such rows answers both probes with one empty read.
+ */
+export type AddedEdgeKindProbes = Readonly<{
+  endpointAllowances: readonly EdgeEndpointAllowance[];
+  acyclicEdgeKinds: readonly string[];
+}>;
+
+export function addedEdgeKindProbes(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+  afterRegistry: KindRegistry,
+): AddedEdgeKindProbes {
+  const addedEdgeKinds = Object.keys(after.edges)
+    .filter((edgeKind) => !hasOwnKey(before.edges, edgeKind))
+    .toSorted((left, right) => compareStrings(left, right));
+  if (addedEdgeKinds.length === 0) {
+    return { endpointAllowances: [], acyclicEdgeKinds: [] };
+  }
+  const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
+  return {
+    endpointAllowances: addedEdgeKinds.map((edgeKind) =>
+      expandEdgeEndpointAllowance(
+        edgeKind,
+        requireDefined(afterEndpoints.get(edgeKind)),
+        afterRegistry,
+      ),
+    ),
+    acyclicEdgeKinds: addedEdgeKinds.filter(
+      (edgeKind) => after.edges[edgeKind]?.acyclic === true,
+    ),
+  };
+}
+
+/**
  * Edge kinds present on both sides whose `acyclic` flag made the transition
- * `wasTransition` selects for — a brand-new edge kind (absent from `before`)
- * never qualifies for either direction, since there is no prior data an
- * added axiom could have violated or a removed one could have depended on.
+ * `wasTransition` selects for. A brand-new edge kind (absent from `before`)
+ * is not a CHANGE to an edge registration, so it qualifies for neither
+ * direction here; the rows a previous removal may have left under its name
+ * are probed by {@link addedEdgeKindProbes} instead.
  * The one loop {@link edgeAcyclicityAddedDelta} and
  * {@link edgeAcyclicityRemovedDelta} both filter, so the "present on both
  * sides" test cannot drift between the two directions.

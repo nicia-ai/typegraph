@@ -467,41 +467,58 @@ export function registerConstraintFenceVerificationIntegrationTests(
       ]);
     });
 
-    it("does not report a misassigned edge whose valid-time window already closed", async () => {
+    it("reports misassigned edges whose valid-time window already closed or has not opened", async () => {
       const store = await context.createStore(verifyGraph);
       const contractor = await store.nodes.VerifyContractor.create({
-        email: "closed-window@example.com",
+        email: "outside-window@example.com",
       });
       const project = await store.nodes.VerifyProject.create({
-        title: "Closed window",
+        title: "Outside window",
       });
 
-      // Same misassignment as the case above, but its valid-time window
-      // ended in the past — a current-coordinate read never returns this
-      // row, so it cannot be violating a declaration only current reads
-      // apply to. "Live" for this family is the same current-window
-      // predicate `compileTemporalFilter({ mode: "current" })` compiles for
-      // an ordinary read: `deleted_at IS NULL AND (valid_from IS NULL OR
-      // valid_from <= now) AND (valid_to IS NULL OR valid_to > now)`.
-      await store.backend.insertEdge({
+      // Neither row is current, but the write path admits and fences both:
+      // an `asOf` read inside the closed window returns the first, and the
+      // second becomes current once the clock reaches it. So both sit on a
+      // pair the declaration does not admit.
+      const misassigned = {
         graphId: verifyGraph.id,
-        id: "verify-misassigned-edge-closed-window",
         kind: "verifyManages",
         fromKind: "VerifyContractor",
         fromId: contractor.id,
         toKind: "VerifyProject",
         toId: project.id,
         props: {},
+      } as const;
+      await store.backend.insertEdge({
+        ...misassigned,
+        id: "verify-misassigned-edge-closed-window",
         validFrom: "2019-01-01T00:00:00.000Z",
         validTo: "2020-01-01T00:00:00.000Z",
       });
+      await store.backend.insertEdge({
+        ...misassigned,
+        id: "verify-misassigned-edge-pending-window",
+        validFrom: "2999-01-01T00:00:00.000Z",
+      });
 
-      expect(await store.verifyConstraintFences()).toEqual([]);
+      // Two edges between the same endpoints also contend for
+      // `verifyManages`'s cardinality axis; this case asserts only the
+      // endpoint family.
+      const violations = await store.verifyConstraintFences();
+      const report = violations.find(
+        (violation) => violation.family === "edgeEndpointAssignability",
+      );
+      if (report?.family !== "edgeEndpointAssignability") {
+        throw new Error("expected an edgeEndpointAssignability violation");
+      }
+      expect(report.edges.map((edge) => edge.edgeId).toSorted()).toEqual([
+        "verify-misassigned-edge-closed-window",
+        "verify-misassigned-edge-pending-window",
+      ]);
     });
-    // MUTATION CHECK (verified): dropping the `valid_to > now` half of the
-    // current-window predicate in `buildMisassignedEdgeEndpointAudit`
-    // (`src/backend/drizzle/operations/constraint-fence-audit.ts`) reports
-    // this closed-window row as a live violation and this test fails.
+    // MUTATION CHECK (verified): reading the endpoint family through the
+    // current-window predicate instead of `auditedRowTerm` in
+    // `buildMisassignedEdgeEndpointAudit` hides both rows and this test fails.
 
     it("reports a misassigned edge with a bounded FUTURE valid-time window", async () => {
       const store = await context.createStore(verifyGraph);
@@ -547,9 +564,8 @@ export function registerConstraintFenceVerificationIntegrationTests(
         },
       ]);
     });
-    // MUTATION CHECK (verified): restoring the original `valid_to IS NULL`
-    // liveness predicate (instead of the current-window one) makes this
-    // bounded-future-window row invisible to the audit and this test fails.
+    // MUTATION CHECK (verified): a `valid_to IS NULL` liveness predicate makes
+    // this bounded-window row invisible to the audit and this test fails.
 
     it(
       "audits a wide subclass hierarchy without exceeding SQLite's " +

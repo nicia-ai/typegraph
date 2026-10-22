@@ -10,6 +10,7 @@
  * schema) and read everywhere else.
  */
 import { type Cardinality, type TargetCardinality } from "../core/types";
+import { type SerializedEdgeDef } from "../schema/types";
 
 /**
  * An edge kind's declared domain (`from`) and range (`to`) kind names, its
@@ -28,3 +29,47 @@ export type EdgeKindFacts = Readonly<{
   cardinality: Cardinality;
   targetCardinality: TargetCardinality;
 }>;
+
+/**
+ * Maps each edge kind's serialized definition to its domain/range kind
+ * names and cardinalities, for `validateImpliesEndpointCompatibility`, for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`),
+ * and for `buildCompositionRelation`
+ * (`src/registry/composition-relation.ts`). A `Map` (rather than the plain
+ * `schema.edges` object) so a lookup for an edge kind literally named
+ * "toString" or another `Object.prototype` member can't resolve to an
+ * inherited member instead of `undefined`.
+ */
+export function buildSerializedEdgeKindFacts(
+  edges: Record<string, SerializedEdgeDef>,
+): ReadonlyMap<string, EdgeKindFacts> {
+  const result = new Map<string, EdgeKindFacts>();
+  for (const [kind, def] of Object.entries(edges)) {
+    const pairs: { from: string; to: string }[] = [];
+    if (def.targetKindsBySource === undefined) {
+      for (const fromKind of def.fromKinds) {
+        for (const toKind of def.toKinds) {
+          pairs.push({ from: fromKind, to: toKind });
+        }
+      }
+    } else {
+      for (const [sourceKind, targetKinds] of Object.entries(
+        def.targetKindsBySource,
+      )) {
+        for (const targetKind of targetKinds) {
+          pairs.push({ from: sourceKind, to: targetKind });
+        }
+      }
+    }
+    result.set(kind, {
+      from: def.fromKinds,
+      to: def.toKinds,
+      pairs,
+      cardinality: def.cardinality,
+      // Absent in documents stored before the option existed (the serializer
+      // omits the default so untouched graphs keep their hash).
+      targetCardinality: def.targetCardinality ?? "many",
+    });
+  }
+  return result;
+}

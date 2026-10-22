@@ -30,6 +30,7 @@ export type {
   GraphReadBackend,
   LineageDelta,
   NodeRow,
+  SchemaVersionRow,
   TransactionBackend,
   TransactionOptions,
 } from "../backend/types";
@@ -90,6 +91,7 @@ export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
+export { activeSchemaHash } from "../schema/manager";
 export {
   computeSchemaHash,
   getGraphDefinitionHash,

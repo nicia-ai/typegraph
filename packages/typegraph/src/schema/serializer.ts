@@ -36,8 +36,16 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
-import { compositionRelationFields } from "../registry/composition-relation";
-import { computeClosuresFromOntology } from "../registry/kind-registry";
+import { type NamedOntologyRelation } from "../ontology/validation";
+import {
+  canonicalCompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
+import {
+  computeClosuresFromNamedOntology,
+  KindRegistry,
+} from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { createDataKeyedBag } from "../utils/object";
@@ -72,7 +80,7 @@ export function serializeSchema<G extends GraphDef>(
 ): SerializedSchema {
   const nodes = serializeNodes(graph);
   const edges = serializeEdges(graph);
-  const ontology = serializeOntology(graph.ontology);
+  const ontology = serializeOntology(graph.ontology, edges);
   const indexes = serializeIndexes(graph.indexes);
   const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
@@ -557,6 +565,7 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
  */
 function serializeOntology(
   relations: readonly OntologyRelation[],
+  edges: Record<string, SerializedEdgeDef>,
 ): SerializedOntology {
   // Collect unique meta-edges
   const metaEdgeMap = new Map<string, MetaEdge>();
@@ -574,13 +583,12 @@ function serializeOntology(
     metaEdges[name] = serializeMetaEdge(metaEdge);
   }
 
-  // Serialize relations
-  const serializedRelations = relations.map((relation) =>
-    serializeOntologyRelation(relation),
+  const serializedRelations = withCanonicalPartSides(
+    relations.map((relation) => serializeOntologyRelation(relation)),
+    edges,
   );
 
-  // Compute and serialize closures
-  const closures = serializeClosures(relations);
+  const closures = serializeClosures(serializedRelations);
 
   return {
     metaEdges: { ...metaEdges },
@@ -614,10 +622,45 @@ function serializeOntologyRelation(
 }
 
 /**
- * Serializes precomputed closures.
+ * `relations` with each composition `partSide` reduced to
+ * `canonicalCompositionPartSide`: a side the realizing edge's endpoints
+ * already decide is omitted, so spelling it out does not change the document,
+ * its hash, or the relation's identity in a diff. A side the edge admits both
+ * ways is kept, since it is what decides the relation.
+ */
+function withCanonicalPartSides(
+  relations: readonly SerializedOntologyRelation[],
+  edges: Record<string, SerializedEdgeDef>,
+): readonly SerializedOntologyRelation[] {
+  if (!relations.some((relation) => relation.partSide !== undefined)) {
+    return relations;
+  }
+  const registry = new KindRegistry(
+    new Map(),
+    new Map(),
+    computeClosuresFromNamedOntology(relations),
+  );
+  const edgeFacts = buildSerializedEdgeKindFacts(edges);
+  return relations.map((relation) => {
+    if (relation.partSide === undefined) return relation;
+    const { partSide: _declared, ...rest } = relation;
+    const partSide = canonicalCompositionPartSide(
+      relation,
+      edgeFacts,
+      registry,
+    );
+    return partSide === undefined ? rest : { ...rest, partSide };
+  });
+}
+
+/**
+ * Serializes the closures precomputed from a set of relations. Takes the
+ * relations by name, so a stored document's own relations recompute exactly
+ * the closures this release writes for them (see
+ * {@link canonicalStoredSchemaDocument}).
  */
 function serializeClosures(
-  relations: readonly OntologyRelation[],
+  relations: readonly NamedOntologyRelation[],
 ): SerializedClosures {
   if (relations.length === 0) {
     return {
@@ -636,7 +679,7 @@ function serializeClosures(
     };
   }
 
-  const computed = computeClosuresFromOntology(relations);
+  const computed = computeClosuresFromNamedOntology(relations);
 
   return {
     subClassAncestors: mapToRecord(computed.subClassAncestors),
@@ -821,6 +864,61 @@ export async function getGraphDefinitionHash(
   graph: GraphDef,
 ): Promise<SchemaHash> {
   return getSchemaHash(graph, DEFINITION_HASH_VERSION);
+}
+
+/**
+ * A stored schema document in the form this release's serializer writes for
+ * the schema it describes, so its {@link computeSchemaHash} is comparable with
+ * the hash of a graph serialized today.
+ *
+ * A document written by an earlier release, or read back through the parser,
+ * differs from that form only in derived or defaulted content, never in what
+ * the schema states:
+ *
+ * - `ontology.metaEdges` entries carried `transitive`/`symmetric`/`reflexive`/
+ *   `inverse`/`inference`, which this release no longer writes.
+ * - `ontology.closures` are derived from `ontology.relations`; an earlier
+ *   release derived some of them differently (the `equivalentTo` closures).
+ *   They are recomputed from the document's own relations.
+ * - An absent edge `targetCardinality` means `"many"`, which the serializer
+ *   omits.
+ *
+ * The document must be the stored JSON as written, not the output of the
+ * schema parser: the parser fills in keys the serializer omits (a unique
+ * constraint's `scope` and `collation`) and an explicit value cannot be told
+ * from a filled-in one afterwards.
+ *
+ * Everything else is kept verbatim, so a document that differs from today's
+ * serialization in anything the schema states still hashes differently.
+ */
+export function canonicalStoredSchemaDocument(
+  document: SerializedSchema,
+): SerializedSchema {
+  // Data-keyed: edge kind names and meta-edge names.
+  const edges = createDataKeyedBag<SerializedEdgeDef>();
+  for (const [kind, edge] of Object.entries(document.edges)) {
+    const { targetCardinality, ...rest } = edge;
+    edges[kind] =
+      targetCardinality === undefined || targetCardinality === "many" ?
+        rest
+      : edge;
+  }
+  const metaEdges = createDataKeyedBag<SerializedMetaEdge>();
+  for (const [name, metaEdge] of Object.entries(document.ontology.metaEdges)) {
+    metaEdges[name] = {
+      name: metaEdge.name,
+      description: metaEdge.description,
+    };
+  }
+  return {
+    ...document,
+    edges: { ...edges },
+    ontology: {
+      ...document.ontology,
+      metaEdges: { ...metaEdges },
+      closures: serializeClosures(document.ontology.relations),
+    },
+  };
 }
 
 /**

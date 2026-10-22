@@ -244,6 +244,49 @@ function declaredEndpointGraph(
   });
 }
 
+/**
+ * An edge kind a graph declares, drops with its rows left in the table
+ * (`discardDroppedKindRows`), and then re-adds: `acyclic` and `narrowed` shape
+ * the re-added declaration.
+ */
+const Gizmo = defineNode("Gizmo", { schema: z.object({}) });
+const Widget = defineNode("Widget", { schema: z.object({}) });
+const feeds = defineEdge("feeds", { schema: z.object({}) });
+function reAddedEdgeGraph(
+  id: string,
+  state: "declared" | "dropped" | "acyclic" | "narrowed",
+) {
+  return defineGraph({
+    id,
+    nodes: { Gizmo: { type: Gizmo }, Widget: { type: Widget } },
+    edges:
+      state === "dropped" ?
+        {}
+      : {
+          feeds: {
+            type: feeds,
+            from: [Gizmo],
+            to: state === "narrowed" ? [Widget] : [Gizmo, Widget],
+            ...(state === "acyclic" ? { acyclic: true } : {}),
+          },
+        },
+  });
+}
+
+/** Drops `feeds` from `id`'s schema while keeping its rows. */
+async function dropKeepingRows(
+  context: IntegrationTestContext,
+  id: string,
+): Promise<void> {
+  await migrateSchema(
+    context.getBackend(),
+    reAddedEdgeGraph(id, "dropped"),
+    1,
+    { discardDroppedKindRows: true },
+  );
+  expect(await activeVersion(context, id)).toBe(2);
+}
+
 function probeGraph(id: string, withDisjoint: boolean) {
   return defineGraph({
     id,
@@ -1097,6 +1140,120 @@ export function registerOntologyTighteningIntegrationTests(
         expect(await activeVersion(context, id)).toBe(1);
       }
       expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses narrowing an edge kind's endpoints out from under an edge that is not yet current", async () => {
+      const id = "ontology_tightening_endpoint_narrowing_pending_edge";
+      const store = await context.createStore(
+        declaredEndpointGraph(id, "wide"),
+      );
+      const person = await store.nodes.Person.create({});
+      const company = await store.nodes.Company.create({});
+      const pending = await store.edges.worksFor.create(
+        person,
+        company,
+        {},
+        { validFrom: "2999-01-01T00:00:00.000Z" },
+      );
+
+      const error = await createAdapterStoreWithSchema(
+        declaredEndpointGraph(id, "list"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      // The edge becomes current once the clock reaches its window, so it
+      // must not end up on a pair the narrowed declaration no longer admits.
+      expect(error).toBeInstanceOf(MigrationError);
+      expect((error as MigrationError).details).toMatchObject({
+        reason: "ontology-tightening-violated",
+        violations: [
+          matchingObject({
+            family: "edgeEndpointAssignability",
+            edges: [matchingObject({ edgeId: pending.id })],
+          }),
+        ],
+      });
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: reading the endpoint family through the current-window
+    // predicate instead of `auditedRowTerm` in
+    // `buildMisassignedEdgeEndpointAudit` commits this narrowing.
+
+    it("refuses re-adding an edge kind as acyclic over rows a discarded drop left in a cycle", async () => {
+      const id = "ontology_tightening_readded_acyclic";
+      const store = await context.createStore(reAddedEdgeGraph(id, "declared"));
+      const a = await store.nodes.Gizmo.create({});
+      const b = await store.nodes.Gizmo.create({});
+      const forward = await store.edges.feeds.create(a, b);
+      const backward = await store.edges.feeds.create(b, a);
+      await dropKeepingRows(context, id);
+
+      const error = await createAdapterStoreWithSchema(
+        reAddedEdgeGraph(id, "acyclic"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      expect((error as MigrationError).details).toMatchObject({
+        reason: "ontology-tightening-violated",
+        violations: [
+          {
+            family: "edgeAcyclicity",
+            relation: "feeds",
+            edgeIds: [forward.id, backward.id].toSorted(compareStrings),
+          },
+        ],
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: returning no `acyclicEdgeKinds` from
+    // `addedEdgeKindProbes` commits the re-added kind over the cycle.
+
+    it("refuses re-adding an edge kind with narrower endpoints than the rows a discarded drop left", async () => {
+      const id = "ontology_tightening_readded_narrowed";
+      const store = await context.createStore(reAddedEdgeGraph(id, "declared"));
+      const a = await store.nodes.Gizmo.create({});
+      const b = await store.nodes.Gizmo.create({});
+      const stranded = await store.edges.feeds.create(a, b);
+      await dropKeepingRows(context, id);
+
+      const error = await createAdapterStoreWithSchema(
+        reAddedEdgeGraph(id, "narrowed"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      expect((error as MigrationError).details).toMatchObject({
+        reason: "ontology-tightening-violated",
+        violations: [
+          matchingObject({
+            family: "edgeEndpointAssignability",
+            edgeKind: "feeds",
+            allowedPairs: [["Gizmo", "Widget"]],
+            edges: [matchingObject({ edgeId: stranded.id })],
+          }),
+        ],
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: returning no `endpointAllowances` from
+    // `addedEdgeKindProbes` commits the re-added kind over the stranded row.
+
+    it("re-adds an edge kind whose declaration admits the rows a discarded drop left", async () => {
+      const id = "ontology_tightening_readded_admitted";
+      const store = await context.createStore(reAddedEdgeGraph(id, "declared"));
+      const a = await store.nodes.Gizmo.create({});
+      const b = await store.nodes.Gizmo.create({});
+      await store.edges.feeds.create(a, b);
+      await dropKeepingRows(context, id);
+
+      const [reAdded] = await createAdapterStoreWithSchema(
+        reAddedEdgeGraph(id, "acyclic"),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(3);
+      expect(await reAdded.verifyConstraintFences()).toEqual([]);
     });
 
     it("auto-migrates a narrowed endpoint declaration no live edge sits outside", async () => {

@@ -186,7 +186,22 @@ function uniquenessClaimKinds(
 export function uniquenessAxisOfKinds(
   kinds: readonly string[],
 ): string | undefined {
-  return kinds.toSorted((left, right) => compareStrings(left, right))[0];
+  return kinds.toSorted((left, right) =>
+    compareUniquenessAxisKinds(left, right),
+  )[0];
+}
+
+/**
+ * THE order a uniqueness axis is the minimum of: code-point order. The schema
+ * gate's "does a lost member sort before the kind?" asks this same order, so
+ * where claims were written and which lost members could hold them cannot
+ * disagree for kind names with astral characters.
+ */
+export function compareUniquenessAxisKinds(
+  left: string,
+  right: string,
+): number {
+  return compareCodePoints(left, right);
 }
 
 /** THE decision above — the one owner of both readings. */
@@ -245,7 +260,7 @@ export function uniquenessProbeKinds(
   const coveredKinds = uniquenessClaimKinds(kind, scope, registry);
   const rest = coveredKinds
     .filter((candidate) => candidate !== axis)
-    .toSorted((left, right) => compareCodePoints(left, right));
+    .toSorted((left, right) => compareUniquenessAxisKinds(left, right));
   return [axis, ...rest];
 }
 
