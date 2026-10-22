@@ -2467,7 +2467,7 @@ for (const violation of await store.verifyConstraintFences()) {
 ```
 
 `target` exists only on the families that are a contended claim row. Narrow on
-`violation.family` before reading it: three of the seven members carry none.
+`violation.family` before reading it: four of the eight members carry none.
 The audit reports these families:
 
 | `family` | Reports | Carries |
@@ -2477,6 +2477,7 @@ The audit reports these families:
 | `edgeCardinality` | a source- or target-side cardinality axis held by more than one live edge | `target`, `edgeIds` |
 | `composition` | a part holding more than one live whole across every declared composition relation | `target`, `edgeIds` |
 | `compositionExistence` | live nodes of an `existence: "required"` part kind with no live whole | `partKind`, `parts` (no `target`) |
+| `compositionFutureWindow` | non-deleted rows of a composition realizing edge kind whose `validFrom` or `validTo` is later than now | `edgeKind`, `edgeIds` (no `target`) |
 | `edgeEndpointAssignability` | edge kinds whose live rows sit outside every endpoint pair the current ontology admits | `edgeKind`, `allowedPairs`, `edges` (no `target`) |
 | `edgeAcyclicity` | live edges of an `acyclic: true` relation whose `to` reaches their `from` | `relation`, `edgeIds` (no `target`) |
 
@@ -2503,6 +2504,16 @@ point read) rather than a `readConstraintFenceViolations` backend member — thi
 explicit diagnostic call and at schema-tightening-commit time, never on a
 write's hot path, so there is no per-dialect SQL for a custom backend to
 implement for this family.
+
+`compositionFutureWindow` reports every non-deleted row of a realizing edge
+kind whose window starts or ends later than the audit's clock. No composition
+edge write may state such a window, and every composition membership decision
+relies on that: an open-ended row is a member and an ended one is history.
+A row reported here was written before its edge kind realized a pair, or
+beneath the store. It is the same kind of portable scan as
+`compositionExistence` (`findEdgesByKind` paged, each row judged by the
+comparison the write path uses), so a custom backend has nothing to implement
+for it either.
 
 A custom backend implementing `readConstraintFenceViolations` may receive an
 `edgeEndpointAllowances` declaration (one entry per edge kind, each the

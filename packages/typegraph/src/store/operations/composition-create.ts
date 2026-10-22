@@ -320,7 +320,10 @@ type CompositionWindow = Readonly<{
  * `edge-operations.ts` — which a graph merge's apply writes through), and
  * import ({@link compositionWindowRefusal}, as a per-row error). `reparent`'s
  * one instant is refused by `assertCompositionMoveCurrent` instead, under its
- * own code.
+ * own code. A row no such write judged — one written before its edge kind
+ * realized a pair — is refused by the schema commit that makes it a
+ * composition row and reported by `store.verifyConstraintFences()`, both
+ * through {@link readCompositionFutureWindowEdges}.
  */
 export function assertCompositionWindowCurrent(
   subject: CompositionWindowSubject,
@@ -329,6 +332,38 @@ export function assertCompositionWindowCurrent(
 ): void {
   const refusal = compositionWindowRefusal(subject, window, operationInstant);
   if (refusal !== undefined) throw refusal;
+}
+
+/** A composition window bound later than the operation clock, and which bound it is. */
+type CompositionWindowFutureBound = Readonly<{
+  situation: "futureStart" | "futureEnd";
+  bound: string;
+}>;
+
+/**
+ * THE comparison behind the no-future-windows rule: the first of `window`'s
+ * bounds later than `operationInstant`, or `undefined` when neither is.
+ * Judges a stated window ({@link compositionWindowRefusal}) and a stored row
+ * ({@link readCompositionFutureWindowEdges}) alike, so a write and the audit
+ * of what it left behind cannot disagree about which bound is "later than now".
+ */
+function compositionWindowFutureBound(
+  window: CompositionWindow,
+  operationInstant: string,
+): CompositionWindowFutureBound | undefined {
+  if (
+    typeof window.validFrom === "string" &&
+    compareCodePoints(window.validFrom, operationInstant) > 0
+  ) {
+    return { situation: "futureStart", bound: window.validFrom };
+  }
+  if (
+    window.validTo !== undefined &&
+    compareCodePoints(window.validTo, operationInstant) > 0
+  ) {
+    return { situation: "futureEnd", bound: window.validTo };
+  }
+  return undefined;
 }
 
 /**
@@ -340,19 +375,9 @@ export function compositionWindowRefusal(
   window: CompositionWindow,
   operationInstant: string,
 ): CompositionError | undefined {
-  const [situation, bound] =
-    (
-      typeof window.validFrom === "string" &&
-      compareCodePoints(window.validFrom, operationInstant) > 0
-    ) ?
-      (["futureStart", window.validFrom] as const)
-    : (
-      window.validTo !== undefined &&
-      compareCodePoints(window.validTo, operationInstant) > 0
-    ) ?
-      (["futureEnd", window.validTo] as const)
-    : [undefined, undefined];
-  if (situation === undefined) return undefined;
+  const futureBound = compositionWindowFutureBound(window, operationInstant);
+  if (futureBound === undefined) return undefined;
+  const { situation, bound } = futureBound;
   return new CompositionError({
     situation,
     partKind: subject.part.kind,
@@ -1994,4 +2019,56 @@ export async function readCompositionUnattachedParts(
     }
   }
   return unattached;
+}
+
+/**
+ * Every non-deleted row of these composition edge kinds whose window starts
+ * or ends later than `operationInstant` — the rows
+ * the no-future-windows rule ({@link assertCompositionWindowCurrent}) refuses
+ * to write, found where a write that rule never saw left them: a row written
+ * before its edge kind realized a pair, or one planted beneath the store.
+ * Ended rows are read too: a row whose `validFrom` is later than `now` can
+ * still carry a `validTo`.
+ *
+ * A portable scan judged by {@link compositionWindowFutureBound}, the write
+ * path's own comparison, rather than a SQL rendering of "later than now" that
+ * would have to stay in step with it. Reused by `store.verifyConstraintFences()`
+ * (every realizing edge kind) and by the schema-commit preflight (the edge
+ * kinds of the pairs a commit adds).
+ */
+export async function readCompositionFutureWindowEdges(
+  backend: GraphReadBackend,
+  graphId: string,
+  edgeKinds: readonly string[],
+  operationInstant: string,
+): Promise<readonly Readonly<{ kind: string; id: string }>[]> {
+  const scheduled: Readonly<{ kind: string; id: string }>[] = [];
+  for (const edgeKind of new Set(edgeKinds)) {
+    let after: string | undefined;
+    for (;;) {
+      const rows = await backend.findEdgesByKind({
+        graphId,
+        kind: edgeKind,
+        excludeDeleted: true,
+        temporalMode: "includeEnded",
+        orderBy: "id",
+        limit: COMPOSITION_ATTACHMENT_PAGE_SIZE,
+        ...(after === undefined ? {} : { after }),
+      });
+      for (const row of rows) {
+        const window = { validFrom: row.valid_from, validTo: row.valid_to };
+        if (
+          compositionWindowFutureBound(window, operationInstant) !== undefined
+        ) {
+          scheduled.push({ kind: row.kind, id: row.id });
+        }
+      }
+      if (rows.length < COMPOSITION_ATTACHMENT_PAGE_SIZE) break;
+      after = requireDefined(
+        rows.at(-1),
+        "findEdgesByKind returned a full page with no last row",
+      ).id;
+    }
+  }
+  return scheduled;
 }

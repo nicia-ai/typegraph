@@ -4401,8 +4401,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly adoptBaseSchema: {
         readonly kind: "reasoned";
-        readonly reason: "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations.";
-        readonly accesses: 2;
+        readonly reason: "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations. Reopening a durable PostgreSQL working copy whose allocation predates the current base schema checks for it and adopts the allocation in place.";
+        readonly accesses: 4;
     };
     readonly assertBaseSchemaCurrent: {
         readonly kind: "reasoned";
@@ -4436,8 +4436,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly tableNames: {
         readonly kind: "reasoned";
-        readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.";
-        readonly accesses: 32;
+        readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers; the schema-commit tightening probe reads the proposed acyclic and composition relations through one of them.";
+        readonly accesses: 31;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";

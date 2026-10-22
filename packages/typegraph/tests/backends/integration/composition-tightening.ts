@@ -200,6 +200,48 @@ function buildCellGraph(
   });
 }
 
+// Fixture for an edge kind dropped with its rows kept, then re-added as a
+// composition pair's realizing edge.
+const ctVolumeOf = defineEdge("ctVolumeOf", { schema: z.object({}) });
+
+function buildReAddedVolumeGraph(
+  id: string,
+  state: "plain" | "dropped" | "composed",
+) {
+  return defineGraph({
+    id,
+    nodes: { CtChapter: { type: CtChapter }, CtBook: { type: CtBook } },
+    edges:
+      state === "dropped" ?
+        {}
+      : {
+          ctVolumeOf: {
+            type: ctVolumeOf,
+            from: [CtChapter],
+            to: [CtBook],
+            cardinality: "one",
+          },
+        },
+    ...(state === "composed" ?
+      { ontology: [partOf(CtChapter, CtBook, { via: ctVolumeOf })] }
+    : {}),
+  });
+}
+
+/** A bound no test run reaches: later than any commit's clock. */
+const FUTURE_INSTANT = "2999-01-01T00:00:00.000Z";
+
+function futureWindowViolations(error: unknown): readonly unknown[] {
+  expect(error).toBeInstanceOf(MigrationError);
+  const details = (error as MigrationError).details;
+  if (details.reason !== "ontology-tightening-violated") {
+    throw new Error(
+      `expected ontology-tightening-violated, got ${details.reason}`,
+    );
+  }
+  return details.violations;
+}
+
 /**
  * `part` was under `whole` through `ctCellUnder` — that row is ended history,
  * outside the composition relation — and `whole` now sits under `part`
@@ -691,6 +733,144 @@ export function registerCompositionTighteningIntegrationTests(
       expect(result.status).toBe("migrated");
       expect(await upgradedStore.verifyConstraintFences()).toEqual([]);
     });
+
+    it("refuses declaring partOf/hasPart over edge kinds whose stored rows start or end later than the commit", async () => {
+      const id = "composition_tightening_future_window";
+      const store = await context.createStore(buildGraph(id, false));
+      const endingChapter = await store.nodes.CtChapter.create({});
+      const startingChapter = await store.nodes.CtChapter.create({});
+      const endedChapter = await store.nodes.CtChapter.create({});
+      const book = await store.nodes.CtBook.create({});
+      const anthology = await store.nodes.CtAnthology.create({});
+      // Legal while neither kind realizes a pair: only a composition edge is
+      // held to a window that is not in the future.
+      const futureEnd = await store.edges.ctChapterOf.create(
+        endingChapter,
+        book,
+        {},
+        { validTo: FUTURE_INSTANT },
+      );
+      const futureStart = await store.edges.ctIncludedIn.create(
+        startingChapter,
+        anthology,
+        {},
+        { validFrom: FUTURE_INSTANT },
+      );
+      // Ended in the past: settled history, which the pair may adopt.
+      await store.edges.ctChapterOf.create(
+        endedChapter,
+        book,
+        {},
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+
+      const error = await createAdapterStoreWithSchema(
+        buildGraph(id, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(futureWindowViolations(error)).toEqual([
+        {
+          family: "compositionFutureWindow",
+          edgeKind: "ctChapterOf",
+          edgeIds: [futureEnd.id],
+        },
+        {
+          family: "compositionFutureWindow",
+          edgeKind: "ctIncludedIn",
+          edgeIds: [futureStart.id],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+
+      // Resolving the rows is what lets the same commit through: a deleted
+      // row is no longer a composition row at all.
+      await store.edges.ctChapterOf.delete(futureEnd.id);
+      await store.edges.ctIncludedIn.delete(futureStart.id);
+      const [, result] = await createAdapterStoreWithSchema(
+        buildGraph(id, true),
+        context.getBackend(),
+      );
+      expect(result.status).toBe("migrated");
+    });
+    // MUTATION CHECK: drop `futureWindowViolations` from the preflight's
+    // violation list in `prepareSchemaTighteningPreflight`
+    // (src/schema/tightening-preflight.ts). The first commit then lands with
+    // both rows as composition rows and `createAdapterStoreWithSchema`
+    // resolves instead of refusing.
+
+    it("refuses re-adding an edge kind as a pair's realizing edge over rows a discarded drop left with a future window", async () => {
+      const id = "composition_tightening_future_window_readded";
+      const store = await context.createStore(
+        buildReAddedVolumeGraph(id, "plain"),
+      );
+      const chapter = await store.nodes.CtChapter.create({});
+      const book = await store.nodes.CtBook.create({});
+      const scheduled = await store.edges.ctVolumeOf.create(
+        chapter,
+        book,
+        {},
+        { validTo: FUTURE_INSTANT },
+      );
+      await migrateSchema(
+        context.getBackend(),
+        buildReAddedVolumeGraph(id, "dropped"),
+        1,
+        { discardDroppedKindRows: true },
+      );
+
+      const error = await createAdapterStoreWithSchema(
+        buildReAddedVolumeGraph(id, "composed"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(futureWindowViolations(error)).toEqual([
+        {
+          family: "compositionFutureWindow",
+          edgeKind: "ctVolumeOf",
+          edgeIds: [scheduled.id],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: as above — the re-added kind arrives with its pair in
+    // the same commit, so the pair's `composition` probe is the only check
+    // that reads the left-behind row.
+
+    it("verifyConstraintFences reports a composition row planted with a future window", async () => {
+      const id = "composition_tightening_future_window_audit";
+      const store = await context.createStore(buildGraph(id, true));
+      const chapter = await store.nodes.CtChapter.create({});
+      const plantedChapter = await store.nodes.CtChapter.create({});
+      const book = await store.nodes.CtBook.create({});
+      await store.edges.ctChapterOf.create(chapter, book, {});
+      // Beneath the store: no write path would accept this window.
+      await store.backend.insertEdge({
+        graphId: store.graphId,
+        id: "ct-planted-future-end",
+        kind: "ctChapterOf",
+        fromKind: "CtChapter",
+        fromId: plantedChapter.id,
+        toKind: "CtBook",
+        toId: book.id,
+        props: {},
+        validTo: FUTURE_INSTANT,
+      });
+
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "compositionFutureWindow",
+          edgeKind: "ctChapterOf",
+          edgeIds: ["ct-planted-future-end"],
+        },
+      ]);
+    });
+    // MUTATION CHECK: drop the `compositionFutureWindow` read from
+    // `verifyConstraintFences` (src/store/claims/verify.ts). The audit then
+    // reports a clean graph.
 
     it("auto-migrates the same subClassOf addition when no row of the new part kind exists", async () => {
       const id = "composition_tightening_inherited_required_clean";

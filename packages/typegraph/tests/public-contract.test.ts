@@ -27,9 +27,16 @@ describe("public contract seams", () => {
     const probe = {
       families: PROBE_VIOLATION_FAMILIES.composition,
     };
-    expect(probe.families).toEqual(["composition", "edgeAcyclicity"]);
+    expect(probe.families).toEqual([
+      "composition",
+      "edgeAcyclicity",
+      "compositionFutureWindow",
+    ]);
     expect(probeCoversViolationFamily(probe, "composition")).toBe(true);
     expect(probeCoversViolationFamily(probe, "edgeAcyclicity")).toBe(true);
+    expect(probeCoversViolationFamily(probe, "compositionFutureWindow")).toBe(
+      true,
+    );
     expect(probeCoversViolationFamily(probe, "compositionExistence")).toBe(
       false,
     );

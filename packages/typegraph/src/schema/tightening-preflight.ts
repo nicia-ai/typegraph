@@ -35,6 +35,7 @@ import {
 } from "../store/claims/edge-claims";
 import {
   auditConstraintFences,
+  compositionFutureWindowViolations,
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
@@ -639,10 +640,22 @@ export function prepareSchemaTighteningPreflight(
           grouped.compositionExistence.edgeKinds,
         );
 
+    // Fourth composition check: does a row of an edge kind that realizes a
+    // pair THIS commit adds already start or end later than now? Every
+    // composition membership decision reads a row's window as settled, which
+    // holds only while no composition window lies in the future — a row
+    // written before its edge kind realized a pair was never held to that.
+    const futureWindowViolations = await compositionFutureWindowViolations(
+      target,
+      params.graphId,
+      grouped.composition?.edgeKinds ?? [],
+    );
+
     const violations = [
       ...claimBackedViolations,
       ...acyclicityViolations,
       ...compositionExistenceViolations,
+      ...futureWindowViolations,
     ];
     if (violations.length === 0) return;
 

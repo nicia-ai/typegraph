@@ -224,7 +224,12 @@ a `differentFrom` relation exactly like the always-safe row.
   `composition` and `edgeAcyclicity`). A pair declared `existence: "required"`
   also refuses when a live part has no live whole (`compositionExistence`);
   flipping an existing pair from optional to required is checked the same way,
-  and required to optional is safe.
+  and required to optional is safe. Because no composition window may start
+  or end later than its write, the commit also refuses when a non-deleted row
+  of the realizing edge kind already has a `validFrom` or `validTo` later
+  than the commit (`compositionFutureWindow`). This includes an edge kind
+  re-added over rows a discarded drop left behind. End or delete those rows,
+  then retry.
 - **Making a realizing edge's ended rows count** is checked the same way.
   Redeclaring a `oneActive` realizing edge `one` refuses the commit when a
   part's ended row would become a second whole beside its live row under

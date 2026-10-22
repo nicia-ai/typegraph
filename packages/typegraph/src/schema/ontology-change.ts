@@ -51,9 +51,11 @@
  * `partOf` / `hasPart` ADDED is a composition tightening: a newly declared
  * composition pair can make an already-live part's second whole a violation
  * of one whole per part (relation-wide) it never was before, so it is
- * `warning`, probed by `compositionSingleWhole` — the single-whole audit AND
- * the composition acyclicity check over the PROPOSED composition relation, both run
- * against the proposed registry in `prepareSchemaTighteningPreflight`.
+ * `warning`, probed by `compositionSingleWhole` — the single-whole audit, the
+ * composition acyclicity check over the PROPOSED composition relation, and
+ * the check that no row of the realizing edge kind starts or ends later than
+ * the commit, all run against the proposed registry in
+ * `prepareSchemaTighteningPreflight`.
  * REMOVED is `breaking`: dropping a composition declaration is a
  * read/write-semantics change (parts stop being deletable-with-their-whole,
  * `parts()`/`wholes()` stop resolving), not a row-level fact a data check
@@ -200,7 +202,9 @@ type OntologyDataProbeBody =
 
 /**
  * The violation families each probe can produce. `compositionSingleWhole`
- * fans out into both `composition` and `edgeAcyclicity`; every other probe
+ * fans out into `composition`, `edgeAcyclicity` and `compositionFutureWindow`
+ * (a row of the pair's realizing edge kind whose window starts or ends later
+ * than the commit); every other probe
  * names the family a `verifyConstraintFences()` row uses for the same fact.
  * `edgeCardinality` has no ontology probe — it is a write-time fence, not a
  * schema-commit check. {@link probeCoversViolationFamily} is the join.
@@ -210,7 +214,7 @@ export const PROBE_VIOLATION_FAMILIES = {
   nodeUniqueness: ["nodeUniqueness"],
   edgeEndpointAssignability: ["edgeEndpointAssignability"],
   edgeAcyclicity: ["edgeAcyclicity"],
-  composition: ["composition", "edgeAcyclicity"],
+  composition: ["composition", "edgeAcyclicity", "compositionFutureWindow"],
   compositionExistence: ["compositionExistence"],
 } as const satisfies Record<OntologyDataProbeBody["kind"], readonly string[]>;
 

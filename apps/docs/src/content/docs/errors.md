@@ -1626,7 +1626,9 @@ that was refused); `details.violations` carries the offending rows in
 exactly the shape `store.verifyConstraintFences()` returns — including
 `family: "composition"` entries when a newly-declared `partOf`/`hasPart`
 pair finds a part already holding two live wholes, or a cycle in the
-proposed composition relation. Resolve those rows (delete them, change
+proposed composition relation, and `family: "compositionFutureWindow"`
+entries when the pair's realizing edge kind already holds a row whose
+window starts or ends later than the commit. Resolve those rows (delete them, change
 their kind, or narrow the ontology change) and retry. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each meta-edge checks.

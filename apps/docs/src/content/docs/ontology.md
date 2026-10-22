@@ -503,7 +503,10 @@ leaves nothing of the refused create behind.
   it (see [Choosing a containment tier](#choosing-a-containment-tier)): a
   later `validFrom` or `validTo` refuses with `CompositionError`
   (`COMPOSITION_VALIDITY_FUTURE_START` / `COMPOSITION_VALIDITY_FUTURE_END`),
-  here and on every write of a realizing edge.
+  here and on every write of a realizing edge. A schema commit that declares
+  a pair over an edge kind whose stored rows already start or end later than
+  the commit is refused the same way
+  ([`compositionFutureWindow`](/schema-evolution#ontology-tightenings-are-checked-against-your-data)).
 - **`props`** are the realizing edge's own properties, validated against that
   edge kind's schema exactly as `store.edges.<via>.create(...)` would
   validate them. A realizing edge with required schema fields therefore needs

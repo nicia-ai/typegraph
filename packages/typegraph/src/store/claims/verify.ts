@@ -49,12 +49,14 @@ import { expandEdgeEndpointAllowance } from "../../registry/edge-endpoint-allowa
 import { type KindRegistry } from "../../registry/kind-registry";
 import { groupBy } from "../../utils/array";
 import { compareStrings } from "../../utils/compare";
+import { nowIso } from "../../utils/date";
 import {
   acyclicEdgeRelations,
   type EdgeAcyclicityViolation,
   readEdgeAcyclicityViolations,
 } from "../acyclicity";
 import {
+  readCompositionFutureWindowEdges,
   readCompositionUnattachedParts,
   requiredCompositionPartKinds,
 } from "../operations/composition-create";
@@ -125,6 +127,20 @@ export type ConstraintFenceViolation =
       family: "compositionExistence";
       partKind: string;
       parts: readonly Readonly<{ kind: string; id: string }>[];
+    }>
+  | Readonly<{
+      /**
+       * Non-deleted rows of a composition realizing edge kind whose window
+       * starts or ends later than the audit's clock — a window no write may
+       * state (`COMPOSITION_VALIDITY_FUTURE_START` / `_END`). Composition
+       * membership is decided from the row alone on the premise that no such
+       * window exists, so each of these rows would join or leave a part's
+       * whole at an instant no claim, cascade or audit observes. Untargeted
+       * like `compositionExistence`: no claim row names the window.
+       */
+      family: "compositionFutureWindow";
+      edgeKind: string;
+      edgeIds: readonly string[];
     }>
   | Readonly<{
       family: "edgeEndpointAssignability";
@@ -435,6 +451,7 @@ const UNTARGETED_FAMILY_ORDER = [
   "edgeEndpointAssignability",
   "edgeAcyclicity",
   "compositionExistence",
+  "compositionFutureWindow",
 ] as const;
 
 /** Narrows to the two claim-backed families, both of which carry `target`. */
@@ -448,7 +465,8 @@ function hasClaimTarget(
  * THE canonical order violations are reported in: claim families first
  * (their existing {@link compareClaimTargets} order), then the untargeted
  * families in {@link UNTARGETED_FAMILY_ORDER}, each ordered by its own key
- * (`edgeEndpointAssignability` by edge kind, `edgeAcyclicity` by relation).
+ * (`edgeEndpointAssignability` and `compositionFutureWindow` by edge kind,
+ * `compositionExistence` by part kind, `edgeAcyclicity` by relation).
  */
 function compareConstraintFenceViolations(
   left: ConstraintFenceViolation,
@@ -475,6 +493,12 @@ function compareConstraintFenceViolations(
   }
   if (left.family === "compositionExistence" && right.family === left.family) {
     return compareStrings(left.partKind, right.partKind);
+  }
+  if (
+    left.family === "compositionFutureWindow" &&
+    right.family === left.family
+  ) {
+    return compareStrings(left.edgeKind, right.edgeKind);
   }
   return compareStrings(
     (left as EdgeAcyclicityViolation).relation,
@@ -613,8 +637,9 @@ export async function auditConstraintFences(
 /**
  * THE fence audit. Reads only; reports every claim axis whose population
  * already carries more than one live claimant, every edge kind whose live
- * rows sit outside every declared endpoint pair, and every acyclic relation
- * already carrying a cycle.
+ * rows sit outside every declared endpoint pair, every acyclic relation
+ * already carrying a cycle, every live required part with no live whole, and
+ * every composition row whose window starts or ends later than now.
  *
  * The `edgeAcyclicity` family does NOT go through
  * `readConstraintFenceViolations` (the backend port every other family
@@ -667,9 +692,51 @@ export async function verifyConstraintFences(
     context.batchPointRead,
   );
 
-  return [...claimBacked, ...acyclicity, ...compositionExistence].toSorted(
-    compareConstraintFenceViolations,
+  // Graph-wide over every realizing edge kind, for the same reason.
+  const compositionFutureWindow = await compositionFutureWindowViolations(
+    context.backend,
+    context.graphId,
+    context.registry.compositionEdgeKinds(),
   );
+
+  return [
+    ...claimBacked,
+    ...acyclicity,
+    ...compositionExistence,
+    ...compositionFutureWindow,
+  ].toSorted(compareConstraintFenceViolations);
+}
+
+/**
+ * The `compositionFutureWindow` family over these realizing edge kinds: one
+ * violation per edge kind holding a row whose window starts or ends later
+ * than now. "Now" is one read of the clock every composition edge write
+ * judges its own window against (`nowIso`), so a row the write path would
+ * have admitted at its write is never reported later. Shared by this audit
+ * and the schema-commit preflight (`src/schema/tightening-preflight.ts`).
+ */
+export async function compositionFutureWindowViolations(
+  backend: GraphReadBackend,
+  graphId: string,
+  edgeKinds: readonly string[],
+): Promise<readonly ConstraintFenceViolation[]> {
+  if (edgeKinds.length === 0) return [];
+  const scheduled = await readCompositionFutureWindowEdges(
+    backend,
+    graphId,
+    edgeKinds,
+    nowIso(),
+  );
+  const byEdgeKind = groupBy(scheduled, (edge) => edge.kind);
+  return [...byEdgeKind.entries()]
+    .map(([edgeKind, edges]) => ({
+      family: "compositionFutureWindow" as const,
+      edgeKind,
+      edgeIds: edges
+        .map((edge) => edge.id)
+        .toSorted((left, right) => compareStrings(left, right)),
+    }))
+    .toSorted((left, right) => compareStrings(left.edgeKind, right.edgeKind));
 }
 
 /**
