@@ -403,25 +403,20 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
    */
   identity?: Readonly<{
     lock: (target: IdentityTarget) => Promise<void>;
-    foldCreated: (
-      target: IdentityTarget,
-      references: readonly Readonly<{ kind: string; id: string }>[],
-      cause: "fold" | "restore",
-    ) => Promise<void>;
     /**
-     * The read-only half of {@link foldCreated}: refuses, writing nothing,
-     * what folding `references` would refuse, so a frame that creates or
-     * restores rows reaches that verdict before its first statement. Returns
-     * the fold it decided, for {@link applyFold}.
+     * The read half of folding created or restored rows into identity:
+     * refuses, writing nothing, what folding `references` would refuse, so a
+     * frame that creates or restores rows reaches that verdict before its
+     * first statement. Returns the fold it decided, for {@link applyFold}.
      */
     assertFoldable: (
       target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
     ) => Promise<IdentityFoldPlan>;
     /**
-     * The write half of {@link foldCreated}: folds what `assertFoldable`
-     * decided earlier in the same frame, once its rows are written, without
-     * reading the verdict again.
+     * The write half: folds what `assertFoldable` decided earlier in the
+     * same frame, once its rows are written, without reading the verdict
+     * again.
      */
     applyFold: (
       target: IdentityTarget,
@@ -639,7 +634,8 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
  * ONE tombstoned node row's revival inside an already-open write frame — the
  * inverse of {@link deleteNodeRowInFrame}'s soft path: the stored props come
  * back as they were (uniqueness claims re-taken, embeddings and fulltext
- * re-synced) and the node re-enters identity as a restore.
+ * re-synced) and the node re-enters identity as a restore, its fold decided
+ * before the row is revived.
  */
 async function reviveNodeRowInFrame<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -648,16 +644,15 @@ async function reviveNodeRowInFrame<G extends GraphDef>(
   existing: TombstonedNodeRow,
 ): Promise<void> {
   const registration = getNodeRegistration(ctx.graph, existing.kind);
+  const foldRevived = await prepareNodeFold(ctx, target, [
+    { kind: existing.kind, id: existing.id },
+  ]);
   await session.reviveNode({
     existing,
     schema: registration.type.schema,
     uniqueConstraints: registration.unique ?? [],
   });
-  await ctx.identity?.foldCreated(
-    target,
-    [{ kind: existing.kind, id: existing.id }],
-    "restore",
-  );
+  await foldRevived("restore");
 }
 
 /**
@@ -1566,31 +1561,43 @@ function foldReferences(
     .map((prepared) => ({ kind: prepared.kind, id: prepared.id }));
 }
 
-/** The identity fold a create frame decided, written once its rows land. */
-type PreparedNodeCreateFold = (cause: "fold" | "restore") => Promise<void>;
+/**
+ * The identity fold a write frame decided, written by calling it once the
+ * frame's rows land. The cause is the row's: `"restore"` for a tombstone
+ * brought back, `"fold"` for an insert.
+ */
+type PreparedNodeFold = (cause: "fold" | "restore") => Promise<void>;
 
 /**
- * Decides, writing nothing, the identity fold a create frame owes its rows,
- * before the frame's first write: a fold the identity rules refuse is raised
- * here, so a refusal caught inside a caller's transaction leaves none of the
- * frame's rows behind. Judged against the identity state as stored — a batch
- * is one kind and two of its rows never share an id, so no row's fold depends
- * on another's — and written as decided, with no second read, by the returned
- * function once the rows are written. The cause is the row's: `"restore"` for
- * a resurrected tombstone, `"fold"` for an insert.
+ * Decides, writing nothing, the identity fold a write frame owes the node rows
+ * it inserts or brings back, before the frame's first write: a fold the
+ * identity rules refuse is raised here, so a refusal caught inside a caller's
+ * transaction leaves none of the frame's rows behind. The returned function
+ * writes the fold as decided, with no second read, once the rows are written:
+ * a row's own write changes neither its live same-id peers nor any class.
  */
-async function prepareNodeCreatesFold<G extends GraphDef>(
+async function prepareNodeFold<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  references: readonly Readonly<{ kind: string; id: string }>[],
+): Promise<PreparedNodeFold> {
+  const identity = ctx.identity;
+  if (identity === undefined) return () => Promise.resolve();
+  const plan = await identity.assertFoldable(target, references);
+  return (cause) => identity.applyFold(target, plan, cause);
+}
+
+/**
+ * The fold a create frame owes its rows ({@link prepareNodeFold}), judged
+ * against the identity state as stored: a batch is one kind and two of its
+ * rows never share an id, so no row's fold depends on another's.
+ */
+function prepareNodeCreatesFold<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   target: WriteTarget,
   preparedCreates: readonly NodeCreatePrepared[],
-): Promise<PreparedNodeCreateFold> {
-  const identity = ctx.identity;
-  if (identity === undefined) return () => Promise.resolve();
-  const plan = await identity.assertFoldable(
-    target,
-    foldReferences(preparedCreates),
-  );
-  return (cause) => identity.applyFold(target, plan, cause);
+): Promise<PreparedNodeFold> {
+  return prepareNodeFold(ctx, target, foldReferences(preparedCreates));
 }
 
 // ============================================================
@@ -2195,6 +2202,14 @@ async function writeNodeUpdateSet<G extends GraphDef>(
         const { prepared: update, preparedAgainstStoredRow } = requireDefined(
           prepared[offset],
         );
+        // Decided again here, against the folds the set's earlier restores
+        // wrote, and before this row's own write.
+        const foldRestored =
+          requireDefined(entries[written + offset]).clearDeleted ?
+            await prepareNodeFold(ctx, target, [
+              { kind: entry.input.kind, id: entry.input.id },
+            ])
+          : undefined;
         nodes.push(
           await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
             preparedAgainstStoredRow ?
@@ -2208,16 +2223,7 @@ async function writeNodeUpdateSet<G extends GraphDef>(
               ),
           ),
         );
-        if (
-          requireDefined(entries[written + offset]).clearDeleted &&
-          ctx.identity !== undefined
-        ) {
-          await ctx.identity.foldCreated(
-            target,
-            [{ kind: entry.input.kind, id: entry.input.id }],
-            "restore",
-          );
-        }
+        await foldRestored?.("restore");
       }
     } catch (error) {
       if (!isNodeUpdateNoRowError(error)) throw error;
@@ -5865,14 +5871,20 @@ export async function executeNodeUpdate<G extends GraphDef>(
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      if (options?.clearDeleted === true) {
+      const restoring = options?.clearDeleted === true;
+      if (restoring) {
         await assertRestoredRequiredPartsAttached(
           { graphId: ctx.graphId, registry: ctx.registry, lock },
           target,
           [{ kind: input.kind, id: input.id }],
         );
       }
-      const identity = ctx.identity;
+      const foldRestored =
+        restoring ?
+          await prepareNodeFold(ctx, target, [
+            { kind: input.kind, id: input.id },
+          ])
+        : undefined;
       const node = await writeNodeRowMovingWindowEnd(ctx, target, input, () =>
         performNodeUpdateWithResurrectionRecovery(
           ctx,
@@ -5882,13 +5894,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
           options,
         ),
       );
-      if (options?.clearDeleted && identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          [{ kind: input.kind, id: input.id }],
-          "restore",
-        );
-      }
+      await foldRestored?.("restore");
       return node;
     },
     { didWrite: writeResultAlwaysChanges },
@@ -6261,8 +6267,13 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           [{ kind: input.kind, id: input.id }],
         );
       }
-      const identity = ctx.identity;
       const restoresPartRow = options?.clearDeleted === true;
+      const foldRestored =
+        restoresPartRow ?
+          await prepareNodeFold(ctx, target, [
+            { kind: input.kind, id: input.id },
+          ])
+        : undefined;
       const { node, preparedAttachment } = await writeNodeRowMovingWindowEnd(
         ctx,
         target,
@@ -6305,13 +6316,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           };
         },
       );
-      if (options?.clearDeleted && identity !== undefined) {
-        await identity.foldCreated(
-          target,
-          [{ kind: input.kind, id: input.id }],
-          "restore",
-        );
-      }
+      await foldRestored?.("restore");
       if (preparedAttachment !== undefined) {
         await insertPreparedCompositionEdge(ctx, session, preparedAttachment);
       }
