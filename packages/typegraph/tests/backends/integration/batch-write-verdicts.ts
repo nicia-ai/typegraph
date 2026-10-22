@@ -24,7 +24,8 @@
  *   BvStamp carries a unique `label`; BvGhost is disjoint with BvSpirit, so a
  *   tombstoned ghost whose id a spirit now holds cannot be restored. A second
  *   graph adds identity (`sameIdAcrossKinds: "fold"`) for the verdicts only
- *   an identity graph reaches.
+ *   an identity graph reaches, with a BvWisp (unique `slug`, disjoint with
+ *   BvSpirit) for the writes that match a row by a unique key.
  *
  * Each case states, in a comment, the mutation/revert that must make it
  * fail.
@@ -48,6 +49,8 @@ import {
   UniquenessError,
   ValidationError,
 } from "../../../src";
+import { FORMAT_VERSION, importGraph } from "../../../src/interchange";
+import { transactionReviveNode } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -62,6 +65,7 @@ const BvGhost = defineNode("BvGhost", {
   schema: z.object({ note: z.string().optional() }),
 });
 const BvSpirit = defineNode("BvSpirit", { schema: z.object({}) });
+const BvWisp = defineNode("BvWisp", { schema: z.object({ slug: z.string() }) });
 const BvOther = defineNode("BvOther", { schema: z.object({}) });
 
 const noteSchema = z.object({ note: z.string().optional() });
@@ -76,6 +80,7 @@ const NEW_ASSIGNMENT_ID = asEdgeId<typeof bvAssignedTo>("bv-new-edge");
 const CREATED_TAG_ID = asEdgeId<typeof bvTagged>("bv-created");
 const NEW_STAMP_ID = asNodeId<typeof BvStamp>("bv-new-stamp");
 const FOLDING_GHOST_ID = "bv-folding-ghost";
+const RESTORED_FOLD_ID = "bv-restored-fold";
 
 const BV_STAMP_LABEL_UNIQUE = {
   name: "bv_stamp_label",
@@ -130,7 +135,14 @@ function buildGraph(id: string) {
   });
 }
 
-/** The identity graph: a ghost disjoint with a spirit, folded by id. */
+const BV_WISP_SLUG_UNIQUE = {
+  name: "bv_wisp_slug",
+  fields: ["slug"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
+/** The identity graph: a ghost and a wisp disjoint with a spirit, folded by id. */
 function buildIdentityGraph(id: string) {
   return defineGraph({
     id,
@@ -138,9 +150,10 @@ function buildIdentityGraph(id: string) {
       BvGhost: { type: BvGhost },
       BvSpirit: { type: BvSpirit },
       BvOther: { type: BvOther },
+      BvWisp: { type: BvWisp, unique: [BV_WISP_SLUG_UNIQUE] },
     },
     edges: {},
-    ontology: [disjointWith(BvGhost, BvSpirit)],
+    ontology: [disjointWith(BvGhost, BvSpirit), disjointWith(BvWisp, BvSpirit)],
     identity: { sameIdAcrossKinds: "fold" },
   });
 }
@@ -163,6 +176,62 @@ async function createFoldConflictStore(context: IntegrationTestContext) {
   const spirit = await store.nodes.BvSpirit.create({});
   await store.identity.assertSame(other, spirit);
   return store;
+}
+
+/**
+ * An identity graph whose `RESTORED_FOLD_ID` names a tombstoned BvGhost and a
+ * tombstoned BvWisp, and a live BvOther whose class holds a BvSpirit: bringing
+ * either tombstone back folds it into a class holding a kind disjoint with its
+ * own. No read of the node rows at that id sees the conflict, only the
+ * identity fold does.
+ */
+async function createRestoreFoldConflictStore(context: IntegrationTestContext) {
+  const store = await context.createStore(buildIdentityGraph(nextGraphId()));
+  const ghost = await store.nodes.BvGhost.create(
+    { note: "before" },
+    { id: RESTORED_FOLD_ID },
+  );
+  const wisp = await store.nodes.BvWisp.create(
+    { slug: "restored" },
+    { id: RESTORED_FOLD_ID },
+  );
+  await store.nodes.BvGhost.delete(ghost.id);
+  await store.nodes.BvWisp.delete(wisp.id);
+  const other = await store.nodes.BvOther.create({}, { id: RESTORED_FOLD_ID });
+  const spirit = await store.nodes.BvSpirit.create({});
+  await store.identity.assertSame(other, spirit);
+  return { store, other };
+}
+
+type RestoreFoldConflict = Awaited<
+  ReturnType<typeof createRestoreFoldConflictStore>
+>;
+
+/**
+ * The tombstones and the identity class a refused restore must leave as they
+ * were: each tombstone's stored version, and the live BvOther's class.
+ */
+async function restoreFoldState({ store, other }: RestoreFoldConflict) {
+  const tombstones = { temporalMode: "includeTombstones" } as const;
+  const ghost = await store.nodes.BvGhost.getById(
+    asNodeId<typeof BvGhost>(RESTORED_FOLD_ID),
+    tombstones,
+  );
+  const wisp = await store.nodes.BvWisp.getById(
+    asNodeId<typeof BvWisp>(RESTORED_FOLD_ID),
+    tombstones,
+  );
+  return {
+    ghost: {
+      deleted: ghost?.meta.deletedAt !== undefined,
+      version: ghost?.meta.version,
+    },
+    wisp: {
+      deleted: wisp?.meta.deletedAt !== undefined,
+      version: wisp?.meta.version,
+    },
+    otherClass: await store.identity.membersOf(other),
+  };
 }
 
 async function ghostIds(
@@ -339,8 +408,8 @@ export function registerBatchWriteVerdictIntegrationTests(
     //
     // MUTATION CHECK for every case below: in the create frame named in the
     // case (src/store/operations/node-operations.ts), let the fold decide its
-    // verdict when it writes (`identity.foldCreated` after the insert) instead
-    // of in `prepareNodeCreatesFold` — the rows are then written before their
+    // verdict when it writes (`prepareNodeCreatesFold` called after the
+    // insert) instead of before it — the rows are then written before their
     // fold refuses, and the caught refusal leaves them.
 
     it("bulkUpsertById keeps no update or create when a create's own identity fold would contradict", async () => {
@@ -450,6 +519,114 @@ export function registerBatchWriteVerdictIntegrationTests(
 
       expect(caught).toBeInstanceOf(IdentityContradictionError);
       expect(await store.nodes.BvGhost.find()).toEqual([]);
+    });
+
+    // ========================================================
+    // A restored row's own identity fold
+    // ========================================================
+    //
+    // MUTATION CHECK for every case below: in the restore frame named in the
+    // case (src/store/operations/node-operations.ts), decide the fold after
+    // the row write instead of before it (`prepareNodeFold` moved below the
+    // write) — the tombstone is then brought back before its fold refuses,
+    // and the caught refusal leaves it live.
+
+    it("upsertById brings back no tombstone when its identity fold would contradict", async () => {
+      // Restore frame: `executeNodeUpdate`.
+      const conflict = await createRestoreFoldConflictStore(context);
+      const { store } = conflict;
+      const before = await restoreFoldState(conflict);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvGhost.upsertById(RESTORED_FOLD_ID, {
+            note: "changed",
+          });
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([]);
+      expect(await restoreFoldState(conflict)).toEqual(before);
+    });
+
+    it("getOrCreateByConstraint brings back no tombstone when its identity fold would contradict", async () => {
+      // Restore frame: `executeNodeUpsertUpdate`.
+      const conflict = await createRestoreFoldConflictStore(context);
+      const { store } = conflict;
+      const before = await restoreFoldState(conflict);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await tx.nodes.BvWisp.getOrCreateByConstraint("bv_wisp_slug", {
+            slug: "restored",
+          });
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await store.nodes.BvWisp.find()).toEqual([]);
+      expect(await restoreFoldState(conflict)).toEqual(before);
+    });
+
+    it("a revive brings back no tombstone when its identity fold would contradict", async () => {
+      // Restore frame: `executeNodeRevive`, through `reviveNodeRowInFrame`.
+      const conflict = await createRestoreFoldConflictStore(context);
+      const { store } = conflict;
+      const before = await restoreFoldState(conflict);
+
+      let caught: unknown;
+      await store.transaction(async (tx) => {
+        try {
+          await transactionReviveNode(tx, {
+            kind: "BvGhost",
+            id: RESTORED_FOLD_ID,
+          });
+        } catch (error) {
+          caught = error;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([]);
+      expect(await restoreFoldState(conflict)).toEqual(before);
+    });
+
+    it("importGraph writes none of its rows when an imported node's identity fold would contradict", async () => {
+      // The import folds its nodes after writing them, in its own
+      // transaction: a fold may join two rows of the same document, which no
+      // read before their inserts can see, so the refusal rolls that
+      // transaction back rather than being reached before the first row.
+      //
+      // MUTATION CHECK: run `foldImportedIdentityNodes` after the import's
+      // write plan returns instead of inside `runImportWritePlanAttempt`
+      // (src/interchange/import.ts) — the rows then commit before the fold
+      // refuses, and the fresh ghost survives the rejected import.
+      const store = await createFoldConflictStore(context);
+
+      await expect(
+        importGraph(
+          store,
+          {
+            formatVersion: FORMAT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: { type: "external" as const },
+            nodes: [
+              { kind: "BvGhost", id: "bv-fresh-ghost", properties: {} },
+              { kind: "BvGhost", id: FOLDING_GHOST_ID, properties: {} },
+            ],
+            edges: [],
+          },
+          { onConflict: "error" },
+        ),
+      ).rejects.toBeInstanceOf(IdentityContradictionError);
+      expect(await ghostIds(store)).toEqual([]);
     });
 
     it("bulkUpsertById keeps no earlier update when a later window end would strand an identity assertion", async () => {

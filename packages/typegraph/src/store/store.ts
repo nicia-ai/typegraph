@@ -7555,22 +7555,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           identity: {
             lock: (target: IdentityTarget) =>
               lockIdentityGraph(target, this.graphId),
-            foldCreated: (
-              target: IdentityTarget,
-              references: readonly Readonly<{ kind: string; id: string }>[],
-              cause: "fold" | "restore",
-            ) =>
-              foldIdentityForCreatedNodes(
-                {
-                  graphId: this.graphId,
-                  registry: this.#registry,
-                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
-                  schema: this.#sqlSchema(),
-                },
-                target,
-                references,
-                cause,
-              ),
             assertFoldable: (
               target: IdentityTarget,
               references: readonly Readonly<{ kind: string; id: string }>[],

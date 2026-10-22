@@ -747,7 +747,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       // folding into a class for the FIRST time, which can only happen when
       // the closure is built from a state where identity had not yet run at
       // all (first enablement). On an already-enabled graph, every node
-      // creation folds through `foldIdentityForCreatedNodes` immediately, so
+      // creation folds in the write frame that creates it, so
       // no live member can reach this cascade as an untouched singleton that
       // is about to be folded for the first time — `replaceClosure`'s
       // active-kinds rebuild can only ever shrink or remove existing
@@ -975,7 +975,7 @@ async function writeIdentityFold(
  * ({@link loadCurrentStructuralClasses} anchors on it and coalesces a missing
  * row to the node itself), so no row means the node is a singleton under every
  * source of identity — assertions AND the same-id structural fold, which
- * `foldIdentityForCreatedNodes` materializes at create time.
+ * a created node's own fold materializes at create time.
  */
 async function hasMaterializedIdentityClass(
   target: Backend,

@@ -727,12 +727,14 @@ properties, the validity window, unique keys, a restore's disjointness,
 composition and identity verdicts, an edge resurrection's or reopen's
 cardinality and composition claims) together with the creates they write
 first, and `bulkGetOrCreateByConstraint` and `bulkGetOrCreateByEndpoints`
-judge their matched items together with the rows they create. A created
-row's own identity fold, on a caller-chosen id, is read before the insert on
-every node create path, `create`, `bulkCreate` and `bulkInsert` included.
-Each item is judged against the state the batch's earlier items leave, so a
-later item may take a key or an allowance an earlier one gives up and is
-refused one an earlier one takes. A refusal the callback catches therefore
+judge their matched items together with the rows they create. A row's own
+identity fold is read before its write on every node path that inserts a
+caller-chosen id or brings a tombstone back: `create`, `bulkCreate` and
+`bulkInsert`, `upsertById` and `getOrCreateByConstraint` on a tombstone,
+their bulk forms, and a fact `unRetract` reopens. Each item is judged
+against the state the batch's earlier items leave, so a later item may take
+a key or an allowance an earlier one gives up and is refused one an earlier
+one takes. A refusal the callback catches therefore
 leaves none of the batch written.
 
 What can still follow a write of the same batch:
@@ -753,7 +755,8 @@ What can still follow a write of the same batch:
 - **An identity fold that depends on another restored row of the same
   batch.** A restored row's fold is judged against the identity state as
   stored, so a contradiction that only appears once another row of the batch
-  has been restored is raised when that restore lands.
+  has been restored is raised when the batch reaches that row: before the
+  row itself is written, after the rows ahead of it.
 
 Let the refusal propagate so the transaction rolls back, or rethrow after
 handling it. See
