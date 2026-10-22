@@ -200,6 +200,11 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
    * `true`.
    */
   serverLaneConcurrency?: boolean;
+  /**
+   * See {@link IntegrationTestContext.recoversFailedStatementInTransaction}.
+   * Defaults to `true`.
+   */
+  recoversFailedStatementInTransaction?: boolean;
 }>;
 
 /**
@@ -287,6 +292,8 @@ export function createIntegrationTestSuite<
         return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
       serverLaneConcurrency: options.serverLaneConcurrency ?? false,
+      recoversFailedStatementInTransaction:
+        options.recoversFailedStatementInTransaction ?? true,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {

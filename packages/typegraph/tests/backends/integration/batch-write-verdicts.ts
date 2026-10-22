@@ -177,65 +177,85 @@ export function registerBatchWriteVerdictIntegrationTests(
 ): void {
   describe("node batch writes decide every item before the first write", () => {
     for (const method of ["bulkUpsertById", "bulkReplaceById"] as const) {
-      it(`${method} keeps no earlier update when a later one loses a unique key`, async () => {
-        const store = await context.createStore(buildGraph(nextGraphId()));
-        const first = await store.nodes.BvStamp.create({ label: "one" });
-        const second = await store.nodes.BvStamp.create({ label: "two" });
-        const holder = await store.nodes.BvStamp.create({ label: "taken" });
+      // A bulkReplaceById refusal is recovered through the fused program's
+      // savepoint, which the postgres-js lane cannot recover (#787).
+      it.skipIf(
+        method === "bulkReplaceById" &&
+          !context.recoversFailedStatementInTransaction,
+      )(
+        `${method} keeps no earlier update when a later one loses a unique key`,
+        async () => {
+          const store = await context.createStore(buildGraph(nextGraphId()));
+          const first = await store.nodes.BvStamp.create({ label: "one" });
+          const second = await store.nodes.BvStamp.create({ label: "two" });
+          const holder = await store.nodes.BvStamp.create({ label: "taken" });
 
-        // MUTATION CHECK: write each entry of `executeNodeUpsertUpdateBatch`
-        // right after preparing it (`writeNodeUpdateSet` without its
-        // `prepareNodeUpdateSet` frame, src/store/operations/node-operations.ts)
-        // — the first stamp is then renamed before the second loses its key,
-        // and keeps the new label after the caught refusal.
-        let caught: unknown;
-        await store.transaction(async (tx) => {
-          try {
-            await tx.nodes.BvStamp[method]([
-              { id: first.id, props: { label: "renamed" } },
-              { id: second.id, props: { label: "taken" } },
-            ]);
-          } catch (error) {
-            caught = error;
-          }
-        });
+          // MUTATION CHECK: write each entry of `executeNodeUpsertUpdateBatch`
+          // right after preparing it (`writeNodeUpdateSet` without its
+          // `prepareNodeUpdateSet` frame, src/store/operations/node-operations.ts)
+          // — the first stamp is then renamed before the second loses its key,
+          // and keeps the new label after the caught refusal.
+          let caught: unknown;
+          await store.transaction(async (tx) => {
+            try {
+              await tx.nodes.BvStamp[method]([
+                { id: first.id, props: { label: "renamed" } },
+                { id: second.id, props: { label: "taken" } },
+              ]);
+            } catch (error) {
+              caught = error;
+            }
+          });
 
-        expect(caught).toBeInstanceOf(UniquenessError);
-        expect((caught as UniquenessError).details.existingId).toBe(holder.id);
-        const after = requireDefined(
-          await store.nodes.BvStamp.getById(first.id),
-        );
-        expect(after.label).toBe("one");
-        expect(after.meta.version).toBe(first.meta.version);
-      });
+          expect(caught).toBeInstanceOf(UniquenessError);
+          expect((caught as UniquenessError).details.existingId).toBe(
+            holder.id,
+          );
+          const after = requireDefined(
+            await store.nodes.BvStamp.getById(first.id),
+          );
+          expect(after.label).toBe("one");
+          expect(after.meta.version).toBe(first.meta.version);
+        },
+      );
 
-      it(`${method} creates nothing when an update in the same batch loses a unique key`, async () => {
-        const store = await context.createStore(buildGraph(nextGraphId()));
-        const second = await store.nodes.BvStamp.create({ label: "two" });
-        await store.nodes.BvStamp.create({ label: "taken" });
+      // A bulkReplaceById refusal is recovered through the fused program's
+      // savepoint, which the postgres-js lane cannot recover (#787).
+      it.skipIf(
+        method === "bulkReplaceById" &&
+          !context.recoversFailedStatementInTransaction,
+      )(
+        `${method} creates nothing when an update in the same batch loses a unique key`,
+        async () => {
+          const store = await context.createStore(buildGraph(nextGraphId()));
+          const second = await store.nodes.BvStamp.create({ label: "two" });
+          await store.nodes.BvStamp.create({ label: "taken" });
 
-        // MUTATION CHECK: hand `executeNodeCreateBatch` no `pairedUpdates`
-        // from the collection (src/store/collections/node-collection.ts) —
-        // the new stamp is then inserted before the update loses its key,
-        // and survives the caught refusal.
-        let caught: unknown;
-        await store.transaction(async (tx) => {
-          try {
-            await tx.nodes.BvStamp[method]([
-              { id: NEW_STAMP_ID, props: { label: "fresh" } },
-              { id: second.id, props: { label: "taken" } },
-            ]);
-          } catch (error) {
-            caught = error;
-          }
-        });
+          // MUTATION CHECK: hand `executeNodeCreateBatch` no `pairedUpdates`
+          // from the collection (src/store/collections/node-collection.ts) —
+          // the new stamp is then inserted before the update loses its key,
+          // and survives the caught refusal.
+          let caught: unknown;
+          await store.transaction(async (tx) => {
+            try {
+              await tx.nodes.BvStamp[method]([
+                { id: NEW_STAMP_ID, props: { label: "fresh" } },
+                { id: second.id, props: { label: "taken" } },
+              ]);
+            } catch (error) {
+              caught = error;
+            }
+          });
 
-        expect(caught).toBeInstanceOf(UniquenessError);
-        expect(await store.nodes.BvStamp.getById(NEW_STAMP_ID)).toBeUndefined();
-        expect(
-          requireDefined(await store.nodes.BvStamp.getById(second.id)).label,
-        ).toBe("two");
-      });
+          expect(caught).toBeInstanceOf(UniquenessError);
+          expect(
+            await store.nodes.BvStamp.getById(NEW_STAMP_ID),
+          ).toBeUndefined();
+          expect(
+            requireDefined(await store.nodes.BvStamp.getById(second.id)).label,
+          ).toBe("two");
+        },
+      );
     }
 
     it("bulkUpsertById refuses an update a create of the same batch takes the key from, writing neither", async () => {
