@@ -19,12 +19,14 @@ import {
   type RecordedInstant,
   recordedInstantRevision,
   recordedInstantWallTime,
+  type RestoredRecordedInstant,
 } from "../core/temporal";
 import { IdentityReplayError, ValidationError } from "../errors";
 import { requireDefined } from "../utils/presence";
 import { readIdentityEvidenceNeighbours } from "./lineage-evidence";
 import { identityActiveKinds } from "./service-components";
 import {
+  type HistoricalClass,
   loadCurrentStructuralClasses,
   loadHistoricalClasses,
   publicNodeRef,
@@ -56,7 +58,8 @@ import {
 export const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
 export const IDENTITY_REPLAY_MAX_LIMIT = 2000;
 
-export type IdentityTransition<G extends GraphDef> = Readonly<{
+/** A transition this graph's own history capture recorded. */
+export type RecordedIdentityTransition<G extends GraphDef> = Readonly<{
   transitionId: string;
   cause: IdentityTransitionCause;
   recorded: RecordedInstant;
@@ -65,40 +68,55 @@ export type IdentityTransition<G extends GraphDef> = Readonly<{
   priorClass?: IdentityNodeReference<G> | undefined;
   assertionIds: readonly IdentityAssertionId[];
   decision?: IdentityDecisionProvenance | undefined;
-  /**
-   * Present when an ARCHIVAL RESTORE inserted this row into the graph being
-   * read, rather than this graph's own history capture recording it — the
-   * public face of the internal marker `isRestoredTransitionRow` reads. An
-   * audit surface uses it to tell an imported explanation from a locally
-   * replayable event: `replay` deliberately excludes every restored
-   * transition from `steps` (a restored row's `recorded` revision was minted
-   * by the SOURCE graph's clock and interleaves arbitrarily with this
-   * graph's, so no before/after could be reconstructed for it honestly),
-   * while `transitionsOf` returns it like any other.
-   *
-   * `at` is the destination graph's WALL CLOCK at restore time, not a
-   * {@link RecordedInstant}: a restore records history, it does not relive
-   * it, so it never advances this graph's recorded revision counter and
-   * there is no revision on this graph's own axis to pair the timestamp
-   * with. The coarser retention watermark (`truncatedBefore`) is the only
-   * revision-shaped signal a restore leaves behind.
-   */
-  restored?: Readonly<{ at: string }> | undefined;
+  restored?: undefined;
 }>;
 
+/** What every transition carries whoever recorded it. */
+type IdentityTransitionFields<G extends GraphDef> = Omit<
+  RecordedIdentityTransition<G>,
+  "recorded" | "restored"
+>;
+
 /**
- * One paired boundary from {@link identityReplay}. `transition.restored` is
- * NEVER set here — `identityReplay` builds `steps` only from `nativeRows`
- * (rows this graph's own history capture recorded), by construction; a
- * restored row's revision is minted by the source graph's clock and cannot
- * be paired with a before/after reconstructed on THIS graph's historical
- * reader (see {@link IdentityTransition.restored}'s docblock for why). The
- * invariant lives on the `IdentityTransition` field rather than a narrower
- * type here so the two APIs share one transition shape; a step's `restored`
- * check, if ever written, is permanently dead code.
+ * A transition an ARCHIVAL RESTORE inserted into the graph being read, rather
+ * than this graph's own history capture recording it — the public face of the
+ * internal marker `isRestoredTransitionRow` reads. An audit surface uses it to
+ * tell an imported explanation from a locally replayable event: `replay`
+ * deliberately excludes every restored transition from `steps` (a restored
+ * row's revision was minted by the SOURCE graph's clock and interleaves
+ * arbitrarily with this graph's, so no before/after could be reconstructed for
+ * it honestly), while `transitionsOf` returns it like any other.
+ *
+ * `recorded` is therefore a {@link RestoredRecordedInstant}, not a
+ * {@link RecordedInstant}. `restored.at` is the destination graph's WALL
+ * CLOCK at restore time: a restore records history, it does not relive it, so
+ * it never advances this graph's recorded revision counter and there is no
+ * revision on this graph's own axis to pair the timestamp with. The coarser
+ * retention watermark (`truncatedBefore`) is the only revision-shaped signal a
+ * restore leaves behind.
+ */
+export type RestoredIdentityTransition<G extends GraphDef> = Omit<
+  RecordedIdentityTransition<G>,
+  "recorded" | "restored"
+> &
+  Readonly<{
+    recorded: RestoredRecordedInstant;
+    restored: Readonly<{ at: string }>;
+  }>;
+
+/** One entry of a `transitionsOf` page; `restored` tells the two apart. */
+export type IdentityTransition<G extends GraphDef> =
+  RecordedIdentityTransition<G> | RestoredIdentityTransition<G>;
+
+/**
+ * One paired boundary from {@link identityReplay}. Its transition is always
+ * one this graph recorded: `identityReplay` builds `steps` only from native
+ * rows, because a restored row's revision is minted by the source graph's
+ * clock and cannot be paired with a before/after reconstructed on THIS
+ * graph's historical reader (see {@link RestoredIdentityTransition}).
  */
 export type IdentityReplayStep<G extends GraphDef> = Readonly<{
-  transition: IdentityTransition<G>;
+  transition: RecordedIdentityTransition<G>;
   before: readonly IdentityNodeReference<G>[];
   after: readonly IdentityNodeReference<G>[];
 }>;
@@ -112,48 +130,93 @@ declare const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
  * next page; the boundary it names opens that page exactly once.
  *
  * A cursor is NOT a recorded instant. It is minted from one, including one a
- * restored row's SOURCE graph allocated (see {@link IdentityTransition.restored}),
+ * restored row's SOURCE graph allocated (see {@link RestoredIdentityTransition}),
  * so it must never reach `store.asOfRecorded`, which anchors a historical read
  * on THIS graph's own recorded axis. To keep the two apart at runtime as well
  * as in the type system, its string form carries a prefix no recorded instant
  * has: `fromRecorded` / `toRecorded` refuse it, and `cursor` refuses a bare
  * recorded instant.
+ *
+ * A cursor is also bound to the reference whose lineage it pages. A position
+ * in one reference's lineage says nothing about another's, so a cursor handed
+ * to a read for a different reference is refused rather than silently
+ * skipping every boundary of that reference below the revision it names.
  */
 export type TransitionPageCursor = string & {
   readonly [TRANSITION_PAGE_CURSOR_BRAND]: "TransitionPageCursor";
 };
 
 const TRANSITION_PAGE_CURSOR_PREFIX = "tpc1:";
+const TRANSITION_PAGE_CURSOR_SEPARATOR = ":";
 
-export function transitionPageCursor(
-  instant: RecordedInstant,
+function transitionPageCursor(
+  reference: PlainNodeRef,
+  revision: number,
+  recordedAt: string,
 ): TransitionPageCursor {
-  return `${TRANSITION_PAGE_CURSOR_PREFIX}${instant}` as TransitionPageCursor;
+  // `encodeURIComponent` escapes the separator, so a kind or id containing it
+  // can never shift where the instant begins.
+  return [
+    `${TRANSITION_PAGE_CURSOR_PREFIX}${encodeURIComponent(reference.kind)}`,
+    encodeURIComponent(reference.id),
+    createRecordedInstant(revision, recordedAt),
+  ].join(TRANSITION_PAGE_CURSOR_SEPARATOR) as TransitionPageCursor;
 }
 
 function isTransitionPageCursorShaped(value: string): boolean {
   return value.startsWith(TRANSITION_PAGE_CURSOR_PREFIX);
 }
 
-/** The revision a cursor names; refuses anything that was not minted as a cursor. */
-function requireCursorRevision(cursor: string): number {
-  if (!isTransitionPageCursorShaped(cursor))
-    throw new ValidationError(
-      "cursor must be a page cursor returned as nextCursor by a previous transitionsOf / replay page.",
-      {
-        issues: [
-          {
-            path: "cursor",
-            message:
-              "Not a transition page cursor. A recorded instant belongs in fromRecorded / toRecorded.",
-          },
-        ],
-      },
-    );
-  return requireTypeGraphRecordedRevision(
-    cursor.slice(TRANSITION_PAGE_CURSOR_PREFIX.length),
-    "cursor",
+function invalidCursorError(message: string): ValidationError {
+  return new ValidationError(
+    `cursor must be a page cursor returned as nextCursor by a previous transitionsOf / replay page for the same reference. ${message}`,
+    { issues: [{ path: "cursor", message }] },
   );
+}
+
+function decodeCursorReference(
+  encodedKind: string,
+  encodedId: string,
+): PlainNodeRef {
+  try {
+    return {
+      kind: decodeURIComponent(encodedKind),
+      id: decodeURIComponent(encodedId),
+    };
+  } catch (error) {
+    if (error instanceof URIError)
+      throw invalidCursorError("Malformed transition page cursor.");
+    throw error;
+  }
+}
+
+/**
+ * The revision a cursor names, for a read of `reference`'s lineage. Refuses
+ * anything that was not minted as a cursor, and a cursor minted for another
+ * reference.
+ */
+function requireCursorRevision(
+  cursor: string,
+  reference: PlainNodeRef,
+): number {
+  if (!isTransitionPageCursorShaped(cursor))
+    throw invalidCursorError(
+      "Not a transition page cursor. A recorded instant belongs in fromRecorded / toRecorded.",
+    );
+  const body = cursor.slice(TRANSITION_PAGE_CURSOR_PREFIX.length);
+  const kindEnd = body.indexOf(TRANSITION_PAGE_CURSOR_SEPARATOR);
+  const idEnd = body.indexOf(TRANSITION_PAGE_CURSOR_SEPARATOR, kindEnd + 1);
+  if (kindEnd === -1 || idEnd === -1)
+    throw invalidCursorError("Malformed transition page cursor.");
+  const cursorReference = decodeCursorReference(
+    body.slice(0, kindEnd),
+    body.slice(kindEnd + 1, idEnd),
+  );
+  if (refKey(cursorReference) !== refKey(reference))
+    throw invalidCursorError(
+      `This cursor pages the lineage of ${cursorReference.kind}/${cursorReference.id}, not ${reference.kind}/${reference.id}.`,
+    );
+  return requireTypeGraphRecordedRevision(body.slice(idEnd + 1), "cursor");
 }
 
 /** A window bound is a recorded instant; a page cursor handed to one is a misuse with a specific remedy. */
@@ -176,11 +239,6 @@ function requireWindowRevision(
     );
   return requireTypeGraphRecordedRevision(value, surface);
 }
-
-type PagedTransitions = Readonly<{
-  rows: readonly IdentityTransitionRow[];
-  nextCursor?: TransitionPageCursor | undefined;
-}>;
 
 /**
  * Set on a `transitionsOf` / `replay` result when lineage discovery could not
@@ -205,7 +263,7 @@ export type IdentityReplay<G extends GraphDef> = Readonly<{
   /**
    * Set when `limit` capped this page; pass it as `cursor` for the next one.
    * Addresses the TRANSITION LOG only — like
-   * {@link IdentityTransition.restored}'s `at`, this can name a revision a
+   * {@link RestoredIdentityTransition}'s `recorded`, this can name a revision a
    * restored row's SOURCE graph allocated, not this graph. Never pass it to
    * `store.asOfRecorded`; pass it only as `cursor`.
    */
@@ -220,7 +278,7 @@ export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
   /**
    * Set when `limit` capped this page; pass it as `cursor` for the next one.
    * Addresses the TRANSITION LOG only — like
-   * {@link IdentityTransition.restored}'s `at`, this can name a revision a
+   * {@link RestoredIdentityTransition}'s `recorded`, this can name a revision a
    * restored row's SOURCE graph allocated, not this graph. Never pass it to
    * `store.asOfRecorded`; pass it only as `cursor`.
    */
@@ -245,24 +303,42 @@ export type IdentityReplayOptions = Readonly<{
   limit?: number | undefined;
 }>;
 
-function publicTransition<G extends GraphDef>(
+function transitionFields<G extends GraphDef>(
   row: IdentityTransitionRow,
-): IdentityTransition<G> {
+): IdentityTransitionFields<G> {
+  const priorClassRef = transitionPriorClassRef(row);
   return {
     transitionId: row.transition_id,
     cause: row.cause,
-    recorded: createRecordedInstant(row.recorded_revision, row.recorded_at),
     validAt: row.valid_at,
     class: publicNodeRef<G>(transitionClassRef(row)),
     priorClass:
-      transitionPriorClassRef(row) === undefined ? undefined : (
-        publicNodeRef<G>(requireDefined(transitionPriorClassRef(row)))
-      ),
+      priorClassRef === undefined ? undefined : publicNodeRef<G>(priorClassRef),
     assertionIds: row.assertion_ids as readonly IdentityAssertionId[],
     decision: row.decision,
-    ...(row.restored_at === undefined ?
-      {}
-    : { restored: { at: row.restored_at } }),
+  };
+}
+
+function recordedTransition<G extends GraphDef>(
+  row: IdentityTransitionRow,
+): RecordedIdentityTransition<G> {
+  return {
+    ...transitionFields<G>(row),
+    recorded: createRecordedInstant(row.recorded_revision, row.recorded_at),
+  };
+}
+
+function publicTransition<G extends GraphDef>(
+  row: IdentityTransitionRow,
+): IdentityTransition<G> {
+  if (row.restored_at === undefined) return recordedTransition<G>(row);
+  return {
+    ...transitionFields<G>(row),
+    recorded: createRecordedInstant(
+      row.recorded_revision,
+      row.recorded_at,
+    ) as string as RestoredRecordedInstant,
+    restored: { at: row.restored_at },
   };
 }
 
@@ -496,6 +572,26 @@ async function walkClassLineage<G extends GraphDef>(
 }
 
 /**
+ * How a reconstruction reads identity: under which same-id profile and over
+ * which node kinds. The graph's CURRENT reading is what a recorded view uses;
+ * {@link membershipReadings} adds the readings an earlier schema could have
+ * used.
+ */
+type IdentityReading = Readonly<{
+  sameIdAcrossKinds: "fold" | "ignore";
+  kinds: ReadonlySet<string>;
+}>;
+
+function currentReading<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+): IdentityReading {
+  return {
+    sameIdAcrossKinds: ctx.sameIdAcrossKinds,
+    kinds: identityActiveKinds(ctx.registry),
+  };
+}
+
+/**
  * Reconstructs the visible class membership of `seed` at `recordedAsOf`, on
  * the diagonal `store.asOfRecorded` reads: the anchor's revision, seen from
  * the valid instant the anchor carries. That shared coordinate
@@ -505,28 +601,35 @@ async function walkClassLineage<G extends GraphDef>(
  * open when the step was recorded stays open in the step, however long after
  * it lapses the replay is asked for.
  *
- * The class is read under the graph's CURRENT identity profile and node
- * kinds, exactly as a recorded view is. A step recorded before a
- * `sameIdAcrossKinds` flip or a kind removal is therefore shown as the
- * current schema reads that revision, not as the schema then in force did.
+ * Unless a `reading` is given, the class is read under the graph's CURRENT
+ * identity profile and node kinds, exactly as a recorded view is. A step
+ * recorded before a `sameIdAcrossKinds` flip or a kind removal is therefore
+ * shown as the current schema reads that revision, not as the schema then in
+ * force did.
  */
 async function reconstructAt<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
   recordedAsOf: RecordedInstant,
-): Promise<readonly IdentityNodeReference<G>[]> {
+  reading: IdentityReading = currentReading(ctx),
+): Promise<HistoricalClass> {
   const classes = await loadHistoricalClasses(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
     [seed],
     recordedDiagonalCoordinate(recordedAsOf),
-    ctx.sameIdAcrossKinds,
-    identityActiveKinds(ctx.registry),
+    reading.sameIdAcrossKinds,
+    reading.kinds,
   );
-  const found = requireDefined(classes.get(refKey(seed)));
-  return found.visible.map((ref) => publicNodeRef<G>(ref));
+  return requireDefined(classes.get(refKey(seed)));
 }
+
+const NO_HISTORICAL_CLASS: HistoricalClass = {
+  structural: [],
+  visible: [],
+  foldEligible: [],
+};
 
 /**
  * The membership immediately BEFORE the commit recorded at `boundary`: one
@@ -538,14 +641,98 @@ async function reconstructBefore<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
   boundary: RecordedInstant,
-): Promise<readonly IdentityNodeReference<G>[]> {
+  reading?: IdentityReading,
+): Promise<HistoricalClass> {
   const priorRevision = recordedInstantRevision(boundary) - 1;
-  if (priorRevision < RECORDED_FIRST_REVISION) return [];
+  if (priorRevision < RECORDED_FIRST_REVISION) return NO_HISTORICAL_CLASS;
   return reconstructAt(
     ctx,
     seed,
     createRecordedInstant(priorRevision, recordedInstantWallTime(boundary)),
+    reading,
   );
+}
+
+/** `seed`'s class on either side of one native boundary. */
+type BoundaryClasses = Readonly<{
+  before: HistoricalClass;
+  after: HistoricalClass;
+}>;
+
+/**
+ * The readings a row's membership is judged under, current reading first.
+ *
+ * A note names a class under the schema in force when it was written, and a
+ * kind drop or a same-id profile change is exactly what makes today's reading
+ * unable to see that class: the dropped kind's members are not in it, and a
+ * cross-kind pair is no longer one class. Judging such a note by today's
+ * reading alone would discard the history that explains how the member got
+ * where it is. The log itself says which schema changes touched this lineage,
+ * so the readings are widened by exactly that: every kind a note names (not
+ * only the registered ones), and, when a schema transition was noted, the
+ * other same-id profile.
+ */
+function membershipReadings<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  lineage: readonly IdentityTransitionRow[],
+): readonly IdentityReading[] {
+  const current = currentReading(ctx);
+  const namedKinds = new Set(current.kinds);
+  for (const row of lineage) {
+    namedKinds.add(row.class_kind);
+    if (row.prior_class_kind !== undefined)
+      namedKinds.add(row.prior_class_kind);
+  }
+  const profiles: readonly ("fold" | "ignore")[] =
+    lineage.some((row) => row.cause === "schema-transition") ?
+      ["fold", "ignore"]
+    : [current.sameIdAcrossKinds];
+  const widened = profiles
+    .map((sameIdAcrossKinds) => ({ sameIdAcrossKinds, kinds: namedKinds }))
+    .filter(
+      (reading) =>
+        reading.sameIdAcrossKinds !== current.sameIdAcrossKinds ||
+        reading.kinds.size !== current.kinds.size,
+    );
+  return [current, ...widened];
+}
+
+/**
+ * Whether a native transition row explains a change to the class `seed`
+ * belonged to on either side of its boundary: its `class` or `priorClass`
+ * canonical is a member of that class just before or at the boundary, under
+ * any of the {@link membershipReadings}.
+ *
+ * The lineage walk reaches every class `seed`'s evidence ever touched,
+ * including classes it has since left, so a row it finds is about `seed` only
+ * while `seed` was in that class. Membership is the STRUCTURAL class (every
+ * member the reconstruction reaches, visible or not), because a note names
+ * its class's closure canonical, which can be a member whose own validity
+ * window has not opened or has already closed at the boundary.
+ */
+function namesBoundaryClass(
+  row: IdentityTransitionRow,
+  members: ReadonlySet<string>,
+): boolean {
+  const priorClassRef = transitionPriorClassRef(row);
+  return (
+    members.has(refKey(transitionClassRef(row))) ||
+    (priorClassRef !== undefined && members.has(refKey(priorClassRef)))
+  );
+}
+
+/** Every reference `seed`'s class held on either side of a boundary under `reading`. */
+async function structuralMembersAround<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  seed: PlainNodeRef,
+  recordedAsOf: RecordedInstant,
+  reading: IdentityReading,
+): Promise<readonly PlainNodeRef[]> {
+  const [before, after] = [
+    await reconstructBefore(ctx, seed, recordedAsOf, reading),
+    await reconstructAt(ctx, seed, recordedAsOf, reading),
+  ];
+  return [...before.structural, ...after.structural];
 }
 
 function invalidReplayLimitError(
@@ -608,12 +795,19 @@ function laterRevision(
   return Math.max(left, right);
 }
 
-function distinctBoundaries(
+/** The rows of each boundary (distinct recorded revision), ascending, each group in arrival order. */
+function groupByBoundary(
   rows: readonly IdentityTransitionRow[],
-): readonly number[] {
-  return [...new Set(rows.map((row) => row.recorded_revision))].toSorted(
-    (left, right) => left - right,
-  );
+): readonly (readonly IdentityTransitionRow[])[] {
+  const groups = new Map<number, IdentityTransitionRow[]>();
+  for (const row of rows) {
+    const group = groups.get(row.recorded_revision) ?? [];
+    group.push(row);
+    groups.set(row.recorded_revision, group);
+  }
+  return [...groups.entries()]
+    .toSorted(([left], [right]) => left - right)
+    .map(([, group]) => group);
 }
 
 /** Applies the caller's recorded window to the fully-discovered lineage — the ONE place `fromRecorded`/`toRecorded` narrow anything, since discovery itself must stay unbounded (see {@link walkClassLineage}). */
@@ -630,34 +824,110 @@ function windowedRows(
 }
 
 /**
- * Cuts the windowed lineage into one page of at most `limit` BOUNDARIES
- * (distinct recorded revisions), not `limit` rows — a page counts
- * boundaries, and every note sharing a boundary shares one replay step, so a
- * row-counted page could split a single step's rows across two pages.
- *
- * `nextCursor` names the first boundary this page did NOT include, so a caller
- * pages by re-issuing the identical call with `cursor: nextCursor` (the
- * cursor's boundary is inclusive). One owner for both `transitionsOf` and
- * `replay`: they page identically, or a caller pairing an explanation from
- * one with a membership step from the other would see the two disagree about
- * where the page ended.
+ * One boundary of a page: the rows kept at one recorded revision and, when any
+ * of them is native, the seed's class on either side of it.
  */
-function pageBoundaries(
+type MemberBoundary = Readonly<{
+  rows: readonly IdentityTransitionRow[];
+  classes?: BoundaryClasses | undefined;
+}>;
+
+type MemberBoundaryPage = Readonly<{
+  boundaries: readonly MemberBoundary[];
+  nextCursor?: TransitionPageCursor | undefined;
+}>;
+
+/**
+ * Keeps, of one boundary's rows, the ones that belong to `seed`'s own history:
+ * a native row only while `seed` was a member of the class it names (see
+ * {@link namesBoundaryClass}), and every restored row. A restored row names a
+ * class on the SOURCE graph's timeline, which this graph cannot reconstruct,
+ * so it stays governed by discovery alone and is reported through
+ * `incompleteDiscovery` when discovery cannot vouch for it.
+ */
+async function memberBoundary<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  seed: PlainNodeRef,
+  readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
-  limit: number,
-): PagedTransitions {
-  const boundaries = distinctBoundaries(rows);
-  if (boundaries.length <= limit) return { rows };
-  const cutoffRevision = requireDefined(boundaries[limit]);
-  const cutoffRow = requireDefined(
-    rows.find((row) => row.recorded_revision === cutoffRevision),
+): Promise<MemberBoundary> {
+  const firstNative = rows.find((row) => !isRestoredTransitionRow(row));
+  if (firstNative === undefined) return { rows };
+  // Every native row of one boundary was flushed by one commit and carries
+  // its recorded instant.
+  const recordedAsOf = createRecordedInstant(
+    firstNative.recorded_revision,
+    firstNative.recorded_at,
+  );
+  const classes: BoundaryClasses = {
+    before: await reconstructBefore(ctx, seed, recordedAsOf),
+    after: await reconstructAt(ctx, seed, recordedAsOf),
+  };
+  const members = new Set(
+    [...classes.before.structural, ...classes.after.structural].map((member) =>
+      refKey(member),
+    ),
+  );
+  for (const reading of readings.slice(1)) {
+    for (const member of await structuralMembersAround(
+      ctx,
+      seed,
+      recordedAsOf,
+      reading,
+    ))
+      members.add(refKey(member));
+  }
+  const kept = rows.filter(
+    (row) => isRestoredTransitionRow(row) || namesBoundaryClass(row, members),
   );
   return {
-    rows: rows.filter((row) => row.recorded_revision < cutoffRevision),
-    nextCursor: transitionPageCursor(
-      createRecordedInstant(cutoffRow.recorded_revision, cutoffRow.recorded_at),
-    ),
+    rows: kept,
+    ...(kept.some((row) => !isRestoredTransitionRow(row)) ? { classes } : {}),
   };
+}
+
+/**
+ * Cuts the windowed lineage into one page of at most `limit` BOUNDARIES
+ * (distinct recorded revisions) of `seed`'s own history, not `limit` rows — a
+ * page counts boundaries, and every note sharing a boundary shares one replay
+ * step, so a row-counted page could split a single step's rows across two
+ * pages. A boundary none of whose rows belongs to `seed` (see
+ * {@link memberBoundary}) is skipped, and does not count.
+ *
+ * Boundaries are judged in order and only until the page is full, so a page
+ * reconstructs the boundaries it returns plus the ones it skipped on the way,
+ * never the whole lineage. `nextCursor` names the first kept boundary this
+ * page did NOT include, so a caller pages by re-issuing the identical call
+ * with `cursor: nextCursor` (the cursor's boundary is inclusive). One owner for
+ * both `transitionsOf` and `replay`: they page identically, or a caller
+ * pairing an explanation from one with a membership step from the other would
+ * see the two disagree about where the page ended.
+ */
+async function pageMemberBoundaries<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  seed: PlainNodeRef,
+  readings: readonly IdentityReading[],
+  rows: readonly IdentityTransitionRow[],
+  limit: number,
+): Promise<MemberBoundaryPage> {
+  const boundaries: MemberBoundary[] = [];
+  for (const group of groupByBoundary(rows)) {
+    const boundary = await memberBoundary(ctx, seed, readings, group);
+    const first = boundary.rows[0];
+    if (first === undefined) continue;
+    if (boundaries.length === limit) {
+      return {
+        boundaries,
+        nextCursor: transitionPageCursor(
+          seed,
+          first.recorded_revision,
+          first.recorded_at,
+        ),
+      };
+    }
+    boundaries.push(boundary);
+  }
+  return { boundaries };
 }
 
 function identityReplayHistoryTruncatedError(
@@ -681,10 +951,9 @@ function identityReplayHistoryTruncatedError(
 }
 
 type WalkedTransitions = Readonly<{
-  seed: PlainNodeRef;
   fromRevision: number | undefined;
   toRevision: number | undefined;
-  rows: readonly IdentityTransitionRow[];
+  boundaries: readonly MemberBoundary[];
   nextCursor?: TransitionPageCursor | undefined;
   incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
 }>;
@@ -694,11 +963,10 @@ type WalkedTransitions = Readonly<{
  * before they diverge: enforce `history: true`, resolve the requested limit
  * and revision bounds, seed and run the lineage walk, report what the walk
  * could not vouch for, narrow the converged result to the requested window,
- * and cut it into one page of at most `limit` boundaries. `seed` is the
- * caller's ORIGINAL reference (not the resolved class canonical), for
- * `identityReplay`'s
- * `reconstructAt` calls — see that function's docblock for why the two must
- * not be conflated.
+ * and cut one page of at most `limit` boundaries of the reference's own
+ * history from it. Classes are reconstructed against the caller's ORIGINAL
+ * reference (not the resolved class canonical) — see `reconstructAt`'s
+ * docblock for why the two must not be conflated.
  *
  * The three stages are ordered and cannot be reshuffled: discovery must run
  * unbounded, the window applies to what discovery found, and the page is cut
@@ -723,22 +991,24 @@ async function walkedTransitionsFor<G extends GraphDef>(
   const cursorRevision =
     options?.cursor === undefined ?
       undefined
-    : requireCursorRevision(options.cursor);
+    : requireCursorRevision(options.cursor, seed);
   const fromRevision = laterRevision(windowFromRevision, cursorRevision);
   const discovered = await walkClassLineage(
     ctx,
     await lineageWalkSeeds(ctx, seed),
   );
   const unattributed = await unattributedRestoredTransitions(ctx, discovered);
-  const page = pageBoundaries(
+  const page = await pageMemberBoundaries(
+    ctx,
+    seed,
+    membershipReadings(ctx, discovered),
     windowedRows(discovered, fromRevision, toRevision),
     limit,
   );
   return {
-    seed,
     fromRevision,
     toRevision,
-    rows: page.rows,
+    boundaries: page.boundaries,
     ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
     ...(unattributed === undefined ?
       {}
@@ -749,8 +1019,10 @@ async function walkedTransitionsFor<G extends GraphDef>(
 }
 
 /**
- * Every transition touching `ref`'s class lineage, ascending by recorded
- * revision, in pages of at most `limit` boundaries.
+ * Every transition that changed `ref`'s own identity class — the class it was
+ * a member of on either side of the transition — ascending by recorded
+ * revision, in pages of at most `limit` boundaries. A class `ref` has left
+ * keeps a history of its own, and none of it is reported here.
  * `store.identity.transitionsOf` is a thin wrapper over this.
  */
 export async function identityTransitionsOf<G extends GraphDef>(
@@ -758,28 +1030,29 @@ export async function identityTransitionsOf<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
-  const { rows, nextCursor, incompleteDiscovery } = await walkedTransitionsFor(
-    ctx,
-    ref,
-    options,
-  );
+  const { boundaries, nextCursor, incompleteDiscovery } =
+    await walkedTransitionsFor(ctx, ref, options);
   return {
-    transitions: rows.map((row) => publicTransition<G>(row)),
+    transitions: boundaries.flatMap((boundary) =>
+      boundary.rows.map((row) => publicTransition<G>(row)),
+    ),
     ...(nextCursor === undefined ? {} : { nextCursor }),
     ...(incompleteDiscovery === undefined ? {} : { incompleteDiscovery }),
   };
 }
 
 /**
- * The full replay algorithm: every transition touching `ref`'s class
- * lineage, each paired with the class membership immediately before and
- * after it. Both are reconstructed for every boundary — `after` at the
- * boundary's own revision, `before` one revision earlier — and neither is
- * carried over from the previous boundary. A class can change between two
- * boundaries without a note under the schema then in force (a same-id node
- * created while the graph ignored same ids, read back after it folds them),
- * and carrying `after` forward would pin that change on the next transition.
- * `store.identity.replay` is a thin wrapper over this.
+ * The full replay algorithm: every transition `identityTransitionsOf` reports,
+ * each paired with the class membership immediately before and after it.
+ * Both are reconstructed for every boundary — `after` at the boundary's own
+ * revision, `before` one revision earlier — and neither is carried over from
+ * the previous boundary. A class can change between two boundaries without a
+ * note under the schema then in force (a same-id node created while the graph
+ * ignored same ids, read back after it folds them), and carrying `after`
+ * forward would pin that change on the next transition. They are the same
+ * reconstruction that decided the boundary belongs to `ref`
+ * ({@link memberBoundary}), so the membership a step shows and the decision to
+ * show it cannot disagree. `store.identity.replay` is a thin wrapper over this.
  *
  * Paged by boundary exactly as `transitionsOf` is: `nextCursor` names the first
  * boundary this page stopped short of. Because the page is cut BEFORE
@@ -794,10 +1067,9 @@ export async function identityReplay<G extends GraphDef>(
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
   const {
-    seed,
     fromRevision,
     toRevision,
-    rows,
+    boundaries,
     nextCursor,
     incompleteDiscovery,
   } = await walkedTransitionsFor(ctx, ref, options);
@@ -828,38 +1100,21 @@ export async function identityReplay<G extends GraphDef>(
   // "cannot vouch below N" contract, which is coarser and orthogonal). Steps
   // are therefore built ONLY from this graph's own (never restored) rows;
   // `transitionsOf` (no such filter) remains the complete answer for "what
-  // changed and why". Filtering the boundary set itself — not merely the
-  // rows matched at each boundary — means no reconstruction is ever asked
-  // for at a revision this graph did not allocate.
-  const nativeRows = rows.filter((row) => !isRestoredTransitionRow(row));
-  // Grouped in ONE pass: a boundary's rows are read from the map rather than
-  // re-scanning the whole lineage per boundary, which a wide page (up to
-  // `IDENTITY_REPLAY_MAX_LIMIT` boundaries, each with unbounded rows) pays for
-  // quadratically. Insertion order within a revision is preserved, so each
-  // boundary emits its steps in the order the rows arrived, and the sorted keys
-  // ARE the boundary list.
-  const rowsByBoundary = new Map<number, IdentityTransitionRow[]>();
-  for (const row of nativeRows) {
-    const group = rowsByBoundary.get(row.recorded_revision) ?? [];
-    group.push(row);
-    rowsByBoundary.set(row.recorded_revision, group);
-  }
-  const boundaries = [...rowsByBoundary.keys()].toSorted(
-    (left, right) => left - right,
-  );
-
+  // changed and why". A boundary holding only restored rows carries no
+  // reconstruction, so no step is ever built at a revision this graph did not
+  // allocate.
   const steps: IdentityReplayStep<G>[] = [];
-  for (const boundary of boundaries) {
-    const transitions = (rowsByBoundary.get(boundary) ?? []).map((row) =>
-      publicTransition<G>(row),
+  for (const { rows, classes } of boundaries) {
+    if (classes === undefined) continue;
+    const before = classes.before.visible.map((member) =>
+      publicNodeRef<G>(member),
     );
-    // Every row of one boundary was flushed by one commit and carries its
-    // recorded instant.
-    const recordedAsOf = requireDefined(transitions[0]).recorded;
-    const before = await reconstructBefore(ctx, seed, recordedAsOf);
-    const after = await reconstructAt(ctx, seed, recordedAsOf);
-    for (const transition of transitions) {
-      steps.push({ transition, before, after });
+    const after = classes.after.visible.map((member) =>
+      publicNodeRef<G>(member),
+    );
+    for (const row of rows) {
+      if (isRestoredTransitionRow(row)) continue;
+      steps.push({ transition: recordedTransition<G>(row), before, after });
     }
   }
 

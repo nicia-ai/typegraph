@@ -508,14 +508,66 @@ type IdentityTransitionImportContext = Readonly<{
   schema: SqlSchema;
 }>;
 
-function transitionShapeError(
-  transitionId: string,
-  message: string,
-  code: string,
-): ValidationError {
+function transitionShapeError(message: string, code: string): ValidationError {
   return new ValidationError(message, {
     issues: [{ path: "identity.transitions", message, code }],
   });
+}
+
+/**
+ * Whether an import restores retained identity explanation: transition rows,
+ * or the watermark of a source that pruned. A zero watermark records that
+ * nothing was pruned, which restores nothing. THE one decision every import
+ * site takes on it — the up-front refusal on a target that keeps no
+ * transition log, the read of the destination baseline before the first
+ * write, and the restore itself — so no site restores what another refused,
+ * or refuses what another would skip.
+ */
+export function isIdentityTransitionRestore(
+  hasTransitions: boolean,
+  prunedBeforeRevision: number | undefined,
+): boolean {
+  return hasTransitions || (prunedBeforeRevision ?? 0) > 0;
+}
+
+/** The refusal for an archival restore whose rows are out of recorded-revision order. */
+function transitionsNotMonotoneError(
+  transitionId: string,
+  revision: number,
+  previousRevision: number,
+): ValidationError {
+  return transitionShapeError(
+    `Archival identity transitions must be ordered by non-decreasing recorded revision; ${transitionId} carries ${String(revision)} after ${String(previousRevision)}.`,
+    "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+  );
+}
+
+/**
+ * Refuses archival transitions out of non-decreasing `recordedRevision` order
+ * and returns the last revision seen. `afterRevision` is the last revision a
+ * previous part of the same restore carried, so a streamed restore whose
+ * transitions arrive over several chunks is held to the order a single
+ * document is, across chunk boundaries.
+ */
+export function assertIdentityTransitionsMonotone(
+  transitions: readonly Readonly<{
+    transitionId: string;
+    recordedRevision: number;
+  }>[],
+  afterRevision = Number.NEGATIVE_INFINITY,
+): number {
+  let previousRevision = afterRevision;
+  for (const row of transitions) {
+    if (row.recordedRevision < previousRevision) {
+      throw transitionsNotMonotoneError(
+        row.transitionId,
+        row.recordedRevision,
+        previousRevision,
+      );
+    }
+    previousRevision = row.recordedRevision;
+  }
+  return previousRevision;
 }
 
 /**
@@ -552,10 +604,10 @@ export async function readIdentityRestoreBaseline(
  * re-derived membership, no renumbering onto the destination graph's live
  * revision sequence, because a restore records history, it does not relive
  * it (see "Archival transitions and the retention watermark" in the identity
- * documentation). Validates SHAPE only: `recordedRevision` must be
- * non-decreasing across the array in the order given (every other shape
- * constraint — a known cause, a well-formed `{kind, id}` ref — is already
- * enforced by the interchange schema before a row reaches here).
+ * documentation). Its rows arrive already validated for SHAPE only, before
+ * the import's first write: the interchange schema enforces a known cause and
+ * a well-formed `{kind, id}` ref, and {@link assertIdentityTransitionsMonotone}
+ * a non-decreasing `recordedRevision` across the whole restore.
  *
  * Every inserted row is marked `restored_at` (the restore's own wall time),
  * regardless of what the wire payload carried — see
@@ -609,8 +661,7 @@ export async function importIdentityTransitionsIntoTarget(
     const restoredAt = nowIso();
     if (transitions.length === 0) {
       if (
-        carriedWatermark === undefined ||
-        carriedWatermark === 0 ||
+        !isIdentityTransitionRestore(false, carriedWatermark) ||
         hasOwnHistory
       ) {
         return { created: 0, watermark: undefined };
@@ -623,17 +674,6 @@ export async function importIdentityTransitionsIntoTarget(
         restoredAt,
       );
       return { created: 0, watermark: destinationFloor };
-    }
-    let previousRevision = Number.NEGATIVE_INFINITY;
-    for (const row of transitions) {
-      if (row.recordedRevision < previousRevision) {
-        throw transitionShapeError(
-          row.transitionId,
-          `Archival identity transitions must be ordered by non-decreasing recorded revision; ${row.transitionId} carries ${String(row.recordedRevision)} after ${String(previousRevision)}.`,
-          "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
-        );
-      }
-      previousRevision = row.recordedRevision;
     }
     const values = transitions.map((row) =>
       encodeIdentityTransitionRow(

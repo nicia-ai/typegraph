@@ -21,6 +21,7 @@ import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
 import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
+import { withIdentityTransitionRelationsPrecondition } from "../../utils/sql-errors";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
 import { allocateRecordedCommit } from "./clock";
@@ -296,12 +297,19 @@ export async function flushIdentityTransitions(
     const values = noteChunk.map((note) =>
       encodeIdentityTransitionRow(note, revision, recordedAt, generateId()),
     );
-    await executeStatement(
-      target,
-      sql`
-        INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
-        VALUES ${sql.join(values, sql`, `)}
-      `,
+    await withIdentityTransitionRelationsPrecondition(
+      executeStatement(
+        target,
+        sql`
+          INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
+          VALUES ${sql.join(values, sql`, `)}
+        `,
+      ),
+      [
+        schema.tables.identityTransitions,
+        schema.tables.identityTransitionRetention,
+      ],
+      { dialect: target.dialect, surface: "capture-flush" },
     );
   }
 }

@@ -103,8 +103,10 @@ import {
   ValidationError,
 } from "../errors";
 import {
+  assertIdentityTransitionsMonotone,
   IDENTITY_IMPORT_FAILED_ASSERTION,
   IDENTITY_IMPORT_PROGRESS,
+  isIdentityTransitionRestore,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
 import {
@@ -197,12 +199,14 @@ import {
   type GraphDataHeader,
   GraphDataHeaderSchema,
   type GraphInterchangeChunk,
+  type IdentityInterchangeMode,
   type ImportError,
   type ImportOptions,
   ImportOptionsSchema,
   type ImportResult,
   type InterchangeEdge,
   type InterchangeIdentityAssertion,
+  type InterchangeIdentityRetention,
   InterchangeIdentitySchema,
   type InterchangeIdentityTransition,
   type InterchangeNode,
@@ -534,7 +538,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   // writes below record transitions of their own.
   const identityRestoreBaseline =
     inputs.identityRestoreBaseline ??
-    (archivalTransitionRestoreStated(inputs.data.identity) ?
+    (identitySectionRestoresTransitions(inputs.data.identity) ?
       await inputs.runtime.readIdentityRestoreBaselineAtTarget(target)
     : undefined);
   await processNodes(
@@ -608,6 +612,14 @@ async function importGraphData<G extends GraphDef>(
   // see assertIdentityImportSupported / validateIdentitySection.
   assertIdentityImportSupported(store, data.identity !== undefined);
   validateIdentitySection(data.identity);
+  if (data.identity !== undefined) {
+    assertStateIdentityCarriesNoHistory(
+      data.identity.mode,
+      (data.identity.transitions?.length ?? 0) > 0,
+      data.identity.retention,
+    );
+    assertIdentityTransitionsMonotone(data.identity.transitions ?? []);
+  }
   assertIdentityTransitionsRestoreSupported(
     store,
     (data.identity?.transitions?.length ?? 0) > 0,
@@ -834,6 +846,9 @@ export async function importGraphStream<G extends GraphDef>(
   let receivedEdges = false;
   let receivedIdentity = false;
   let receivedIdentityTransitions = false;
+  // The last revision a transitions chunk carried, so the next one is held
+  // to the same non-decreasing order a single document is.
+  let lastTransitionRevision = Number.NEGATIVE_INFINITY;
   // The destination before this stream's first chunk, when the header
   // announces an archival transition restore. Read there, once: every chunk
   // commits on its own, so by the time the transitions chunk runs the
@@ -897,16 +912,19 @@ export async function importGraphStream<G extends GraphDef>(
           // `hasTransitions` announcement in place of the array itself — the
           // "identity-transitions" chunk always arrives last, after nodes,
           // edges and identity assertions have already been written.
+          if (chunk.header.identity !== undefined) {
+            assertStateIdentityCarriesNoHistory(
+              chunk.header.identity.mode,
+              chunk.header.identity.hasTransitions === true,
+              chunk.header.identity.retention,
+            );
+          }
           assertIdentityTransitionsRestoreSupported(
             store,
             chunk.header.identity?.hasTransitions === true,
             chunk.header.identity?.retention,
           );
-          if (
-            chunk.header.identity?.mode === "archival" &&
-            (chunk.header.identity.hasTransitions === true ||
-              chunk.header.identity.retention !== undefined)
-          ) {
+          if (streamHeaderAnnouncesRestore(chunk.header)) {
             identityRestoreBaseline =
               await storeRuntime(store).readIdentityRestoreBaselineAtTarget(
                 targetBackend,
@@ -1028,6 +1046,10 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity transitions its header did not announce (identity.hasTransitions).",
             );
           }
+          lastTransitionRevision = assertIdentityTransitionsMonotone(
+            chunk.transitions,
+            lastTransitionRevision,
+          );
           receivedIdentityTransitions = true;
           mergeImportResult(
             result,
@@ -1047,6 +1069,9 @@ export async function importGraphStream<G extends GraphDef>(
       throw new Error(
         "Graph interchange stream ended before emitting a header.",
       );
+    }
+    if (streamHeaderAnnouncesRestore(header) && !receivedIdentityTransitions) {
+      throw streamTransitionsMissingError();
     }
     // The trailing ANALYZE is a WRITE on the target connection, exactly like
     // the chunks were, so it belongs inside the lease rather than after it.
@@ -1247,9 +1272,10 @@ function assertIdentityImportSupported<G extends GraphDef>(
 /**
  * Rejects an archival transitions/retention payload aimed at a store that
  * keeps no TypeGraph transition log (history off, or engine-native recorded
- * time) BEFORE any entity write. A non-zero retention watermark counts as an
- * archival restore on its own, exactly as a non-empty `transitions` array does,
- * so both call sites refuse the same documents.
+ * time) BEFORE any entity write. Whether a payload is a restore at all is
+ * {@link isIdentityTransitionRestore}'s decision — the same one the baseline
+ * read and the restore itself take — so a document this guard lets through is
+ * never refused later for being a restore.
  *
  * `importIdentityTransitionsAtTarget` (`store.ts`) raises the same
  * `IdentityReplayError` (both gate on TypeGraph capture, never the public
@@ -1266,24 +1292,16 @@ function assertIdentityImportSupported<G extends GraphDef>(
  * so the header's `hasTransitions` announcement is the only pre-write
  * signal available).
  */
-/**
- * Whether a payload restores retained identity explanation: transition rows,
- * or the watermark of a source whose rows were all pruned.
- */
-function restoresIdentityTransitions(
-  hasTransitions: boolean,
-  retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
-): boolean {
-  return hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0;
-}
-
 function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
   store: Store<G>,
   hasTransitions: boolean,
   retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
 ): void {
   if (
-    restoresIdentityTransitions(hasTransitions, retention) &&
+    isIdentityTransitionRestore(
+      hasTransitions,
+      retention?.prunedBeforeRevision,
+    ) &&
     !storeCaptureEnabled(store)
   ) {
     throw identityTransitionLogUnavailableError(
@@ -1291,6 +1309,84 @@ function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
       store.recordedTimeOwnership,
     );
   }
+}
+
+/**
+ * A `state` identity section carries current truth only, never explanation:
+ * one naming transitions or a retention watermark is a shape defect, refused
+ * before the import's first write (and, for a stream, at its header) rather
+ * than after the node and edge writes, where a backend without a transaction
+ * would already have committed them.
+ */
+function assertStateIdentityCarriesNoHistory(
+  mode: IdentityInterchangeMode,
+  hasTransitions: boolean,
+  retention: InterchangeIdentityRetention | undefined,
+): void {
+  if (mode !== "state") return;
+  if (hasTransitions) {
+    throw new ValidationError(
+      "State identity import cannot carry archival transitions.",
+      {
+        issues: [
+          {
+            path: "identity.transitions",
+            message: 'transitions is only valid for mode: "archival".',
+            code: "IDENTITY_STATE_IMPORT_TRANSITIONS",
+          },
+        ],
+      },
+    );
+  }
+  if (retention !== undefined) {
+    throw new ValidationError(
+      "State identity import cannot carry a retention watermark.",
+      {
+        issues: [
+          {
+            path: "identity.retention",
+            message: 'retention is only valid for mode: "archival".',
+            code: "IDENTITY_STATE_IMPORT_RETENTION",
+          },
+        ],
+      },
+    );
+  }
+}
+
+/** Whether a stream header announces an archival transition restore its last chunk must carry. */
+function streamHeaderAnnouncesRestore(header: GraphDataHeader): boolean {
+  return (
+    header.identity !== undefined &&
+    isIdentityTransitionRestore(
+      header.identity.hasTransitions === true,
+      header.identity.retention?.prunedBeforeRevision,
+    )
+  );
+}
+
+/**
+ * The refusal for a stream whose header announced a transition restore but
+ * that ended without the `identity-transitions` chunk carrying it: a
+ * truncated stream, or a writer that left out the trailing chunk. Accepting
+ * it would drop the transitions and the retention watermark the header
+ * promised. Raised at the end of the stream, after the earlier chunks
+ * committed, because only the end shows the chunk is missing.
+ */
+function streamTransitionsMissingError(): ValidationError {
+  return new ValidationError(
+    "Graph interchange stream ended without the identity transitions its header announced (identity.hasTransitions / identity.retention).",
+    {
+      issues: [
+        {
+          path: "identity.transitions",
+          message:
+            "The header announced an archival transition restore, but no identity-transitions chunk arrived.",
+          code: "IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING",
+        },
+      ],
+    },
+  );
 }
 
 /**
@@ -1511,11 +1607,9 @@ async function importIdentitySection<G extends GraphDef>(
  * restore (see "Archival transitions and the retention watermark" in the
  * identity documentation): no closure repair, no renumbering, nothing reported back on
  * {@link ImportResult} (there is no live-conflict dimension to count, unlike
- * assertions). Never attempted for `state` mode, which carries current truth
- * only; a `state` payload naming transitions is a shape defect and throws
- * uncaught here, exactly like {@link validateIdentitySection}'s upfront schema
- * check — a malformed archival payload is a precondition failure, not a
- * per-row import outcome.
+ * assertions). Never reached for `state` mode, which carries current truth
+ * only: {@link assertStateIdentityCarriesNoHistory} refused a `state` payload
+ * naming transitions or a watermark before the first write.
  */
 async function importIdentityTransitionsSection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
@@ -1523,26 +1617,10 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
   identity: NonNullable<GraphData["identity"]>,
   restoreBaseline: IdentityRestoreBaseline | undefined,
 ): Promise<void> {
-  const transitions = identity.transitions ?? [];
-  if (identity.mode === "state") {
-    if (transitions.length === 0) return;
-    throw new ValidationError(
-      "State identity import cannot carry archival transitions.",
-      {
-        issues: [
-          {
-            path: "identity.transitions",
-            message: 'transitions is only valid for mode: "archival".',
-            code: "IDENTITY_STATE_IMPORT_TRANSITIONS",
-          },
-        ],
-      },
-    );
-  }
-  if (!archivalTransitionRestoreStated(identity)) return;
+  if (!identitySectionRestoresTransitions(identity)) return;
   await runtime.importIdentityTransitionsAtTarget(
     target,
-    transitions,
+    identity.transitions ?? [],
     identity.retention?.prunedBeforeRevision,
     requireDefined(
       restoreBaseline,
@@ -1552,19 +1630,21 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
 }
 
 /**
- * Whether an identity section states an archival transition restore — rows
- * to insert, or a retention watermark to carry — and so whether the import
- * owes the destination's {@link IdentityRestoreBaseline}. THE one predicate
- * both the baseline read (before the import's first write) and the restore
- * itself (after its last) decide on, so neither runs without the other.
+ * Whether an identity section restores transitions (see
+ * {@link isIdentityTransitionRestore}), and so whether the import owes the
+ * destination's {@link IdentityRestoreBaseline}: both the baseline read
+ * (before the import's first write) and the restore itself (after its last)
+ * decide on it, so neither runs without the other.
  */
-function archivalTransitionRestoreStated(
+function identitySectionRestoresTransitions(
   identity: GraphData["identity"],
 ): boolean {
   return (
-    identity?.mode === "archival" &&
-    ((identity.transitions?.length ?? 0) > 0 ||
-      identity.retention !== undefined)
+    identity !== undefined &&
+    isIdentityTransitionRestore(
+      (identity.transitions?.length ?? 0) > 0,
+      identity.retention?.prunedBeforeRevision,
+    )
   );
 }
 
@@ -1856,13 +1936,25 @@ function unattachableRequiredPartRefusal(
   };
 }
 
-/** The one message a required part refused for want of a whole is reported with. */
+/** The message a required part refused before its create, for want of any composition edge to attach it, is reported with. */
 function unattachedRequiredPartMessage(part: PendingRequiredPart): string {
   return new CompositionExistenceError({
     partKind: part.kind,
     partId: part.id,
     situation: "create",
   }).message;
+}
+
+/**
+ * The message a required part this import created and then removed is
+ * reported with. It was written, but once every edge in the payload was it
+ * still held no live whole: its composition edge was refused, ended, or named
+ * a whole that is not live, or the whole holding it was itself removed. The
+ * create-situation text ("no `partOf` was given") would name only the first
+ * of those, and a payload that carried the edge would read it as wrong.
+ */
+function purgedRequiredPartMessage(part: PendingRequiredPart): string {
+  return `${part.kind} "${part.id}" was removed: its kind requires a whole (\`existence: "required"\`), and once every edge in the payload was written it held no live whole — its composition edge was refused, ended, or named a whole that is not live, or the whole that held it was removed.`;
 }
 
 async function processNodes(
@@ -3269,6 +3361,12 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
  * Removes one refused required part and settles the import's result for it.
  * Returns whether the row was removed; a failed purge is reported as that
  * row's own error and leaves the counts alone.
+ *
+ * Once the row is gone its identity detach is owed, not optional: a failure
+ * there is not this row's outcome but a graph whose closure still names a
+ * deleted node, so it propagates and fails the import, exactly as a store
+ * delete whose detach fails does. Catching it here would also report the part
+ * as kept while its row and edges were already removed.
  */
 async function purgeUnattachedRequiredPart<G extends GraphDef>(
   frame: ImportWriteFrame,
@@ -3299,10 +3397,6 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
       },
       { enforceDeleteBehavior: false },
     );
-    await runtime.detachDeletedImportedIdentityNode(frame.target, {
-      kind: part.kind,
-      id: part.id,
-    });
   } catch (error: unknown) {
     errors.push({
       entityType: "node",
@@ -3315,6 +3409,10 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     });
     return false;
   }
+  await runtime.detachDeletedImportedIdentityNode(frame.target, {
+    kind: part.kind,
+    id: part.id,
+  });
   const partKey = makeNodeKey(part.kind, part.id);
   result.nodes.created--;
   result.nodes.updated -= ledger.partUpdates.get(partKey) ?? 0;
@@ -3325,7 +3423,7 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     entityType: "node",
     kind: part.kind,
     id: part.id,
-    error: unattachedRequiredPartMessage(part),
+    error: purgedRequiredPartMessage(part),
   });
   for (const edge of removedEdges) {
     const written = ledger.edgeWrites.get(edge.id);

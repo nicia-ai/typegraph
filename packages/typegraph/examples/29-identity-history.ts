@@ -359,7 +359,9 @@ export async function main(): Promise<void> {
         "replay pairs only the import's own native transition",
       );
       assertTrue(
-        requireDefined(targetReplay.steps[0]).transition.restored === undefined,
+        !sourceTransitionIds.has(
+          requireDefined(targetReplay.steps[0]).transition.transitionId,
+        ),
         "the one step replay produced is the NATIVE transition, never a restored one",
       );
     } finally {

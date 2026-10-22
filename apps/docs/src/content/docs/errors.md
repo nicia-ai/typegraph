@@ -1323,15 +1323,24 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
 
-Archival transitions carry two of their own `ValidationError` codes, both
-precondition failures on the `identity.transitions` section as a whole rather
-than a per-row outcome — unlike the table above, these THROW uncaught and are
-never recorded in `result.errors`:
+Archival transitions carry four `ValidationError` codes of their own, each a
+precondition failure on the identity section as a whole rather than a per-row
+outcome — unlike the table above, these THROW uncaught and are never recorded
+in `result.errors`:
 
 | Issue `code` | Meaning |
 | --- | --- |
-| `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. |
-| `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` array is not ordered by non-decreasing `recordedRevision`. |
+| `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. Refused before any write. |
+| `IDENTITY_STATE_IMPORT_RETENTION` | A `state`-mode document carries a `retention` watermark; only archival exports carry one. Refused before any write. |
+| `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` are not ordered by non-decreasing `recordedRevision` — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. |
+| `IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING` | An `importGraphStream` header announced a transition restore (`hasTransitions`, or a non-zero `retention`), but the stream ended without an `identity-transitions` chunk. Raised at the end of the stream, after its earlier chunks committed. |
+
+A write that records an identity transition on a database whose transition-log
+relations were never created (base-schema version 6 not yet adopted; see
+[Base-schema version 6](/backend-setup/#base-schema-version-6-the-identity-transition-log))
+throws a `ConfigurationError` whose `details.code` is
+`IDENTITY_TRANSITION_RELATIONS_MISSING` and whose `details.relations` names
+both relations.
 
 #### Merge provenance sidecar codes
 

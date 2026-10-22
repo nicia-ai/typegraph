@@ -155,8 +155,11 @@ current-truth state export is not a backup of explanation.
 Restoring `identity.transitions` validates shape only (a known cause, a
 well-formed reference, a `recordedRevision` a recorded instant can carry —
 an integer from 1, below `Number.MAX_SAFE_INTEGER` — in a non-decreasing
-sequence) and inserts every row verbatim, never re-deriving membership or touching the
-target's closure. Every restored row is marked internally as such — a
+sequence) and inserts every row verbatim. `importGraph` validates the whole
+section before writing anything; `importGraphStream` validates each
+`identity-transitions` chunk when it arrives, in order across chunks as well as
+within one, after the stream's earlier chunks have committed. A restore never
+re-derives membership or touches the target's closure. Every restored row is marked internally as such — a
 restore always inserts rows this graph did not record itself, regardless of
 what the archive's own history looks like. A replay over the restored graph
 (`store.identity.replay`, see the [identity guide](/identity/#replay-and-identity-history))
@@ -175,7 +178,9 @@ existing watermark untouched, so an unrelated restore can never misreport that g
 fully-retained classes as truncated. `replay` reports the watermark, when
 set, as `truncatedBefore`.
 
-A `state`-mode document naming a `transitions` section is refused. Archival
+A `state`-mode document naming a `transitions` section or a `retention`
+watermark is refused before anything is written, and a streamed one at its
+header. Archival
 transitions export is always whole-graph — an export's `nodeKinds` filter
 does not scope the transitions section the way it scopes assertions.
 
@@ -192,6 +197,10 @@ archival export from a `history: true` source that carries retained
 transitions or a retention watermark now requires the target to also be
 opened with `history: true`; previously the transitions section did not
 exist, so nothing was silently dropped, but nothing could refuse it either.
+A zero watermark restores nothing and is accepted by any target. A stream whose
+header announces a restore but that ends without an `identity-transitions` chunk
+is refused at its end (`IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING`), since
+accepting it would drop the transitions and the watermark the header announced.
 
 ## Exporting Data
 

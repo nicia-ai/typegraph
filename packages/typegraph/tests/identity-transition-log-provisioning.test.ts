@@ -26,7 +26,13 @@ import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  ConfigurationError,
+  createStore,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "../src";
 import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
@@ -156,6 +162,43 @@ describe("identity transition log provisioning", () => {
         },
       );
       expect(rows.length).toBeGreaterThan(0);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("names the transition-log relations when a write reaches a database that never adopted them", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(enabledGraph, result.backend, {
+        history: true,
+      });
+      dropTables(result, TRANSITION_LOG_TABLES);
+      // A plain attach adopts nothing, so the first fold's capture flush is
+      // what reaches the missing relation. Every recorded-time relation is
+      // still there.
+      const store = createStore(enabledGraph, result.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "Dana" }, { id: "dana" });
+      const failure = await store.nodes.Author.create(
+        { penName: "D." },
+        { id: "dana" },
+      ).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(ConfigurationError);
+      const refusal = failure as ConfigurationError;
+      expect(refusal.details).toMatchObject({
+        code: "IDENTITY_TRANSITION_RELATIONS_MISSING",
+        surface: "capture-flush",
+        relations: [
+          "typegraph_identity_transitions",
+          "typegraph_identity_transition_retention",
+        ],
+      });
+      expect(refusal.message).toMatch(/typegraph_identity_transitions/);
+      expect(refusal.message).not.toMatch(/recorded-time relations/);
+      expect(refusal.suggestion).toMatch(/adoptBaseSchema\(\)/);
     } finally {
       await result.backend.close();
     }

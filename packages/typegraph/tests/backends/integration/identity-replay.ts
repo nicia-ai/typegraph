@@ -16,12 +16,15 @@ import {
   asNodeId,
   createStoreWithSchema,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   IdentityReplayError,
   pruneIdentityTransitions,
   type TransitionPageCursor,
+  ValidationError,
 } from "../../../src";
 import {
+  asRecordedInstant,
   createRecordedInstant,
   recordedInstantRevision,
   recordedInstantWallTime,
@@ -263,7 +266,9 @@ export function registerIdentityReplayIntegrationTests(
       );
       const restoredRevisions = restoredHistory.transitions
         .filter((transition) => transition.restored !== undefined)
-        .map((transition) => recordedInstantRevision(transition.recorded));
+        .map((transition) =>
+          recordedInstantRevision(asRecordedInstant(transition.recorded)),
+        );
       const highestRestored = Math.max(...restoredRevisions);
       expect(highestRestored).toBeGreaterThanOrEqual(nextRevision);
 
@@ -486,6 +491,64 @@ export function registerIdentityReplayIntegrationTests(
       },
     );
 
+    it("stops a member's history where it left its class, though that class goes on changing", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageSourceGraph,
+      );
+      const [a, b, c, d] = ["left-a", "left-b", "left-c", "left-d"].map(
+        (id) => ({ kind: "Person" as const, id }),
+      ) as [
+        ReturnType<typeof personRef>,
+        ReturnType<typeof personRef>,
+        ReturnType<typeof personRef>,
+        ReturnType<typeof personRef>,
+      ];
+      for (const ref of [a, b, c, d]) {
+        await store.nodes.Person.create({}, { id: ref.id });
+      }
+      const joined = await store.identity.assertSame(a, b);
+      await store.identity.retractAssertion(joined.assertion.id);
+      const left = requireDefined(await store.recordedNow());
+      // `a` is alone from here on; the class it left keeps merging.
+      await store.identity.assertSame(b, c);
+      await store.identity.assertSame(c, d);
+
+      const history = await store.identity.transitionsOf(a);
+      const replay = await store.identity.replay(a);
+      expect(history.transitions.map((transition) => transition.cause)).toEqual(
+        ["assert", "retract", "retract"],
+      );
+      expect(
+        history.transitions.every(
+          (transition) =>
+            recordedInstantRevision(asRecordedInstant(transition.recorded)) <=
+            recordedInstantRevision(left),
+        ),
+      ).toBe(true);
+      expect(
+        replay.steps.map((step) => [
+          step.transition.cause,
+          memberKeys(step.before),
+          memberKeys(step.after),
+        ]),
+      ).toEqual([
+        ["assert", ["Person:left-a"], ["Person:left-a", "Person:left-b"]],
+        ["retract", ["Person:left-a", "Person:left-b"], ["Person:left-a"]],
+        ["retract", ["Person:left-a", "Person:left-b"], ["Person:left-a"]],
+      ]);
+      // Every step changed `a`'s class.
+      for (const step of replay.steps) {
+        expect(memberKeys(step.before)).not.toEqual(memberKeys(step.after));
+      }
+
+      // The class `a` left still reports its own later merges.
+      const remainingHistory = await store.identity.transitionsOf(b);
+      expect(
+        remainingHistory.transitions.map((transition) => transition.cause),
+      ).toEqual(["assert", "retract", "retract", "assert", "assert"]);
+    });
+
     it("keeps a departed same-id fold member's history discoverable when no assertion ever named it", async () => {
       const store = await provisionDepartedLineageStore(
         context,
@@ -507,6 +570,73 @@ export function registerIdentityReplayIntegrationTests(
         ["fold", [], ["Org:departed-fold", "Person:departed-fold"]],
         ["detach", ["Org:departed-fold", "Person:departed-fold"], []],
       ]);
+    });
+
+    it("keeps the history that put a member in a class after the class's kind is dropped", async () => {
+      const store = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_replay_kind_drop"),
+      );
+      const evolved = await store.evolve(
+        defineGraphExtension({
+          nodes: { Alias: { properties: { label: { type: "string" } } } },
+        }),
+      );
+      const person = personRef("dropped-p");
+      await evolved.nodes.Person.create({}, { id: person.id });
+      const alias = await evolved
+        .getNodeCollectionOrThrow("Alias")
+        .create({ label: "alias" }, { id: "dropped-a" });
+      await evolved.identity.assertSame(person, alias);
+      const removed = await evolved.removeKinds(["Alias"]);
+
+      const history = await removed.identity.transitionsOf(person);
+      expect(history.transitions.map((transition) => transition.cause)).toEqual(
+        ["assert", "kind-drop"],
+      );
+      const replay = await removed.identity.replay(person);
+      expect(replay.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+        "kind-drop",
+      ]);
+    });
+
+    it("keeps the history that put a member in a class after same-id folding is switched off", async () => {
+      const backend = context.getStore().backend;
+      const foldGraph = departedLineageGraph(
+        "identity_replay_fold_switched_off",
+      );
+      const ignoreGraph = defineGraph({
+        id: foldGraph.id,
+        nodes: { Person: { type: DepartedPerson }, Org: { type: DepartedOrg } },
+        edges: {},
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const [foldStore] = await createStoreWithSchema(foldGraph, backend, {
+        history: true,
+      });
+      const shared = personRef("switched-off");
+      await foldStore.nodes.Person.create({}, { id: shared.id });
+      await foldStore.nodes.Org.create({}, { id: shared.id });
+      const active = requireDefined(
+        await getActiveSchema(backend, foldGraph.id),
+      );
+      await migrateSchema(backend, ignoreGraph, active.version);
+      const [ignoreStore] = await createStoreWithSchema(ignoreGraph, backend, {
+        history: true,
+      });
+
+      const history = await ignoreStore.identity.transitionsOf(shared);
+      const causes = history.transitions.map((transition) => transition.cause);
+      expect(causes).toEqual([
+        "fold",
+        "schema-transition",
+        "schema-transition",
+      ]);
+      const replay = await ignoreStore.identity.replay(shared);
+      expect(replay.steps.map((step) => step.transition.transitionId)).toEqual(
+        history.transitions.map((transition) => transition.transitionId),
+      );
     });
 
     it("reports restored transitions it can neither attribute nor rule out, instead of a silent short page", async () => {
@@ -889,6 +1019,31 @@ export function registerIdentityReplayIntegrationTests(
             CURSOR_GIVEN_NON_CURSOR,
           );
         }
+      });
+
+      it("a cursor refuses a read of another reference's lineage", async () => {
+        const { store, cursor } = await provisionPagedLineage(context);
+        const other = personRef("cursor-b");
+        await expect(
+          store.identity.transitionsOf(other, { cursor }),
+        ).rejects.toThrow(
+          /pages the lineage of Person\/cursor-a, not Person\/cursor-b/,
+        );
+        await expect(store.identity.replay(other, { cursor })).rejects.toThrow(
+          ValidationError,
+        );
+      });
+
+      it("cursor refuses text that looks like a cursor but cannot be decoded", async () => {
+        const { store, a, cursor } = await provisionPagedLineage(context);
+        const revision = requireDefined(cursor.split(":").at(-1));
+        const undecodable = `tpc1:%:x:${revision}` as TransitionPageCursor;
+        await expect(
+          store.identity.transitionsOf(a, { cursor: undecodable }),
+        ).rejects.toThrow(ValidationError);
+        await expect(
+          store.identity.replay(a, { cursor: undecodable }),
+        ).rejects.toThrow(/Malformed transition page cursor/);
       });
 
       it("a cursor composes with the window by intersection", async () => {

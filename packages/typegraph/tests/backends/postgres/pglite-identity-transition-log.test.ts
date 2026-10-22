@@ -20,7 +20,10 @@ import { z } from "zod";
 
 import { defineGraph, defineNode } from "../../../src";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
-import { recordedInstantWallTime } from "../../../src/core/temporal";
+import {
+  asRecordedInstant,
+  recordedInstantWallTime,
+} from "../../../src/core/temporal";
 import { identityTransitionsOf } from "../../../src/identity/replay";
 import { createStore } from "../../../src/store";
 import { storeRuntime } from "../../../src/store/runtime-port";
@@ -56,7 +59,9 @@ describe("identity transition log on PGlite (PostgreSQL dialect)", () => {
       expect(transitions.length).toBeGreaterThan(0);
       for (const transition of transitions) {
         expect(
-          isCanonicalIsoDate(recordedInstantWallTime(transition.recorded)),
+          isCanonicalIsoDate(
+            recordedInstantWallTime(asRecordedInstant(transition.recorded)),
+          ),
         ).toBe(true);
         expect(isCanonicalIsoDate(transition.validAt)).toBe(true);
       }

@@ -1181,6 +1181,70 @@ Externally managed DDL applies the same statements, then advances the marker to 
 monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
 correct pages, by reading and de-duplicating the anchor relations instead of walking them.
 
+### Base-schema version 6: the identity transition log
+
+Version 6 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
+`store.identity.transitionsOf()` and `store.identity.replay()` read, and
+`typegraph_identity_transition_retention`, the per-graph watermark `pruneIdentityTransitions()`
+advances. Every database gets both, whether or not any graph in it enables identity, the same way
+version 2 added `fences`. `createSqlSchema` names them `identityTransitions` and
+`identityTransitionRetention`; replace the default names below consistently when the adapter
+overrides them. The step only creates relations, so it never rewrites existing rows and finishes in
+the time two `CREATE TABLE` statements and three `CREATE INDEX` statements on empty tables take.
+
+The privileged open adopts it in place: `createStoreWithSchema()`, `createAdapterStoreWithSchema()`
+or an explicit `backend.adoptBaseSchema()`. Until one of them has run, a DML-only or zero-DDL
+runtime (`createVerifiedStore()`, graph-template attach) refuses with `BaseSchemaMigrationError`,
+so finish privileged adoption before those workers start. A plain `createStore()` attaches without
+reading the marker; on an identity graph opened with `history: true`, its first write that records
+an identity transition then fails with `ConfigurationError` and
+`details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`, naming both relations.
+
+Externally managed DDL applies these statements, then advances the marker to 6 with the monotonic
+`INSERT ... ON CONFLICT` shown above. For PostgreSQL:
+
+```sql
+CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" BIGINT NOT NULL,
+  "recorded_at" TIMESTAMPTZ NOT NULL,
+  "valid_at" TIMESTAMPTZ NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" JSONB NOT NULL,
+  "decision" JSONB,
+  "tx_id" TEXT,
+  "restored_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id", "transition_id")
+);
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");
+CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" BIGINT NOT NULL,
+  "pruned_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id")
+);
+```
+
+SQLite uses the same statements with `INTEGER` for the two revision columns and `TEXT` for the
+timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_at`, `assertion_ids`,
+`decision`).
+
+Advancing the marker to 6 is one-way: a library release that knows only version 5 or lower refuses a
+database stamped 6 as newer, so roll forward rather than back once any process has adopted it. A
+PostgreSQL durable working copy carries its own marker; reopening one provisioned under version 5
+adopts version 6 into the allocation in place (see
+[PostgreSQL table-backed working copies](/graph-merge/#postgresql-table-backed-working-copies)).
+
 ## Drizzle-Free Entrypoints
 
 TypeGraph keeps its public core and backend contracts independent of Drizzle:

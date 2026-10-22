@@ -314,9 +314,15 @@ const [store] = await createAdapterStoreWithSchema(graph, backend, {
 ```
 
 `store.identity.transitionsOf(ref)` returns a **page** of the transitions
-touching `ref`'s class lineage, oldest first — an assertion, a retraction, a
-same-ID fold, a delete or restore, a validity-window end, a kind drop, a
-schema transition, or an identity change a graph merge applied. A page covers
+that changed `ref`'s own identity class, oldest first — an assertion, a
+retraction, a same-ID fold, a delete or restore, a validity-window end, a kind
+drop, a schema transition, or an identity change a graph merge applied. A
+transition is `ref`'s when `ref` was a member of the class it names just before
+or at the revision it was recorded at. A class `ref` has left keeps a history of
+its own, and none of that later history is reported for `ref`. Membership is
+judged against the kinds the log names and, once a schema transition was
+recorded, under both same-ID settings, so the history that put `ref` in a class
+survives a later kind drop or a change to `sameIdAcrossKinds`. A page covers
 at most `limit` recorded boundaries (default 200), and one boundary can hold
 several transitions, so a page's `transitions` can be longer than `limit`;
 when the lineage has more boundaries, the page carries `nextCursor`, and
@@ -352,7 +358,12 @@ also follow the recorded evidence that once tied the reference to a class:
 every `same` assertion that ever named it and, on a folding graph, every node
 that ever shared its id. Asking for the history of a deleted node therefore
 returns the assertions, folds and the detach that explain it, and `replay`
-pairs them with the membership it had at each boundary.
+pairs them with the membership it had at each boundary. Of what that search
+finds, only the transitions recorded while the reference was in the class they
+name are returned: each candidate boundary is checked against the reference's
+class reconstructed just before and at it, the same reconstruction `replay`
+pairs each step with. A page therefore reads, beyond the boundaries it returns,
+the ones of classes the reference had already left that sit between them.
 
 That evidence is this graph's own recorded history. An archival restore
 brings transitions in without the source graph's history behind them, so a
@@ -379,7 +390,16 @@ this graph's own history capture recording it — carries `restored`, whose
 `replay` itself uses to leave the row out of `steps`, made public so an audit
 view can label an imported explanation instead of inferring it from a
 revision comparison (see [Archival transitions and the retention
-watermark](#archival-transitions-and-the-retention-watermark)).
+watermark](#archival-transitions-and-the-retention-watermark)). A restored
+transition's `recorded` is the *source* graph's instant, so it is typed
+`RestoredRecordedInstant` rather than `RecordedInstant`, and
+`store.asOfRecorded` does not accept it: an anchor on this graph at a
+revision the source allocated would read an unrelated state. Narrow on
+`restored` (the `RecordedIdentityTransition` and `RestoredIdentityTransition`
+variants) to tell the two apart. Its class membership on the source graph
+cannot be reconstructed here either, so a restored transition is returned on
+lineage discovery alone, and counted in `incompleteDiscovery` when discovery
+cannot vouch for it.
 
 | Cause | Fires when |
 | --- | --- |
@@ -461,7 +481,10 @@ it names was minted by the *source* graph's clock, not this graph's. It is a
 call's `cursor`. `store.asOfRecorded` does not accept it (a type error), and
 `fromRecorded` / `toRecorded` refuse one at runtime with a `ValidationError`
 rather than reading it as a window bound. A `cursor` that is not a page
-cursor is refused the same way.
+cursor is refused the same way. A cursor is bound to the reference whose
+lineage it pages: passing one returned for `alice` to a read of `bob` is
+refused with a `ValidationError` rather than silently skipping every boundary of
+`bob`'s below the revision it names.
 
 A cursor is a position within the windowed lineage, so it composes with
 `fromRecorded` / `toRecorded` by intersection: the page starts at the later of
@@ -687,11 +710,19 @@ archive.identity?.retention; // { prunedBeforeRevision, prunedAt } — absent if
 State export and working-copy branch cloning carry **no** transitions —
 a clone's own history starts at its clone revision, and current-truth state
 export is not a backup of explanation. `state`-mode identity import refuses
-a document naming a `transitions` section.
+a document naming a `transitions` section (`IDENTITY_STATE_IMPORT_TRANSITIONS`)
+or a `retention` watermark (`IDENTITY_STATE_IMPORT_RETENTION`) with a
+`ValidationError`, before the import writes anything; a stream is refused at
+its header.
 
 Restoring a `transitions` section validates **shape only**: a known cause, a
 well-formed `{ kind, id }` reference on every `class` / `priorClass`, and a
-non-decreasing `recordedRevision` sequence across the array. It never
+non-decreasing `recordedRevision` sequence across the array
+(`IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE`). `importGraph` checks it before
+writing anything. `importGraphStream` checks each `identity-transitions` chunk
+when it arrives, against the chunks before it as well as within itself — after
+the stream's node, edge and assertion chunks have committed, since by protocol
+the transitions come last. It never
 touches the target's closure and never re-derives membership — the rows are
 inserted verbatim, carrying the source's own revision numbers and
 timestamps, because a restore records history, it does not relive it.
@@ -710,7 +741,15 @@ retention watermark now requires the restore target to also be opened with
 `history: true` — previously the transitions section did not exist at all,
 so nothing was silently dropped, but it also could not throw. Open the
 restore target with `history: true` if it needs to accept archival exports
-from a history-enabled source.
+from a history-enabled source. A zero `retention` watermark records that the
+source never pruned, restores nothing, and is accepted by any target.
+
+A stream whose header announces a restore — `hasTransitions`, or a non-zero
+`retention` watermark — but that ends without an `identity-transitions` chunk
+(a truncated stream, or a writer that left the trailing chunk out) is refused at
+its end with a `ValidationError` (`IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING`).
+Its earlier chunks have committed by then, but accepting it would report success
+with neither the transitions nor the watermark the header promised.
 
 Restoring an archive that carries a live identity assertion also performs
 that assertion as a real write on the target, so `history: true` records one

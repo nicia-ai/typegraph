@@ -1729,7 +1729,12 @@ custom status table names; pass `reopenOptions` to restore process-local hooks
 or query options on a later process. An external `recordedRead` binding is
 refused because its relation is outside the owned table inventory. Reopen
 options cannot replace the allocation's schema, recorded-read binding,
-history mode, or revision-tracking mode. Pass `operations` to let
+history mode, or revision-tracking mode. An allocation keeps the base-schema
+version of the release that provisioned it; reopening one under a later release
+adopts the base-schema steps it is missing in place, through the `connect`
+session (the role that created the allocation's relations), before the Store
+opens. An allocation stamped by a newer release is refused, with a
+`BaseSchemaMigrationError` as the reopen error's cause. Pass `operations` to let
 `durable.operations` commit host mutations atomically with immutable evidence;
 see [Atomic operations and immutable evidence](#atomic-operations-and-immutable-evidence).
 Each durable allocation also owns an evidence table (`<prefix>op_evidence`) in
@@ -1870,7 +1875,9 @@ tables that removal never finds.
   no schema. They resolve through the session that removes them and reopen
   without binding, and follow the same removal rule: relations found in a schema
   other than the removing session's refuse removal and name that schema. `control` adds the column to an
-  existing ledger the first time it runs.
+  existing ledger the first time it runs. Reopening such an allocation also
+  adopts any missing base-schema steps unqualified, under the pooled
+  connection's `search_path`, exactly as its other statements resolve.
 
 The connection must still be able to *resolve* the allocation's tables, so its
 `search_path` must include the schema, typically `public`. A per-role `"$user"`

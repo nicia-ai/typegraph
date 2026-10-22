@@ -174,6 +174,7 @@ import {
   type IdentityTransitionTransfer,
   importIdentityAssertionsIntoTarget,
   importIdentityTransitionsIntoTarget,
+  isIdentityTransitionRestore,
   liveNodeKindsSharingIds,
   loadAssertionsByIds,
   loadCurrentStructuralClasses,
@@ -2275,7 +2276,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     carriedWatermark: number | undefined,
     baseline: IdentityRestoreBaseline,
   ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
-    if (transitions.length === 0 && carriedWatermark === undefined) {
+    if (
+      !isIdentityTransitionRestore(transitions.length > 0, carriedWatermark)
+    ) {
       return Promise.resolve({ created: 0, watermark: undefined });
     }
     this.#requireIdentityTransitionRestore();

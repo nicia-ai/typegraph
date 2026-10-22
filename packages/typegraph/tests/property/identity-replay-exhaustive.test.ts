@@ -23,6 +23,11 @@
  * `store.nodes[kind].update(id, {}, { validTo })` shape
  * identity-transition-log.test.ts's dedicated window-end unit test uses).
  *
+ * Half the runs open with the seed joining another class and leaving it
+ * again before any generated operation runs, so the class it left goes on
+ * changing without it: the seed's lineage keeps naming that class, and none
+ * of that class's later history may be reported as the seed's.
+ *
  * `kind-drop` is the one cause this generator does NOT model, and cannot:
  * it requires a SCHEMA EVOLUTION (dropping a node kind mid-run), which is a
  * fixed-graph property outside what a per-operation generator over one
@@ -154,7 +159,8 @@ describe("identity replay exhaustiveness property", () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(opIntentArbitrary, { minLength: 1, maxLength: 40 }),
-        async (intents) => {
+        fc.boolean(),
+        async (intents, seedLeavesAClass) => {
           const [store] = await createAdapterStoreWithSchema(
             graph,
             createTestBackend(),
@@ -188,6 +194,17 @@ describe("identity replay exhaustiveness property", () => {
           await store.nodes[seed.kind].create({}, { id: seed.id });
           live.add(refKeyOf(seed));
           await recordCheckpoint();
+
+          if (seedLeavesAClass) {
+            const partner = requireDefined(UNIVERSE[1]);
+            await store.nodes[partner.kind].create({}, { id: partner.id });
+            live.add(refKeyOf(partner));
+            await recordCheckpoint();
+            const joined = await store.identity.assertSame(seed, partner);
+            await recordCheckpoint();
+            await store.identity.retractAssertion(joined.assertion.id);
+            await recordCheckpoint();
+          }
 
           // Revisions at which a `windowEnd` intent narrowed a REAL (>=2
           // member) class the seed itself currently belongs to — the
@@ -373,28 +390,6 @@ describe("identity replay exhaustiveness property", () => {
 
           const changedRevisionSet = new Set(changedRevisions);
 
-          // Revisions the seed sat out entirely: it existed neither just
-          // before nor at the revision (`membersOf` reports a node's own
-          // self-membership whenever it exists, so an empty answer on both
-          // sides means a deleted seed, read through a path the log never
-          // touches). A class the seed has left keeps a history of its own,
-          // and the seed's lineage keeps naming that class, so the log may
-          // carry a row there although the seed's own membership cannot
-          // change — the same fact about lineage scope the up-front seed
-          // creation above sidesteps for revisions BEFORE the seed existed.
-          // The revision at which the seed departs is NOT one of these: it
-          // existed just before, and that boundary is checked in full.
-          const seedAbsentRevisions = new Set(
-            revisions.filter((revision, index) => {
-              const previousRevision =
-                index === 0 ? 0 : requireDefined(revisions[index - 1]);
-              return (
-                requireDefined(bruteForce.get(previousRevision)).length === 0 &&
-                requireDefined(bruteForce.get(revision)).length === 0
-              );
-            }),
-          );
-
           // Assertion 1: membership changed at r IFF the transition log
           // (walked through `identityTransitionsOf` — the seed's own class
           // lineage, not a hand-rolled scan of the whole universe) carries a
@@ -436,14 +431,13 @@ describe("identity replay exhaustiveness property", () => {
             const touched = touchedRevisions.has(revision);
             // A changed revision must be touched; an untouched revision must
             // be unchanged; a touched-but-unchanged revision must be
-            // self-referential-only (window-end's documented exception) or
-            // one the seed sat out.
+            // self-referential-only (window-end's documented exception). A
+            // revision the seed sat out (deleted, or outside a class it has
+            // left) touches nothing: its lineage names classes it is no
+            // longer in, and their history is not its own.
             expect(!changed || touched).toBe(true);
             expect(
-              changed ||
-                !touched ||
-                selfReferentialRevisions.has(revision) ||
-                seedAbsentRevisions.has(revision),
+              changed || !touched || selfReferentialRevisions.has(revision),
             ).toBe(true);
           }
 
@@ -474,9 +468,7 @@ describe("identity replay exhaustiveness property", () => {
           // self-referential `window-end` revisions above (each of which
           // legitimately produces a step whose `before` and `after` are
           // identical — see assertion 1's comment) — no missing boundary,
-          // and no phantom one beyond that documented exception. Revisions
-          // the seed sat out are left out of BOTH sides: a changed revision
-          // is never one of them, so nothing the seed lived through escapes.
+          // and no phantom one beyond that documented exception.
           const replayBoundaries = [
             ...new Set(
               replay.steps.map((step) =>
@@ -489,15 +481,7 @@ describe("identity replay exhaustiveness property", () => {
           const expectedBoundaries = [
             ...new Set([...changedRevisions, ...selfReferentialRevisions]),
           ].toSorted((left, right) => left - right);
-          expect(
-            replayBoundaries.filter(
-              (revision) => !seedAbsentRevisions.has(revision),
-            ),
-          ).toEqual(
-            expectedBoundaries.filter(
-              (revision) => !seedAbsentRevisions.has(revision),
-            ),
-          );
+          expect(replayBoundaries).toEqual(expectedBoundaries);
 
           // Assertion 3: every step's `after` equals brute-force
           // membership at that revision, and every step's `before` equals it

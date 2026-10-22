@@ -90,6 +90,52 @@ async function* chunkStream(
   }
 }
 
+/** A history-enabled source with one assertion, one retraction and one re-assertion. */
+async function sourceWithIdentityHistory() {
+  const [source] = await createAdapterStoreWithSchema(
+    graph,
+    createTestBackend(),
+    { history: true },
+  );
+  const alice = await source.nodes.Person.create(
+    { name: "Alice" },
+    { id: "alice" },
+  );
+  const bob = await source.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+  const carol = await source.nodes.Person.create(
+    { name: "Carol" },
+    { id: "carol" },
+  );
+  const first = await source.identity.assertSame(alice, bob);
+  await source.identity.retractAssertion(first.assertion.id);
+  await source.identity.assertSame(alice, carol);
+  return { source };
+}
+
+async function collectArchivalStream(
+  source: Awaited<ReturnType<typeof sourceWithIdentityHistory>>["source"],
+  batchSize?: number,
+): Promise<GraphInterchangeChunk[]> {
+  const chunks: GraphInterchangeChunk[] = [];
+  for await (const chunk of exportGraphStream(source, {
+    identityMode: "archival",
+    includeDeleted: true,
+    ...(batchSize === undefined ? {} : { batchSize }),
+  })) {
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+async function historyTarget() {
+  const [target] = await createAdapterStoreWithSchema(
+    graph,
+    createTestBackend(),
+    { history: true },
+  );
+  return target;
+}
+
 function isoAt(offsetMs: number): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
@@ -1297,6 +1343,240 @@ describe("archival identity import window bounds", () => {
     await expect(
       importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
     ).rejects.toThrow(/did not announce/);
+  });
+
+  it("refuses a stream whose header announces a transition restore that never arrives", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const whole = await collectArchivalStream(source);
+    expect(
+      requireDefined(whole.find((chunk) => chunk.type === "header")).header
+        .identity?.hasTransitions,
+    ).toBe(true);
+
+    const target = await historyTarget();
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream(
+          whole.filter((chunk) => chunk.type !== "identity-transitions"),
+        ),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("refuses a stream whose header carries a pruned watermark but no transitions chunk", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    await pruneIdentityTransitions(source, {
+      beforeRecorded: requireDefined(await source.recordedNow()),
+    });
+    const whole = await collectArchivalStream(source);
+    const header = requireDefined(
+      whole.find((chunk) => chunk.type === "header"),
+    ).header;
+    expect(header.identity?.retention?.prunedBeforeRevision).toBeGreaterThan(0);
+
+    // The whole stream restores the watermark...
+    const complete = await historyTarget();
+    await importGraphStream(complete, chunkStream(whole), {
+      onConflict: "skip",
+    });
+    const restored = await storeRuntime(
+      complete,
+    ).identityTransitionRetentionAtTarget(storeBackend(complete));
+    expect(restored.prunedBeforeRevision).toBeGreaterThan(0);
+
+    // ...so the same stream cut before its transitions chunk is refused
+    // rather than reporting success with no watermark.
+    const truncated = await historyTarget();
+    await expect(
+      importGraphStream(
+        truncated,
+        chunkStream(
+          whole.filter((chunk) => chunk.type !== "identity-transitions"),
+        ),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toThrow(/ended without the identity transitions its header/);
+  });
+
+  it("holds streamed transitions to one non-decreasing order across chunks", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const chunks = await collectArchivalStream(source, 1);
+    const transitionChunks = chunks.filter(
+      (chunk) => chunk.type === "identity-transitions",
+    );
+    expect(transitionChunks.length).toBeGreaterThan(1);
+    const reordered = [
+      ...chunks.filter((chunk) => chunk.type !== "identity-transitions"),
+      ...transitionChunks.toReversed(),
+    ];
+
+    const target = await historyTarget();
+    await expect(
+      importGraphStream(target, chunkStream(reordered), { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("refuses a state-mode payload carrying a retention watermark, on either entry point", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    await pruneIdentityTransitions(source, {
+      beforeRecorded: requireDefined(await source.recordedNow()),
+    });
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const identity = requireDefined(archive.identity);
+    const stateWithRetention: GraphData = {
+      ...archive,
+      identity: {
+        profile: identity.profile,
+        mode: "state",
+        assertions: identity.assertions.filter(
+          (assertion) => assertion.validTo === undefined,
+        ),
+        retention: requireDefined(identity.retention),
+      },
+    };
+    const refusal = {
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({ code: "IDENTITY_STATE_IMPORT_RETENTION" }),
+        ]),
+      }),
+    };
+    await expect(
+      importGraph(await historyTarget(), stateWithRetention, {
+        onConflict: "skip",
+      }),
+    ).rejects.toMatchObject(refusal);
+
+    const streamed = await collectArchivalStream(source);
+    const header = requireDefined(
+      streamed.find((chunk) => chunk.type === "header"),
+    ).header;
+    const stateHeader: GraphDataHeader = {
+      ...header,
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        retention: requireDefined(header.identity?.retention),
+      },
+    };
+    const streamTarget = await historyTarget();
+    await expect(
+      importGraphStream(
+        streamTarget,
+        chunkStream([
+          { type: "header", header: stateHeader },
+          { type: "nodes", nodes: archive.nodes },
+        ]),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toMatchObject(refusal);
+    await expect(streamTarget.nodes.Person.count()).resolves.toBe(0);
+  });
+
+  // The shape checks need only the payload in hand, so they run before the
+  // import opens its write transaction; on a backend that writes without one,
+  // a refusal after the node writes would leave them committed.
+  it("refuses a misordered or state-mode transitions payload before opening a write transaction", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const identity = requireDefined(archive.identity);
+    const transitions = requireDefined(identity.transitions);
+    expect(transitions.length).toBeGreaterThanOrEqual(2);
+    const misordered: GraphData = {
+      ...archive,
+      identity: { ...identity, transitions: transitions.toReversed() },
+    };
+    const stateWithTransitions: GraphData = {
+      ...archive,
+      identity: {
+        profile: identity.profile,
+        mode: "state",
+        assertions: [],
+        transitions,
+      },
+    };
+
+    const base = createTestBackend();
+    let transactionsOpened = 0;
+    const counting = deriveBackend(base, {
+      transaction: (fn, options) => {
+        transactionsOpened += 1;
+        return base.transaction(fn, options);
+      },
+    });
+    const [target] = await createAdapterStoreWithSchema(graph, counting, {
+      history: true,
+    });
+    for (const [document, code] of [
+      [misordered, "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE"],
+      [stateWithTransitions, "IDENTITY_STATE_IMPORT_TRANSITIONS"],
+    ] as const) {
+      transactionsOpened = 0;
+      await expect(
+        importGraph(target, document, { onConflict: "skip" }),
+      ).rejects.toMatchObject({
+        details: matchingObject({
+          issues: matchingArray([expect.objectContaining({ code })]),
+        }),
+      });
+      expect(transactionsOpened).toBe(0);
+    }
+  });
+
+  it("treats a zero retention watermark as no restore", async () => {
+    const { formatVersion } = await exportGraph(await historyTarget());
+    const zeroWatermark: GraphData = {
+      formatVersion,
+      exportedAt: new Date().toISOString(),
+      source: { type: "external", description: "zero watermark" },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "A" } }],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "archival",
+        assertions: [],
+        retention: {
+          prunedBeforeRevision: 0,
+          prunedAt: new Date().toISOString(),
+        },
+      },
+    };
+    const withoutHistory = await createInitializedStore(
+      graph,
+      createTestBackend(),
+    );
+    const result = await importGraph(withoutHistory, zeroWatermark, {
+      onConflict: "error",
+    });
+    expect(result.errors).toEqual([]);
+    await expect(withoutHistory.nodes.Person.count()).resolves.toBe(1);
   });
 
   // A restore into a destination that has recorded no identity history of its
