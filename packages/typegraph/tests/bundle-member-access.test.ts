@@ -49,7 +49,10 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // and composition tightening add four table-name reads: 125 -> 130.
 // The managed PostgreSQL copy guards the preflight-carrying version flip
 // beside its five other schema-writing ports: 130 -> 131.
-const REASONED_FLOOR = 131;
+// Reopening a durable working copy below the current base schema checks and
+// calls adoptBaseSchema (+2), and the tightening probe reads its acyclic and
+// composition relations through one table-name read (-1): 131 -> 132.
+const REASONED_FLOOR = 132;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -77,7 +80,7 @@ const REASONED_FLOOR = 131;
 const DEFERRED_LIVE_TOTAL = 240;
 const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 385;
+const TOTAL_ROW_COUNT = 386;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

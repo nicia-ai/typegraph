@@ -897,8 +897,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   adoptBaseSchema: {
     kind: "reasoned",
     reason:
-      "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations.",
-    accesses: 2,
+      "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations. Reopening a durable PostgreSQL working copy whose allocation predates the current base schema checks for it and adopts the allocation in place.",
+    accesses: 4,
   },
   assertBaseSchemaCurrent: {
     kind: "reasoned",
@@ -939,13 +939,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   tableNames: {
     kind: "reasoned",
     reason:
-      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.",
-    // 32, including the namespace fork's and managed PostgreSQL copy's backend table-name probes, the graph storage inventory's one resolution of the graph-relation names, three acyclicity readers and the composition tightening probe. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers; the schema-commit tightening probe reads the proposed acyclic and composition relations through one of them.",
+    // 31, including the namespace fork's and managed PostgreSQL copy's backend table-name probes, the graph storage inventory's one resolution of the graph-relation names, and three acyclicity readers. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy and managed PostgreSQL copy read the
     // connected backend's names to fence physical target bindings.
-    accesses: 32,
+    accesses: 31,
   },
   fenceSql: {
     kind: "reasoned",

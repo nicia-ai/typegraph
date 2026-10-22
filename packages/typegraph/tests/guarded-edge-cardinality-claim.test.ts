@@ -38,21 +38,24 @@ import { createRecordedPostgresStore } from "./statement-recorder";
 import { createInitializedStore } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
-const relation = defineEdge("relation", { schema: z.object({}) });
+const one = defineEdge("one", { schema: z.object({}) });
+const unique = defineEdge("unique", { schema: z.object({}) });
+const oneActive = defineEdge("oneActive", { schema: z.object({}) });
+const both = defineEdge("both", { schema: z.object({}) });
 
 const graph = defineGraph({
   id: "guarded_edge_cardinality_claim",
   nodes: { Person: { type: Person } },
   edges: {
-    one: { type: relation, from: [Person], to: [Person], cardinality: "one" },
+    one: { type: one, from: [Person], to: [Person], cardinality: "one" },
     unique: {
-      type: relation,
+      type: unique,
       from: [Person],
       to: [Person],
       cardinality: "unique",
     },
     oneActive: {
-      type: relation,
+      type: oneActive,
       from: [Person],
       to: [Person],
       cardinality: "oneActive",
@@ -96,7 +99,7 @@ const bothAxesGraph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {
     both: {
-      type: relation,
+      type: both,
       from: [Person],
       to: [Person],
       cardinality: "one",
