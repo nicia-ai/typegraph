@@ -944,6 +944,10 @@ type ConstraintFenceViolation = Readonly<{
         id: string;
     }>[];
 }> | Readonly<{
+    family: "compositionFutureWindow";
+    edgeKind: string;
+    edgeIds: readonly string[];
+}> | Readonly<{
     family: "edgeEndpointAssignability";
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
@@ -5069,7 +5073,7 @@ const PROBE_VIOLATION_FAMILIES: {
     readonly nodeUniqueness: readonly ["nodeUniqueness"];
     readonly edgeEndpointAssignability: readonly ["edgeEndpointAssignability"];
     readonly edgeAcyclicity: readonly ["edgeAcyclicity"];
-    readonly composition: readonly ["composition", "edgeAcyclicity"];
+    readonly composition: readonly ["composition", "edgeAcyclicity", "compositionFutureWindow"];
     readonly compositionExistence: readonly ["compositionExistence"];
 };
 

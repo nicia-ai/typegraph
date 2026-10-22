@@ -2242,7 +2242,7 @@ export const PROBE_VIOLATION_FAMILIES: {
     readonly nodeUniqueness: readonly ["nodeUniqueness"];
     readonly edgeEndpointAssignability: readonly ["edgeEndpointAssignability"];
     readonly edgeAcyclicity: readonly ["edgeAcyclicity"];
-    readonly composition: readonly ["composition", "edgeAcyclicity"];
+    readonly composition: readonly ["composition", "edgeAcyclicity", "compositionFutureWindow"];
     readonly compositionExistence: readonly ["compositionExistence"];
 };
 
