@@ -380,9 +380,10 @@ Detected at merge **plan time** when the branches being merged carry opposing
 or otherwise contradictory identity truth: one branch asserts a pair `same`
 while another asserts it `different` (directly, or transitively through a
 chain of `same` assertions no single branch ever wrote), a branch retracts an
-assertion that a different branch reasserts under a new id (a retract/reassert
-race — a branch that reasserts a pair it *also* retracted itself is
-convergent, not a conflict, and merges cleanly), or a branch asserts an
+assertion that a different branch reasserts under a new id, or retracts one
+that a different branch both retracts and reasserts (a retract/reassert race —
+a retraction and a reassertion are convergent, and merge cleanly, only when
+every branch that retracts the pair also reasserts it), or a branch asserts an
 identity relation over a node another branch deleted. Extends `MergeError`, so
 an `instanceof MergeError` catch covers it alongside the other merge failures.
 
@@ -479,7 +480,10 @@ delete a composition whole while one of its live parts is not itself among
 the plan's node deletions — the target gained that part after the branch
 point (or independently of it), and the branch's diff carries no deletion for
 it. Applying the plan as trusted would leave the part's composition edge
-pointing at a whole that no longer exists.
+pointing at a whole that no longer exists. The mirror case is refused the same
+way: the plan deletes a part (directly, or through the branch's cascade from
+its old whole) that the target has meanwhile moved under another live whole
+the plan leaves standing.
 
 ```typescript
 import {
@@ -490,9 +494,9 @@ import {
 
 const applied = await applyMergePlan(store, plan);
 if (isErr(applied) && applied.error instanceof MergeCompositionOrphanError) {
-  console.log(applied.error.code); // "MERGE_COMPOSITION_ORPHAN"
+  console.log(applied.error.code); // "GRAPH_MERGE_COMPOSITION_ORPHAN"
   console.log(applied.error.details.part); // { kind, id }
-  console.log(applied.error.details.cause); // "deleted" | "unattached"
+  console.log(applied.error.details.cause); // "deleted" | "moved" | "unattached"
   console.log(applied.error.details.whole); // { kind, id } — absent for cause: "unattached"
   console.log(applied.error.details.viaEdgeKind);
 }
@@ -504,9 +508,11 @@ the target's state at plan time. This error is the authoritative,
 apply-time re-verification of that same check, run under the per-graph write
 lock so it cannot miss an orphan the plan-time report's unlocked read raced
 past. `cause: "deleted"` names the whole a branch deletes while a part
-survives; `cause: "unattached"` (a part that requires a whole) has no whole
-to name — recompute the merge plan against the target's current state, or
-delete/attach the orphaned part in the branch before merging.
+survives; `cause: "moved"` names the live whole the target holds a part under
+that the plan would delete; `cause: "unattached"` (a part that requires a
+whole) has no whole to name — recompute the merge plan against the target's
+current state, or delete, attach or reconcile the part in the branch before
+merging.
 
 ### Merge plan and evidence errors
 
@@ -1954,7 +1960,7 @@ try {
 | `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
-| `MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions |
+| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |

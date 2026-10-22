@@ -109,7 +109,11 @@ describe.each(backendMatrix())(
         await planMerge(target, [source], { branchOrder: [BRANCH_A] }),
       );
       const applied = await applyMergePlan(target, artifact, {
-        reviewDigest: REVIEW_DIGEST,
+        review: {
+          status: "compatible",
+          reviewDigest: { algorithm: "sha256", value: REVIEW_DIGEST },
+          plan: artifact,
+        },
       });
       if (isErr(applied)) throw applied.error;
       expect(applied.data.merged.identity.asserted).toBe(1);

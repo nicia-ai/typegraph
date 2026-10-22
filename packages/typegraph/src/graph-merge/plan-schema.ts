@@ -215,16 +215,20 @@ export type MergePlanTypeReconciliation = Readonly<{
 }>;
 
 /**
- * A live, required-existence composition part this merge would leave with no
- * whole. Two independent causes, both surfaced through the SAME shape and
- * the SAME `MergeCompositionOrphanError` — a caller distinguishes them only
- * by `cause`, never by a second error class:
+ * A composition part this merge would separate from its whole without the
+ * target's consent. Three independent causes, all surfaced through the SAME
+ * shape and the SAME `MergeCompositionOrphanError` — a caller distinguishes
+ * them only by `cause`, never by a second error class:
  *
  * - `"deleted"`: a whole the plan deletes has a live
  *   part the plan does NOT itself delete — attached on the target after the
  *   branch point, or independently of it — found by re-reading the parts
  *   closure (`planCompositionCascade`) against every planned node deletion.
  *   `whole` is that about-to-be-deleted whole.
+ * - `"moved"`: the mirror case. The plan deletes a part — directly, or
+ *   because the branch's cascade from its old whole deleted it — that the
+ *   target has meanwhile moved under (or attached to) a live whole the plan
+ *   neither deletes nor detaches it from. `whole` is that surviving whole.
  * - `"unattached"`: a required-existence part THIS
  *   MERGE WRITES resolves, after canonicalization, to no live whole at
  *   all — its composition edge was dropped or collapsed while both
@@ -236,10 +240,10 @@ export type MergePlanTypeReconciliation = Readonly<{
  */
 export type MergePlanCompositionOrphan = Readonly<{
   part: MergePlanEntityRef;
-  /** Present for `cause: "deleted"`; absent for `cause: "unattached"` — there is no whole to name. */
+  /** Present for `cause: "deleted"` and `"moved"`; absent for `cause: "unattached"` — there is no whole to name. */
   whole?: MergePlanEntityRef;
   viaEdgeKind: string;
-  cause: "deleted" | "unattached";
+  cause: "deleted" | "moved" | "unattached";
 }>;
 
 export type MergePlanReview = Readonly<{
@@ -723,7 +727,7 @@ const mergePlanReviewSchema = z
           part: mergePlanEntityRefSchema,
           whole: mergePlanEntityRefSchema.optional(),
           viaEdgeKind: nonEmptyStringSchema,
-          cause: z.enum(["deleted", "unattached"]),
+          cause: z.enum(["deleted", "moved", "unattached"]),
         })
         .strict(),
     ),

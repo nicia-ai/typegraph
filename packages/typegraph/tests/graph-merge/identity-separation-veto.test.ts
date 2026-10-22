@@ -512,6 +512,94 @@ describe.each(backendMatrix())("identity separation veto [$name]", (entry) => {
   });
 
   /**
+   * A `same` assertion the branch carries moves its endpoint into a class the
+   * ledger already holds apart from another. The target separates `alpha`
+   * from `gamma`; the branch asserts `beta` the same as `gamma`. A scored
+   * match between `alpha` and `beta` would therefore fuse two classes the
+   * merged ledger holds apart, so the veto drops it, reports it naming the
+   * target's assertion, and the merge lands the branch's `same` assertion.
+   */
+  it("drops a scored match into a class a staged same assertion joins", async () => {
+    const forkPoint = await makeSimilarityStore();
+    await forkPoint.nodes.Person.create(
+      { name: "gamma", email: "gamma@example.test" },
+      { id: "gamma" },
+    );
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
+    ).store;
+    await target.nodes.Person.create(
+      { name: "alpha", email: "alpha@example.test" },
+      { id: "alpha" },
+    );
+    const { assertion: separation } = await target.identity.assertDifferent(
+      { kind: "Person", id: "alpha" },
+      { kind: "Person", id: "gamma" },
+    );
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await source.store.nodes.Person.create(
+      { name: "beta", email: "beta@example.test" },
+      { id: "beta" },
+    );
+    await source.store.identity.assertSame(
+      { kind: "Person", id: "beta" },
+      { kind: "Person", id: "gamma" },
+    );
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [source],
+      options: {
+        branchOrder: [BRANCH_A],
+        resolve: {
+          Person: {
+            ...ONE_BUCKET,
+            threshold: 0.5,
+            similarity: {
+              kind: "custom",
+              score: (left, right) => {
+                const ids = [left.id as string, right.id as string].toSorted();
+                return ids[0] === "alpha" && ids[1] === "beta" ? 1 : 0;
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (isErr(result)) {
+      console.info("merge refused", result.error.code, result.error.message);
+      throw result.error;
+    }
+    console.info("identity conflicts", result.data.identityConflicts);
+    expect(result.data.identityConflicts).toEqual([
+      {
+        kind: "separation",
+        a: { kind: "Person", id: "alpha" },
+        b: { kind: "Person", id: "beta" },
+        assertionIds: [separation.id],
+        source: expect.anything() as unknown,
+      },
+    ]);
+    expect(await livePersonIds(target)).toEqual(["alpha", "beta", "gamma"]);
+    expect(
+      await target.identity.areSame(
+        { kind: "Person", id: "beta" },
+        { kind: "Person", id: "gamma" },
+      ),
+    ).toBe(true);
+    expect(
+      await target.identity.areDifferent(
+        { kind: "Person", id: "alpha" },
+        { kind: "Person", id: "beta" },
+      ),
+    ).toBe(true);
+  });
+
+  /**
    * The veto reads the ledger as it stands at plan time, not a fact an
    * earlier identity call on the same Store handle settled. An `assertSame`
    * or an `areDifferent` read on a graph holding no `different` assertion

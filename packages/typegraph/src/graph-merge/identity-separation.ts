@@ -9,9 +9,10 @@
  * two entities and the assertions that separated them.
  *
  * The facts are captured ONCE, before planning, from the merge target's own
- * identity context together with the `different` assertions the merged
- * branches carry, and consumed by three application points that all read
- * this single fact set:
+ * identity context together with the identity assertions the merged branches
+ * carry — a staged `same` joins classes, a staged `different` separates them —
+ * and consumed by three application points that all read this single fact
+ * set:
  *
  *   1. the candidate-edge veto, which DROPS a scored edge (recall the ledger
  *      forbids) and reports it as a typed `separation` conflict;
@@ -47,6 +48,7 @@ import type {
 } from "./typegraph-internal";
 import {
   bulkIsSeparated,
+  compareCodePoints,
   currentClassKey,
   identityReferenceKeyOf,
   loadCurrentStructuralClasses,
@@ -55,11 +57,12 @@ import {
   separationFactsEmpty,
   storeRuntime,
 } from "./typegraph-internal";
+import { UnionFind } from "./union-find";
 
 /**
  * The separation facts one merge plan is judged against: each candidate
- * participant's current identity CLASS key, and the ordered class-key pairs the
- * ledger holds as `different`.
+ * participant's identity CLASS key once the merge lands, and the ordered
+ * class-key pairs held as `different`.
  *
  * Evidence bound to the resource that earned it: the classes come from the
  * merge target's own identity context, the separations from that context's
@@ -67,7 +70,10 @@ import {
  * before planning and consumed only by that plan.
  */
 export type IdentitySeparationFacts = Readonly<{
-  /** Class key per candidate participant, from the target's current closure. */
+  /**
+   * Class key per candidate participant: its class in the target's current
+   * closure, joined with every class a staged `same` assertion connects it to.
+   */
   classKeyOf: ReadonlyMap<MergeKey, string>;
   /**
    * NUL-joined, code-point-ordered class-key pairs held apart, by the target's
@@ -125,20 +131,25 @@ function fusionPairs(
 }
 
 /**
- * Resolves every candidate participant to its current identity class and
- * decides which of the pairs the plan could fuse are held apart: by the
- * target's ledger ({@link bulkIsSeparated}), or by a `different` assertion
- * among `stagedAssertions`.
+ * Resolves every candidate participant to the identity class it holds once the
+ * merge lands, and decides which of the pairs the plan could fuse are held
+ * apart: by the target's ledger ({@link bulkIsSeparated}), or by a `different`
+ * assertion among `stagedAssertions`.
  *
  * `groups` are the participant sets a fusion could occur WITHIN — the connected
  * components of the candidate-edge graph. Passing the flat participant list as
  * one group is correct but quadratic; passing the components keeps the probe
  * proportional to what the plan can actually merge.
  *
- * `stagedAssertions` are the assertions the merged branches add. A `different`
- * among them is not in the target's ledger yet, and is as binding on the merge
- * that lands it as one that is: it separates the target classes of its two
- * endpoints, a node the target does not hold being its own class.
+ * `stagedAssertions` are the assertions the merged branches add, and both
+ * relations bind the merge that lands them as firmly as the target's own
+ * ledger does:
+ *
+ *  - a current `same` among them joins its endpoints' target classes, so a
+ *    participant a branch asserts into a class answers for every separation
+ *    that class carries — a node the target does not hold being its own class;
+ *  - a `different` among them separates the resulting classes of its two
+ *    endpoints.
  *
  * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the separation
  * relation this graph's veto reads has never been provisioned or filled —
@@ -154,6 +165,10 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   if (participants.length === 0) return NO_IDENTITY_SEPARATION_FACTS;
   const stagedDifferent = stagedAssertions.filter(
     (assertion) => assertion.relation === "different",
+  );
+  const stagedSame = stagedAssertions.filter(
+    (assertion) =>
+      assertion.relation === "same" && assertion.validTo === undefined,
   );
   const ctx = storeRuntime(target).identityContext();
   // A graph holding no `different` assertion can separate nothing, so the whole
@@ -182,54 +197,87 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   if (ledgerSeparatesNothing && stagedDifferent.length === 0) {
     return NO_IDENTITY_SEPARATION_FACTS;
   }
-  const stagedEndpoints = stagedDifferent.flatMap((assertion) => [
-    mergeKeyOf(assertion.a),
-    mergeKeyOf(assertion.b),
-  ]);
+  const stagedEndpoints = [...stagedDifferent, ...stagedSame].flatMap(
+    (assertion) => [mergeKeyOf(assertion.a), mergeKeyOf(assertion.b)],
+  );
   const resolved = [...new Set([...participants, ...stagedEndpoints])];
-  const classes = await loadCurrentStructuralClasses(
+  const targetClasses = await loadCurrentStructuralClasses(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
     resolved.map((key) => ({ kind: kindOf(key), id: idOf(key) })),
   );
-  const classKeyOf = new Map<MergeKey, string>();
-  const membersByClassKey = new Map<string, readonly PlainNodeRef[]>();
+  const targetClassKeyOf = new Map<MergeKey, string>();
+  const membersByTargetClassKey = new Map<string, readonly PlainNodeRef[]>();
   for (const key of resolved) {
     const ref = { kind: kindOf(key), id: idOf(key) };
     // `loadCurrentStructuralClasses` keys on the identity module's OWN
     // reference key — reached here rather than re-spelled — and coalesces an
     // unclosed node onto itself, so a node belonging to no class is still
     // answered, as its own singleton class.
-    const members = classes.get(identityReferenceKeyOf(ref)) ?? [ref];
+    const members = targetClasses.get(identityReferenceKeyOf(ref)) ?? [ref];
     const classKey = currentClassKey(members);
-    classKeyOf.set(key, classKey);
-    membersByClassKey.set(classKey, members);
+    targetClassKeyOf.set(key, classKey);
+    membersByTargetClassKey.set(classKey, members);
   }
+  const mergedClasses = new UnionFind<string>(compareCodePoints);
+  for (const classKey of membersByTargetClassKey.keys()) {
+    mergedClasses.add(classKey);
+  }
+  for (const assertion of stagedSame) {
+    mergedClasses.union(
+      requireDefined(targetClassKeyOf.get(mergeKeyOf(assertion.a))),
+      requireDefined(targetClassKeyOf.get(mergeKeyOf(assertion.b))),
+    );
+  }
+  const classKeyOf = new Map<MergeKey, string>();
+  for (const [key, targetClassKey] of targetClassKeyOf) {
+    classKeyOf.set(key, mergedClasses.find(targetClassKey));
+  }
+  const targetClassKeysByClassKey = new Map<string, string[]>();
+  for (const targetClassKey of membersByTargetClassKey.keys()) {
+    const classKey = mergedClasses.find(targetClassKey);
+    const grouped = targetClassKeysByClassKey.get(classKey) ?? [];
+    grouped.push(targetClassKey);
+    targetClassKeysByClassKey.set(classKey, grouped);
+  }
+
   const separatedClassPairs = new Set<string>();
   const separatingAssertionIdOf = new Map<string, string>();
   const pairs = ledgerSeparatesNothing ? [] : fusionPairs(groups, classKeyOf);
-  if (pairs.length > 0) {
+  // The ledger holds TARGET classes apart. A resulting class a staged `same`
+  // joined is separated from another when any target class inside the one is
+  // separated from any target class inside the other.
+  const targetPairs = pairs.flatMap((pair) =>
+    (targetClassKeysByClassKey.get(pair.first) ?? []).flatMap((first) =>
+      (targetClassKeysByClassKey.get(pair.second) ?? []).map((second) => ({
+        pairKey: separationClassPairKey(pair.first, pair.second),
+        first,
+        second,
+      })),
+    ),
+  );
+  if (targetPairs.length > 0) {
     const verdicts = await bulkIsSeparated(
       ctx.backend,
       ctx.schema,
       ctx.graphId,
-      pairs,
+      targetPairs.map(({ first, second }) => ({ first, second })),
       ctx.registry,
     );
-    for (const [index, pair] of pairs.entries()) {
+    for (const [index, targetPair] of targetPairs.entries()) {
       if (verdicts[index] !== true) continue;
-      const pairKey = separationClassPairKey(pair.first, pair.second);
-      separatedClassPairs.add(pairKey);
+      if (separatedClassPairs.has(targetPair.pairKey)) continue;
+      separatedClassPairs.add(targetPair.pairKey);
       const witness = await loadSpanningDifferentAssertion(
         ctx.backend,
         ctx.schema,
         ctx.graphId,
-        membersByClassKey.get(pair.first) ?? [],
-        membersByClassKey.get(pair.second) ?? [],
+        membersByTargetClassKey.get(targetPair.first) ?? [],
+        membersByTargetClassKey.get(targetPair.second) ?? [],
       );
       if (witness !== undefined) {
-        separatingAssertionIdOf.set(pairKey, witness.id);
+        separatingAssertionIdOf.set(targetPair.pairKey, witness.id);
       }
     }
   }

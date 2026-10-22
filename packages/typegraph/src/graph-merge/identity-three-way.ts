@@ -384,8 +384,8 @@ export function assertNoOpposingIdentityRelationsRaw(
  * retraction is not a race at plan time: the race detector only fires when a
  * retraction is staged.
  *
- * A genuine RACE (base present, one branch retracts while a DIFFERENT branch
- * reasserts under a new id without retracting) and an OPPOSING-RELATIONS
+ * A genuine RACE (base present, and the branches that retract the pair are not
+ * exactly the branches that reassert it under a new id) and an OPPOSING-RELATIONS
  * collision (both `same` and `different` staged for one endpoint with
  * overlapping windows) span more than one pair, so
  * {@link planIdentityThreeWay} refuses them before any pair reaches here.
@@ -436,10 +436,20 @@ function assertNoStagedOpposingRelations(staging: StagingSet): void {
 }
 
 /**
- * Refuses a RETRACT/REASSERT RACE: one branch retracts a pair's committed
- * truth while a DIFFERENT branch reasserts that pair under a new id WITHOUT
- * also retracting it. A branch that retracts AND reasserts the same pair
- * itself is convergent, not a race.
+ * Refuses a RETRACT/REASSERT RACE: branches disagree about whether a pair's
+ * committed truth survives. Two shapes, one rule — a staged retraction and a
+ * staged reassertion of one pair (under a new id) are convergent only when
+ * every branch that retracted the pair also reasserted it, and every branch
+ * that reasserted it also retracted it:
+ *
+ *  - a branch retracts the pair while a DIFFERENT branch reasserts it without
+ *    retracting it;
+ *  - a branch retracts the pair and stops there while a DIFFERENT branch
+ *    retracts AND reasserts it — keeping the reassertion would silently
+ *    overrule the first branch's retraction.
+ *
+ * A branch that retracts AND reasserts the same pair itself, with no other
+ * branch disagreeing, is convergent, not a race.
  */
 function assertNoRetractReassertRace(staging: StagingSet): void {
   const retractedBySemantic = new Map<string, StagedRetraction[]>();
@@ -450,15 +460,26 @@ function assertNoRetractReassertRace(staging: StagingSet): void {
     retractedBySemantic.set(key, group);
   }
   for (const staged of staging.newIdentityAssertions) {
-    const retractions =
-      retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? [];
+    const retractions = (
+      retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? []
+    ).filter((candidate) => candidate.assertion.id !== staged.assertion.id);
+    if (retractions.length === 0) continue;
+    const reasserters = new Set(
+      staging.newIdentityAssertions
+        .filter(
+          (other) =>
+            identitySemanticKey(other.assertion) ===
+            identitySemanticKey(staged.assertion),
+        )
+        .map((other) => other.branchId),
+    );
     const selfRetracted = retractions.some(
       (retraction) => retraction.branchId === staged.branchId,
     );
-    if (selfRetracted) continue;
-    const retraction = retractions.find(
-      (candidate) => candidate.assertion.id !== staged.assertion.id,
-    );
+    const retraction =
+      selfRetracted ?
+        retractions.find((candidate) => !reasserters.has(candidate.branchId))
+      : retractions[0];
     if (retraction === undefined) continue;
     throw new IdentityMergeConflictError(
       "Branches contain a retract/reassert race for one identity pair.",
@@ -469,6 +490,8 @@ function assertNoRetractReassertRace(staging: StagingSet): void {
           reassertedAssertion: staged.assertion,
           reassertedBy: staged.branchId,
         },
+        suggestion:
+          "Reconcile the branches so that every branch that retracts this identity assertion either also reasserts it or none reasserts it, then re-plan the merge.",
       },
     );
   }

@@ -12,6 +12,11 @@
  * Fixture: the base holds nothing; the branch creates people `a1` and `b1` and
  * asserts they are one person. The merge lands both rows and the assertion.
  *
+ * An apply under a review records that review's digest only when the review
+ * revalidated the very plan being applied; a review naming another plan, a
+ * review that is not compatible, and an undeclared apply option are refused
+ * before anything is written.
+ *
  * A transition the merge causes through a NODE write rather than an identity
  * row keeps the cause that names its mechanism — `detach` for a deleted
  * member, `fold` for a created same-ID peer — and carries the same decision.
@@ -27,7 +32,13 @@ import {
   type Store,
 } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import type {
+  CompatibleMergeReview,
+  MergePlanApplyOptions,
+  MergePlanDecisionOptions,
+} from "../../src/graph-merge/apply-callbacks";
 import { branch } from "../../src/graph-merge/branch";
+import { InvalidMergeOptionsError } from "../../src/graph-merge/errors";
 import {
   applyMergePlan,
   applyMergePlanInTransaction,
@@ -36,7 +47,8 @@ import {
   planMerge,
   planMergeIncremental,
 } from "../../src/graph-merge/merge";
-import { unwrap } from "../../src/graph-merge/result";
+import type { MergePlanArtifact } from "../../src/graph-merge/plan-schema";
+import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -306,5 +318,154 @@ describe("a transition a merge-applied node write causes carries the merge's dec
       branchAncestry: FOLD_BRANCH_ANCESTRY,
       mergePlanDigest: callerOwnedPlan.digest.value,
     });
+  });
+});
+
+/** What `work` rejected with, or `undefined` when it resolved. */
+async function rejectionOf(work: Promise<unknown>): Promise<unknown> {
+  try {
+    await work;
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+/** A compatible revalidation of `plan`, as `revalidateCandidateWriteSetReview` returns one. */
+function compatibleReviewOf(plan: MergePlanArtifact): CompatibleMergeReview {
+  return {
+    status: "compatible",
+    reviewDigest: { algorithm: "sha256", value: REVIEW_DIGEST },
+    plan,
+  };
+}
+
+const REVIEW_DIGEST = "a".repeat(64);
+
+describe("an apply under a review records the review digest bound to its plan", () => {
+  it("applyMergePlan and applyMergePlanInTransaction record the digest of a review naming the applied plan", async () => {
+    const managed = await branchDeletingAClassMember();
+    const managedPlan = unwrap(await planMerge(managed.base, [managed.source]));
+    unwrap(
+      await applyMergePlan(managed.base, managedPlan, {
+        review: compatibleReviewOf(managedPlan),
+      }),
+    );
+
+    const callerOwned = await branchDeletingAClassMember();
+    const callerOwnedPlan = unwrap(
+      await planMerge(callerOwned.base, [callerOwned.source]),
+    );
+    await callerOwned.base.transaction((tx) =>
+      applyMergePlanInTransaction(callerOwned.base, tx, callerOwnedPlan, {
+        review: compatibleReviewOf(callerOwnedPlan),
+      }),
+    );
+
+    expect(await decisionOfCause(managed.base, "detach")).toEqual({
+      branchId: BRANCH,
+      branchAncestry: FOLD_BRANCH_ANCESTRY,
+      mergePlanDigest: managedPlan.digest.value,
+      reviewDigest: REVIEW_DIGEST,
+    });
+    expect(await decisionOfCause(callerOwned.base, "detach")).toEqual({
+      branchId: BRANCH,
+      branchAncestry: FOLD_BRANCH_ANCESTRY,
+      mergePlanDigest: callerOwnedPlan.digest.value,
+      reviewDigest: REVIEW_DIGEST,
+    });
+  });
+
+  it("refuses a review that revalidated a different plan, on both apply paths, writing nothing", async () => {
+    const { base, source } = await branchDeletingAClassMember();
+    const plan = unwrap(await planMerge(base, [source]));
+    const other = await branchCreatingASameIdPeer();
+    const otherPlan = unwrap(await planMerge(other.base, [other.source]));
+
+    const managed = await applyMergePlan(base, plan, {
+      review: compatibleReviewOf(otherPlan),
+    });
+    if (!isErr(managed)) throw new Error("expected the apply to be refused");
+    console.info("managed refusal", managed.error.message);
+    expect(managed.error).toBeInstanceOf(InvalidMergeOptionsError);
+    expect(managed.error.details).toMatchObject({
+      option: "review",
+      reason: "plan-mismatch",
+    });
+
+    const callerOwned = await rejectionOf(
+      base.transaction((tx) =>
+        applyMergePlanInTransaction(base, tx, plan, {
+          review: compatibleReviewOf(otherPlan),
+        }),
+      ),
+    );
+    expect(callerOwned).toBeInstanceOf(InvalidMergeOptionsError);
+    expect((callerOwned as InvalidMergeOptionsError).details).toMatchObject({
+      option: "review",
+      reason: "plan-mismatch",
+    });
+
+    await expect(
+      base.nodes.Person.getById(asNodeId("a1")),
+    ).resolves.toBeDefined();
+  });
+
+  it("refuses a review revalidation that is not compatible", async () => {
+    const { base, source } = await branchDeletingAClassMember();
+    const plan = unwrap(await planMerge(base, [source]));
+    const changed = {
+      status: "changed",
+      reviewDigest: { algorithm: "sha256", value: REVIEW_DIGEST },
+      differences: [],
+      plan,
+    } as unknown as CompatibleMergeReview;
+
+    const result = await applyMergePlan(base, plan, { review: changed });
+    if (!isErr(result)) throw new Error("expected the apply to be refused");
+    expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+    expect(result.error.details).toMatchObject({
+      option: "review",
+      reason: "not-compatible",
+    });
+    await expect(
+      base.nodes.Person.getById(asNodeId("a1")),
+    ).resolves.toBeDefined();
+  });
+
+  it("refuses an apply option neither apply path declares", async () => {
+    const { base, source } = await branchDeletingAClassMember();
+    const plan = unwrap(await planMerge(base, [source]));
+    const undeclared = {
+      reviewDigest: REVIEW_DIGEST,
+    } as unknown as MergePlanApplyOptions<typeof foldGraph>;
+
+    const managed = await applyMergePlan(base, plan, undeclared);
+    if (!isErr(managed)) throw new Error("expected the apply to be refused");
+    expect(managed.error).toBeInstanceOf(InvalidMergeOptionsError);
+    expect(managed.error.details).toMatchObject({ option: "reviewDigest" });
+
+    const callerOwned = await rejectionOf(
+      base.transaction((tx) =>
+        applyMergePlanInTransaction(base, tx, plan, undeclared),
+      ),
+    );
+    expect(callerOwned).toBeInstanceOf(InvalidMergeOptionsError);
+    expect((callerOwned as InvalidMergeOptionsError).details).toMatchObject({
+      option: "reviewDigest",
+    });
+    // The caller-owned path accepts only the decision provenance, not the
+    // managed path's callbacks.
+    const withCallback = await rejectionOf(
+      base.transaction((tx) =>
+        applyMergePlanInTransaction(base, tx, plan, {
+          afterApply: () => Promise.resolve(),
+        } as unknown as MergePlanDecisionOptions),
+      ),
+    );
+    expect(withCallback).toBeInstanceOf(InvalidMergeOptionsError);
+    await expect(
+      base.nodes.Person.getById(asNodeId("a1")),
+    ).resolves.toBeDefined();
   });
 });

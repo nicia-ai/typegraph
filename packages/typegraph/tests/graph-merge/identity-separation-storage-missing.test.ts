@@ -88,6 +88,9 @@ describe("a merge against a target whose separation relation is unreadable", () 
       { kind: "Person", id: "a1" },
       { kind: "Person", id: "b1" },
     );
+    // The staged `same` joins `a1` and `b1` into one class, so `c1` is what
+    // leaves the veto a cross-class pair to judge.
+    await source.store.nodes.Person.create({ name: "Ada K." }, { id: "c1" });
 
     // The relation goes away under the target's LIVE handle: every separation
     // read from here on is loud, and the merge's fact capture is one of them.

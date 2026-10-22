@@ -111,6 +111,30 @@ describe("a retract/reassert race", () => {
     });
   });
 
+  it("is refused when another branch retracts the pair without reasserting it, naming that branch", () => {
+    const caught = caughtFrom(() =>
+      planIdentityChanges(
+        stagingWithIdentityChanges(
+          [{ branchId: BRANCH_B, assertion: reasserted }],
+          [
+            { branchId: BRANCH_A, assertion: inherited },
+            { branchId: BRANCH_B, assertion: inherited },
+          ],
+        ),
+        new Map(),
+      ),
+    );
+    expect(caught).toBeInstanceOf(IdentityMergeConflictError);
+    const error = caught as IdentityMergeConflictError;
+    console.info("race refusal", error.details);
+    expect(error.details).toEqual({
+      retractedAssertion: inherited,
+      retractedBy: BRANCH_A,
+      reassertedAssertion: reasserted,
+      reassertedBy: BRANCH_B,
+    });
+  });
+
   it("is not a race when the reasserting branch retracted the pair itself: both writes are planned", () => {
     const ended: IdentityTransferAssertion = {
       ...inherited,
