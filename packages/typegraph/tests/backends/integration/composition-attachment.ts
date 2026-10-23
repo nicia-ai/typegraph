@@ -632,6 +632,99 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(requireDefined(atMove[0]).toId).toBe(showB.id);
     });
 
+    it("reparent refuses an `at` earlier than the `oneActive` incumbent's start, before any write, and accepts one equal to it", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const showA = await store.nodes.CaShow.create({});
+      const showB = await store.nodes.CaShow.create({});
+      const attachedAt = "2024-06-01T00:00:00.000Z";
+      const earlier = "2024-01-01T00:00:00.000Z";
+      const [first, second] = [
+        await store.nodes.CaClip.create(
+          {},
+          {
+            partOf: {
+              whole: { kind: "CaShow", id: showA.id },
+              validFrom: attachedAt,
+            },
+          },
+        ),
+        await store.nodes.CaClip.create(
+          {},
+          { partOf: { whole: { kind: "CaShow", id: showA.id } } },
+        ),
+      ];
+      const attachments = await store.edges.caClipOf.find({});
+      const incumbent = requireDefined(
+        attachments.find((edge) => edge.fromId === first.id),
+        "the first clip's attachment",
+      );
+      const whole = { kind: "CaShow", id: showB.id } as const;
+
+      // MUTATION CHECK: make `resolveCompositionMoveInstant`
+      // (src/store/operations/composition-create.ts) return a stated `at`
+      // unjudged — the window end then reaches the edge update and is refused
+      // with an inverted-window ValidationError instead of this code.
+      const error = await store.nodes.CaClip.reparent(first.id, {
+        whole,
+        at: earlier,
+      }).catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(CompositionError);
+      expect(error).toMatchObject({
+        code: "COMPOSITION_MOVE_BEFORE_INCUMBENT",
+        details: {
+          situation: "moveBeforeIncumbent",
+          partKind: "CaClip",
+          partId: first.id,
+          wholeKind: "CaShow",
+          wholeId: showB.id,
+          incumbentEdgeKind: "caClipOf",
+          incumbentEdgeId: incumbent.id,
+          incumbentValidFrom: attachedAt,
+          at: earlier,
+        },
+      });
+
+      // The batch's first item is legal on its own; the refusal of its last
+      // leaves it unmoved, also caught on `tx` inside a committing transaction.
+      await store.transaction(async (tx) => {
+        await expect(
+          tx.nodes.CaClip.bulkReparent([
+            { id: second.id, options: { whole } },
+            { id: first.id, options: { whole, at: earlier } },
+          ]),
+        ).rejects.toMatchObject({ code: "COMPOSITION_MOVE_BEFORE_INCUMBENT" });
+      });
+      const untouched = await store.edges.caClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      expect(untouched.map((edge) => [edge.toId, edge.meta.validTo])).toEqual([
+        [showA.id, undefined],
+        [showA.id, undefined],
+      ]);
+
+      // MUTATION CHECK: refuse an `at` that is not LATER than the incumbent's
+      // start — this zero-width retire is then refused.
+      const moved = await store.nodes.CaClip.reparent(first.id, {
+        whole,
+        at: attachedAt,
+      });
+      expect(moved.edge.meta.validFrom).toBe(attachedAt);
+      const history = await store.edges.caClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      const retired = requireDefined(
+        history.find((edge) => edge.id === incumbent.id),
+        "the retired attachment",
+      );
+      expect([retired.meta.validFrom, retired.meta.validTo]).toEqual([
+        attachedAt,
+        attachedAt,
+      ]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
     it("reparent to the whole the part already holds is an accepted no-op", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const book = await store.nodes.CaBook.create({});

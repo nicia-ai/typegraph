@@ -566,6 +566,22 @@ population, which is also what decides how the old attachment is retired:
 | `"one"` | the composition edge is deleted | the attachment is gone from every `store.asOf(t)` read, at every coordinate — a `"one"` binding persists for the row's whole life, ended or not, so an ended row would still read as an attachment |
 | `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history; because the same instant ends the old window and opens the new one, no `store.asOf(t)` coordinate shows the part with zero wholes or with two |
 
+A `"oneActive"` window cannot end before it starts, so the move instant is
+judged against the incumbent's `validFrom`. An `at` equal to it retires a
+zero-width window. An earlier `at` is refused before any write with
+`CompositionError` (`COMPOSITION_MOVE_BEFORE_INCUMBENT`, `situation:
+"moveBeforeIncumbent"`), whose details name the incumbent edge's kind, id and
+`validFrom`. An omitted `at` is never refused for this: when the clock has
+stepped backward since the incumbent was written, the move happens at the
+incumbent's `validFrom` instead of the clock read, the way the recorded clock
+clamps to its previous anchor (see
+[Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time)).
+Both windows then start later than the clock. Until wall time catches up, a
+current-time read shows the part under neither whole (as it already showed
+the incumbent's whole nowhere before the move), and
+`store.verifyConstraintFences()` reports both rows under
+`compositionFutureWindow`, as it already reported the incumbent.
+
 Reparenting to the whole the part already holds (through the same `via`, when
 one is stated) is accepted as a **no-op** — no write, no history — so a
 caller converging on a destination need not first ask where the part is.

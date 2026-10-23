@@ -697,6 +697,7 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"futureStart"` | `COMPOSITION_VALIDITY_FUTURE_START` | A composition edge write states a `validFrom` later than the operation clock |
 | `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
 | `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
 
 A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
@@ -757,6 +758,13 @@ exists already; `partId` is absent while a `partOf` create has not assigned
 the part its id yet. `"futureMove"` carries `at` instead. Record a change
 when it happens: a past `validTo` writes history, and `reparent` moves a part
 now (or at a past `at`).
+
+A move ends a `oneActive` incumbent's window at its `at`, so an `at` earlier
+than that window's `validFrom` would close it before it opened:
+`"moveBeforeIncumbent"` refuses it before any write, carrying `at` and the
+incumbent's `incumbentEdgeKind`, `incumbentEdgeId` and `incumbentValidFrom`.
+An omitted `at` is never refused for this; see
+[reparent](/ontology#reparent-moving-a-part-to-a-new-whole).
 
 The composition claim rides `typegraph_edge_claims`, the same relation
 `CardinalityError`'s claims do. A deployment initialized before that
@@ -2007,6 +2015,7 @@ try {
 | `COMPOSITION_VALIDITY_FUTURE_START` | `CompositionError` | constraint | A composition edge write states a `validFrom` later than the operation clock |
 | `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
 | `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
 | `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |

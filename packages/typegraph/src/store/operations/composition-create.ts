@@ -68,6 +68,7 @@ import { canonicalEqual } from "../../schema/canonical";
 import { compareCodePoints } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
+  isInvertedValidityWindow,
   nowIso,
   statedBoundMatchesStored,
   validateCanonicalIsoDate,
@@ -235,6 +236,16 @@ export function readCompositionAttachment(
 }
 
 /**
+ * `reparent`'s move instant and whether the caller stated it. The two are
+ * judged differently against the attachment the move ends
+ * ({@link resolveCompositionMoveInstant}): a stated instant is applied or
+ * refused, a defaulted one — a clock read nobody asked for — gives way.
+ */
+export type CompositionMoveInstant =
+  | Readonly<{ source: "stated"; at: string }>
+  | Readonly<{ source: "defaulted"; at: string }>;
+
+/**
  * Reads `reparent`'s options: the destination attachment and the move
  * instant, which is `at` or one clock read. The new edge's lower bound is
  * that instant, never a separately stated `validFrom`. Only a stated `at` is
@@ -244,15 +255,71 @@ export function readCompositionAttachment(
 export function readReparentOptions(
   options: NodeReparentOptions,
   part: Readonly<{ kind: string; id: string }>,
-): Readonly<{ attachment: StatedCompositionAttachment; moveAt: string }> {
+): Readonly<{
+  attachment: StatedCompositionAttachment;
+  moveAt: CompositionMoveInstant;
+}> {
   const attachment = readStatedAttachment(options, REPARENT_SURFACE, part);
-  if (options.at === undefined) return { attachment, moveAt: nowIso() };
-  const moveAt = validateCanonicalIsoDate(
+  if (options.at === undefined) {
+    return { attachment, moveAt: { source: "defaulted", at: nowIso() } };
+  }
+  const at = validateCanonicalIsoDate(
     options.at,
     `${REPARENT_SURFACE.path}.at`,
   );
-  assertCompositionMoveCurrent(part, attachment.whole, moveAt, nowIso());
-  return { attachment, moveAt };
+  assertCompositionMoveCurrent(part, attachment.whole, at, nowIso());
+  return { attachment, moveAt: { source: "stated", at } };
+}
+
+/**
+ * THE effective instant of a composition move: the `validTo` it gives the
+ * incumbent whose window it ends, and the new attachment's `validFrom`.
+ *
+ * `endedIncumbent` is the row whose window the move ends — a
+ * `population: "oneActive"` incumbent. A `population: "one"` incumbent is
+ * deleted, and a part with no incumbent has nothing to end, so neither
+ * passes one and the instant stands as read.
+ *
+ * Ending a window at an instant earlier than its `validFrom` would invert it.
+ * A STATED `at` there is refused (`COMPOSITION_MOVE_BEFORE_INCUMBENT`). A
+ * DEFAULTED one is a clock read that has fallen behind the incumbent — the
+ * clock stepped backward since the incumbent was written — so the move
+ * happens at the incumbent's `validFrom` instead, retiring a zero-width
+ * window, the way the recorded clock clamps to its previous anchor. The two
+ * halves still abut.
+ *
+ * Read-free over the incumbent the frame's fenced decision already read, so
+ * every move of a frame is judged before its first statement.
+ */
+export function resolveCompositionMoveInstant(
+  move: Readonly<{
+    part: Readonly<{ kind: string; id: string }>;
+    whole: CompositionNodeRef;
+    moveAt: CompositionMoveInstant;
+  }>,
+  endedIncumbent: EdgeRow | undefined,
+): string {
+  const { part, whole, moveAt } = move;
+  const incumbentValidFrom = endedIncumbent?.valid_from;
+  if (
+    endedIncumbent === undefined ||
+    incumbentValidFrom === undefined ||
+    !isInvertedValidityWindow(incumbentValidFrom, moveAt.at)
+  ) {
+    return moveAt.at;
+  }
+  if (moveAt.source === "defaulted") return incumbentValidFrom;
+  throw new CompositionError({
+    situation: "moveBeforeIncumbent",
+    partKind: part.kind,
+    partId: part.id,
+    wholeKind: whole.kind,
+    wholeId: whole.id,
+    incumbentEdgeKind: endedIncumbent.kind,
+    incumbentEdgeId: endedIncumbent.id,
+    incumbentValidFrom,
+    at: moveAt.at,
+  });
 }
 
 /**
@@ -319,11 +386,14 @@ type CompositionWindow = Readonly<{
  * (`validateAndPrepareEdgeCreate` / `prepareEdgeUpdate`,
  * `edge-operations.ts` — which a graph merge's apply writes through), and
  * import ({@link compositionWindowRefusal}, as a per-row error). `reparent`'s
- * one instant is refused by `assertCompositionMoveCurrent` instead, under its
- * own code. A row no such write judged — one written before its edge kind
- * realized a pair — is refused by the schema commit that makes it a
- * composition row and reported by `store.verifyConstraintFences()`, both
- * through {@link readCompositionFutureWindowEdges}.
+ * one instant is judged by its own rules instead, under its own codes —
+ * `assertCompositionMoveCurrent` against the clock and
+ * {@link resolveCompositionMoveInstant} against the window it ends — and its
+ * two edge writes judge their windows against that instant. A row no such
+ * write judged — one written before its edge kind realized a pair — is
+ * refused by the schema commit that makes it a composition row and reported
+ * by `store.verifyConstraintFences()`, both through
+ * {@link readCompositionFutureWindowEdges}.
  */
 export function assertCompositionWindowCurrent(
   subject: CompositionWindowSubject,
