@@ -237,6 +237,7 @@ import {
   assertEndpointRowLive,
   compositionWindowSubject,
   edgeWriteEndsOpenWindow,
+  type ResolvedCompositionMoveInstant,
 } from "./composition-create";
 import {
   createEdgeBatchValidationBackend,
@@ -444,8 +445,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
      */
     validateAcyclicity?: boolean;
     lock?: GraphWriteLock;
-    /** See {@link assertCompositionEdgeWindowCurrent}. */
-    operationInstant?: string | undefined;
+    /** A `reparent`'s instant; see {@link assertCompositionEdgeWindowCurrent}. */
+    moveInstant?: ResolvedCompositionMoveInstant | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
@@ -517,7 +518,7 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     ctx,
     { kind, id, fromKind, fromId: input.fromId, toKind, toId: input.toId },
     { validFrom, validTo },
-    options?.operationInstant,
+    options?.moveInstant,
   );
 
   // Check cardinality constraints
@@ -655,11 +656,14 @@ function edgeAcyclic<G extends GraphDef>(
  * kind (a non-composition kind passes untouched). Read-free, so every create
  * and update reaches it before the frame's first statement.
  *
- * "Now" is one clock read, except on the two writes of a `reparent`: those
- * pass the move instant as `operationInstant`, because that instant was
- * already judged by the move's own rules (`assertCompositionMoveCurrent` for
- * a stated `at`, `resolveCompositionMoveInstant` for a defaulted one, which
- * can only reach past the clock to the start of the window it ends).
+ * "Now" is one clock read, except on the two writes of a `reparent` /
+ * `bulkReparent` — the replacement's create and the incumbent's window end —
+ * which are judged at the move instant `resolveCompositionMoveInstant`
+ * decided (the {@link ResolvedCompositionMoveInstant} brand admits no other
+ * value). That instant was already judged by the move's own rules, and it can
+ * exceed the clock only as the `validFrom` of the stored window the move
+ * ends; a fresh read would refuse that clamp, and would refuse a defaulted
+ * instant outright if the clock stepped back between the read and the write.
  */
 function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -675,11 +679,11 @@ function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
   }>,
-  operationInstant: string | undefined,
+  moveInstant: ResolvedCompositionMoveInstant | undefined,
 ): void {
   const subject = compositionWindowSubject(ctx.registry, edge);
   if (subject === undefined) return;
-  assertCompositionWindowCurrent(subject, window, operationInstant ?? nowIso());
+  assertCompositionWindowCurrent(subject, window, moveInstant ?? nowIso());
 }
 
 /**
@@ -2438,8 +2442,8 @@ type EdgeUpdateOptions = Readonly<{
   matchProps?: Record<string, unknown>;
   /** See {@link assertCompositionExistencePreserved}'s `reattachedPart`. */
   reattachedPart?: CompositionNodeRef;
-  /** See {@link assertCompositionEdgeWindowCurrent}. */
-  operationInstant?: string;
+  /** A `reparent`'s window end; see {@link assertCompositionEdgeWindowCurrent}. */
+  moveInstant?: ResolvedCompositionMoveInstant;
 }>;
 
 /**
@@ -2513,7 +2517,7 @@ async function prepareEdgeUpdate<G extends GraphDef>(
       toId: existing.to_id,
     },
     { validFrom: appliedValidFrom, validTo },
-    options?.operationInstant,
+    options?.moveInstant,
   );
   const declarations = edgeCardinalityDeclarations(ctx, input.identity.kind);
   const reentersLivePopulation =
@@ -3071,25 +3075,24 @@ async function writeEdgeUpdateSet<G extends GraphDef>(
  * take. `reattachedPart` is the reparent's own evidence that this part is
  * not being detached at all (see `assertCompositionExistencePreserved`), so
  * the required-existence refusal is APPLIED with the frame's real end state
- * rather than bypassed. `validTo` is the move instant, and the window rule
- * judges it as the move's operation instant
- * ({@link assertCompositionEdgeWindowCurrent}).
+ * rather than bypassed. The window ends at `moveInstant`, which the window
+ * rule also judges it at ({@link assertCompositionEdgeWindowCurrent}).
  */
 export async function endCompositionEdgeWindow<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   edge: BackendEdgeRow,
   reattachedPart: CompositionNodeRef,
-  validTo: string,
+  moveInstant: ResolvedCompositionMoveInstant,
   session: EdgeWriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
 ): Promise<void> {
   await performEdgeUpdateConverging(
     ctx,
-    compositionEdgeWindowEndInput(edge, validTo),
+    compositionEdgeWindowEndInput(edge, moveInstant),
     session,
     target,
-    { reattachedPart, operationInstant: validTo },
+    { reattachedPart, moveInstant },
     edge,
     lock,
   );
@@ -3115,15 +3118,15 @@ export async function assertCompositionEdgeWindowEndable<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   edge: BackendEdgeRow,
   reattachedPart: CompositionNodeRef,
-  validTo: string,
+  moveInstant: ResolvedCompositionMoveInstant,
   target: WriteTarget,
   lock: GraphWriteLock,
 ): Promise<void> {
   await prepareEdgeUpdate(
     ctx,
-    compositionEdgeWindowEndInput(edge, validTo),
+    compositionEdgeWindowEndInput(edge, moveInstant),
     target,
-    { reattachedPart, operationInstant: validTo },
+    { reattachedPart, moveInstant },
     edge,
     lock,
   );

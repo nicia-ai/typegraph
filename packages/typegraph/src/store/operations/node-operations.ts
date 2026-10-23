@@ -277,6 +277,7 @@ import {
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
   resolveCompositionMoveInstant,
+  type ResolvedCompositionMoveInstant,
 } from "./composition-create";
 import {
   createEdgeBatchValidationBackend,
@@ -3336,8 +3337,8 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   options: Readonly<{
     endpoints: CompositionEndpointEvidence;
     validateAcyclicity: boolean;
-    /** A move's instant; see `assertCompositionEdgeWindowCurrent`. */
-    operationInstant?: string | undefined;
+    /** A `reparent`'s instant; see `assertCompositionEdgeWindowCurrent`. */
+    moveInstant?: ResolvedCompositionMoveInstant | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   if (options.endpoints.source === "primedWhole") {
@@ -3349,7 +3350,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
     validateCardinality: true,
     validateAcyclicity: options.validateAcyclicity,
     lock,
-    operationInstant: options.operationInstant,
+    moveInstant: options.moveInstant,
   });
 }
 
@@ -3721,7 +3722,7 @@ type PreparedAttachmentMove = Readonly<{
   retire?: Readonly<{
     incumbent: BackendEdgeRow;
     population: "one" | "oneActive";
-    moveInstant: string;
+    moveInstant: ResolvedCompositionMoveInstant;
   }>;
 }>;
 
@@ -3769,10 +3770,8 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     );
 
   const prepared: PreparedAttachmentMove[] = [];
-  for (const [
-    index,
-    { partId, decided, moveAt, endpoints },
-  ] of moves.entries()) {
+  for (const [index, move] of moves.entries()) {
+    const { partId, decided, endpoints } = move;
     if (decided.disposition === "satisfied") {
       prepared.push({ partId, decided });
       continue;
@@ -3780,7 +3779,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     const { work } = decided.request;
     const part = { kind: work.partKind, id: partId };
     const retire = retires[index];
-    const moveInstant = retire?.moveInstant ?? moveAt?.at;
+    const moveInstant = retire?.moveInstant ?? unretiringMoveInstant(move);
     const replacement = await prepareCompositionCreateEdge(
       ctx,
       validationTarget,
@@ -3791,7 +3790,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
       {
         endpoints,
         validateAcyclicity: false,
-        operationInstant: moveInstant,
+        moveInstant,
       },
     );
     registerPendingEdgeForCardinality(
@@ -3886,6 +3885,25 @@ function incumbentRetire<G extends GraphDef>(
     population === "oneActive" ? incumbent.edge : undefined,
   );
   return { incumbent: incumbent.edge, population, moveInstant };
+}
+
+/**
+ * The instant of a decided move that retires nothing: a `reparent` of a part
+ * with no incumbent attaches at its own `at` (or clock read), through the same
+ * owner as a move that ends one. Every other surface states no move instant.
+ */
+function unretiringMoveInstant(
+  move: DecidedAttachmentMove,
+): ResolvedCompositionMoveInstant | undefined {
+  if (move.moveAt === undefined) return undefined;
+  return resolveCompositionMoveInstant(
+    {
+      part: { kind: move.decided.request.work.partKind, id: move.partId },
+      whole: move.decided.request.work.whole,
+      moveAt: move.moveAt,
+    },
+    undefined,
+  );
 }
 
 /** The incumbent's row and the state its retire leaves it in. */

@@ -245,6 +245,19 @@ export type CompositionMoveInstant =
   | Readonly<{ source: "stated"; at: string }>
   | Readonly<{ source: "defaulted"; at: string }>;
 
+declare const RESOLVED_COMPOSITION_MOVE_INSTANT_BRAND: unique symbol;
+
+/**
+ * A move instant {@link resolveCompositionMoveInstant} decided — the only
+ * value a `reparent`'s two edge writes accept as the instant their windows
+ * are judged against (`assertCompositionEdgeWindowCurrent`,
+ * `edge-operations.ts`). Only that function mints one, so the instant a
+ * move's writes are judged at can exceed the clock only where it says so:
+ * the `validFrom` of the incumbent window the move ends, already stored.
+ */
+export type ResolvedCompositionMoveInstant = string &
+  Readonly<{ [RESOLVED_COMPOSITION_MOVE_INSTANT_BRAND]: true }>;
+
 /**
  * Reads `reparent`'s options: the destination attachment and the move
  * instant, which is `at` or one clock read. The new edge's lower bound is
@@ -288,6 +301,10 @@ export function readReparentOptions(
  * window, the way the recorded clock clamps to its previous anchor. The two
  * halves still abut.
  *
+ * So the instant returned is `moveAt.at` — a stated `at` the clock already
+ * admitted ({@link assertCompositionMoveCurrent}) or a defaulted clock read —
+ * or, for a defaulted read only, the incumbent's stored `validFrom`.
+ *
  * Read-free over the incumbent the frame's fenced decision already read, so
  * every move of a frame is judged before its first statement.
  */
@@ -298,7 +315,7 @@ export function resolveCompositionMoveInstant(
     moveAt: CompositionMoveInstant;
   }>,
   endedIncumbent: EdgeRow | undefined,
-): string {
+): ResolvedCompositionMoveInstant {
   const { part, whole, moveAt } = move;
   const incumbentValidFrom = endedIncumbent?.valid_from;
   if (
@@ -306,9 +323,11 @@ export function resolveCompositionMoveInstant(
     incumbentValidFrom === undefined ||
     !isInvertedValidityWindow(incumbentValidFrom, moveAt.at)
   ) {
-    return moveAt.at;
+    return moveAt.at as ResolvedCompositionMoveInstant;
   }
-  if (moveAt.source === "defaulted") return incumbentValidFrom;
+  if (moveAt.source === "defaulted") {
+    return incumbentValidFrom as ResolvedCompositionMoveInstant;
+  }
   throw new CompositionError({
     situation: "moveBeforeIncumbent",
     partKind: part.kind,
