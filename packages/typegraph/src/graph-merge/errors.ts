@@ -236,7 +236,10 @@ export function translateMergeCommitError(error: unknown): unknown {
 }
 
 /**
- * Raised at APPLY when the plan would separate a composition part from its
+ * Raised at PLAN time when two branches conflict over a composition
+ * attachment — one branch attaches a part to a whole while another deletes
+ * one end of it (`details.branchId` names the attaching branch) — and at
+ * APPLY when the plan would separate a composition part from its
  * whole behind the target's back: a live part of a whole the plan deletes is
  * not itself among the plan's node deletions (the target gained that part
  * AFTER the branch point, or independently of it), or a part the plan
@@ -264,7 +267,8 @@ export function translateMergeCommitError(error: unknown): unknown {
  * would delete; `"moved"` names the live whole the target holds a part under
  * that this plan would delete; `"unattached"` has no whole to name at all —
  * the part's composition edge was dropped or collapsed by canonicalization
- * while the part itself survives.
+ * while the part itself survives. With `details.branchId`, the attachment at
+ * stake is that branch's, not the target's.
  */
 export class MergeCompositionOrphanError extends MergeError {
   protected static override readonly errorCategory = "constraint";
@@ -277,8 +281,11 @@ export class MergeCompositionOrphanError extends MergeError {
   }
 }
 
-/** The `MergeCompositionOrphanError` messages, one per `cause`. */
+/** The `MergeCompositionOrphanError` messages, one per `cause` and attaching side. */
 function compositionOrphanMessage(details: MergePlanCompositionOrphan): string {
+  if (details.branchId !== undefined) {
+    return branchAttachmentLossMessage(details, details.branchId);
+  }
   if (details.cause === "moved") {
     // `cause: "moved"` always carries `whole` — the only producer,
     // `compositionMovedPartsAmong` (`merge.ts`), sets both together.
@@ -312,6 +319,30 @@ function compositionOrphanMessage(details: MergePlanCompositionOrphan): string {
     `while its part "${details.part.kind}:${details.part.id}" (via "${details.viaEdgeKind}") ` +
     "is not itself among the plan's node deletions. Recompute the merge plan against the " +
     "target's current state, or delete the orphaned part in the branch before merging."
+  );
+}
+
+/**
+ * The message for a cross-branch finding: `whole` is always set, because the
+ * only producer, `lostBranchAttachment` (`merge.ts`), reads it off the
+ * attaching edge.
+ */
+function branchAttachmentLossMessage(
+  details: MergePlanCompositionOrphan,
+  branchId: string,
+): string {
+  const whole = requireDefined(
+    details.whole,
+    "MergePlanCompositionOrphan.whole for a branch attachment",
+  );
+  const attachment =
+    `branch "${branchId}" attaches part "${details.part.kind}:${details.part.id}" ` +
+    `to whole "${whole.kind}:${whole.id}" (via "${details.viaEdgeKind}")`;
+  const deletedEnd = details.cause === "moved" ? "part" : "whole";
+  return (
+    `Merging these branches would lose a composition attachment: ${attachment}, ` +
+    `but the merge also deletes that ${deletedEnd}. ` +
+    "Drop either the deletion or the attachment from its branch before merging."
   );
 }
 

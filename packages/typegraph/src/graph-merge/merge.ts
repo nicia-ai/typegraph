@@ -96,12 +96,17 @@ import {
   resolveDeleteModify,
   resolveEdgeDeleteModify,
 } from "./delete-modify";
-import type { MergedEdge, StagedEdge } from "./edge-repoint";
+import type {
+  EndpointDeletedEdge,
+  MergedEdge,
+  StagedEdge,
+} from "./edge-repoint";
 import {
   BRANCH_CREATED_EDGE_ORIGIN,
   buildCanonicalMap,
   INHERITED_EDGE_ORIGIN,
   repointEdges,
+  withRepointedEndpoints,
 } from "./edge-repoint";
 import {
   AcyclicityMergeConflictError,
@@ -213,10 +218,15 @@ import type {
   StagedNewEdge,
   StagedNewNode,
   StagedRetraction,
+  StagedWindowedEdge,
   StagingSet,
 } from "./staging";
 import { stageBranches } from "./staging";
-import type { ModifiedNode, StateDiffBaseReader } from "./state-diff";
+import type {
+  ModifiedNode,
+  StateDiffBaseReader,
+  ValidWindow,
+} from "./state-diff";
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
@@ -948,6 +958,12 @@ function indexNewNodesById(
  * `windowOnlyCarried` names the identities staged ONLY to carry an ending. Their
  * `branchId` is a write vehicle rather than a contribution (see the loop below),
  * which the provenance fold must know so it does not credit it.
+ *
+ * `deletionAbsorbed` holds the re-windowed copies a finally-deleted edge absorbs:
+ * never written, but still a branch's staged state, so the cross-branch
+ * composition check ({@link lostBranchAttachment}) can see a re-attachment the
+ * deletion would otherwise discard without a trace. Each carries the window its
+ * branch wrote.
  */
 function buildStagedEdges(
   staging: StagingSet,
@@ -957,10 +973,18 @@ function buildStagedEdges(
 ): Readonly<{
   edges: readonly StagedEdge[];
   windowOnlyCarried: ReadonlySet<MergeKey>;
+  deletionAbsorbed: readonly StagedEdge[];
 }> {
   const staged: StagedEdge[] = [];
   const stagedIdentities = new Set<MergeKey>();
   const windowOnlyCarried = new Set<MergeKey>();
+  const deletionAbsorbed: StagedEdge[] = [];
+  // Every branch diffs against the same merge base, so any re-windowed copy of
+  // an identity states that base's window.
+  const baseWindowByEdge = new Map<MergeKey, ValidWindow>();
+  for (const item of staging.windowedEdges) {
+    baseWindowByEdge.set(mergeKeyOf(item.edge), item.edge.base);
+  }
   for (const items of staging.newEdgesByKind.values()) {
     for (const item of items) {
       staged.push(toStagedEdge(item.branchId, item));
@@ -970,6 +994,11 @@ function buildStagedEdges(
     const identity = mergeKeyOf(item.edge);
     stagedIdentities.add(identity);
     const validToChange = edgeValidityEnds.get(identity);
+    // A modified row whose window no branch moved holds the base's window.
+    const baseValidTo =
+      baseWindowByEdge.has(identity) ?
+        baseWindowByEdge.get(identity)?.validTo
+      : item.edge.row.valid_to;
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
@@ -980,6 +1009,7 @@ function buildStagedEdges(
       toKind: item.edge.toKind,
       props: item.edge.forkProps as Readonly<Record<string, JsonValue>>,
       baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
+      ...(baseValidTo === undefined ? {} : { baseValidTo }),
       branchId: item.branchId,
       ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
       : validToChange?.kind === "clear" ? { clearValidTo: true as const }
@@ -1001,33 +1031,54 @@ function buildStagedEdges(
   // is credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
-    const validToChange = edgeValidityEnds.get(identity);
-    if (
-      validToChange === undefined ||
-      stagedIdentities.has(identity) ||
-      edgeDeletions.has(identity)
-    ) {
+    if (stagedIdentities.has(identity)) continue;
+    if (edgeDeletions.has(identity)) {
+      deletionAbsorbed.push(
+        windowedStagedEdge(
+          item,
+          item.edge.fork.validTo === undefined ?
+            { clearValidTo: true }
+          : { validTo: item.edge.fork.validTo },
+        ),
+      );
       continue;
     }
+    const validToChange = edgeValidityEnds.get(identity);
+    if (validToChange === undefined) continue;
     stagedIdentities.add(identity);
     windowOnlyCarried.add(identity);
-    staged.push({
-      id: item.edge.id,
-      kind: item.edge.kind,
-      origin: INHERITED_EDGE_ORIGIN,
-      fromId: item.edge.fromId,
-      toId: item.edge.toId,
-      fromKind: item.edge.fromKind,
-      toKind: item.edge.toKind,
-      props: item.edge.props as Readonly<Record<string, JsonValue>>,
-      baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
-      branchId: item.branchId,
-      ...(validToChange.kind === "set" ?
-        { validTo: validToChange.validTo }
-      : { clearValidTo: true as const }),
-    });
+    staged.push(
+      windowedStagedEdge(
+        item,
+        validToChange.kind === "set" ?
+          { validTo: validToChange.validTo }
+        : { clearValidTo: true },
+      ),
+    );
   }
-  return { edges: staged, windowOnlyCarried };
+  return { edges: staged, windowOnlyCarried, deletionAbsorbed };
+}
+
+/** The inherited {@link StagedEdge} for a re-windowed row, carrying `window`. */
+function windowedStagedEdge(
+  item: StagedWindowedEdge,
+  window: Readonly<{ validTo: string }> | Readonly<{ clearValidTo: true }>,
+): StagedEdge {
+  const baseValidTo = item.edge.base.validTo;
+  return {
+    id: item.edge.id,
+    kind: item.edge.kind,
+    origin: INHERITED_EDGE_ORIGIN,
+    fromId: item.edge.fromId,
+    toId: item.edge.toId,
+    fromKind: item.edge.fromKind,
+    toKind: item.edge.toKind,
+    props: item.edge.props as Readonly<Record<string, JsonValue>>,
+    baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
+    ...(baseValidTo === undefined ? {} : { baseValidTo }),
+    branchId: item.branchId,
+    ...window,
+  };
 }
 
 /**
@@ -1772,7 +1823,11 @@ function buildInternalMergePlan<G extends GraphDef>(
     identityContext,
     identityNodeUniverse,
   );
-  const { edges: stagedEdges, windowOnlyCarried } = buildStagedEdges(
+  const {
+    edges: stagedEdges,
+    windowOnlyCarried,
+    deletionAbsorbed,
+  } = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
     validWindows.edgeEnds,
@@ -1817,6 +1872,16 @@ function buildInternalMergePlan<G extends GraphDef>(
     branchRank,
     weights,
     preferredBranchId,
+  );
+  assertNoLostBranchAttachments(
+    registry,
+    [
+      ...repoint.endpointDeletedEdges,
+      ...deletionAbsorbed.map((staged) =>
+        withRepointedEndpoints(staged, canonicalOf),
+      ),
+    ],
+    deletedNodeIdSet,
   );
   for (const merged of repoint.edges) {
     for (const sourceId of merged.mergedIds) {
@@ -3541,6 +3606,119 @@ async function compositionMovedPartsAmong(
     });
   }
   return moved;
+}
+
+/**
+ * THE cross-branch composition finding: whether a branch's staged edge that the
+ * plan does not write because an endpoint is finally deleted — dropped by the
+ * repoint, or a re-windowed copy absorbed by the edge's own deletion — is a
+ * composition attachment the plan would silently lose, and if so which `cause`
+ * it is.
+ *
+ * One branch attached the part — moved it, created it under a whole, or
+ * re-attached it through a row ended at the merge base — while another
+ * branch's deletion took away one end of that attachment:
+ *
+ * - the part is deleted (directly, or by its old whole's cascade) and the
+ *   whole the branch attached it to survives: `"moved"`, the multi-branch
+ *   mirror of {@link compositionMovedPartsAmong}; `whole` is that survivor.
+ * - the whole is deleted and the part survives: `"deleted"`, the mirror of
+ *   {@link compositionOrphansAmong}; `whole` is the deleted whole.
+ *
+ * Anything else is ordinary: an edge that does not realize a composition pair,
+ * a staged row that does not attach its part (the predicate every composition
+ * reader shares, {@link stagedRowAttachesForBranch}), a plan that deletes BOTH
+ * ends, and an INHERITED row that already attached at the merge base, whose
+ * loss is the ordinary cascade or an edge delete/modify case. The incremental
+ * target's own attachments are
+ * excluded too: {@link compositionOrphansAmong} and
+ * {@link compositionMovedPartsAmong} already judge those against the target's
+ * live rows, so one situation never gets two verdicts.
+ *
+ * `fromKey`/`toKey` are the post-repoint identities the drop was decided on,
+ * so the finding names the canonical nodes the plan actually deletes or keeps.
+ */
+function lostBranchAttachment(
+  registry: KindRegistry,
+  dropped: EndpointDeletedEdge,
+  deletedNodes: ReadonlySet<MergeKey>,
+): MergePlanCompositionOrphan | undefined {
+  const { staged } = dropped;
+  if (staged.branchId === COMMITTED_TARGET_BRANCH) return undefined;
+  const partSide = registry.compositionPartSide(staged.kind);
+  if (partSide === undefined) return undefined;
+  const sourcePartKind = partSide === "from" ? staged.fromKind : staged.toKind;
+  if (!stagedRowAttachesForBranch(registry, sourcePartKind, staged)) {
+    return undefined;
+  }
+  const [partKey, wholeKey] =
+    partSide === "from" ?
+      [dropped.fromKey, dropped.toKey]
+    : [dropped.toKey, dropped.fromKey];
+  const partDeleted = deletedNodes.has(partKey);
+  if (partDeleted === deletedNodes.has(wholeKey)) return undefined;
+  return {
+    part: entityRef(partKey),
+    whole: entityRef(wholeKey),
+    viaEdgeKind: staged.kind,
+    cause: partDeleted ? "moved" : "deleted",
+    branchId: staged.branchId,
+  };
+}
+
+/**
+ * Whether the BRANCH is what makes this staged composition row attach its
+ * part: a row the branch created that attaches, or an inherited row that
+ * attaches in the staged copy but not at the merge base — a re-attachment
+ * through a row the base had already ended. An inherited row that attached
+ * at the base was not attached by the branch, whatever else it changed.
+ */
+function stagedRowAttachesForBranch(
+  registry: KindRegistry,
+  partKind: string,
+  staged: StagedEdge,
+): boolean {
+  const attaches = (validTo: string | undefined): boolean =>
+    compositionEdgeAttachesPart(registry, partKind, {
+      kind: staged.kind,
+      deleted_at: undefined,
+      valid_to: validTo,
+    });
+  if (staged.origin === BRANCH_CREATED_EDGE_ORIGIN) {
+    return attaches(staged.validTo);
+  }
+  const stagedValidTo =
+    staged.clearValidTo === true ?
+      undefined
+    : (staged.validTo ?? staged.baseValidTo);
+  return attaches(stagedValidTo) && !attaches(staged.baseValidTo);
+}
+
+/**
+ * Plan-time refusal of every {@link lostBranchAttachment}: throws
+ * `MergeCompositionOrphanError` for the first one — the repoint's drops in
+ * their (edge id, branch id) order, then the deletion-absorbed copies in
+ * staging order — so the refusal does not depend on the order the branches
+ * were passed in.
+ *
+ * Plan time, not apply time, because the conflict lives entirely in the
+ * branch diffs the plan froze: no target write can resolve it, so a later
+ * re-verification would only repeat this verdict. Every planning entry point
+ * builds its plan through `buildInternalMergePlan`, so all of them refuse
+ * here, ahead of the plan-time report — which is also why a required-existence
+ * part caught here is never additionally reported as `"unattached"`.
+ */
+function assertNoLostBranchAttachments(
+  registry: KindRegistry,
+  endpointDeletedEdges: readonly EndpointDeletedEdge[],
+  deletedNodes: ReadonlySet<MergeKey>,
+): void {
+  for (const dropped of endpointDeletedEdges) {
+    const finding = lostBranchAttachment(registry, dropped, deletedNodes);
+    if (finding !== undefined) {
+      throw new MergeCompositionOrphanError(finding);
+    }
+  }
 }
 
 /**

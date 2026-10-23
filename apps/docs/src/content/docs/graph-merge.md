@@ -1130,8 +1130,35 @@ type MergePlanCompositionOrphan = {
   whole?: { kind: string; id: string }; // absent for cause: "unattached"
   viaEdgeKind: string; // the realizing composition edge
   cause: "deleted" | "moved" | "unattached";
+  branchId?: string; // the attaching branch, for a cross-branch refusal
 };
 ```
+
+Two branches can also conflict with each other over one attachment: one
+branch moves a part (`reparent`), attaches a new part, or re-attaches a part
+by reopening an ended `oneActive` row (`clearValidTo`), while another
+branch's deletion removes one end of that attachment. Merged as-is, the
+attaching branch's composition edge would be dropped as
+`edge:endpoint-deleted` (a reopened row is absorbed by its deletion without
+even that) and its move would be lost. Every planning entry
+point (`merge`, `mergeIncremental`, `planMerge`, `planMergeIncremental`)
+therefore refuses at plan time with `MergeCompositionOrphanError`, and
+`details.branchId` names the attaching branch:
+
+- `cause: "moved"`: the part is deleted (directly, or by its old whole's
+  cascade) while the attaching branch put it under a whole that survives.
+  `whole` names that surviving whole.
+- `cause: "deleted"`: the whole is deleted while the attaching branch put a
+  surviving part under it. `whole` names the deleted whole.
+
+Because no target write can resolve this conflict, it is refused while the
+plan is built rather than reported in `compositionOrphans` for apply to
+re-check. The refusal comes before the plan-time report, so a required-existence part caught here is not also
+reported as `"unattached"`. If the plan deletes both the part and the whole,
+or the edge does not realize a composition pair, the edge is an ordinary
+`edge:endpoint-deleted` drop and the merge proceeds. A finding without
+`branchId` is about the target's own state, including the incremental
+target's own moves.
 
 This is a best-effort, unlocked dry-run read, surfaced for an operator to act
 on before approving the plan. `applyMergePlan` re-verifies the same finding

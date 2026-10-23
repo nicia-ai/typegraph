@@ -5367,6 +5367,7 @@ export type MergePlanCompositionOrphan = Readonly<{
     whole?: MergePlanEntityRef;
     viaEdgeKind: string;
     cause: "deleted" | "moved" | "unattached";
+    branchId?: string;
 }>;
 
 // @public

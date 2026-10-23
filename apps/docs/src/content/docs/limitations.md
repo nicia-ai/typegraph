@@ -384,7 +384,23 @@ before the affected nodes can be deleted.
   and `DroppedEdge` carries no endpoint data to recover the orphaned part
   from after the fact. The gap is caught after the fact by
   `store.verifyConstraintFences()`'s `compositionExistence` family run
-  separately against the merged store.
+  separately against the merged store. A composition attachment a branch made
+  is outside this gap — an edge it created, or an ended `oneActive` row it
+  reopened: when another branch's deletion removes one of its endpoints and the
+  other survives, planning refuses with `MergeCompositionOrphanError` (see
+  [Composition orphans](/graph-merge#composition-orphans)). The gap is limited
+  to composition edges that already attached their part at the branch point.
+- **Graph merge does not protect a reopened composition row from a
+  concurrent deletion of that same row.** If one branch moves a part back
+  under a whole by reopening an ended `oneActive` row (`clearValidTo`) while
+  another branch deletes that row itself, with both the part and the whole
+  surviving, the deletion wins under every `onDeleteModifyConflict` policy: a
+  window change is not a modification, so no `DeleteModifyConflict` is
+  recorded, and the absorbed reopen does not appear in `validityEnds`. If the
+  reopening branch also ended the part's other attachment, the merged part is
+  left with no whole and nothing reports it.
+  `store.verifyConstraintFences()`'s `compositionExistence` family reports
+  such a part only when its pair declares `existence: "required"`.
 
 ## Write Fence Row
 
