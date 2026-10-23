@@ -514,6 +514,15 @@ whole) has no whole to name — recompute the merge plan against the target's
 current state, or delete, attach or reconcile the part in the branch before
 merging.
 
+Every planning entry point (`merge`, `mergeIncremental`, `planMerge`,
+`planMergeIncremental`) also returns this error when two branches conflict
+over one composition attachment: one branch moves or attaches a part while
+another deletes the part (`cause: "moved"`, `whole` is the surviving whole
+the part was moved under) or the whole (`cause: "deleted"`, `whole` is the
+deleted whole). `details.branchId` names the attaching branch; it is absent on
+every finding about the target's own state. See
+[Composition orphans](/graph-merge#composition-orphans).
+
 ### Merge plan and evidence errors
 
 The reviewable merge lifecycle also returns errors in its `Result` arm. It does
@@ -1997,7 +2006,7 @@ try {
 | `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
-| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps |
+| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps; or, at planning, one branch's composition attachment loses its part or whole to another branch's deletion |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |

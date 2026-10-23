@@ -96,7 +96,11 @@ import {
   resolveDeleteModify,
   resolveEdgeDeleteModify,
 } from "./delete-modify";
-import type { MergedEdge, StagedEdge } from "./edge-repoint";
+import type {
+  EndpointDeletedEdge,
+  MergedEdge,
+  StagedEdge,
+} from "./edge-repoint";
 import {
   BRANCH_CREATED_EDGE_ORIGIN,
   buildCanonicalMap,
@@ -1817,6 +1821,11 @@ function buildInternalMergePlan<G extends GraphDef>(
     branchRank,
     weights,
     preferredBranchId,
+  );
+  assertNoLostBranchAttachments(
+    registry,
+    repoint.endpointDeletedEdges,
+    deletedNodeIdSet,
   );
   for (const merged of repoint.edges) {
     for (const sourceId of merged.mergedIds) {
@@ -3541,6 +3550,97 @@ async function compositionMovedPartsAmong(
     });
   }
   return moved;
+}
+
+/**
+ * THE cross-branch composition finding: whether a staged edge the repoint
+ * dropped for a finally-deleted endpoint is a branch's composition attachment
+ * that the drop would silently lose, and if so which `cause` it is.
+ *
+ * One branch attached the part — moved it, or created it under a whole —
+ * while another branch's deletion took away one end of that attachment:
+ *
+ * - the part is deleted (directly, or by its old whole's cascade) and the
+ *   whole the branch attached it to survives: `"moved"`, the multi-branch
+ *   mirror of {@link compositionMovedPartsAmong}; `whole` is that survivor.
+ * - the whole is deleted and the part survives: `"deleted"`, the mirror of
+ *   {@link compositionOrphansAmong}; `whole` is the deleted whole.
+ *
+ * Anything else stays an ordinary `edge:endpoint-deleted` drop: an edge that
+ * does not realize a composition pair, a row whose window no longer attaches
+ * its part (the predicate every composition reader shares), a plan that
+ * deletes BOTH ends, and an INHERITED edge, whose loss is the ordinary cascade
+ * or an edge delete/modify case. The incremental target's own attachments are
+ * excluded too: {@link compositionOrphansAmong} and
+ * {@link compositionMovedPartsAmong} already judge those against the target's
+ * live rows, so one situation never gets two verdicts.
+ *
+ * `fromKey`/`toKey` are the post-repoint identities the drop was decided on,
+ * so the finding names the canonical nodes the plan actually deletes or keeps.
+ */
+function lostBranchAttachment(
+  registry: KindRegistry,
+  dropped: EndpointDeletedEdge,
+  deletedNodes: ReadonlySet<MergeKey>,
+): MergePlanCompositionOrphan | undefined {
+  const { staged } = dropped;
+  if (
+    staged.origin !== BRANCH_CREATED_EDGE_ORIGIN ||
+    staged.branchId === COMMITTED_TARGET_BRANCH
+  ) {
+    return undefined;
+  }
+  const partSide = registry.compositionPartSide(staged.kind);
+  if (partSide === undefined) return undefined;
+  const sourcePartKind = partSide === "from" ? staged.fromKind : staged.toKind;
+  if (
+    !compositionEdgeAttachesPart(registry, sourcePartKind, {
+      kind: staged.kind,
+      deleted_at: undefined,
+      valid_to: staged.validTo,
+    })
+  ) {
+    return undefined;
+  }
+  const [partKey, wholeKey] =
+    partSide === "from" ?
+      [dropped.fromKey, dropped.toKey]
+    : [dropped.toKey, dropped.fromKey];
+  const partDeleted = deletedNodes.has(partKey);
+  if (partDeleted === deletedNodes.has(wholeKey)) return undefined;
+  return {
+    part: entityRef(partKey),
+    whole: entityRef(wholeKey),
+    viaEdgeKind: staged.kind,
+    cause: partDeleted ? "moved" : "deleted",
+    branchId: staged.branchId,
+  };
+}
+
+/**
+ * Plan-time refusal of every {@link lostBranchAttachment}: throws
+ * `MergeCompositionOrphanError` for the first one in the repoint's drop order
+ * (edge id, then branch id), so the refusal does not depend on the order the
+ * branches were passed in.
+ *
+ * Plan time, not apply time, because the conflict lives entirely in the
+ * branch diffs the plan froze: no target write can resolve it, so a later
+ * re-verification would only repeat this verdict. Every planning entry point
+ * builds its plan through `buildInternalMergePlan`, so all of them refuse
+ * here, ahead of the plan-time report — which is also why a required-existence
+ * part caught here is never additionally reported as `"unattached"`.
+ */
+function assertNoLostBranchAttachments(
+  registry: KindRegistry,
+  endpointDeletedEdges: readonly EndpointDeletedEdge[],
+  deletedNodes: ReadonlySet<MergeKey>,
+): void {
+  for (const dropped of endpointDeletedEdges) {
+    const finding = lostBranchAttachment(registry, dropped, deletedNodes);
+    if (finding !== undefined) {
+      throw new MergeCompositionOrphanError(finding);
+    }
+  }
 }
 
 /**

@@ -212,13 +212,26 @@ export type MergedEdge = Readonly<{
   ValidityEndMutation;
 
 /**
+ * A staged edge dropped because a repointed endpoint is finally deleted, with
+ * the post-repoint endpoint identities the drop was decided on. The report sees
+ * only its {@link DroppedEdge}; the orchestrator reads this to tell an ordinary
+ * drop from a branch's composition attachment the drop would silently lose.
+ */
+export type EndpointDeletedEdge = Readonly<{
+  staged: StagedEdge;
+  fromKey: MergeKey;
+  toKey: MergeKey;
+}>;
+
+/**
  * The outcome of the repoint + dedupe cascade: the surviving merged edges, every
- * edge dropped for a deleted endpoint, and every edge-level property conflict the
- * dedupe surfaced.
+ * edge dropped for a deleted endpoint (as a report item and as the staged edge it
+ * came from), and every edge-level property conflict the dedupe surfaced.
  */
 export type EdgeRepointResult<G extends GraphDef = GraphDef> = Readonly<{
   edges: readonly MergedEdge[];
   dropped: readonly DroppedEdge[];
+  endpointDeletedEdges: readonly EndpointDeletedEdge[];
   conflicts: readonly PropertyConflict<G>[];
 }>;
 
@@ -814,6 +827,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   preferredBranchId?: BranchId,
 ): EdgeRepointResult<G> {
   const dropped: DroppedEdge[] = [];
+  const endpointDeletedEdges: EndpointDeletedEdge[] = [];
   // Per `(from', type, to')` group → its members. Insertion order is irrelevant:
   // Phase 2 partitions the group, re-derives each survivor, and sorts the output
   // explicitly, so the bucket carries membership only.
@@ -834,6 +848,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
         id: staged.id,
         reason: ENDPOINT_DELETED_DROP_REASON,
       });
+      endpointDeletedEdges.push({ staged, fromKey, toKey });
       continue;
     }
 
@@ -911,6 +926,12 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   return {
     edges: sortedEdges,
     dropped: dropped.sort((left, right) => compareStrings(left.id, right.id)),
+    endpointDeletedEdges: endpointDeletedEdges.sort((left, right) => {
+      const byId = compareStrings(left.staged.id, right.staged.id);
+      return byId === 0 ?
+          compareStrings(left.staged.branchId, right.staged.branchId)
+        : byId;
+    }),
     conflicts: conflicts.sort((left, right) =>
       compareStrings(
         `${left.entityId}|${left.property}`,

@@ -237,6 +237,13 @@ export type MergePlanTypeReconciliation = Readonly<{
  * Surfaced here so a dry run reports it; apply re-verifies the same finding
  * under the write lock and refuses with `MergeCompositionOrphanError` when
  * it recurs.
+ *
+ * Between branches, the same two shapes are refused at plan time instead of
+ * reported, with `branchId` naming the branch whose attachment would be lost:
+ * `"moved"` when one branch attached a part to a whole that survives while
+ * another deletes the part, `"deleted"` when one branch attached a surviving
+ * part to a whole another deletes. No target write can resolve that conflict,
+ * so such a finding never appears in `MergePlanReview.compositionOrphans`.
  */
 export type MergePlanCompositionOrphan = Readonly<{
   part: MergePlanEntityRef;
@@ -244,6 +251,8 @@ export type MergePlanCompositionOrphan = Readonly<{
   whole?: MergePlanEntityRef;
   viaEdgeKind: string;
   cause: "deleted" | "moved" | "unattached";
+  /** The branch whose staged attachment the merge would lose; absent when the conflict is with the target's own state. */
+  branchId?: string;
 }>;
 
 export type MergePlanReview = Readonly<{
@@ -728,6 +737,7 @@ const mergePlanReviewSchema = z
           whole: mergePlanEntityRefSchema.optional(),
           viaEdgeKind: nonEmptyStringSchema,
           cause: z.enum(["deleted", "moved", "unattached"]),
+          branchId: nonEmptyStringSchema.optional(),
         })
         .strict(),
     ),
