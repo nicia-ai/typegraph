@@ -6,6 +6,7 @@ import {
 } from "../src/backend/capabilities/resolve";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
+import { SavepointRecoveryFailure } from "../src/backend/session-savepoint";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   createRecordedBackend,
@@ -202,7 +203,7 @@ describe("recorded-capture write-surface parity", () => {
             };
           },
         ),
-      ).rejects.toThrow("Failed to recover a TypeGraph recorded transaction");
+      ).rejects.toBeInstanceOf(SavepointRecoveryFailure);
       expect(await scope.flush()).toEqual(new Map());
     });
   });
