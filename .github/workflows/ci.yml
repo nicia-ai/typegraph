@@ -450,6 +450,30 @@ jobs:
       - name: Run Durable Objects SQLite tests (workerd)
         run: pnpm --filter @nicia-ai/typegraph test:do
 
+  test-doltlite:
+    name: DoltLite (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the pinned upstream binding with structured errors and vec1
+        run: pnpm --filter @nicia-ai/typegraph build:doltlite-binding
+      - run: pnpm --filter @nicia-ai/typegraph smoke:doltlite
+      - run: pnpm --filter @nicia-ai/typegraph test:doltlite
+      - run: pnpm --filter @nicia-ai/typegraph test:doltlite:merge
+
   build-artifacts:
     name: Build artifacts
     runs-on: ubuntu-24.04
@@ -495,6 +519,7 @@ jobs:
       - test-typescript-compat
       - test-postgres
       - test-durable-objects
+      - test-doltlite
     if: >-
       ${{
         !cancelled() &&

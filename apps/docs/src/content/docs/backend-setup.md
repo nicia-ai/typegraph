@@ -1,15 +1,97 @@
 ---
 title: Backend Setup
-description: Configure SQLite and PostgreSQL backends for TypeGraph
+description: Configure SQLite, PostgreSQL, PGlite, and DoltLite backends for TypeGraph
 ---
 
 TypeGraph stores graph data in your existing relational database using Drizzle ORM adapters.
-This guide covers setting up SQLite, PostgreSQL, and PGlite backends.
+This guide covers setting up SQLite, PostgreSQL, PGlite, and DoltLite backends.
 
 :::note[Custom indexes]
 TypeGraph migrations create the core tables and built-in indexes. For application-specific indexes
 on JSON properties (and Drizzle/drizzle-kit integration), see [Indexes](/performance/indexes).
 :::
+
+## DoltLite
+
+DoltLite embeds a versioned SQLite-compatible database. TypeGraph reuses its SQLite dialect,
+FTS5, schema lifecycle, identity, recorded history, and revision journal.
+
+The Node binding currently requires the upstream patch in
+`patches/doltlite-node-0.51.1.patch`: structured SQLite errors and builds with vec1 and math
+functions enabled. The published unpatched 0.51.1 binding is refused before opening user data.
+From a development checkout, with Node 22 or 24, a C/C++ compiler, Python 3, Git, and curl:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter @nicia-ai/typegraph build:doltlite-binding
+pnpm --filter @nicia-ai/typegraph test:doltlite
+pnpm --filter @nicia-ai/typegraph test:doltlite:merge
+```
+
+The build script pins the binding commit, verifies the released engine's published SHA-256,
+applies the reviewed patch, runs native regression checks, and links the built binding locally.
+Re-running `pnpm install` may replace that link; re-run the binding build in that case.
+This source-build requirement remains until an upstream release includes the fixes.
+
+The managed entrypoint returns a typed Store:
+
+```typescript
+import { createDoltliteStore } from "@nicia-ai/typegraph/doltlite";
+
+const store = await createDoltliteStore(graph, {
+  path: "./graph.db",
+  store: { history: true, revisionTracking: true },
+});
+```
+
+Omit `path` for a private in-memory database. Pass `branch` to pin an existing native branch.
+Use filesystem paths, not SQLite `file:` URIs. `busyTimeoutMs` defaults to zero so an async
+writer on another connection fails promptly rather than blocking the event loop while the
+first transaction waits to resume. Contention and stale snapshots retain distinct native codes;
+retry a refused write in a fresh transaction.
+
+`@dolthub/doltlite` and `drizzle-orm` are optional peers. The managed factory reports missing
+peers as `ConfigurationError` with `MISSING_PEER_DEPENDENCY`; install them with
+`npm install @dolthub/doltlite drizzle-orm` and use the patched binding described above.
+The explicit `@nicia-ai/typegraph/adapters/drizzle/doltlite` entrypoint exposes
+`createDoltliteBackend`, its Drizzle database, and the native connection. It eagerly loads
+Drizzle, so importing it without that peer reports a raw module-resolution error
+(`npm install drizzle-orm`).
+
+Vector search uses exact vec1 cosine or Euclidean distance. Declare embedding fields with
+`embedding(dimensions, { indexType: "none" })`. Filtering and pagination operate on the exact
+ranked results; vector and fulltext predicates support the shared fusion API. `inner_product`,
+ANN indexes, training parameters, and `efSearch` are unsupported and refused. Pass `vector: false`
+to use a binding without vec1/math support. Recorded-time queries refuse current-only vector
+and fulltext indexes, as on other backends.
+
+The native adapter also exports `commitDoltlite(store, message)` and
+`doltliteWorkingCopyStrategy()`. A checkpoint includes the entire native database branch,
+including other graphs sharing that file. Checkpoints are refused inside an open SQL/Store
+transaction. The working-copy strategy requires file-backed storage, checkpoints an exact
+native commit, opens an independent branch-pinned connection, verifies TypeGraph's base
+version, and releases the temporary branch on close. Apply changes through TypeGraph's
+semantic graph merge; raw `dolt_merge()` does not reconcile recorded clocks or lineage.
+Native branch names do not change the base Store's connection or schema cache.
+
+### DoltLite capability parity
+
+| Capability | DoltLite behavior |
+| --- | --- |
+| Typed queries, schema evolution, identity, history, revision journal | Shared SQLite implementation and conformance suites |
+| Writer exclusion | One writer per file; competing writers fail with structured busy codes |
+| Fulltext and fusion | FTS5; fixed tokenizer language, with vector/fulltext fusion |
+| Vector search | Exact cosine/L2, index type `none`; ANN and frontier tuning refused |
+| Working copies | Native file-backed branches; TypeGraph semantic merge and managed cleanup |
+| Recorded vector/fulltext queries | Refused because the indexes are current-only |
+| Native commit inside a Store transaction | Refused by the managed checkpoint API |
+
+One durable writer owns the database file, even across branches. Raw access through the
+native connection can bypass the managed checkpoint guard: DoltLite version-control commands
+may commit an enclosing SQL transaction. Use the managed APIs when operating on a Store.
+Backup and restore must preserve the native DoltLite file and its history, not SQLite page
+images; follow DoltLite's supported backup/GC procedures. Browser/WASM and non-Linux platforms
+are not validated by the Node/Linux lane.
 
 ## SQLite
 

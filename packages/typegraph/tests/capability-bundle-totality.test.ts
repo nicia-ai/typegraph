@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("41 reasoned entries sum to 125 accesses; 50 deferred entries sum to 243", () => {
+  it("41 reasoned entries sum to 126 accesses; 50 deferred entries sum to 243", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -167,7 +167,8 @@ describe("capability bundle totality (T9)", () => {
     // add four accesses. The graph storage inventory resolves the
     // graph-relation names through one tableNames access and reads the session
     // isolation expression through one fenceSql access: 123 -> 125.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(125);
+    // The managed DoltLite factory adds one guarded bootstrapTables access.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(126);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

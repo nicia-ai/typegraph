@@ -152,7 +152,8 @@ describe("drizzle zone inventory (I1)", () => {
   );
 
   it("every zone entry names an existing file and carries a non-empty reason", () => {
-    expect(DRIZZLE_ZONE.length).toBe(35);
+    // The native DoltLite transport adds one explicitly reasoned Drizzle module.
+    expect(DRIZZLE_ZONE.length).toBe(36);
 
     const seen = new Set<string>();
     const duplicates: string[] = [];

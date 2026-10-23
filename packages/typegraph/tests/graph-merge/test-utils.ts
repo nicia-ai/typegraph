@@ -370,6 +370,19 @@ export type BackendMatrixEntry = Readonly<{
  */
 export function backendMatrix(): readonly BackendMatrixEntry[] {
   const selectedBackend = process.env["TYPEGRAPH_TEST_BACKEND"];
+  if (selectedBackend === "doltlite") {
+    return [
+      {
+        name: "DoltLite",
+        make: async () => {
+          const { createDoltliteBackend } =
+            await import("../../src/backend/doltlite");
+          const { backend } = await createDoltliteBackend({ vector: false });
+          return { backend, cleanup: () => backend.close() };
+        },
+      },
+    ];
+  }
   if (selectedBackend !== undefined && selectedBackend !== "postgres") {
     throw new Error(`Unsupported TYPEGRAPH_TEST_BACKEND: ${selectedBackend}`);
   }

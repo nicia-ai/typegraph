@@ -4345,8 +4345,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly bootstrapTables: {
         readonly kind: "reasoned";
-        readonly reason: "One-shot provisioning hook consulted by createStore and the managed libSQL legacy fallback before any capability question exists; it has no operation that could refuse or degrade.";
-        readonly accesses: 4;
+        readonly reason: "One-shot provisioning hook consulted by createStore, the managed libSQL legacy fallback, and the managed DoltLite factory before any capability question exists; it has no operation that could refuse or degrade.";
+        readonly accesses: 5;
     };
     readonly tableNames: {
         readonly kind: "reasoned";

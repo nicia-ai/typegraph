@@ -44,6 +44,7 @@ import {
   createSqlSchema,
   recordedRelation,
 } from "@nicia-ai/typegraph";
+import { createDoltliteStore } from "@nicia-ai/typegraph/doltlite";
 import { createLocalPgliteStore } from "@nicia-ai/typegraph/postgres/pglite";
 import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
 import { defineGraphExtension } from "@nicia-ai/typegraph/graph-extension";
@@ -410,6 +411,16 @@ export async function exerciseStrictLocalConsumers(): Promise<
       await createLocalSqliteStore(graph, { store: { recordedRead } });
     const pgliteRecorded: RecordedReadStore<typeof graph> =
       await createLocalPgliteStore(graph, { store: { recordedRead } });
+    const doltliteDefault: Store<typeof graph> =
+      await createDoltliteStore(graph);
+    const doltliteHistory: HistoryStore<typeof graph> =
+      await createDoltliteStore(graph, { store: { history: true } });
+    const doltliteRecorded: RecordedReadStore<typeof graph> =
+      await createDoltliteStore(graph, { store: { recordedRead } });
+    // @ts-expect-error Managed DoltLite stores omit caller-owned transaction adoption.
+    doltliteDefault.withTransaction({});
+    void doltliteHistory;
+    void doltliteRecorded;
     const widenedLiveOptions = {} as LiveStoreOptions;
     const widenedStoreOptions = {} as StoreOptions;
     const sqliteLive = await createLocalSqliteStore(graph, {

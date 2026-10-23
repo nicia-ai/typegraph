@@ -31,6 +31,8 @@ const SHARED_EXCLUDE = [
   // #140: workerd-only do-sqlite suite — runs via `test:do`
   // (vitest.workers.config.ts), not the Node suite.
   "tests/do-sqlite/**",
+  // Experimental engine conformance is opt-in via test:doltlite.
+  "tests/doltlite/**",
   "**/dist/**",
   "**/.{idea,git,cache,output,temp}/**",
   "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc}.config.*",
@@ -41,6 +43,14 @@ const UNIT_PROPERTY_EXCLUDE = UNIT_SCOPE ? ["tests/property/**"] : [];
 export default defineConfig({
   resolve: {
     alias: {
+      "@nicia-ai/typegraph/doltlite": resolve(
+        __dirname,
+        "src/backend/doltlite/store.ts",
+      ),
+      "@nicia-ai/typegraph/adapters/drizzle/doltlite": resolve(
+        __dirname,
+        "src/backend/doltlite/index.ts",
+      ),
       "@nicia-ai/typegraph/sqlite/local": resolve(
         __dirname,
         "src/backend/sqlite/local-store.ts",
