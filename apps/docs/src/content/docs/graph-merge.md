@@ -1135,10 +1135,12 @@ type MergePlanCompositionOrphan = {
 ```
 
 Two branches can also conflict with each other over one attachment: one
-branch moves a part (`reparent`) or attaches a new part, while another
+branch moves a part (`reparent`), attaches a new part, or re-attaches a part
+by reopening an ended `oneActive` row (`clearValidTo`), while another
 branch's deletion removes one end of that attachment. Merged as-is, the
-attaching branch's composition edge would only show up in `dropped` as
-`edge:endpoint-deleted` and its move would be lost. Every planning entry
+attaching branch's composition edge would be dropped as
+`edge:endpoint-deleted` (a reopened row is absorbed by its deletion without
+even that) and its move would be lost. Every planning entry
 point (`merge`, `mergeIncremental`, `planMerge`, `planMergeIncremental`)
 therefore refuses at plan time with `MergeCompositionOrphanError`, and
 `details.branchId` names the attaching branch:

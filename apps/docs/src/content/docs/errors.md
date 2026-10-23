@@ -516,8 +516,8 @@ merging.
 
 Every planning entry point (`merge`, `mergeIncremental`, `planMerge`,
 `planMergeIncremental`) also returns this error when two branches conflict
-over one composition attachment: one branch moves or attaches a part while
-another deletes the part (`cause: "moved"`, `whole` is the surviving whole
+over one composition attachment: one branch moves, attaches or re-attaches
+(reopens an ended `oneActive` row) a part while another deletes the part (`cause: "moved"`, `whole` is the surviving whole
 the part was moved under) or the whole (`cause: "deleted"`, `whole` is the
 deleted whole). `details.branchId` names the attaching branch; it is absent on
 every finding about the target's own state. See

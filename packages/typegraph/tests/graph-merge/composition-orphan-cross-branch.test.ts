@@ -11,6 +11,11 @@
  *  - `cause: "deleted"`: the whole is deleted while the attaching branch moved
  *    a surviving part under it.
  *
+ * Moving a part back under a whole by reopening an ENDED `oneActive` row
+ * (`clearValidTo`) is an attachment too. That row existed at the fork point,
+ * so another branch's deletion absorbs it without even a drop; it gets the
+ * same refusal.
+ *
  * When the plan deletes BOTH ends, or the edge does not realize a composition
  * pair, the edge is an ordinary `edge:endpoint-deleted` drop and the merge
  * proceeds.
@@ -90,6 +95,9 @@ function buildGraph(
   });
 }
 type G = ReturnType<typeof buildGraph>;
+type AttachEdgeId = Awaited<
+  ReturnType<Store<G>["edges"]["attach"]["find"]>
+>[number]["id"];
 
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
@@ -422,6 +430,174 @@ describe.each(backendMatrix())(
           open.map((edge) => ({ partId: edge.fromId, wholeId: edge.toId })),
         ).toEqual([{ partId: P1, wholeId: W1 }]);
       });
+    });
+
+    describe.each(
+      FIXTURES.filter((fixture) => fixture.population === "oneActive"),
+    )("re-attachment through an ended row, $orientation", ({ orientation }) => {
+      const graph = buildGraph(orientation, "oneActive");
+
+      /**
+       * The fork point holds `p1` under `w1` through an open row, and an ENDED
+       * row from an earlier attachment to `w2`. The attaching branch moves `p1`
+       * back to `w2` by ending the `w1` row and reopening the `w2` row.
+       */
+      async function makeReopenForkPoint(): Promise<
+        Readonly<{
+          forkPoint: Store<G>;
+          toW1: AttachEdgeId;
+          toW2: AttachEdgeId;
+        }>
+      > {
+        const [forkPoint] = await createStoreWithSchema(
+          graph,
+          await makeBackend(),
+          { revisionTracking: true },
+        );
+        await forkPoint.nodes.Whole.create({}, { id: W1 });
+        await forkPoint.nodes.Whole.create({}, { id: W2 });
+        await forkPoint.nodes.Part.create(
+          {},
+          { id: P1, partOf: { whole: { kind: "Whole", id: W2 } } },
+        );
+        await forkPoint.nodes.Part.reparent(P1, {
+          whole: { kind: "Whole", id: W1 },
+        });
+        const rows = await forkPoint.edges.attach.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        const rowTo = (wholeId: string): AttachEdgeId => {
+          const row = rows.find(
+            (edge) => attachmentOf(orientation, edge).wholeId === wholeId,
+          );
+          if (row === undefined)
+            throw new Error(`expected a row to ${wholeId}`);
+          return row.id;
+        };
+        return { forkPoint, toW1: rowTo(W1), toW2: rowTo(W2) };
+      }
+
+      async function reopenUnderW2(
+        attacher: GraphBranch<G>,
+        rows: Readonly<{ toW1: AttachEdgeId; toW2: AttachEdgeId }>,
+      ): Promise<void> {
+        await attacher.store.edges.attach.update(
+          rows.toW1,
+          {},
+          { validTo: new Date().toISOString() },
+        );
+        await attacher.store.edges.attach.update(
+          rows.toW2,
+          {},
+          { clearValidTo: true },
+        );
+      }
+
+      async function expectReopenForkPointState(
+        store: Store<G>,
+      ): Promise<void> {
+        await expect(store.nodes.Whole.getById(W2)).resolves.toBeDefined();
+        await expect(store.nodes.Part.getById(P1)).resolves.toBeDefined();
+        const edges = await store.edges.attach.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        expect(
+          edges
+            .map((edge) => ({
+              wholeId: attachmentOf(orientation, edge).wholeId,
+              open: edge.meta.validTo === undefined,
+            }))
+            .toSorted((left, right) =>
+              left.wholeId.localeCompare(right.wholeId),
+            ),
+        ).toEqual([
+          { wholeId: W1, open: true },
+          { wholeId: W2, open: false },
+        ]);
+      }
+
+      const SHAPES = [
+        {
+          shape: "the whole",
+          cause: "deleted",
+          deleteEnd: (deleter: GraphBranch<G>) =>
+            deleter.store.nodes.Whole.delete(W2),
+        },
+        {
+          shape: "the part",
+          cause: "moved",
+          deleteEnd: (deleter: GraphBranch<G>) =>
+            deleter.store.nodes.Part.delete(P1),
+        },
+      ] as const;
+
+      it.each(
+        SHAPES.flatMap((shape) =>
+          BRANCH_ORDERS.map((order) => ({ ...shape, ...order })),
+        ),
+      )(
+        "refuses a reopened attachment when another branch deletes $shape ($order)",
+        async ({ cause, deleteEnd, deleterFirst }) => {
+          const { forkPoint, ...rows } = await makeReopenForkPoint();
+          const deleter = await makeBranchOf(forkPoint, BRANCH_A);
+          await deleteEnd(deleter);
+          const attacher = await makeBranchOf(forkPoint, BRANCH_B);
+          await reopenUnderW2(attacher, rows);
+
+          const expected = {
+            part: { kind: "Part", id: P1 },
+            whole: { kind: "Whole", id: W2 },
+            viaEdgeKind: "attach",
+            cause,
+            branchId: BRANCH_B,
+          } as const;
+          const branches = ordered(deleter, attacher, deleterFirst);
+          expectCompositionRefusal(
+            await planMergeIncremental<G>({
+              forkPoint,
+              target: forkPoint,
+              branches,
+            }),
+            expected,
+            "planMergeIncremental",
+          );
+          expectCompositionRefusal(
+            await merge(forkPoint, branches),
+            expected,
+            "merge",
+          );
+          await expectReopenForkPointState(forkPoint);
+        },
+      );
+
+      it.each(SHAPES)(
+        "refuses a reopened attachment the branch also edits when another branch deletes $shape",
+        async ({ cause, deleteEnd }) => {
+          const { forkPoint, ...rows } = await makeReopenForkPoint();
+          const deleter = await makeBranchOf(forkPoint, BRANCH_A);
+          await deleteEnd(deleter);
+          const attacher = await makeBranchOf(forkPoint, BRANCH_B);
+          await reopenUnderW2(attacher, rows);
+          await attacher.store.edges.attach.update(rows.toW2, {
+            note: "reopened",
+          });
+
+          expectCompositionRefusal(
+            await merge(forkPoint, [deleter, attacher]),
+            {
+              part: { kind: "Part", id: P1 },
+              whole: { kind: "Whole", id: W2 },
+              viaEdgeKind: "attach",
+              cause,
+              branchId: BRANCH_B,
+            },
+            "merge",
+          );
+          await expectReopenForkPointState(forkPoint);
+        },
+      );
     });
 
     describe("every planning entry point", () => {
