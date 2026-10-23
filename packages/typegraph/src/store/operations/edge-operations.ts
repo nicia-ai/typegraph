@@ -444,6 +444,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
      */
     validateAcyclicity?: boolean;
     lock?: GraphWriteLock;
+    /** See {@link assertCompositionEdgeWindowCurrent}. */
+    operationInstant?: string | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
@@ -515,6 +517,7 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     ctx,
     { kind, id, fromKind, fromId: input.fromId, toKind, toId: input.toId },
     { validFrom, validTo },
+    options?.operationInstant,
   );
 
   // Check cardinality constraints
@@ -651,6 +654,12 @@ function edgeAcyclic<G extends GraphDef>(
  * `assertCompositionWindowCurrent`'s rule, applied to an edge write of any
  * kind (a non-composition kind passes untouched). Read-free, so every create
  * and update reaches it before the frame's first statement.
+ *
+ * "Now" is one clock read, except on the two writes of a `reparent`: those
+ * pass the move instant as `operationInstant`, because that instant was
+ * already judged by the move's own rules (`assertCompositionMoveCurrent` for
+ * a stated `at`, `resolveCompositionMoveInstant` for a defaulted one, which
+ * can only reach past the clock to the start of the window it ends).
  */
 function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -666,10 +675,11 @@ function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
   }>,
+  operationInstant: string | undefined,
 ): void {
   const subject = compositionWindowSubject(ctx.registry, edge);
   if (subject === undefined) return;
-  assertCompositionWindowCurrent(subject, window, nowIso());
+  assertCompositionWindowCurrent(subject, window, operationInstant ?? nowIso());
 }
 
 /**
@@ -2428,6 +2438,8 @@ type EdgeUpdateOptions = Readonly<{
   matchProps?: Record<string, unknown>;
   /** See {@link assertCompositionExistencePreserved}'s `reattachedPart`. */
   reattachedPart?: CompositionNodeRef;
+  /** See {@link assertCompositionEdgeWindowCurrent}. */
+  operationInstant?: string;
 }>;
 
 /**
@@ -2501,6 +2513,7 @@ async function prepareEdgeUpdate<G extends GraphDef>(
       toId: existing.to_id,
     },
     { validFrom: appliedValidFrom, validTo },
+    options?.operationInstant,
   );
   const declarations = edgeCardinalityDeclarations(ctx, input.identity.kind);
   const reentersLivePopulation =
@@ -3058,7 +3071,9 @@ async function writeEdgeUpdateSet<G extends GraphDef>(
  * take. `reattachedPart` is the reparent's own evidence that this part is
  * not being detached at all (see `assertCompositionExistencePreserved`), so
  * the required-existence refusal is APPLIED with the frame's real end state
- * rather than bypassed.
+ * rather than bypassed. `validTo` is the move instant, and the window rule
+ * judges it as the move's operation instant
+ * ({@link assertCompositionEdgeWindowCurrent}).
  */
 export async function endCompositionEdgeWindow<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -3074,7 +3089,7 @@ export async function endCompositionEdgeWindow<G extends GraphDef>(
     compositionEdgeWindowEndInput(edge, validTo),
     session,
     target,
-    { reattachedPart },
+    { reattachedPart, operationInstant: validTo },
     edge,
     lock,
   );
@@ -3108,7 +3123,7 @@ export async function assertCompositionEdgeWindowEndable<G extends GraphDef>(
     ctx,
     compositionEdgeWindowEndInput(edge, validTo),
     target,
-    { reattachedPart },
+    { reattachedPart, operationInstant: validTo },
     edge,
     lock,
   );

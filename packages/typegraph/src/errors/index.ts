@@ -1203,6 +1203,11 @@ export class CompositionCycleError extends TypeGraphError {
  *   exist yet.
  * - `"futureMove"` (`COMPOSITION_MOVE_FUTURE`): `reparent`/`bulkReparent`
  *   names an `at` later than the operation clock.
+ * - `"moveBeforeIncumbent"` (`COMPOSITION_MOVE_BEFORE_INCUMBENT`):
+ *   `reparent`/`bulkReparent` names an `at` earlier than the `validFrom` of
+ *   the `population: "oneActive"` attachment the move would end, so the
+ *   ended window would close before it opened. `incumbentEdgeKind` /
+ *   `incumbentEdgeId` name that attachment's realizing edge.
  *
  * Composition membership is a fact of a row, not of an instant: a row with
  * no `validTo` is the part's current attachment and an ended row is history,
@@ -1240,6 +1245,17 @@ export type CompositionErrorDetails =
       wholeId: string;
       at: string;
       operationInstant: string;
+    }>
+  | Readonly<{
+      situation: "moveBeforeIncumbent";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      incumbentEdgeKind: string;
+      incumbentEdgeId: string;
+      incumbentValidFrom: string;
+      at: string;
     }>;
 
 /**
@@ -1288,6 +1304,14 @@ function describeCompositionRefusal(
         message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": the move instant is later than the operation clock "${details.operationInstant}".`,
         suggestion:
           "Omit `at` to move the part now, or pass an instant at or before the current time. A move cannot be scheduled for later.",
+      };
+    }
+    case "moveBeforeIncumbent": {
+      return {
+        code: "COMPOSITION_MOVE_BEFORE_INCUMBENT",
+        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": its current attachment (edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}) starts at "${details.incumbentValidFrom}", so ending it at the move instant would close it before it opened.`,
+        suggestion:
+          "Pass an `at` at or after the current attachment's validFrom, or omit `at` to move the part at the later of the current time and that validFrom.",
       };
     }
   }

@@ -266,6 +266,7 @@ import {
   type CompositionAttachmentRequest,
   type CompositionCreateWork,
   type CompositionIncumbentDisposition,
+  type CompositionMoveInstant,
   decideCompositionAttachmentUnderFence,
   type FencedCompositionAttachment,
   findLiveCompositionAttachment,
@@ -275,6 +276,7 @@ import {
   readReparentOptions,
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
+  resolveCompositionMoveInstant,
 } from "./composition-create";
 import {
   createEdgeBatchValidationBackend,
@@ -3334,6 +3336,8 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   options: Readonly<{
     endpoints: CompositionEndpointEvidence;
     validateAcyclicity: boolean;
+    /** A move's instant; see `assertCompositionEdgeWindowCurrent`. */
+    operationInstant?: string | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   if (options.endpoints.source === "primedWhole") {
@@ -3345,6 +3349,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
     validateCardinality: true,
     validateAcyclicity: options.validateAcyclicity,
     lock,
+    operationInstant: options.operationInstant,
   });
 }
 
@@ -3687,8 +3692,11 @@ function attachmentWindow(
 type DecidedAttachmentMove = Readonly<{
   partId: string;
   decided: FencedCompositionAttachment;
-  /** The caller-stated move instant (`reparent`'s `at`), when there is one. */
-  moveAt: string | undefined;
+  /**
+   * `reparent`'s move instant, stated or defaulted. Absent on every other
+   * surface, none of which can decide `"replace"`.
+   */
+  moveAt: CompositionMoveInstant | undefined;
   /**
    * What the frame already knows about the two endpoint rows
    * ({@link CompositionEndpointEvidence}): `"restoredByUpdate"` for a tombstone
@@ -3738,8 +3746,9 @@ type PreparedAttachmentMove = Readonly<{
  *   window end ({@link assertCompositionEdgeWindowEndable}) and a `one`
  *   incumbent's delete ({@link assertCompositionExistencePreserved}).
  *
- * `"replace"` reads ONE clock value per move — the instant the incumbent
- * window ends is the instant the new attachment begins.
+ * `"replace"` decides ONE instant per move ({@link incumbentRetire}) — the
+ * instant the incumbent window ends is the instant the new attachment begins,
+ * and the instant both edge writes judge their window against.
  */
 async function prepareCompositionAttachmentMoves<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3771,16 +3780,18 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     const { work } = decided.request;
     const part = { kind: work.partKind, id: partId };
     const retire = retires[index];
+    const moveInstant = retire?.moveInstant ?? moveAt?.at;
     const replacement = await prepareCompositionCreateEdge(
       ctx,
       validationTarget,
       lock,
       work,
       partId,
-      attachmentWindow(work, retire?.moveInstant ?? moveAt),
+      attachmentWindow(work, moveInstant),
       {
         endpoints,
         validateAcyclicity: false,
+        operationInstant: moveInstant,
       },
     );
     registerPendingEdgeForCardinality(
@@ -3845,12 +3856,12 @@ type IncumbentRetire = NonNullable<PreparedAttachmentMove["retire"]>;
  * that retires nothing. The population is the one declared on the
  * incumbent's OWN pair, resolved through the realizing edge that holds the
  * attachment: a `one` incumbent is deleted, a `oneActive` one has its window
- * ended at the move instant — one clock read, shared by the ended window and
- * the new one.
+ * ended at the move instant — one instant, shared by the ended window and the
+ * new one, decided against the incumbent by `resolveCompositionMoveInstant`.
  */
 function incumbentRetire<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  { decided, moveAt }: DecidedAttachmentMove,
+  { partId, decided, moveAt }: DecidedAttachmentMove,
 ): IncumbentRetire | undefined {
   if (decided.disposition !== "replace") return undefined;
   const incumbent = requireDefined(
@@ -3863,11 +3874,18 @@ function incumbentRetire<G extends GraphDef>(
     incumbent.whole.kind,
     incumbent.edge.kind,
   );
-  return {
-    incumbent: incumbent.edge,
-    population,
-    moveInstant: moveAt ?? nowIso(),
-  };
+  const moveInstant = resolveCompositionMoveInstant(
+    {
+      part: { kind: decided.request.work.partKind, id: partId },
+      whole: decided.request.work.whole,
+      moveAt: requireDefined(
+        moveAt,
+        'a composition attachment decided "replace" outside reparent, which alone states a move instant',
+      ),
+    },
+    population === "oneActive" ? incumbent.edge : undefined,
+  );
+  return { incumbent: incumbent.edge, population, moveInstant };
 }
 
 /** The incumbent's row and the state its retire leaves it in. */
@@ -4053,7 +4071,6 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
   lock: GraphWriteLock,
   partId: string,
   request: CompositionAttachmentRequest,
-  moveAt?: string,
 ): Promise<AttachmentApplyResult> {
   const decided = await decideCompositionAttachmentUnderFence(
     ctx.registry,
@@ -4070,7 +4087,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
     target,
     lock,
     await prepareCompositionAttachmentMoves(ctx, target, lock, "nodes.attach", [
-      { partId, decided, moveAt, endpoints: { source: "read" } },
+      { partId, decided, moveAt: undefined, endpoints: { source: "read" } },
     ]),
   );
   return requireDefined(
@@ -4929,7 +4946,6 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
   id: string,
   request: CompositionAttachmentRequest,
   backend: GraphBackend | TransactionBackend,
-  moveAt?: string,
 ): Promise<AttachmentApplyResult> {
   const gate = await backend.getNode(ctx.graphId, kind, id);
   if (!gate || !isLiveNodeRow(gate)) throw new NodeNotFoundError(kind, id);
@@ -4960,7 +4976,6 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
         lock,
         id,
         request,
-        moveAt,
       );
     },
     { didWrite: (applied) => applied.wrote },

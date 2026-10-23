@@ -1120,6 +1120,16 @@ export type CompositionErrorDetails = Readonly<{
     wholeId: string;
     at: string;
     operationInstant: string;
+}> | Readonly<{
+    situation: "moveBeforeIncumbent";
+    partKind: string;
+    partId: string;
+    wholeKind: string;
+    wholeId: string;
+    incumbentEdgeKind: string;
+    incumbentEdgeId: string;
+    incumbentValidFrom: string;
+    at: string;
 }>;
 
 // @public
