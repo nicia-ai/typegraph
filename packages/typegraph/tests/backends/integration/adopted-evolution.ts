@@ -184,6 +184,37 @@ export function registerAdoptedEvolutionIntegrationTests(
       expect(active?.version).toBe(plan.result.version);
     });
 
+    it("refuses to adopt a native transaction handle whose transaction has ended", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      const adopt = backend.adoptSchemaWriteTransaction;
+      if (adopt === undefined) {
+        const plan = await store.planEvolution(extension);
+        await assertUnsupportedAdoption(() =>
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async () => {
+              await Promise.resolve();
+            }),
+          ),
+        );
+        return;
+      }
+      const endedTransaction = await backend.transactionWithNative(
+        (_target, nativeTx) => Promise.resolve(nativeTx),
+      );
+
+      await expect(
+        adopt(endedTransaction, graph.id, { waitBudgetMs: 1000 }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+
+      const person = await store.nodes.AdoptedPerson.create({
+        name: "after the refused adoption",
+      });
+      await expect(
+        store.nodes.AdoptedPerson.getById(person.id),
+      ).resolves.toMatchObject({ name: "after the refused adoption" });
+    });
+
     it("refuses copied plans and plans for another graph before the callback", async () => {
       const backend = context.getBackend();
       const [store] = await createAdapterStoreWithSchema(graph, backend);
