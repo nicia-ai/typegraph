@@ -546,3 +546,117 @@ describe("reparent across a backward clock step", () => {
     }
   });
 });
+
+/**
+ * Steps the fake clock back by `stepMs` as the write transaction opens: after
+ * `reparent` has read its default instant, before any edge write is judged.
+ */
+function clockSteppingBackOnTransactionBackend(
+  base: GraphBackend,
+  stepMs: number,
+): GraphBackend {
+  return deriveBackend(base, {
+    transaction: (run, options) => {
+      vi.setSystemTime(new Date(Date.now() - stepMs));
+      return base.transaction(run, options);
+    },
+  });
+}
+
+describe("the instant a move's edge writes are judged at", () => {
+  it("is the move instant, so a clock step between the move's clock read and its writes refuses nothing", async () => {
+    try {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(CLOCK_START));
+      const backend = createTestBackend();
+      const [store] = await createStoreWithSchema(
+        buildGraph("reparent_step_mid_move"),
+        backend,
+      );
+      const showA = await store.nodes.RiShow.create({});
+      const showB = await store.nodes.RiShow.create({});
+      const clip = await store.nodes.RiClip.create(
+        {},
+        { partOf: { whole: { kind: "RiShow", id: showA.id } } },
+      );
+      const readAt = "2026-03-01T00:01:00.000Z";
+      vi.setSystemTime(new Date(readAt));
+      const [steppingStore] = await createStoreWithSchema(
+        buildGraph("reparent_step_mid_move"),
+        clockSteppingBackOnTransactionBackend(backend, 30_000),
+      );
+
+      // MUTATION: judge the composition window rule at a fresh clock read
+      // only (`moveInstant ?? nowIso()` → `nowIso()` in
+      // `assertCompositionEdgeWindowCurrent`, src/store/operations/edge-operations.ts).
+      // The new edge's validFrom — the read taken before the step — is then
+      // refused as COMPOSITION_VALIDITY_FUTURE_START.
+      const moved = await steppingStore.nodes.RiClip.reparent(clip.id, {
+        whole: { kind: "RiShow", id: showB.id },
+      });
+      expect(moved.edge.meta.validFrom).toBe(readAt);
+      const history = await steppingStore.edges.riClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      const retired = requireDefined(
+        history.find((edge) => edge.toId === showA.id),
+        "the retired attachment",
+      );
+      expect(retired.meta.validTo).toBe(readAt);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is not a caller option: an edge write stating one is still judged at the clock", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("move_instant_not_public"),
+      createTestBackend(),
+    );
+    const show = await store.nodes.RiShow.create({});
+    const otherShow = await store.nodes.RiShow.create({});
+    const clip = await store.nodes.RiClip.create(
+      {},
+      { partOf: { whole: { kind: "RiShow", id: show.id } } },
+    );
+    const [held] = await store.edges.riClipOf.find({});
+    const later = "2999-01-01T00:00:00.000Z";
+
+    // MUTATION: forward the caller's update options into the internal ones —
+    // spread `options` into `buildUpdateEdgeInput`'s result
+    // (src/store/collections/edge-collection.ts) and pass that input as
+    // `executeEdgeUpdate`'s `EdgeUpdateOptions`. The stated instant then
+    // admits the future `validTo`, which reaches the existence rule instead.
+    const updateRefusal = await store.edges.riClipOf
+      .update(
+        requireDefined(held, "the clip's attachment").id,
+        {},
+        {
+          validTo: later,
+          // @ts-expect-error a move's instant is internal; no edge write takes one
+          moveInstant: later,
+        },
+      )
+      .catch((error: unknown) => error);
+    expect(updateRefusal).toMatchObject({
+      code: "COMPOSITION_VALIDITY_FUTURE_END",
+    });
+
+    const createRefusal = await store.edges.riClipOf
+      .create(
+        clip,
+        otherShow,
+        {},
+        {
+          validFrom: later,
+          // @ts-expect-error a move's instant is internal; no edge write takes one
+          moveInstant: later,
+        },
+      )
+      .catch((error: unknown) => error);
+    expect(createRefusal).toMatchObject({
+      code: "COMPOSITION_VALIDITY_FUTURE_START",
+    });
+  });
+});

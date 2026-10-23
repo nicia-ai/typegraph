@@ -545,6 +545,9 @@ takes no `validFrom` or `validTo` — stating either is a compile error and a
 a window edit on the realizing edge. A malformed `at` is refused under
 `options.at`, and an `at` later than now with `CompositionError`
 (`COMPOSITION_MOVE_FUTURE`): a move happens when it is made, never scheduled.
+The move's two edge writes — the old window's end and the new edge — are
+judged at the move instant rather than a second clock read, so they agree
+with the instant the move was judged at.
 Like every other batch method, `bulkReparent` fires no operation hooks;
 `reparent` fires one `update` operation for the part it moves.
 
@@ -792,7 +795,8 @@ Tier 1 is enforced, in full, at write time:
   later than the write that states it — every write path refuses one with
   `CompositionError` (`COMPOSITION_VALIDITY_FUTURE_START`,
   `COMPOSITION_VALIDITY_FUTURE_END`, `COMPOSITION_MOVE_FUTURE` for a
-  `reparent` `at`). So a row with no `validTo` is the part's attachment now
+  `reparent` `at`, whose two edge writes are judged at that move instant).
+  So a row with no `validTo` is the part's attachment now
   and at every later instant, and an ended row is history for good: the
   claim, the cascade, the acyclicity check and every current read agree on
   which whole a part holds, without any of them choosing an instant. Record a
