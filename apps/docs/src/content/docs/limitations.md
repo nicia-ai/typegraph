@@ -400,7 +400,9 @@ before the affected nodes can be deleted.
   reopening branch also ended the part's other attachment, the merged part is
   left with no whole and nothing reports it.
   `store.verifyConstraintFences()`'s `compositionExistence` family reports
-  such a part only when its pair declares `existence: "required"`.
+  such a part only when its pair declares `existence: "required"`. The same
+  absorption drops a reopen of any edge kind; it is tracked in
+  [#789](https://github.com/nicia-ai/typegraph/issues/789).
 
 ## Write Fence Row
 
