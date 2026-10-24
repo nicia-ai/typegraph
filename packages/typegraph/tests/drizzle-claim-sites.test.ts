@@ -61,7 +61,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/fulltext-search.md",
-    line: 726,
+    line: 725,
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {

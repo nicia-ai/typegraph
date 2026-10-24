@@ -887,9 +887,9 @@ export class ExecutableQuery<
         },
         {
           suggestion:
-            ast.start.expansion === "exact" ?
-              "Run one updateWhere() per node kind, each with a single-kind candidate query."
-            : 'The candidate kind has subclasses or equivalent kinds; pass { expansion: "exact" } to from() to select only the named kind.',
+            this.#state.startRequestedKinds.length === 1 ?
+              'The candidate kind has subclasses or equivalent kinds; pass { expansion: "exact" } to from() to select only the named kind.'
+            : "Run one updateWhere() per node kind, each with a single-kind candidate query.",
         },
       );
     }

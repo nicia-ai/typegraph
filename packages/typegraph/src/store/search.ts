@@ -36,6 +36,7 @@ import {
   DEFAULT_ALIAS_EXPANSION_AXES,
   type DefaultAliasExpansionAxis,
   expandKindsForAxis,
+  INDEPENDENT_ALIAS_TYPING,
   SEARCH_EXPANSION_DEFAULT,
 } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
@@ -323,9 +324,9 @@ function buildKindCandidates(
  * The query builder refuses the identical values; one predicate, one owner.
  * The axis-to-kind-list mapping itself is likewise the shared owner's
  * (`expandKindsForAxis`), not re-spelled here. A hit's type under
- * `"subclasses"` is `AliasNodeType`, computed from the compile-time graph,
- * so that owner also refuses the expansion when a persisted extension widened
- * the kind past it.
+ * `"subclasses"` is `PolymorphicNodeType` whatever the compile-time graph
+ * declares, so a subclass a persisted extension added is admitted, not
+ * refused.
  */
 function resolveSearchKinds(
   ctx: StoreSearchContext,
@@ -341,7 +342,12 @@ function resolveSearchKinds(
       { capability: "search", graphId: ctx.graphId },
     );
   }
-  return expandKindsForAxis(axis, nodeKind, ctx.registry, "compileTimeGraph");
+  return expandKindsForAxis(
+    axis,
+    nodeKind,
+    ctx.registry,
+    INDEPENDENT_ALIAS_TYPING,
+  );
 }
 
 /**

@@ -37,6 +37,7 @@ import {
   type AliasExpansionOptions,
   aliasOverloadTyping,
   expandKindsForAxis,
+  INDEPENDENT_ALIAS_TYPING,
   resolveAliasExpansion,
 } from "./alias-expansion";
 // Type-only import to get the QueryBuilder type without runtime circular dependency
@@ -690,7 +691,7 @@ export class TraversalBuilder<
       expansion,
       kind,
       this.#config.registry,
-      aliasOverloadTyping(options),
+      aliasOverloadTyping(options, "to()"),
     );
     if (expansion === "narrower") {
       this.#assertNarrowerEndpointsAdmitted(kind, kinds);
@@ -791,7 +792,7 @@ export class TraversalBuilder<
       expansion,
       kindName,
       this.#config.registry,
-      "independent",
+      INDEPENDENT_ALIAS_TYPING,
     );
     if (expansion === "narrower") {
       this.#assertNarrowerEndpointsAdmitted(kindName, kinds);

@@ -195,6 +195,7 @@ describe("createTrackingContext", () => {
   const mockState: QueryBuilderState = {
     startAlias: "p",
     startKinds: ["Person"],
+    startRequestedKinds: ["Person"],
     currentAlias: "p",
     startExpansion: "exact",
     traversals: [],

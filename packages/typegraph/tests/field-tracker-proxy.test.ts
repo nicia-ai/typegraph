@@ -45,6 +45,7 @@ const schemaIntrospector = createSchemaIntrospector(
 function createTestState(): QueryBuilderState {
   return {
     startKinds: ["Person"],
+    startRequestedKinds: ["Person"],
     startAlias: "p",
     currentAlias: "p",
     startExpansion: "exact",

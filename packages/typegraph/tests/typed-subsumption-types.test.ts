@@ -299,10 +299,22 @@ describe("alias typing under the polymorphic axis", () => {
         .from(LISTED, "n", { expansion: "subclasses" })
         .select((ctx) => ctx.n);
       expect(query).toBeDefined();
+      const media = listQuery()
+        .from("MediaAliasTest", "n", { expansion: "subclasses" })
+        .select((ctx) => ctx.n);
+      const company = listQuery()
+        .from("CompanyListAliasTest", "n", { expansion: "subclasses" })
+        .select((ctx) => ctx.n);
+      expect(media).toBeDefined();
+      expect(company).toBeDefined();
       type Row = Awaited<ReturnType<typeof query.execute>>[number];
+      type MediaRow = Awaited<ReturnType<typeof media.execute>>[number];
+      type CompanyRow = Awaited<ReturnType<typeof company.execute>>[number];
       expectTypeOf<
         Extract<Row, { kind: "CompanyListAliasTest" }>
       >().toEqualTypeOf<never>();
+      expectTypeOf<Row>().toEqualTypeOf<MediaRow | CompanyRow>();
+      expectTypeOf<Row["title"]>().toEqualTypeOf<string>();
     });
 
     it('keeps the exact union under expansion: "exact"', () => {
@@ -677,8 +689,10 @@ describe("alias typing under the polymorphic axis", () => {
       expectTypeOf(spelledExact.node.kind).toEqualTypeOf<"MediaAliasTest">();
       expectTypeOf(spelledExpanded.node.kind).toEqualTypeOf<string>();
 
-      // A kind the ontology cannot affect stays exact under "subclasses",
-      // exactly as its from() alias does; an unpinned axis still widens it.
+      // A stated "subclasses" widens even a kind the compile-time ontology
+      // cannot affect, exactly as from(kind, alias, { expansion:
+      // "subclasses" }) types its alias: a persisted extension may add a
+      // subclass the compile-time graph never declares.
       const plainStore = undefined as unknown as Store<typeof plainGraph>;
       const plain = first(
         await plainStore.search.fulltext("MediaAliasTest", {
@@ -687,7 +701,20 @@ describe("alias typing under the polymorphic axis", () => {
           expansion: "subclasses",
         }),
       );
-      expectTypeOf(plain.node.kind).toEqualTypeOf<"MediaAliasTest">();
+      const plainAliasRow = first(
+        await plainStore
+          .query()
+          .from("MediaAliasTest", "m", { expansion: "subclasses" })
+          .select((ctx) => ctx.m)
+          .execute(),
+      );
+      expectTypeOf(plain.node.kind).toEqualTypeOf<string>();
+      expectTypeOf(plainAliasRow.id).toEqualTypeOf<typeof plain.node.id>();
+      expectTypeOf(plain.node.title).toEqualTypeOf<string>();
+      // @ts-expect-error - the hit may be a subclass row a persisted extension added; Media's update() requires an exact NodeId<MediaAliasTest>
+      void plainStore.nodes.MediaAliasTest.update(plain.node.id, {
+        title: "x",
+      });
       const plainForwarded = first(
         await plainStore.search.fulltext("MediaAliasTest", {
           query: "x",

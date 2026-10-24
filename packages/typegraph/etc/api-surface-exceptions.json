@@ -1434,6 +1434,14 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
@@ -2074,6 +2082,14 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
@@ -2714,6 +2730,14 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
@@ -3354,6 +3378,14 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
@@ -3989,6 +4021,14 @@
     "member": "startExpansion",
     "kind": "required-member-added",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -4930,6 +4970,14 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
@@ -5642,6 +5690,14 @@
   {
     "entrypoint": "typegraph.api.md",
     "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
@@ -6277,6 +6333,14 @@
     "member": "startExpansion",
     "kind": "required-member-added",
     "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "QueryBuilderState",
+    "member": "startRequestedKinds",
+    "kind": "required-member-added",
+    "reason": "the list-source expansion makes the start alias's expanded kinds differ from the kinds the source named, so the builder's internal state carries `startRequestedKinds` beside `startKinds`, and a set-update candidate refusal advises from the named kinds rather than the resolved axis. `QueryBuilderState` is not exported from any entrypoint; it is the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {

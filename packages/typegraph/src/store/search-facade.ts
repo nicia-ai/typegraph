@@ -22,7 +22,6 @@ import { KindNotFoundError } from "../errors";
 import { type PolymorphicNodeType } from "../ontology/types";
 import { type DefaultAliasExpansionAxis } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
-import { type AliasNodeType } from "../query/builder/types";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   rebuildFulltextIndex,
@@ -65,26 +64,20 @@ type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
 }>;
 
 /**
- * The node type a hit carries for a kind searched under axis `E`, decided by
- * the query builder's own alias typing so a search hit and a `from()` alias
- * over the same kind and axis cannot disagree:
+ * The node type a hit carries for a kind searched under axis `E`, matching
+ * the `from()` alias over the same kind and stated axis:
  *
  * - `"exact"` — the kind's own type.
- * - `"subclasses"` — {@link AliasNodeType}: the kind's properties, with the
- *   `kind` discriminant and `NodeId` brand widened only when the ontology
- *   can actually return another kind's row.
- * - an axis the call site does not pin to one literal — widened
- *   unconditionally, the conservative reading.
+ * - `"subclasses"` — {@link PolymorphicNodeType} unconditionally, as
+ *   `from(kind, alias, { expansion: "subclasses" })` types its alias: the
+ *   kind's properties, with the `kind` discriminant and `NodeId` brand
+ *   widened whether or not the compile-time ontology declares a subclass, so
+ *   a subclass a persisted extension added is typed soundly.
+ * - an axis the call site does not pin to one literal — widened too, the
+ *   conservative reading.
  */
-type SearchNodeType<
-  G extends GraphDef,
-  K extends NodeKinds<G>,
-  N extends NodeType,
-  E extends DefaultAliasExpansionAxis,
-> =
-  [E] extends ["exact"] ? N
-  : [E] extends ["subclasses"] ? AliasNodeType<G, K>
-  : PolymorphicNodeType<N>;
+type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> =
+  [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 /**
  * Resolves the hit's `node` type. Compile-time kinds keep their
@@ -104,7 +97,7 @@ type ResolveNode<
 > =
   K extends NodeKinds<G> ?
     G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ?
-      Node<SearchNodeType<G, K, N, E>>
+      Node<SearchNodeType<N, E>>
     : Node
   : Node;
 

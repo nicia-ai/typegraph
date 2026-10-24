@@ -313,7 +313,11 @@ const runtimeSubclassGraph = defineGraph({
 });
 const runtimeSubclassExtension = defineGraphExtension({
   nodes: {
-    TsRuntimeMemo: { properties: { title: { type: "string" } } },
+    TsRuntimeMemo: {
+      properties: {
+        title: { type: "string", searchable: { language: "english" } },
+      },
+    },
   },
   ontology: [
     { metaEdge: "subClassOf", from: "TsRuntimeMemo", to: "TsRuntimeDoc" },
@@ -330,11 +334,13 @@ async function expectRefusedAndStatedAxesAnswered(
     await rejectionOf(
       Promise.resolve().then(() => store.query().from("TsRuntimeDoc", "d")),
     ),
+    ["from()", "fromDynamic()"],
   );
   expectUntypedSubclassRefusal(
     await rejectionOf(
       Promise.resolve().then(() => store.query().from(["TsRuntimeDoc"], "d")),
     ),
+    ["from()", "fromDynamic()"],
   );
   expectUntypedSubclassRefusal(
     await rejectionOf(
@@ -346,16 +352,30 @@ async function expectRefusedAndStatedAxesAnswered(
           .to("TsRuntimeDoc", "d"),
       ),
     ),
+    ["to()", "toDynamic()"],
   );
-  expectUntypedSubclassRefusal(
-    await rejectionOf(
-      store.search.fulltext("TsRuntimeDoc", {
-        query: "runtime",
-        limit: 10,
-        expansion: "subclasses",
-      }),
-    ),
-  );
+
+  // A stated "subclasses" search hit is typed polymorphically whatever the
+  // compile-time graph declares, so the extension's subclass is answered.
+  const searchHits = await store.search.fulltext("TsRuntimeDoc", {
+    query: "runtime",
+    limit: 10,
+    expansion: "subclasses",
+  });
+  expect(kindsOf(searchHits.map((hit) => hit.node))).toEqual([
+    "TsRuntimeDoc",
+    "TsRuntimeMemo",
+  ]);
+  const searchedKind = "TsRuntimeDoc";
+  const stringKindHits = await store.search.fulltext(searchedKind, {
+    query: "runtime",
+    limit: 10,
+    expansion: "subclasses",
+  });
+  expect(kindsOf(stringKindHits.map((hit) => hit.node))).toEqual([
+    "TsRuntimeDoc",
+    "TsRuntimeMemo",
+  ]);
 
   expect(
     kindsOf(
@@ -431,14 +451,54 @@ function kindsOf(rows: readonly Readonly<{ kind: string }>[]): string[] {
   return rows.map((row) => row.kind).toSorted();
 }
 
-function expectUntypedSubclassRefusal(caught: unknown): void {
+function expectUntypedSubclassRefusal(
+  caught: unknown,
+  suggestedSurfaces: readonly string[],
+): void {
   const error = expectConfigurationError(caught);
   expect(error.details).toMatchObject({
     code: UNTYPED_SUBCLASSES_CODE,
     kind: "TsRuntimeDoc",
     extraKinds: ["TsRuntimeMemo"],
   });
+  for (const surface of suggestedSurfaces) {
+    expect(error.suggestion).toContain(surface);
+  }
 }
+
+// Four compile-time kinds; only TsCoverTopic is polymorphic at compile time.
+// A persisted extension then declares TsCoverNote and TsCoverTag subclasses
+// of TsCoverDoc, and TsCoverTag a subclass of TsCoverTopic too.
+const CoverDocument = defineNode("TsCoverDoc", {
+  schema: z.object({ title: z.string() }),
+});
+const CoverNote = defineNode("TsCoverNote", {
+  schema: z.object({ title: z.string() }),
+});
+const CoverTopic = defineNode("TsCoverTopic", {
+  schema: z.object({ title: z.string() }),
+});
+const CoverTag = defineNode("TsCoverTag", {
+  schema: z.object({ title: z.string() }),
+});
+const listCoverageGraph = defineGraph({
+  id: "typed_subsumption_list_coverage_integration",
+  nodes: {
+    TsCoverDoc: { type: CoverDocument },
+    TsCoverNote: { type: CoverNote },
+    TsCoverTopic: { type: CoverTopic },
+    TsCoverTag: { type: CoverTag },
+  },
+  edges: {},
+  ontology: [subClassOf(CoverNote, CoverTopic)],
+});
+const listCoverageExtension = defineGraphExtension({
+  ontology: [
+    { metaEdge: "subClassOf", from: "TsCoverNote", to: "TsCoverDoc" },
+    { metaEdge: "subClassOf", from: "TsCoverTag", to: "TsCoverDoc" },
+    { metaEdge: "subClassOf", from: "TsCoverTag", to: "TsCoverTopic" },
+  ],
+});
 
 export function registerOntologyTypedSubsumptionIntegrationTests(
   context: IntegrationTestContext,
@@ -1400,6 +1460,55 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         backend,
       );
       await expectRefusedAndStatedAxesAnswered(reloaded);
+    });
+
+    it("refuses a list source only for extension subclasses no listed kind's type admits", async () => {
+      const backend = context.getBackend();
+      const [store] = await createStoreWithSchema(listCoverageGraph, backend);
+      const evolved = await store.evolve(listCoverageExtension);
+      await evolved.nodes.TsCoverDoc.create({ title: "doc" });
+      await evolved.nodes.TsCoverNote.create({ title: "note" });
+      await evolved.nodes.TsCoverTopic.create({ title: "topic" });
+      await evolved.nodes.TsCoverTag.create({ title: "tag" });
+
+      // Every extra kind is listed, so the list type admits each row exactly.
+      expect(
+        kindsOf(
+          await evolved
+            .query()
+            .from(["TsCoverDoc", "TsCoverNote", "TsCoverTag"], "n")
+            .select((ctx) => ctx.n)
+            .execute(),
+        ),
+      ).toEqual(["TsCoverDoc", "TsCoverNote", "TsCoverTag"]);
+      // TsCoverTag is not listed, but TsCoverTopic is polymorphic at compile
+      // time and expands to it, so the list type's TsCoverTopic member admits
+      // TsCoverTag rows.
+      expect(
+        kindsOf(
+          await evolved
+            .query()
+            .from(["TsCoverDoc", "TsCoverNote", "TsCoverTopic"], "n")
+            .select((ctx) => ctx.n)
+            .execute(),
+        ),
+      ).toEqual(["TsCoverDoc", "TsCoverNote", "TsCoverTag", "TsCoverTopic"]);
+
+      const uncovered = expectConfigurationError(
+        await rejectionOf(
+          Promise.resolve().then(() =>
+            evolved.query().from(["TsCoverDoc", "TsCoverNote"], "n"),
+          ),
+        ),
+      );
+      expect(uncovered.details).toMatchObject({
+        code: UNTYPED_SUBCLASSES_CODE,
+        kind: "TsCoverDoc",
+        extraKinds: ["TsCoverTag"],
+      });
+      expect(uncovered.message).toContain("one of the listed kinds");
+      expect(uncovered.suggestion).toContain("every listed kind");
+      expect(uncovered.suggestion).not.toContain("fromDynamic()");
     });
 
     it("answers an unstated expansion when the compile-time graph already types the kind polymorphically", async () => {

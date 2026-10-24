@@ -64,7 +64,9 @@ import {
 import {
   type AliasExpansionOptions,
   aliasOverloadTyping,
+  expandKindListForAxis,
   expandKindsForAxis,
+  INDEPENDENT_ALIAS_TYPING,
   resolveAliasExpansion,
 } from "./alias-expansion";
 import { buildQueryAst } from "./ast-builder";
@@ -656,25 +658,19 @@ export class QueryBuilder<
       options,
       this.#config.defaultExpansion,
     );
-    const typing = aliasOverloadTyping(options);
-    const kinds = [
-      ...new Set(
-        requestedKinds.flatMap((requestedKind) =>
-          expandKindsForAxis(
-            expansion,
-            requestedKind,
-            this.#config.registry,
-            typing,
-          ),
-        ),
-      ),
-    ];
+    const kinds = expandKindListForAxis(
+      expansion,
+      requestedKinds,
+      this.#config.registry,
+      aliasOverloadTyping(options, "from()"),
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,
       startAlias: alias,
       currentAlias: alias,
       startKinds: kinds,
+      startRequestedKinds: requestedKinds,
       startExpansion: expansion,
     };
 
@@ -762,7 +758,7 @@ export class QueryBuilder<
       expansion,
       kindName,
       this.#config.registry,
-      "independent",
+      INDEPENDENT_ALIAS_TYPING,
     );
 
     const newState: QueryBuilderState = {
@@ -770,6 +766,7 @@ export class QueryBuilder<
       startAlias: alias,
       currentAlias: alias,
       startKinds: kinds,
+      startRequestedKinds: [kindName],
       startExpansion: expansion,
       dynamicNodeAliases: new Set([...this.#state.dynamicNodeAliases, alias]),
     };
@@ -1736,6 +1733,7 @@ export class QueryBuilder<
           startAlias: "",
           currentAlias: "",
           startKinds: [],
+          startRequestedKinds: [],
           traversals: [],
           predicates: [],
           projection: [],
