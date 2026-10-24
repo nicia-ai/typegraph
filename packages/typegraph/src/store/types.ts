@@ -192,9 +192,12 @@ export type CompositionNodeRef = Readonly<{ kind: string; id: string }>;
 /**
  * One part a composition whole's delete cascades through: the part itself, the
  * whole it was directly a part of, and the composition edge kind that bound the
- * two. Walking a cascade's list in reverse and re-creating each part with
- * `partOf: { whole, via: viaEdgeKind }` rebuilds the tree; the composition
- * edges' own props are not carried.
+ * two. Reversed, the list names every part after its whole, so once the
+ * deleted root is restored (the root is not in the list) it gives the order to
+ * re-attach parts in and the `partOf: { whole, via: viaEdgeKind }` each one
+ * takes. Neither the parts' props nor the composition edges' props are
+ * carried, and a part re-created under a new id replaces its old id wherever
+ * that id is a later entry's `whole`.
  */
 export type CompositionCascadedPart = CompositionNodeRef &
   Readonly<{
@@ -1475,8 +1478,19 @@ export type NodeCollection<
    * concurrent ordinary edge changes `removedEdgeIds` or a restrict verdict.
    * On the store's collections the plan is an unlocked, best-effort read.
    *
-   * Either form writes no row. The transactional form issues only the lock
-   * statements the delete itself would.
+   * Neither form writes a graph, sidecar, history or revision row. The
+   * transactional form takes the lock the delete takes, which for a
+   * composition whole on PostgreSQL advances the graph's fence row as the
+   * delete does. It therefore fails the way that delete's fence fails: under
+   * PostgreSQL `REPEATABLE READ` or `SERIALIZABLE`, a snapshot taken before a
+   * concurrent attach fails with a serialization failure
+   * (`TransactionConflictError` inside your transaction), and a custom backend
+   * whose fence advances no fence row refuses at those levels with
+   * `ConfigurationError` (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`).
+   * Inside `store.transaction(fn, { accessMode: "read_only" })` the
+   * transactional form refuses before any statement, for every kind, with
+   * `UnsupportedBackendCapabilityError`; use `store.nodes.<Kind>.planDelete`
+   * there for an unlocked preview.
    */
   planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
 

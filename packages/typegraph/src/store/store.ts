@@ -400,6 +400,7 @@ import {
   batchRefusalDetails,
   batchRefusalSuffix,
   diagnoseFusedSchemaFenceNoRow,
+  refuseReadOnlyTransactionWrite,
   resolveBatchWriteVerdict,
   runInWriteTransaction,
   withPreAcquiredTransactionSchemaFenceLease,
@@ -4493,7 +4494,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 receiptRecorder,
                 runBulkHooks,
                 frame.attempt,
-                backendOptions.accessMode !== "read_only",
+                backendOptions.accessMode === "read_only",
               ),
               invoke,
             );
@@ -5284,7 +5285,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // 1 outside a retried `store.transaction`; the retry owner's attempt
     // factory is the only caller that supplies anything else.
     attempt = 1,
-    recordedRevisionRequestAllowed = true,
+    // The transaction was opened with `accessMode: "read_only"`.
+    readOnly = false,
   ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
@@ -5304,6 +5306,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         runBulkHooks,
         attempt,
         receiptRecorders,
+        readOnly,
       );
       const nodeOperations: NodeOperations = {
         ...this.#buildNodeOperations(nodeOperationContext),
@@ -5408,11 +5411,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...(this.#captureEnabled || this.#engineNativeHistory ?
         {
           requestRecordedRevision: (): void => {
-            if (!recordedRevisionRequestAllowed) {
-              throw new UnsupportedBackendCapabilityError(
+            if (readOnly) {
+              refuseReadOnlyTransactionWrite(
                 "tx.requestRecordedRevision()",
-                "write transaction access",
-                { graphId: this.graphId, accessMode: "read_only" },
+                this.graphId,
                 'Remove accessMode: "read_only" when the transaction must allocate a recorded revision.',
               );
             }
@@ -7596,11 +7598,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
     attempt = 1,
     receiptRecorders: readonly TransactionReceiptRecorder[] = [],
+    readOnlyTransaction = false,
   ): NodeOperationContext<G> {
     const identityConfig = this.#graph.identity;
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      readOnlyTransaction,
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,

@@ -367,7 +367,23 @@ that take no per-graph lock can still change the outcome: a part detached or
 deleted concurrently drops out of the delete's cascade, and an ordinary edge
 created concurrently changes `removedEdgeIds` or a restrict verdict. On the
 store's collections, `store.nodes.<Kind>.planDelete` is an unlocked read and
-only a best-effort answer. Neither form writes a row.
+only a best-effort answer.
+
+Neither form writes a graph, sidecar, history or revision row. The
+transactional form does take the delete's lock, and for a composition whole on
+PostgreSQL that lock advances the graph's fence row as the delete does. Two
+consequences follow:
+
+- It fails the way the delete's fence fails: a `REPEATABLE READ` or
+  `SERIALIZABLE` transaction whose snapshot predates a concurrent attach gets a
+  serialization failure, and a custom backend with no fence row refuses at
+  those levels (see the isolation bullet under
+  [Composition Cascade](#composition-cascade)).
+- It needs a read-write transaction. Inside
+  `store.transaction(fn, { accessMode: "read_only" })`,
+  `tx.nodes.<Kind>.planDelete` refuses before any statement, on every backend
+  and for every kind, with `UnsupportedBackendCapabilityError`. Call
+  `store.nodes.<Kind>.planDelete` instead for an unlocked preview.
 
 ## Composition Existence (`existence: "required"`)
 
