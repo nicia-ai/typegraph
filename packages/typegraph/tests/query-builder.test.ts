@@ -2460,8 +2460,9 @@ describe("QueryBuilder Variable-Length Paths", () => {
 
     // SQLite uses INSTR for cycle detection
     expect(sql).toContain("INSTR");
-    // SQLite uses string-based path
-    expect(sql).toContain("|| n0.id ||");
+    // SQLite uses a string-based path; a Person -> Organization walk visits two
+    // kinds, so its tokens are kind-qualified
+    expect(sql).toContain("|| (n0.kind || ? || n0.id) ||");
   });
 
   it("skips cycle checks when cyclePolicy('allow') is selected", () => {
