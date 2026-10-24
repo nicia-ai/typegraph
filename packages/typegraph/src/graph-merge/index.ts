@@ -32,6 +32,7 @@ export {
 } from "./candidate-review";
 export type {
   CandidateWriteSet,
+  CandidateWriteSetPlan,
   CandidateWriteSetTarget,
   PlanCandidateWriteSetArgs,
   PlanCandidateWriteSetForEvolutionArgs,
@@ -96,6 +97,7 @@ export {
   AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   BranchError,
+  CandidatePlanningScopeError,
   CandidateSourceError,
   CandidateWriteSetError,
   DurableEvidenceUndeliveredError,
@@ -218,6 +220,11 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
+export type {
+  CandidatePlanningScope,
+  CandidatePlanningScopeReason,
+  WholeTargetPlanningScope,
+} from "./sparse-candidate-branch";
 export type {
   IdentityAssertionWriteFacade,
   IdentityDecisionProvenance,
