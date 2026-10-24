@@ -83,6 +83,7 @@ export { buildQueryAst } from "./ast-builder";
 export {
   type AliasMap,
   type ArrayFieldAccessor,
+  type AssignableNodeKinds,
   type BaseFieldAccessor,
   type BatchableQuery,
   type BatchResults,
@@ -132,6 +133,7 @@ export {
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
+  type SubsumedNodeType,
   type TraversalExpansion,
   type UniqueAlias,
   type ValidEdgeTargets,

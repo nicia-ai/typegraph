@@ -58,6 +58,7 @@ export {
 export type {
   AggregateResult,
   AliasMap,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
   CommonPropertyKeys,
@@ -102,6 +103,7 @@ export type {
   SelectableNode,
   SelectContext,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./builder/index";
 

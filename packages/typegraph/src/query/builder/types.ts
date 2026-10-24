@@ -396,6 +396,103 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
   : false;
 
 /**
+ * Node type `N` as graph `G`'s subsumption lets it read back: the
+ * {@link PolymorphicNodeType} of `N` when its kind is
+ * {@link SubsumptionAffected}, `N` itself otherwise. Distributes over an
+ * endpoint union, deciding each member on its own kind.
+ *
+ * The one owner of "the type a declared kind's row carries": a polymorphic
+ * alias ({@link AliasNodeType}), an expanded search hit, and an edge's
+ * declared endpoint all read through it, so a row typed one way by a query
+ * is typed the same way by the edge that points at it.
+ */
+export type SubsumedNodeType<G extends GraphDef, N extends NodeType> =
+  N extends NodeType ?
+    SubsumptionAffected<G, N["kind"]> extends true ?
+      PolymorphicNodeType<N>
+    : N
+  : never;
+
+declare const IRI_ENDPOINT: unique symbol;
+
+type IriEndpointKey = Readonly<{ [IRI_ENDPOINT]: true }>;
+
+/**
+ * The closure key an ontology endpoint contributes to
+ * {@link AssignableNodeKinds}: a node or edge type's `kind` literal, or one
+ * shared marker for every IRI endpoint. The IRI overload of `equivalentTo`
+ * types its IRI as the general `string`, so two IRI endpoints cannot be told
+ * apart; folding them all onto one marker over-admits (every kind mapped to
+ * any IRI joins one class) rather than missing a kind two relations really
+ * route through the same IRI.
+ */
+type SubsumptionEndpointKeys<Endpoint> =
+  Endpoint extends string ? IriEndpointKey
+  : Endpoint extends { kind: infer Kind extends string } ? Kind
+  : never;
+
+/**
+ * The closure keys one step of {@link AssignableNodeKinds} adds from the
+ * ontology-tuple elements whose matched endpoints ({@link MatchedEndpoints})
+ * name a key already in `Reached`: a `subClassOf` contributes its child, an
+ * `equivalentTo`/`sameAs` both sides.
+ *
+ * Distributes over the element union.
+ */
+type DirectlyAssignableKeys<Relation, Reached> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      [
+        Extract<
+          SubsumptionEndpointKeys<MatchedEndpoints<Name, From, To>>,
+          Reached
+        >,
+      ] extends [never] ?
+        never
+      : SubsumptionEndpointKeys<From | To>
+    : never
+  : never;
+
+type AssignableKeyClosure<Relation, Reached> =
+  [Exclude<DirectlyAssignableKeys<Relation, Reached>, Reached>] extends (
+    [never]
+  ) ?
+    Reached
+  : AssignableKeyClosure<
+      Relation,
+      Reached | DirectlyAssignableKeys<Relation, Reached>
+    >;
+
+/**
+ * The node kinds of graph `G` an edge endpoint declared as kind `K` admits at
+ * runtime (`KindRegistry.isAssignableTo(kind, K)`): `K` itself, its
+ * transitive `subClassOf` descendants, and every kind folded into the same
+ * class by `equivalentTo`, followed through any mix of the two.
+ *
+ * Takes the same conservative arms as {@link SubsumptionAffected}: an
+ * {@link OntologyTypeErased} ontology, or one element whose literals are
+ * {@link SubsumptionLiteralsErased}, admits every node kind of `G` rather
+ * than under-admitting a kind the runtime accepts. Kinds mapped to an IRI
+ * join one class (see {@link SubsumptionEndpointKeys}). The runtime check
+ * stays authoritative for every kind this admits.
+ */
+export type AssignableNodeKinds<G extends GraphDef, K extends string> =
+  OntologyTypeErased<G> extends true ? K | (keyof G["nodes"] & string)
+  : true extends SubsumptionLiteralsErased<G["ontology"][number]> ?
+    K | (keyof G["nodes"] & string)
+  : | K
+    | Extract<
+        AssignableKeyClosure<G["ontology"][number], K>,
+        keyof G["nodes"] & string
+      >;
+
+/**
  * The meta-edge names that make one kind assignable to another at runtime
  * (`KindRegistry.isAssignableTo`): a declared composition pair then also
  * admits every kind assignable to its part or whole endpoint.
@@ -508,10 +605,10 @@ export type CompositionWholeKinds<G extends GraphDef, K extends string> =
  * State `{ expansion: "subclasses" }` (typed {@link PolymorphicNodeType}
  * unconditionally) or `{ expansion: "exact" }`, or use `fromDynamic()`.
  */
-export type AliasNodeType<G extends GraphDef, K extends string> =
-  SubsumptionAffected<G, K> extends true ?
-    PolymorphicNodeType<G["nodes"][K]["type"]>
-  : G["nodes"][K]["type"];
+export type AliasNodeType<
+  G extends GraphDef,
+  K extends string,
+> = SubsumedNodeType<G, G["nodes"][K]["type"]>;
 
 /**
  * The alias type of a list source that states no `expansion`: each listed

@@ -3248,6 +3248,39 @@ const collection = store.getNodeCollection(edge.fromKind);
 const node = await collection?.getById(edge.fromId);
 ```
 
+#### `store.getNodeByRef(reference)`
+
+Reads the node a `{ kind, id }` reference names through the same node collection
+`getNodeCollectionOrThrow(kind)` returns. It returns `undefined` when no node with that
+id exists under that kind, and rejects with `KindNotFoundError` when the kind is not
+registered. The kind is matched exactly: a reference naming a supertype with a subclass
+node's id resolves to `undefined`.
+
+The result is typed by the reference. A reference whose `kind` is one of the graph's
+node kinds resolves to that kind's node. A reference whose `kind` is `string`, such as
+the endpoint of an edge whose declared kind has subclasses, resolves to the union of the
+graph's node types plus the base `Node` of a kind added at runtime.
+
+```typescript
+const [employment] = await store.edges.employs.findFrom(acme);
+// employment.toKind is string: the declared Person endpoint admits Employee rows.
+if (employment.toKind === "Employee") {
+  // Narrowing the reference first resolves straight to Node<typeof Employee>.
+  const employee = await store.getNodeByRef({
+    kind: employment.toKind,
+    id: employment.toId,
+  });
+}
+// Without narrowing: Node<typeof Person> | Node<typeof Employee> | ... | Node
+const target = await store.getNodeByRef({
+  kind: employment.toKind,
+  id: employment.toId,
+});
+```
+
+Transactions (`tx.getNodeByRef`) resolve through the transaction's own collections, and
+views (`view.getNodeByRef`, including recorded-time views) read at their pinned coordinate.
+
 #### `store.getEdgeCollection(kind)`
 
 Returns the [`DynamicEdgeCollection`](/types#dynamicedgecollection) for the given kind, or
