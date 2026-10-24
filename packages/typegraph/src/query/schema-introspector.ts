@@ -70,14 +70,16 @@ export type SchemaIntrospector = Readonly<{
   /**
    * The type of `fieldName` across every kind an alias resolves to.
    *
-   * When one of `kindNames` subsumes all the others (a kind expanded through
-   * its subclasses), that kind's declaration is the answer: the structural
-   * contract makes every row satisfy it, so a subclass that omits a
-   * parent-optional property or narrows its type does not make the field
-   * unusable. Without such a kind the answer is `undefined` unless every kind
-   * declares the field with an agreeing type. A kind that redeclares an
-   * `embedding()` field untagged (or a `searchable()` field untagged) also
-   * returns the strict answer, since the parent's index would not reach it.
+   * The kinds no other kind of `kindNames` subsumes — one for a kind
+   * expanded through its subclasses, one per listed kind for an expanded
+   * list source — decide: the answer is their agreeing declaration, and the
+   * structural contract makes every row beneath them satisfy it, so a
+   * subclass that omits a parent-optional property or narrows its type does
+   * not make the field unusable. When no kind subsumes another, that is the
+   * strict answer: `undefined` unless every kind declares the field with an
+   * agreeing type. A kind that redeclares an `embedding()` field untagged (or
+   * a `searchable()` field untagged) also returns the strict answer, since
+   * the parent's index would not reach it.
    */
   getSharedFieldTypeInfo: (
     kindNames: readonly string[],
@@ -117,19 +119,18 @@ export type SchemaIntrospector = Readonly<{
   ) => boolean;
   /**
    * The kinds that leave the alias `kindNames` resolves to without searchable
-   * content, empty when `$fulltext` is available: the kind subsuming all the
-   * others when it declares no `searchable()` field, any kind beneath it that
-   * redeclares one of its `searchable()` fields untagged, or, when no kind
-   * subsumes the rest, each kind declaring none — `.matches()` would
-   * otherwise silently miss some of them.
+   * content, empty when `$fulltext` is available: each kind no other kind
+   * subsumes that declares no `searchable()` field, or else any kind beneath
+   * one of those that redeclares one of its `searchable()` fields untagged —
+   * `.matches()` would otherwise silently miss some of them.
    */
   kindsWithoutSearchableField: (
     kindNames: readonly string[],
   ) => readonly string[];
   /**
    * The kinds of `kindNames` whose declaration of `fieldName` loses an
-   * indexing tag (`searchable()` / `embedding()`) the subsuming kind's
-   * declaration carries, or carries one it lacks. A subclass may legally
+   * indexing tag (`searchable()` / `embedding()`) the declaration of a kind
+   * subsuming it carries, or carries one it lacks. A subclass may legally
    * redeclare such a field differently (the tags are annotations, not
    * constraints), and its rows then reach no index the subsuming-kind accessor
    * reads. This is the very decision the shared-field accessor makes before it
@@ -187,16 +188,34 @@ export function createSchemaIntrospector(
   }
 
   /**
-   * The kinds of `kindNames` that subsume every other one. More than one only
-   * when they are equivalent, and then they are structurally interchangeable.
+   * The kinds of `kindNames` no other kind of `kindNames` strictly subsumes.
+   * Every other kind sits beneath at least one of them. One root for a kind
+   * expanded through its subclasses, several for a list of unrelated kinds
+   * (each expanded or not), and several mutually equivalent ones, which are
+   * structurally interchangeable. Without an assignability relation every
+   * kind is a root.
    */
-  function subsumingKinds(kindNames: readonly string[]): readonly string[] {
-    if (isAssignableTo === undefined || kindNames.length < 2) return [];
-    return kindNames.filter((candidate) =>
-      kindNames.every(
-        (kindName) =>
-          kindName === candidate || isAssignableTo(kindName, candidate),
-      ),
+  function rootKinds(kindNames: readonly string[]): readonly string[] {
+    if (isAssignableTo === undefined) return kindNames;
+    return kindNames.filter(
+      (candidate) =>
+        !kindNames.some(
+          (other) =>
+            other !== candidate &&
+            isAssignableTo(candidate, other) &&
+            !isAssignableTo(other, candidate),
+        ),
+    );
+  }
+
+  /** The roots, other than `kindName` itself, that `kindName` is assignable to. */
+  function rootsAbove(
+    kindName: string,
+    roots: readonly string[],
+  ): readonly string[] {
+    if (isAssignableTo === undefined) return [];
+    return roots.filter(
+      (root) => root !== kindName && isAssignableTo(kindName, root),
     );
   }
 
@@ -213,14 +232,13 @@ export function createSchemaIntrospector(
   }
 
   /**
-   * The kinds whose declaration of the field differs in its indexing tags from
-   * the subsuming kinds' declaration — and that declaration itself, when the
-   * subsuming kinds agree on one. The structural contract does not see the
-   * tags (`searchable()` and `embedding()` are annotations, not constraints),
-   * so a subclass may legally redeclare a tagged field untagged (or tag an
-   * untagged one) — and its rows then never reach the fulltext or vector index
-   * the parent-typed accessor reads. When the subsuming kinds disagree among
-   * themselves, each of their declarations is the reference a kind is held to.
+   * The roots' declaration of the field, and the kinds whose declaration
+   * differs in its indexing tags from that of a root above them. The
+   * structural contract does not see the tags (`searchable()` and
+   * `embedding()` are annotations, not constraints), so a subclass may legally
+   * redeclare a tagged field untagged (or tag an untagged one) — and its rows
+   * then never reach the fulltext or vector index the root-typed accessor
+   * reads.
    */
   function subsumingDeclaration(
     kindNames: readonly string[],
@@ -229,28 +247,25 @@ export function createSchemaIntrospector(
     resolved: FieldTypeInfo | undefined;
     divergingKinds: readonly string[];
   }> {
-    const subsuming = subsumingKinds(kindNames);
-    const resolved = mergeDeclaredFieldTypeInfos(subsuming, fieldName);
-    const references =
-      resolved === undefined ?
-        subsuming
-          .map((kindName) => getFieldTypeInfo(kindName, fieldName))
-          .filter((info): info is FieldTypeInfo => info !== undefined)
-      : [resolved];
+    const roots = rootKinds(kindNames);
     const divergingKinds = kindNames.filter((kindName) => {
       const info = getFieldTypeInfo(kindName, fieldName);
-      return (
-        info !== undefined &&
-        references.some((reference) => !keepsIndexingTags(reference, info))
-      );
+      if (info === undefined) return false;
+      return rootsAbove(kindName, roots).some((root) => {
+        const reference = getFieldTypeInfo(root, fieldName);
+        return reference !== undefined && !keepsIndexingTags(reference, info);
+      });
     });
-    return { resolved, divergingKinds };
+    return {
+      resolved: mergeDeclaredFieldTypeInfos(roots, fieldName),
+      divergingKinds,
+    };
   }
 
   /**
-   * The field as the kind subsuming the others declares it, unless a kind
-   * diverges from that declaration's indexing tags. Those aliases fall back to
-   * the strict all-kinds merge rather than silently omit rows.
+   * The field as the roots declare it, unless a kind diverges from a root's
+   * declaration's indexing tags. Those aliases fall back to the strict
+   * all-kinds merge rather than silently omit rows.
    */
   function resolveFromSubsumingKinds(
     kindNames: readonly string[],
@@ -424,35 +439,32 @@ export function createSchemaIntrospector(
   }
 
   /**
-   * With no subsuming kind, every kind must declare searchable content. With
-   * one, its declaration decides — and a kind beneath it that redeclares one
-   * of its searchable fields untagged still holds that text, unindexed, so it
-   * is named too. A kind that omits the field holds no text there.
+   * Every root must declare searchable content, and its declaration decides
+   * for the kinds beneath it: a kind that redeclares one of a root's
+   * searchable fields untagged still holds that text, unindexed, so it is
+   * named too. A kind that omits the field holds no text there.
    */
   function computeKindsWithoutSearchableField(
     kindNames: readonly string[],
   ): readonly string[] {
-    const subsuming = subsumingKinds(kindNames);
-    if (subsuming.length === 0) {
-      return kindNames.filter((kindName) => !hasSearchableContent(kindName));
-    }
-    const parentsWithoutContent = subsuming.filter(
+    const roots = rootKinds(kindNames);
+    const rootsWithoutContent = roots.filter(
       (kindName) => !hasSearchableContent(kindName),
     );
-    if (parentsWithoutContent.length > 0) return parentsWithoutContent;
+    if (rootsWithoutContent.length > 0) return rootsWithoutContent;
 
-    const searchableFieldNames = subsuming.flatMap((kindName) =>
-      Object.entries(getShapeForKind(kindName) ?? {})
-        .filter(([, info]) => info.searchable !== undefined)
-        .map(([fieldName]) => fieldName),
-    );
     return kindNames.filter(
       (kindName) =>
-        !subsuming.includes(kindName) &&
-        searchableFieldNames.some((fieldName) => {
-          const info = getFieldTypeInfo(kindName, fieldName);
-          return info !== undefined && info.searchable === undefined;
-        }),
+        !roots.includes(kindName) &&
+        rootsAbove(kindName, roots).some((root) =>
+          Object.entries(getShapeForKind(root) ?? {}).some(
+            ([fieldName, rootInfo]) => {
+              if (rootInfo.searchable === undefined) return false;
+              const info = getFieldTypeInfo(kindName, fieldName);
+              return info !== undefined && info.searchable === undefined;
+            },
+          ),
+        ),
     );
   }
 

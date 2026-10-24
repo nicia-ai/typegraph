@@ -116,7 +116,7 @@ type AggregateResult<R extends Record<string, FieldRef | AggregateExpr>, Aliases
 // @public
 type AlgorithmCyclePolicy = RecursiveCyclePolicy;
 
-// @public (undocumented)
+// @public
 type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
 
 // @public (undocumented)
@@ -4962,6 +4962,12 @@ type LineageMembers = Readonly<{
 // @public
 type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
+// @public
+type ListAliasNodeType<G extends GraphDef, K extends string> = K extends unknown ? AliasNodeType<G, K> : never;
+
+// @public
+type ListPolymorphicNodeType<G extends GraphDef, K extends string> = K extends unknown ? PolymorphicNodeType<G["nodes"][K]["type"]> : never;
+
 // @public (undocumented)
 type LiteralExpressionNode = Readonly<{
     kind: "literal";
@@ -6873,10 +6879,18 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     aggregate<R extends Record<string, FieldRef | AggregateExpr>>(fields: R): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
     count(): Promise<number>;
     exists(): Promise<boolean>;
-    from<const Kinds extends readonly [
-    keyof G["nodes"] & string,
-    ...(keyof G["nodes"] & string)[]
-    ], A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>): QueryBuilder<G, Aliases & Record<A, NodeAlias<G["nodes"][Kinds[number]]["type"]>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options?: {
+        expansion?: undefined;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<ListAliasNodeType<G, Kinds[number]>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
+    from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options: {
+        expansion: "exact";
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<G["nodes"][Kinds[number]]["type"]>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
+    from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options: {
+        expansion: "subclasses";
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<ListPolymorphicNodeType<G, Kinds[number]>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
     // (undocumented)
     from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: undefined;
@@ -7968,6 +7982,12 @@ type SimilarToOptions = Readonly<{
 
 // @public
 type SortDirection = "asc" | "desc";
+
+// @public
+type SourceKindList<G extends GraphDef> = readonly [
+keyof G["nodes"] & string,
+...(keyof G["nodes"] & string)[]
+];
 
 // @public
 type SourceResult = Readonly<{

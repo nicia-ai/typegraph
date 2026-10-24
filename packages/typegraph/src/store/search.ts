@@ -322,7 +322,10 @@ function buildKindCandidates(
  * `"exact"`. The same owner refuses the removed `includeSubClasses` option.
  * The query builder refuses the identical values; one predicate, one owner.
  * The axis-to-kind-list mapping itself is likewise the shared owner's
- * (`expandKindsForAxis`), not re-spelled here.
+ * (`expandKindsForAxis`), not re-spelled here. A hit's type under
+ * `"subclasses"` is `AliasNodeType`, computed from the compile-time graph,
+ * so that owner also refuses the expansion when a persisted extension widened
+ * the kind past it.
  */
 function resolveSearchKinds(
   ctx: StoreSearchContext,
@@ -338,7 +341,7 @@ function resolveSearchKinds(
       { capability: "search", graphId: ctx.graphId },
     );
   }
-  return expandKindsForAxis(axis, nodeKind, ctx.registry);
+  return expandKindsForAxis(axis, nodeKind, ctx.registry, "compileTimeGraph");
 }
 
 /**

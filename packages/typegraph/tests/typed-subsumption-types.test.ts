@@ -21,6 +21,7 @@ import {
   equivalentTo,
   type FulltextSearchOptions,
   type HybridSearchOptions,
+  type NodeId,
   type NodeType,
   relatedTo,
   type Store,
@@ -260,6 +261,75 @@ describe("alias typing under the polymorphic axis", () => {
     expect(query).toBeDefined();
     type Row = Awaited<ReturnType<typeof query.execute>>[number];
     expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+  });
+
+  describe("list sources", () => {
+    const CompanyKind = defineNode("CompanyListAliasTest", {
+      schema: z.object({ title: z.string() }),
+    });
+    const listGraph = defineGraph({
+      id: "alias_typing_list",
+      nodes: {
+        MediaAliasTest: { type: MediaKind },
+        PodcastAliasTest: { type: PodcastKind },
+        CompanyListAliasTest: { type: CompanyKind },
+      },
+      edges: {},
+      ontology: [subClassOf(PodcastKind, MediaKind)],
+    });
+    const listRegistry = buildKindRegistry(listGraph);
+    const LISTED = ["MediaAliasTest", "CompanyListAliasTest"] as const;
+    const listQuery = () =>
+      createQueryBuilder<typeof listGraph>(listGraph.id, listRegistry);
+
+    it("types each listed kind as a single-kind alias over it would be when no expansion is stated", () => {
+      const query = listQuery()
+        .from(LISTED, "n")
+        .select((ctx) => ctx.n);
+      expect(query).toBeDefined();
+      type Row = Awaited<ReturnType<typeof query.execute>>[number];
+      expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+      expectTypeOf<
+        Extract<Row, { kind: "CompanyListAliasTest" }>["id"]
+      >().toEqualTypeOf<NodeId<typeof CompanyKind>>();
+    });
+
+    it('widens every listed kind under expansion: "subclasses"', () => {
+      const query = listQuery()
+        .from(LISTED, "n", { expansion: "subclasses" })
+        .select((ctx) => ctx.n);
+      expect(query).toBeDefined();
+      type Row = Awaited<ReturnType<typeof query.execute>>[number];
+      expectTypeOf<
+        Extract<Row, { kind: "CompanyListAliasTest" }>
+      >().toEqualTypeOf<never>();
+    });
+
+    it('keeps the exact union under expansion: "exact"', () => {
+      const query = listQuery()
+        .from(LISTED, "n", { expansion: "exact" })
+        .select((ctx) => ctx.n);
+      expect(query).toBeDefined();
+      type Row = Awaited<ReturnType<typeof query.execute>>[number];
+      expectTypeOf<Row["kind"]>().toEqualTypeOf<
+        "MediaAliasTest" | "CompanyListAliasTest"
+      >();
+    });
+
+    it("types an axis-unknown options bag as a single-kind source types it", () => {
+      const options: AliasExpansionOptions = {};
+      const listed = listQuery()
+        .from(LISTED, "n", options)
+        .select((ctx) => ctx.n);
+      const single = listQuery()
+        .from("CompanyListAliasTest", "n", options)
+        .select((ctx) => ctx.n);
+      expect(listed).toBeDefined();
+      expect(single).toBeDefined();
+      expectTypeOf<
+        Awaited<ReturnType<typeof listed.execute>>[number]
+      >().toEqualTypeOf<Awaited<ReturnType<typeof single.execute>>[number]>();
+    });
   });
 
   it('expansion: "exact" keeps kind literal even on an affected alias', () => {

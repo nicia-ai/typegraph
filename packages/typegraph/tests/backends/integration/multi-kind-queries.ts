@@ -8,7 +8,7 @@ export function registerMultiKindQueryIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Multi-kind queries", () => {
-    it("refuses empty and unknown sources, expansion options, and unshared fields", () => {
+    it("refuses empty and unknown sources, the removed includeSubClasses option, and unshared fields", () => {
       const store = context.getStore();
       expect(() =>
         store.query().from([] as unknown as readonly ["Person"], "node"),
@@ -21,11 +21,11 @@ export function registerMultiKindQueryIntegrationTests(
       expect(() =>
         store
           .query()
-          // @ts-expect-error List sources deliberately have no ontology expansion option.
+          // @ts-expect-error `expansion` replaced the includeSubClasses option.
           .from(["Person", "Company"] as const, "node", {
             includeSubClasses: true,
           }),
-      ).toThrow("does not accept from() options");
+      ).toThrow('no longer accepts "includeSubClasses"');
       expect(() =>
         store
           .query()

@@ -492,6 +492,12 @@ applies (search across multiple kinds must agree on one declared metric; see
 [Semantic Search](/semantic-search)) with no migration knob of its own. If
 this asymmetry surprises you, that's the intended signal that it's worth
 double-checking whether your search call should opt in explicitly.
+[Scope at a glance](/queries/source#scope-at-a-glance) lists the default
+scope of every query, collection and search surface side by side. A kind whose
+subclasses only a persisted [graph extension](/graph-extensions) declares is
+refused under `expansion: "subclasses"` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`),
+since the hit type is computed from the compile-time graph; search it with
+`"exact"` and search the extension kind separately.
 
 An expansion that would silently miss rows is refused rather than
 under-returned, exactly where `$fulltext.matches()` refuses the same alias: if

@@ -351,14 +351,19 @@ a redeclaration that breaks a hierarchy it already participates in — as a
 parent, a child, or an equivalent — is re-checked and refused just as a
 first declaration would be.
 
-**A `subClassOf` declared through `evolve()` is invisible to the
-compile-time alias type.** `evolve()` returns `Store<G>` with the same
-compile-time `G` it was called on, so a base-graph kind that only becomes
-polymorphic through an extension's `subClassOf` still types `from(kind,
-alias)` as the narrow, exact kind — even though a row may come back as the
-extension's subclass at runtime. See [Query Source ▸ Subclass
-Expansion](/queries/source#subclass-expansion) for the `fromDynamic()` /
-`expansion: "exact"` workaround.
+**A query that leaves the axis to the default refuses a base-graph kind an
+extension subclasses.** `evolve()` returns `Store<G>` with the same
+compile-time `G` it was called on, and a later `createStoreWithSchema(graph,
+backend)` folds the persisted extension back in under the same `G`, so the
+compile-time alias type of a base-graph kind that only becomes polymorphic
+through an extension's `subClassOf` is still the exact kind. Rather than
+return the extension's subclass rows under that type, `from(kind, alias)`, a
+list source and `to(kind, alias)` with no `expansion` throw
+`ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`), on the
+evolved store and after every restart, and so does `store.search()` with
+`expansion: "subclasses"`. State `{ expansion: "subclasses" }` or `{
+expansion: "exact" }`, or use `fromDynamic()`; see [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion).
 
 ## `store.evolve(extension, options?)`
 

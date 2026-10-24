@@ -35,6 +35,7 @@ import {
 } from "../predicates";
 import {
   type AliasExpansionOptions,
+  aliasOverloadTyping,
   expandKindsForAxis,
   resolveAliasExpansion,
 } from "./alias-expansion";
@@ -685,7 +686,12 @@ export class TraversalBuilder<
       options,
       this.#config.defaultExpansion,
     );
-    const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
+    const kinds = expandKindsForAxis(
+      expansion,
+      kind,
+      this.#config.registry,
+      aliasOverloadTyping(options),
+    );
     if (expansion === "narrower") {
       this.#assertNarrowerEndpointsAdmitted(kind, kinds);
     }
@@ -785,6 +791,7 @@ export class TraversalBuilder<
       expansion,
       kindName,
       this.#config.registry,
+      "independent",
     );
     if (expansion === "narrower") {
       this.#assertNarrowerEndpointsAdmitted(kindName, kinds);

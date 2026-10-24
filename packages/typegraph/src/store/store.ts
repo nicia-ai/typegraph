@@ -227,6 +227,7 @@ import {
   type QueryCoordinateState,
 } from "../query/builder";
 import {
+  bindCompileTimeAliasTyping,
   type DefaultAliasExpansionAxis,
   resolveDefaultAliasExpansion,
 } from "../query/builder/alias-expansion";
@@ -1612,6 +1613,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
     });
     this.#registry = buildKindRegistry(graph);
+    bindCompileTimeAliasTyping(this.#registry, stripGraphExtension(graph));
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
