@@ -355,7 +355,7 @@ Typed collection writes preserve the source/target relationship; dynamic writes
 and imports enforce it at runtime. Bulk writes reject invalid pairs atomically.
 Import pair validation remains active even when reference validation is disabled;
 imports retain their own documented error-handling and partial-success behavior.
-See [collection types](/types#typededgecollectionr) for inference limits,
+See [collection types](/types#typededgecollectionr-g) for inference limits,
 [graph extensions](/graph-extensions#edges) for runtime declarations, and
 [schema management](/schema-management#endpoint-pair-changes) for schema changes.
 
