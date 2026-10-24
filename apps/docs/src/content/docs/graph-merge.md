@@ -1165,11 +1165,15 @@ on before approving the plan. `applyMergePlan` re-verifies the same finding
 inside the apply transaction, under the per-graph write lock, and refuses with
 `MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
 if it still recurs there — so a plan-time report that comes back empty is not
-a guarantee against a concurrent attach racing the eventual apply. The
-`"unattached"` cause has its own residual blind spot: a composition edge
-silently dropped by canonicalization's endpoint-deleted repointing issues no
-write for any per-write guard to see — see
-[Limitations](/limitations#composition-existence-existence-required).
+a guarantee against a concurrent attach racing the eventual apply. A
+composition edge canonicalization drops as `edge:endpoint-deleted` issues no
+write, and none is needed to catch it. If a branch made that attachment,
+planning refuses as described above. If the edge already attached its part at
+the branch point, the plan deletes its whole, and the `"deleted"` check reads
+the target's live parts of every whole the plan deletes: a surviving part is
+reported at plan time and refused inside the apply transaction. Running
+`store.verifyConstraintFences()` after a merge is a generic audit, not a step
+the merge relies on.
 
 A branch's composition writes merge as the unit they were written as. Apply
 replays a plan one row at a time, so it postpones the per-write

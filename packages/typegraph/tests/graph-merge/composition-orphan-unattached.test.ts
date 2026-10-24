@@ -313,14 +313,11 @@ describe.each(backendMatrix())(
       // `MergeConstraintConflictError` at the merge boundary, not
       // `MergeCompositionOrphanError`. Either way nothing commits, which
       // is the guarantee the merge-existence audit asks for.
-      // `assertNoUnattachedRequiredParts`'s OWN distinguishing value is
-      // the case the per-write detach refusal cannot reach at all — a
-      // composition edge silently DROPPED by canonicalization
-      // (`ENDPOINT_DELETED_DROP_REASON`, `src/graph-merge/edge-repoint.ts`)
-      // with no explicit delete/update call for anything to intercept.
-      // `DroppedEdge` carries no endpoint data to construct that case from
-      // the public API; it is documented as a residual gap
-      // (`limitations.md`) rather than reproduced here.
+      // A composition edge canonicalization DROPS as
+      // `ENDPOINT_DELETED_DROP_REASON` issues no delete/update call for the
+      // per-write refusal to intercept; the plan deletes that edge's whole,
+      // so the "deleted" arm reports and refuses it instead
+      // (`composition-orphan-endpoint-deleted.test.ts`).
       const applyResult = await applyMergePlan(target, artifact);
       expect(isErr(applyResult)).toBe(true);
       if (!isErr(applyResult)) throw new Error("expected apply to be refused");
