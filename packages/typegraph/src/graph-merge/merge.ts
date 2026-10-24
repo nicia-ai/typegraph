@@ -3221,17 +3221,18 @@ type ResolvedMerge<G extends GraphDef> = Readonly<{
   incrementalGuard?: IncrementalCommitGuard<G>;
 }>;
 
-function assertPublicPlanCapability<G extends GraphDef>(
+/** Why `target` cannot carry a public merge plan, or `undefined` when it can. */
+export function publicPlanCapabilityRefusal<G extends GraphDef>(
   target: Store<G>,
-): void {
+): MergePlanCapabilityError | undefined {
   if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
-    throw new MergePlanCapabilityError(
+    return new MergePlanCapabilityError(
       "Public merge plans require a transaction-capable target backend.",
       { details: { capability: "execution.interactiveTransactions" } },
     );
   }
   if (!target.revisionTrackingEnabled) {
-    throw new MergePlanCapabilityError(
+    return new MergePlanCapabilityError(
       "Public merge plans require durable target revision tracking.",
       {
         details: { capability: "revisionTracking" },
@@ -3240,6 +3241,14 @@ function assertPublicPlanCapability<G extends GraphDef>(
       },
     );
   }
+  return undefined;
+}
+
+function assertPublicPlanCapability<G extends GraphDef>(
+  target: Store<G>,
+): void {
+  const refusal = publicPlanCapabilityRefusal(target);
+  if (refusal !== undefined) throw refusal;
 }
 
 export async function captureMergePlanTargetFence<G extends GraphDef>(

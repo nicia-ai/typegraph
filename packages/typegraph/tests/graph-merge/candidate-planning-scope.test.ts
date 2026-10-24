@@ -195,8 +195,6 @@ type ScopeCase = Readonly<{
   expected: CandidatePlanningScope;
   /** Whether the static decision already names `expected`, before the candidate is read. */
   decidedStatically: boolean;
-  /** The whole-target path's own refusal, when the default call cannot plan either. */
-  defaultRefusal?: typeof MergeError;
   arrange: (backend: GraphBackend) => Promise<Arranged>;
 }>;
 
@@ -220,18 +218,6 @@ const SCOPE_CASES: readonly ScopeCase[] = [
         await revisionTrackedTarget(plainGraph, backend),
         PERSON_CANDIDATE,
       ),
-  },
-  {
-    name: "a target without revision tracking",
-    expected: { scope: "whole-target", reason: "revision-tracking-disabled" },
-    decidedStatically: true,
-    defaultRefusal: MergePlanCapabilityError,
-    arrange: async (backend) => {
-      const [target] = await createStoreWithSchema(plainGraph, backend, {
-        revisionTracking: false,
-      });
-      return arranged(target, PERSON_CANDIDATE);
-    },
   },
   {
     name: "a composition pair",
@@ -308,19 +294,6 @@ const SCOPE_CASES: readonly ScopeCase[] = [
     },
   },
   {
-    name: "a candidate edge whose match-identity owner key cannot be derived",
-    expected: {
-      scope: "whole-target",
-      reason: "match-identity-owners-unavailable",
-    },
-    decidedStatically: false,
-    defaultRefusal: CandidateWriteSetError,
-    arrange: async (backend) => {
-      const { target } = await matchIdentityTarget(backend);
-      return arranged(target, matchedCandidate(42));
-    },
-  },
-  {
     name: "a match-identity owner excluded from the clone projection",
     expected: {
       scope: "whole-target",
@@ -337,6 +310,81 @@ const SCOPE_CASES: readonly ScopeCase[] = [
       );
       await target.edges.matched.delete(deletedOwner.id);
       return arranged(target, matchedCandidate("reusable"));
+    },
+  },
+];
+
+const weightedLink = defineEdge("link", {
+  schema: z.object({ weight: z.number() }),
+});
+const weightedGraph = defineGraph({
+  id: "scope_weighted",
+  nodes: { Person: { type: Person } },
+  edges: { link: { type: weightedLink, from: [Person], to: [Person] } },
+});
+
+type MalformedCase = Readonly<{
+  name: string;
+  /** A fragment of the import's own validation error. */
+  expectedError: string;
+  arrange: (backend: GraphBackend) => Promise<Arranged>;
+}>;
+
+function describeRefusal(error: MergeError): string {
+  const cause = error.cause instanceof Error ? error.cause.message : "";
+  return `${error.message} ${JSON.stringify(error.details)} ${cause}`;
+}
+
+/** Candidates the target's schema refuses; none of them is a planning-scope cause. */
+const MALFORMED_CASES: readonly MalformedCase[] = [
+  {
+    name: "an edge with invalid properties on a graph without match identity",
+    expectedError: "weight: Invalid input: expected number, received string",
+    arrange: async (backend) => {
+      const target = await revisionTrackedTarget(weightedGraph, backend);
+      await target.nodes.Person.create({ name: "Source" }, { id: "source" });
+      await target.nodes.Person.create({ name: "Peer" }, { id: "peer" });
+      return arranged(target, {
+        nodes: [],
+        edges: [
+          {
+            kind: "link",
+            id: "candidate-edge",
+            from: { kind: "Person", id: "source" },
+            to: { kind: "Person", id: "peer" },
+            properties: { weight: "heavy" },
+            validFrom,
+          },
+        ],
+      });
+    },
+  },
+  {
+    name: "a match-identity edge whose owner key cannot be derived",
+    expectedError: "code: Invalid input: expected string, received number",
+    arrange: async (backend) => {
+      const { target } = await matchIdentityTarget(backend);
+      return arranged(target, matchedCandidate(42));
+    },
+  },
+  {
+    name: "a match-identity edge whose owner key exceeds the storage limit",
+    expectedError: "exceeds the portable storage limit",
+    arrange: async (backend) => {
+      const { target } = await matchIdentityTarget(backend);
+      return arranged(target, matchedCandidate("x".repeat(3000)));
+    },
+  },
+  {
+    name: "an edge of a kind the graph does not declare",
+    expectedError: "Unknown edge kind: undeclared",
+    arrange: async (backend) => {
+      const { target } = await matchIdentityTarget(backend);
+      const candidate = matchedCandidate("code");
+      return arranged(target, {
+        ...candidate,
+        edges: candidate.edges.map((edge) => ({ ...edge, kind: "undeclared" })),
+      });
     },
   },
 ];
@@ -367,12 +415,6 @@ describe("candidate planning scope", () => {
       );
 
       const planned = await subject.plan({ makeBackend: stagingBackend() });
-      if (testCase.defaultRefusal !== undefined) {
-        if (!isErr(planned))
-          throw new Error("expected the default call to fail");
-        expect(planned.error).toBeInstanceOf(testCase.defaultRefusal);
-        return;
-      }
       if (isErr(planned)) throw planned.error;
       expect(planned.data.planningScope).toEqual(testCase.expected);
     });
@@ -458,6 +500,60 @@ describe("candidate planning scope", () => {
     );
     expect(refusedRevalidation.error.details).toEqual(expected);
     expect(revalidateBackend).not.toHaveBeenCalled();
+  });
+
+  it("refuses a target without revision tracking as a plan capability gap before staging", async () => {
+    const [target] = await createStoreWithSchema(plainGraph, sqliteBackend(), {
+      revisionTracking: false,
+    });
+    const subject = await arranged(target, PERSON_CANDIDATE);
+    for (const planningScope of [undefined, "candidate"] as const) {
+      const makeBackend = stagingBackend();
+      const refused = await subject.plan({
+        makeBackend,
+        ...(planningScope === undefined ? {} : { planningScope }),
+      });
+      if (!isErr(refused))
+        throw new Error(`expected a capability refusal (${planningScope})`);
+      expect(refused.error).toBeInstanceOf(MergePlanCapabilityError);
+      expect(refused.error.details).toEqual({ capability: "revisionTracking" });
+      expect(makeBackend).not.toHaveBeenCalled();
+    }
+  });
+
+  describe.each(MALFORMED_CASES)("$name", (testCase) => {
+    it("reports the candidate's own validation error with or without the candidate scope", async () => {
+      const subject = await testCase.arrange(sqliteBackend());
+      expect(subject.staticScope()).toEqual({ scope: "candidate" });
+
+      const unscoped = await subject.plan({ makeBackend: stagingBackend() });
+      const scoped = await subject.plan({
+        makeBackend: stagingBackend(),
+        planningScope: "candidate",
+      });
+
+      if (!isErr(unscoped) || !isErr(scoped))
+        throw new Error("expected both calls to refuse the candidate");
+      expect(scoped.error).toBeInstanceOf(CandidateWriteSetError);
+      expect(unscoped.error).toBeInstanceOf(CandidateWriteSetError);
+      expect(describeRefusal(scoped.error)).toBe(
+        describeRefusal(unscoped.error),
+      );
+      expect(describeRefusal(scoped.error)).toContain(testCase.expectedError);
+    });
+  });
+
+  it("hands each caller a planning scope that cannot change later decisions", async () => {
+    const target = await revisionTrackedTarget(plainGraph, sqliteBackend());
+    const subject = await arranged(target, PERSON_CANDIDATE);
+    const planned = await subject.plan({ makeBackend: stagingBackend() });
+    if (isErr(planned)) throw planned.error;
+
+    const reported = planned.data.planningScope as { scope: string };
+    expect(() => {
+      reported.scope = "whole-target";
+    }).toThrow(TypeError);
+    expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
   });
 
   it("refuses an unsupported planning scope value", async () => {

@@ -323,6 +323,7 @@ export function registerGraphMergePlanIntegrationTests(
         evolutionPlan,
         makeBackend: scopedBackend,
         writeSet,
+        // @ts-expect-error the evolution planner declares no planningScope; an untyped caller is refused
         planningScope: "candidate",
       });
       if (!isErr(scoped))

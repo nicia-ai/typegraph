@@ -1540,11 +1540,11 @@ describe("candidate write-set planning", () => {
         "full-match-identity-tombstone",
       ),
     ).toBe(true);
-    const owners = await readCandidateMatchIdentityOwners(target, writeSet);
-    expect(owners).toHaveLength(1);
-    expect(owners?.[0]?.deleted_at).toBeDefined();
-    if (owners === undefined) throw new Error("Expected the exact owner read");
-    expect(matchIdentityOwnersAreCloneVisible(owners)).toBe(false);
+    const ownerRead = await readCandidateMatchIdentityOwners(target, writeSet);
+    expect(ownerRead.status).toBe("complete");
+    expect(ownerRead.owners).toHaveLength(1);
+    expect(ownerRead.owners[0]?.deleted_at).toBeDefined();
+    expect(matchIdentityOwnersAreCloneVisible(ownerRead.owners)).toBe(false);
 
     const bounded = await planCandidateWriteSet({
       target,

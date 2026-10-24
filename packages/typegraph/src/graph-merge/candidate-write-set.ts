@@ -8,6 +8,7 @@ import {
 } from "../interchange";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { isCanonicalIsoDate } from "../utils/date";
+import { readOwnProperty } from "../utils/object";
 import { computeSchemaComponent } from "./base-version";
 import {
   CandidatePlanningScopeError,
@@ -26,6 +27,7 @@ import {
   planMergeIncremental,
   planMergeIncrementalForEvolution,
   planMergeIncrementalWithCandidateKeys,
+  publicPlanCapabilityRefusal,
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
@@ -133,10 +135,13 @@ export type CandidateWriteSetPlan = Readonly<{
   planningScope: CandidatePlanningScope;
 }>;
 
-/** Object-form arguments for candidate planning against a planned evolution. */
+/**
+ * Object-form arguments for candidate planning against a planned evolution.
+ * It always stages the whole resulting graph, so it takes no `planningScope`.
+ */
 export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<
   PlanCandidateWriteSetArgs<G>,
-  "target"
+  "target" | "planningScope"
 > &
   Readonly<{
     target: Store<G>;
@@ -194,9 +199,9 @@ function sameCandidateTarget(
 }
 
 function requestedPlanningScope(
-  args: Readonly<{ planningScope?: unknown }>,
+  args: Readonly<Record<string, unknown>>,
 ): Result<"candidate" | undefined, InvalidMergeOptionsError> {
-  const requested = args.planningScope;
+  const requested = readOwnProperty(args, "planningScope");
   if (requested === undefined || requested === "candidate")
     return ok(requested);
   return err(
@@ -235,6 +240,8 @@ export async function planCandidateWriteSet<G extends GraphDef>(
 ): Promise<Result<CandidateWriteSetPlan, MergeError>> {
   const requested = requestedPlanningScope(args);
   if (isErr(requested)) return requested;
+  const capabilityRefusal = publicPlanCapabilityRefusal(args.target);
+  if (capabilityRefusal !== undefined) return err(capabilityRefusal);
   if (requested.data === "candidate") {
     const targetScope = candidatePlanningScope(args.target);
     if (targetScope.scope === "whole-target")
@@ -294,7 +301,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
       sparseCandidateWorkingCopyStrategy<G>(
         writeSet,
         args.makeBackend,
-        bounded.matchIdentityOwners,
+        bounded.ownerRead.owners,
       )
     );
   try {
@@ -340,6 +347,14 @@ export async function planCandidateWriteSet<G extends GraphDef>(
           "The candidate write set could not be staged against the active schema.",
           { details: { errors: imported.errors } },
         ),
+      );
+    }
+    if (bounded?.ownerRead.status === "malformed") {
+      // The sparse seed omits these edges' owners; a plan may rely on it only
+      // because import refuses every such edge.
+      throw new CandidateWriteSetError(
+        "Import staged a candidate edge whose durable match-identity owner could not be read.",
+        { details: { edges: bounded.ownerRead.malformed } },
       );
     }
     const mergeArgs = {
@@ -407,8 +422,9 @@ export async function planCandidateWriteSet<G extends GraphDef>(
  * resulting schema fence, so
  * `withEvolvedTransaction()` and `applyMergePlanInTransaction()` can commit
  * schema and accepted candidate writes in one caller transaction and revision.
- * The staging copy is always the whole resulting graph, so
- * `planningScope: "candidate"` is refused with `CandidatePlanningScopeError`.
+ * The staging copy is always the whole resulting graph, so the result reports
+ * `planned-evolution`, and an untyped `planningScope: "candidate"` is refused
+ * with `CandidatePlanningScopeError`.
  */
 export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
   args: PlanCandidateWriteSetForEvolutionArgs<G>,

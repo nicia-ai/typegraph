@@ -752,7 +752,7 @@ export class CandidatePlanningScopeError extends MergeError {
 }
 
 // @public
-export type CandidatePlanningScopeReason = "revision-tracking-disabled" | "composition" | "acyclic-relation" | "target-side-cardinality" | "missing-active-source-read" | "missing-match-identity-read" | "missing-scoped-identity-reads" | "match-identity-owners-unavailable" | "match-identity-owner-not-clone-visible" | "planned-evolution";
+export type CandidatePlanningScopeReason = "composition" | "acyclic-relation" | "target-side-cardinality" | "missing-active-source-read" | "missing-match-identity-read" | "missing-scoped-identity-reads" | "match-identity-owner-not-clone-visible" | "planned-evolution";
 
 // @public
 export type CandidateSource = Readonly<{
@@ -6675,7 +6675,7 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
 export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<CandidateWriteSetPlan, MergeError>>;
 
 // @public
-export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target"> & Readonly<{
+export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target" | "planningScope"> & Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
 }>;
