@@ -470,9 +470,11 @@ export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
  * `z.bigint()`, a `.transform()` — where the persisted projection would
  * collapse the whole kind to its placeholder instead. Such a node states
  * nothing to compare, so it is accepted without a verdict while every other
- * node of the pair is still judged. Written only by
- * `structuralSubtypeProjection` (`./structural-subtype-projection`), never
- * into a persisted document.
+ * node of the pair is still judged. A node Zod converts only in part (a
+ * dynamic `.catch()` keeps its `type`) does not carry this marker; the
+ * projection marks it with {@link ZOD_ONLY_CONSTRAINT_KEYWORD} instead.
+ * Written only by `structuralSubtypeProjection`
+ * (`./structural-subtype-projection`), never into a persisted document.
  */
 export const UNPROJECTABLE_NODE_KEYWORD = "x-typegraph-unprojectable";
 

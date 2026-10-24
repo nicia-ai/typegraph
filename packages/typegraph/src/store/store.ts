@@ -279,7 +279,7 @@ import {
   serializeSchema,
   serializeSchemaPreservingUnknownFields,
 } from "../schema/serializer";
-import { prepareSchemaTighteningPreflight } from "../schema/tightening-preflight";
+import { prepareStoreVerbSchemaTighteningPreflight } from "../schema/tightening-preflight";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -5954,7 +5954,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
-  /** Prepares immutable schema instructions without acquiring a write fence. */
+  /**
+   * Prepares immutable schema instructions without acquiring a write fence.
+   *
+   * @throws {MigrationError} (`reason: "custom-relation-removal"`) when the
+   *   plan would drop a stored custom-meta-edge relation, as `evolve()` does.
+   */
   async planEvolution(
     extension: GraphExtension,
     options?: PlanEvolutionOptions,
@@ -6103,6 +6108,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {IncompatibleChangeError} when a redeclared kind narrows
    *   in a way the existing rows can't satisfy
    *   (code `INCOMPATIBLE_CHANGE`).
+   * @throws {MigrationError} (`reason: "custom-relation-removal"`) when
+   *   the stored schema holds a relation whose meta-edge is not built in:
+   *   the evolved schema would drop its last copy, which only an explicit
+   *   `migrateSchema()` may do.
    * @throws {GraphExtensionUnresolvedEndpointError} when an edge
    *   endpoint references a kind that exists in neither the extension
    *   nor the host graph
@@ -6219,17 +6228,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // unclassified — that function's own docblock explains why (ontology is out
     // of its scope by design). The ontology half is classified here instead,
     // against the exact after-document the commit is about to publish.
-    const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
-      graphId: this.graphId,
-      fromVersion: activeRow.version,
-      toVersion: activeRow.version + 1,
-      before: storedSchema,
-      after: serializeSchemaPreservingUnknownFields(
-        merged,
-        activeRow.version + 1,
-        storedSchema,
-      ),
-    });
+    const schemaTighteningPreflight = prepareStoreVerbSchemaTighteningPreflight(
+      {
+        verb: "store.evolve()",
+        graphId: this.graphId,
+        fromVersion: activeRow.version,
+        toVersion: activeRow.version + 1,
+        before: storedSchema,
+        after: serializeSchemaPreservingUnknownFields(
+          merged,
+          activeRow.version + 1,
+          storedSchema,
+        ),
+      },
+    );
     const identityCandidate =
       merged.identity === undefined ?
         undefined
@@ -7055,6 +7067,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {MigrationError} (`reason: "ontology-tightening-violated"`)
    *   when a surviving kind was assignable to an edge endpoint only through
    *   a removed kind and a live edge still relies on it.
+   * @throws {MigrationError} (`reason: "custom-relation-removal"`) when
+   *   the stored schema holds a relation whose meta-edge is not built in,
+   *   as `evolve()` does.
    * @throws {MigrationError} (`reason: "unique-constraint-requires-empty-kind"`)
    *   when a removed kind that sorts before a surviving, populated kind
    *   leaves its `kindWithSubClasses` subclass component, where its uniqueness
@@ -7118,17 +7133,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // the middle of a subclass chain cuts its surviving descendants off from
     // every edge kind that admitted them through it. The preflight decides,
     // from the same before/after documents every commit path hands it.
-    const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
-      graphId: this.graphId,
-      fromVersion: activeRow.version,
-      toVersion: activeRow.version + 1,
-      before: storedSchema,
-      after: serializeSchemaPreservingUnknownFields(
-        finalGraph,
-        activeRow.version + 1,
-        storedSchema,
-      ),
-    });
+    const schemaTighteningPreflight = prepareStoreVerbSchemaTighteningPreflight(
+      {
+        verb: "store.removeKinds()",
+        graphId: this.graphId,
+        fromVersion: activeRow.version,
+        toVersion: activeRow.version + 1,
+        before: storedSchema,
+        after: serializeSchemaPreservingUnknownFields(
+          finalGraph,
+          activeRow.version + 1,
+          storedSchema,
+        ),
+      },
+    );
     // No structural gate: dropping kinds that still hold rows is this verb's
     // purpose (materializeRemovals reclaims them). No edge match identity
     // step: a removal declares no new durable key.

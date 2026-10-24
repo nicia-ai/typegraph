@@ -520,7 +520,11 @@ never auto-migrates. The first `ensureSchema`/`createStoreWithSchema` call
 after upgrading throws `MigrationError`, or returns `status: "breaking"` with
 `throwOnBreaking: false`. Its migration actions include one entry naming
 every persisted relation that uses a custom meta-edge, and each such change
-in `diff.ontology` carries the relation in `removedCustomRelation`. Once
+in `diff.ontology` carries the relation in `removedCustomRelation`.
+`store.evolve()`, `store.planEvolution()` and `store.removeKinds()` would
+drop the relations too, so each refuses before writing with `MigrationError`
+(`reason: "custom-relation-removal"`, the relations in `details.relations`),
+even on a store opened despite the breaking status. Once
 those relations are in `annotations`, commit the new schema once with
 `migrateSchema(backend, graph, currentVersion)`. That commit drops them from
 the stored document, and later opens report `status: "unchanged"`. The prior

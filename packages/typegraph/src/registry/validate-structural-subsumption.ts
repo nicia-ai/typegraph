@@ -17,8 +17,8 @@
  * strict objects, constraint-shaped `.meta()` keys), so a pair carrying one
  * is `incomparable` rather than judged on a projection that lost it. A
  * persisted document has no Zod schema and is compared on its projection
- * alone; the live check, which every commit path builds first, is the
- * stricter of the two.
+ * alone; the live check, which every commit path, `createStore` and
+ * `getSchemaChanges` build, is the stricter of the two.
  *
  * **The pair set is `subClassAncestors`, not the declared relations.** The
  * registry folds every `equivalentTo` class into `subClassAncestors` /
@@ -60,8 +60,9 @@
  * compared as a schema: read as one it is an open object declaring no
  * properties, which would refuse a genuine subtype as missing a property it
  * declares. Every commit path also builds the live registry from the code
- * graph before it writes (`prepareNewSchemaVersion`), so the document's
- * coarser check never decides alone. What neither check sees inside an
+ * graph before it writes (`prepareNewSchemaVersion`), as do `createStore` and
+ * the pre-flight (`getSchemaChanges`), so the document's coarser check never
+ * decides alone. What neither check sees inside an
  * unconvertible node is left to the compile-time check.
  *
  * `evolve()` re-declaring an existing kind needs no special path: the

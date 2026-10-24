@@ -5,6 +5,7 @@
  * what has changed and what migrations might be needed.
  */
 import { type IndexEntity } from "../core/types";
+import { MigrationError } from "../errors";
 import { type IndexDeclaration } from "../indexes/types";
 import { isSubsumptionMetaEdge } from "../ontology/constants";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
@@ -1638,17 +1639,9 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
     }
   }
 
-  const removedCustomRelations = diff.ontology.flatMap((change) =>
-    change.removedCustomRelation === undefined ?
-      []
-    : [change.removedCustomRelation],
-  );
-  if (removedCustomRelations.length > 0) {
-    actions.push(
-      `MOVE custom ontology relations ${removedCustomRelations.join(", ")} ` +
-        `into defineGraph({ annotations }), then commit with migrateSchema() ` +
-        `(their meta-edges are not built in, and the committed schema drops them)`,
-    );
+  const customRelations = removedCustomRelations(diff.ontology);
+  if (customRelations.length > 0) {
+    actions.push(moveCustomRelationsAction(customRelations));
   }
 
   if (diff.identity !== undefined) {
@@ -1687,6 +1680,60 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
   }
 
   return actions;
+}
+
+/** Every relation `changes` drops whose meta-edge is not built in, as written. */
+function removedCustomRelations(
+  changes: readonly OntologyChange[],
+): readonly string[] {
+  return changes.flatMap((change) =>
+    change.removedCustomRelation === undefined ?
+      []
+    : [change.removedCustomRelation],
+  );
+}
+
+function moveCustomRelationsAction(relations: readonly string[]): string {
+  return (
+    `MOVE custom ontology relations ${relations.join(", ")} ` +
+    `into defineGraph({ annotations }), then commit with migrateSchema() ` +
+    `(their meta-edges are not built in, and the committed schema drops them)`
+  );
+}
+
+/**
+ * Refuses a schema commit that would drop a stored custom-meta-edge relation,
+ * for the store verbs that commit without `ensureSchema`'s severity gate
+ * (`store.evolve()`, `store.planEvolution()`, `store.removeKinds()`). The
+ * removal is breaking (see `classifyOntologyChanges`), and `migrateSchema()`
+ * is the one path that acknowledges it. Call it with the ontology changes of
+ * the exact before/after documents the commit publishes, before any write.
+ *
+ * @throws MigrationError (`reason: "custom-relation-removal"`) naming every
+ *   such relation and the migration action that moves it.
+ */
+export function assertNoRemovedCustomRelations(
+  params: Readonly<{
+    verb: string;
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    changes: readonly OntologyChange[];
+  }>,
+): void {
+  const relations = removedCustomRelations(params.changes);
+  if (relations.length === 0) return;
+  throw new MigrationError(
+    `${params.verb} would drop ${String(relations.length)} stored custom ontology ` +
+      `relation(s) the graph can no longer declare. ${moveCustomRelationsAction(relations)}.`,
+    {
+      graphId: params.graphId,
+      fromVersion: params.fromVersion,
+      toVersion: params.toVersion,
+      reason: "custom-relation-removal",
+      relations,
+    },
+  );
 }
 
 /**

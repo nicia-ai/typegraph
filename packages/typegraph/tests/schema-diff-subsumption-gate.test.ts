@@ -12,9 +12,19 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, subClassOf } from "../src";
+import {
+  createStore,
+  defineGraph,
+  defineNode,
+  embedding,
+  subClassOf,
+} from "../src";
 import { ConfigurationError } from "../src/errors";
-import { getSchemaChanges, requiresMigration } from "../src/schema";
+import {
+  ensureSchema,
+  getSchemaChanges,
+  requiresMigration,
+} from "../src/schema";
 import { computeSchemaDiff } from "../src/schema/migration";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import {
@@ -195,5 +205,87 @@ describe("an unchanged graph whose existing hierarchy is refused", () => {
     const backend = await seedUnchangedDeployment();
 
     expect(await requiresMigration(backend, unchangedGraph())).toBe(true);
+  });
+});
+
+async function settle(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    (value) => ({ resolved: value }),
+    (error: unknown) => error,
+  );
+}
+
+/**
+ * A kind holding a field JSON Schema cannot express (`embedding()` here)
+ * persists as a whole-kind placeholder, so a stored document's registry cannot
+ * judge the pair it sits in. The commit path and `createStore` judge with the
+ * live graph's per-field projection instead; the pre-flight has to reach the
+ * same verdict, or a least-privilege runtime routed by `requiresMigration`
+ * boots straight into the refusal.
+ */
+describe("a hierarchy refused beside a field the stored document cannot express", () => {
+  const Parent = defineNode("Parent", {
+    schema: z.object({ code: z.string().min(5) }),
+  });
+  const Child = defineNode("Child", {
+    schema: z.object({ code: z.string(), vector: embedding(3) }),
+  });
+  const nodes = { Parent: { type: Parent }, Child: { type: Child } };
+  const graphId = "unprojectable_preflight";
+
+  function hierarchyGraph() {
+    return defineGraph({
+      id: graphId,
+      nodes,
+      edges: {},
+      ontology: [subClassOf(Child, Parent)],
+    });
+  }
+
+  const expectedRefusal: unknown = expect.objectContaining({
+    details: matchingObject({
+      code: "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+      childKind: "Child",
+      parentKind: "Parent",
+      reason: "string-length-not-tighter",
+      path: ["code"],
+    }),
+  });
+
+  it("is reported by getSchemaChanges when the upgrade adds the hierarchy, as ensureSchema refuses it", async () => {
+    const backend = createTestBackend();
+    await ensureSchema(backend, defineGraph({ id: graphId, nodes, edges: {} }));
+
+    const preflight = await settle(getSchemaChanges(backend, hierarchyGraph()));
+    const commit = await settle(ensureSchema(backend, hierarchyGraph()));
+
+    console.log("pre-flight:", preflight, "commit:", commit);
+    expect(commit).toEqual(expectedRefusal);
+    expect(preflight).toBeInstanceOf(ConfigurationError);
+    expect(preflight).toEqual(expectedRefusal);
+    expect(await requiresMigration(backend, hierarchyGraph())).toBe(true);
+  });
+
+  it("is reported by getSchemaChanges and requiresMigration when the stored document already holds it, as createStore refuses it", async () => {
+    const backend = createTestBackend();
+    const stored = serializeSchema(hierarchyGraph(), 1);
+    await backend.commitSchemaVersion({
+      graphId: stored.graphId,
+      expected: { kind: "initial" },
+      version: stored.version,
+      schemaHash: await computeSchemaHash(stored),
+      schemaDoc: stored,
+    });
+
+    const preflight = await settle(getSchemaChanges(backend, hierarchyGraph()));
+    const routed = await requiresMigration(backend, hierarchyGraph());
+    const open = await settle(
+      Promise.resolve().then(() => createStore(hierarchyGraph(), backend)),
+    );
+
+    console.log("pre-flight:", preflight, "routed:", routed, "open:", open);
+    expect(open).toEqual(expectedRefusal);
+    expect(preflight).toEqual(expectedRefusal);
+    expect(routed).toBe(true);
   });
 });

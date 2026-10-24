@@ -23,7 +23,8 @@
  * and its hash, and none of these facts was ever part of it. The markers live
  * only in this comparison input, so a stored document's own registry (which
  * has no Zod schema) never refuses what a live graph accepts — the live check
- * is the stricter of the two, and every commit path builds it first.
+ * is the stricter of the two, and every commit path, `createStore` and the
+ * `getSchemaChanges` pre-flight build it.
  *
  * A marker's value names the Zod instance that carries the fact, so a child
  * that reuses its parent's schema (or a field schema they share) still
@@ -36,9 +37,11 @@
  * which projects as the unprojectable placeholder. Here each such node is
  * replaced by {@link UNPROJECTABLE_NODE_KEYWORD} instead, which
  * `isStructuralSubtype` accepts unjudged, so every other field of the kind
- * is still compared. The persisted placeholder is kept when this projection
- * cannot do better: a conversion that fails for another reason, or a Zod
- * release older than 4.5 that ignores the `unrepresentable` handler.
+ * is still compared. A node Zod converts only in part (a dynamic `.catch()`
+ * keeps its `type`) is marked as carrying a Zod-only constraint instead. The
+ * persisted placeholder is kept when this projection cannot do better: a
+ * conversion that fails for another reason, or a Zod release older than 4.5
+ * that ignores the `unrepresentable` handler.
  */
 import { z } from "zod";
 
@@ -155,6 +158,33 @@ function markZodOnlyConstraints(
 }
 
 /**
+ * Zod also reports as unconvertible a fact of a node it otherwise converts (a
+ * dynamic `.catch()`, a `multipleOf` of zero, a bigint default) and merges the
+ * marker beside the keywords it did write. Accepting that node unjudged would
+ * skip the `type` it still states, so the lost fact is marked as a Zod-only
+ * constraint instead, which leaves the node comparable only to itself.
+ */
+function markPartlyConvertedNode(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const { jsonSchema } = context;
+  const nodeType = jsonSchema[UNPROJECTABLE_NODE_KEYWORD];
+  if (typeof nodeType !== "string") return;
+  if (!Object.keys(jsonSchema).some((key) => isConstrainingKeyword(key))) {
+    return;
+  }
+  Reflect.deleteProperty(jsonSchema, UNPROJECTABLE_NODE_KEYWORD);
+  markOpaque(
+    jsonSchema,
+    ZOD_ONLY_CONSTRAINT_KEYWORD,
+    `unconvertible:${nodeType}:${instanceToken(context.zodSchema)}`,
+  );
+}
+
+/**
  * `schema` converted with every Zod-only constraint and every unconvertible
  * node marked, or the persisted placeholder when that conversion cannot
  * replace it (see the module docblock).
@@ -165,6 +195,7 @@ function projectForComparison(schema: z.ZodType): JsonSchema {
     z.toJSONSchema(schema, {
       override: (context) => {
         markZodOnlyConstraints(context);
+        markPartlyConvertedNode(context);
       },
       unrepresentable: (context) => {
         const nodeType = context.zodSchema._zod.def.type;

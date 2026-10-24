@@ -1676,6 +1676,14 @@ export const MIGRATION_FAILURE_REASONS = [
    * empty. Inspect `details.constraints`.
    */
   "unique-constraint-requires-empty-kind",
+  /**
+   * `store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would
+   * drop a stored relation whose meta-edge is not built in, the last copy of
+   * a relation the graph can no longer declare. Inspect `details.relations`,
+   * move them into `defineGraph({ annotations })`, then commit with
+   * `migrateSchema()`.
+   */
+  "custom-relation-removal",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -1783,6 +1791,23 @@ export type MigrationErrorDetails =
        * migration retried.
        */
       violations: readonly ConstraintFenceViolation[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      /**
+       * `store.evolve()`, `store.planEvolution()` or `store.removeKinds()`
+       * would drop a stored relation whose meta-edge is not built in. The
+       * stored schema holds its last copy, so only an explicit
+       * `migrateSchema()` may drop it.
+       */
+      reason: "custom-relation-removal";
+      /**
+       * Each such relation as written, such as `governs(Team, Project)`: the
+       * `removedCustomRelation` of every change that drops one.
+       */
+      relations: readonly string[];
     }>;
 
 /**
