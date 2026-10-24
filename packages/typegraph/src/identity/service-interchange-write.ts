@@ -631,7 +631,8 @@ export async function readIdentityRestoreBaseline(
  * unconditionally (the original design here) would, for a graph that already
  * has its own retained history, stamp a
  * destination-clock-derived floor over transitions the restore never
- * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
+ * touched — misreporting the `retention-truncated` completeness reason, and
+ * `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
  * for classes the restore had nothing to do with. A graph with no native
  * rows yet has nothing of its own for that floor to misclassify, so setting
  * it there stays sound: reading THIS graph's clock at restore time and

@@ -357,11 +357,18 @@ do {
   commits ([Inside a transaction](#inside-a-transaction)).
 - **Pruned history is gone.** Nothing below the retention watermark is
   retained ([Retention](#retention)).
+- **Only captured changes are logged.** Capture sees only writes made after
+  `history: true` was enabled ([no
+  backfill](/limitations#recorded--system-time-history-true)), so a class
+  whose members joined, or were created, before then is not explained by the
+  log, and transitions that involved those members can be missing from the
+  page.
 
 Every page carries `completeness`, the one place to check whether it is the
-whole answer: it reports the last three, more pages, and restored transitions
-discovery could not attribute ([Completeness](#completeness)). Current-schema
-reconstruction applies to every replay, so it is not reported per page.
+whole answer the log can give: it reports the last four, more pages, and
+restored transitions discovery could not attribute
+([Completeness](#completeness)). Current-schema reconstruction applies to
+every replay, so it is not reported per page.
 
 :::
 
@@ -558,14 +565,16 @@ await store.identity.transitionsOf(alice); // now includes it, post-commit
 
 Every `transitionsOf` and `replay` page carries `completeness`, which is
 either `{ status: "complete" }` or `{ status: "partial", reasons }`. A
-complete page is the whole answer for that reference and range; a partial one
-lists every reason it is not, in this order:
+complete page is the whole answer the transition log can give for that
+reference and range; a partial one lists every reason it is not, in this
+order:
 
 | `reason` | Carries | Holds when |
 | --- | --- | --- |
 | `more-pages` | `nextCursor` | `limit` capped the page; the same cursor is on the page as `nextCursor` |
 | `retention-truncated` | `before` (a `RecordedInstant`) | The range starts below the [retention watermark](#retention), so history below `before` is gone |
 | `unattributed-restored` | `count` | The graph holds restored transitions lineage discovery could neither tie to the reference nor rule out; graph-wide, so the same on every page |
+| `uncaptured-members` | `count` | Members of the reference's current class arrived through writes capture never saw (made before `history: true` was enabled, or bypassing capture): the member's node has no recorded version, or no recorded evidence ties it to the reference. Transitions that involved them can be missing from the page. Not reported alongside `pending-transaction-notes` |
 | `restored-not-reconstructed` | `count` | `replay` only: this page's restored transitions, which are in `transitionsOf` but not in `steps` |
 | `pending-transaction-notes` | — | `tx.identity` only: the transaction has made identity changes to this graph that the log does not hold yet (see [Inside a transaction](#inside-a-transaction)) |
 
@@ -580,6 +589,13 @@ if (page.completeness.status === "partial") {
 
 `completeness` does not report that a step was read under the current schema
 (see [Replay steps](#replay-steps)): that holds for every replay.
+
+`uncaptured-members` is read from the current class, so it cannot see a
+change made before capture was enabled that the class no longer shows (a
+pre-capture merge that has since been undone), or a captured change that
+involved a node before capture first recorded the node. On a graph with data
+written before `history: true` was enabled, `complete` covers only what
+capture recorded.
 
 ### Retention
 
@@ -621,7 +637,9 @@ starts below the watermark carries a `retention-truncated` reason in its
 at or above it (a `fromRecorded` there, or a later page's `cursor`) does not.
 `replay` additionally refuses a range that lies entirely below the watermark
 with `IDENTITY_REPLAY_HISTORY_TRUNCATED`, since it has no step to pair;
-`transitionsOf` answers that range with an empty page that reports the cut.
+`transitionsOf` answers that range with a page holding no transitions of this
+graph's own (restored rows keep their source revisions, so some can still
+fall in the range) that reports the cut.
 
 ## Identity-expanded traversal
 

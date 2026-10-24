@@ -47,6 +47,7 @@ import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
 import {
   createRecordedTransactionScope,
+  hasPendingIdentityTransitionNotes,
   runRecordedTransactionSavepoint,
   withRecordedIdentityMutationTarget,
 } from "../src/store/recorded-capture";
@@ -429,6 +430,46 @@ describe("identity transition log", () => {
       limit: 200,
     });
     expect(rows.map((row) => row.class_id)).toEqual(["released"]);
+  });
+
+  it("reports pending identity notes only for the graph that took them", async () => {
+    // Every public path runs one store's writes per capture session, so two
+    // graphs' notes meet in one session only through the session API
+    // itself; this drives it directly to pin the per-graph answer.
+    const backend = createTestBackend();
+    const schema = createSqlSchema(backend.tableNames);
+    const notedGraphId = "identity_transition_log_pending_noted";
+    const otherGraphId = "identity_transition_log_pending_other";
+
+    await backend.transaction(async (target) => {
+      const scope = createRecordedTransactionScope(
+        target,
+        batchPointReadVerdict(backend),
+        schema,
+      );
+      expect(
+        hasPendingIdentityTransitionNotes(scope.backend, notedGraphId),
+      ).toBe(false);
+      await withRecordedIdentityMutationTarget(
+        scope.backend,
+        (_rawTarget, _touch, noteTransition) => {
+          noteTransition(notedGraphId, {
+            cause: "fold",
+            classRef: { kind: "Person", id: "pending" },
+            assertionIds: [],
+            validAt: new Date().toISOString(),
+          });
+          return Promise.resolve();
+        },
+      );
+      const pending = {
+        noted: hasPendingIdentityTransitionNotes(scope.backend, notedGraphId),
+        other: hasPendingIdentityTransitionNotes(scope.backend, otherGraphId),
+      };
+      console.log("pending notes by graph:", pending);
+      expect(pending).toEqual({ noted: true, other: false });
+      await scope.flush();
+    });
   });
 
   it("throws the sealed-session ConfigurationError for a note taken after flush", async () => {

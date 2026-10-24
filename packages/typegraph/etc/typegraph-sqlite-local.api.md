@@ -3615,6 +3615,9 @@ type IdentityHistoryIncompleteReason = Readonly<{
     reason: "unattributed-restored";
     count: number;
 }> | Readonly<{
+    reason: "uncaptured-members";
+    count: number;
+}> | Readonly<{
     reason: "restored-not-reconstructed";
     count: number;
 }> | Readonly<{
