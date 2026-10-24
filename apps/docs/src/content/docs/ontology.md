@@ -390,6 +390,13 @@ partOf(Episode, Podcast, { via: episodeOf });
 // pick whichever direction reads more naturally, not both.
 ```
 
+Deleting a whole deletes its parts with it, leaf-first and in the same
+transaction, and resurrecting the whole later does not bring them back. If
+parts must outlive their whole, use the aggregation tier instead (see
+[Choosing a containment tier](#choosing-a-containment-tier)). To see what a
+delete will remove before running it, call `planDelete` (see
+[Previewing a delete](/limitations#previewing-a-delete)).
+
 `via`'s realizing edge must declare a whole-side cardinality of `"one"` or
 `"oneActive"`: `cardinality` when the part is the edge's `from` endpoint,
 `targetCardinality` when the part is its `to` endpoint. Every `(from, to)`
@@ -818,7 +825,8 @@ Tier 1 is enforced, in full, at write time:
   the caller's `maxDepth`. A part attached through a `population: "one"` edge
   whose validity window has ended is outside a current read, though the
   delete cascade still takes it (see
-  [Composition Cascade](/limitations#composition-cascade)).
+  [Composition Cascade](/limitations#composition-cascade)); preview a delete
+  with [`planDelete`](/limitations#previewing-a-delete), not this export.
   There is no depth ceiling on that closure and no partial answer: it is a
   set-semantics recursion bounded by its own visited set, the same way the
   acyclicity probe is exhaustive, so a part chain of any length comes back

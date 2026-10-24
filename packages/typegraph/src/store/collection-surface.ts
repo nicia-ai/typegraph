@@ -33,11 +33,12 @@ export const NODE_TEMPORAL_READ_NAMES = [
   "count",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
-/** Current-state-only node reads (constraint / index lookups). */
+/** Current-state-only node reads (constraint / index lookups, delete plans). */
 export const CURRENT_ONLY_READ_NAMES = [
   "findByConstraint",
   "bulkFindByConstraint",
   "bulkFindByIndex",
+  "planDelete",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
 /** Node write method names: never available on a read-only StoreView. */

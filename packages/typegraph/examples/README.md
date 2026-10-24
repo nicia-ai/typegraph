@@ -39,7 +39,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [05-edge-implications.ts](./05-edge-implications.ts) | Edge hierarchies with `implies` |
 | [06-inverse-edges.ts](./06-inverse-edges.ts) | Bidirectional relationships with `inverseOf` |
 | [08-custom-ontology.ts](./08-custom-ontology.ts) | The core meta-edges working together (`broader`, `equivalentTo`, `disjointWith`, `partOf`, `inverseOf`, `implies`) plus free-form type-level semantics via `defineGraph({ annotations })` — persisted, introspectable, and serialized, with the vocabulary interpreted by your application |
-| [28-composition-lifecycle.ts](./28-composition-lifecycle.ts) | Whole/part composition with `partOf` and `existence: "required"`: a bare create of a required part is refused, `getOrCreateByConstraint`'s attachment postcondition, `reparent` between wholes, `subgraph({ composition: true })` exporting the complete owned unit, and the delete cascade's `cascadedParts` on both an `onOperationEnd` hook and a `transactionWithReceipt` receipt |
+| [28-composition-lifecycle.ts](./28-composition-lifecycle.ts) | Whole/part composition with `partOf` and `existence: "required"`: a bare create of a required part is refused, `getOrCreateByConstraint`'s attachment postcondition, `reparent` between wholes, `subgraph({ composition: true })` exporting the complete owned unit, `planDelete` previewing a delete, and the delete cascade's `cascadedParts` on both an `onOperationEnd` hook and a `transactionWithReceipt` receipt |
 
 ### Data Management
 

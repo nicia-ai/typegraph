@@ -2246,8 +2246,10 @@ live parts — see [Composition Cascade](/limitations#composition-cascade) for
 what the cascade itself does and does not do. Both the delete's
 `onOperationEnd` hook context (see [Observability Hooks](#observability-hooks))
 and every transaction receipt that covers the delete carry the parts it
-removed, as `cascadedParts`: `{ kind, id }` refs taken from the same plan the
-cascade executed, in the order the cascade deleted them — **leaf-first, then
+removed, as `cascadedParts`: one `{ kind, id, whole, viaEdgeKind }` entry per
+part, naming the whole it was directly a part of and the composition edge kind
+that bound it, taken from the same plan the cascade executed, in the order the
+cascade deleted them — **leaf-first, then
 deterministically by kind, then id**. Leaf-first is the part of that order with
 meaning: a part is always named before the whole it belongs to. Two sibling
 parts of one whole have no order between them to respect, so they are sorted
@@ -2319,7 +2321,10 @@ const { receipt, result } = await store.transactionWithReceipt(async (tx) => {
 });
 
 result.receipt.cascadedParts;
-// [{ kind: "Track", id: trackOne.id }, { kind: "Track", id: trackTwo.id }]
+// [
+//   { kind: "Track", id: trackOne.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+//   { kind: "Track", id: trackTwo.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+// ]
 result.receipt.writes.nodes;
 // { Album: 1 } — the scope's own delete call. The two cascaded Track
 // deletes never went through `scoped.nodes.Track.*`, so they are not write
@@ -2330,9 +2335,9 @@ receipt.cascadedParts;
 // closure (leaf-first, then by kind and id), concatenated in the order the
 // deletes ran:
 // [
-//   { kind: "Track", id: trackOne.id },
-//   { kind: "Track", id: trackTwo.id },
-//   { kind: "Track", id: trackThree.id },
+//   { kind: "Track", id: trackOne.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+//   { kind: "Track", id: trackTwo.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+//   { kind: "Track", id: trackThree.id, whole: { kind: "Album", id: albumTwo.id }, viaEdgeKind: "trackOf" },
 // ]
 receipt.writes.nodes; // { Album: 2 }
 ```
@@ -2351,6 +2356,10 @@ A cascaded part is never a write intent, in either place it is reported.
 hook context's `entity` / `kind` / `id` fields describe only that same call.
 Cascaded parts are reported as refs beside those counters, never folded into
 them.
+
+To see what a delete will cascade through before running it, call
+`nodes.<Kind>.planDelete(id)`; see
+[Previewing a delete](/limitations#previewing-a-delete).
 
 #### Rollback and error propagation
 
@@ -3463,7 +3472,7 @@ coordinate:
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
 | `view.subgraph(rootId, options)` | pinned |
 | `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |
-| `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
+| `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` / `planDelete` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
 | `view.search` reads (`fulltext` / `vector` / `hybrid`) | delegate to the live search on a `"current"` view; reject on any other pin |
 | `view.search.rebuildFulltext()` | rejected on every view (maintenance write) |
 | `view.mode` / `view.asOf` | the pinned coordinate |
@@ -3623,13 +3632,14 @@ type OperationHookContext = HookContext &
     kind: string;
     id: string;
     /**
-     * The composition parts a whole's delete cascaded through, leaf-first, as
-     * `{ kind, id }` refs. Present (and possibly empty) on `onOperationEnd`
+     * The composition parts a whole's delete cascaded through, leaf-first, each
+     * with the whole it was directly a part of and the edge kind that bound
+     * it. Present (and possibly empty) on `onOperationEnd`
      * for a node delete; absent on `onOperationStart`, which fires before the
      * cascade is planned, and on every non-delete operation. See
      * [Cascaded parts in receipts and hooks](#cascaded-parts-in-receipts-and-hooks).
      */
-    cascadedParts?: readonly CompositionNodeRef[];
+    cascadedParts?: readonly CompositionCascadedPart[];
   }>;
 ```
 

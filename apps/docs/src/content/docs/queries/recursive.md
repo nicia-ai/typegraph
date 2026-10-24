@@ -485,6 +485,8 @@ with a `ConfigurationError` (`details.code` is `RECURSIVE_PAGINATION_UNSUPPORTED
 any statement. Read the walk with `execute()` and a `limit()` or `maxHops` you choose, or page the
 start nodes in a query without the recursive traversal and run the walk for each page. See
 [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated).
+The one-hop composition shortcut is not recursive and does page; see
+[Paging direct parts](#paging-direct-parts).
 
 ## Depth Limits
 
@@ -613,6 +615,40 @@ const directChildren = await store
   .select((ctx) => ctx.x)
   .execute();
 ```
+
+### Paging direct parts
+
+`parts()` and `wholes()` with `maxHops: 1` and neither `depth` nor `path` compile to a fixed one-hop
+step rather than a recursive one, so `paginate()`, `page()` and `stream()` accept them, with every
+realizing edge kind and orientation of that level in one result. This is the way to list one level
+of a part tree at a time, however many children a node has:
+
+```typescript
+const children = store
+  .query()
+  .from("Folder", "f")
+  .whereNode("f", (f) => f.id.eq(folderId))
+  .parts("child", { maxHops: 1 })
+  .orderBy("f", "name", "asc")
+  .select((ctx) => ({ kind: ctx.child.kind, id: ctx.child.id }));
+
+let after: string | undefined;
+do {
+  const page = await children.paginate({
+    first: 50,
+    ...(after === undefined ? {} : { after }),
+  });
+  // render `page.data`
+  after = page.nextCursor;
+} while (after !== undefined);
+
+for await (const child of children.stream({ batchSize: 500 })) {
+  // one row per direct part
+}
+```
+
+Asking for `depth` or `path`, or for any `maxHops` above 1, makes the step recursive again, and the
+pagination surfaces refuse it as described in [Pagination](#pagination).
 
 **`via` narrows the walk to one realizing edge.** `parts("x", { via: episodeOf })`
 on the Podcast above follows `episodeOf` alone, so it returns the Episodes and

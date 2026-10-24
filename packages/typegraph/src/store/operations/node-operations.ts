@@ -204,7 +204,10 @@ import {
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
 import { collectRecordedIdentityTransitionNotes } from "../recorded-capture";
-import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  type GraphWriteLock,
+  uncapturedGraphWriteLock,
+} from "../recorded-capture/clock";
 import {
   appliedResolvedMutationSet,
   type ResolvedMutationSetAttempt,
@@ -216,6 +219,7 @@ import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
   type CompositionAttachment,
+  type CompositionCascadedPart,
   type CompositionNodeRef,
   type CreateNodeInput,
   type Edge,
@@ -223,6 +227,7 @@ import {
   type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeReparentOptions,
   type NodeReparentResult,
@@ -388,7 +393,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
    * refs the delete's `onOperationEnd` context carries, from the same cascade
    * plan, so the hook and every receipt agree.
    */
-  recordCascadedParts?: (parts: readonly CompositionNodeRef[]) => void;
+  recordCascadedParts?: (parts: readonly CompositionCascadedPart[]) => void;
   createBulkOperationContext: (
     operation: "compareAndSet" | "updateWhere",
     kind: string,
@@ -6742,7 +6747,7 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
 type NodeDeleteOutcome = Readonly<{
   wrote: boolean;
   /** Leaf-first, empty when the kind declares no composition parts. */
-  cascadedParts: readonly CompositionNodeRef[];
+  cascadedParts: readonly CompositionCascadedPart[];
 }>;
 
 const NODE_DELETE_NOT_WRITTEN: NodeDeleteOutcome = {
@@ -6761,7 +6766,7 @@ const NODE_DELETE_NOT_WRITTEN: NodeDeleteOutcome = {
  */
 type NodeDeleteBatchOutcome = Readonly<{
   affectedCount: number;
-  cascadedParts: readonly CompositionNodeRef[];
+  cascadedParts: readonly CompositionCascadedPart[];
 }>;
 
 function nodeDeleteWrote(outcome: NodeDeleteOutcome): boolean {
@@ -6892,6 +6897,75 @@ export async function executeNodeDelete<G extends GraphDef>(
     },
   );
   ctx.recordCascadedParts?.(outcome.cascadedParts);
+}
+
+/**
+ * What {@link executeNodeDelete} would do to one live node, without writing:
+ * the read half of its portable frame — the live-row gate, then
+ * {@link planCascadingNodeDelete} with the root always judged — and none of
+ * the writes. `undefined` for an absent or tombstoned node, where the delete
+ * is a no-op. A refusal the planner reaches propagates as the delete's own
+ * error.
+ *
+ * Inside a transaction the caller owns (`"existing"`), the plan is read in a
+ * write frame under the delete's own plan: the same constraint fence, so the
+ * per-graph write lock a composition whole's delete takes is taken here and
+ * held to the end of the caller's transaction. The frame reports
+ * `didWrite: false`, so it advances no revision. Identity is not locked: the
+ * plan folds nothing. Anywhere else there is no transaction to hold that lock
+ * in, so the plan is a best-effort unlocked read, as merge plan time reads
+ * the cascade (`uncapturedGraphWriteLock`).
+ */
+export async function executeNodeDeletePlan<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  backend: GraphBackend | TransactionBackend,
+): Promise<NodeDeletePlan | undefined> {
+  if (resolveWriteTransactionMode(backend) !== "existing") {
+    return planLiveNodeDelete(
+      ctx,
+      kind,
+      id,
+      backend,
+      uncapturedGraphWriteLock(),
+    );
+  }
+  return runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeWritePlan(nodeDeleteConstraintProbe(ctx, kind), false),
+    backend,
+    (_session, target, _overlaidSession, lock) =>
+      planLiveNodeDelete(ctx, kind, id, target, lock),
+    { didWrite: () => false },
+  );
+}
+
+async function planLiveNodeDelete<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+): Promise<NodeDeletePlan | undefined> {
+  const existing = await target.getNode(ctx.graphId, kind, id);
+  if (existing === undefined || !isLiveNodeRow(existing)) return undefined;
+  const effects = noPlannedDeleteEffects();
+  const cascadePlan = await planCascadingNodeDelete(
+    ctx,
+    { kind, id },
+    target,
+    lock,
+    undefined,
+    effects,
+    true,
+  );
+  return {
+    cascadedParts: cascadedPartReferences(cascadePlan),
+    removedEdgeIds: [...effects.removedEdgeIds].toSorted((left, right) =>
+      compareStrings(left, right),
+    ),
+  };
 }
 
 /**
@@ -7071,7 +7145,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
       }
 
       let affectedCount = 0;
-      const cascadedParts: CompositionNodeRef[] = [];
+      const cascadedParts: CompositionCascadedPart[] = [];
       for (const { id, preflight, cascadePlan } of plannedDeletes) {
         await applyCompositionCascade(
           ctx,

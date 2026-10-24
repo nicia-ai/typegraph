@@ -29,7 +29,7 @@ import {
   fenceLockOnlyDecision,
   type GraphWriteLock,
 } from "../recorded-capture/clock";
-import { type CompositionNodeRef } from "../types";
+import { type CompositionCascadedPart } from "../types";
 
 /**
  * One node the walk discovered, with the composition edge that binds it.
@@ -86,10 +86,12 @@ const EMPTY_COMPOSITION_CASCADE_PLAN: CompositionCascadePlan = {
 };
 
 /**
- * The plan's members as bare `{ kind, id }` refs, in the cascade's own delete
- * order — leaf-first, then deterministically by kind, then id, within each level
- * ({@link cascadeDeletionOrder}) — what a whole's delete reports to its
- * operation hook and to the transaction receipt (`cascadedParts`).
+ * The plan's members as {@link CompositionCascadedPart}s — each part with its
+ * own immediate whole and the edge kind that bound it — in the cascade's own
+ * delete order: leaf-first, then deterministically by kind, then id, within
+ * each level ({@link cascadeDeletionOrder}). What a whole's delete reports to
+ * its operation hook and to the transaction receipt (`cascadedParts`), and
+ * what `planDelete` previews.
  *
  * A projection of the plan the cascade ALREADY computes, not a second walk:
  * the exposure and the deletions are the same list by construction, so a
@@ -98,8 +100,13 @@ const EMPTY_COMPOSITION_CASCADE_PLAN: CompositionCascadePlan = {
  */
 export function cascadedPartReferences(
   plan: CompositionCascadePlan,
-): readonly CompositionNodeRef[] {
-  return plan.members.map((member) => ({ kind: member.kind, id: member.id }));
+): readonly CompositionCascadedPart[] {
+  return plan.members.map((member) => ({
+    kind: member.kind,
+    id: member.id,
+    whole: { kind: member.whole.kind, id: member.whole.id },
+    viaEdgeKind: member.viaEdgeKind,
+  }));
 }
 
 /**

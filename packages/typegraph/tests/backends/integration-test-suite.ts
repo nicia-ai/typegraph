@@ -50,6 +50,7 @@ import {
   registerCoalesceUpsertIntegrationTests,
   registerCollectionAggregateIntegrationTests,
   registerCompositionAttachmentIntegrationTests,
+  registerCompositionDeletePlanIntegrationTests,
   registerCompositionExistenceIntegrationTests,
   registerCompositionFenceIntegrationTests,
   registerCompositionNavigationIntegrationTests,
@@ -342,6 +343,7 @@ export function createIntegrationTestSuite<
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
     registerCompositionAttachmentIntegrationTests(context);
+    registerCompositionDeletePlanIntegrationTests(context);
     registerCompositionExistenceIntegrationTests(context);
     registerCompositionFenceIntegrationTests(context);
     registerCompositionNavigationIntegrationTests(context);

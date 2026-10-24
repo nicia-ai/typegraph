@@ -176,6 +176,58 @@ const sharedIdCompositionGraph = defineGraph({
   ],
 });
 
+/**
+ * One whole whose DIRECT level mixes both orientations across two edge kinds —
+ * `cnFolderHasFile` (`hasPart`, whole names the part) and `cnLinkIn`
+ * (`partOf`, part names the whole) — with a grandchild level under the files
+ * that a one-hop read must leave out.
+ */
+const CnFolder = defineNode("CnFolder", {
+  schema: z.object({ name: z.string() }),
+});
+const CnFile = defineNode("CnFile", { schema: z.object({ name: z.string() }) });
+const CnLink = defineNode("CnLink", { schema: z.object({ name: z.string() }) });
+const CnBlock = defineNode("CnBlock", {
+  schema: z.object({ name: z.string() }),
+});
+const cnFolderHasFile = defineEdge("cnFolderHasFile", { schema: z.object({}) });
+const cnLinkIn = defineEdge("cnLinkIn", { schema: z.object({}) });
+const cnBlockOf = defineEdge("cnBlockOf", { schema: z.object({}) });
+const directPartsGraph = defineGraph({
+  id: "composition_navigation_direct_parts",
+  nodes: {
+    CnFolder: { type: CnFolder },
+    CnFile: { type: CnFile },
+    CnLink: { type: CnLink },
+    CnBlock: { type: CnBlock },
+  },
+  edges: {
+    cnFolderHasFile: {
+      type: cnFolderHasFile,
+      from: [CnFolder],
+      to: [CnFile],
+      targetCardinality: "one",
+    },
+    cnLinkIn: {
+      type: cnLinkIn,
+      from: [CnLink],
+      to: [CnFolder],
+      cardinality: "one",
+    },
+    cnBlockOf: {
+      type: cnBlockOf,
+      from: [CnBlock],
+      to: [CnFile],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    hasPart(CnFolder, CnFile, { via: cnFolderHasFile }),
+    partOf(CnLink, CnFolder, { via: cnLinkIn }),
+    partOf(CnBlock, CnFile, { via: cnBlockOf }),
+  ],
+});
+
 /** No `partOf`/`hasPart` declared anywhere — the set-level subgraph refusal. */
 const noCompositionGraph = defineGraph({
   id: "composition_navigation_none",
@@ -563,6 +615,128 @@ export function registerCompositionNavigationIntegrationTests(
             details: matchingObject({
               code: "RECURSIVE_PAGINATION_UNSUPPORTED",
               operation: "page",
+            }),
+          }),
+        );
+        expect(() => query.stream()).toThrow(
+          expect.objectContaining({
+            details: matchingObject({
+              code: "RECURSIVE_PAGINATION_UNSUPPORTED",
+              operation: "stream",
+            }),
+          }),
+        );
+      }
+    });
+
+    it("pages and streams one whole's direct parts across mixed-orientation edge kinds with parts({ maxHops: 1 })", async () => {
+      const store = await context.createStore(directPartsGraph);
+      const folder = await store.nodes.CnFolder.create({ name: "root" });
+      const otherFolder = await store.nodes.CnFolder.create({ name: "other" });
+      const directParts: { kind: string; id: string }[] = [];
+      for (const name of ["a", "b", "c"]) {
+        const file = await store.nodes.CnFile.create(
+          { name },
+          { partOf: { whole: folder } },
+        );
+        directParts.push({ kind: "CnFile", id: file.id });
+        await store.nodes.CnBlock.create(
+          { name: `${name}-block` },
+          { partOf: { whole: file } },
+        );
+      }
+      for (const name of ["d", "e"]) {
+        const link = await store.nodes.CnLink.create(
+          { name },
+          { partOf: { whole: folder } },
+        );
+        directParts.push({ kind: "CnLink", id: link.id });
+      }
+      await store.nodes.CnFile.create(
+        { name: "elsewhere" },
+        { partOf: { whole: otherFolder } },
+      );
+
+      const level = store
+        .query()
+        .from("CnFolder", "f")
+        .whereNode("f", (f) => f.id.eq(folder.id))
+        .parts("x", { maxHops: 1 })
+        .orderBy("f", "name", "asc")
+        .select((ctx) => ({ kind: ctx.x.kind, id: ctx.x.id }));
+
+      // MUTATION CHECK: force `willRecurse` to `true` in `parts()`/`wholes()`
+      // (src/query/builder/query-builder.ts) and every call below refuses
+      // with RECURSIVE_PAGINATION_UNSUPPORTED, because the one-hop step is
+      // then compiled as a recursive traversal.
+      const pages: (readonly { kind: string; id: string }[])[] = [];
+      let after: string | undefined;
+      do {
+        const page = await level.paginate({
+          first: 2,
+          ...(after === undefined ? {} : { after }),
+        });
+        pages.push(page.data);
+        after = page.nextCursor;
+      } while (after !== undefined);
+
+      const paged = pages.flat();
+      expect(pages.map((page) => page.length)).toEqual([2, 2, 1]);
+      expect(paged).toHaveLength(directParts.length);
+      expect(new Set(paged.map((row) => `${row.kind}:${row.id}`))).toEqual(
+        new Set(directParts.map((part) => `${part.kind}:${part.id}`)),
+      );
+
+      const streamed: typeof directParts = [];
+      for await (const row of level.stream({ batchSize: 2 })) {
+        streamed.push(row);
+      }
+      expect(streamed).toEqual(paged);
+
+      const fileWholes: string[] = [];
+      for await (const row of store
+        .query()
+        .from("CnFile", "file")
+        .wholes("w", { maxHops: 1 })
+        .orderBy("file", "name", "asc")
+        .select((ctx) => ({ file: ctx.file.name, whole: ctx.w.id }))
+        .stream({ batchSize: 1 })) {
+        fileWholes.push(`${row.file}:${row.whole}`);
+      }
+      expect(fileWholes).toEqual([
+        `a:${folder.id}`,
+        `b:${folder.id}`,
+        `c:${folder.id}`,
+        `elsewhere:${otherFolder.id}`,
+      ]);
+    });
+
+    it("refuses paging parts({ maxHops: 1 }) once depth or path makes the step recursive", async () => {
+      const store = await context.createStore(directPartsGraph);
+      const folder = await store.nodes.CnFolder.create({ name: "root" });
+      const queries = [
+        store
+          .query()
+          .from("CnFolder", "f")
+          .whereNode("f", (f) => f.id.eq(folder.id))
+          .parts("x", { maxHops: 1, depth: "d" })
+          .orderBy("f", "name", "asc")
+          .select((ctx) => ({ id: ctx.x.id, depth: ctx.d })),
+        store
+          .query()
+          .from("CnFolder", "f")
+          .whereNode("f", (f) => f.id.eq(folder.id))
+          .parts("x", { maxHops: 1, path: "route" })
+          .orderBy("f", "name", "asc")
+          .select((ctx) => ({ id: ctx.x.id, route: ctx.route })),
+      ];
+
+      for (const query of queries) {
+        await expect(query.paginate({ first: 1 })).rejects.toThrow(
+          expect.objectContaining({
+            details: matchingObject({
+              code: "RECURSIVE_PAGINATION_UNSUPPORTED",
+              operation: "paginate",
             }),
           }),
         );

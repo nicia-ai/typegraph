@@ -159,6 +159,7 @@ export function registerGraphMergeCallbackIntegrationTests(
               "findByConstraint",
               "getById",
               "getByIds",
+              "planDelete",
             ]);
             expect(Object.keys(reads.edges.accepts).toSorted()).toEqual([
               "bulkFindFrom",

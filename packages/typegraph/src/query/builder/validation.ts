@@ -456,10 +456,12 @@ export type CursorPaginationSurface = "paginate" | "page" | "stream";
  * fans one start node out into rows that have no single edge to extend the
  * start node's keys with, so the cursor can only name the start node. The next
  * page then resumes strictly after that node and loses every row of it not yet
- * returned. No recursive shape escapes this: even a traversal bounded to one
- * hop yields rows per start node that the start-node keys cannot tell apart,
- * and the compiler's lowering of that shape to a fixed hop is an engine detail
- * the cursor does not see.
+ * returned. A `recursive({ maxHops: 1 })` step is refused too: the compiler's
+ * lowering of that shape to a fixed hop is an engine detail the cursor does
+ * not see. `parts()` / `wholes()` with `maxHops: 1` and neither `depth` nor
+ * `path` are different: the builder emits a fixed step, never a recursive one,
+ * so this refusal does not apply and the cursor carries that step's edge key
+ * like any `traverse()`.
  *
  * Every pagination surface calls this before building or executing anything, so
  * the refusal is the same on every backend and costs no statement.

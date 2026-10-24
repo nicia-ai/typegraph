@@ -251,6 +251,64 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
+      "holds the per-graph write lock from a transaction's planDelete to its delete, so no part is attached in between",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        const live = requirePostgres();
+        const deleter = createStore(graph, createPostgresBackend(live.first));
+        const attacher = createStore(graph, createPostgresBackend(live.second));
+        const show = await deleter.nodes.Show.create({}, { id: "show" });
+        await deleter.nodes.Clip.create(
+          { slug: "c0" },
+          { id: "clip0", partOf: { whole: show } },
+        );
+
+        const planned = createGate();
+        const proceed = createGate();
+        const deletion = deleter.transactionWithReceipt(async (tx) => {
+          const plan = await tx.nodes.Show.planDelete(show.id);
+          planned.open();
+          await proceed.opened;
+          await tx.nodes.Show.delete(show.id);
+          return requireDefined(plan);
+        });
+        await planned.opened;
+
+        const attach = attacher.nodes.Clip.create(
+          { slug: "c1" },
+          { id: "clip1", partOf: { whole: show } },
+        );
+        const attachOutcome = attach.then(
+          () => "committed" as const,
+          (error: unknown) => error,
+        );
+        // MUTATION CHECK: plan with `uncapturedGraphWriteLock()` on the
+        // transactional branch of `executeNodeDeletePlan`
+        // (src/store/operations/node-operations.ts) and the attach commits
+        // here instead of waiting, so the race answers "attach finished" —
+        // verified and reverted.
+        const firstToSettle = await Promise.race([
+          untilSessionWaitsOnFence(live.observer).then(
+            () => "attach waiting" as const,
+          ),
+          attachOutcome.then(() => "attach finished" as const),
+        ]);
+        expect(firstToSettle).toBe("attach waiting");
+
+        proceed.open();
+        const { result: plan, receipt } = await deletion;
+        expect(plan.cascadedParts.map((part) => part.id)).toEqual(["clip0"]);
+        expect(receipt.cascadedParts).toEqual(plan.cascadedParts);
+        // The attach ran only after the delete committed, and found its whole
+        // gone.
+        expect(await attachOutcome).toBeInstanceOf(Error);
+        expect(
+          await deleter.nodes.Clip.getById("clip1" as never),
+        ).toBeUndefined();
+      },
+    );
+
+    it(
       "releases the unique key a member holds when its delete runs, not the one the plan read",
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {

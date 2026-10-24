@@ -24,6 +24,8 @@
  *   whole as a no-op
  * - `store.subgraph(root, { composition: true })` exporting the complete
  *   owned unit, at any depth
+ * - `planDelete` previewing exactly what a delete will cascade through,
+ *   decided by the planner the delete itself runs
  * - the delete cascade's `cascadedParts`, surfaced identically on an
  *   `onOperationEnd` hook and on a `transactionWithReceipt` receipt
  *
@@ -404,9 +406,16 @@ export async function main(): Promise<void> {
     startedOperations.length = 0;
     endedOperations.length = 0;
 
-    const { receipt } = await store.transactionWithReceipt(async (tx) => {
-      await tx.nodes.Podcast.delete(exportPodcast.id);
-    });
+    // `planDelete` on the transaction's collection reads the delete's own plan
+    // under the per-graph write lock the delete takes, so no part can be
+    // attached between the preview and the delete that follows it.
+    const { receipt, result: preview } = await store.transactionWithReceipt(
+      async (tx) => {
+        const plan = await tx.nodes.Podcast.planDelete(exportPodcast.id);
+        await tx.nodes.Podcast.delete(exportPodcast.id);
+        return plan;
+      },
+    );
 
     console.log(`  onOperationEnd fired ${endedOperations.length} time(s)`);
     assertEqual(
@@ -428,11 +437,21 @@ export async function main(): Promise<void> {
     // then id. The two segments are siblings of one episode, so their
     // relative order is that sort, not the order they were created in; the
     // episode follows both of them because it owns them.
+    // Each entry also names the whole the part was directly a part of and the
+    // edge kind that bound it, so the tree can be rebuilt from the list.
     const expectedCascade = [
-      ...[exportSegmentOne.id, exportSegmentTwo.id]
-        .toSorted()
-        .map((id) => ({ kind: "Segment", id })),
-      { kind: "Episode", id: exportEpisode.id },
+      ...[exportSegmentOne.id, exportSegmentTwo.id].toSorted().map((id) => ({
+        kind: "Segment",
+        id,
+        whole: { kind: "Episode", id: exportEpisode.id },
+        viaEdgeKind: "segmentOf",
+      })),
+      {
+        kind: "Episode",
+        id: exportEpisode.id,
+        whole: { kind: "Podcast", id: exportPodcast.id },
+        viaEdgeKind: "episodeOf",
+      },
     ];
     assertEqual(
       cascadedParts,
@@ -451,6 +470,11 @@ export async function main(): Promise<void> {
       receipt.cascadedParts,
       cascadedParts,
       "the receipt reports the identical cascade, in the identical order",
+    );
+    assertEqual(
+      requireDefined(preview, "the delete plan").cascadedParts,
+      cascadedParts,
+      "planDelete previewed exactly the parts the delete then cascaded through",
     );
     assertEqual(
       receipt.writes.nodes,

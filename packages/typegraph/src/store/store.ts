@@ -374,6 +374,7 @@ import {
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
   executeNodeDeleteBatch,
+  executeNodeDeletePlan,
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
@@ -491,7 +492,7 @@ import {
   type BulkFindRuntimeEdgesFromParams,
   type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
-  type CompositionNodeRef,
+  type CompositionCascadedPart,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
@@ -2995,6 +2996,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
+      executeDeletePlan: (kind, id, backend) =>
+        executeNodeDeletePlan(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByConstraint: (
@@ -7615,7 +7618,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...(receiptRecorders.length === 0 ?
         {}
       : {
-          recordCascadedParts: (parts: readonly CompositionNodeRef[]) => {
+          recordCascadedParts: (parts: readonly CompositionCascadedPart[]) => {
             for (const recorder of receiptRecorders) {
               recorder.recordCascadedParts(parts);
             }
