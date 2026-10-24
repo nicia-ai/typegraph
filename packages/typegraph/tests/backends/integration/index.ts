@@ -65,6 +65,7 @@ export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
+export { registerRecursiveSharedIdIntegrationTests } from "./recursive-shared-ids";
 export { registerRecursiveStopExpansionIntegrationTests } from "./recursive-stop-expansion";
 export { registerRelationalCompositionIntegrationTests } from "./relational-composition";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";

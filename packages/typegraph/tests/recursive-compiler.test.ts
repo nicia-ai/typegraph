@@ -24,7 +24,8 @@ import {
 import { compileMultiStageRecursiveQuery } from "../src/query/compiler/recursive-chain";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import { postgresDialect, sqliteDialect } from "../src/query/dialect";
-import { sql } from "../src/query/sql-fragment";
+import { renderSql, sql } from "../src/query/sql-fragment";
+import { KIND_QUALIFIED_PATH_TOKEN_SEPARATOR } from "../src/utils/path";
 import { requireDefined } from "../src/utils/presence";
 import { toSqlString } from "./sql-test-utils";
 
@@ -129,6 +130,15 @@ function createOrderSpec(
     return { ...spec, nulls };
   }
   return spec;
+}
+
+function renderForDialect(ast: QueryAst, dialect: "sqlite" | "postgres") {
+  const compiled = compileVariableLengthQuery(
+    ast,
+    "test-graph",
+    createContext(dialect === "sqlite" ? sqliteDialect : postgresDialect),
+  );
+  return renderSql(compiled, dialect);
 }
 
 function getSqlString(ast: QueryAst, ctx = createContext()): string {
@@ -843,6 +853,87 @@ describe("compileVariableLengthQuery", () => {
 
       expect(sql).toContain("INSTR");
       expect(sql).toContain(" AS path");
+    });
+  });
+
+  describe("path tokens", () => {
+    // `RecursivePathTokenShape` decides between these two spellings. A walk
+    // that can only hold one kind must keep the bare-id token so its SQL is
+    // unchanged; one that can hold several must key the token on (kind, id) so
+    // same-id nodes of different kinds are not mistaken for revisits.
+    const singleKindAst = createAst({
+      start: { alias: "source", kinds: ["Node"], includeSubClasses: false },
+      traversals: [
+        createTraversal({
+          nodeKinds: ["Node"],
+          variableLength: createVariableLengthSpec({ pathAlias: "path" }),
+        }),
+      ],
+    });
+    const multiKindAst = createAst({
+      traversals: [
+        createTraversal({
+          nodeKinds: ["Node"],
+          variableLength: createVariableLengthSpec({ pathAlias: "path" }),
+        }),
+      ],
+    });
+
+    it("keeps the bare-id token for a single-kind walk on SQLite", () => {
+      const { sql: text, params } = renderForDialect(singleKindAst, "sqlite");
+      expect(text).toContain("'|' || n0.id || '|' AS path");
+      expect(text).toContain("INSTR(r.path, '|' || n.id || '|') = 0");
+      expect(text).toContain("r.path || n.id || '|' AS path");
+      expect(text).not.toContain(".kind ||");
+      expect(params).not.toContain(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
+    });
+
+    it("keeps the bare-id token for a single-kind walk on PostgreSQL", () => {
+      const { sql: text, params } = renderForDialect(singleKindAst, "postgres");
+      expect(text).toContain("ARRAY[n0.id] AS path");
+      expect(text).toContain("n.id != ALL(r.path)");
+      expect(text).toContain("r.path || n.id AS path");
+      expect(text).not.toContain(".kind ||");
+      expect(params).not.toContain(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
+    });
+
+    it("kind-qualifies the token when the walk can visit more than one kind", () => {
+      const sqlite = renderForDialect(multiKindAst, "sqlite");
+      expect(sqlite.sql).toContain(
+        "'|' || (n0.kind || ? || n0.id) || '|' AS path",
+      );
+      expect(sqlite.sql).toContain(
+        "INSTR(r.path, '|' || (n.kind || ? || n.id) || '|') = 0",
+      );
+      expect(sqlite.params).toContain(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
+
+      const postgres = renderForDialect(multiKindAst, "postgres");
+      expect(postgres.sql).toMatch(
+        /ARRAY\[\(n0\.kind \|\| \$\d+ \|\| n0\.id\)\] AS path/,
+      );
+      expect(postgres.sql).toMatch(
+        /\(n\.kind \|\| \$\d+ \|\| n\.id\) != ALL\(r\.path\)/,
+      );
+      expect(postgres.params).toContain(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
+    });
+
+    it("kind-qualifies the token of a single-kind walk that expands identity members", () => {
+      const { sql: text } = renderForDialect(
+        createAst({
+          start: { alias: "source", kinds: ["Node"], includeSubClasses: false },
+          traversals: [
+            createTraversal({
+              nodeKinds: ["Node"],
+              includeIdentityMembers: true,
+              variableLength: createVariableLengthSpec(),
+            }),
+          ],
+        }),
+        "sqlite",
+      );
+      expect(text).toContain(
+        "INSTR(r.path, '|' || (n.kind || ? || n.id) || '|') = 0",
+      );
     });
   });
 
