@@ -315,8 +315,8 @@ identity rather than the currently active one. The planner stages the candidate
 against that resulting graph and returns, as `plan`, the same resulting-schema
 merge artifact accepted by `withEvolvedTransaction()`. It always stages the
 whole resulting graph, so its `planningScope` is
-`{ scope: "whole-target", reason: "planned-evolution" }` and
-`planningScope: "candidate"` is refused.
+`{ scope: "whole-target", reason: "planned-evolution" }` and it takes no
+`planningScope` option.
 
 Candidate resolution still includes the committed target as an accepted source.
 Existing unique matches and property conflicts are therefore visible in the
@@ -1176,8 +1176,9 @@ a guarantee against a concurrent attach racing the eventual apply. A
 composition edge canonicalization drops as `edge:endpoint-deleted` issues no
 write, and none is needed to catch it. If a branch made that attachment,
 planning refuses as described above. If the edge already attached its part at
-the branch point, the plan deletes its whole, and the `"deleted"` check reads
-the target's live parts of every whole the plan deletes: a surviving part is
+the branch point, the plan deletes one of its endpoints. A deleted part leaves
+nothing to orphan. For a deleted whole, the `"deleted"` check reads the
+target's live parts of every whole the plan deletes: a surviving part is
 reported at plan time and refused inside the apply transaction. Running
 `store.verifyConstraintFences()` after a merge is a generic audit, not a step
 the merge relies on.
@@ -2759,14 +2760,12 @@ type CandidatePlanningScope =
 
 | `reason` | Cause |
 | --- | --- |
-| `revision-tracking-disabled` | The target does not track revisions |
 | `composition` | The graph declares a `partOf`/`hasPart` pair |
 | `acyclic-relation` | An edge is declared `acyclic: true` |
 | `target-side-cardinality` | An edge declares `targetCardinality` |
 | `missing-active-source-read` | A `oneActive` edge on a backend without `findActiveEdgesBySourceV1` |
 | `missing-match-identity-read` | A `matchIdentity` edge on a backend without `findEdgesByMatchIdentity` |
 | `missing-scoped-identity-reads` | An identity graph whose Store runtime lacks the endpoint- and assertion-ID-scoped identity reads |
-| `match-identity-owners-unavailable` | A durable owner key cannot be derived from a candidate edge |
 | `match-identity-owner-not-clone-visible` | A candidate edge names a durable owner the clone projection excludes |
 | `planned-evolution` | `planCandidateWriteSetForEvolution()` always stages the whole resulting graph |
 
@@ -2776,6 +2775,12 @@ target. When the target or candidate needs the whole target, planning is
 refused with `CandidatePlanningScopeError`
 (`GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE`) before any staging backend is
 created, and `details.planningScope.reason` names the cause.
+
+Neither scope changes what is refused for other causes. A target that cannot
+carry a public merge plan (no revision tracking, or no interactive
+transactions) is refused with `MergePlanCapabilityError` before any staging
+backend is created, and a candidate the target's schema refuses reports its own
+`CandidateWriteSetError`, with or without `planningScope: "candidate"`.
 
 ## Valid-time windows
 

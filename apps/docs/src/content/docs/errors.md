@@ -2015,7 +2015,7 @@ try {
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps; or, at planning, one branch's composition attachment loses its part or whole to another branch's deletion |
-| `GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE` | `CandidatePlanningScopeError` | user | `planCandidateWriteSet` or `planCandidateWriteSetForEvolution` was called with `planningScope: "candidate"`, but the target or candidate must be planned against the whole target; `details.planningScope.reason` names why |
+| `GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE` | `CandidatePlanningScopeError` | user | `planCandidateWriteSet` was called with `planningScope: "candidate"`, but the target or candidate must be planned against the whole target; `details.planningScope.reason` names why |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
