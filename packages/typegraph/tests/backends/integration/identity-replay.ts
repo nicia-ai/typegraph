@@ -38,6 +38,10 @@ import {
 } from "../../../src/interchange";
 import { getActiveSchema, migrateSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
+import {
+  completenessReason,
+  truncatedBeforeOf,
+} from "../../identity-history-completeness";
 import { type IntegrationTestContext } from "./test-context";
 
 const ReplayPerson = defineNode("Person", { schema: z.object({}) });
@@ -204,7 +208,7 @@ export function registerIdentityReplayIntegrationTests(
 
       // The refusal installed nothing and deleted nothing.
       const untouched = await store.identity.replay(a);
-      expect(untouched.truncatedBefore).toBeUndefined();
+      expect(truncatedBeforeOf(untouched)).toBeUndefined();
       expect(untouched.steps.map((step) => step.transition.cause)).toEqual([
         "assert",
       ]);
@@ -226,7 +230,7 @@ export function registerIdentityReplayIntegrationTests(
         fromRecorded: latest,
         toRecorded: latest,
       });
-      expect(fresh.truncatedBefore).toBeUndefined();
+      expect(truncatedBeforeOf(fresh)).toBeUndefined();
       expect(fresh.steps.map((step) => step.transition.cause)).toEqual([
         "assert",
       ]);
@@ -295,7 +299,9 @@ export function registerIdentityReplayIntegrationTests(
       expect(pruned.pruned).toBeGreaterThanOrEqual(restoredRevisions.length);
       const after = await target.identity.transitionsOf(personRef("pr-a"));
       expect(after.transitions).toEqual([]);
-      expect(after.incompleteDiscovery).toBeUndefined();
+      expect(
+        completenessReason(after, "unattributed-restored"),
+      ).toBeUndefined();
 
       // The watermark stays on the destination's own axis, so its next
       // commit is not reported as pruned.
@@ -310,13 +316,13 @@ export function registerIdentityReplayIntegrationTests(
         fromRecorded: latest,
         toRecorded: latest,
       });
-      expect(fresh.truncatedBefore).toBeUndefined();
+      expect(truncatedBeforeOf(fresh)).toBeUndefined();
     });
   });
 
   describe("archival restore sets one watermark on either entry point", () => {
     for (const variant of ["unpruned", "pruned"] as const) {
-      it(`importGraph and importGraphStream agree on truncatedBefore for an ${variant} source`, async () => {
+      it(`importGraph and importGraphStream agree on the retention cut for an ${variant} source`, async () => {
         const source = await provisionDepartedLineageStore(
           context,
           departedLineageGraph(`identity_restore_parity_source_${variant}`),
@@ -370,10 +376,12 @@ export function registerIdentityReplayIntegrationTests(
         expect(streamResult.errors).toEqual([]);
 
         const documentReplay = await documentTarget.identity.replay(alice);
-        const documentFloor = requireDefined(documentReplay.truncatedBefore);
+        const documentFloor = requireDefined(truncatedBeforeOf(documentReplay));
         const streamReplay = await streamTarget.identity.replay(alice);
         expect(
-          recordedInstantRevision(requireDefined(streamReplay.truncatedBefore)),
+          recordedInstantRevision(
+            requireDefined(truncatedBeforeOf(streamReplay)),
+          ),
         ).toBe(recordedInstantRevision(documentFloor));
         // The floor sits at the restore's first commit, so the union the
         // restore itself recorded is still a replayable step.
@@ -419,7 +427,7 @@ export function registerIdentityReplayIntegrationTests(
       expect(streamResult.errors).toEqual([]);
 
       const own = await target.identity.replay(personRef("rn-own-a"));
-      expect(own.truncatedBefore).toBeUndefined();
+      expect(truncatedBeforeOf(own)).toBeUndefined();
     });
   });
 
@@ -448,7 +456,9 @@ export function registerIdentityReplayIntegrationTests(
         expect(
           history.transitions.map((transition) => transition.cause),
         ).toEqual(["assert", "assert", "detach", "detach"]);
-        expect(history.incompleteDiscovery).toBeUndefined();
+        expect(
+          completenessReason(history, "unattributed-restored"),
+        ).toBeUndefined();
         const survivorHistory = await store.identity.transitionsOf(a);
         expect(
           history.transitions.map((transition) => transition.transitionId),
@@ -487,7 +497,9 @@ export function registerIdentityReplayIntegrationTests(
             [],
           ],
         ]);
-        expect(replay.incompleteDiscovery).toBeUndefined();
+        expect(
+          completenessReason(replay, "unattributed-restored"),
+        ).toBeUndefined();
       },
     );
 
@@ -654,7 +666,9 @@ export function registerIdentityReplayIntegrationTests(
       expect(
         sourceHistory.transitions.map((transition) => transition.cause),
       ).toEqual(["assert", "detach"]);
-      expect(sourceHistory.incompleteDiscovery).toBeUndefined();
+      expect(
+        completenessReason(sourceHistory, "unattributed-restored"),
+      ).toBeUndefined();
 
       const archive = await exportGraph(source, { identityMode: "archival" });
       const target = await provisionDepartedLineageStore(
@@ -670,13 +684,14 @@ export function registerIdentityReplayIntegrationTests(
       // evidence tying it to the two restored rows that explain it.
       const departed = await target.identity.transitionsOf(b);
       expect(departed.transitions).toEqual([]);
-      expect(departed.incompleteDiscovery).toEqual({
-        unattributedRestoredTransitions: 2,
+      expect(completenessReason(departed, "unattributed-restored")).toEqual({
+        reason: "unattributed-restored",
+        count: 2,
       });
       const departedReplay = await target.identity.replay(b);
-      expect(departedReplay.incompleteDiscovery).toEqual({
-        unattributedRestoredTransitions: 2,
-      });
+      expect(
+        completenessReason(departedReplay, "unattributed-restored"),
+      ).toEqual({ reason: "unattributed-restored", count: 2 });
 
       // The surviving canonical is named by both rows, so nothing is left
       // unattributed and no signal is raised.
@@ -686,7 +701,189 @@ export function registerIdentityReplayIntegrationTests(
       ).toEqual(
         sourceHistory.transitions.map((transition) => transition.transitionId),
       );
-      expect(survivor.incompleteDiscovery).toBeUndefined();
+      expect(
+        completenessReason(survivor, "unattributed-restored"),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("identity history completeness", () => {
+    it("reports a fully read lineage as complete on both transitionsOf and replay", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = personRef("complete-a");
+      const b = personRef("complete-b");
+      await store.nodes.Person.create({}, { id: a.id });
+      await store.nodes.Person.create({}, { id: b.id });
+      const joined = await store.identity.assertSame(a, b);
+      await store.identity.retractAssertion(joined.assertion.id);
+
+      const history = await store.identity.transitionsOf(a);
+      const replay = await store.identity.replay(a);
+      console.log(
+        "complete lineage:",
+        history.completeness,
+        replay.completeness,
+      );
+      expect(history.transitions[0]?.cause).toBe("assert");
+      expect(history.completeness).toEqual({ status: "complete" });
+      expect(replay.completeness).toEqual({ status: "complete" });
+    });
+
+    it("reports more pages with the cursor that reads the next one, until the last page", async () => {
+      const { store, a, firstPage, cursor } =
+        await provisionPagedLineage(context);
+      console.log("first page completeness:", firstPage.completeness);
+      expect(firstPage.completeness).toEqual({
+        status: "partial",
+        reasons: [{ reason: "more-pages", nextCursor: cursor }],
+      });
+      const firstReplayPage = await store.identity.replay(a, { limit: 1 });
+      expect(completenessReason(firstReplayPage, "more-pages")).toEqual({
+        reason: "more-pages",
+        nextCursor: requireDefined(firstReplayPage.nextCursor),
+      });
+
+      const rest = await store.identity.transitionsOf(a, { cursor });
+      expect(rest.nextCursor).toBeUndefined();
+      expect(rest.completeness).toEqual({ status: "complete" });
+    });
+
+    it("reports the retention cut on transitionsOf as on replay, without refusing a range below it", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = personRef("retention-a");
+      const b = personRef("retention-b");
+      await store.nodes.Person.create({}, { id: a.id });
+      await store.nodes.Person.create({}, { id: b.id });
+      const joined = await store.identity.assertSame(a, b);
+      const joinedAt = requireDefined(await store.recordedNow());
+      await store.identity.retractAssertion(joined.assertion.id);
+      const retractedAt = requireDefined(await store.recordedNow());
+      const pruned = await pruneIdentityTransitions(store, {
+        beforeRecorded: retractedAt,
+      });
+      expect(pruned.pruned).toBe(1);
+
+      const history = await store.identity.transitionsOf(a);
+      console.log("pruned lineage completeness:", history.completeness);
+      expect(
+        history.transitions.every(
+          (transition) => transition.cause === "retract",
+        ),
+      ).toBe(true);
+      const cut = requireDefined(
+        completenessReason(history, "retention-truncated"),
+      );
+      expect(recordedInstantRevision(cut.before)).toBe(
+        pruned.prunedBeforeRevision,
+      );
+      expect(history.completeness).toEqual({
+        status: "partial",
+        reasons: [cut],
+      });
+      const replay = await store.identity.replay(a);
+      expect(replay.completeness).toEqual(history.completeness);
+
+      // `replay` refuses a range wholly below the watermark; `transitionsOf`
+      // answers it, empty, and says why it is empty.
+      const belowWatermark = await store.identity.transitionsOf(a, {
+        toRecorded: joinedAt,
+      });
+      expect(belowWatermark.transitions).toEqual([]);
+      expect(belowWatermark.completeness).toEqual({
+        status: "partial",
+        reasons: [cut],
+      });
+
+      // A range that starts at the watermark is untouched by it.
+      const aboveWatermark = await store.identity.transitionsOf(a, {
+        fromRecorded: retractedAt,
+      });
+      expect(aboveWatermark.completeness).toEqual({ status: "complete" });
+    });
+
+    it("counts the restored transitions of a replay page that are not steps", async () => {
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_completeness_restored_source"),
+      );
+      const alice = personRef("nr-alice");
+      const bob = personRef("nr-bob");
+      await source.nodes.Person.create({}, { id: alice.id });
+      await source.nodes.Person.create({}, { id: bob.id });
+      const first = await source.identity.assertSame(alice, bob);
+      await source.identity.retractAssertion(first.assertion.id);
+      await source.identity.assertSame(alice, bob);
+      const archive = await exportGraph(source, { identityMode: "archival" });
+
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_completeness_restored_target"),
+      );
+      const imported = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(imported.errors).toEqual([]);
+
+      const history = await target.identity.transitionsOf(alice);
+      const restored = history.transitions.filter(
+        (transition) => transition.restored !== undefined,
+      );
+      const replay = await target.identity.replay(alice);
+      console.log(
+        "restored lineage:",
+        history.transitions.length,
+        "transitions,",
+        replay.steps.length,
+        "steps,",
+        replay.completeness,
+      );
+      expect(restored.length).toBeGreaterThan(0);
+      expect(replay.steps.length).toBe(
+        history.transitions.length - restored.length,
+      );
+      expect(completenessReason(replay, "restored-not-reconstructed")).toEqual({
+        reason: "restored-not-reconstructed",
+        count: restored.length,
+      });
+      // `transitionsOf` returns every restored row, so it has nothing to report.
+      expect(
+        completenessReason(history, "restored-not-reconstructed"),
+      ).toBeUndefined();
+    });
+
+    it("reports a transaction's own pending identity changes on tx.identity reads, and nothing once committed", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = personRef("pending-a");
+      const b = personRef("pending-b");
+      await store.nodes.Person.create({}, { id: a.id });
+      await store.nodes.Person.create({}, { id: b.id });
+
+      await store.transaction(async (tx) => {
+        const txIdentity = requireDefined(tx.identity);
+        // A write that changes no class notes nothing.
+        await tx.nodes.Person.create({}, { id: "pending-unrelated" });
+        const beforeIdentityWrite = await txIdentity.transitionsOf(a);
+        expect(beforeIdentityWrite.completeness).toEqual({
+          status: "complete",
+        });
+
+        await txIdentity.assertSame(a, b);
+        const history = await txIdentity.transitionsOf(a);
+        const replay = await txIdentity.replay(a);
+        console.log("in-transaction completeness:", history.completeness);
+        expect(history.transitions).toEqual([]);
+        expect(history.completeness).toEqual({
+          status: "partial",
+          reasons: [{ reason: "pending-transaction-notes" }],
+        });
+        expect(replay.completeness).toEqual(history.completeness);
+      });
+
+      const committed = await store.identity.transitionsOf(a);
+      expect(
+        committed.transitions.map((transition) => transition.cause),
+      ).toEqual(["assert"]);
+      expect(committed.completeness).toEqual({ status: "complete" });
     });
   });
 

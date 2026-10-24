@@ -350,13 +350,27 @@ export async function main(): Promise<void> {
       // transition with a before/after snapshot and excludes the four
       // restored ones, which is why `steps` is shorter than `transitions`.
       const targetReplay = await target.identity.replay(sourceCrm);
+      const partialReasons =
+        targetReplay.completeness.status === "partial" ?
+          targetReplay.completeness.reasons
+        : [];
       console.log(
-        `  target replay: ${targetReplay.steps.length} step(s), truncatedBefore=${targetReplay.truncatedBefore}`,
+        `  target replay: ${targetReplay.steps.length} step(s), completeness=${targetReplay.completeness.status} (${partialReasons.map((entry) => entry.reason).join(", ")})`,
       );
       assertEqual(
         targetReplay.steps.length,
         1,
         "replay pairs only the import's own native transition",
+      );
+      const notReconstructed = partialReasons.find(
+        (entry) => entry.reason === "restored-not-reconstructed",
+      );
+      assertEqual(
+        notReconstructed?.reason === "restored-not-reconstructed" ?
+          notReconstructed.count
+        : 0,
+        restoredHere.length,
+        "completeness counts every restored transition replay left out of steps",
       );
       assertTrue(
         !sourceTransitionIds.has(

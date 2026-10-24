@@ -29,6 +29,7 @@ import {
 } from "../../../src/store/runtime-port";
 import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
+import { truncatedBeforeOf } from "../../identity-history-completeness";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -1376,7 +1377,7 @@ export function registerIdentityIntegrationTests(
           false,
         );
       }
-      expect(replay.truncatedBefore).toBeDefined();
+      expect(truncatedBeforeOf(replay)).toBeDefined();
 
       // A second, identical import — `ON CONFLICT (graph_id, transition_id)
       // DO NOTHING` — must not raise a raw driver UNIQUE-constraint error on
