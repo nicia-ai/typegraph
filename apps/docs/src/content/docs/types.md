@@ -261,10 +261,16 @@ const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[
 }))
 ```
 
-### `TypedEdgeCollection<R>`
+### `TypedEdgeCollection<R, G>`
 
 A type-safe edge collection derived from the edge registration. This is what
-`store.edges.*` returns. With array-valued `to`, each source type can connect to
+`store.edges.*` returns, with `G` the store's graph. In `G`, each declared
+endpoint reads back as `SubsumedNodeType<G, N>` (its `kind` and `NodeId` widen
+when `G`'s ontology gives the kind subclasses or equivalent kinds) and endpoint
+arguments take an `EdgeEndpointRef<G, N>`, which also admits the kinds in
+`AssignableNodeKinds<G, N["kind"]>` and polymorphic query rows; see
+[typed edge collections under subsumption](/ontology#subsumption-type-inheritance).
+Named without `G`, the declared kinds are taken exactly. With array-valued `to`, each source type can connect to
 each target type. With a [source-dependent target map](/core-concepts#source-dependent-targets),
 typed writes preserve the allowed pairs instead of accepting independent endpoint unions.
 

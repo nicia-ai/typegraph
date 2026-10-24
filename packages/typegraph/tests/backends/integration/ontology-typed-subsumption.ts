@@ -23,8 +23,10 @@ import {
 import {
   ConfigurationError,
   EndpointError,
+  KindNotFoundError,
   UnsupportedPredicateError,
 } from "../../../src/errors";
+import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
 const Media = defineNode("TsMedia", {
@@ -496,6 +498,53 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       expect(result.affectedCount).toBe(1);
       const stillPodcast = await store.nodes.TsPodcast.getById(podcast.id);
       expect(stillPodcast?.title).toBe("before");
+    });
+  });
+
+  describe("Typed subsumption — subclass endpoints on typed edge collections", () => {
+    it("connects a polymorphic row without a cast and resolves its endpoint by reference", async () => {
+      const store = await context.createStore(subsumptionGraph);
+      const media = await store.nodes.TsMedia.create({ title: "plain" });
+      const podcast = await store.nodes.TsPodcast.create({
+        title: "cast",
+        rssUrl: "https://x",
+      });
+      const rows = await store
+        .query()
+        .from("TsMedia", "m")
+        .whereNode("m", (m) => m.title.eq("cast"))
+        .select((ctx) => ctx.m)
+        .execute();
+      const podcastRow = requireDefined(rows[0]);
+      expect(podcastRow.kind).toBe("TsPodcast");
+
+      await store.edges.tsLinksTo.create(media, podcastRow);
+      const links = await store.edges.tsLinksTo.findFrom(media);
+      const link = requireDefined(links[0]);
+      expect(link.toKind).toBe("TsPodcast");
+
+      const reference = { kind: link.toKind, id: link.toId };
+      const resolved = await store.getNodeByRef(reference);
+      expect(resolved).toMatchObject({
+        kind: "TsPodcast",
+        id: podcast.id,
+        rssUrl: "https://x",
+      });
+      const inTransaction = await store.transaction((tx) =>
+        tx.getNodeByRef(reference),
+      );
+      expect(inTransaction?.id).toBe(podcast.id);
+      const inView = await store.snapshot().getNodeByRef(reference);
+      expect(inView?.id).toBe(podcast.id);
+
+      const supertypeNamed = await store.getNodeByRef({
+        kind: "TsMedia",
+        id: podcast.id,
+      });
+      expect(supertypeNamed).toBeUndefined();
+      await expect(
+        store.getNodeByRef({ kind: "TsUnregistered", id: podcast.id }),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
     });
   });
 

@@ -154,16 +154,45 @@ unaffected and stay exact-kind. See
 `queryDefaults.expansion` in [Schemas & Stores](/schemas-stores) for
 the store-wide migration knob.
 
-**Known limitation — typed edge collections keep the declared endpoint kinds.**
-An edge declared `to: [Person]` admits an `Employee` (a `subClassOf` descendant,
-or an `equivalentTo` kind) at runtime, but `store.edges.<kind>` types the edge's
-`toKind` and `toId` by the declared kind, not by the kinds it can hold, and its
-typed `create` refuses a subclass endpoint at compile time. Reading such an edge
-through `findFrom` can therefore give a `toKind` typed `"Person"` that is
-`"Employee"` at runtime, and `store.nodes.Person.getById(edge.toId)` typechecks
-and returns `undefined` for it. Check `edge.toKind` at runtime before choosing
-the collection, or read the endpoint through a query, whose aliases widen.
-Create an edge to a subclass row with a cast at the call site.
+**Typed edge collections follow the same subsumption.** An edge declared
+`to: [Person]` admits an `Employee` (a `subClassOf` descendant, or an
+`equivalentTo` kind) at runtime, and `store.edges.<kind>` types it that way:
+
+- **Reads widen like a query alias.** For a declared endpoint kind the
+  ontology can affect, the edge's `toKind` is `string` and `toId` carries the
+  widened `NodeId` brand, on every typed edge read (`getById`, `findFrom`,
+  `findTo`, the bulk and batch reads, `create`, `update`, `bulkFindEdgesFrom`
+  and the view and recorded-time collections). An endpoint kind no subsumption
+  relation names keeps its literal kind and exact id. So
+  `store.nodes.Person.getById(edge.toId)` no longer compiles for such an
+  endpoint; resolve it with
+  [`store.getNodeByRef({ kind: edge.toKind, id: edge.toId })`](/schemas-stores#storegetnodebyrefreference),
+  narrowing `edge.toKind` first when you want a specific kind's typed node.
+- **Inputs admit subclass nodes and polymorphic rows.** Endpoint arguments
+  (`create`, `findFrom`/`findTo`, `find`/`count` filters, the bulk and batch
+  methods, `findByEndpoints`, `getOrCreateByEndpoints`) accept a node or
+  `{ kind, id }` of the declared kind or of any kind assignable to it, followed
+  transitively through `subClassOf` and `equivalentTo`, and a row from a
+  polymorphic `from("Person", ...)` query, whose `kind` is `string`. A
+  subclass row from a supertype query connects without a cast. The runtime
+  endpoint check stays authoritative. A polymorphic row is accepted at compile
+  time by its properties, so a node or row of an unrelated kind whose schema
+  has the same shape compiles and is then refused with `EndpointError`; and
+  because an IRI is typed as a plain `string`, every kind mapped to an IRI
+  with `equivalentTo` is admitted wherever any one of them is.
+
+An endpoint lookup matches the kind it is given exactly. A `Node` value
+carries its real kind, so `findFrom(employee)` finds an `Employee`'s edges,
+but `findFrom({ kind: "Person", id: employee.id })` compiles (the declared
+kind is always accepted) and returns `[]`, because no `Person` row has that
+id. Pass the node, or the reference with its real kind. A graph whose
+ontology type has lost its literals (a relation annotated as the bare
+`OntologyRelation`) admits every node kind at each endpoint and widens every
+endpoint read, the same conservative arm the query aliases take. A
+`subClassOf` added at runtime through `store.evolve()` is invisible to these
+types, as it is to query aliases: reach such an endpoint through
+`store.getEdgeCollectionOrThrow(kind)` and `store.getNodeByRef(...)`, whose
+kinds are runtime strings.
 
 **Changing this on a populated graph**: adding a `subClassOf` relation is
 checked against existing data before it commits — it can merge two

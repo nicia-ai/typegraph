@@ -75,6 +75,10 @@ import {
   withCoordinate,
   withValidCoordinate,
 } from "./collections/temporal-read-params";
+import {
+  type NodeByIdReader,
+  readNodeByReference,
+} from "./node-reference-read";
 import { storeRuntime } from "./runtime-port";
 import { type StoreSearch } from "./search-facade";
 import { type Store, type ViewIdentityAccess } from "./store";
@@ -94,6 +98,8 @@ import {
   type DynamicStoreViewEdgeCollection,
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
+  type GraphNodeForKinds,
+  type Node,
   type NodeCollection,
   type NodeCurrentReads,
   type RecordedStoreViewEdgeCollection,
@@ -978,6 +984,32 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   query(): InitialQueryBuilder<G, "sealed"> {
     return storeRuntime(this.store).sealedQuery(this.coordinate);
   }
+
+  /**
+   * Reads the node a `{ kind, id }` reference names at this view's
+   * coordinate, mirroring `Store.getNodeByRef`.
+   */
+  getNodeByRef<const K extends NodeKinds<G>>(
+    reference: Readonly<{ kind: K; id: string }>,
+  ): Promise<GraphNodeForKinds<G, K> | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<GraphNodeForKinds<G, NodeKinds<G>> | Node | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<unknown> {
+    return readNodeByReference(
+      (kind) =>
+        this.store.getNodeCollection(kind) === undefined ?
+          undefined
+        : (this.nodes as Readonly<Record<string, NodeByIdReader>>)[kind],
+      reference,
+      this.store.graphId,
+    );
+  }
+
+  /** The view's pinned node collections, keyed by kind. */
+  abstract get nodes(): object;
 
   protected internalAlgorithms(): InternalGraphAlgorithms<G> {
     this.#internalAlgorithms ??= storeRuntime(

@@ -12,6 +12,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type AssignableNodeKinds,
   type BaseStoreOptions,
   broader,
   createQueryBuilder,
@@ -21,10 +22,14 @@ import {
   equivalentTo,
   type FulltextSearchOptions,
   type HybridSearchOptions,
+  type Node,
+  type NodeId,
+  type NodeReferenceLookup,
   type NodeType,
   relatedTo,
   type Store,
   subClassOf,
+  type TransactionContext,
   type VectorSearchOptions,
 } from "../src";
 import { ConfigurationError } from "../src/errors";
@@ -1144,5 +1149,327 @@ describe("typed relations and conservative widening", () => {
       ReturnType<typeof unrelatedQuery.execute>
     >[number];
     expectTypeOf<UnrelatedRow["kind"]>().toEqualTypeOf<"LiteralUnrelated">();
+  });
+});
+
+describe("typed edge collections under subsumption", () => {
+  const Staff = defineNode("EndpointStaff", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Engineer = defineNode("EndpointEngineer", {
+    schema: z.object({ name: z.string(), level: z.number() }),
+  });
+  const Lead = defineNode("EndpointLead", {
+    schema: z.object({
+      name: z.string(),
+      level: z.number(),
+      reports: z.number(),
+    }),
+  });
+  const Contractor = defineNode("EndpointContractor", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Vendor = defineNode("EndpointVendor", {
+    schema: z.object({ vendorCode: z.string() }),
+  });
+  const Supplier = defineNode("EndpointSupplier", {
+    schema: z.object({ vendorCode: z.string() }),
+  });
+  const Firm = defineNode("EndpointFirm", {
+    schema: z.object({ name: z.string() }),
+  });
+  const employs = defineEdge("endpointEmploys", { schema: z.object({}) });
+
+  const nodes = {
+    EndpointStaff: { type: Staff },
+    EndpointEngineer: { type: Engineer },
+    EndpointLead: { type: Lead },
+    EndpointContractor: { type: Contractor },
+    EndpointVendor: { type: Vendor },
+    EndpointSupplier: { type: Supplier },
+    EndpointFirm: { type: Firm },
+  } as const;
+  const edges = {
+    endpointEmploys: { type: employs, from: [Firm], to: [Staff] },
+  } as const;
+
+  const affectedGraph = defineGraph({
+    id: "endpoint_typing_affected",
+    nodes,
+    edges,
+    ontology: [subClassOf(Engineer, Staff), subClassOf(Lead, Engineer)],
+  });
+  const plainGraph = defineGraph({
+    id: "endpoint_typing_plain",
+    nodes,
+    edges,
+    ontology: [],
+  });
+  type AffectedStore = Store<typeof affectedGraph>;
+  type PlainStore = Store<typeof plainGraph>;
+  type AffectedEdge = Awaited<
+    ReturnType<AffectedStore["edges"]["endpointEmploys"]["findFrom"]>
+  >[number];
+  type PlainEdge = Awaited<
+    ReturnType<PlainStore["edges"]["endpointEmploys"]["findFrom"]>
+  >[number];
+
+  it("widens an affected endpoint's kind and id on every edge read", () => {
+    expectTypeOf<AffectedEdge["toKind"]>().toEqualTypeOf<string>();
+    expectTypeOf<AffectedEdge["fromKind"]>().toEqualTypeOf<"EndpointFirm">();
+    type ViewEdge = Awaited<
+      ReturnType<
+        ReturnType<AffectedStore["asOf"]>["edges"]["endpointEmploys"]["findTo"]
+      >
+    >[number];
+    expectTypeOf<ViewEdge["toKind"]>().toEqualTypeOf<string>();
+    type CreatedEdge = Awaited<
+      ReturnType<AffectedStore["edges"]["endpointEmploys"]["create"]>
+    >;
+    expectTypeOf<CreatedEdge["toKind"]>().toEqualTypeOf<string>();
+    type BulkEdge = Awaited<
+      ReturnType<AffectedStore["bulkFindEdgesFrom"]>
+    >[number]["edges"][number];
+    expectTypeOf<BulkEdge["toKind"]>().toEqualTypeOf<string>();
+  });
+
+  it("keeps declared endpoint literals when the graph declares no subsumption", () => {
+    expectTypeOf<PlainEdge["toKind"]>().toEqualTypeOf<"EndpointStaff">();
+    expectTypeOf<PlainEdge["toId"]>().toEqualTypeOf<NodeId<typeof Staff>>();
+  });
+
+  it("refuses an affected endpoint's id on the declared kind's collection", () => {
+    // Type-checked only — never called.
+    function assertWidenedIdRefused(): void {
+      const affected = undefined as unknown as AffectedStore;
+      const plain = undefined as unknown as PlainStore;
+      const affectedEdge = undefined as unknown as AffectedEdge;
+      const plainEdge = undefined as unknown as PlainEdge;
+      // @ts-expect-error - the target may be an EndpointEngineer row
+      void affected.nodes.EndpointStaff.getById(affectedEdge.toId);
+      void plain.nodes.EndpointStaff.getById(plainEdge.toId);
+    }
+    void assertWidenedIdRefused;
+    expectTypeOf<AffectedEdge["toId"]>().not.toEqualTypeOf<
+      NodeId<typeof Staff>
+    >();
+  });
+
+  it("accepts a subclass node, a transitive descendant and a polymorphic row as an endpoint", () => {
+    const registry = buildKindRegistry(affectedGraph);
+    const rows = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      registry,
+    )
+      .from("EndpointStaff", "s")
+      .select((ctx) => ctx.s);
+    type StaffRow = Awaited<ReturnType<typeof rows.execute>>[number];
+    expectTypeOf<StaffRow["kind"]>().toEqualTypeOf<string>();
+
+    // Type-checked only — never called.
+    function assertEndpointsAccepted(): void {
+      const store = undefined as unknown as AffectedStore;
+      const firm = undefined as unknown as Node<typeof Firm>;
+      const engineer = undefined as unknown as Node<typeof Engineer>;
+      const lead = undefined as unknown as Node<typeof Lead>;
+      const row = undefined as unknown as StaffRow;
+      void store.edges.endpointEmploys.create(firm, engineer);
+      void store.edges.endpointEmploys.create(firm, lead);
+      void store.edges.endpointEmploys.create(firm, row);
+      void store.edges.endpointEmploys.create(firm, {
+        kind: "EndpointLead",
+        id: "lead-id",
+      });
+      void store.edges.endpointEmploys.findTo(engineer);
+      void store.edges.endpointEmploys.bulkFindTo([engineer, row]);
+      void store.edges.endpointEmploys.bulkCreate([{ from: firm, to: row }]);
+      void store.edges.endpointEmploys.getOrCreateByEndpoints(firm, lead, {});
+      void store
+        .asOf("2026-01-01T00:00:00.000Z")
+        .edges.endpointEmploys.findTo(row);
+    }
+    void assertEndpointsAccepted;
+    expect(rows).toBeDefined();
+  });
+
+  it("still refuses an endpoint the ontology does not admit", () => {
+    // Type-checked only — never called.
+    function assertEndpointsRefused(): void {
+      const affected = undefined as unknown as Store<typeof affectedGraph>;
+      const plain = undefined as unknown as Store<typeof plainGraph>;
+      const firm = undefined as unknown as Node<typeof Firm>;
+      const engineer = undefined as unknown as Node<typeof Engineer>;
+      const vendor = undefined as unknown as Node<typeof Vendor>;
+      // @ts-expect-error - EndpointVendor is no subclass of EndpointStaff
+      void affected.edges.endpointEmploys.create(firm, vendor);
+      // @ts-expect-error - EndpointContractor is no subclass of EndpointStaff
+      void affected.edges.endpointEmploys.create(firm, {
+        kind: "EndpointContractor",
+        id: "contractor-id",
+      });
+      // @ts-expect-error - without the subClassOf, EndpointEngineer is not admitted
+      void plain.edges.endpointEmploys.create(firm, engineer);
+    }
+    void assertEndpointsRefused;
+    expect(
+      buildKindRegistry(plainGraph).expandSubClasses("EndpointStaff"),
+    ).toEqual(["EndpointStaff"]);
+    expectTypeOf<
+      AssignableNodeKinds<typeof affectedGraph, "EndpointStaff">
+    >().toEqualTypeOf<"EndpointStaff" | "EndpointEngineer" | "EndpointLead">();
+    expectTypeOf<
+      AssignableNodeKinds<typeof affectedGraph, "EndpointEngineer">
+    >().toEqualTypeOf<"EndpointEngineer" | "EndpointLead">();
+    expectTypeOf<
+      AssignableNodeKinds<typeof plainGraph, "EndpointStaff">
+    >().toEqualTypeOf<"EndpointStaff">();
+  });
+
+  it("admits every kind folded together by equivalence, through a shared IRI too", () => {
+    const iri = "https://example.com/Worker";
+    const equivalenceGraph = defineGraph({
+      id: "endpoint_typing_equivalence",
+      nodes,
+      edges,
+      ontology: [
+        equivalentTo(Staff, Contractor),
+        subClassOf(Engineer, Contractor),
+        equivalentTo(Vendor, iri),
+        equivalentTo(Supplier, iri),
+      ],
+    });
+    expectTypeOf<
+      AssignableNodeKinds<typeof equivalenceGraph, "EndpointStaff">
+    >().toEqualTypeOf<
+      "EndpointStaff" | "EndpointContractor" | "EndpointEngineer"
+    >();
+    expectTypeOf<
+      AssignableNodeKinds<typeof equivalenceGraph, "EndpointVendor">
+    >().toEqualTypeOf<"EndpointVendor" | "EndpointSupplier">();
+    // The runtime closure the type mirrors.
+    const registry = buildKindRegistry(equivalenceGraph);
+    expect(registry.expandSubClasses("EndpointStaff").toSorted()).toEqual([
+      "EndpointContractor",
+      "EndpointEngineer",
+      "EndpointStaff",
+    ]);
+    expect(registry.expandSubClasses("EndpointVendor").toSorted()).toEqual([
+      "EndpointSupplier",
+      "EndpointVendor",
+    ]);
+  });
+
+  it("admits every kind when the ontology tuple lost its literals", () => {
+    const erasedOntology: readonly OntologyRelation[] = [
+      subClassOf(Engineer, Staff),
+    ];
+    const erasedGraph = defineGraph({
+      id: "endpoint_typing_erased",
+      nodes,
+      edges,
+      ontology: erasedOntology,
+    });
+    expectTypeOf<
+      AssignableNodeKinds<typeof erasedGraph, "EndpointStaff">
+    >().toEqualTypeOf<keyof typeof nodes>();
+    expect(
+      buildKindRegistry(erasedGraph).isAssignableTo(
+        "EndpointEngineer",
+        "EndpointStaff",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("getNodeByRef result typing", () => {
+  const Staff = defineNode("RefStaff", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Engineer = defineNode("RefEngineer", {
+    schema: z.object({ name: z.string(), level: z.number() }),
+  });
+  const Firm = defineNode("RefFirm", {
+    schema: z.object({ title: z.string() }),
+  });
+  const employs = defineEdge("refEmploys", { schema: z.object({}) });
+  const graph = defineGraph({
+    id: "node_by_ref_typing",
+    nodes: {
+      RefStaff: { type: Staff },
+      RefEngineer: { type: Engineer },
+      RefFirm: { type: Firm },
+    },
+    edges: { refEmploys: { type: employs, from: [Firm], to: [Staff] } },
+    ontology: [subClassOf(Engineer, Staff)],
+  });
+  type GraphStore = Store<typeof graph>;
+  type Employment = Awaited<
+    ReturnType<GraphStore["edges"]["refEmploys"]["findFrom"]>
+  >[number];
+
+  it("resolves a typed reference to its kind's node", () => {
+    // Type-checked only — never called.
+    async function resolveFirm(
+      store: Store<typeof graph>,
+      edge: Employment,
+    ): Promise<void> {
+      const firm = await store.getNodeByRef({
+        kind: edge.fromKind,
+        id: edge.fromId,
+      });
+      expectTypeOf(firm).toEqualTypeOf<Node<typeof Firm> | undefined>();
+    }
+    void resolveFirm;
+    expectTypeOf<Employment["fromKind"]>().toEqualTypeOf<"RefFirm">();
+    expect(
+      buildKindRegistry(graph).isAssignableTo("RefEngineer", "RefStaff"),
+    ).toBe(true);
+  });
+
+  it("resolves a widened endpoint to a kind-discriminated union", () => {
+    // Type-checked only — never called.
+    async function narrowResolvedEndpoint(
+      store: GraphStore,
+      edge: Employment,
+    ): Promise<void> {
+      if (edge.toKind === "RefEngineer") {
+        const engineer = await store.getNodeByRef({
+          kind: edge.toKind,
+          id: edge.toId,
+        });
+        expectTypeOf(engineer).toEqualTypeOf<
+          Node<typeof Engineer> | undefined
+        >();
+      }
+      const target = await store.getNodeByRef({
+        kind: edge.toKind,
+        id: edge.toId,
+      });
+      if (target?.kind === "RefEngineer") {
+        expectTypeOf(target).toEqualTypeOf<Node<typeof Engineer> | Node>();
+      }
+    }
+    void narrowResolvedEndpoint;
+    type Resolved = Awaited<ReturnType<GraphStore["getNodeByRef"]>>;
+    expectTypeOf<Resolved>().toEqualTypeOf<
+      | Node<typeof Staff>
+      | Node<typeof Engineer>
+      | Node<typeof Firm>
+      | Node
+      | undefined
+    >();
+  });
+
+  it("offers the same resolver on transactions and views", () => {
+    type TransactionResolve = TransactionContext<typeof graph>["getNodeByRef"];
+    expectTypeOf<TransactionResolve>().toEqualTypeOf<
+      NodeReferenceLookup<typeof graph>
+    >();
+    type ViewResolved = Awaited<
+      ReturnType<ReturnType<GraphStore["asOf"]>["getNodeByRef"]>
+    >;
+    expectTypeOf<ViewResolved>().toEqualTypeOf<
+      Awaited<ReturnType<GraphStore["getNodeByRef"]>>
+    >();
   });
 });

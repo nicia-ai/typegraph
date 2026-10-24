@@ -1106,9 +1106,20 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // entrypoint that reaches `GraphBackend` carries the first as a forgotten
   // name, and every one but `.` and `./backend` the second: +1 at those two,
   // +2 at the other fourteen; no other name moved.
+  // Typed edge endpoints under subsumption: edge collections type each
+  // declared endpoint through `SubsumedNodeType` and accept an
+  // `EdgeEndpointRef`, and `getNodeByRef` returns a `NodeReferenceLookup`
+  // result. `.` exports those, `AssignableNodeKinds`, `EdgeInGraph` and
+  // `GraphNodeForKinds` directly and gains only the nine unexported helpers
+  // they are spelled with (`AssignableKeyClosure`, `AssignableNodeTypes`,
+  // `DirectlyAssignableKeys`, `EdgeFromNodeTypes`, `EdgeToNodeTypes`,
+  // `GraphWithoutOntology`, `IriEndpointKey`, `KindNodeTypes`,
+  // `SubsumptionEndpointKeys`): 544 → 553. The seven Store-bearing
+  // entrypoints reach all fifteen only transitively: +15 apiece. No other
+  // entrypoint renders an edge collection, so none moves.
   ".": {
-    count: 544,
-    sha256: "1bc8ecfa65ca6e9c941597b32be28ddb6e51888ba6f53d7c5de862f3b266d8c9",
+    count: 553,
+    sha256: "94983ceda939943f5c1e5f75b9513b97b900a69650682bb291f55155dcf86a27",
   },
   "./adapters/drizzle/engine": {
     count: 347,
@@ -1142,8 +1153,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // through the identity facade and gain exactly those three forgotten names
   // (+3 apiece), no other name moved.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 947,
-    sha256: "9ef57897e3de047db884e2d16b3ff0af28985806578bf9b7c524e90758ea4e42",
+    count: 962,
+    sha256: "66bfbf816d1ef6a335645406215a1d42418800262c208c7e6c327db31b4a1a67",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 281,
@@ -1189,28 +1200,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 941,
-    sha256: "0c1296648e2ff17ca9e8f9672d1649fe9dcbf191307c941e45e402f54d7702da",
+    count: 956,
+    sha256: "261d2ad492a0019a8290e0aac60026691ba00a2d0cfb1c0fe569892ef387dc5e",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 926,
-    sha256: "6af69167740c1c799e506ce1fdd0bb0468d8b2ebe1c38c50590304785738d2d9",
+    count: 941,
+    sha256: "07b6a0ef2df63ad0d13b70005f8b093c08030af12514da4ab074fedd07e63164",
   },
   "./postgres/pglite": {
-    count: 932,
-    sha256: "3542545a0a7cf56ddc57aee2471dbccaeace63b10fa00a2713fe47a89bd4a0b5",
+    count: 947,
+    sha256: "5ad6d584544406c765ea1ec51a7db5b804f6d8a9bbec721fbc12f3868621892e",
   },
   "./profiler": {
-    count: 928,
-    sha256: "db12c634f2786bd74abcec383de064c009cb28c67fcbe536cde29cc8910b9f8b",
+    count: 943,
+    sha256: "38583124ad7aeef51f03641817f8476f2203943134571e7e53a8b04655c26a5a",
   },
   "./provenance": {
-    count: 941,
-    sha256: "b79cc60c384079f24c6f275dac048587d12ba6de38a83fbc242bc243afcc4df8",
+    count: 956,
+    sha256: "a66a4fcb159f9062a1f06db9850d523d9ceddb1973424281c4cf54b3ee50a80f",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1226,8 +1237,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "43cfec34867c5ab909e9e52593be02de833262a50f63fc55189e0e902f75b693",
   },
   "./sqlite/local": {
-    count: 932,
-    sha256: "3542545a0a7cf56ddc57aee2471dbccaeace63b10fa00a2713fe47a89bd4a0b5",
+    count: 947,
+    sha256: "5ad6d584544406c765ea1ec51a7db5b804f6d8a9bbec721fbc12f3868621892e",
   },
 };
 

@@ -28,7 +28,6 @@ import {
   defineGraph,
   defineNode,
   hasPart,
-  type NodeRef,
   partOf,
   type QualifiedRecursivePath,
   subClassOf,
@@ -438,17 +437,11 @@ export function registerCompositionNavigationIntegrationTests(
       const bonusEpisode = await store.nodes.CnBonusEpisode.create({
         title: "Bonus Episode",
       });
-      // `cnEpisodeOf.create` is typed against the edge's DECLARED `from`
-      // kind (CnEpisode); the cast crosses only the compile-time gap — the
-      // ontology's `subClassOf(CnBonusEpisode, CnEpisode)` makes the
-      // resulting row a legitimate one at runtime, accepted by
-      // edge-endpoint validation via `isAssignableToAny`, exactly as the
-      // finding describes.
-      await store.edges.cnEpisodeOf.create(
-        bonusEpisode as unknown as NodeRef<typeof CnEpisode>,
-        podcast,
-        {},
-      );
+      // `cnEpisodeOf.create` admits the subclass endpoint: the ontology's
+      // `subClassOf(CnBonusEpisode, CnEpisode)` makes the resulting row a
+      // legitimate one, accepted by edge-endpoint validation via
+      // `isAssignableToAny`.
+      await store.edges.cnEpisodeOf.create(bonusEpisode, podcast, {});
 
       // MUTATION CHECK: reverting the subclass-expansion fix (using the bare
       // declared kind list from `compositionPartKindsUnder` instead of

@@ -49,6 +49,7 @@ export type {
 // Builder types users need
 export type {
   AliasMap,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
   CommonPropertyKeys,
@@ -93,6 +94,7 @@ export type {
   SelectableNode,
   SelectContext,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./builder";
 

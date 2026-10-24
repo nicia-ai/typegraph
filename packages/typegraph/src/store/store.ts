@@ -350,6 +350,7 @@ import {
   type NeighborResult,
   readNeighbors,
 } from "./neighbors";
+import { readNodeByReference } from "./node-reference-read";
 import {
   applyIdentityWindowEnd,
   type EdgeOperationContext,
@@ -499,6 +500,7 @@ import {
   type GraphEdgeCollections,
   type GraphEdgeForKinds,
   type GraphNodeCollections,
+  type GraphNodeForKinds,
   type GraphNodeReference,
   type HeterogeneousNodeUpsertInput,
   type HeterogeneousNodeUpsertResult,
@@ -510,6 +512,7 @@ import {
   type MeasurableHistoryTransactionContext,
   type MeasurableTransactionContext,
   type Node,
+  type NodeReferenceLookup,
   type OperationHookContext,
   type OperationOutcomeFacts,
   type QueryHookContext,
@@ -868,6 +871,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   ) => RuntimeEdgeKind<K, ExtensionObjectSchema<ExtensionEdgeProperties<D>>>;
   getNodeCollection: NodeCollectionLookup;
   getNodeCollectionOrThrow: RequiredNodeCollectionLookup;
+  getNodeByRef: NodeReferenceLookup<G>;
   getEdgeCollection: EdgeCollectionLookup<G>;
   getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
   getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -2659,6 +2663,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ] as unknown as DynamicNodeCollection<K>;
   }
 
+  /** Resolve node lookups through the supplied context's collections, as {@link #edgeCollectionAccess} does for edges. */
+  #nodeCollectionAccess(collections: GraphNodeCollections<G>): Readonly<{
+    getNodeCollection: NodeCollectionLookup;
+    getNodeByRef: NodeReferenceLookup<G>;
+  }> {
+    const getNodeCollection = <const K extends string>(
+      kind: K,
+    ): DynamicNodeCollection<K> | undefined =>
+      this.#resolveDynamicNodeCollection(collections, kind);
+    const getNodeByRef = (
+      reference: Readonly<{ kind: string; id: string }>,
+    ): Promise<unknown> =>
+      readNodeByReference(
+        (kind) => getNodeCollection(kind),
+        reference,
+        this.graphId,
+      );
+    return {
+      getNodeCollection,
+      getNodeByRef: getNodeByRef as NodeReferenceLookup<G>,
+    };
+  }
+
   /**
    * Returns the node collection for the given kind, or undefined if the kind
    * is not registered in this graph.
@@ -2699,6 +2726,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
     }
     return collection;
+  }
+
+  /**
+   * Reads the node a `{ kind, id }` reference names, such as an edge's
+   * `{ kind: edge.fromKind, id: edge.fromId }`; see {@link NodeReferenceLookup}
+   * for the result typing. Returns `undefined` when the node does not exist
+   * under that kind and throws `KindNotFoundError` for an unregistered kind.
+   */
+  getNodeByRef<const K extends NodeKinds<G>>(
+    reference: Readonly<{ kind: K; id: string }>,
+  ): Promise<GraphNodeForKinds<G, K> | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<GraphNodeForKinds<G, NodeKinds<G>> | Node | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<unknown> {
+    return this.#nodeCollectionAccess(this.nodes).getNodeByRef(reference);
   }
 
   /**
@@ -4959,8 +5004,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         edges: scopedEdges,
         ...(identity === undefined ? {} : { identity }),
         ...this.#edgeCollectionAccess(scopedEdges),
-        getNodeCollection: <const K extends string>(kind: K) =>
-          this.#resolveDynamicNodeCollection(scopedNodes, kind),
+        ...this.#nodeCollectionAccess(scopedNodes),
         [TRANSACTION_RUNTIME]: {
           ...outerRuntime,
           deleteNodeWithPolicy: (
@@ -5317,11 +5361,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         identity
       : wrapTransactionIdentity(identity, receiptRecorder);
 
-    const getNodeCollection = <const K extends string>(
-      kind: K,
-    ): DynamicNodeCollection<K> | undefined =>
-      this.#resolveDynamicNodeCollection(nodes, kind);
-
     // Honest capability discriminant for `tx.sql`. Capture/revision tracking
     // take precedence because they replace `tx.sql` with a fail-loud guard even
     // though the transaction itself is real; only a genuinely absent handle is
@@ -5359,7 +5398,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             txBackend,
           ),
       },
-      getNodeCollection,
+      ...this.#nodeCollectionAccess(nodes),
       ...this.#edgeCollectionAccess(edges),
       ...(this.#captureEnabled || this.#engineNativeHistory ?
         {
