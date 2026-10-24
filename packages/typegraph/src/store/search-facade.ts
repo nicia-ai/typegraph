@@ -55,7 +55,10 @@ type ExactExpansion = Readonly<{
  * follow it. Intersected with the option type rather than threaded through
  * it: the axis is a fact about one call, not about a reusable options value.
  * The key is required, so a call that omits the option or passes `undefined`
- * never lands here: it takes the exact overload.
+ * never lands here: it takes the exact overload. An options value typed by
+ * the library's own option type, whose `expansion` is optional and either
+ * axis, matches neither and takes the last overload, which types the hit as
+ * an unpinned axis would.
  */
 type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
   expansion: E;
@@ -199,6 +202,12 @@ export class StoreSearch<G extends GraphDef> {
     nodeKind: K,
     options: FulltextSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
   ): Promise<readonly FulltextSearchHit<ResolveNode<G, K, "exact">>[]>;
+  fulltext<K extends string>(
+    nodeKind: K,
+    options: FulltextSearchOptions<ResolveNodeType<G, K>>,
+  ): Promise<
+    readonly FulltextSearchHit<ResolveNode<G, K, DefaultAliasExpansionAxis>>[]
+  >;
   async fulltext(
     nodeKind: string,
     // Contravariance: the overloads narrow the accessor callback to the
@@ -235,6 +244,12 @@ export class StoreSearch<G extends GraphDef> {
     nodeKind: K,
     options: VectorSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
   ): Promise<readonly VectorSearchHit<ResolveNode<G, K, "exact">>[]>;
+  vector<K extends string>(
+    nodeKind: K,
+    options: VectorSearchOptions<ResolveNodeType<G, K>>,
+  ): Promise<
+    readonly VectorSearchHit<ResolveNode<G, K, DefaultAliasExpansionAxis>>[]
+  >;
   async vector(
     nodeKind: string,
     // Contravariance: the overloads narrow the accessor callback to the
@@ -269,6 +284,12 @@ export class StoreSearch<G extends GraphDef> {
     nodeKind: K,
     options: HybridSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
   ): Promise<readonly HybridSearchHit<ResolveNode<G, K, "exact">>[]>;
+  hybrid<K extends string>(
+    nodeKind: K,
+    options: HybridSearchOptions<ResolveNodeType<G, K>>,
+  ): Promise<
+    readonly HybridSearchHit<ResolveNode<G, K, DefaultAliasExpansionAxis>>[]
+  >;
   async hybrid(
     nodeKind: string,
     // Contravariance: the overloads narrow the accessor callback to the

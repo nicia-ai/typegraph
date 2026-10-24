@@ -19,10 +19,13 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
+  type FulltextSearchOptions,
+  type HybridSearchOptions,
   type NodeType,
   relatedTo,
   type Store,
   subClassOf,
+  type VectorSearchOptions,
 } from "../src";
 import { ConfigurationError } from "../src/errors";
 import type {
@@ -623,6 +626,42 @@ describe("alias typing under the polymorphic axis", () => {
         }),
       );
       expectTypeOf(plainForwarded.node.kind).toEqualTypeOf<string>();
+
+      // A wrapper forwarding the library's own option types, whose
+      // `expansion` is optional and either axis, reaches an overload; the
+      // axis is unpinned, so the hit widens.
+      async function forwardFulltext(
+        options: FulltextSearchOptions<typeof MediaKind>,
+      ) {
+        return store.search.fulltext("MediaAliasTest", options);
+      }
+      async function forwardVector(
+        options: VectorSearchOptions<typeof MediaKind>,
+      ) {
+        return store.search.vector("MediaAliasTest", options);
+      }
+      async function forwardHybrid(
+        options: HybridSearchOptions<typeof MediaKind>,
+      ) {
+        return store.search.hybrid("MediaAliasTest", options);
+      }
+      const forwardedFulltext = first(
+        await forwardFulltext({ query: "x", limit: 1 }),
+      );
+      const forwardedVector = first(
+        await forwardVector({ ...vectorLeg, limit: 1 }),
+      );
+      const forwardedHybrid = first(
+        await forwardHybrid({
+          vector: vectorLeg,
+          fulltext: fulltextLeg,
+          limit: 1,
+        }),
+      );
+      expectTypeOf(forwardedFulltext.node.kind).toEqualTypeOf<string>();
+      expectTypeOf(forwardedVector.node.kind).toEqualTypeOf<string>();
+      expectTypeOf(forwardedHybrid.node.kind).toEqualTypeOf<string>();
+      expectTypeOf(forwardedFulltext.node.title).toEqualTypeOf<string>();
     }
     void assertExpandedSearchTyping;
     expect(affectedGraph.id).toBe("alias_typing_affected");

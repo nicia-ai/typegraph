@@ -515,7 +515,8 @@ so its id is not accepted by the searched kind's own `update()`. Narrow on
 `hit.node.kind` before treating the row as one concrete kind. A kind no
 subsumption relation names keeps its exact type, and an `expansion` value
 that is not a literal at the call site (a variable typed
-`"exact" | "subclasses"`) always types the hit in the widened form.
+`"exact" | "subclasses"`, or an options value typed `FulltextSearchOptions`
+that a wrapper forwards) always types the hit in the widened form.
 
 ```typescript
 const hits = await store.search.fulltext("Content", {
