@@ -639,7 +639,7 @@ export function createSqlBackend<TTx>(
   // `SchemaCommitPreflightBackend` preflight parameter) rather than left to
   // infer `SchemaVersionMembers`. Once this group is spread into the
   // `backend` literal below, that inference can no longer catch a
-  // divergence between `SchemaVersionMembers` and the four keys it fills —
+  // divergence between `SchemaVersionMembers` and the five keys it fills —
   // this annotation is what still does. Every other group assembled here
   // gets the same treatment implicitly, through the literal's own
   // `satisfies AdapterBackend<TTx>` check below.
@@ -650,6 +650,7 @@ export function createSqlBackend<TTx>(
       | "commitSchemaVersionIfKindsEmpty"
       | "commitSchemaVersionWithPreflight"
       | "setActiveVersion"
+      | "setActiveVersionWithPreflight"
     >
   > = createSchemaVersionMembers({
     runSchemaWriteTransaction: late.fence.runSchemaWriteTransaction,

@@ -11,6 +11,7 @@ import type {
   GraphCommandPort,
   GraphCommandResult,
   GraphCommandSession,
+  GraphWriteFenceAcquisition,
   NodeCreateCommand,
   NodeCreateCommandResult,
 } from "./types";
@@ -19,7 +20,7 @@ const graphCommandCoordinationBindings = new WeakMap<
   object,
   Readonly<{
     graphId: string;
-    isolation: GraphCommandIsolation;
+    acquisition: GraphWriteFenceAcquisition;
     sessionIdentity: object;
   }>
 >();
@@ -30,6 +31,7 @@ export type {
   GraphCommandExecutionContext,
   GraphCommandIsolation,
   GraphCommandSession,
+  GraphWriteFenceAcquisition,
 } from "./types";
 
 /**
@@ -59,19 +61,21 @@ function graphCommandPortSessionIdentity(port: GraphCommandPort): object {
 }
 
 /**
- * Internal evidence mint used only after a graph's advisory lock has been
+ * Internal evidence mint used only after a graph's write fence has been
  * acquired on the command port's transaction. The binding prevents a real
- * lock from transaction A (or graph A) authorizing a command on B.
+ * acquisition from transaction A (or graph A) authorizing a command on B, and
+ * carries what that acquisition observed and did so every later decision
+ * reads the facts of the statement that earned them.
  */
 export function mintGraphCommandCoordination(
   port: GraphCommandPort,
   graphId: string,
-  isolation: GraphCommandIsolation,
+  acquisition: GraphWriteFenceAcquisition,
 ): GraphCommandCoordination {
   const coordination = Object.freeze({}) as GraphCommandCoordination;
   graphCommandCoordinationBindings.set(coordination, {
     graphId,
-    isolation,
+    acquisition,
     sessionIdentity: graphCommandPortSessionIdentity(port),
   });
   return coordination;
@@ -106,6 +110,35 @@ export function normalizeGraphCommandIsolation(
   }
 }
 
+/** The column a fence acquisition reports its session isolation under. */
+const FENCE_ISOLATION_COLUMN = "transaction_isolation";
+/** The column a fence acquisition reports its advanced fence row under. */
+const FENCE_ROW_GENERATION_COLUMN = "generation";
+
+/**
+ * THE one reader of a graph-write fence acquisition's result row, shared by
+ * the portable acquisition and the fused schema + graph fence so neither can
+ * read the session's isolation or the fence-row evidence differently. A
+ * missing row or column is the absence of the fact, never a default: an
+ * unreported isolation is `unknown`, and an unreported generation means the
+ * statement advanced no fence row.
+ */
+export function readGraphWriteFenceAcquisition(
+  row: Readonly<Record<string, unknown>> | undefined,
+): GraphWriteFenceAcquisition {
+  const generation = row?.[FENCE_ROW_GENERATION_COLUMN];
+  return {
+    isolation: normalizeGraphCommandIsolation(row?.[FENCE_ISOLATION_COLUMN]),
+    fenceRow:
+      generation === undefined || generation === null ? "none" : "advanced",
+  };
+}
+
+const UNOBSERVED_FENCE_ACQUISITION: GraphWriteFenceAcquisition = {
+  isolation: "unknown",
+  fenceRow: "none",
+};
+
 function boundGraphCommandCoordination(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
@@ -126,35 +159,164 @@ export function graphCommandCoordinationIsolation(
   graphId: string,
   coordination: GraphCommandCoordination,
 ): GraphCommandIsolation {
+  return graphCommandCoordinationAcquisition(port, coordination, graphId)
+    .isolation;
+}
+
+/**
+ * What the acquisition behind `coordination` observed and did, when it was
+ * earned on this graph and transaction; an unobserved acquisition otherwise —
+ * coordination minted for another graph or session is evidence of nothing.
+ */
+export function graphCommandCoordinationAcquisition(
+  port: GraphCommandPort,
+  coordination: GraphCommandCoordination,
+  graphId?: string,
+): GraphWriteFenceAcquisition {
   return (
-    boundGraphCommandCoordination(port, coordination, graphId)?.isolation ??
-    "unknown"
+    boundGraphCommandCoordination(port, coordination, graphId)?.acquisition ??
+    UNOBSERVED_FENCE_ACQUISITION
+  );
+}
+
+/**
+ * Whether a session that acquired the per-graph write fence this way reads
+ * everything committed by EVERY earlier holder of the fence, whatever that
+ * holder did under it.
+ *
+ * Only an isolation that takes a fresh snapshot per statement does. The fence
+ * row is advanced by the holders that make a lock-only decision, not by every
+ * holder, so advancing it proves nothing about a holder that only captured
+ * history or advanced a revision: a snapshot isolation is never admitted
+ * here. A stricter question than {@link observesPostFenceCommits}, for a
+ * holder whose reads span the whole graph rather than one lock-only decision —
+ * a merge plan applied inside a caller's transaction, or a PostgreSQL schema
+ * write under the advisory schema fence, whose earlier holders lock the
+ * schema row `FOR SHARE` and advance nothing.
+ */
+export function observesEveryEarlierFenceHolder(
+  acquisition: GraphWriteFenceAcquisition,
+): boolean {
+  return acquisition.isolation === "read_committed";
+}
+
+/**
+ * Whether a session that acquired the per-graph write fence this way reads
+ * every lock-only decision committed by the holders that had the fence before
+ * it.
+ *
+ * `read_committed` takes a fresh snapshot per statement, so every statement
+ * after the acquisition sees what committed while it waited. A snapshot
+ * isolation (`repeatable_read`, `serializable`) keeps the snapshot it took at
+ * its first statement, however long it then waits — and a lock cannot change
+ * that. PostgreSQL's serialization-failure detection does not help either: it
+ * arbitrates serializable transactions against each other only, so a
+ * serializable session and a read-committed writer can both commit. What does
+ * hold at those levels is first-updater-wins on a row both sessions write:
+ * every holder that makes a lock-only decision advances the graph's fence row
+ * (`fenceLockOnlyDecision`), so an acquisition that advanced it succeeds only
+ * when no such holder committed after this session's snapshot, and fails with
+ * a serialization failure otherwise. So a snapshot isolation observes the
+ * earlier deciders exactly when its own acquisition advanced the fence row.
+ * Everything else — including `unknown` — fails closed.
+ *
+ * THE one predicate every "must observe the earlier deciders" check consults:
+ * match-key convergence ({@link assertGraphCommandConvergenceIsolation}) and
+ * the lock-only reads of {@link assertFencedSnapshotIsFresh} both need "did
+ * this session's snapshot start after the last decision under the fence", and
+ * a second inline spelling of the isolation set is exactly the copy that
+ * drifts. A holder that must observe EVERY earlier holder asks
+ * {@link observesEveryEarlierFenceHolder} instead.
+ */
+export function observesPostFenceCommits(
+  acquisition: GraphWriteFenceAcquisition,
+): boolean {
+  switch (acquisition.isolation) {
+    case "read_committed": {
+      return true;
+    }
+    case "repeatable_read":
+    case "serializable": {
+      return acquisition.fenceRow === "advanced";
+    }
+    case "unknown": {
+      return false;
+    }
+    default: {
+      return acquisition.isolation satisfies never;
+    }
+  }
+}
+
+/** What a caller changes to pass {@link observesPostFenceCommits}. */
+const FRESH_SNAPSHOT_SUGGESTION =
+  "Use read_committed transaction isolation. Snapshot isolation levels " +
+  "(repeatable_read, serializable) are supported only on a backend whose " +
+  "graph-write fence advances the graph's fence row (`tableNames.fences`) " +
+  "and reports the effective transaction isolation.";
+
+/**
+ * THE fresh-snapshot guard of a decision the per-graph write fence alone
+ * protects — a read with no claim row behind it, such as the edge-acyclicity
+ * probe or a whole delete's parts closure. Such a read is only as good as the
+ * snapshot it runs on, so the session that took the fence must observe what
+ * committed while it waited.
+ *
+ * `coordination` is `undefined` exactly when the store's write-fence plan is
+ * `engine-serialized` or `caller-serialized` (one writer at a time, nothing
+ * to observe). Every frame of a transaction that holds a keyed fence carries
+ * the coordination its acquisition minted, the nested and sibling frames
+ * included, so this cannot be skipped by where in the transaction it runs.
+ *
+ * @throws ConfigurationError carrying `refusal.code`
+ */
+export function assertFencedSnapshotIsFresh(
+  port: GraphCommandPort,
+  graphId: string,
+  coordination: GraphCommandCoordination | undefined,
+  refusal: Readonly<{ code: string; subject: string }>,
+): void {
+  if (coordination === undefined) return;
+  const acquisition = graphCommandCoordinationAcquisition(
+    port,
+    coordination,
+    graphId,
+  );
+  if (observesPostFenceCommits(acquisition)) return;
+  throw new ConfigurationError(
+    `${refusal.subject} requires a transaction isolation that observes ` +
+      "writes committed while this session waited for the per-graph write fence.",
+    {
+      code: refusal.code,
+      graphId,
+      isolation: acquisition.isolation,
+      fenceRow: acquisition.fenceRow,
+    },
+    { suggestion: FRESH_SNAPSHOT_SUGGESTION },
   );
 }
 
 /**
  * A match-key convergence must observe the winner after waiting for its graph
- * lock. Repeatable-read snapshots cannot do that; serializable can instead
- * force a database serialization retry. Adopted/custom transaction ports
- * without an audited isolation level fail closed for the same reason.
+ * lock. A snapshot isolation can do that only when its acquisition advanced
+ * the graph's fence row; adopted/custom transaction ports without an audited
+ * isolation level fail closed for the same reason.
  */
 export function assertGraphCommandConvergenceIsolation(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
 ): void {
-  const isolation =
-    boundGraphCommandCoordination(port, coordination)?.isolation ?? "unknown";
-  if (isolation === "read_committed" || isolation === "serializable") return;
+  const acquisition = graphCommandCoordinationAcquisition(port, coordination);
+  if (observesPostFenceCommits(acquisition)) return;
   throw new ConfigurationError(
-    "Match-key convergence requires read-committed or serializable transaction isolation.",
+    "Match-key convergence requires a transaction isolation that observes " +
+      "writes committed while this session waited for the per-graph write fence.",
     {
       code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
-      isolation,
+      isolation: acquisition.isolation,
+      fenceRow: acquisition.fenceRow,
     },
-    {
-      suggestion:
-        "Use read_committed, retry a serializable transaction as a whole, or configure a custom PostgreSQL graph-write fence to report the effective transaction isolation.",
-    },
+    { suggestion: FRESH_SNAPSHOT_SUGGESTION },
   );
 }
 

@@ -339,8 +339,9 @@ function getNodeEnv(): string | undefined {
 /**
  * Checks whether a JSON pointer exists in the schema for the given kind.
  *
- * This is used to attribute multi-kind aliases (includeSubClasses) to the most
- * relevant concrete kinds by verifying that the accessed pointer exists.
+ * This is used to attribute multi-kind aliases (`expansion: "subclasses"`) to
+ * the most relevant concrete kinds by verifying that the accessed pointer
+ * exists.
  *
  * Returns false on missing fields or invalid pointers.
  */

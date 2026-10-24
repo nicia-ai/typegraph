@@ -14,7 +14,7 @@ export async function executeShortestPath(
   targetId: string,
   options: InternalTraversalOptions,
 ): Promise<ShortestPathResult | undefined> {
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
   const maxHops = resolveMaxHops(
     options.maxHops,
     DEFAULT_ALGORITHM_MAX_HOPS,

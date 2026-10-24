@@ -10,7 +10,7 @@
  * committing.
  */
 import type { KindEntity } from "../core/types";
-import { canonicalEqual } from "../schema/canonical";
+import { uniqueConstraintEnforcementChange } from "../schema/unique-constraint-change";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type IncompatibleChange, IncompatibleChangeError } from "./errors";
@@ -598,41 +598,20 @@ function classifyUnique(
   next: readonly ExtensionUniqueConstraint[],
   recorders: Recorders,
 ): void {
-  const existingByName = new Map(
-    existing.map((constraint) => [constraint.name, constraint]),
-  );
-  const nextByName = new Map(
-    next.map((constraint) => [constraint.name, constraint]),
-  );
-  for (const [name, constraint] of nextByName) {
-    if (!existingByName.has(name)) {
-      // ADD_UNIQUE — allowed-on-empty (existing rule, kept).
-      recorders.recordRequireEmpty({
-        kind,
-        type: "ADD_UNIQUE_ON_POPULATED",
-        detail: `unique constraint "${name}" on [${constraint.fields.join(", ")}]`,
-      });
-    }
-  }
-  // Dropped unique constraints — DROP_UNIQUE, allowed.
-  // Modified — DROP + ADD; the ADD is recorded above for any
-  // structurally-different constraint with a same name.
-  for (const [name, constraint] of existingByName) {
-    const newOne = nextByName.get(name);
-    if (newOne === undefined) continue;
-    // Different shape with same name → treat as modify; ADD half is
-    // allowed-on-empty. Use `canonicalEqual` so the comparison is
-    // key-order-stable; plain `JSON.stringify` would flag two
-    // structurally identical constraints with differently-ordered
-    // keys as reshaped.
-    const { name: _existingName, ...existingShape } = constraint;
-    const { name: _nextName, ...nextShape } = newOne;
-    if (!canonicalEqual(existingShape, nextShape)) {
-      recorders.recordRequireEmpty({
-        kind,
-        type: "ADD_UNIQUE_ON_POPULATED",
-        detail: `unique constraint "${name}" reshaped`,
-      });
-    }
+  // A dropped constraint is allowed. An added or reshaped one is
+  // allowed-on-empty: no existing row holds a claim for it. The decision is
+  // `uniqueConstraintEnforcementChange`'s, shared with the schema-commit
+  // preflight that gates the same change on compile-time kinds.
+  for (const constraint of next) {
+    const change = uniqueConstraintEnforcementChange(existing, constraint);
+    if (change === undefined) continue;
+    recorders.recordRequireEmpty({
+      kind,
+      type: "ADD_UNIQUE_ON_POPULATED",
+      detail:
+        change === "added" ?
+          `unique constraint "${constraint.name}" on [${constraint.fields.join(", ")}]`
+        : `unique constraint "${constraint.name}" reshaped`,
+    });
   }
 }

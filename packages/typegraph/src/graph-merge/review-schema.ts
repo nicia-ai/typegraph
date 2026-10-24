@@ -9,13 +9,39 @@ import type {
   MergePlanDigest,
   MergePlanEntityRef,
 } from "./plan-schema";
-import { mergePlanArtifactV1Schema } from "./plan-schema";
+import { mergePlanArtifactV2Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
-/** Default review format, retained for callers that validate V1 artifacts. */
-export const MERGE_REVIEW_FORMAT_VERSION = 1 as const;
-export const MERGE_REVIEW_FORMAT_VERSION_V1 = 1 as const;
-export const MERGE_REVIEW_FORMAT_VERSION_V2 = 2 as const;
+// A review embeds its plan under the strict plan schema, so a review stored
+// before the plan's own 1 -> 2 bump (`MERGE_PLAN_FORMAT_VERSION`) can never
+// validate. Formats 1 (whole-target baseline) and 2 (candidate-scoped
+// baseline) embedded a version-1 plan; both evidence modes are numbered past
+// them so a stored one is refused as an unsupported version rather than as
+// malformed.
+
+/** The default review format: its baseline covers the whole target. */
+export const MERGE_REVIEW_FORMAT_VERSION = 3 as const;
+/** The opt-in review format whose baseline covers the candidate's own scope. */
+export const MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED = 4 as const;
+
+/** Every review format this library version validates, in ascending order. */
+export const SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS = [
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+] as const;
+
+type MergeReviewFormatVersion =
+  (typeof SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)[number];
+
+/** Whether a stored review's `formatVersion` is one this library validates. */
+export function isSupportedMergeReviewFormatVersion(
+  formatVersion: unknown,
+): formatVersion is MergeReviewFormatVersion {
+  return (
+    formatVersion === MERGE_REVIEW_FORMAT_VERSION ||
+    formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED
+  );
+}
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
 export type MergeReviewPolicy = Readonly<{
@@ -32,12 +58,15 @@ export type MergeReviewRow = MergePlanEntityRef &
     digest?: string | undefined;
   }>;
 
-/** V1 retains a global baseline; V2 records the exact candidate identity scope. */
+/**
+ * The default format retains a whole-target baseline; the candidate-scoped
+ * format records the exact candidate identity scope.
+ */
 export type MergeReviewBaseline = Readonly<{
   rows: readonly MergeReviewRow[];
   identityDigest: string;
   scope?: "referenced" | undefined;
-  /** Present in V2: endpoint scope retained to make revalidation exact. */
+  /** Present in the candidate-scoped format: endpoint scope retained to make revalidation exact. */
   identityReferences?: readonly MergePlanEntityRef[] | undefined;
   /** Candidate assertion IDs whose unrelated ID collisions affect import. */
   identityAssertionIds?: readonly string[] | undefined;
@@ -45,13 +74,11 @@ export type MergeReviewBaseline = Readonly<{
 
 /**
  * Immutable review evidence, distinct from its single-use execution plan.
- * Both versions support candidate write sets. Authenticate stored artifacts
+ * Both formats review candidate write sets. Authenticate stored artifacts
  * separately.
  */
 export type MergeReviewArtifact = Readonly<{
-  formatVersion:
-    | typeof MERGE_REVIEW_FORMAT_VERSION_V1
-    | typeof MERGE_REVIEW_FORMAT_VERSION_V2;
+  formatVersion: MergeReviewFormatVersion;
   kind: "candidate-write-set";
   digest: MergePlanDigest;
   writeSet: CandidateWriteSet;
@@ -95,8 +122,8 @@ export const mergeReviewPolicySchema = z
 export const mergeReviewArtifactSchema = z
   .object({
     formatVersion: z.union([
-      z.literal(MERGE_REVIEW_FORMAT_VERSION_V1),
-      z.literal(MERGE_REVIEW_FORMAT_VERSION_V2),
+      z.literal(MERGE_REVIEW_FORMAT_VERSION),
+      z.literal(MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED),
     ]),
     kind: z.literal("candidate-write-set"),
     digest: z
@@ -105,7 +132,7 @@ export const mergeReviewArtifactSchema = z
     writeSet: CandidateWriteSetSchema,
     policy: mergeReviewPolicySchema,
     options: z.json(),
-    plan: mergePlanArtifactV1Schema,
+    plan: mergePlanArtifactV2Schema,
     baseline: z
       .object({
         rows: z.array(

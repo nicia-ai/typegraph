@@ -64,7 +64,7 @@ function makeComparison(
 
 function makeMinimalAst(predicates: readonly NodePredicate[] = []): QueryAst {
   return {
-    start: { alias: "p", kinds: ["Person"], includeSubClasses: false },
+    start: { alias: "p", kinds: ["Person"], expansion: "exact" as const },
     traversals: [],
     predicates,
     projection: { fields: [] },
@@ -220,7 +220,7 @@ describe("hasParameterReferences", () => {
       __type: "exists",
       subquery: {
         ...subqueryAst,
-        start: { alias: "q", kinds: ["Order"], includeSubClasses: false },
+        start: { alias: "q", kinds: ["Order"], expansion: "exact" as const },
       },
       negated: false,
     };
@@ -236,7 +236,7 @@ describe("hasParameterReferences", () => {
           "q",
         ),
       ]),
-      start: { alias: "q", kinds: ["Order"], includeSubClasses: false },
+      start: { alias: "q", kinds: ["Order"], expansion: "exact" as const },
     };
     const expr: PredicateExpression = {
       __type: "in_subquery",

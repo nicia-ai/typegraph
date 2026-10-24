@@ -21,8 +21,9 @@ import { afterEach } from "vitest";
 
 import { type GraphDef } from "../src";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
+import { type AnyPgTransaction } from "../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../src/backend/postgres";
-import { type GraphBackend } from "../src/backend/types";
+import { type AdapterBackend } from "../src/backend/types";
 import { createStore, type Store } from "../src/store";
 
 /** One statement as drizzle's logger reports it. */
@@ -33,7 +34,7 @@ export type LoggedStatement = Readonly<{
 
 export type RecordedPostgresStore<TGraph extends GraphDef> = Readonly<{
   store: Store<TGraph>;
-  backend: GraphBackend;
+  backend: AdapterBackend<AnyPgTransaction>;
   /** Every statement recorded since the last `reset()`, in issue order. */
   statements: readonly LoggedStatement[];
   /** Drops the recording so the next assertion sees one write's statements. */

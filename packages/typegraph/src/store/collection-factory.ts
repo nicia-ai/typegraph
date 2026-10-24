@@ -18,8 +18,12 @@ import type { CompiledSelectSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
-import { type EdgeUpsertUpdateBatchEntry } from "./collections/edge-collection";
 import {
+  type EdgeCreateBatchOptions,
+  type EdgeUpsertUpdateBatchEntry,
+} from "./collections/edge-collection";
+import {
+  type NodeCreateBatchOptions,
   type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
@@ -36,7 +40,10 @@ import {
   type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
 } from "./types";
 
@@ -60,7 +67,7 @@ export type NodeOperations = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ propsPreValidated?: true }>,
+    options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
@@ -112,6 +119,17 @@ export type NodeOperations = Readonly<{
    * the other preconditions.
    */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    options: NodeReparentOptions,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
@@ -127,6 +145,11 @@ export type NodeOperations = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeletePlan: (
+    kind: string,
+    id: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByConstraint: (
@@ -181,6 +204,7 @@ export type EdgeOperations = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],

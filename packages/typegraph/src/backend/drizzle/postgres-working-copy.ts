@@ -6,7 +6,7 @@ import { getTableName } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
 import { resolveGraphVectorSlots } from "../../core/embedding";
-import { ConfigurationError } from "../../errors";
+import { BaseSchemaMigrationError, ConfigurationError } from "../../errors";
 import {
   compareBaseVersionAtTarget,
   computeBaseVersion,
@@ -82,6 +82,10 @@ import {
   ALLOCATION_LOCK_TRANSACTION_OPTIONS,
   lockAllocation,
 } from "./postgres-working-copy-lock";
+import {
+  allocationNames,
+  allocationPhysicalPrefix,
+} from "./postgres-working-copy-names";
 import {
   allocationRemovedError,
   createPostgresOperationCapability,
@@ -489,22 +493,6 @@ function assertVectorManifestOwned(
   }
 }
 
-function allocationNames(allocationId: string): Promise<PostgresTableNames> {
-  return sha256Hex(allocationId, 12).then(
-    (digest) =>
-      Object.fromEntries(
-        Object.keys(defaultPostgresTableNames).map((key) => [
-          key,
-          `tgw_${digest}_${key.slice(0, 15)}`,
-        ]),
-      ) as PostgresTableNames,
-  );
-}
-
-function allocationPhysicalPrefix(names: PostgresTableNames): string {
-  return names.nodes.slice(0, -"nodes".length);
-}
-
 function assertAllocationPrefix(
   row: AllocationRow,
   names: PostgresTableNames,
@@ -523,7 +511,7 @@ async function resolveAllocationIndexNames(
   declarations: readonly IndexDeclaration[],
   names: PostgresTableNames,
 ): Promise<ReadonlyMap<string, string>> {
-  const prefix = names.nodes.slice(0, -"nodes".length);
+  const prefix = allocationPhysicalPrefix(names);
   const reserved = resolveSystemIndexNames(names);
   const entries = await Promise.all(
     declarations
@@ -681,6 +669,12 @@ function fixedSchemaBackend(
         commitSchemaVersionWithPreflight: () =>
           Promise.reject(fixedSchemaError("commitSchemaVersionWithPreflight")),
       }),
+    ...(backend.setActiveVersionWithPreflight === undefined ?
+      {}
+    : {
+        setActiveVersionWithPreflight: () =>
+          Promise.reject(fixedSchemaError("setActiveVersionWithPreflight")),
+      }),
     ...(backend.instantiateGraphTemplate === undefined ?
       {}
     : {
@@ -703,6 +697,41 @@ function fixedSchemaBackend(
   markFixedSchemaWorkingCopyBackend(guarded);
   bindRelationalIndexNames(guarded, indexNames);
   return guarded;
+}
+
+/**
+ * Brings an allocation's own base schema up to the running release, in place.
+ *
+ * An allocation carries its own base-schema marker, stamped by the release
+ * that provisioned it, and a durable allocation outlives that release. A
+ * release whose base-schema step adds relations (version 6 adds the identity
+ * transition log) would otherwise attach to an allocation that lacks them and
+ * fail on its first write that reaches one. The connection is the
+ * provisioning role (`assertConnectionRole`), which created every relation in
+ * the allocation, so it can create the missing ones beside them; a current
+ * marker costs one read. A marker newer than this release is refused with
+ * `BaseSchemaMigrationError`, and a failed adoption with a `BranchError`
+ * naming the allocation, before any store is built over it.
+ */
+async function adoptAllocationBaseSchema(
+  backend: GraphBackend,
+  allocationId: string,
+): Promise<void> {
+  if (backend.adoptBaseSchema === undefined) {
+    throw new BranchError(
+      `Working-copy connection for allocation ${allocationId} cannot adopt its base schema.`,
+      { details: { allocationId } },
+    );
+  }
+  try {
+    await backend.adoptBaseSchema();
+  } catch (error) {
+    if (error instanceof BaseSchemaMigrationError) throw error;
+    throw new BranchError(
+      `Working-copy allocation ${allocationId} could not adopt base-schema version ${String(CURRENT_BASE_SCHEMA_VERSION)} in place.`,
+      { details: { allocationId }, cause: error },
+    );
+  }
 }
 
 function withoutBootstrapDdl(backend: GraphBackend): GraphBackend {
@@ -1684,8 +1713,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
 
   /**
    * Connects to a resolved allocation and attests the connection: table
-   * bindings, shared role, vector strategy and ownership token. The caller owns
-   * `backend` and must close it.
+   * bindings, shared role, vector strategy and ownership token. Then brings the
+   * allocation's base schema up to this release (see
+   * {@link adoptAllocationBaseSchema}) before any store reads or writes it. The
+   * caller owns `backend` and must close it.
    */
   async function attachAllocation(
     graph: G,
@@ -1708,6 +1739,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
       }
       await assertAttachedSession(backend, row);
+      await adoptAllocationBaseSchema(backend, row.allocation_id);
       const store = createStore(
         graph,
         fixedSchemaBackend(provisionedBackend(backend, indexNames), indexNames),

@@ -413,7 +413,7 @@ round trip instead of three. The saving scales with per-statement cost:
 decisive on serverless HTTP drivers, Cloudflare D1 / Durable Objects, and
 remote databases; on a local low-latency connection the two paths are
 within a few milliseconds of each other. (Kind expansions via
-`includeSubClasses`, and custom backends without the composed statement,
+`expansion`, and custom backends without the composed statement,
 transparently use a multi-statement path with identical results.)
 
 ```typescript
@@ -481,16 +481,70 @@ for (const hit of hits) {
 | `includeSnippets` | `boolean` | `false` | Return a highlighted `<mark>…</mark>` snippet per hit. Noticeably slower than plain search — request only for final-page results. |
 | `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist (libSQL DiskANN: bounded by its 4× over-fetch). Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |
 | `offset` | `number` | `0` | Rank-relative pagination: skip the first `offset` ranked hits. |
-| `includeSubClasses` | `boolean` | `false` | Also search `subClassOf` descendant kinds and merge their scores into one ranking. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | `"subclasses"` also searches `subClassOf` descendant kinds and merges their scores into one ranking. |
+
+`search()`'s `expansion` stays **opt-in** and defaults to `"exact"` —
+this is a deliberate asymmetry with the query builder's `from()`/`to()`,
+which default to `expansion: "subclasses"`. `search()` is a facade with its
+own documented option rather than a `from()`/`to()` call, and flipping its
+default in the same release would also change which vector-metric union
+applies (search across multiple kinds must agree on one declared metric; see
+[Semantic Search](/semantic-search)) with no migration knob of its own. If
+this asymmetry surprises you, that's the intended signal that it's worth
+double-checking whether your search call should opt in explicitly.
+[Scope at a glance](/queries/source#scope-at-a-glance) lists the default
+scope of every query, collection and search surface side by side. A subclass
+only a persisted [graph extension](/graph-extensions) declares is searched like
+any other under `expansion: "subclasses"`, because the hit type is widened
+whatever the compile-time graph declares (see below).
+
+An expansion that would silently miss rows is refused rather than
+under-returned, exactly where `$fulltext.matches()` refuses the same alias: if
+a subclass redeclares a `searchable()` field without `searchable()`, its text
+is not in the index, so `expansion: "subclasses"` throws `ConfigurationError`
+(`SEARCH_EXPANSION_KIND_UNINDEXED`) naming the kind. The same holds for an
+exact search of a kind that declares no `searchable()` field at all: it is
+refused rather than returning nothing, as `$fulltext.matches()` refuses the
+same alias. A subclass that merely omits the field holds no text there and is
+searched as usual. Passing the
+removed `includeSubClasses` option from untyped code is refused
+(`QUERY_ALIAS_EXPANSION_INVALID`) rather than ignored.
+
+A hit's type follows the stated axis. With `"exact"` (stated or omitted),
+`hit.node` is the searched kind exactly. With `expansion: "subclasses"`,
+`hit.node` keeps the searched kind's properties while its `kind` widens to
+`string` and its `NodeId` brand widens, exactly as a
+`from(kind, alias, { expansion: "subclasses" })` alias does: the row may be a
+subclass, so its id is not accepted by the searched kind's own `update()`.
+This holds even for a kind no compile-time subsumption relation names, since
+a persisted extension can still subclass it. Narrow on `hit.node.kind` before
+treating the row as one concrete kind. An `expansion` value that is not a
+literal at the call site (a variable typed `"exact" | "subclasses"`, or an
+options value typed `FulltextSearchOptions` that a wrapper forwards) also
+types the hit in the widened form.
+
+```typescript
+const hits = await store.search.fulltext("Content", {
+  query: "climate",
+  limit: 10,
+  expansion: "subclasses",
+});
+
+for (const hit of hits) {
+  hit.node.title; // typed: every subclass satisfies Content's properties
+  hit.node.kind; // string — "Content", or any of its subclasses
+}
+```
 
 The same three options are available on `store.search.vector` and
-`store.search.hybrid` (where `where` and `includeSubClasses` apply to both
+`store.search.hybrid` (where `where` and `expansion` apply to both
 halves). Search always follows current-read semantics: tombstoned nodes and
 nodes outside their validity window never rank.
 
 Returned hits are `FulltextSearchHit<Node<K>>` with `node`, `score`
 (higher = more relevant), `rank` (1-based), and `snippet` (when
-requested).
+requested). Under `expansion: "subclasses"`, `Node<K>` is the widened form
+described above.
 
 ## Reciprocal Rank Fusion
 

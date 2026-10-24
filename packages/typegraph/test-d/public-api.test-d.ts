@@ -1200,12 +1200,17 @@ expectType<"edge">(edgeIndex.entity);
 
 import { type Node } from "..";
 
-declare const personHits: Awaited<
-  ReturnType<typeof store.search.fulltext<"Person">>
->;
-declare const runtimeHits: Awaited<
-  ReturnType<typeof store.search.fulltext<"Paper">>
->;
+// Typed through a call, not `ReturnType<typeof store.search.fulltext<K>>`:
+// that reads the last overload, which is the widened one an options value of
+// the library's own option type takes.
+async function searchPeople() {
+  return store.search.fulltext("Person", { query: "x", limit: 1 });
+}
+async function searchPapers() {
+  return store.search.fulltext("Paper", { query: "x", limit: 1 });
+}
+declare const personHits: Awaited<ReturnType<typeof searchPeople>>;
+declare const runtimeHits: Awaited<ReturnType<typeof searchPapers>>;
 
 // Compile-time kind narrows to Node<typeof Person>.
 expectAssignable<Node<typeof Person>>(personHits[0]!.node);
@@ -1214,19 +1219,29 @@ expectAssignable<Node<typeof Person>>(personHits[0]!.node);
 expectAssignable<Node>(runtimeHits[0]!.node);
 
 // vector + hybrid follow the same pattern.
-declare const vectorHits: Awaited<
-  ReturnType<typeof store.search.vector<"Paper">>
->;
+async function vectorSearchPapers() {
+  return store.search.vector("Paper", {
+    fieldPath: "embedding",
+    queryEmbedding: [0, 1],
+    limit: 1,
+  });
+}
+declare const vectorHits: Awaited<ReturnType<typeof vectorSearchPapers>>;
 expectAssignable<Node>(vectorHits[0]!.node);
 
-declare const hybridHits: Awaited<
-  ReturnType<typeof store.search.hybrid<"Paper">>
->;
+async function hybridSearch<K extends "Paper" | "Person">(kind: K) {
+  return store.search.hybrid(kind, {
+    limit: 1,
+    vector: { fieldPath: "embedding", queryEmbedding: [0, 1] },
+    fulltext: { query: "x" },
+  });
+}
+declare const hybridHits: Awaited<ReturnType<typeof hybridSearch<"Paper">>>;
 expectAssignable<Node>(hybridHits[0]!.node);
 
 // Compile-time hybrid narrows.
 declare const compileTimeHybrid: Awaited<
-  ReturnType<typeof store.search.hybrid<"Person">>
+  ReturnType<typeof hybridSearch<"Person">>
 >;
 expectAssignable<Node<typeof Person>>(compileTimeHybrid[0]!.node);
 

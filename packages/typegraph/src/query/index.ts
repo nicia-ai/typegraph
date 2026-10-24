@@ -49,10 +49,13 @@ export type {
 // Builder types users need
 export type {
   AliasMap,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
   CommonPropertyKeys,
   CompiledOneStatementRead,
+  CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
@@ -91,6 +94,7 @@ export type {
   SelectableNode,
   SelectContext,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./builder";
 
@@ -126,6 +130,12 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export {
+  type AliasExpansionAxis,
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  type DefaultAliasExpansionAxis,
+  SEARCH_EXPANSION_DEFAULT,
+} from "./builder/alias-expansion";
 export type {
   PreparedBindings,
   PreparedParameterDeclaration,

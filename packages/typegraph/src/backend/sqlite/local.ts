@@ -34,13 +34,14 @@ import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteMissingEdgeMatchIdentityColumnError,
 } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
 import {
+  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
   generateSqliteMigrationSQL,
   planSqliteEdgeMatchIdentityAdoption,
   quoteDdlIdentifier,
@@ -88,8 +89,9 @@ function installLocalSqliteBaseSchema(
 ): void {
   // v2 (the fences relation), v3 (the recorded-relations' and recorded
   // identity-assertions relation's `since_idx` indexes), v4 (the revision
-  // changes relation) and v5 (PostgreSQL's byte-ordered `graph_id` indexes,
-  // which SQLite has no counterpart for) need no adoption
+  // changes relation), v5 (PostgreSQL's byte-ordered `graph_id` indexes,
+  // which SQLite has no counterpart for) and v6 (the identity transition log
+  // plus its retention watermark) need no adoption
   // logic beyond what `generateSqliteMigrationSQL` already emits: a
   // brand-new relation or index is fully covered by its own `CREATE TABLE
   // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, on both a fresh database
@@ -97,9 +99,9 @@ function installLocalSqliteBaseSchema(
   // edge-match-identity `ADD COLUMN` migration — handled by the catch block
   // below — needed runtime introspection this synchronous path writes by
   // hand instead of running `BaseSchemaLifecycle`'s async state machine.
-  if (CURRENT_BASE_SCHEMA_VERSION !== 5) {
+  if (CURRENT_BASE_SCHEMA_VERSION !== 6) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 through v5 adoption.",
+      "The synchronous managed SQLite installation path only implements base-schema v1 through v6 adoption.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }
@@ -122,19 +124,19 @@ function installLocalSqliteBaseSchema(
       );
       try {
         sqlite.exec([...adoptionSql, installationSql].join("\n"));
-        return;
+        break;
       } catch (repairError) {
         if (
           attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(repairError)
+          !isSqliteDuplicateColumnError(
+            repairError,
+            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+          )
         ) {
           throw repairError;
         }
       }
     }
-    throw new CompilerInvariantError(
-      "Local SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
-    );
   }
 }
 

@@ -1,3 +1,5 @@
+export { bindExtraIfReachable } from "../backend/capabilities/bind";
+export { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
 export {
   batchPointReadVerdict,
   recordedRevisionOriginsVerdict,
@@ -25,11 +27,14 @@ export type {
   EngineRevision,
   EntityKey,
   GraphBackend,
+  GraphReadBackend,
   LineageDelta,
   NodeRow,
+  SchemaVersionRow,
   TransactionBackend,
   TransactionOptions,
 } from "../backend/types";
+export { isLiveNodeRow } from "../backend/types";
 export { computeUniqueKey } from "../constraints";
 export {
   defineInternalGraph,
@@ -49,10 +54,24 @@ export {
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";
+export {
+  bulkIsSeparated,
+  separationClassPairKey,
+  separationFactsEmpty,
+} from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";
+export { currentClassKey } from "../identity/service-mutation";
+export {
+  refKey as identityReferenceKeyOf,
+  loadCurrentStructuralClasses,
+  loadSpanningDifferentAssertion,
+} from "../identity/service-read";
+export type { PlainNodeRef } from "../identity/sql-target";
+export type { IdentityDecisionProvenance } from "../identity/transition-log";
 export type {
   IdentityAssertionWriteFacade,
   IdentityFacade,
+  IdentityRelation,
 } from "../identity/types";
 export { exportGraph, exportGraphStream } from "../interchange/export";
 export {
@@ -60,11 +79,6 @@ export {
   importGraphStream,
   summarizeImportErrors,
 } from "../interchange/import";
-export { computeTransitiveClosure, isReachable } from "../ontology/closures";
-export {
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
-} from "../ontology/constants";
 export { getEdgeRowsByIds } from "../store/edge-fetch";
 export { getNodeRowsByIds } from "../store/node-fetch";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
@@ -73,18 +87,34 @@ export {
   createSqlSchema,
   type ResolvedSqlTableNames,
 } from "../query/compiler/schema";
+export { getDialect } from "../query/dialect";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
+export { activeSchemaHash } from "../schema/manager";
 export {
   computeSchemaHash,
   getGraphDefinitionHash,
   serializeSchema,
 } from "../schema/serializer";
 export {
-  type OntologyIntrospection,
-  type UniqueIntrospection,
-} from "../store/introspect";
+  acyclicEdgeRelations,
+  type EdgeAcyclicityViolation,
+  edgeKindIsInAcyclicRelation,
+  type ProposedRelationEdge,
+  readProposedEdgeAcyclicityViolations,
+} from "../store/acyclicity";
+export { type UniqueIntrospection } from "../store/introspect";
+export { planCompositionCascade } from "../store/operations/composition-cascade";
+export {
+  compositionEdgeAttachesPart,
+  declaresRequiredCompositionParts,
+  findLiveCompositionAttachment,
+  findLiveCompositionWhole,
+  withDeferredCompositionExistence,
+} from "../store/operations/composition-create";
+export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
@@ -97,7 +127,13 @@ export {
   readRevisionOrigin,
   recordedRelationsLineage,
   resolveLineage,
+  withRecordedIdentityDecision,
 } from "../store/recorded-capture";
+export {
+  type GraphWriteLock,
+  lockRecordedGraphWrite,
+  uncapturedGraphWriteLock,
+} from "../store/recorded-capture/clock";
 export {
   hasScopedIdentityReads,
   storeBackend,
@@ -105,6 +141,8 @@ export {
   storeQueryBackend,
   storeRuntime,
   transactionBackend,
+  type TransactionDeleteNodeWithPolicy,
+  transactionDeleteNodeWithPolicy,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";
 export { createStore, createStoreWithSchema } from "../store/store";

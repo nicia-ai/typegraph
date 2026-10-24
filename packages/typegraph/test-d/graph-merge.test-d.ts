@@ -285,7 +285,14 @@ expectType<Promise<MergeReport<typeof graph>>>(
 );
 expectError(applyMergePlanInTransaction(store, store, mergePlan));
 expectError(applyMergePlanInTransaction(store, transaction, {} as unknown));
-expectError(applyMergePlanInTransaction(store, transaction, mergePlan, {}));
+expectType<Promise<MergeReport<typeof graph>>>(
+  applyMergePlanInTransaction(store, transaction, mergePlan, {}),
+);
+expectError(
+  applyMergePlanInTransaction(store, transaction, mergePlan, {
+    beforeApply: async () => {},
+  }),
+);
 
 const related = defineEdge("related", { schema: z.object({}) });
 const identityGraph = defineGraph({

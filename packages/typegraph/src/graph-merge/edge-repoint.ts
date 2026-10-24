@@ -172,6 +172,13 @@ export type StagedEdge = Readonly<{
    * rank-based policy — see {@link authoredProperty}.
    */
   baseProps?: Readonly<Record<string, JsonValue>>;
+  /**
+   * The end of validity the MERGE BASE holds for this row — present only on an
+   * INHERITED edge whose base window was already ended. The repoint never reads
+   * it; the orchestrator's cross-branch composition check does, to tell a branch
+   * that re-attaches a part through an ended row from one that merely edits it.
+   */
+  baseValidTo?: string;
   branchId: BranchId;
   /**
    * The valid-time window the commit must write. A NEW edge carries the branch's
@@ -212,13 +219,26 @@ export type MergedEdge = Readonly<{
   ValidityEndMutation;
 
 /**
+ * A staged edge with the post-repoint endpoint identities a deleted-endpoint
+ * drop is decided on — in {@link EdgeRepointResult}, one the repoint dropped. The report sees
+ * only its {@link DroppedEdge}; the orchestrator reads this to tell an ordinary
+ * drop from a branch's composition attachment the drop would silently lose.
+ */
+export type EndpointDeletedEdge = Readonly<{
+  staged: StagedEdge;
+  fromKey: MergeKey;
+  toKey: MergeKey;
+}>;
+
+/**
  * The outcome of the repoint + dedupe cascade: the surviving merged edges, every
- * edge dropped for a deleted endpoint, and every edge-level property conflict the
- * dedupe surfaced.
+ * edge dropped for a deleted endpoint (as a report item and as the staged edge it
+ * came from), and every edge-level property conflict the dedupe surfaced.
  */
 export type EdgeRepointResult<G extends GraphDef = GraphDef> = Readonly<{
   edges: readonly MergedEdge[];
   dropped: readonly DroppedEdge[];
+  endpointDeletedEdges: readonly EndpointDeletedEdge[];
   conflicts: readonly PropertyConflict<G>[];
 }>;
 
@@ -258,6 +278,22 @@ function repoint(
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
 ): MergeKey {
   return canonicalOf.get(key) ?? key;
+}
+
+/**
+ * A staged edge with the post-repoint identities of its endpoints: the one
+ * owner of that mapping, shared by {@link repointEdges} and by callers judging a
+ * staged edge the repoint never sees.
+ */
+export function withRepointedEndpoints(
+  staged: StagedEdge,
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+): EndpointDeletedEdge {
+  return {
+    staged,
+    fromKey: repoint(mergeKey(staged.fromKind, staged.fromId), canonicalOf),
+    toKey: repoint(mergeKey(staged.toKind, staged.toId), canonicalOf),
+  };
 }
 
 /**
@@ -814,6 +850,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   preferredBranchId?: BranchId,
 ): EdgeRepointResult<G> {
   const dropped: DroppedEdge[] = [];
+  const endpointDeletedEdges: EndpointDeletedEdge[] = [];
   // Per `(from', type, to')` group → its members. Insertion order is irrelevant:
   // Phase 2 partitions the group, re-derives each survivor, and sorts the output
   // explicitly, so the bucket carries membership only.
@@ -825,8 +862,8 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   for (const staged of stagedEdges) {
     const sourceFromKey = mergeKey(staged.fromKind, staged.fromId);
     const sourceToKey = mergeKey(staged.toKind, staged.toId);
-    const fromKey = repoint(sourceFromKey, canonicalOf);
-    const toKey = repoint(sourceToKey, canonicalOf);
+    const endpoints = withRepointedEndpoints(staged, canonicalOf);
+    const { fromKey, toKey } = endpoints;
 
     if (deletedNodeIds.has(fromKey) || deletedNodeIds.has(toKey)) {
       dropped.push({
@@ -834,6 +871,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
         id: staged.id,
         reason: ENDPOINT_DELETED_DROP_REASON,
       });
+      endpointDeletedEdges.push(endpoints);
       continue;
     }
 
@@ -911,6 +949,12 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   return {
     edges: sortedEdges,
     dropped: dropped.sort((left, right) => compareStrings(left.id, right.id)),
+    endpointDeletedEdges: endpointDeletedEdges.sort((left, right) => {
+      const byId = compareStrings(left.staged.id, right.staged.id);
+      return byId === 0 ?
+          compareStrings(left.staged.branchId, right.staged.branchId)
+        : byId;
+    }),
     conflicts: conflicts.sort((left, right) =>
       compareStrings(
         `${left.entityId}|${left.property}`,

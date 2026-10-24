@@ -62,6 +62,16 @@ export const BASE_SCHEMA_RELEASES = [
         "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
     },
   },
+  {
+    version: 6,
+    id: "identity-transition-log",
+    orderedShapeDigests: {
+      postgres:
+        "6c0977cd0c0fd2a73b685fcbc6b502f429f69704342d795b0f56e9cb790e1492",
+      sqlite:
+        "37978036648df400a50e0b59337b3c29ca66fdc16f69b927d645b6ec6cba0c0d",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {

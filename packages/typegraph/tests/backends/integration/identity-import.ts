@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  IdentityEndpointValidityError,
+} from "../../../src";
 import { snapshotExportContention } from "../../../src/backend/transaction-resource";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import {
   exportGraph,
   exportGraphStream,
+  FORMAT_VERSION,
   importGraph,
   importGraphStream,
 } from "../../../src/interchange";
 import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
 import { type Store } from "../../../src/store/store";
+import { requireDefined } from "../../../src/utils/presence";
 import {
   createTestBackend,
   expectAuditedBackend,
@@ -167,10 +174,203 @@ async function createStreamingImportTarget(
   return target;
 }
 
+/** A one-node document stating that node's window end. */
+function windowEndDocument(
+  ref: Ref,
+  properties: Record<string, unknown>,
+  validTo: string,
+) {
+  return {
+    formatVersion: FORMAT_VERSION,
+    exportedAt: new Date().toISOString(),
+    source: { type: "external" as const },
+    nodes: [{ ...ref, properties, validTo }],
+    edges: [],
+  };
+}
+
+/** A same-id fold class: Person and Author both named `shared`. */
+async function makeFoldClass(context: IntegrationTestContext, graphId: string) {
+  const store = await context.createHistoryStore(
+    identityInterchangeGraph(graphId),
+  );
+  await store.nodes.Person.create({ name: "S" }, { id: "shared" });
+  await store.nodes.Author.create({ penName: "S" }, { id: "shared" });
+  return store;
+}
+
+/**
+ * How many `window-end` transitions the fold class records once `endWindow`
+ * has ended the Person member's window.
+ */
+async function windowEndTransitions(
+  context: IntegrationTestContext,
+  graphId: string,
+  endWindow: (
+    store: Awaited<ReturnType<typeof makeFoldClass>>,
+    validTo: string,
+  ) => Promise<void>,
+): Promise<number> {
+  const store = await makeFoldClass(context, graphId);
+  await endWindow(store, isoAt(24 * HOUR_MS));
+  const history = await store.identity.transitionsOf({
+    kind: "Author",
+    id: "shared",
+  });
+  return history.transitions.filter(
+    (transition) => transition.cause === "window-end",
+  ).length;
+}
+
 export function registerIdentityImportIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Operational Identity interchange", () => {
+    describe("a node window end stated by onConflict: update", () => {
+      it("refuses an end an open identity assertion would outlive, as the store update does", async () => {
+        const store = await context.createHistoryStore(
+          identityInterchangeGraph("identity_import_window_end_refusal"),
+        );
+        const a = await store.nodes.Person.create({ name: "A" }, { id: "a" });
+        const b = await store.nodes.Person.create({ name: "B" }, { id: "b" });
+        await store.identity.assertSame(a, b);
+        const validTo = isoAt(24 * HOUR_MS);
+
+        await expect(
+          store.nodes.Person.update(a.id, {}, { validTo }),
+        ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+
+        const result = await importGraph(
+          store,
+          windowEndDocument(
+            { kind: "Person", id: "a" },
+            { name: "A" },
+            validTo,
+          ),
+          { onConflict: "update" },
+        );
+        console.info("import window-end refusal", {
+          nodes: result.nodes,
+          errors: result.errors,
+        });
+        expect(result.nodes).toEqual({ created: 0, updated: 0, skipped: 0 });
+        expect(result.errors).toEqual([
+          matchingObject({ entityType: "node", kind: "Person", id: "a" }),
+        ]);
+        const stored = await store.nodes.Person.getById(a.id);
+        expect(stored?.meta.validTo).toBeUndefined();
+        expect(await store.identity.assertionsOf(a)).toHaveLength(1);
+      });
+
+      it("records no window-end transition for a row the import then refuses", async () => {
+        const UniquePerson = defineNode("Person", {
+          schema: z.object({ name: z.string() }),
+        });
+        const store = await context.createHistoryStore(
+          defineGraph({
+            id: "identity_import_window_end_refused_row",
+            nodes: {
+              Person: {
+                type: UniquePerson,
+                unique: [
+                  {
+                    name: "iwe_person_name",
+                    fields: ["name"],
+                    scope: "kind",
+                    collation: "binary",
+                  },
+                ],
+              },
+              Author: { type: InterchangeAuthor },
+            },
+            edges: {},
+            identity: { sameIdAcrossKinds: "fold" },
+          }),
+        );
+        await store.nodes.Person.create({ name: "S" }, { id: "shared" });
+        await store.nodes.Author.create({ penName: "S" }, { id: "shared" });
+
+        // The first row reserves "Dup", so the second row's update, which also
+        // states a window end for a fold-class member, is refused on its own
+        // claim after the end was decided.
+        const result = await importGraph(
+          store,
+          {
+            formatVersion: FORMAT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: { type: "external" as const },
+            nodes: [
+              { kind: "Person", id: "fresh", properties: { name: "Dup" } },
+              {
+                kind: "Person",
+                id: "shared",
+                properties: { name: "Dup" },
+                validTo: isoAt(24 * HOUR_MS),
+              },
+            ],
+            edges: [],
+          },
+          { onConflict: "update" },
+        );
+        const history = await store.identity.transitionsOf({
+          kind: "Author",
+          id: "shared",
+        });
+        const causes = history.transitions.map(
+          (transition) => transition.cause,
+        );
+        console.info("refused-row import", {
+          nodes: result.nodes,
+          errors: result.errors,
+          causes,
+        });
+
+        expect(result.nodes).toEqual({ created: 1, updated: 0, skipped: 0 });
+        expect(result.errors).toEqual([
+          matchingObject({ entityType: "node", kind: "Person", id: "shared" }),
+        ]);
+        expect(causes).not.toContain("window-end");
+        const stored = await store.nodes.Person.getById("shared" as never);
+        expect(stored?.meta.validTo).toBeUndefined();
+      });
+
+      it("records the window-end transition the store update records", async () => {
+        const viaStore = await windowEndTransitions(
+          context,
+          "identity_import_window_end_store",
+          async (store, validTo) => {
+            const person = await store.nodes.Person.getById("shared" as never);
+            await store.nodes.Person.update(
+              requireDefined(person).id,
+              {},
+              { validTo },
+            );
+          },
+        );
+        const viaImport = await windowEndTransitions(
+          context,
+          "identity_import_window_end_import",
+          async (store, validTo) => {
+            const result = await importGraph(
+              store,
+              windowEndDocument(
+                { kind: "Person", id: "shared" },
+                { name: "S" },
+                validTo,
+              ),
+              { onConflict: "update" },
+            );
+            expect(result.errors).toEqual([]);
+            expect(result.nodes.updated).toBe(1);
+          },
+        );
+
+        console.info("window-end transitions", { viaStore, viaImport });
+        expect(viaStore).toBe(1);
+        expect(viaImport).toBe(viaStore);
+      });
+    });
+
     it("round-trips state identity and re-imports it idempotently", async () => {
       const { store: source, alice, author, bob } = await seedSource(context);
       await source.identity.assertSame(alice, author);
