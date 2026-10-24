@@ -604,6 +604,9 @@ export type CompositionWholeKinds<G extends GraphDef, K extends string> =
  * rather than return rows whose `kind` and `NodeId` contradict this type.
  * State `{ expansion: "subclasses" }` (typed {@link PolymorphicNodeType}
  * unconditionally) or `{ expansion: "exact" }`, or use `fromDynamic()`.
+ * The refusal reads the graph's ontology values, which cannot show a widened
+ * `G` (`GraphDef`, or relation literals an `OntologyRelation` annotation
+ * erased), so it also fires where this type is already polymorphic.
  */
 export type AliasNodeType<
   G extends GraphDef,
@@ -1238,6 +1241,8 @@ export type QueryBuilderConfig = Readonly<{
 export type QueryBuilderState = Readonly<{
   startAlias: string;
   startKinds: readonly string[];
+  /** The kinds the source named, before `startExpansion` expanded them. */
+  startRequestedKinds: readonly string[];
   /** The current alias (last traversal target, or startAlias if no traversals) */
   currentAlias: string;
   /** The start alias's resolved expansion axis — see `alias-expansion.ts`. */

@@ -250,6 +250,7 @@ function createQueryBuilderWithContext<
     startAlias: "",
     currentAlias: "",
     startKinds: [],
+    startRequestedKinds: [],
     startExpansion: "exact",
     traversals: [],
     predicates: [],

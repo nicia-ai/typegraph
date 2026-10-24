@@ -762,6 +762,50 @@ export function registerSetNodeMutationIntegrationTests(
       ).resolves.toMatchObject({ name: "subclass" });
     });
 
+    it("advises one update per kind when a candidate list names several kinds", async () => {
+      const invoice = defineNode("CandidateInvoice", {
+        schema: z.object({ name: z.string() }),
+      });
+      const receipt = defineNode("CandidateReceipt", {
+        schema: z.object({ name: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "update_where_listed_candidates",
+        nodes: {
+          CandidateInvoice: { type: invoice },
+          CandidateReceipt: { type: receipt },
+        },
+        edges: {},
+      });
+      const store = await context.createStore(graph);
+      const invoiceNode = await store.nodes.CandidateInvoice.create({
+        name: "invoice",
+      });
+      const listedCandidates = store
+        .query()
+        .from(["CandidateInvoice", "CandidateReceipt"], "document")
+        .select((query) => query.document.id);
+
+      const refusal = await store.nodes.CandidateInvoice.updateWhere({
+        candidates: listedCandidates,
+        patch: { name: "must not change" },
+      }).catch((error: unknown) => error);
+      if (!(refusal instanceof ConfigurationError)) {
+        throw new TypeError("expected a ConfigurationError refusal", {
+          cause: refusal,
+        });
+      }
+      expect(refusal.details).toMatchObject({
+        code: "SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED",
+        candidateKinds: ["CandidateInvoice", "CandidateReceipt"],
+      });
+      expect(refusal.suggestion).toContain("one updateWhere() per node kind");
+      expect(refusal.suggestion).not.toContain("expansion");
+      await expect(
+        store.nodes.CandidateInvoice.getById(invoiceNode.id),
+      ).resolves.toMatchObject({ name: "invoice" });
+    });
+
     it("refuses parameterized candidate queries before executing the set update", async () => {
       const store = context.getStore();
       const candidates = store

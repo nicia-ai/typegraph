@@ -360,10 +360,19 @@ through an extension's `subClassOf` is still the exact kind. Rather than
 return the extension's subclass rows under that type, `from(kind, alias)`, a
 list source and `to(kind, alias)` with no `expansion` throw
 `ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`), on the
-evolved store and after every restart, and so does `store.search()` with
-`expansion: "subclasses"`. State `{ expansion: "subclasses" }` or `{
-expansion: "exact" }`, or use `fromDynamic()`; see [Query Source ▸ Subclass
-Expansion](/queries/source#subclass-expansion).
+evolved store and after every restart. A list source is refused only for an
+extra kind none of its listed kinds' types admits. `store.search()` with
+`expansion: "subclasses"` is not refused: its hit is typed polymorphically
+whatever the compile-time graph declares. State `{ expansion: "subclasses" }`
+or `{ expansion: "exact" }`, or use `fromDynamic()`; see [Query Source ▸
+Subclass Expansion](/queries/source#subclass-expansion).
+
+The refusal reads the graph's ontology **values** at run time, not the type
+the store was declared with, so it also fires for a store typed over a wide
+graph type (`Store<GraphDef>`) or an ontology whose literals an
+`OntologyRelation` annotation erased, although such a store already types the
+alias polymorphically. Code like that should state `expansion` or use
+`fromDynamic()`.
 
 ## `store.evolve(extension, options?)`
 

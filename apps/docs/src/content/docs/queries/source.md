@@ -201,7 +201,11 @@ back in on every later boot. Neither changes the compile-time `G`, so
 back as the extension's `Podcast`. An alias that states no `expansion` over
 such a kind is therefore refused with `ConfigurationError`
 (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`, naming the kind and the extra
-kinds) on `from()`, a list source, and `to()`. State the axis to choose:
+kinds) on `from()`, a list source, and `to()`. A list source is refused only
+for an extra kind no member of its type admits: a kind the list itself names
+is typed exactly by the list, and so is a kind in the expansion of a listed
+kind the compile-time graph already types polymorphically. State the axis to
+choose:
 
 ```typescript
 // Typed polymorphically: kind is string, the id is not Media's own NodeId.
@@ -212,10 +216,19 @@ store.query().from("Media", "m", { expansion: "exact" });
 store.query().fromDynamic("Media", "m");
 ```
 
-A kind the compile-time graph already types polymorphically (it has a
-compile-time subclass) is not refused when an extension adds another one.
-`store.search()` with `expansion: "subclasses"` refuses the same kinds; search
-them with `expansion: "exact"` and search the extension kind separately.
+A kind the compile-time graph's ontology affects (it has a compile-time
+subclass, say) is not refused when an extension adds another one.
+`store.search()` is never refused: its `expansion: "subclasses"` hit is typed
+polymorphically whatever the compile-time graph declares, as a stated
+`"subclasses"` alias is.
+
+The refusal is decided from the **values** of the graph's ontology at run time,
+because the store cannot see the type it was declared with. So it also fires
+where the static type already widened: for a store typed over a wide graph
+type (`Store<GraphDef>` in generic tooling or a wrapper), and for an ontology
+whose literals an `OntologyRelation` annotation erased. Such code reads its
+aliases as `string`-kinded anyway, so state `expansion` on the call or use
+`fromDynamic()`.
 
 ### Scope at a glance
 
@@ -224,10 +237,10 @@ them with `expansion: "exact"` and search the extension kind separately.
 | `from(kind, alias)` | The kind, its subclasses and its `equivalentTo` kinds | `expansion: "exact" \| "subclasses" \| "narrower"` | Yes | `string` for a kind the compile-time ontology affects, else the literal; `"exact"` keeps the literal, a stated `"subclasses"` widens |
 | `from([kinds], alias)` | Each listed kind expanded as `from(kind)` would, deduplicated | The same `expansion` option | Yes | Per listed kind, as `from(kind)` types it |
 | `traverse(...).to(kind, alias)` | Same as `from(kind)` | The same `expansion` option | Yes | Same as `from(kind)` |
-| `fromDynamic()` / `toDynamic()` | Same as `from(kind)` | The same `expansion` option | Yes | Always `string` (untyped for `"narrower"`), the literal under `"exact"` |
+| `fromDynamic()` / `toDynamic()` | Same as `from(kind)` | The same `expansion` option | Yes | `string` (untyped for `"narrower"`); the token's literal for a `RuntimeNodeKind` under `"exact"` |
 | [`parts()` / `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes) | Every kind the composition relation reaches | `maxHops`, `via` | No | Untyped |
 | Node collection reads (`find`, `count`, `updateWhere`, `compareAndSet`) | The exact kind | No option; query instead | No | The literal |
-| [`store.search`](/fulltext-search) (`fulltext`, `vector`, `hybrid`) | The exact kind | `expansion: "exact" \| "subclasses"` | No | The literal; `"subclasses"` types like `from(kind)` |
+| [`store.search`](/fulltext-search) (`fulltext`, `vector`, `hybrid`) | The exact kind | `expansion: "exact" \| "subclasses"` | No | The literal; `"subclasses"` widens, as a stated `from(kind, alias, { expansion: "subclasses" })` does |
 | [`subgraph({ includeKinds })`](/schemas-stores#storesubgraphrootid-options) | Exactly the listed kinds | List every kind to include | No | Not applicable |
 
 An omitted `expansion` means the store default everywhere in the query

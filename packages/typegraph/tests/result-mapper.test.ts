@@ -20,6 +20,7 @@ import { requireDefined } from "../src/utils/presence";
 describe("transformPathColumns", () => {
   const baseState: QueryBuilderState = {
     startKinds: ["Person"],
+    startRequestedKinds: ["Person"],
     startAlias: "p",
     currentAlias: "p",
     startExpansion: "exact",

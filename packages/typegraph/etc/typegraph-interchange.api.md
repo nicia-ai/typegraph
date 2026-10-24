@@ -5998,6 +5998,7 @@ type QueryBuilderConfig = Readonly<{
 type QueryBuilderState = Readonly<{
     startAlias: string;
     startKinds: readonly string[];
+    startRequestedKinds: readonly string[];
     currentAlias: string;
     startExpansion: AliasExpansionAxis;
     traversals: readonly Traversal[];
@@ -6507,7 +6508,7 @@ type ResolvedSqlTableNames = Readonly<{
 type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
 
 // @public
-type ResolveNode<G extends GraphDef, K extends string, E extends DefaultAliasExpansionAxis> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<SearchNodeType<G, K, N, E>> : Node : Node;
+type ResolveNode<G extends GraphDef, K extends string, E extends DefaultAliasExpansionAxis> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<SearchNodeType<N, E>> : Node : Node;
 
 // @public
 type ResolveNodeType<G extends GraphDef, K extends string> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? N : NodeType : NodeType;
@@ -6685,9 +6686,9 @@ type SearchableMetadata = Readonly<{
 }>;
 
 // @public
-type SearchNodeType<G extends GraphDef, K extends NodeKinds<G>, N extends NodeType, E extends DefaultAliasExpansionAxis> = [
+type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [
 E
-] extends ["exact"] ? N : [E] extends ["subclasses"] ? AliasNodeType<G, K> : PolymorphicNodeType<N>;
+] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 // @public
 type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{

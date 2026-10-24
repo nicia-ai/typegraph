@@ -493,11 +493,10 @@ applies (search across multiple kinds must agree on one declared metric; see
 this asymmetry surprises you, that's the intended signal that it's worth
 double-checking whether your search call should opt in explicitly.
 [Scope at a glance](/queries/source#scope-at-a-glance) lists the default
-scope of every query, collection and search surface side by side. A kind whose
-subclasses only a persisted [graph extension](/graph-extensions) declares is
-refused under `expansion: "subclasses"` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`),
-since the hit type is computed from the compile-time graph; search it with
-`"exact"` and search the extension kind separately.
+scope of every query, collection and search surface side by side. A subclass
+only a persisted [graph extension](/graph-extensions) declares is searched like
+any other under `expansion: "subclasses"`, because the hit type is widened
+whatever the compile-time graph declares (see below).
 
 An expansion that would silently miss rows is refused rather than
 under-returned, exactly where `$fulltext.matches()` refuses the same alias: if
@@ -512,17 +511,17 @@ removed `includeSubClasses` option from untyped code is refused
 (`QUERY_ALIAS_EXPANSION_INVALID`) rather than ignored.
 
 A hit's type follows the stated axis. With `"exact"` (stated or omitted),
-`hit.node` is the searched kind exactly. With `expansion: "subclasses"` on a
-kind the ontology can affect — one another kind declares itself a subclass
-of, or one in an `equivalentTo` pair — `hit.node` keeps the searched kind's
-properties while its `kind` widens to `string` and its `NodeId` brand widens,
-exactly as a `from()` alias over that kind does: the row may be a subclass,
-so its id is not accepted by the searched kind's own `update()`. Narrow on
-`hit.node.kind` before treating the row as one concrete kind. A kind no
-subsumption relation names keeps its exact type, and an `expansion` value
-that is not a literal at the call site (a variable typed
-`"exact" | "subclasses"`, or an options value typed `FulltextSearchOptions`
-that a wrapper forwards) always types the hit in the widened form.
+`hit.node` is the searched kind exactly. With `expansion: "subclasses"`,
+`hit.node` keeps the searched kind's properties while its `kind` widens to
+`string` and its `NodeId` brand widens, exactly as a
+`from(kind, alias, { expansion: "subclasses" })` alias does: the row may be a
+subclass, so its id is not accepted by the searched kind's own `update()`.
+This holds even for a kind no compile-time subsumption relation names, since
+a persisted extension can still subclass it. Narrow on `hit.node.kind` before
+treating the row as one concrete kind. An `expansion` value that is not a
+literal at the call site (a variable typed `"exact" | "subclasses"`, or an
+options value typed `FulltextSearchOptions` that a wrapper forwards) also
+types the hit in the widened form.
 
 ```typescript
 const hits = await store.search.fulltext("Content", {
@@ -544,8 +543,8 @@ nodes outside their validity window never rank.
 
 Returned hits are `FulltextSearchHit<Node<K>>` with `node`, `score`
 (higher = more relevant), `rank` (1-based), and `snippet` (when
-requested). Under an affecting `expansion: "subclasses"`, `Node<K>` is the
-widened form described above.
+requested). Under `expansion: "subclasses"`, `Node<K>` is the widened form
+described above.
 
 ## Reciprocal Rank Fusion
 
