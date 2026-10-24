@@ -12,8 +12,10 @@ import { z } from "zod";
 import {
   broader,
   count,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   embedding,
   field,
@@ -25,6 +27,7 @@ import {
   EndpointError,
   UnsupportedPredicateError,
 } from "../../../src/errors";
+import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
 const Media = defineNode("TsMedia", {
@@ -245,6 +248,144 @@ const taggedSubclassGraph = defineGraph({
   ],
 });
 
+// List sources: two unrelated listed kinds, one of which has a subclass that
+// omits the parent-optional `rank` both listed kinds declare.
+const ListMedia = defineNode("TsListMedia", {
+  schema: z.object({ title: z.string(), rank: z.number().optional() }),
+});
+const ListPodcast = defineNode("TsListPodcast", {
+  schema: z.object({ title: z.string(), rssUrl: z.string() }),
+});
+const ListCompany = defineNode("TsListCompany", {
+  schema: z.object({ title: z.string(), rank: z.number().optional() }),
+});
+const LIST_KINDS = ["TsListCompany", "TsListMedia"] as const;
+
+const listSourceGraph = defineGraph({
+  id: "typed_subsumption_list_source_integration",
+  nodes: {
+    TsListMedia: { type: ListMedia },
+    TsListPodcast: { type: ListPodcast },
+    TsListCompany: { type: ListCompany },
+  },
+  edges: {},
+  ontology: [subClassOf(ListPodcast, ListMedia)],
+});
+
+async function seedListSourceStore(
+  context: IntegrationTestContext,
+  options?: Parameters<IntegrationTestContext["createStore"]>[1],
+) {
+  const store = await context.createStore(listSourceGraph, options);
+  await store.nodes.TsListMedia.create({ title: "media", rank: 2 });
+  await store.nodes.TsListPodcast.create({
+    title: "podcast",
+    rssUrl: "https://x",
+  });
+  await store.nodes.TsListCompany.create({ title: "company", rank: 1 });
+  return store;
+}
+
+// A compile-time kind with no subclass in the compile-time graph, which a
+// persisted extension then subclasses.
+const RuntimeSubclassDocument = defineNode("TsRuntimeDoc", {
+  schema: z.object({ title: searchable({ language: "english" }) }),
+});
+const RuntimeSubclassOwner = defineNode("TsRuntimeOwner", {
+  schema: z.object({ name: z.string() }),
+});
+const runtimeSubclassOwns = defineEdge("tsRuntimeOwns", {
+  schema: z.object({}),
+});
+const runtimeSubclassGraph = defineGraph({
+  id: "typed_subsumption_runtime_subclass_integration",
+  nodes: {
+    TsRuntimeDoc: { type: RuntimeSubclassDocument },
+    TsRuntimeOwner: { type: RuntimeSubclassOwner },
+  },
+  edges: {
+    tsRuntimeOwns: {
+      type: runtimeSubclassOwns,
+      from: [RuntimeSubclassOwner],
+      to: [RuntimeSubclassDocument],
+    },
+  },
+});
+const runtimeSubclassExtension = defineGraphExtension({
+  nodes: {
+    TsRuntimeMemo: { properties: { title: { type: "string" } } },
+  },
+  ontology: [
+    { metaEdge: "subClassOf", from: "TsRuntimeMemo", to: "TsRuntimeDoc" },
+  ],
+});
+const UNTYPED_SUBCLASSES_CODE = "QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES";
+
+async function expectRefusedAndStatedAxesAnswered(
+  store: Awaited<
+    ReturnType<typeof createStoreWithSchema<typeof runtimeSubclassGraph>>
+  >[0],
+): Promise<void> {
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      Promise.resolve().then(() => store.query().from("TsRuntimeDoc", "d")),
+    ),
+  );
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      Promise.resolve().then(() => store.query().from(["TsRuntimeDoc"], "d")),
+    ),
+  );
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      Promise.resolve().then(() =>
+        store
+          .query()
+          .from("TsRuntimeOwner", "o")
+          .traverse("tsRuntimeOwns", "e")
+          .to("TsRuntimeDoc", "d"),
+      ),
+    ),
+  );
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      store.search.fulltext("TsRuntimeDoc", {
+        query: "runtime",
+        limit: 10,
+        expansion: "subclasses",
+      }),
+    ),
+  );
+
+  expect(
+    kindsOf(
+      await store
+        .query()
+        .from("TsRuntimeDoc", "d", { expansion: "subclasses" })
+        .select((ctx) => ctx.d)
+        .execute(),
+    ),
+  ).toEqual(["TsRuntimeDoc", "TsRuntimeMemo"]);
+  expect(
+    kindsOf(
+      await store
+        .query()
+        .from("TsRuntimeDoc", "d", { expansion: "exact" })
+        .select((ctx) => ctx.d)
+        .execute(),
+    ),
+  ).toEqual(["TsRuntimeDoc"]);
+  expect(
+    kindsOf(
+      await store
+        .query()
+        .fromDynamic("TsRuntimeDoc", "d")
+        .select((ctx) => ctx.d)
+        .execute(),
+    ),
+  ).toEqual(["TsRuntimeDoc", "TsRuntimeMemo"]);
+}
+
 async function seedOptionalFieldStore(context: IntegrationTestContext) {
   const store = await context.createStore(optionalFieldGraph);
   await store.nodes.TsOptionalMedia.create({
@@ -284,6 +425,19 @@ async function rejectionOf(attempt: Promise<unknown>): Promise<unknown> {
 function expectConfigurationError(caught: unknown): ConfigurationError {
   expect(caught).toBeInstanceOf(ConfigurationError);
   return caught as ConfigurationError;
+}
+
+function kindsOf(rows: readonly Readonly<{ kind: string }>[]): string[] {
+  return rows.map((row) => row.kind).toSorted();
+}
+
+function expectUntypedSubclassRefusal(caught: unknown): void {
+  const error = expectConfigurationError(caught);
+  expect(error.details).toMatchObject({
+    code: UNTYPED_SUBCLASSES_CODE,
+    kind: "TsRuntimeDoc",
+    extraKinds: ["TsRuntimeMemo"],
+  });
 }
 
 export function registerOntologyTypedSubsumptionIntegrationTests(
@@ -1158,6 +1312,129 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         .select((ctx) => ({ id: ctx.target.id }))
         .execute();
       expect(rows).toEqual([{ id: other.id }]);
+    });
+  });
+  describe("Typed subsumption — list sources", () => {
+    it("expands each listed kind through its subclasses when no expansion is stated", async () => {
+      const store = await seedListSourceStore(context);
+
+      expect(
+        kindsOf(
+          await store
+            .query()
+            .from(LIST_KINDS, "n")
+            .select((ctx) => ctx.n)
+            .execute(),
+        ),
+      ).toEqual(["TsListCompany", "TsListMedia", "TsListPodcast"]);
+      expect(
+        kindsOf(
+          await store
+            .query()
+            .from(LIST_KINDS, "n", { expansion: "subclasses" })
+            .select((ctx) => ctx.n)
+            .execute(),
+        ),
+      ).toEqual(["TsListCompany", "TsListMedia", "TsListPodcast"]);
+      expect(
+        kindsOf(
+          await store
+            .query()
+            .from(LIST_KINDS, "n", { expansion: "exact" })
+            .select((ctx) => ctx.n)
+            .execute(),
+        ),
+      ).toEqual(["TsListCompany", "TsListMedia"]);
+    });
+
+    it("follows the store's queryDefaults.expansion like a single-kind source", async () => {
+      const store = await seedListSourceStore(context, {
+        queryDefaults: { expansion: "exact" },
+      });
+
+      const rows = await store
+        .query()
+        .from(LIST_KINDS, "n")
+        .select((ctx) => ctx.n)
+        .execute();
+      expect(rows.map((row) => row.kind).toSorted()).toEqual([
+        "TsListCompany",
+        "TsListMedia",
+      ]);
+    });
+
+    it("filters an expanded list on a parent-optional field a subclass omits", async () => {
+      const store = await seedListSourceStore(context);
+
+      const rows = await store
+        .query()
+        .from(LIST_KINDS, "n")
+        .whereNode("n", (node) => node.rank.gte(1))
+        .orderBy("n", "rank")
+        .select((ctx) => ({ kind: ctx.n.kind, rank: ctx.n.rank }))
+        .execute();
+      expect(rows).toEqual([
+        { kind: "TsListCompany", rank: 1 },
+        { kind: "TsListMedia", rank: 2 },
+      ]);
+    });
+  });
+
+  describe("Typed subsumption — subclasses the compile-time graph does not declare", () => {
+    it("refuses an unstated expansion after store.evolve() adds a subclass, and after a reload from the persisted schema", async () => {
+      const backend = context.getBackend();
+      const [store] = await createStoreWithSchema(
+        runtimeSubclassGraph,
+        backend,
+      );
+      const evolved = await store.evolve(runtimeSubclassExtension);
+      await evolved.nodes.TsRuntimeDoc.create({ title: "runtime doc" });
+      await requireDefined(evolved.getNodeCollection("TsRuntimeMemo")).create({
+        title: "runtime memo",
+      });
+
+      await expectRefusedAndStatedAxesAnswered(evolved);
+
+      const [reloaded] = await createStoreWithSchema(
+        runtimeSubclassGraph,
+        backend,
+      );
+      await expectRefusedAndStatedAxesAnswered(reloaded);
+    });
+
+    it("answers an unstated expansion when the compile-time graph already types the kind polymorphically", async () => {
+      const backend = context.getBackend();
+      const [store] = await createStoreWithSchema(subsumptionGraph, backend);
+      const evolved = await store.evolve(
+        defineGraphExtension({
+          nodes: {
+            TsEpisode: {
+              properties: {
+                title: { type: "string" },
+                rssUrl: { type: "string" },
+              },
+            },
+          },
+          ontology: [
+            { metaEdge: "subClassOf", from: "TsEpisode", to: "TsMedia" },
+          ],
+        }),
+      );
+      await evolved.nodes.TsMedia.create({ title: "plain" });
+      await requireDefined(evolved.getNodeCollection("TsEpisode")).create({
+        title: "episode",
+        rssUrl: "https://x",
+      });
+
+      const rows = await evolved
+        .query()
+        .from("TsMedia", "m")
+        .select((ctx) => ctx.m)
+        .execute();
+      expect(rows.map((row) => row.kind).toSorted()).toEqual([
+        "TsEpisode",
+        "TsMedia",
+      ]);
     });
   });
 }

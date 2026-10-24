@@ -495,24 +495,40 @@ export type CompositionWholeKinds<G extends GraphDef, K extends string> =
  * brand, so a row may come back as a narrower concrete kind whenever the
  * axis can expand at all.
  *
- * **Documented limitation: a `subClassOf` (or registered-kind
- * `equivalentTo`/`sameAs`) added at runtime through `store.evolve()` is
- * invisible to this type.** `evolve()` merges the extension into the LIVE
- * registry but returns `Store<G>` with the compile-time `G` unchanged, so
- * `SubsumptionAffected<G, K>` still evaluates against the graph as it was
- * declared, not as it now runs. A kind that only becomes polymorphic
- * through a runtime extension therefore keeps its narrow, exact-kind alias
- * type here — `from(kind, alias)` types the row as the single compile-time
- * kind even though it may come back as the extension's subclass at
- * runtime, which would let a subtype id round-trip through
- * `store.nodes.<K>.update()` typechecked and silently match nothing. Use
- * `fromDynamic()` (always `PolymorphicNodeType`-typed) or `{ expansion: "exact" }` for a kind a runtime
- * extension subclasses.
+ * **A `subClassOf` (or registered-kind `equivalentTo`/`sameAs`) added at
+ * runtime is invisible to this type, so the runtime refuses the expansion it
+ * would mistype.** `store.evolve()` merges the extension into the LIVE
+ * registry (and `createStoreWithSchema` folds a persisted one back in on
+ * every later boot) but returns `Store<G>` with the compile-time `G`
+ * unchanged, so `SubsumptionAffected<G, K>` still evaluates against the
+ * graph as it was declared. When that keeps `K` exact while the live
+ * registry expands it to further kinds, `expandKindsForAxis`
+ * (`./alias-expansion.ts`) throws `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`
+ * rather than return rows whose `kind` and `NodeId` contradict this type.
+ * State `{ expansion: "subclasses" }` (typed {@link PolymorphicNodeType}
+ * unconditionally) or `{ expansion: "exact" }`, or use `fromDynamic()`.
  */
 export type AliasNodeType<G extends GraphDef, K extends string> =
   SubsumptionAffected<G, K> extends true ?
     PolymorphicNodeType<G["nodes"][K]["type"]>
   : G["nodes"][K]["type"];
+
+/**
+ * The alias type of a list source that states no `expansion`: each listed
+ * kind typed as {@link AliasNodeType} types a `from(kind, alias)` over it,
+ * as one union. Distributed explicitly, because `SubsumptionAffected` asked
+ * of the whole union would widen every listed kind once any one is affected.
+ */
+export type ListAliasNodeType<G extends GraphDef, K extends string> =
+  K extends unknown ? AliasNodeType<G, K> : never;
+
+/**
+ * The alias type of a list source stated `expansion: "subclasses"`: each
+ * listed kind widened to {@link PolymorphicNodeType}, as one union — what a
+ * `from(kind, alias, { expansion: "subclasses" })` over each kind types.
+ */
+export type ListPolymorphicNodeType<G extends GraphDef, K extends string> =
+  K extends unknown ? PolymorphicNodeType<G["nodes"][K]["type"]> : never;
 
 /**
  * A map of alias names to their node aliases.

@@ -63,6 +63,7 @@ import {
 } from "../schema-introspector";
 import {
   type AliasExpansionOptions,
+  aliasOverloadTyping,
   expandKindsForAxis,
   resolveAliasExpansion,
 } from "./alias-expansion";
@@ -113,6 +114,8 @@ import {
   type EmptyAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type ListAliasNodeType,
+  type ListPolymorphicNodeType,
   type NodeAccessor,
   type NodeAlias,
   type QualifiedRecursivePathOption,
@@ -191,6 +194,12 @@ export type IdentityTraversalOption<G extends GraphDef> =
 
 type DynamicNodeTypeFor<T> =
   T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
+
+/** A nonempty list of compile-time node kinds, as `from()` accepts it. */
+type SourceKindList<G extends GraphDef> = readonly [
+  keyof G["nodes"] & string,
+  ...(keyof G["nodes"] & string)[],
+];
 
 /**
  * Options shared by `parts()` and `wholes()`. There is deliberately no
@@ -472,8 +481,9 @@ export class QueryBuilder<
 
   /**
    * Starts a query from one kind or a nonempty explicit list of kinds.
-   * Lists scan exactly the requested kinds; duplicates are normalized.
-   * Properties used in predicates and expressions must be shared by all kinds.
+   * A list expands each listed kind under the same axis a single kind takes,
+   * and scans the union; duplicates are normalized. Properties used in
+   * predicates and expressions must be shared by all listed kinds.
    *
    * The alias's expansion axis is one option, `expansion` (default
    * `"subclasses"` — a supertype query is polymorphic unless
@@ -493,18 +503,50 @@ export class QueryBuilder<
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
-  from<
-    const Kinds extends readonly [
-      keyof G["nodes"] & string,
-      ...(keyof G["nodes"] & string)[],
-    ],
-    A extends string,
-  >(
+  from<const Kinds extends SourceKindList<G>, A extends string>(
     kinds: Kinds,
     alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: undefined },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<ListAliasNodeType<G, Kinds[number]>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<const Kinds extends SourceKindList<G>, A extends string>(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][Kinds[number]]["type"]>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<const Kinds extends SourceKindList<G>, A extends string>(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "subclasses" },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<ListPolymorphicNodeType<G, Kinds[number]>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
+  from<const Kinds extends SourceKindList<G>, A extends string>(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options: AliasExpansionOptions,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias>,
     EdgeAliases,
     RecursiveAliases,
     CoordinateState
@@ -596,12 +638,6 @@ export class QueryBuilder<
     validateQuerySource(this.#state, true);
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);
-    const explicitKinds = typeof kind !== "string";
-    if (explicitKinds && options !== undefined) {
-      throw new ConfigurationError(
-        "An explicit source kind list does not accept from() options.",
-      );
-    }
     const requestedKinds =
       typeof kind === "string" ? [kind] : [...new Set(kind)];
     if (requestedKinds.length === 0) {
@@ -616,14 +652,23 @@ export class QueryBuilder<
         });
       }
     }
-    const expansion =
-      explicitKinds ? "exact" : (
-        resolveAliasExpansion(options, this.#config.defaultExpansion)
-      );
-    const kinds =
-      typeof kind === "string" ?
-        expandKindsForAxis(expansion, kind, this.#config.registry)
-      : requestedKinds;
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultExpansion,
+    );
+    const typing = aliasOverloadTyping(options);
+    const kinds = [
+      ...new Set(
+        requestedKinds.flatMap((requestedKind) =>
+          expandKindsForAxis(
+            expansion,
+            requestedKind,
+            this.#config.registry,
+            typing,
+          ),
+        ),
+      ),
+    ];
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -717,6 +762,7 @@ export class QueryBuilder<
       expansion,
       kindName,
       this.#config.registry,
+      "independent",
     );
 
     const newState: QueryBuilderState = {

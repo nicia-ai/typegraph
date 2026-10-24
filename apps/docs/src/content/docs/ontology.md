@@ -150,7 +150,9 @@ exact literal types); only the parent's own properties are statically typed on
 the alias, since that is all the contract guarantees. `search()` and the
 collection APIs (`find`, `count`, `updateWhere`, `compareAndSet`) are
 unaffected and stay exact-kind. See
-[Subclass queries are polymorphic](/queries/source) for the full option and
+[Subclass queries are polymorphic](/queries/source) for the full option,
+[Scope at a glance](/queries/source#scope-at-a-glance) for the default scope
+of every query, collection and search surface, and
 `queryDefaults.expansion` in [Schemas & Stores](/schemas-stores) for
 the store-wide migration knob.
 
