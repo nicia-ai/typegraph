@@ -761,6 +761,108 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
     });
   });
 
+  describe("Typed subsumption — widened endpoints feed the next read", () => {
+    it("reads the next hop from a widened endpoint and a polymorphic row without a cast", async () => {
+      const store = await context.createStore(subsumptionGraph);
+      const media = await store.nodes.TsMedia.create({ title: "plain" });
+      const podcast = await store.nodes.TsPodcast.create({
+        title: "cast",
+        rssUrl: "https://x",
+      });
+      const rows = await store
+        .query()
+        .from("TsMedia", "m")
+        .whereNode("m", (m) => m.title.eq("cast"))
+        .select((ctx) => ctx.m)
+        .execute();
+      const podcastRow = requireDefined(rows[0]);
+      await store.edges.tsLinksTo.create(media, podcastRow);
+      await store.edges.tsLinksTo.create(podcastRow, media);
+      const links = await store.edges.tsLinksTo.findFrom(media);
+      const link = requireDefined(links[0]);
+      const target = { kind: link.toKind, id: link.toId };
+      const edgeKinds = ["tsLinksTo"] as const;
+
+      const incoming = await store.bulkFindEdgesTo({
+        targets: [{ kind: link.toKind, ids: [link.toId] }],
+        edgeKinds,
+      });
+      expect(incoming).toHaveLength(1);
+      expect(incoming[0]?.target).toEqual({
+        kind: "TsPodcast",
+        id: podcast.id,
+      });
+      expect(incoming[0]?.edges.map((edge) => edge.fromId)).toEqual([media.id]);
+
+      const outgoing = await store.bulkFindEdgesFrom({
+        sources: [{ kind: podcastRow.kind, ids: [podcastRow.id] }],
+        edgeKinds,
+      });
+      expect(outgoing[0]?.edges.map((edge) => edge.toId)).toEqual([media.id]);
+
+      const callers = await store.neighbors(target, {
+        edges: edgeKinds,
+        direction: "in",
+      });
+      expect(callers.map((neighbor) => neighbor.node.id)).toEqual([media.id]);
+      expect(
+        await store.countNeighbors(podcastRow, {
+          edges: edgeKinds,
+          direction: "out",
+        }),
+      ).toBe(1);
+      expect(
+        await store.edges.tsLinksTo
+          .findTo(target)
+          .then((found) => found.length),
+      ).toBe(1);
+
+      await expect(
+        store.neighbors(
+          { kind: "TsUnregistered", id: link.toId },
+          { edges: edgeKinds },
+        ),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
+      await expect(
+        store.bulkFindEdgesTo({
+          targets: [{ kind: "TsUnregistered", ids: [link.toId] }],
+          edgeKinds,
+        }),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
+    });
+
+    it("resolves a reference on a recorded view at its recorded coordinate", async () => {
+      const store = await context.createHistoryStore(subsumptionGraph);
+      const media = await store.nodes.TsMedia.create({ title: "plain" });
+      const podcast = await store.nodes.TsPodcast.create({
+        title: "cast",
+        rssUrl: "https://x",
+      });
+      await store.edges.tsLinksTo.create(media, podcast);
+      const links = await store.edges.tsLinksTo.findFrom(media);
+      const link = requireDefined(links[0]);
+      const reference = { kind: link.toKind, id: link.toId };
+      const beforeRename = requireDefined(await store.recordedNow());
+      await store.nodes.TsPodcast.update(podcast.id, { title: "recast" });
+
+      const recorded = store.asOfRecorded(beforeRename);
+      expect(await recorded.getNodeByRef(reference)).toMatchObject({
+        kind: "TsPodcast",
+        id: podcast.id,
+        title: "cast",
+      });
+      expect(
+        await recorded.getNodeByRef({ kind: "TsMedia", id: podcast.id }),
+      ).toBeUndefined();
+      await expect(
+        recorded.getNodeByRef({ kind: "TsUnregistered", id: podcast.id }),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
+      expect(await store.getNodeByRef(reference)).toMatchObject({
+        title: "recast",
+      });
+    });
+  });
+
   describe("Typed subsumption — parent properties a subclass omits", () => {
     it("decodes a field-level select as the parent's property types", async () => {
       const store = await seedOptionalFieldStore(context);

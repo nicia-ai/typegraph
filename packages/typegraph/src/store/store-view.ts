@@ -999,12 +999,9 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     reference: Readonly<{ kind: string; id: string }>,
   ): Promise<unknown> {
     return readNodeByReference(
-      (kind) =>
-        this.store.getNodeCollection(kind) === undefined ?
-          undefined
-        : (this.nodes as Readonly<Record<string, NodeByIdReader>>)[kind],
+      this.store.graph,
+      (kind) => (this.nodes as Readonly<Record<string, NodeByIdReader>>)[kind],
       reference,
-      this.store.graphId,
     );
   }
 

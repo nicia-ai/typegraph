@@ -29,6 +29,7 @@ import {
   relatedTo,
   type Store,
   subClassOf,
+  type SubsumedNodeReference,
   type TransactionContext,
   type VectorSearchOptions,
 } from "../src";
@@ -1419,6 +1420,119 @@ describe("typed edge collections under subsumption", () => {
     expectTypeOf<
       AssignableNodeKinds<typeof plainGraph, "EndpointStaff">
     >().toEqualTypeOf<"EndpointStaff">();
+  });
+
+  it("passes a widened endpoint and a polymorphic row back into every endpoint input", () => {
+    const registry = buildKindRegistry(affectedGraph);
+    const rows = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      registry,
+    )
+      .from("EndpointStaff", "s")
+      .select((ctx) => ctx.s);
+    type StaffRow = Awaited<ReturnType<typeof rows.execute>>[number];
+
+    // Type-checked only — never called.
+    async function chainHops(
+      store: AffectedStore,
+      edge: AffectedEdge,
+      row: StaffRow,
+    ): Promise<void> {
+      const target = { kind: edge.toKind, id: edge.toId };
+      const edgeKinds = ["endpointEmploys"] as const;
+      void store.edges.endpointEmploys.findTo(target);
+      void store.bulkFindEdgesTo({
+        targets: [{ kind: edge.toKind, ids: [edge.toId] }],
+        edgeKinds,
+      });
+      void store.bulkFindEdgesFrom({
+        sources: [
+          { kind: edge.toKind, ids: [edge.toId] },
+          { kind: row.kind, ids: [row.id] },
+          { kind: edge.fromKind, ids: [edge.fromId] },
+        ],
+        edgeKinds,
+      });
+      void store.neighbors(target, { edges: edgeKinds, direction: "in" });
+      void store.neighbors(row, { edges: edgeKinds, direction: "in" });
+      void store.countNeighbors(target, { edges: edgeKinds });
+      void store.batchOnce((read) => [
+        read.neighbors(target, { edges: edgeKinds }),
+        read.countNeighbors(row, { edges: edgeKinds }),
+      ]);
+      await store.transaction(async (tx) => {
+        await tx.neighbors(target, { edges: edgeKinds });
+        await tx.countNeighbors(row, { edges: edgeKinds });
+      });
+      if (edge.toKind === "EndpointEngineer") {
+        const engineer = { kind: edge.toKind, id: edge.toId };
+        void store.edges.endpointEmploys.findTo(engineer);
+        void store.neighbors(engineer, { edges: edgeKinds });
+        void store.bulkFindEdgesTo({
+          targets: [{ kind: edge.toKind, ids: [edge.toId] }],
+          edgeKinds,
+        });
+      }
+    }
+    void chainHops;
+    expect(rows).toBeDefined();
+  });
+
+  it("refuses a reference whose id brand no admitted kind carries", () => {
+    // Type-checked only — never called.
+    function assertReferencesRefused(): void {
+      const affected = undefined as unknown as AffectedStore;
+      const plain = undefined as unknown as PlainStore;
+      const plainEdge = undefined as unknown as PlainEdge;
+      const vendor = undefined as unknown as Node<typeof Vendor>;
+      const kind: string = affectedGraph.id;
+      const edgeKinds = ["endpointEmploys"] as const;
+      // @ts-expect-error - a bare string id carries no node brand
+      void affected.neighbors({ kind, id: "raw-id" }, { edges: edgeKinds });
+      // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
+      void affected.neighbors({ kind, id: vendor.id }, { edges: edgeKinds });
+      void affected.bulkFindEdgesTo({
+        // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
+        targets: [{ kind, ids: [vendor.id] }],
+        edgeKinds,
+      });
+      // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
+      void affected.edges.endpointEmploys.findTo({ kind, id: vendor.id });
+      // @ts-expect-error - without subsumption, the kind stays a literal
+      void plain.neighbors({ kind, id: plainEdge.toId }, { edges: edgeKinds });
+      void plain.neighbors(
+        { kind: plainEdge.toKind, id: plainEdge.toId },
+        { edges: edgeKinds },
+      );
+    }
+    void assertReferencesRefused;
+    expectTypeOf<
+      SubsumedNodeReference<typeof plainGraph, typeof Staff>
+    >().toBeNever();
+    expectTypeOf<
+      SubsumedNodeReference<typeof affectedGraph, typeof Firm>
+    >().toBeNever();
+  });
+
+  it("admits an unrelated kind whose properties include the declared kind's, structurally", () => {
+    // Type-checked only — never called. The id brand is structural, so an
+    // EndpointContractor (same properties as EndpointStaff, no ontology
+    // relation) compiles; the runtime endpoint check refuses it with
+    // EndpointError.
+    type ContractorNode = Node<typeof Contractor>;
+    function assertStructuralAdmission(): void {
+      const store = undefined as unknown as AffectedStore;
+      const firm = undefined as unknown as Node<typeof Firm>;
+      const contractor = undefined as unknown as ContractorNode;
+      void store.edges.endpointEmploys.create(firm, contractor);
+    }
+    void assertStructuralAdmission;
+    expect(
+      buildKindRegistry(affectedGraph).isAssignableTo(
+        "EndpointContractor",
+        "EndpointStaff",
+      ),
+    ).toBe(false);
   });
 
   it("admits every kind folded together by equivalence, through a shared IRI too", () => {

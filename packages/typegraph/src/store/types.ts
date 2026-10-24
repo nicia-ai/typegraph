@@ -1105,14 +1105,6 @@ export type EdgeBulkFindOptions = Readonly<{
  */
 export type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
 
-/** A kind-grouped source list for a heterogeneous bulk edge read. */
-export type BulkEdgeSourceGroup<G extends GraphDef> = {
-  [K in NodeKinds<G>]: Readonly<{
-    kind: K;
-    ids: readonly NodeId<G["nodes"][K]["type"]>[];
-  }>;
-}[NodeKinds<G>];
-
 /** A node reference whose kind and branded id remain correlated. */
 export type GraphNodeReference<G extends GraphDef> = {
   [K in NodeKinds<G>]: Readonly<{
@@ -1120,6 +1112,52 @@ export type GraphNodeReference<G extends GraphDef> = {
     id: NodeId<G["nodes"][K]["type"]>;
   }>;
 }[NodeKinds<G>];
+
+type BrandedNodeReference<N extends NodeType> =
+  N extends NodeType ? Readonly<{ kind: N["kind"]; id: NodeId<N> }> : never;
+
+/**
+ * The widened `{ kind, id }` a node of type `N` carries when graph `G`'s
+ * subsumption reads it back polymorphically ({@link SubsumedNodeType}): a
+ * `string` kind and the widened `NodeId` brand, for each member of `N` whose
+ * kind has `subClassOf` descendants or `equivalentTo` kinds. A kind the
+ * ontology leaves exact contributes nothing, since its exact reference
+ * already covers it.
+ *
+ * The one owner of the widened reference every endpoint input accepts, so an
+ * endpoint read off a widened edge (`{ kind: edge.toKind, id: edge.toId }`),
+ * the same reference narrowed by `kind`, and a polymorphic query row all pass
+ * back into the next read without a cast. The id brand is what ties the
+ * reference to the declared kind; the runtime checks the `kind`.
+ */
+export type SubsumedNodeReference<
+  G extends GraphDef,
+  N extends NodeType,
+> = BrandedNodeReference<Exclude<SubsumedNodeType<G, N>, N>>;
+
+/**
+ * A node reference the graph-wide endpoint reads (`bulkFindEdgesFrom`,
+ * `bulkFindEdgesTo`, `neighbors`, `countNeighbors`) accept: a
+ * {@link GraphNodeReference}, or the {@link SubsumedNodeReference} a
+ * widened edge endpoint or polymorphic query row carries. A `kind` the
+ * graph does not register is refused at runtime with `KindNotFoundError`.
+ */
+export type GraphNodeReferenceInput<G extends GraphDef> =
+  GraphNodeReference<G> | SubsumedNodeReference<G, AllNodeTypes<G>>;
+
+type NodeReferenceGroup<R> =
+  R extends Readonly<{ kind: infer K extends string; id: infer I }> ?
+    Readonly<{ kind: K; ids: readonly I[] }>
+  : never;
+
+/**
+ * A kind-grouped source list for a heterogeneous bulk edge read: one
+ * {@link GraphNodeReferenceInput} shape with its ids gathered under one
+ * `kind`.
+ */
+export type BulkEdgeSourceGroup<G extends GraphDef> = NodeReferenceGroup<
+  GraphNodeReferenceInput<G>
+>;
 
 /** Runtime edge union narrowed to the selected graph edge kinds. */
 export type GraphEdgeForKinds<G extends GraphDef, K extends EdgeKinds<G>> = {
@@ -1829,15 +1867,16 @@ type AssignableNodeTypes<G extends GraphDef, N extends NodeType> =
  * What a typed edge method accepts for an endpoint declared as `N` in graph
  * `G`: a {@link NodeRef} of `N` or of a kind the runtime admits in its place
  * ({@link AssignableNodeKinds}: a `subClassOf` descendant or an
- * `equivalentTo` kind), or the node a polymorphic query row over one of
- * those kinds carries ({@link SubsumedNodeType}), whose `kind` is the
- * general `string`. The runtime endpoint check stays authoritative: a
- * polymorphic row of a kind the edge does not admit is refused with
- * `EndpointError`.
+ * `equivalentTo` kind), or the {@link SubsumedNodeReference} a widened edge
+ * endpoint or a polymorphic query row over one of those kinds carries, whose
+ * `kind` is the general `string`. That arm is structural: a node or
+ * reference of an unrelated kind whose properties include the declared
+ * kind's also compiles. The runtime endpoint check stays authoritative and
+ * refuses a kind the edge does not admit with `EndpointError`.
  */
 export type EdgeEndpointRef<G extends GraphDef, N extends NodeType> =
   | NodeRef<N | AssignableNodeTypes<G, N>>
-  | Node<SubsumedNodeType<G, N | AssignableNodeTypes<G, N>>>;
+  | SubsumedNodeReference<G, N | AssignableNodeTypes<G, N>>;
 
 /**
  * An edge read in graph `G`: each declared endpoint typed by
@@ -2883,11 +2922,11 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
       options?: BatchOnceOptions,
     ) => Promise<OneStatementBatchResults<Queries>>;
     neighbors: <const K extends EdgeKinds<G>>(
-      source: GraphNodeReference<G>,
+      source: GraphNodeReferenceInput<G>,
       options: NeighborReadOptions<G, K>,
     ) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors: <const K extends EdgeKinds<G>>(
-      source: GraphNodeReference<G>,
+      source: GraphNodeReferenceInput<G>,
       options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
     ) => Promise<number>;
     subgraph: <

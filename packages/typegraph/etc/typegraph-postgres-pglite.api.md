@@ -25,8 +25,8 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
-    neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
-    countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+    neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
     lineageRevisionNow?: () => Promise<EngineRevision | undefined>;
     changesSince?: (revision: EngineRevision) => Promise<LineageDelta>;
 }>;
@@ -415,8 +415,8 @@ type BatchOnceOptions = Readonly<{
 
 // @public
 type BatchReadBuilder<G extends GraphDef> = Readonly<{
-    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
-    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => CompiledOneStatementRead<number>;
+    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => CompiledOneStatementRead<number>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
 }>;
 
@@ -443,16 +443,17 @@ type BooleanExpressionNode = Readonly<{
 // @public (undocumented)
 type BooleanFieldAccessor<T extends boolean = boolean> = BaseFieldAccessor<T>;
 
+// @public (undocumented)
+type BrandedNodeReference<N extends NodeType> = N extends NodeType ? Readonly<{
+    kind: N["kind"];
+    id: NodeId<N>;
+}> : never;
+
 // @public
 type BuildRecursiveAliases<DC, PC, A extends string, Optional extends boolean = false> = ([DC] extends [false] ? {} : Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth", "ids", Optional>>) & ([PC] extends [false] ? {} : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path", ResolvePathFormat<PC>, Optional>>);
 
 // @public
-type BulkEdgeSourceGroup<G extends GraphDef> = {
-    [K in NodeKinds<G>]: Readonly<{
-        kind: K;
-        ids: readonly NodeId<G["nodes"][K]["type"]>[];
-    }>;
-}[NodeKinds<G>];
+type BulkEdgeSourceGroup<G extends GraphDef> = NodeReferenceGroup<GraphNodeReferenceInput<G>>;
 
 // @public
 type BulkFindEdgesFromParams<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
@@ -1784,7 +1785,7 @@ type EdgeEndpointPairTypes = Readonly<{
 }>;
 
 // @public
-type EdgeEndpointRef<G extends GraphDef, N extends NodeType> = NodeRef<N | AssignableNodeTypes<G, N>> | Node<SubsumedNodeType<G, N | AssignableNodeTypes<G, N>>>;
+type EdgeEndpointRef<G extends GraphDef, N extends NodeType> = NodeRef<N | AssignableNodeTypes<G, N>> | SubsumedNodeReference<G, N | AssignableNodeTypes<G, N>>;
 
 // @public
 type EdgeEndpointSide = "from" | "to";
@@ -3313,6 +3314,9 @@ type GraphNodeReference<G extends GraphDef> = {
 }[NodeKinds<G>];
 
 // @public
+type GraphNodeReferenceInput<G extends GraphDef> = GraphNodeReference<G> | SubsumedNodeReference<G, AllNodeTypes<G>>;
+
+// @public
 type GraphTemplateRow = Readonly<{
     template_id: string;
     schema_hash: string;
@@ -4772,6 +4776,15 @@ type NodeRef<N extends NodeType = NodeType> = Node<N> | Readonly<{
     kind: N["kind"];
     id: string;
 }>;
+
+// @public (undocumented)
+type NodeReferenceGroup<R> = R extends Readonly<{
+    kind: infer K extends string;
+    id: infer I;
+}> ? Readonly<{
+    kind: K;
+    ids: readonly I[];
+}> : never;
 
 // @public
 interface NodeReferenceLookup<G extends GraphDef> {
@@ -6581,8 +6594,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     ...BatchableQuery<unknown>[]
     ]>(...queries: Queries) => Promise<BatchResults<Queries>>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
-    neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
-    countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+    neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
     bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
@@ -7239,6 +7252,9 @@ V
 ] extends [AnyEdgeType] ? V["kind"] extends EdgeKinds<G> ? V["kind"] : EdgeKinds<G> : EdgeKinds<G> : never);
 
 // @public
+type SubsumedNodeReference<G extends GraphDef, N extends NodeType> = BrandedNodeReference<Exclude<SubsumedNodeType<G, N>, N>>;
+
+// @public
 type SubsumedNodeType<G extends GraphDef, N extends NodeType> = N extends NodeType ? SubsumptionAffected<G, N["kind"]> extends true ? PolymorphicNodeType<N> : N : never;
 
 // @public
@@ -7389,8 +7405,8 @@ type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readon
     describe: () => Promise<StoreDescription>;
     validateStore: (options: ValidateStoreOptions) => Promise<StoreValidationPage>;
     batchOnce: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
-    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
-    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
 }>;
 

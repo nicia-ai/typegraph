@@ -170,8 +170,9 @@ the store-wide migration knob.
 - **Reads widen like a query alias.** For a declared endpoint kind the
   ontology can affect, the edge's `toKind` is `string` and `toId` carries the
   widened `NodeId` brand, on every typed edge read (`getById`, `findFrom`,
-  `findTo`, the bulk and batch reads, `create`, `update`, `bulkFindEdgesFrom`
-  and the view and recorded-time collections). An endpoint kind no subsumption
+  `findTo`, the bulk and batch reads, `create`, `update`, `bulkFindEdgesFrom`,
+  the edges `neighbors()` returns, and the view and recorded-time
+  collections). An endpoint kind no subsumption
   relation names keeps its literal kind and exact id. So
   `store.nodes.Person.getById(edge.toId)` no longer compiles for such an
   endpoint; resolve it with
@@ -181,14 +182,23 @@ the store-wide migration knob.
   (`create`, `findFrom`/`findTo`, `find`/`count` filters, the bulk and batch
   methods, `findByEndpoints`, `getOrCreateByEndpoints`) accept a node or
   `{ kind, id }` of the declared kind or of any kind assignable to it, followed
-  transitively through `subClassOf` and `equivalentTo`, and a row from a
-  polymorphic `from("Person", ...)` query, whose `kind` is `string`. A
-  subclass row from a supertype query connects without a cast. The runtime
-  endpoint check stays authoritative. A polymorphic row is accepted at compile
-  time by its properties, so a node or row of an unrelated kind whose schema
-  has the same shape compiles and is then refused with `EndpointError`; and
-  because an IRI is typed as a plain `string`, every kind mapped to an IRI
-  with `equivalentTo` is admitted wherever any one of them is.
+  transitively through `subClassOf` and `equivalentTo`, a row from a
+  polymorphic `from("Person", ...)` query, whose `kind` is `string`, and a
+  widened endpoint reference such as `{ kind: edge.toKind, id: edge.toId }`.
+  A subclass row from a supertype query connects without a cast. The runtime
+  endpoint check stays authoritative. The widened form is accepted at compile
+  time by its id brand, which is structural, so any node or reference whose
+  properties include the declared kind's compiles at an affected endpoint,
+  even of an unrelated kind, and the runtime refuses an unrelated kind with
+  `EndpointError`; and because an IRI is typed as a plain `string`, every kind
+  mapped to an IRI with `equivalentTo` is admitted wherever any one of them
+  is.
+- **The next hop takes the same references.** The `sources` / `targets` of
+  `bulkFindEdgesFrom` / `bulkFindEdgesTo` and the `source` of `neighbors()` /
+  `countNeighbors()` accept the widened reference and the polymorphic row
+  too, so `{ kind: edge.toKind, ids: [edge.toId] }` feeds the next read as it
+  is. A `kind` the graph does not register is refused with
+  `KindNotFoundError`.
 
 An endpoint lookup matches the kind it is given exactly. A `Node` value
 carries its real kind, so `findFrom(employee)` finds an `Employee`'s edges,
