@@ -4910,6 +4910,7 @@ type OntologyChange = Readonly<{
     severity: ChangeSeverity;
     details: string;
     probes?: readonly OntologyDataProbe[];
+    removedCustomRelation?: string;
 }>;
 
 // @public (undocumented)

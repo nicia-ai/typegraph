@@ -29,6 +29,16 @@
  * that reuses its parent's schema (or a field schema they share) still
  * compares equal under rule 2 of `isStructuralSubtype`, while two different
  * refinements never do.
+ *
+ * A node `z.toJSONSchema` has no spelling for at all (`embedding()` and any
+ * other `z.custom()`, `z.date()`, `z.set()`, `z.map()`, `z.bigint()`, a
+ * `.transform()`) makes the persisted projection give up on the whole kind,
+ * which projects as the unprojectable placeholder. Here each such node is
+ * replaced by {@link UNPROJECTABLE_NODE_KEYWORD} instead, which
+ * `isStructuralSubtype` accepts unjudged, so every other field of the kind
+ * is still compared. The persisted placeholder is kept when this projection
+ * cannot do better: a conversion that fails for another reason, or a Zod
+ * release older than 4.5 that ignores the `unrepresentable` handler.
  */
 import { z } from "zod";
 
@@ -39,6 +49,7 @@ import {
 import {
   COMPARABLE_KEYWORDS,
   UNMODELED_CONSTRAINING_KEYWORDS,
+  UNPROJECTABLE_NODE_KEYWORD,
   ZOD_ONLY_CONSTRAINT_KEYWORD,
   ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
 } from "./structural-subtype";
@@ -144,23 +155,44 @@ function markZodOnlyConstraints(
 }
 
 /**
- * The comparison projection of `schema` (see the module docblock). The
- * unprojectable placeholder is returned as is, so
- * `isUnprojectableSchemaProjection` still recognizes it. Memoized by schema
- * identity.
+ * `schema` converted with every Zod-only constraint and every unconvertible
+ * node marked, or the persisted placeholder when that conversion cannot
+ * replace it (see the module docblock).
+ */
+function projectForComparison(schema: z.ZodType): JsonSchema {
+  const unconvertibleNodeTypes: string[] = [];
+  const project = (): JsonSchema =>
+    z.toJSONSchema(schema, {
+      override: (context) => {
+        markZodOnlyConstraints(context);
+      },
+      unrepresentable: (context) => {
+        const nodeType = context.zodSchema._zod.def.type;
+        unconvertibleNodeTypes.push(nodeType);
+        return { [UNPROJECTABLE_NODE_KEYWORD]: nodeType };
+      },
+    }) as JsonSchema;
+
+  const persisted = serializeSchemaProperties(schema);
+  if (!isUnprojectableSchemaProjection(persisted)) return project();
+  try {
+    const projection = project();
+    return unconvertibleNodeTypes.length > 0 ? projection : persisted;
+  } catch {
+    return persisted;
+  }
+}
+
+/**
+ * The comparison projection of `schema` (see the module docblock). Where it
+ * falls back to the unprojectable placeholder, the placeholder is returned
+ * as is, so `isUnprojectableSchemaProjection` still recognizes it. Memoized
+ * by schema identity.
  */
 export function structuralSubtypeProjection(schema: z.ZodType): JsonSchema {
   const cached = PROJECTION_CACHE.get(schema);
   if (cached !== undefined) return cached;
-  const persisted = serializeSchemaProperties(schema);
-  const projection =
-    isUnprojectableSchemaProjection(persisted) ? persisted : (
-      (z.toJSONSchema(schema, {
-        override: (context) => {
-          markZodOnlyConstraints(context);
-        },
-      }) as JsonSchema)
-    );
+  const projection = projectForComparison(schema);
   PROJECTION_CACHE.set(schema, projection);
   return projection;
 }

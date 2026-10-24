@@ -36,9 +36,17 @@
  * (`src/registry/kind-registry.ts`), so classifying it differently from
  * `equivalentTo` would make the classifier lie about the closure it produces.
  *
- * `differentFrom` and an unknown/custom meta-edge name reach no arm of
- * `collectOntologyRelations` — they feed no closure and drive no write-path
- * decision, so they are inert and `safe`.
+ * `differentFrom` reaches no arm of `collectOntologyRelations` — it feeds no
+ * closure and drives no write-path decision, so it is inert and `safe`.
+ *
+ * A custom meta-edge name (one outside `ALL_META_EDGE_NAMES`, declared by the
+ * removed `metaEdge()` factory) is just as inert to the engine, and ADDED it
+ * is `safe`. REMOVED it is `breaking`: no code path can declare such a
+ * relation any more (`metaEdge()` is gone and graph extensions refuse the
+ * name), so the stored document holds the application's last copy of it,
+ * and dropping that copy must wait for an explicit `migrateSchema()` after
+ * the relation is moved into `defineGraph({ annotations })`. The change
+ * names the relation in `removedCustomRelation` for `getMigrationActions`.
  *
  * `inverseOf` / `implies` change default traversal results (`expand:
  * "inverse"` / `expand: "implying"`), which is a read-semantics change; the
@@ -264,6 +272,16 @@ export type OntologyChange = Readonly<{
    * has any actual work to fold into a commit preflight.
    */
   probes?: readonly OntologyDataProbe[];
+  /**
+   * Set only on the removal of a relation whose meta-edge is not built in,
+   * one a custom `metaEdge()` declared before that factory was removed: the
+   * relation as written, such as `governs(Team, Project)`. The removal is
+   * `breaking` because the stored document holds the last copy of a relation
+   * the graph can no longer declare. Move it into
+   * `defineGraph({ annotations })`, then commit with `migrateSchema()`;
+   * `getMigrationActions` lists every such relation.
+   */
+  removedCustomRelation?: string;
 }>;
 
 /** Everything classification reads. Deliberately narrower than `SerializedSchema`. */
@@ -749,6 +767,9 @@ type ProbeKind = Exclude<OntologyDataProbe["kind"], "edgeAcyclicity">;
 type RelationSeverity = Readonly<{
   severity: ChangeSeverity;
   probeKinds: readonly ProbeKind[];
+  /** Replaces the plain "was added/removed" details with what to do about it. */
+  details?: string;
+  removedCustomRelation?: string;
 }>;
 
 const KNOWN_META_EDGE_NAMES: ReadonlySet<string> = new Set(ALL_META_EDGE_NAMES);
@@ -761,7 +782,8 @@ function isKnownMetaEdgeName(name: string): name is MetaEdgeName {
  * The severity table from the module docblock, as one exhaustive `switch`.
  * `MetaEdgeName` is checked exhaustively (a `never` default catches a future
  * addition to `ALL_META_EDGE_NAMES` at compile time); a custom or otherwise
- * unregistered meta-edge name is filtered to `safe` before this runs.
+ * unregistered meta-edge name is classified by
+ * {@link classifyCustomRelationSeverity} before this runs.
  */
 function classifyKnownRelationSeverity(
   direction: "added" | "removed",
@@ -830,15 +852,35 @@ function classifyKnownRelationSeverity(
   }
 }
 
+/**
+ * A relation whose meta-edge is not built in: inert to the engine, but
+ * removing it drops the stored document's last copy of a relation no code
+ * path can declare any more (see the module docblock).
+ */
+function classifyCustomRelationSeverity(
+  direction: "added" | "removed",
+  relation: SerializedOntologyRelation,
+): RelationSeverity {
+  if (direction === "added") return { severity: "safe", probeKinds: [] };
+  const description = relationDescription(relation);
+  return {
+    severity: "breaking",
+    probeKinds: [],
+    details:
+      `Relation ${description} was removed. Its meta-edge "${relation.metaEdge}" ` +
+      `is not built in and can no longer be declared, so the stored schema ` +
+      `holds its last copy: move it into defineGraph({ annotations }) before ` +
+      `committing with migrateSchema()`,
+    removedCustomRelation: description,
+  };
+}
+
 function classifyRelationSeverity(
   direction: "added" | "removed",
   relation: SerializedOntologyRelation,
 ): RelationSeverity {
   if (!isKnownMetaEdgeName(relation.metaEdge)) {
-    // Custom / unregistered meta-edge name: reaches no arm of
-    // `collectOntologyRelations`, so it feeds no closure and drives no
-    // write-path decision.
-    return { severity: "safe", probeKinds: [] };
+    return classifyCustomRelationSeverity(direction, relation);
   }
   return classifyKnownRelationSeverity(direction, relation.metaEdge, relation);
 }
@@ -954,19 +996,23 @@ function classifyRelation(
     };
   }
 
-  const { severity, probeKinds } = classifyRelationSeverity(
-    direction,
-    relation,
+  const classified = classifyRelationSeverity(direction, relation);
+  const probes = classified.probeKinds.map((kind) =>
+    buildProbe(kind, context, relation),
   );
-  const probes = probeKinds.map((kind) => buildProbe(kind, context, relation));
 
   return {
     type: direction,
     entity: "relation",
     name,
-    severity,
-    details: `Relation ${relationDescription(relation)} was ${verb}`,
+    severity: classified.severity,
+    details:
+      classified.details ??
+      `Relation ${relationDescription(relation)} was ${verb}`,
     ...(probes.length > 0 ? { probes } : {}),
+    ...(classified.removedCustomRelation === undefined ?
+      {}
+    : { removedCustomRelation: classified.removedCustomRelation }),
   };
 }
 

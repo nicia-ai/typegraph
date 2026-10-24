@@ -47,17 +47,22 @@
  * `src/registry/builders.ts`) or an external IRI — is skipped: subsumption
  * does not apply to a kind this registry does not know the shape of.
  *
- * **Known gap: `isAssignableTo(A, B) ⇒ every A row satisfies B's schema`
- * is not guaranteed for a pair where EITHER kind's Zod schema fails
- * `z.toJSONSchema` conversion** (`z.set()`, `z.map()`, `z.date()`,
- * `z.bigint()`, a `.transform()`, `embedding()` and any other `z.custom()`).
- * Such a kind has no projection — `isUnprojectableSchemaProjection`
- * (`src/schema/serializer.ts`) is the one test for that — so there is
- * nothing to compare and the pair is skipped, whichever side it is on. The
- * placeholder is never compared as a schema: read as one it is an open
- * object declaring no properties, which would refuse a genuine subtype as
- * missing a property it declares. The compile-time check still holds for
- * such a pair; what is lost is the value-level half only this module sees.
+ * **A Zod construct `z.toJSONSchema` cannot convert** (`z.set()`, `z.map()`,
+ * `z.date()`, `z.bigint()`, a `.transform()`, `embedding()` and any other
+ * `z.custom()`) is judged per node in a live graph: the comparison
+ * projection marks that node alone, `isStructuralSubtype` accepts it
+ * unjudged, and every other property of the pair is still compared. A
+ * persisted document has no such marker. Its kind holding the construct
+ * projects as the whole-kind placeholder (`isUnprojectableSchemaProjection`,
+ * `src/schema/serializer.ts`), so a pair with that kind on either side is
+ * skipped here. The live projection keeps the placeholder too when it cannot
+ * do better (see `structuralSubtypeProjection`). The placeholder is never
+ * compared as a schema: read as one it is an open object declaring no
+ * properties, which would refuse a genuine subtype as missing a property it
+ * declares. Every commit path also builds the live registry from the code
+ * graph before it writes (`prepareNewSchemaVersion`), so the document's
+ * coarser check never decides alone. What neither check sees inside an
+ * unconvertible node is left to the compile-time check.
  *
  * `evolve()` re-declaring an existing kind needs no special path: the
  * registry is rebuilt from the merged graph and this module walks the WHOLE

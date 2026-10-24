@@ -17,12 +17,17 @@ import {
   defineNode,
   embedding,
   equivalentTo,
+  type GraphDef,
   subClassOf,
 } from "../src";
 import { ConfigurationError } from "../src/errors";
 import { defineGraphExtension } from "../src/graph-extension";
 import { buildKindRegistry } from "../src/registry/builders";
-import { deserializeSchema, serializeSchema } from "../src/schema";
+import {
+  computeSchemaHash,
+  deserializeSchema,
+  serializeSchema,
+} from "../src/schema";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 
@@ -425,61 +430,53 @@ describe("registry check — evolve() checks an authored extension before any wr
   });
 });
 
-describe("registry check — known gap: a pair with an unprojectable kind is skipped", () => {
-  // A kind holding a construct `z.toJSONSchema` cannot convert has no
-  // projection (src/schema/serializer.ts), so a pair with such a kind on
-  // either side is SKIPPED by the registry check rather than guaranteed.
-  // This pair is genuinely incompatible (Parent requires a "tags" set the
-  // Child does not declare) and is accepted: the documented gap.
-  //
-  // Child genuinely lacks Parent's "tags" property, so `subClassOf(Child,
-  // Parent)` would also fail the compile-time check for THIS pair — this
-  // reaches the registry check through the deserialized-document route instead, the same
-  // way an older, laxer validator (or a hand-edited document) could have
-  // written it, matching the "deserialized documents" pattern above. That is
-  // not true in general: the next test reaches the same gap from a plain
-  // live `defineGraph` (no deserialization needed at all) with a
-  // value-constraint mismatch the compile-time check cannot see.
-  it("does not refuse a persisted subClassOf pair that differs only inside a z.set()/z.map() field", () => {
-    const SetChild = defineNode("SetChild", {
-      schema: z.object({ note: z.string() }),
-    });
-    const SetParent = defineNode("SetParent", {
-      schema: z.object({ note: z.string(), tags: z.set(z.string()) }),
-    });
-    const graph = defineGraph({
-      id: "subclass_unconvertible_gap",
-      nodes: { SetChild: { type: SetChild }, SetParent: { type: SetParent } },
-      edges: {},
-      ontology: [],
-    });
-    const serialized = serializeSchema(graph, 1);
-    const withUnconvertibleRelation = {
-      ...serialized,
-      ontology: {
-        ...serialized.ontology,
-        relations: [
-          ...serialized.ontology.relations,
-          { metaEdge: "subClassOf", from: "SetChild", to: "SetParent" },
-        ],
-      },
-    };
+/** Pinned before per-field comparison existed: it must never move. */
+const PERSISTED_EMBEDDING_KIND_PROJECTION = JSON.stringify({ type: "object" });
+const PERSISTED_EMBEDDING_GRAPH_HASH = "061d57c95847595f";
 
-    expect(() =>
-      deserializeSchema(withUnconvertibleRelation).buildRegistry(),
-    ).not.toThrow();
+/** The `ConfigurationError` a registry build throws, or `undefined` when it builds. */
+function registryRefusal(graph: GraphDef): ConfigurationError | undefined {
+  try {
+    buildKindRegistry(graph);
+    return undefined;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return error;
+    throw error;
+  }
+}
+
+describe("registry check — a field the projection cannot convert is accepted unjudged, every other field is still compared", () => {
+  // `z.toJSONSchema` has no spelling for `embedding()` (a `z.custom()`),
+  // `z.date()`, `z.set()`, `z.map()`, `z.bigint()` or a `.transform()`. A
+  // live graph's comparison projection marks each such node on its own, so
+  // that node is accepted without a verdict while its siblings are judged.
+  it("refuses a subclass that adds embedding() when an unrelated field is incompatible", () => {
+    const Tight = defineNode("Tight", {
+      schema: z.object({ code: z.string().min(5) }),
+    });
+    const Embedded = defineNode("Embedded", {
+      schema: z.object({ code: z.string(), vector: embedding(3) }),
+    });
+
+    const refusal = registryRefusal(
+      defineGraph({
+        id: "subclass_embedding_with_mismatch",
+        nodes: { Tight: { type: Tight }, Embedded: { type: Embedded } },
+        edges: {},
+        ontology: [subClassOf(Embedded, Tight)],
+      }),
+    );
+
+    expect(refusal?.details["code"]).toBe(
+      "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+    );
+    expect(refusal?.details["childKind"]).toBe("Embedded");
+    expect(refusal?.details["parentKind"]).toBe("Tight");
+    expect(refusal?.details["reason"]).toBe("string-length-not-tighter");
+    expect(refusal?.details["path"]).toEqual(["code"]);
   });
 
-  // The gap above is not confined to a hand-edited or otherwise
-  // deserialized document. A live, ordinary `defineGraph` reaches it too, as
-  // long as the incompatibility is hidden behind a VALUE-level constraint
-  // (invisible to the compile-time check) rather than a missing property (which it would
-  // refuse before this pair ever reached the registry). Both `tags` fields
-  // infer to the identical `Set<string>` TypeScript type, so
-  // `subClassOf(SetChildLive, SetParentLive)` compiles; neither kind has a
-  // projection, so the genuinely tighter `code` constraint on the parent is
-  // never compared and `buildKindRegistry` accepts the pair.
-  it("does not refuse a live subClassOf pair whose incompatibility is hidden behind a z.set() field", () => {
+  it("refuses a live pair whose incompatibility sits beside a z.set() field both sides declare", () => {
     const SetChildLive = defineNode("SetChildLive", {
       schema: z.object({ code: z.string(), tags: z.set(z.string()) }),
     });
@@ -489,30 +486,96 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
         tags: z.set(z.string()),
       }),
     });
-    const relation = subClassOf(SetChildLive, SetParentLive);
 
-    const registry = buildKindRegistry(
+    const refusal = registryRefusal(
       defineGraph({
-        id: "subclass_unconvertible_gap_live",
+        id: "subclass_set_with_mismatch",
         nodes: {
           SetChildLive: { type: SetChildLive },
           SetParentLive: { type: SetParentLive },
         },
         edges: {},
-        ontology: [relation],
+        ontology: [subClassOf(SetChildLive, SetParentLive)],
       }),
     );
 
-    // Documents the gap, it does not endorse it: a "SetChildLive" row with
-    // `code: "hi"` satisfies neither `SetParentLive`'s declared nor its
-    // intended contract, yet the registry calls it assignable.
-    expect(registry.isAssignableTo("SetChildLive", "SetParentLive")).toBe(true);
+    expect(refusal?.details["reason"]).toBe("string-length-not-tighter");
+    expect(refusal?.details["path"]).toEqual(["code"]);
   });
 
-  // The mirror case: only the CHILD is unprojectable. Its whole schema
-  // projects as the placeholder, which carries none of the properties the
-  // child really declares, so comparing it would refuse a genuine subtype
-  // as "missing" a property it has. The pair is skipped, like the others.
+  it("refuses a nested object holding an opaque field beside an incompatible sibling", () => {
+    const Parent = defineNode("Parent", {
+      schema: z.object({
+        details: z.object({ at: z.date(), code: z.string().min(5) }),
+      }),
+    });
+    const Child = defineNode("Child", {
+      schema: z.object({
+        details: z.object({ at: z.date(), code: z.string() }),
+      }),
+    });
+
+    const refusal = registryRefusal(
+      defineGraph({
+        id: "subclass_nested_opaque_with_mismatch",
+        nodes: { Parent: { type: Parent }, Child: { type: Child } },
+        edges: {},
+        ontology: [subClassOf(Child, Parent)],
+      }),
+    );
+
+    expect(refusal?.details["reason"]).toBe("string-length-not-tighter");
+    expect(refusal?.details["path"]).toEqual(["details", "code"]);
+  });
+
+  it("accepts independently declared z.date() fields on both sides", () => {
+    const Event = defineNode("Event", {
+      schema: z.object({ title: z.string(), at: z.date() }),
+    });
+    const Meeting = defineNode("Meeting", {
+      schema: z.object({
+        title: z.string().min(1),
+        at: z.date(),
+        room: z.string(),
+      }),
+    });
+
+    const graph = defineGraph({
+      id: "subclass_independent_dates",
+      nodes: { Event: { type: Event }, Meeting: { type: Meeting } },
+      edges: {},
+      ontology: [subClassOf(Meeting, Event)],
+    });
+
+    expect(registryRefusal(graph)).toBeUndefined();
+    expect(buildKindRegistry(graph).isAssignableTo("Meeting", "Event")).toBe(
+      true,
+    );
+  });
+
+  it("accepts a subclass that redeclares a parent's plain field through a .transform()", () => {
+    const Tagged = defineNode("Tagged", {
+      schema: z.object({ label: z.string().min(2) }),
+    });
+    const Normalized = defineNode("Normalized", {
+      schema: z.object({
+        label: z.string().transform((value) => value.trim()),
+      }),
+    });
+
+    expect(
+      registryRefusal(
+        defineGraph({
+          id: "subclass_transform_redeclaration",
+          nodes: { Tagged: { type: Tagged }, Normalized: { type: Normalized } },
+          edges: {},
+          ontology: [subClassOf(Normalized, Tagged)],
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  // Only the CHILD holds an unprojectable field, and nothing else differs.
   const UNPROJECTABLE_FIELDS = {
     embedding: () => embedding(3),
     "optional embedding": () => embedding(3).optional(),
@@ -532,7 +595,7 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
     PROJECTABLE_PARENTS,
   )) {
     for (const [fieldLabel, field] of Object.entries(UNPROJECTABLE_FIELDS)) {
-      it(`skips a subclass adding ${fieldLabel} under a parent with ${parentLabel}`, () => {
+      it(`accepts a subclass adding ${fieldLabel} under a parent with ${parentLabel}`, () => {
         const Document = defineNode("Document", { schema: parentSchema() });
         const Article = defineNode("Article", {
           schema: z.object({
@@ -548,9 +611,7 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
           ontology: [subClassOf(Article, Document)],
         });
 
-        expect(
-          buildKindRegistry(graph).isAssignableTo("Article", "Document"),
-        ).toBe(true);
+        expect(registryRefusal(graph)).toBeUndefined();
         // The persisted document reaches the same verdict as the live graph.
         expect(() =>
           deserializeSchema(serializeSchema(graph, 1)).buildRegistry(),
@@ -559,7 +620,7 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
     }
   }
 
-  it("skips an equivalentTo pair when one side is unprojectable", () => {
+  it("accepts an equivalentTo pair when one side holds an unprojectable field", () => {
     const Plain = defineNode("Plain", {
       schema: z.object({ title: z.string() }),
     });
@@ -567,8 +628,8 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
       schema: z.object({ title: z.string(), at: z.date().optional() }),
     });
 
-    expect(() =>
-      buildKindRegistry(
+    expect(
+      registryRefusal(
         defineGraph({
           id: "equivalence_unprojectable_side",
           nodes: { Plain: { type: Plain }, Dated: { type: Dated } },
@@ -576,7 +637,7 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
           ontology: [equivalentTo(Plain, Dated)],
         }),
       ),
-    ).not.toThrow();
+    ).toBeUndefined();
   });
 
   it("opens a store whose subclass adds an embedding to its parent", async () => {
@@ -607,5 +668,73 @@ describe("registry check — known gap: a pair with an unprojectable kind is ski
       .select((context) => context.content)
       .execute();
     expect(contents.map((content) => content.kind)).toEqual(["Document"]);
+  });
+
+  // The per-field markers exist only in the comparison input: the persisted
+  // projection of a kind holding embedding() is still the whole-kind
+  // placeholder, so neither the stored document nor its hash moves.
+  it("leaves the persisted projection and the schema hash of a kind with embedding() unchanged", async () => {
+    const Content = defineNode("Content", {
+      schema: z.object({ title: z.string() }),
+    });
+    const Document = defineNode("Document", {
+      schema: z.object({ title: z.string(), embedding: embedding(4) }),
+    });
+    const graph = defineGraph({
+      id: "subclass_embedding_hash",
+      nodes: { Content: { type: Content }, Document: { type: Document } },
+      edges: {},
+      ontology: [subClassOf(Document, Content)],
+    });
+
+    buildKindRegistry(graph);
+    const serialized = serializeSchema(graph, 1);
+
+    expect(JSON.stringify(serialized.nodes["Document"]?.properties)).toBe(
+      PERSISTED_EMBEDDING_KIND_PROJECTION,
+    );
+    expect(await computeSchemaHash(serialized)).toBe(
+      PERSISTED_EMBEDDING_GRAPH_HASH,
+    );
+  });
+});
+
+describe("registry check — a persisted document compares an unprojectable kind as a whole", () => {
+  // A deserialized document has no Zod schema, only the persisted
+  // projection, and a kind holding a construct `z.toJSONSchema` cannot
+  // convert is persisted as the whole-kind placeholder. There is nothing to
+  // compare, so a pair with such a kind on either side is skipped. This
+  // pair is genuinely incompatible (Parent requires a "tags" set the Child
+  // does not declare) and is accepted. The compile-time check would refuse
+  // it, so it reaches the registry through a hand-assembled document, the
+  // way an older, laxer validator could have written it.
+  it("does not refuse a persisted subClassOf pair that differs only inside a z.set()/z.map() field", () => {
+    const SetChild = defineNode("SetChild", {
+      schema: z.object({ note: z.string() }),
+    });
+    const SetParent = defineNode("SetParent", {
+      schema: z.object({ note: z.string(), tags: z.set(z.string()) }),
+    });
+    const graph = defineGraph({
+      id: "subclass_unconvertible_gap",
+      nodes: { SetChild: { type: SetChild }, SetParent: { type: SetParent } },
+      edges: {},
+      ontology: [],
+    });
+    const serialized = serializeSchema(graph, 1);
+    const withUnconvertibleRelation = {
+      ...serialized,
+      ontology: {
+        ...serialized.ontology,
+        relations: [
+          ...serialized.ontology.relations,
+          { metaEdge: "subClassOf", from: "SetChild", to: "SetParent" },
+        ],
+      },
+    };
+
+    expect(() =>
+      deserializeSchema(withUnconvertibleRelation).buildRegistry(),
+    ).not.toThrow();
   });
 });

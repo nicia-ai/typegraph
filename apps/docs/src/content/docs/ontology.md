@@ -101,17 +101,20 @@ authored extension, and a deserialized persisted document), throwing a
 | `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | an `equivalentTo` pair fails in one direction |
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | the same, but the pair is incomparable |
 
-**Known gap:** the registry check compares kinds' projected JSON Schema, and
-a kind whose schema holds a Zod construct `z.toJSONSchema` cannot convert has
-no projection to compare: `z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a
-`.transform()`, and any `z.custom()`, which includes TypeGraph's own
-`embedding()`. A `subClassOf` or `equivalentTo` pair with such a kind on
-**either** side is skipped by the registry check rather than guaranteed, so a
-subclass that adds an `embedding()` to its parent opens normally, and a pair
-that is incompatible only at the value level (a tighter `z.string().min(5)`
-on the parent, say) is accepted rather than refused. The compile-time check
-still applies to these pairs. This holds equally for a compile-time graph, an
-`evolve()`-authored extension, and a deserialized document.
+**Fields JSON Schema cannot express:** the registry check compares kinds'
+projected JSON Schema, and some Zod constructs have no JSON Schema form:
+`z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, and any
+`z.custom()`, which includes TypeGraph's own `embedding()`. In a
+compile-time graph or an `evolve()`-authored extension, each such field is
+accepted without a value-level comparison, and every other field of the pair
+is still compared. A subclass that adds an `embedding()` to its parent opens
+normally, two independently declared `z.date()` fields are accepted, and a
+pair that is also incompatible elsewhere (a tighter `z.string().min(5)` on
+the parent, say) is refused. The compile-time check still applies to the
+unconverted fields. A deserialized document has no Zod schemas, and it stores
+such a kind without a property projection, so a pair with that kind on
+**either** side is skipped there. Every commit also checks the graph in
+your code, so this coarser check never decides alone.
 
 If your hierarchy is a **taxonomy** rather than a genuine subtype
 relationship — the child doesn't actually extend the parent's schema —

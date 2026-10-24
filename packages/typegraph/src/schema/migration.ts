@@ -1565,8 +1565,9 @@ function generateSummary(
  * Checks if a schema change is backwards compatible: exactly "no `breaking`
  * change" (`!diff.hasBreakingChanges`) — nodes or edges removed, required
  * properties added, existing properties removed, and a `breaking` ontology
- * change (`inverseOf`/`implies` added or removed, or Operational Identity's
- * `sameIdAcrossKinds` flip) all count.
+ * change (`inverseOf`/`implies` added or removed, a relation naming a custom
+ * meta-edge removed, or Operational Identity's `sameIdAcrossKinds` flip) all
+ * count.
  *
  * "Backwards compatible" does NOT mean "will commit unconditionally": a
  * `warning`-severity ontology change (see `ChangeSeverity`'s docblock)
@@ -1635,6 +1636,19 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
     if (isMatchIdentityChange(change)) {
       actions.push(`REKEY edge data for "${change.kind}": ${change.details}`);
     }
+  }
+
+  const removedCustomRelations = diff.ontology.flatMap((change) =>
+    change.removedCustomRelation === undefined ?
+      []
+    : [change.removedCustomRelation],
+  );
+  if (removedCustomRelations.length > 0) {
+    actions.push(
+      `MOVE custom ontology relations ${removedCustomRelations.join(", ")} ` +
+        `into defineGraph({ annotations }), then commit with migrateSchema() ` +
+        `(their meta-edges are not built in, and the committed schema drops them)`,
+    );
   }
 
   if (diff.identity !== undefined) {

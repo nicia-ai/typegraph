@@ -409,7 +409,7 @@ const MATRIX: readonly MatrixRow[] = [
     direction: "removed",
     from: "A",
     to: "B",
-    expectedSeverity: "safe",
+    expectedSeverity: "breaking",
     expectedProbeKinds: [],
   },
 ];

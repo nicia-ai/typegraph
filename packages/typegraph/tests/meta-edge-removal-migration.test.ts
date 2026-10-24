@@ -15,13 +15,17 @@
  * - "differentFrom dropped": the classifier's verdict on a store opened
  *   after the code simply deletes a `differentFrom(A, B)` declaration is
  *   safe — it auto-migrates on open.
+ * - "custom meta-edge dropped": a persisted relation naming a custom
+ *   meta-edge is the last copy of a relation the graph can no longer
+ *   declare, so its removal is breaking, names the relation, and commits
+ *   only through an explicit `migrateSchema()`.
  *
- * The three `describe` blocks above exercise `computeSchemaDiff` and
- * `deserializeSchema` directly — the classification math in isolation. The
- * final block drives the same two migrations end to end through
- * `ensureSchema` against a real backend, the way a booting `Store` actually
- * encounters a pre-removal document: committed schema rows, not diff
- * literals, and the "migrated" status the schema manager actually returns.
+ * The `describe` blocks that call `computeSchemaDiff` and
+ * `deserializeSchema` directly test the classification math in isolation.
+ * The two `ensureSchema` blocks drive the same migrations end to end against
+ * a real backend, the way a booting `Store` actually encounters a
+ * pre-removal document: committed schema rows, not diff literals, and the
+ * status the schema manager actually returns.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -32,9 +36,17 @@ import {
   equivalentTo,
   type GraphBackend,
 } from "../src";
+import { MigrationError } from "../src/errors";
 import { deserializeSchema } from "../src/schema/deserializer";
-import { ensureSchema } from "../src/schema/manager";
-import { computeSchemaDiff } from "../src/schema/migration";
+import {
+  ensureSchema,
+  migrateSchema,
+  parseSerializedSchema,
+} from "../src/schema/manager";
+import {
+  computeSchemaDiff,
+  getMigrationActions,
+} from "../src/schema/migration";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import {
   type SerializedNodeDef,
@@ -43,6 +55,7 @@ import {
   serializedSchemaZod,
 } from "../src/schema/types";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -207,7 +220,67 @@ describe("dropping a differentFrom(A, B) declaration auto-migrates", () => {
   });
 });
 
-describe("ensureSchema auto-migrates a persisted pre-removal document", () => {
+const CUSTOM_RELATIONS_ONTOLOGY: SerializedOntology = {
+  metaEdges: {
+    governs: { name: "governs", description: "Team governs a project" },
+    audits: { name: "audits", description: undefined },
+  },
+  relations: [
+    { metaEdge: "governs", from: "A", to: "B" },
+    { metaEdge: "audits", from: "B", to: "A" },
+  ],
+  closures: EMPTY_CLOSURES,
+};
+
+describe("dropping a relation that names a custom meta-edge is breaking", () => {
+  it("classifies each removal as breaking and lists every relation in one migration action", () => {
+    const before = createSchema(CUSTOM_RELATIONS_ONTOLOGY);
+    const after = createSchema({
+      metaEdges: {},
+      relations: [],
+      closures: EMPTY_CLOSURES,
+    });
+
+    const diff = computeSchemaDiff(before, after);
+
+    expect(diff.hasBreakingChanges).toBe(true);
+    expect(diff.isBackwardsCompatible).toBe(false);
+    const removedCustomRelations = diff.ontology.map((change) => ({
+      type: change.type,
+      severity: change.severity,
+      removedCustomRelation: change.removedCustomRelation,
+    }));
+    expect(removedCustomRelations).toEqual(
+      expect.arrayContaining([
+        {
+          type: "removed",
+          severity: "breaking",
+          removedCustomRelation: "governs(A, B)",
+        },
+        {
+          type: "removed",
+          severity: "breaking",
+          removedCustomRelation: "audits(B, A)",
+        },
+      ]),
+    );
+    const governs = diff.ontology.find(
+      (change) => change.removedCustomRelation === "governs(A, B)",
+    );
+    expect(governs?.details).toContain("governs(A, B)");
+    expect(governs?.details).toContain("defineGraph({ annotations })");
+
+    const moveActions = getMigrationActions(diff).filter((action) =>
+      action.startsWith("MOVE custom ontology relations"),
+    );
+    expect(moveActions).toHaveLength(1);
+    expect(moveActions[0]).toContain("governs(A, B)");
+    expect(moveActions[0]).toContain("audits(B, A)");
+    expect(moveActions[0]).toContain("defineGraph({ annotations })");
+  });
+});
+
+describe("ensureSchema against a persisted pre-removal document", () => {
   const A = defineNode("A", { schema: z.object({}) });
   const B = defineNode("B", { schema: z.object({}) });
 
@@ -242,6 +315,57 @@ describe("ensureSchema auto-migrates a persisted pre-removal document", () => {
       schemaDoc: legacySchema,
     });
   }
+
+  async function activeRelations(
+    backend: GraphBackend,
+  ): Promise<Readonly<{ version: number; metaEdges: readonly string[] }>> {
+    const row = requireDefined(await backend.getActiveSchema(baseGraph.id));
+    const document = parseSerializedSchema(row.schema_doc);
+    return {
+      version: row.version,
+      metaEdges: document.ontology.relations.map(
+        (relation) => relation.metaEdge,
+      ),
+    };
+  }
+
+  it("reports a persisted custom-meta-edge relation as breaking and does not commit its removal", async () => {
+    const backend = createTestBackend();
+    await persistLegacyOntologyDocument(backend, CUSTOM_RELATIONS_ONTOLOGY);
+
+    const result = await ensureSchema(backend, baseGraph, {
+      autoMigrate: true,
+      throwOnBreaking: false,
+    });
+
+    expect(result.status).toBe("breaking");
+    const actions = result.status === "breaking" ? result.actions : [];
+    expect(actions).toEqual([expect.stringContaining("governs(A, B)")]);
+    expect(actions[0]).toContain("audits(B, A)");
+    // The stored document still parses with its unknown meta-edge names.
+    expect(await activeRelations(backend)).toEqual({
+      version: 2,
+      metaEdges: ["governs", "audits"],
+    });
+    await expect(ensureSchema(backend, baseGraph)).rejects.toThrow(
+      MigrationError,
+    );
+  });
+
+  it("commits the removal through an explicit migrateSchema()", async () => {
+    const backend = createTestBackend();
+    await persistLegacyOntologyDocument(backend, CUSTOM_RELATIONS_ONTOLOGY);
+
+    const committedVersion = await migrateSchema(backend, baseGraph, 2);
+
+    expect(committedVersion).toBe(3);
+    expect(await activeRelations(backend)).toEqual({
+      version: 3,
+      metaEdges: [],
+    });
+    const reopened = await ensureSchema(backend, baseGraph);
+    expect(reopened.status).toBe("unchanged");
+  });
 
   it("migrates a persisted sameAs(A, B) relation to equivalentTo(A, B) on open", async () => {
     const backend = createTestBackend();

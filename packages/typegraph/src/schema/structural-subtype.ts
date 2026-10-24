@@ -13,7 +13,8 @@
  * `structuralSubtypeProjection` (./structural-subtype-projection.ts), which
  * marks where the projection dropped a regex flag, a refinement, a strict
  * object, or read a `.meta()` key as a constraint, so such a pair answers
- * `incomparable` (rule 3) instead of a guess.
+ * `incomparable` (rule 3) instead of a guess. It also marks each node the
+ * projection cannot convert at all, which rule 2 accepts unjudged.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -50,6 +51,11 @@
  *    sides. The projection names a recursive definition by encounter order,
  *    so two unrelated recursive types share a name; an unresolvable
  *    reference is refused the same way. Rule 6 decides through the same test.
+ *    Right after it, a node marked {@link UNPROJECTABLE_NODE_KEYWORD} on
+ *    either side (a Zod construct with no JSON Schema spelling, such as
+ *    `embedding()` or `z.date()`) is accepted UNJUDGED: there is nothing to
+ *    compare, and the node's siblings are still compared by the enclosing
+ *    object or union. Only a live graph's comparison projection carries it.
  * 3. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
  *    which is why recursion here cannot diverge. So is a node carrying a
@@ -458,6 +464,18 @@ export const ZOD_ONLY_CONSTRAINT_KEYWORD = "x-typegraph-zod-only-constraint";
 export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
   "x-typegraph-zod-only-parent-constraint";
 
+/**
+ * Marks a schema node `z.toJSONSchema` has no spelling for at all —
+ * `embedding()` and any other `z.custom()`, `z.date()`, `z.set()`, `z.map()`,
+ * `z.bigint()`, a `.transform()` — where the persisted projection would
+ * collapse the whole kind to its placeholder instead. Such a node states
+ * nothing to compare, so it is accepted without a verdict while every other
+ * node of the pair is still judged. Written only by
+ * `structuralSubtypeProjection` (`./structural-subtype-projection`), never
+ * into a persisted document.
+ */
+export const UNPROJECTABLE_NODE_KEYWORD = "x-typegraph-unprojectable";
+
 const SUBTYPE: StructuralSubtypeResult = { verdict: "subtype" };
 
 // ============================================================
@@ -686,6 +704,13 @@ function compareSchemas(
   // trivially compatible, property.
   if (
     sameSchema(stripSchemaMetadata(child), stripSchemaMetadata(parent), walk)
+  ) {
+    return SUBTYPE;
+  }
+
+  if (
+    hasOwnKey(child, UNPROJECTABLE_NODE_KEYWORD) ||
+    hasOwnKey(parent, UNPROJECTABLE_NODE_KEYWORD)
   ) {
     return SUBTYPE;
   }

@@ -764,6 +764,8 @@ export function serializeSchemaProperties(schema: z.ZodType): JsonSchema {
  * placeholder, so it states nothing about the kind's properties: it is the
  * absence of a projection, in the persisted form documents have always
  * carried (changing that form would change every such graph's schema hash).
+ * A live graph's structural-subsumption check does not compare this form: it
+ * marks each unconvertible node on its own (`structuralSubtypeProjection`).
  *
  * A genuine projection is never mistaken for it, because Zod stamps every
  * converted schema with `$schema` — an empty `z.object({})` included.

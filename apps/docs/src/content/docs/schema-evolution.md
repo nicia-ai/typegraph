@@ -182,6 +182,7 @@ transaction, which TypeGraph cannot move to `READ COMMITTED`, is refused with
 | `inverseOf`, `implies`                        | Breaking                                            | Breaking                                            |
 | `partOf`, `hasPart`                           | Warning — checked against live parts (one whole per part, no cycles, and a required whole when `existence: "required"`) | Breaking |
 | `broader`, `narrower`, `relatedTo`            | Safe | Safe |
+| a custom meta-edge (from the removed `metaEdge()`) | Safe | Breaking — see [the upgrade guide](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis) |
 | an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
 | an edge's admitted endpoint pair              | Safe                                                | Warning — checked against live edges               |
 
@@ -508,24 +509,26 @@ accompanying ontology change — keeps loading the schema document unmodified
 and reports `status: "unchanged"`; no action is required for that case
 alone. **This does not mean every existing document is unaffected** — see
 the `metaEdge()` bullet immediately below for the one case where opening a
-store under this release rewrites the persisted document on its own.
+store under this release stops at a breaking change until you migrate.
 
-**If your code calls `metaEdge()`.** Delete the declaration, and **before
-upgrading**, copy any relation you actually rely on into `annotations` on
-`defineGraph()` — the custom `metaEdge()` factory is gone, so a graph that
-no longer declares the relation can no longer serialize it. The first
-`ensureSchema`/`createStoreWithSchema` call after upgrading auto-migrates:
-it classifies every one of the persisted document's relations naming your
-custom meta-edge as a `safe` removal (a custom name reaches no closure or
-write-path decision, so dropping it changes nothing the engine can
-observe) and commits a rewritten schema document with those relations
-gone — silently, with no opt-in and no warning. The only way to recover the
-dropped relation afterward is to read it back out of the now-inactive prior
-schema-version row. Move any other free-form metadata you attached (a
-custom `description`, or the `transitive`/`inference`/etc. properties you
-set) into `annotations` too, and update whatever application code walked
-`store.introspect().ontology` for that meta-edge's relations to instead walk
-the annotated data — see
+**If your code calls `metaEdge()`.** Delete the declaration and copy any
+relation you rely on into `annotations` on `defineGraph()`. The custom
+`metaEdge()` factory is gone, so a graph that no longer declares the relation
+can no longer serialize it, and the stored schema document holds its last
+copy. Removing such a relation is therefore classified `breaking`, so it
+never auto-migrates. The first `ensureSchema`/`createStoreWithSchema` call
+after upgrading throws `MigrationError`, or returns `status: "breaking"` with
+`throwOnBreaking: false`. Its migration actions include one entry naming
+every persisted relation that uses a custom meta-edge, and each such change
+in `diff.ontology` carries the relation in `removedCustomRelation`. Once
+those relations are in `annotations`, commit the new schema once with
+`migrateSchema(backend, graph, currentVersion)`. That commit drops them from
+the stored document, and later opens report `status: "unchanged"`. The prior
+schema-version row keeps the old document. Move any other free-form
+metadata you attached (a custom `description`, or the
+`transitive`/`inference`/etc. properties you set) into `annotations` too, and
+update whatever application code walked `store.introspect().ontology` for
+that meta-edge's relations to instead walk the annotated data — see
 [Type-Level Annotations](/ontology#type-level-annotations) for a worked
 example.
 
@@ -594,6 +597,8 @@ These require explicit handling:
 - Adding required properties (no default)
 - Renaming types or properties
 - Adding or removing an `inverseOf` or `implies` ontology relation
+- Removing a persisted relation that names a custom meta-edge (see
+  [Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis))
 
 TypeGraph will throw `MigrationError` by default. You have two options: fix
 the schema to be backwards compatible, or use the expand-contract pattern.
