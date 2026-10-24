@@ -1469,7 +1469,12 @@ export function registerCompositionAttachmentIntegrationTests(
       });
 
       expect(receipt.cascadedParts).toEqual([
-        { kind: "CaFolder", id: leaf.id },
+        {
+          kind: "CaFolder",
+          id: leaf.id,
+          whole: { kind: "CaFolder", id: child.id },
+          viaEdgeKind: "caParentFolder",
+        },
       ]);
       expect(await store.nodes.CaFolder.find({})).toEqual([]);
       expect(await store.edges.caParentFolder.find({})).toEqual([]);
@@ -1492,8 +1497,18 @@ export function registerCompositionAttachmentIntegrationTests(
       });
 
       expect(receipt.cascadedParts).toEqual([
-        { kind: "CaFolder", id: leaf.id },
-        { kind: "CaFolder", id: child.id },
+        {
+          kind: "CaFolder",
+          id: leaf.id,
+          whole: { kind: "CaFolder", id: child.id },
+          viaEdgeKind: "caParentFolder",
+        },
+        {
+          kind: "CaFolder",
+          id: child.id,
+          whole: { kind: "CaFolder", id: root.id },
+          viaEdgeKind: "caParentFolder",
+        },
       ]);
       expect(await store.nodes.CaFolder.find({})).toEqual([]);
     });

@@ -27,6 +27,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type CompositionCascadedPart,
   createStore,
   createStoreWithSchema,
   defineEdge,
@@ -75,6 +76,20 @@ const Tag = defineNode("Tag", { schema: emptySchema });
 const episodeOf = defineEdge("episodeOf", { schema: emptySchema });
 const segmentOf = defineEdge("segmentOf", { schema: emptySchema });
 const taggedWith = defineEdge("taggedWith", { schema: emptySchema });
+
+/** One expected `cascadedParts` entry: the part, its immediate whole, and the binding edge kind. */
+function cascadedPart(
+  part: Readonly<{ kind: string; id: string }>,
+  whole: Readonly<{ kind: string; id: string }>,
+  viaEdgeKind: string,
+): CompositionCascadedPart {
+  return {
+    kind: part.kind,
+    id: part.id,
+    whole: { kind: whole.kind, id: whole.id },
+    viaEdgeKind,
+  };
+}
 
 function buildPodcastGraph(id: string) {
   return defineGraph({
@@ -327,9 +342,17 @@ describe("planCompositionCascade", () => {
     // The plan's order IS the reported order: the receipt is a projection of
     // it, never a second walk. (Same MUTATION as the test above.)
     expect(receipt.cascadedParts).toEqual([
-      { kind: "Segment", id: "receipt-order-a" },
-      { kind: "Segment", id: "receipt-order-b" },
-      { kind: "Episode", id: "receipt-order-episode" },
+      cascadedPart(
+        { kind: "Segment", id: "receipt-order-a" },
+        episode,
+        "segmentOf",
+      ),
+      cascadedPart(
+        { kind: "Segment", id: "receipt-order-b" },
+        episode,
+        "segmentOf",
+      ),
+      cascadedPart(episode, podcast, "episodeOf"),
     ]);
 
     // The consumed composition EDGE rows are deleted in one agreed order too —
@@ -1194,9 +1217,12 @@ describe("composition cascade — cascadedParts exposure", () => {
     // MUTATION: drop `operationFacts: nodeDeleteOperationFacts` from
     // `executeNodeDelete`'s write-plan options
     // (src/store/operations/node-operations.ts) and this becomes undefined.
+    // MUTATION: project only `{ kind, id }` in `cascadedPartReferences`
+    // (src/store/operations/composition-cascade.ts) and the `whole` /
+    // `viaEdgeKind` of each entry go missing here.
     expect(endContext.cascadedParts).toEqual([
-      { kind: "Segment", id: segment.id },
-      { kind: "Episode", id: episode.id },
+      cascadedPart(segment, episode, "segmentOf"),
+      cascadedPart(episode, podcast, "episodeOf"),
     ]);
     // The START context cannot carry them: the cascade has not been planned.
     expect(requireDefined(started[0]).cascadedParts).toBeUndefined();
@@ -1237,8 +1263,8 @@ describe("composition cascade — cascadedParts exposure", () => {
     });
 
     expect(receipt.cascadedParts).toEqual([
-      { kind: "Segment", id: segment.id },
-      { kind: "Episode", id: episode.id },
+      cascadedPart(segment, episode, "segmentOf"),
+      cascadedPart(episode, podcast, "episodeOf"),
     ]);
     // The cascade is NOT folded into the write counters: one caller-issued
     // delete stays one write intent.
@@ -1275,9 +1301,9 @@ describe("composition cascade — cascadedParts exposure", () => {
 
     // Leaf-first within each item, items in the batch's own order.
     expect(receipt.cascadedParts).toEqual([
-      { kind: "Segment", id: firstSegment.id },
-      { kind: "Episode", id: firstEpisode.id },
-      { kind: "Episode", id: secondEpisode.id },
+      cascadedPart(firstSegment, firstEpisode, "segmentOf"),
+      cascadedPart(firstEpisode, first, "episodeOf"),
+      cascadedPart(secondEpisode, second, "episodeOf"),
     ]);
     await expect(
       store.nodes.Segment.getById(firstSegment.id),
@@ -1323,13 +1349,13 @@ describe("composition cascade — cascadedParts exposure", () => {
     );
 
     expect(result.receipt.cascadedParts).toEqual([
-      { kind: "Episode", id: measuredEpisode.id },
+      cascadedPart(measuredEpisode, measured, "episodeOf"),
     ]);
     expect(result.receipt.writes.nodes).toEqual({ Podcast: 1 });
     // The outer receipt sees both cascades, in the order they ran.
     expect(receipt.cascadedParts).toEqual([
-      { kind: "Episode", id: measuredEpisode.id },
-      { kind: "Episode", id: outerEpisode.id },
+      cascadedPart(measuredEpisode, measured, "episodeOf"),
+      cascadedPart(outerEpisode, outer, "episodeOf"),
     ]);
   });
 
@@ -1362,10 +1388,10 @@ describe("composition cascade — cascadedParts exposure", () => {
     );
 
     expect(result.receipt.cascadedParts).toEqual([
-      { kind: "Episode", id: episode.id },
+      cascadedPart(episode, podcast, "episodeOf"),
     ]);
     expect(receipt.cascadedParts).toEqual([
-      { kind: "Episode", id: episode.id },
+      cascadedPart(episode, podcast, "episodeOf"),
     ]);
   });
 
@@ -1393,7 +1419,7 @@ describe("composition cascade — cascadedParts exposure", () => {
 
     expect(result.receipt.cascadedParts).toEqual([]);
     expect(receipt.cascadedParts).toEqual([
-      { kind: "Episode", id: episode.id },
+      cascadedPart(episode, podcast, "episodeOf"),
     ]);
   });
 

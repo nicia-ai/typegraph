@@ -53,6 +53,7 @@ import {
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
   type NodeCreateOptions,
+  type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
   type NodeReparentOptions,
@@ -317,6 +318,11 @@ export type NodeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeletePlan: (
+    kind: string,
+    id: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByConstraint: (
@@ -455,6 +461,7 @@ export function createNodeCollection<
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
+    executeDeletePlan: executeNodeDeletePlan,
     temporalRowMatcher,
     createQuery,
     executeGetOrCreateByConstraint,
@@ -756,6 +763,10 @@ export function createNodeCollection<
 
     async hardDelete(id: NodeId<N>): Promise<void> {
       await executeNodeHardDelete(kind, id, backend);
+    },
+
+    async planDelete(id: NodeId<N>): Promise<NodeDeletePlan | undefined> {
+      return executeNodeDeletePlan(kind, id, backend);
     },
 
     async find(

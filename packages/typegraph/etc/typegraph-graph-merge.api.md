@@ -1230,6 +1230,12 @@ Via
 ] extends [AnyEdgeType] ? z.input<Via["schema"]> : Record<string, unknown>;
 
 // @public
+type CompositionCascadedPart = CompositionNodeRef & Readonly<{
+    whole: CompositionNodeRef;
+    viaEdgeKind: string;
+}>;
+
+// @public
 type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
@@ -1585,7 +1591,7 @@ type CreateVectorIndexParams = Readonly<{
 }>;
 
 // @public
-const CURRENT_ONLY_READ_NAMES: readonly ["findByConstraint", "bulkFindByConstraint", "bulkFindByIndex"];
+const CURRENT_ONLY_READ_NAMES: readonly ["findByConstraint", "bulkFindByConstraint", "bulkFindByIndex", "planDelete"];
 
 // @public
 const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
@@ -5877,7 +5883,7 @@ type Node<N extends NodeType = NodeType> = Readonly<{
 }> & Readonly<z.infer<N["schema"]>>;
 
 // @public (undocumented)
-const NODE_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findByConstraint", "bulkFindByConstraint", "bulkFindByIndex"];
+const NODE_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findByConstraint", "bulkFindByConstraint", "bulkFindByIndex", "planDelete"];
 
 // @public
 const NODE_TYPE_BRAND: "__nodeType";
@@ -5959,6 +5965,7 @@ type NodeCollection<N extends NodeType, CN extends string = string, WholeKind ex
     }>[]) => Promise<readonly NodeReparentResult<Via>[]>;
     delete: (id: NodeId<N>) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
+    planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
     find: (filter?: Readonly<{
         where?: (accessor: NodeAccessor<N>) => Predicate;
         limit?: number;
@@ -6044,6 +6051,12 @@ type NodeCreateOptions<Via extends CompositionViaRef | undefined = CompositionVi
 
 // @public
 type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
+
+// @public
+type NodeDeletePlan = Readonly<{
+    cascadedParts: readonly CompositionCascadedPart[];
+    removedEdgeIds: readonly string[];
+}>;
 
 // @public
 type NodeDeletePolicy = Readonly<{
@@ -6443,7 +6456,7 @@ type OperationHookContext = HookContext & OperationOutcomeFacts & Readonly<{
 
 // @public
 type OperationOutcomeFacts = Readonly<{
-    cascadedParts?: readonly CompositionNodeRef[];
+    cascadedParts?: readonly CompositionCascadedPart[];
 }>;
 
 // @public
@@ -9007,7 +9020,7 @@ type TransactionReceipt = Readonly<{
         identity: IdentityWriteSummary;
         total: number;
     }>;
-    cascadedParts: readonly CompositionNodeRef[];
+    cascadedParts: readonly CompositionCascadedPart[];
     recorded?: RecordedInstant;
 }>;
 

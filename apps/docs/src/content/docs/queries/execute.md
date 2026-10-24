@@ -260,7 +260,10 @@ const employeesPage = await store
 `paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
 `parts()` or `wholes()`) with a `ConfigurationError` whose `details.code` is
 `RECURSIVE_PAGINATION_UNSUPPORTED`. The refusal is the same on every backend and happens before
-any statement runs, including for a traversal bounded to a single hop.
+any statement runs, including for `recursive({ maxHops: 1 })`. `parts()` and `wholes()` with
+`maxHops: 1` and neither `depth` nor `path` are the exception: they compile to a fixed one-hop step,
+not a recursive one, so they page and stream like `traverse()`. See
+[Paging direct parts](/queries/recursive#paging-direct-parts).
 
 A recursive traversal fans one start node out into rows that have no single edge to extend the
 start node's keys with, so a cursor can only name the start node. The next page would resume after

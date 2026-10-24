@@ -1401,6 +1401,14 @@
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "QueryBuilder",
     "member": "parts",
     "kind": "required-member-added",
@@ -2041,6 +2049,14 @@
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
     "declaration": "QueryBuilder",
     "member": "parts",
     "kind": "required-member-added",
@@ -2681,6 +2697,14 @@
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "QueryBuilder",
     "member": "parts",
     "kind": "required-member-added",
@@ -3321,6 +3345,14 @@
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
     "declaration": "QueryBuilder",
     "member": "parts",
     "kind": "required-member-added",
@@ -3957,6 +3989,14 @@
     "member": "bulkReparent",
     "kind": "required-member-added",
     "reason": "`NodeCollection` is built by the library (`createStore`); it gains `bulkReparent`, which runs `reparent` for many parts in one transaction. The changeset tells a hand-written implementation of the interface to add both `reparent` and `bulkReparent`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
     "issue": "#637"
   },
   {
@@ -4897,6 +4937,14 @@
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "QueryBuilder",
     "member": "parts",
     "kind": "required-member-added",
@@ -5609,6 +5657,14 @@
   },
   {
     "entrypoint": "typegraph.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
     "declaration": "QueryBuilder",
     "member": "parts",
     "kind": "required-member-added",
@@ -6245,6 +6301,14 @@
     "member": "bulkReparent",
     "kind": "required-member-added",
     "reason": "`NodeCollection` is built by the library (`createStore`); it gains `bulkReparent`, which runs `reparent` for many parts in one transaction. The changeset tells a hand-written implementation of the interface to add both `reparent` and `bulkReparent`. Declared in .changeset/composition.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "NodeCollection",
+    "member": "planDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`); it gains `planDelete`, which reads the delete's own plan with every write skipped. The changeset tells a hand-written implementation of the interface to add `reparent`, `bulkReparent` and `planDelete`. Declared in .changeset/composition.md.",
     "issue": "#637"
   },
   {

@@ -1059,6 +1059,12 @@ Via
 ] extends [AnyEdgeType] ? z.input<Via["schema"]> : Record<string, unknown>;
 
 // @public
+export type CompositionCascadedPart = CompositionNodeRef & Readonly<{
+    whole: CompositionNodeRef;
+    viaEdgeKind: string;
+}>;
+
+// @public
 export type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
@@ -1833,7 +1839,7 @@ SchemaValidationResult
 export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 
 // @public
-const CURRENT_ONLY_READ_NAMES: readonly ["findByConstraint", "bulkFindByConstraint", "bulkFindByIndex"];
+const CURRENT_ONLY_READ_NAMES: readonly ["findByConstraint", "bulkFindByConstraint", "bulkFindByIndex", "planDelete"];
 
 // @public
 const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
@@ -6619,6 +6625,7 @@ export type NodeCollection<N extends NodeType, CN extends string = string, Whole
     }>[]) => Promise<readonly NodeReparentResult<Via>[]>;
     delete: (id: NodeId<N>) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
+    planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
     find: (filter?: Readonly<{
         where?: (accessor: NodeAccessor<N>) => Predicate;
         limit?: number;
@@ -6719,6 +6726,12 @@ export type NodeCreateOptions<Via extends CompositionViaRef | undefined = Compos
 
 // @public
 export type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
+
+// @public
+export type NodeDeletePlan = Readonly<{
+    cascadedParts: readonly CompositionCascadedPart[];
+    removedEdgeIds: readonly string[];
+}>;
 
 // @public
 type NodeDeletePolicy = Readonly<{
@@ -7218,7 +7231,7 @@ export type OperationHookContext = HookContext & OperationOutcomeFacts & Readonl
 
 // @public
 type OperationOutcomeFacts = Readonly<{
-    cascadedParts?: readonly CompositionNodeRef[];
+    cascadedParts?: readonly CompositionCascadedPart[];
 }>;
 
 // @public
@@ -10087,7 +10100,7 @@ export type TransactionReceipt = Readonly<{
         identity: IdentityWriteSummary;
         total: number;
     }>;
-    cascadedParts: readonly CompositionNodeRef[];
+    cascadedParts: readonly CompositionCascadedPart[];
     recorded?: RecordedInstant;
 }>;
 

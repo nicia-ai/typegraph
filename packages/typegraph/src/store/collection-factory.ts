@@ -40,6 +40,7 @@ import {
   type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeReparentOptions,
   type NodeReparentResult,
@@ -144,6 +145,11 @@ export type NodeOperations = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeletePlan: (
+    kind: string,
+    id: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByConstraint: (

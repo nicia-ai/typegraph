@@ -239,6 +239,9 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 one start node fans out into. Use `execute()` with an explicit `limit()` or `maxHops`, or page the
 start nodes in a non-recursive query and run the walk for each page. See
 [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated).
+`parts()` and `wholes()` with `maxHops: 1` and neither `depth` nor `path` are not recursive: they
+compile to a fixed one-hop step, so they page and stream. See
+[Paging direct parts](/queries/recursive#paging-direct-parts).
 
 ## Composition Cascade
 
@@ -267,12 +270,13 @@ are not what happens:
   cascaded part delete runs through its own node-delete pipeline but is not
   itself a caller-issued operation, so `onOperationEnd` fires exactly once —
   for the whole's delete, not once per part. It does not leave you guessing
-  which parts went: that hook's context carries `cascadedParts` (`{ kind, id }`
-  refs taken from the plan the cascade executed, leaf-first and then ordered
-  deterministically by kind, then id, within one level of the closure, so the list
-  is the same on every run and every backend), and a
-  `store.transactionWithReceipt` receipt carries the same refs for every
-  cascade in the transaction. `onOperationStart` never carries them — the
+  which parts went: that hook's context carries `cascadedParts` (one
+  `{ kind, id, whole, viaEdgeKind }` entry per part, naming the whole it was
+  directly a part of and the edge kind that bound it, taken from the plan the
+  cascade executed, leaf-first and then ordered deterministically by kind,
+  then id, within one level of the closure, so the list is the same on every
+  run and every backend), and a `store.transactionWithReceipt` receipt
+  carries the same entries for every cascade in the transaction. `onOperationStart` never carries them — the
   cascade has not been planned when the operation begins.
 - **A PostgreSQL `REPEATABLE READ` or `SERIALIZABLE` whole delete can fail
   with a serialization failure.** The parts closure is read under the
@@ -292,42 +296,36 @@ are not what happens:
   commit while a delete, direct or cascaded, is in flight. The delete
   releases the unique keys of the props the row holds once it is tombstoned,
   so the key such an update moved the node to is released with it.
-- **There is no cascade PREVIEW API in this release.** `cascadedParts` reports
-  what a delete removed, after the fact. To decide *before* deleting, read
-  the closure yourself with
-  [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
-  which APPROXIMATES the closure — it is not the cascade's own verdict. A
-  composition row's window never starts or ends later than its write, so an
-  open-ended row is a membership for both and the two differ only in how
-  they read ENDED rows. The subgraph walk runs in the read's temporal mode
-  (current, unless the read is pinned), so a current read does not follow a
-  `population: "one"` composition edge whose validity window was ended; the
-  cascade does, because a `one` binding holds for the row's whole life. An
-  optional part attached through such a row is therefore deleted by the
-  cascade without appearing in the preview. Reading with
-  `temporalMode: "includeEnded"` follows those rows, and then also follows an
-  ended `population: "oneActive"` row — the history a `reparent` leaves
-  behind, which the cascade does not follow — so that preview can be wider
-  instead. Gate a destructive action on a current preview only for pairs you
-  know carry no ended `one` rows, and on an `includeEnded` preview only for
-  pairs with no `oneActive` history.
-- **A subgraph result is keyed by node id.** The preview's closure walk
+- **`subgraph({ composition: true })` is an export, not a delete preview.**
+  [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier)
+  returns the owned unit as a read sees it, in the read's temporal mode
+  (current, unless the read is pinned). The cascade admits each composition
+  row by its pair's population instead. A composition row's window never
+  starts or ends later than its write, so an open-ended row is a membership
+  for both, and the two differ only in how they treat ENDED rows. The
+  cascade follows an ended `population: "one"` row, because a `one` binding
+  holds for the row's whole life, and a current read does not. It does not
+  follow an ended `population: "oneActive"` row, the history a `reparent`
+  leaves behind, and an `includeEnded` read does. So the export can name
+  fewer or more parts than a delete removes. To know what a delete will do,
+  use [`planDelete`](#previewing-a-delete).
+- **A subgraph result is keyed by node id.** The export's closure walk
   follows each edge from the `(kind, id)` it reached, exactly as the cascade
   does, but `subgraph()` returns one node per id: where a node of the unit
   shares its id with a node of another kind, the result holds only one of
   the two, and a root id held by two kinds walks the unit of the kind that
   sorts first by code point. Give composition parts ids that are unique
-  across kinds when you rely on the preview.
+  across kinds when you rely on the export.
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`
 another `Section`, for example), so a kind-level depth bound cannot cap
 instance depth. The same holds for the `subgraph({ composition: true })`
-preview above: its composition closure has no hop ceiling and never returns a
+export above: its composition closure has no hop ceiling and never returns a
 truncated unit — a part chain of any length comes back whole, and an engine
 that cuts the closure statement short refuses with a `ConfigurationError`
 (`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached
-(the read's temporal mode, described above, is what separates the preview from
+(the read's temporal mode, described above, is what separates the export from
 the cascade). The write path refuses an INSTANCE-level cycle (the
 composition union's acyclicity fence), so one only survives in rows written
 before the pair was declared, by trusted import, or by direct SQL; deleting
@@ -335,6 +333,41 @@ any node in such a cycle throws `CompositionCycleError` (see
 [Errors](/errors#compositioncycleerror)) rather than looping. Break the cycle
 by hand (delete or reassign one of the composition edges that closes it)
 before the affected nodes can be deleted.
+
+### Previewing a delete
+
+`nodes.<Kind>.planDelete(id)` answers what `delete(id)` would do, computed by
+the planner the delete itself runs, with every write skipped. It returns
+`{ cascadedParts, removedEdgeIds }`: the parts the cascade would delete, in
+the shape and order the delete reports them as `cascadedParts`, and the ids
+of every edge the delete would remove. It returns `undefined` for a node that
+is absent or already deleted, where `delete(id)` is a no-op. A delete the
+planner refuses is refused by `planDelete` with the same error, such as
+`RestrictedDeleteError` for an `onDelete: "restrict"` node or part that still
+has an ordinary edge. A `hardDelete(id)` of a live node cascades through the
+same parts.
+
+Call it on the transaction's collections when the decision must hold:
+
+```typescript
+await store.transaction(async (tx) => {
+  const plan = await tx.nodes.Podcast.planDelete(podcast.id);
+  if (plan === undefined) return;
+  if (plan.cascadedParts.length > 100) {
+    throw new Error(`refusing to delete ${plan.cascadedParts.length} parts`);
+  }
+  await tx.nodes.Podcast.delete(podcast.id);
+});
+```
+
+`tx.nodes.<Kind>.planDelete` reads the plan under the per-graph write lock
+the delete takes and keeps it until the transaction ends, so no concurrent
+attach or reparent can add a part between the preview and the delete. Writes
+that take no per-graph lock can still change the outcome: a part detached or
+deleted concurrently drops out of the delete's cascade, and an ordinary edge
+created concurrently changes `removedEdgeIds` or a restrict verdict. On the
+store's collections, `store.nodes.<Kind>.planDelete` is an unlocked read and
+only a best-effort answer. Neither form writes a row.
 
 ## Composition Existence (`existence: "required"`)
 

@@ -14,7 +14,7 @@ import type {
 } from "./collection-surface";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
-  CompositionNodeRef,
+  CompositionCascadedPart,
   EdgeWrites,
   GraphEdgeCollections,
   GraphNodeCollections,
@@ -89,7 +89,7 @@ export type TransactionReceiptRecorder = Readonly<{
    * work (`node-operations.ts`), which is the only place the cascade plan
    * exists.
    */
-  recordCascadedParts: (parts: readonly CompositionNodeRef[]) => void;
+  recordCascadedParts: (parts: readonly CompositionCascadedPart[]) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -190,7 +190,7 @@ interface WriteCounters {
   readonly identity: { -readonly [K in keyof IdentityWriteSummary]: number };
   total: number;
   /** Appended in delete order; each entry is one cascade's leaf-first closure. */
-  readonly cascadedParts: CompositionNodeRef[];
+  readonly cascadedParts: CompositionCascadedPart[];
 }
 
 export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {

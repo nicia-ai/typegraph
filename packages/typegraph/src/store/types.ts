@@ -188,6 +188,45 @@ export type Node<N extends NodeType = NodeType> = Readonly<{
 export type CompositionNodeRef = Readonly<{ kind: string; id: string }>;
 
 /**
+ * One part a composition whole's delete cascades through: the part itself, the
+ * whole it was directly a part of, and the composition edge kind that bound the
+ * two. Walking a cascade's list in reverse and re-creating each part with
+ * `partOf: { whole, via: viaEdgeKind }` rebuilds the tree; the composition
+ * edges' own props are not carried.
+ */
+export type CompositionCascadedPart = CompositionNodeRef &
+  Readonly<{
+    /**
+     * The part's own immediate whole: the deleted node for a direct part, an
+     * intermediate part for one deeper in the closure.
+     */
+    whole: CompositionNodeRef;
+    /** The composition edge kind that realized this part's membership. */
+    viaEdgeKind: string;
+  }>;
+
+/**
+ * What `nodes.<Kind>.delete(id)` would do to a live node, computed by the same
+ * planner the delete runs and with every write skipped. See
+ * {@link NodeCollection.planDelete}.
+ */
+export type NodeDeletePlan = Readonly<{
+  /**
+   * The parts the delete would cascade through, in the order the delete would
+   * report them as `cascadedParts`: leaf-first, then by kind, then id, within
+   * one level of the closure. Empty for a node with no live parts.
+   */
+  cascadedParts: readonly CompositionCascadedPart[];
+  /**
+   * Every edge the delete would remove, sorted by id: the composition edges
+   * the cascade consumes, and the edges each deleted node's `onDelete`
+   * (`cascade` / `disconnect`, or a `restrict` node's composition edges)
+   * removes alongside it.
+   */
+  removedEdgeIds: readonly string[];
+}>;
+
+/**
  * The edge that holds a part after an attachment write.
  *
  * Not a schema-typed {@link Edge}: the realizing kind is chosen at runtime
@@ -500,9 +539,11 @@ export type QueryHookContext = HookContext &
  */
 export type OperationOutcomeFacts = Readonly<{
   /**
-   * The composition parts a whole's delete cascaded through, as `{ kind, id }`
-   * refs in the cascade's own delete order: LEAF-FIRST — every part before the
-   * whole it belongs to — and then a deterministic order by kind, then id,
+   * The composition parts a whole's delete cascaded through, each with the
+   * whole it was directly a part of and the edge kind that bound it
+   * ({@link CompositionCascadedPart}), in the cascade's own delete order:
+   * LEAF-FIRST — every part before the whole it belongs to — and then a
+   * deterministic order by kind, then id,
    * within one level of the closure. Two sibling parts of one whole have no order
    * between them to respect, so they are sorted rather than left in the order
    * the cascade's reads returned them, which makes this list comparable for
@@ -517,7 +558,7 @@ export type OperationOutcomeFacts = Readonly<{
    * outright) and on every non-delete operation. So "did a cascade happen"
    * is the array's CONTENTS, never its presence.
    */
-  cascadedParts?: readonly CompositionNodeRef[];
+  cascadedParts?: readonly CompositionCascadedPart[];
 }>;
 
 /**
@@ -932,7 +973,7 @@ export type TransactionReceipt = Readonly<{
    * alone), so it is reported as refs beside the counters rather than folded
    * into them.
    */
-  cascadedParts: readonly CompositionNodeRef[];
+  cascadedParts: readonly CompositionCascadedPart[];
   /**
    * The recorded commit instant allocated for this store's graph by this
    * transaction. Under TypeGraph-owned capture, an explicit
@@ -1374,6 +1415,32 @@ export type NodeCollection<
    * @throws Error if edges are still connected to this node (delete edges first)
    */
   hardDelete: (id: NodeId<N>) => Promise<void>;
+
+  /**
+   * Plans `delete(id)` without writing: the parts its composition cascade
+   * would delete and the edges it would remove, decided by the same planner
+   * the delete runs. `undefined` when the node is absent or already deleted,
+   * where `delete(id)` is a no-op.
+   *
+   * A delete the planner refuses is refused here with the same error the
+   * delete throws (`RestrictedDeleteError` for an `onDelete: "restrict"` node,
+   * or a cascaded part, that still has an ordinary edge;
+   * `CompositionCycleError` for a cycle in the stored parts), so a preview is
+   * read exactly like the delete it previews.
+   *
+   * On a transaction's collections (`tx.nodes.<Kind>.planDelete`), the plan
+   * is read under the same per-graph write lock the delete takes and holds it
+   * until the transaction ends, so no concurrent attach or reparent can add a
+   * part before a `delete(id)` later in the same transaction. Writes that take
+   * no per-graph lock still can change the answer: a concurrent detach or
+   * part delete drops that part from the later delete's cascade, and a
+   * concurrent ordinary edge changes `removedEdgeIds` or a restrict verdict.
+   * On the store's collections the plan is an unlocked, best-effort read.
+   *
+   * Either form writes no row. The transactional form issues only the lock
+   * statements the delete itself would.
+   */
+  planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
 
   /**
    * Find nodes matching criteria.
@@ -2299,9 +2366,9 @@ export type NodeTemporalReads<
 > = Pick<NodeCollection<N, CN>, (typeof NODE_TEMPORAL_READ_NAMES)[number]>;
 
 /**
- * Current-state-only node reads (constraint / index lookups). No temporal
- * axis, so a {@link StoreView} delegates them on a `current` pin and refuses
- * them on a temporal pin.
+ * Current-state-only node reads (constraint / index lookups, delete plans).
+ * No temporal axis, so a {@link StoreView} delegates them on a `current` pin
+ * and refuses them on a temporal pin.
  */
 export type NodeCurrentReads<
   N extends NodeType,
