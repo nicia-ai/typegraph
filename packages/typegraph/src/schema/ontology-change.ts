@@ -46,7 +46,9 @@
  * name), so the stored document holds the application's last copy of it,
  * and dropping that copy must wait for an explicit `migrateSchema()` after
  * the relation is moved into `defineGraph({ annotations })`. The change
- * names the relation in `removedCustomRelation` for `getMigrationActions`.
+ * names the relation in `removedCustomRelation` for `getMigrationActions`
+ * and for the store verbs that commit without `ensureSchema`, which refuse
+ * the drop (`assertNoRemovedCustomRelations`).
  *
  * `inverseOf` / `implies` change default traversal results (`expand:
  * "inverse"` / `expand: "implying"`), which is a read-semantics change; the
@@ -277,9 +279,11 @@ export type OntologyChange = Readonly<{
    * one a custom `metaEdge()` declared before that factory was removed: the
    * relation as written, such as `governs(Team, Project)`. The removal is
    * `breaking` because the stored document holds the last copy of a relation
-   * the graph can no longer declare. Move it into
-   * `defineGraph({ annotations })`, then commit with `migrateSchema()`;
-   * `getMigrationActions` lists every such relation.
+   * the graph can no longer declare; a relation dropped alongside a kind it
+   * names stays `safe` under the removed-kind rule but is still named here.
+   * Move it into `defineGraph({ annotations })`, then commit with
+   * `migrateSchema()`; `getMigrationActions` lists every such relation, and
+   * the store verbs that commit without `ensureSchema` refuse to drop one.
    */
   removedCustomRelation?: string;
 }>;
@@ -982,7 +986,14 @@ function classifyRelation(
   // `Company` rows the removal itself reclaims. Same reasoning as
   // `migrateSchema`'s dropped-kind handling. What the removal costs a
   // SURVIVING kind is not decided here: `edgeEndpointAdmissionLosses`
-  // reports it, and `classifyOntologyChanges` attaches the probe.
+  // reports it, and `classifyOntologyChanges` attaches the probe. A custom
+  // relation dropped this way is still named, since the stored document
+  // holds its last copy whatever happens to the kind.
+  const classified = classifyRelationSeverity(direction, relation);
+  const removedCustomRelation =
+    classified.removedCustomRelation === undefined ?
+      {}
+    : { removedCustomRelation: classified.removedCustomRelation };
   if (
     context.removedKindNames.has(relation.from) ||
     context.removedKindNames.has(relation.to)
@@ -993,10 +1004,10 @@ function classifyRelation(
       name,
       severity: "safe",
       details: `Relation ${relationDescription(relation)} was ${verb} alongside a removed kind`,
+      ...removedCustomRelation,
     };
   }
 
-  const classified = classifyRelationSeverity(direction, relation);
   const probes = classified.probeKinds.map((kind) =>
     buildProbe(kind, context, relation),
   );
@@ -1010,9 +1021,7 @@ function classifyRelation(
       classified.details ??
       `Relation ${relationDescription(relation)} was ${verb}`,
     ...(probes.length > 0 ? { probes } : {}),
-    ...(classified.removedCustomRelation === undefined ?
-      {}
-    : { removedCustomRelation: classified.removedCustomRelation }),
+    ...removedCustomRelation,
   };
 }
 

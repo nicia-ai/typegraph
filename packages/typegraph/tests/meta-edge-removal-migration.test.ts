@@ -18,7 +18,9 @@
  * - "custom meta-edge dropped": a persisted relation naming a custom
  *   meta-edge is the last copy of a relation the graph can no longer
  *   declare, so its removal is breaking, names the relation, and commits
- *   only through an explicit `migrateSchema()`.
+ *   only through an explicit `migrateSchema()`. `store.evolve()`,
+ *   `store.planEvolution()` and `store.removeKinds()`, which commit without
+ *   `ensureSchema`'s severity gate, refuse it before writing anything.
  *
  * The `describe` blocks that call `computeSchemaDiff` and
  * `deserializeSchema` directly test the classification math in isolation.
@@ -31,12 +33,14 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   defineGraph,
   defineNode,
   equivalentTo,
   type GraphBackend,
 } from "../src";
 import { MigrationError } from "../src/errors";
+import { defineGraphExtension } from "../src/graph-extension";
 import { deserializeSchema } from "../src/schema/deserializer";
 import {
   ensureSchema,
@@ -280,6 +284,37 @@ describe("dropping a relation that names a custom meta-edge is breaking", () => 
   });
 });
 
+describe("dropping a custom-meta-edge relation alongside a kind it names", () => {
+  it("still names the relation in the migration action, though the removed-kind rule keeps it safe", () => {
+    const before: SerializedSchema = {
+      ...createSchema({
+        metaEdges: { governs: { name: "governs", description: undefined } },
+        relations: [{ metaEdge: "governs", from: "A", to: "X" }],
+        closures: EMPTY_CLOSURES,
+      }),
+      nodes: { A: nodeDef("A"), B: nodeDef("B"), X: nodeDef("X") },
+    };
+    const after = createSchema({
+      metaEdges: {},
+      relations: [],
+      closures: EMPTY_CLOSURES,
+    });
+
+    const diff = computeSchemaDiff(before, after);
+
+    expect(diff.ontology).toEqual([
+      expect.objectContaining({
+        type: "removed",
+        severity: "safe",
+        removedCustomRelation: "governs(A, X)",
+      }),
+    ]);
+    expect(getMigrationActions(diff)).toContainEqual(
+      expect.stringContaining("MOVE custom ontology relations governs(A, X)"),
+    );
+  });
+});
+
 describe("ensureSchema against a persisted pre-removal document", () => {
   const A = defineNode("A", { schema: z.object({}) });
   const B = defineNode("B", { schema: z.object({}) });
@@ -417,5 +452,156 @@ describe("ensureSchema against a persisted pre-removal document", () => {
 
     const result = await ensureSchema(backend, migratedGraph);
     expect(result.status).toBe("migrated");
+  });
+});
+
+async function refusal(promise: Promise<unknown>): Promise<MigrationError> {
+  const outcome = await promise.then(
+    (value: unknown) => ({ resolved: value }),
+    (error: unknown) => error,
+  );
+  console.log("custom relation refusal:", outcome);
+  expect(outcome).toBeInstanceOf(MigrationError);
+  return outcome as MigrationError;
+}
+
+describe("store verbs that commit without ensureSchema refuse to drop a persisted custom-meta-edge relation", () => {
+  const A = defineNode("A", { schema: z.object({}) });
+  const B = defineNode("B", { schema: z.object({}) });
+
+  const baseGraph = defineGraph({
+    id: "meta-edge-removal-store-verbs",
+    nodes: { A: { type: A }, B: { type: B } },
+    edges: {},
+  });
+
+  const documentExtension = defineGraphExtension({
+    nodes: { Doc: { properties: { title: { type: "string" } } } },
+  });
+
+  // An earlier process committed `ontology` on top of whatever the active
+  // document holds (its extension included), as pre-removal code would have.
+  async function persistCustomRelations(
+    backend: GraphBackend,
+    ontology: SerializedOntology,
+  ): Promise<number> {
+    const row = requireDefined(await backend.getActiveSchema(baseGraph.id));
+    const version = row.version + 1;
+    const document: SerializedSchema = {
+      ...parseSerializedSchema(row.schema_doc),
+      version,
+      ontology,
+    };
+    await backend.commitSchemaVersion({
+      graphId: baseGraph.id,
+      expected: { kind: "active", version: row.version },
+      version,
+      schemaHash: await computeSchemaHash(document),
+      schemaDoc: document,
+    });
+    return version;
+  }
+
+  async function activeRelations(
+    backend: GraphBackend,
+  ): Promise<Readonly<{ version: number; relations: readonly string[] }>> {
+    const row = requireDefined(await backend.getActiveSchema(baseGraph.id));
+    return {
+      version: row.version,
+      relations: parseSerializedSchema(row.schema_doc).ontology.relations.map(
+        (relation) => `${relation.metaEdge}(${relation.from}, ${relation.to})`,
+      ),
+    };
+  }
+
+  it("store.evolve() on a store createStoreWithSchema opened despite the breaking status refuses and commits nothing", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+    await persistCustomRelations(backend, CUSTOM_RELATIONS_ONTOLOGY);
+    const [store, opened] = await createStoreWithSchema(baseGraph, backend, {
+      throwOnBreaking: false,
+    });
+    expect(opened.status).toBe("breaking");
+
+    const error = await refusal(store.evolve(documentExtension));
+
+    expect(error.details).toEqual({
+      graphId: baseGraph.id,
+      fromVersion: 2,
+      toVersion: 3,
+      reason: "custom-relation-removal",
+      relations: ["governs(A, B)", "audits(B, A)"],
+    });
+    expect(error.message).toContain(
+      "MOVE custom ontology relations governs(A, B), audits(B, A)",
+    );
+    expect(await activeRelations(backend)).toEqual({
+      version: 2,
+      relations: ["governs(A, B)", "audits(B, A)"],
+    });
+    expect(store.getNodeCollection("Doc")).toBeUndefined();
+  });
+
+  it("store.planEvolution() on a plainly constructed store refuses before any apply", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+    await persistCustomRelations(backend, CUSTOM_RELATIONS_ONTOLOGY);
+    const store = createStore(baseGraph, backend);
+
+    const error = await refusal(store.planEvolution(documentExtension));
+
+    expect(error.details).toMatchObject({
+      reason: "custom-relation-removal",
+      relations: ["governs(A, B)", "audits(B, A)"],
+    });
+    expect(await activeRelations(backend)).toMatchObject({ version: 2 });
+  });
+
+  it("store.removeKinds() refuses, naming a relation on a surviving kind and one on the removed kind", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    await store.evolve(documentExtension);
+    const version = await persistCustomRelations(backend, {
+      metaEdges: {
+        governs: { name: "governs", description: undefined },
+        cites: { name: "cites", description: undefined },
+      },
+      relations: [
+        { metaEdge: "governs", from: "A", to: "B" },
+        { metaEdge: "cites", from: "A", to: "Doc" },
+      ],
+      closures: EMPTY_CLOSURES,
+    });
+
+    const error = await refusal(
+      createStore(baseGraph, backend).removeKinds(["Doc"]),
+    );
+
+    expect(error.details).toMatchObject({
+      reason: "custom-relation-removal",
+      fromVersion: version,
+      relations: ["governs(A, B)", "cites(A, Doc)"],
+    });
+    expect(await activeRelations(backend)).toEqual({
+      version,
+      relations: ["governs(A, B)", "cites(A, Doc)"],
+    });
+  });
+
+  it("store.evolve() commits once migrateSchema() has dropped the relations", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+    await persistCustomRelations(backend, CUSTOM_RELATIONS_ONTOLOGY);
+    await migrateSchema(backend, baseGraph, 2);
+
+    const evolved = await createStore(baseGraph, backend).evolve(
+      documentExtension,
+    );
+
+    expect(evolved.getNodeCollection("Doc")).toBeDefined();
+    expect(await activeRelations(backend)).toEqual({
+      version: 4,
+      relations: [],
+    });
   });
 });

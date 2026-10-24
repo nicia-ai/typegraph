@@ -12,7 +12,7 @@ import { canonicalEqual } from "./canonical";
 import { prepareNewSchemaVersion } from "./new-schema-version";
 import type { OntologyChange } from "./ontology-change";
 import {
-  prepareSchemaTighteningPreflight,
+  prepareStoreVerbSchemaTighteningPreflight,
   type SchemaTighteningPreflight,
 } from "./tightening-preflight";
 import type { SchemaHash, SchemaIdentity, SerializedSchema } from "./types";
@@ -246,7 +246,8 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   const addedKinds = newlyAddedKinds(existingExtension, extension);
   // Derived from the exact before/after documents this plan commits, the
   // same pair `Store.evolve()` hands the same preflight.
-  const schemaTightening = prepareSchemaTighteningPreflight({
+  const schemaTightening = prepareStoreVerbSchemaTighteningPreflight({
+    verb: "store.planEvolution()",
     graphId: baselineGraph.id,
     fromVersion: baselineVersion,
     toVersion: resultingVersion,

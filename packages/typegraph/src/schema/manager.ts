@@ -2186,7 +2186,8 @@ export async function isSchemaInitialized(
  *   subtype of its target — reported HERE, before an upgrade, rather than
  *   only at commit, and whether or not anything changed: the diff enforces
  *   the contract whenever the graph declares such a relation (see
- *   `computeSchemaDiff`'s own docblock).
+ *   `computeSchemaDiff`'s own docblock), and the live registry the commit
+ *   and `createStore` build judges a pair the stored document cannot.
  */
 export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,
@@ -2209,6 +2210,11 @@ export async function getSchemaChanges<G extends GraphDef>(
     storedSchema,
   );
   const diff = computeSchemaDiff(storedSchema, currentSchema);
+  // The diff judges subsumption from documents, which skip any pair holding a
+  // field JSON Schema cannot express. The commit path and `createStore` judge
+  // that pair field by field from the live graph, so the pre-flight builds the
+  // same live registry over the same merged graph and refuses what they do.
+  buildKindRegistry(merged);
 
   return diff.hasChanges ? diff : { ...diff, toVersion: diff.fromVersion };
 }

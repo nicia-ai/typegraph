@@ -575,6 +575,67 @@ describe("registry check — a field the projection cannot convert is accepted u
     ).toBeUndefined();
   });
 
+  // Zod also reports as unconvertible a fact of a node it otherwise converts:
+  // a dynamic `.catch()` keeps its inner `type` and loses only the catch. Such
+  // a node is compared as one carrying a Zod-only constraint, not accepted
+  // unjudged, so the `type` it still states is never skipped.
+  const dynamicCatchSides = {
+    child: {
+      child: () => z.number().catch((error) => Number(error.value)),
+      parent: () => z.string().min(5),
+    },
+    parent: {
+      child: () => z.number(),
+      parent: () => z.string().catch((error) => String(error.value)),
+    },
+  } as const;
+  for (const [side, fields] of Object.entries(dynamicCatchSides)) {
+    it(`refuses a pair whose ${side} field holds a dynamic .catch() over a different type`, () => {
+      const Parent = defineNode("Parent", {
+        schema: z.object({ name: fields.parent() }),
+      });
+      const Child = defineNode("Child", {
+        schema: z.object({ name: fields.child() }),
+      });
+
+      const refusal = registryRefusal(
+        defineGraph({
+          id: `subclass_dynamic_catch_${side}`,
+          nodes: { Parent: { type: Parent }, Child: { type: Child } },
+          edges: {},
+          // The compile-time check refuses this pair; the cast stands in for
+          // an untyped caller so the registry check is the one exercised.
+          ontology: [subClassOf(Child as unknown as typeof Parent, Parent)],
+        }),
+      );
+
+      console.log(`dynamic .catch() on the ${side}:`, refusal?.details);
+      expect(refusal?.details["code"]).toBe(
+        "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+      );
+      expect(refusal?.details["path"]).toEqual(["name"]);
+    });
+  }
+
+  it("accepts a subclass that shares its parent's dynamic .catch() field schema", () => {
+    const name = z.string().catch((error) => String(error.value));
+    const Parent = defineNode("Parent", { schema: z.object({ name }) });
+    const Child = defineNode("Child", {
+      schema: z.object({ name, extra: z.string() }),
+    });
+
+    expect(
+      registryRefusal(
+        defineGraph({
+          id: "subclass_shared_dynamic_catch",
+          nodes: { Parent: { type: Parent }, Child: { type: Child } },
+          edges: {},
+          ontology: [subClassOf(Child, Parent)],
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
   // Only the CHILD holds an unprojectable field, and nothing else differs.
   const UNPROJECTABLE_FIELDS = {
     embedding: () => embedding(3),

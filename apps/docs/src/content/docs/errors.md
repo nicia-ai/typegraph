@@ -1710,6 +1710,16 @@ try {
 }
 ```
 
+The `details.reason` value `"custom-relation-removal"` means
+`store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would drop a
+stored relation that names a custom meta-edge from the removed `metaEdge()`
+factory. The stored schema holds the last copy of that relation, so these verbs
+refuse before writing anything. `details.relations` names each relation as
+written, such as `governs(Team, Project)`. Move them into
+`defineGraph({ annotations })`, commit once with `migrateSchema()`, then retry.
+See
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis).
+
 #### Schema-tightening and constraint-fence audit guard codes
 
 Committing a schema tightening — ontology, edge cardinality, or a gated

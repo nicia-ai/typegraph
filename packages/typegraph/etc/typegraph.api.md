@@ -6467,7 +6467,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
-export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal", "edge-match-identity-rekey", "ontology-tightening-violated", "edge-cardinality-tightening-violated", "unique-constraint-requires-empty-kind"];
+export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal", "edge-match-identity-rekey", "ontology-tightening-violated", "edge-cardinality-tightening-violated", "unique-constraint-requires-empty-kind", "custom-relation-removal"];
 
 // @public
 export class MigrationError extends TypeGraphError {
@@ -6525,6 +6525,12 @@ export type MigrationErrorDetails = Readonly<{
     reason: "edge-cardinality-tightening-violated";
     axes: readonly EdgeCardinalityDeclaration[];
     violations: readonly ConstraintFenceViolation[];
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "custom-relation-removal";
+    relations: readonly string[];
 }>;
 
 // @public (undocumented)

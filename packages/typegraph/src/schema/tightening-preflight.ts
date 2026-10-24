@@ -50,6 +50,7 @@ import {
   type EdgeCardinalityDeclaration,
   newlyConstrainedEdgeAxes,
 } from "./edge-cardinality-change";
+import { assertNoRemovedCustomRelations } from "./migration";
 import {
   type AddedEdgeKindProbes,
   addedEdgeKindProbes,
@@ -443,6 +444,33 @@ export type SchemaTighteningPreflight = Readonly<{
    */
   capabilityError: AtomicPreflightCapabilityError;
 }>;
+
+/**
+ * {@link prepareSchemaTighteningPreflight} for a store verb that commits
+ * without `ensureSchema`'s severity gate (`store.evolve()`,
+ * `store.planEvolution()`, `store.removeKinds()`): it first refuses a commit
+ * that would drop a stored custom-meta-edge relation, which only an explicit
+ * `migrateSchema()` may do, and classifies the pair once for both decisions.
+ *
+ * @throws MigrationError (`reason: "custom-relation-removal"`) from
+ *   `assertNoRemovedCustomRelations`.
+ */
+export function prepareStoreVerbSchemaTighteningPreflight(
+  params: SchemaTighteningPreflightParams & Readonly<{ verb: string }>,
+): SchemaTighteningPreflight | undefined {
+  const { verb, ...preflightParams } = params;
+  const changes =
+    preflightParams.changes ??
+    classifyOntologyChanges(preflightParams.before, preflightParams.after);
+  assertNoRemovedCustomRelations({
+    verb,
+    graphId: preflightParams.graphId,
+    fromVersion: preflightParams.fromVersion,
+    toVersion: preflightParams.toVersion,
+    changes,
+  });
+  return prepareSchemaTighteningPreflight({ ...preflightParams, changes });
+}
 
 /**
  * The data preflight a schema tightening owes, or `undefined` when the
