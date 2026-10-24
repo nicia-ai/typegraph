@@ -41,6 +41,7 @@ import { exportGraph, importGraph } from "../src/interchange";
 import { storeRuntime } from "../src/store/runtime-port";
 import { nowIso } from "../src/utils/date";
 import { requireDefined } from "../src/utils/presence";
+import { truncatedBeforeOf } from "./identity-history-completeness";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -371,7 +372,7 @@ describe("identity replay", () => {
     }
   });
 
-  it("reports truncatedBefore once transitions are pruned, and throws when the requested range is entirely below the watermark", async () => {
+  it("reports the retention cut once transitions are pruned, and throws when the requested range is entirely below the watermark", async () => {
     const store = await buildAbcStore();
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
@@ -395,7 +396,7 @@ describe("identity replay", () => {
 
     // Open-ended range: partial truncation is reported, not thrown.
     const partial = await identityReplay(ctx, a);
-    expect(partial.truncatedBefore).toBeDefined();
+    expect(truncatedBeforeOf(partial)).toBeDefined();
 
     // Bounded entirely below the watermark: refused.
     await expect(

@@ -250,7 +250,12 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * this table when the transaction commits, so `tx.identity.transitionsOf`
      * can undercount relative to `tx.identity.assertionsOf` on the identical
      * pending write until the transaction flushes; call it again on
-     * `store.identity` after commit for the complete answer.
+     * `store.identity` after commit for the complete answer. Such a page's
+     * `completeness` carries the `pending-transaction-notes` reason.
+     *
+     * `completeness` is the one place to check whether a page is the whole
+     * answer: more pages, a retention cut, and restored transitions discovery
+     * could not attribute are all reported there.
      *
      * Deliberately absent from {@link IdentityReadFacade}: it answers across
      * every recorded coordinate, not the one a read-only lens is pinned to.
@@ -271,7 +276,9 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * On `tx.identity`: carries the same pending-notes caveat as
      * {@link IdentityFacade.transitionsOf} — a transition noted earlier in
      * the SAME open transaction is not yet in the log this reads, so it is
-     * absent from `steps` until the transaction commits.
+     * absent from `steps` until the transaction commits, and `completeness`
+     * says so. `completeness` also counts the restored transitions of the
+     * page that are not `steps`.
      *
      * Deliberately absent from {@link IdentityReadFacade}: it answers across
      * every recorded coordinate, not the one a read-only lens is pinned to.

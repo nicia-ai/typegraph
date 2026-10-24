@@ -774,6 +774,24 @@ export function hasPendingRecordedGraphWrites(
   );
 }
 
+/**
+ * Whether the capture session bound to `target` holds identity transition
+ * notes for `graphId` that its flush has yet to write to the transition log.
+ * Resolved through the same binding `withRecordedIdentityMutationTarget`
+ * buffers those notes through, so it answers for exactly the session a
+ * transaction's identity writes noted into.
+ */
+export function hasPendingIdentityTransitionNotes(
+  target: IdentityTarget,
+  graphId: string,
+): boolean {
+  const session = recordedTransactionBindings.get(target)?.capture?.session;
+  if (session === undefined) return false;
+  return session
+    .checkpoint()
+    .identityTransitionNotes.some((note) => note.graphId === graphId);
+}
+
 /** Forces one revision allocation when this capture transaction flushes. */
 export function forceRecordedGraphRevision(
   backend: TransactionBackend,

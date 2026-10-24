@@ -5136,8 +5136,28 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonl
 }>;
 
 // @public
-export type IdentityLineageIncompleteDiscovery = Readonly<{
-    unattributedRestoredTransitions: number;
+export type IdentityHistoryCompleteness = Readonly<{
+    status: "complete";
+}> | Readonly<{
+    status: "partial";
+    reasons: readonly IdentityHistoryIncompleteReason[];
+}>;
+
+// @public
+export type IdentityHistoryIncompleteReason = Readonly<{
+    reason: "more-pages";
+    nextCursor: TransitionPageCursor;
+}> | Readonly<{
+    reason: "retention-truncated";
+    before: RecordedInstant;
+}> | Readonly<{
+    reason: "unattributed-restored";
+    count: number;
+}> | Readonly<{
+    reason: "restored-not-reconstructed";
+    count: number;
+}> | Readonly<{
+    reason: "pending-transaction-notes";
 }>;
 
 // @public
@@ -5175,9 +5195,8 @@ export type IdentityRelation = "same" | "different";
 // @public (undocumented)
 export type IdentityReplay<G extends GraphDef> = Readonly<{
     steps: readonly IdentityReplayStep<G>[];
-    truncatedBefore?: RecordedInstant | undefined;
     nextCursor?: TransitionPageCursor | undefined;
-    incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
+    completeness: IdentityHistoryCompleteness;
 }>;
 
 // @public
@@ -5311,7 +5330,7 @@ export type IdentityTransitionCursor = Readonly<{
 export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
     transitions: readonly IdentityTransition<G>[];
     nextCursor?: TransitionPageCursor | undefined;
-    incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
+    completeness: IdentityHistoryCompleteness;
 }>;
 
 // @public

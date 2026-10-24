@@ -342,6 +342,29 @@ do {
 } while (cursor !== undefined);
 ```
 
+:::note[What replay and transition history can and cannot tell you]
+
+- **Membership is reconstructed under the current schema.** A `replay` step
+  recorded before a kind drop or a `sameIdAcrossKinds` change shows that
+  revision as today's schema reads it, not as the schema then in force did
+  ([Replay steps](#replay-steps)).
+- **Restored transitions are explanations, not replay steps.**
+  `transitionsOf` returns the transitions an archival restore brought in;
+  `replay` never pairs one with a before/after ([Archival transitions and the
+  retention watermark](#archival-transitions-and-the-retention-watermark)).
+- **Transaction reads omit pending notes.** On `tx.identity`, both read the
+  committed log, so a change the same transaction made is missing until it
+  commits ([Inside a transaction](#inside-a-transaction)).
+- **Pruned history is gone.** Nothing below the retention watermark is
+  retained ([Retention](#retention)).
+
+Every page carries `completeness`, the one place to check whether it is the
+whole answer: it reports the last three, more pages, and restored transitions
+discovery could not attribute ([Completeness](#completeness)). Current-schema
+reconstruction applies to every replay, so it is not reported per page.
+
+:::
+
 A single call without the loop reads only the first page; a lineage short
 enough to fit in one page returns no `nextCursor`, which is what ends the loop.
 "Oldest first" is by this graph's recorded revision. A transition an
@@ -369,20 +392,11 @@ That evidence is this graph's own recorded history. An archival restore
 brings transitions in without the source graph's history behind them, so a
 restored transition that discovery reaches from neither side can be neither
 tied to the reference nor ruled out. When the graph holds such transitions,
-the result says so instead of returning a short page that looks complete:
-
-```typescript
-const { transitions, incompleteDiscovery } =
-  await store.identity.transitionsOf(ref);
-if (incompleteDiscovery !== undefined) {
-  // Restored transitions this lineage could not be checked against.
-  console.log(incompleteDiscovery.unattributedRestoredTransitions);
-}
-```
-
-`incompleteDiscovery` is absent whenever every restored transition in the
-graph belongs to the lineage that was read, and always absent on a graph that
-never restored an archive. `replay` carries the same member.
+the result's `completeness` says so with an `unattributed-restored` reason
+carrying their count, instead of returning a short page that looks complete
+(see [Completeness](#completeness)). The reason is absent whenever every
+restored transition in the graph belongs to the lineage that was read, and
+always absent on a graph that never restored an archive.
 
 A transition that an archival restore brought into this graph — rather than
 this graph's own history capture recording it — carries `restored`, whose
@@ -398,8 +412,8 @@ revision the source allocated would read an unrelated state. Narrow on
 `restored` (the `RecordedIdentityTransition` and `RestoredIdentityTransition`
 variants) to tell the two apart. Its class membership on the source graph
 cannot be reconstructed here either, so a restored transition is returned on
-lineage discovery alone, and counted in `incompleteDiscovery` when discovery
-cannot vouch for it.
+lineage discovery alone, and counted as `unattributed-restored` in
+`completeness` when discovery cannot vouch for it.
 
 | Cause | Fires when |
 | --- | --- |
@@ -419,6 +433,8 @@ transition it causes, not only the `reconcile` ones: a class member the merge
 deleted is a `detach` and a same-ID peer it created is a `fold`, each carrying
 the same branch, ancestry and digests as the merge's `reconcile` rows. A
 transition with no `decision` came from an ordinary API write.
+
+### Replay steps
 
 `store.identity.replay(ref, options?)` pairs every transition with the class
 membership immediately before and after it, reconstructed through the exact
@@ -447,7 +463,7 @@ On a bulk write, each transition's `assertionIds` name only the `same`
 assertions with an endpoint in that transition's class.
 
 ```typescript
-const { steps, truncatedBefore } = await store.identity.replay(alice, {
+const { steps, completeness } = await store.identity.replay(alice, {
   limit: 100,
 });
 for (const step of steps) {
@@ -506,27 +522,64 @@ only, never on a coordinate-pinned read lens (`store.asOf(t).identity`,
 `store.snapshot().identity`): both answer **across** every recorded
 coordinate, which a lens pinned to one coordinate cannot honor.
 
+Restored transitions are never `steps`, but they are always
+`transitions` — see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark) for the marker
+that tells them apart. A `replay` page counts the ones it left out as
+`restored-not-reconstructed` in its `completeness`.
+
+### Inside a transaction
+
 On `tx.identity` specifically, both are the one read on the transaction
 facade that is **not** read-your-writes: they read the transition log table
 directly, while a note for a write made earlier in the same transaction sits
 buffered in the capture session until the transaction commits. `tx.identity
 .assertionsOf(ref)` sees a pending `assertSame` immediately; `tx.identity
 .transitionsOf(ref)` does not see the transition it noted until after
-commit, when `store.identity.transitionsOf(ref)` does.
+commit, when `store.identity.transitionsOf(ref)` does. While the transaction
+holds such changes for the graph, every `tx.identity.transitionsOf` and
+`tx.identity.replay` page reports `pending-transaction-notes` in its
+`completeness`. The flag is graph-wide: it says the transaction changed some
+class in this graph, not that the change touched this reference's lineage. A
+write that changes no class, such as creating a node with no same-ID peer,
+does not raise it.
 
 ```typescript
 await store.transaction(async (tx) => {
   await tx.identity.assertSame(alice, bob);
   await tx.identity.assertionsOf(alice); // includes the pending assertion
-  await tx.identity.transitionsOf(alice); // does NOT yet include its note
+  await tx.identity.transitionsOf(alice); // does NOT yet include its note;
+  // its completeness reports "pending-transaction-notes"
 });
 await store.identity.transitionsOf(alice); // now includes it, post-commit
 ```
 
-Restored transitions are never `steps`, but they are always
-`transitions` — see [Archival transitions and the retention
-watermark](#archival-transitions-and-the-retention-watermark) for the marker
-that tells them apart.
+### Completeness
+
+Every `transitionsOf` and `replay` page carries `completeness`, which is
+either `{ status: "complete" }` or `{ status: "partial", reasons }`. A
+complete page is the whole answer for that reference and range; a partial one
+lists every reason it is not, in this order:
+
+| `reason` | Carries | Holds when |
+| --- | --- | --- |
+| `more-pages` | `nextCursor` | `limit` capped the page; the same cursor is on the page as `nextCursor` |
+| `retention-truncated` | `before` (a `RecordedInstant`) | The range starts below the [retention watermark](#retention), so history below `before` is gone |
+| `unattributed-restored` | `count` | The graph holds restored transitions lineage discovery could neither tie to the reference nor rule out; graph-wide, so the same on every page |
+| `restored-not-reconstructed` | `count` | `replay` only: this page's restored transitions, which are in `transitionsOf` but not in `steps` |
+| `pending-transaction-notes` | — | `tx.identity` only: the transaction has made identity changes to this graph that the log does not hold yet (see [Inside a transaction](#inside-a-transaction)) |
+
+```typescript
+const page = await store.identity.transitionsOf(alice);
+if (page.completeness.status === "partial") {
+  for (const entry of page.completeness.reasons) {
+    console.log(entry.reason);
+  }
+}
+```
+
+`completeness` does not report that a step was read under the current schema
+(see [Replay steps](#replay-steps)): that holds for every replay.
 
 ### Retention
 
@@ -561,13 +614,14 @@ revision the graph's next commit takes, even when the prune deleted restored
 rows with higher revisions: the watermark describes this graph's own history,
 and installing a higher one would report its later commits as already pruned.
 
-Once anything has been pruned, `replay` reports the gap honestly rather than
-silently answering from an incomplete log: a call whose range lies entirely
-below the watermark throws `IDENTITY_REPLAY_HISTORY_TRUNCATED`, and an
-open-ended call that reaches back past the watermark returns a
-`truncatedBefore` recorded instant on its result instead of throwing.
-`transitionsOf` is unaffected by pruning beyond returning fewer rows — it
-never throws for a truncated range.
+Once anything has been pruned, both `replay` and `transitionsOf` report the
+gap rather than silently answering from an incomplete log: a page whose range
+starts below the watermark carries a `retention-truncated` reason in its
+`completeness`, naming the watermark as `before`. A page whose range starts
+at or above it (a `fromRecorded` there, or a later page's `cursor`) does not.
+`replay` additionally refuses a range that lies entirely below the watermark
+with `IDENTITY_REPLAY_HISTORY_TRUNCATED`, since it has no step to pair;
+`transitionsOf` answers that range with an empty page that reports the cut.
 
 ## Identity-expanded traversal
 
@@ -783,7 +837,8 @@ watermark, and the transitions the import's own node and assertion writes
 record do not make the destination look as if it already had a history. A
 fresh graph has
 nothing of its own for that floor to misclassify, so setting it there is
-safe, and `replay` reports it as `truncatedBefore` — the point below which
+safe, and `transitionsOf` and `replay` report it as the
+`retention-truncated` completeness reason — the point below which
 this graph's own timeline carries no retained explanation. What the restore
 itself records sits at or above the floor and stays replayable. A graph that
 already has its own retained transitions keeps its existing watermark

@@ -22,6 +22,7 @@ import {
   type RestoredRecordedInstant,
 } from "../core/temporal";
 import { IdentityReplayError, ValidationError } from "../errors";
+import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { requireDefined } from "../utils/presence";
 import { readIdentityEvidenceNeighbours } from "./lineage-evidence";
 import { identityActiveKinds } from "./service-components";
@@ -92,8 +93,8 @@ type IdentityTransitionFields<G extends GraphDef> = Omit<
  * CLOCK at restore time: a restore records history, it does not relive it, so
  * it never advances this graph's recorded revision counter and there is no
  * revision on this graph's own axis to pair the timestamp with. The coarser
- * retention watermark (`truncatedBefore`) is the only revision-shaped signal a
- * restore leaves behind.
+ * retention watermark (the `retention-truncated` completeness reason) is the
+ * only revision-shaped signal a restore leaves behind.
  */
 export type RestoredIdentityTransition<G extends GraphDef> = Omit<
   RecordedIdentityTransition<G>,
@@ -241,25 +242,52 @@ function requireWindowRevision(
 }
 
 /**
- * Set on a `transitionsOf` / `replay` result when lineage discovery could not
- * vouch for the whole answer, so a short or empty page is never mistaken for
- * "nothing happened".
+ * One reason a `transitionsOf` / `replay` page is not the whole answer for
+ * the reference it was asked about. Several can hold at once.
  *
- * `unattributedRestoredTransitions` counts the transitions an archival restore
- * brought into this graph that discovery could neither tie to the requested
- * reference nor rule out. Discovery follows this graph's own recorded
- * evidence, and a restore carries none for what happened on the source graph
- * before the archive was taken, so a member that had already left its class
- * there cannot be traced to the restored rows that explain it.
+ * - `more-pages`: `limit` capped the page; `nextCursor` reads the next one.
+ * - `retention-truncated`: a prune (or an archival restore's floor) removed
+ *   this graph's history below `before`, and the requested range reaches
+ *   below it.
+ * - `unattributed-restored`: the graph holds `count` transitions an archival
+ *   restore brought in that lineage discovery could neither tie to the
+ *   reference nor rule out. Discovery follows this graph's own recorded
+ *   evidence, and a restore carries none for what happened on the source
+ *   graph before the archive was taken, so a member that had already left its
+ *   class there cannot be traced to the restored rows that explain it. The
+ *   count is graph-wide, so it is the same on every page.
+ * - `restored-not-reconstructed` (`replay` only): `count` restored
+ *   transitions on this page belong to the lineage but are not `steps`,
+ *   because no before/after can be reconstructed on this graph for a
+ *   revision the source graph allocated. `transitionsOf` returns them.
+ * - `pending-transaction-notes` (`tx.identity` only): the transaction this
+ *   read runs in has made identity changes to this graph whose transitions
+ *   are buffered until it commits, so the log this read answers from does
+ *   not hold them yet. Graph-wide: it does not say whether those changes
+ *   touched this reference's lineage.
  */
-export type IdentityLineageIncompleteDiscovery = Readonly<{
-  unattributedRestoredTransitions: number;
-}>;
+export type IdentityHistoryIncompleteReason =
+  | Readonly<{ reason: "more-pages"; nextCursor: TransitionPageCursor }>
+  | Readonly<{ reason: "retention-truncated"; before: RecordedInstant }>
+  | Readonly<{ reason: "unattributed-restored"; count: number }>
+  | Readonly<{ reason: "restored-not-reconstructed"; count: number }>
+  | Readonly<{ reason: "pending-transaction-notes" }>;
+
+/**
+ * Whether a `transitionsOf` / `replay` page is the whole answer: the one
+ * place to check before treating a short or empty page as "nothing else
+ * happened". Every step is reconstructed under the graph's current schema
+ * whatever this says; that is a property of replay, not of a page.
+ */
+export type IdentityHistoryCompleteness =
+  | Readonly<{ status: "complete" }>
+  | Readonly<{
+      status: "partial";
+      reasons: readonly IdentityHistoryIncompleteReason[];
+    }>;
 
 export type IdentityReplay<G extends GraphDef> = Readonly<{
   steps: readonly IdentityReplayStep<G>[];
-  /** Set when the retention watermark cut history above the requested start. */
-  truncatedBefore?: RecordedInstant | undefined;
   /**
    * Set when `limit` capped this page; pass it as `cursor` for the next one.
    * Addresses the TRANSITION LOG only — like
@@ -268,8 +296,7 @@ export type IdentityReplay<G extends GraphDef> = Readonly<{
    * `store.asOfRecorded`; pass it only as `cursor`.
    */
   nextCursor?: TransitionPageCursor | undefined;
-  /** Set when discovery could not vouch for the whole lineage; identical on every page. */
-  incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
+  completeness: IdentityHistoryCompleteness;
 }>;
 
 /** One page of {@link identityTransitionsOf}'s answer. */
@@ -283,8 +310,7 @@ export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
    * `store.asOfRecorded`; pass it only as `cursor`.
    */
   nextCursor?: TransitionPageCursor | undefined;
-  /** Set when discovery could not vouch for the whole lineage; identical on every page. */
-  incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
+  completeness: IdentityHistoryCompleteness;
 }>;
 
 /**
@@ -441,7 +467,7 @@ async function lineageWalkSeeds<G extends GraphDef>(
 
 /**
  * How many restored transitions the walk could neither attribute to the
- * lineage nor rule out of it, or `undefined` when there are none.
+ * lineage nor rule out of it (`0` when there are none).
  *
  * A restored row names class canonicals on the SOURCE graph's timeline. The
  * evidence the walk is seeded from is this graph's own recorded relations,
@@ -454,7 +480,7 @@ async function lineageWalkSeeds<G extends GraphDef>(
 async function unattributedRestoredTransitions<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   discovered: readonly IdentityTransitionRow[],
-): Promise<number | undefined> {
+): Promise<number> {
   const restored = await countRestoredIdentityTransitions(
     ctx.backend,
     ctx.schema,
@@ -463,7 +489,7 @@ async function unattributedRestoredTransitions<G extends GraphDef>(
   const attributed = discovered.filter((row) =>
     isRestoredTransitionRow(row),
   ).length;
-  return restored > attributed ? restored - attributed : undefined;
+  return Math.max(restored - attributed, 0);
 }
 
 /**
@@ -843,7 +869,7 @@ type MemberBoundaryPage = Readonly<{
  * {@link namesBoundaryClass}), and every restored row. A restored row names a
  * class on the SOURCE graph's timeline, which this graph cannot reconstruct,
  * so it stays governed by discovery alone and is reported through
- * `incompleteDiscovery` when discovery cannot vouch for it.
+ * `completeness` (`unattributed-restored`) when discovery cannot vouch for it.
  */
 async function memberBoundary<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -950,23 +976,89 @@ function identityReplayHistoryTruncatedError(
   );
 }
 
-type WalkedTransitions = Readonly<{
-  fromRevision: number | undefined;
-  toRevision: number | undefined;
-  boundaries: readonly MemberBoundary[];
+/**
+ * The facts a page's {@link IdentityHistoryCompleteness} is decided from, as
+ * the read gathered them. A count of `0` and an absent value both mean "does
+ * not apply".
+ */
+type HistoryCompletenessFacts = Readonly<{
   nextCursor?: TransitionPageCursor | undefined;
-  incompleteDiscovery?: IdentityLineageIncompleteDiscovery | undefined;
+  truncatedBefore?: RecordedInstant | undefined;
+  unattributedRestored: number;
+  restoredNotReconstructed: number;
+  pendingTransactionNotes: boolean;
+}>;
+
+/**
+ * The ONE owner of a page's completeness, so `transitionsOf` and `replay`
+ * cannot report the same facts differently. Reasons are listed in a fixed
+ * order: pagination, retention, then what discovery and reconstruction could
+ * not account for, then the enclosing transaction.
+ */
+function historyCompleteness(
+  facts: HistoryCompletenessFacts,
+): IdentityHistoryCompleteness {
+  const reasons: IdentityHistoryIncompleteReason[] = [];
+  if (facts.nextCursor !== undefined)
+    reasons.push({ reason: "more-pages", nextCursor: facts.nextCursor });
+  if (facts.truncatedBefore !== undefined)
+    reasons.push({
+      reason: "retention-truncated",
+      before: facts.truncatedBefore,
+    });
+  if (facts.unattributedRestored > 0)
+    reasons.push({
+      reason: "unattributed-restored",
+      count: facts.unattributedRestored,
+    });
+  if (facts.restoredNotReconstructed > 0)
+    reasons.push({
+      reason: "restored-not-reconstructed",
+      count: facts.restoredNotReconstructed,
+    });
+  if (facts.pendingTransactionNotes)
+    reasons.push({ reason: "pending-transaction-notes" });
+  return reasons.length === 0 ?
+      { status: "complete" }
+    : { status: "partial", reasons };
+}
+
+type TransitionRetention = Readonly<{
+  prunedBeforeRevision: number;
+  prunedAt: string;
+}>;
+
+/**
+ * The retention watermark as a page reports it: the instant below which this
+ * graph's history is gone, when the page's range starts below it. A page
+ * that starts at or above the watermark (a later cursor page, or a
+ * `fromRecorded` above it) is unaffected by it.
+ */
+function truncatedBeforeFor(
+  retention: TransitionRetention,
+  fromRevision: number | undefined,
+): RecordedInstant | undefined {
+  return retention.prunedBeforeRevision > (fromRevision ?? 0) ?
+      createRecordedInstant(retention.prunedBeforeRevision, retention.prunedAt)
+    : undefined;
+}
+
+type WalkedTransitions = Readonly<{
+  toRevision: number | undefined;
+  retention: TransitionRetention;
+  boundaries: readonly MemberBoundary[];
+  completenessFacts: Omit<HistoryCompletenessFacts, "restoredNotReconstructed">;
 }>;
 
 /**
  * The shared setup both `identityTransitionsOf` and `identityReplay` need
  * before they diverge: enforce `history: true`, resolve the requested limit
- * and revision bounds, seed and run the lineage walk, report what the walk
- * could not vouch for, narrow the converged result to the requested window,
- * and cut one page of at most `limit` boundaries of the reference's own
- * history from it. Classes are reconstructed against the caller's ORIGINAL
- * reference (not the resolved class canonical) — see `reconstructAt`'s
- * docblock for why the two must not be conflated.
+ * and revision bounds, seed and run the lineage walk, narrow the converged
+ * result to the requested window, cut one page of at most `limit` boundaries
+ * of the reference's own history from it, and gather the facts the page's
+ * completeness is decided from. Classes are reconstructed against the
+ * caller's ORIGINAL reference (not the resolved class canonical) — see
+ * `reconstructAt`'s docblock for why the two must not be conflated.
  *
  * The three stages are ordered and cannot be reshuffled: discovery must run
  * unbounded, the window applies to what discovery found, and the page is cut
@@ -997,7 +1089,10 @@ async function walkedTransitionsFor<G extends GraphDef>(
     ctx,
     await lineageWalkSeeds(ctx, seed),
   );
-  const unattributed = await unattributedRestoredTransitions(ctx, discovered);
+  const unattributedRestored = await unattributedRestoredTransitions(
+    ctx,
+    discovered,
+  );
   const page = await pageMemberBoundaries(
     ctx,
     seed,
@@ -1005,16 +1100,24 @@ async function walkedTransitionsFor<G extends GraphDef>(
     windowedRows(discovered, fromRevision, toRevision),
     limit,
   );
+  const retention = await readTransitionRetentionDetails(
+    ctx.backend,
+    ctx.schema,
+    ctx.graphId,
+  );
   return {
-    fromRevision,
     toRevision,
+    retention,
     boundaries: page.boundaries,
-    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
-    ...(unattributed === undefined ?
-      {}
-    : {
-        incompleteDiscovery: { unattributedRestoredTransitions: unattributed },
-      }),
+    completenessFacts: {
+      nextCursor: page.nextCursor,
+      truncatedBefore: truncatedBeforeFor(retention, fromRevision),
+      unattributedRestored,
+      pendingTransactionNotes: hasPendingIdentityTransitionNotes(
+        ctx.backend,
+        ctx.graphId,
+      ),
+    },
   };
 }
 
@@ -1022,7 +1125,8 @@ async function walkedTransitionsFor<G extends GraphDef>(
  * Every transition that changed `ref`'s own identity class — the class it was
  * a member of on either side of the transition — ascending by recorded
  * revision, in pages of at most `limit` boundaries. A class `ref` has left
- * keeps a history of its own, and none of it is reported here.
+ * keeps a history of its own, and none of it is reported here. A range below
+ * the retention watermark is reported through `completeness`, never refused.
  * `store.identity.transitionsOf` is a thin wrapper over this.
  */
 export async function identityTransitionsOf<G extends GraphDef>(
@@ -1030,14 +1134,21 @@ export async function identityTransitionsOf<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
-  const { boundaries, nextCursor, incompleteDiscovery } =
-    await walkedTransitionsFor(ctx, ref, options);
+  const { boundaries, completenessFacts } = await walkedTransitionsFor(
+    ctx,
+    ref,
+    options,
+  );
+  const { nextCursor } = completenessFacts;
   return {
     transitions: boundaries.flatMap((boundary) =>
       boundary.rows.map((row) => publicTransition<G>(row)),
     ),
     ...(nextCursor === undefined ? {} : { nextCursor }),
-    ...(incompleteDiscovery === undefined ? {} : { incompleteDiscovery }),
+    completeness: historyCompleteness({
+      ...completenessFacts,
+      restoredNotReconstructed: 0,
+    }),
   };
 }
 
@@ -1059,26 +1170,18 @@ export async function identityTransitionsOf<G extends GraphDef>(
  * restored rows are excluded, `steps` can be shorter than `limit` boundaries
  * on a page whose lineage mixes restored and native rows — the page boundary
  * stays identical between the two methods, which is what lets a caller pair
- * a `transitionsOf` explanation with a `replay` step page for page.
+ * a `transitionsOf` explanation with a `replay` step page for page. How many
+ * restored rows a page left out is its `restored-not-reconstructed`
+ * completeness reason.
  */
 export async function identityReplay<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
-  const {
-    fromRevision,
-    toRevision,
-    boundaries,
-    nextCursor,
-    incompleteDiscovery,
-  } = await walkedTransitionsFor(ctx, ref, options);
+  const { toRevision, retention, boundaries, completenessFacts } =
+    await walkedTransitionsFor(ctx, ref, options);
 
-  const retention = await readTransitionRetentionDetails(
-    ctx.backend,
-    ctx.schema,
-    ctx.graphId,
-  );
   const watermark = retention.prunedBeforeRevision;
   // "Entirely below the watermark" is a property of the REQUESTED range, not
   // of what came back: only a range bounded on both ends (`toRecorded` given)
@@ -1117,17 +1220,17 @@ export async function identityReplay<G extends GraphDef>(
       steps.push({ transition: recordedTransition<G>(row), before, after });
     }
   }
+  const restoredNotReconstructed = boundaries
+    .flatMap((boundary) => boundary.rows)
+    .filter((row) => isRestoredTransitionRow(row)).length;
 
-  const requestedFromRevision = fromRevision ?? 0;
-  const truncatedBefore =
-    watermark > requestedFromRevision ?
-      createRecordedInstant(watermark, retention.prunedAt)
-    : undefined;
-
+  const { nextCursor } = completenessFacts;
   return {
     steps,
-    ...(truncatedBefore === undefined ? {} : { truncatedBefore }),
     ...(nextCursor === undefined ? {} : { nextCursor }),
-    ...(incompleteDiscovery === undefined ? {} : { incompleteDiscovery }),
+    completeness: historyCompleteness({
+      ...completenessFacts,
+      restoredNotReconstructed,
+    }),
   };
 }

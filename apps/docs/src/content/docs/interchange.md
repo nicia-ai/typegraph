@@ -175,8 +175,9 @@ when the destination recorded no identity transitions of its own before the
 restore began. `importGraph` and `importGraphStream` set the same watermark
 for the same archive. A graph that already retains its own history keeps its
 existing watermark untouched, so an unrelated restore can never misreport that graph's own,
-fully-retained classes as truncated. `replay` reports the watermark, when
-set, as `truncatedBefore`.
+fully-retained classes as truncated. `transitionsOf` and `replay` report the
+watermark, when set, as the `retention-truncated` reason of their
+`completeness`.
 
 A `state`-mode document naming a `transitions` section or a `retention`
 watermark is refused before anything is written, and a streamed one at its

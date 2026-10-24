@@ -39,6 +39,7 @@ import {
 import { storeBackend, storeRuntime } from "../src/store/runtime-port";
 import { generateId } from "../src/utils/id";
 import { requireDefined } from "../src/utils/presence";
+import { truncatedBeforeOf } from "./identity-history-completeness";
 import {
   createInitializedStore,
   createTestBackend,
@@ -619,7 +620,7 @@ describe("archival identity import window bounds", () => {
     // is above 0, the point an unbounded replay call's requested range
     // starts from.
     const targetReplay = await target.identity.replay(alice);
-    expect(targetReplay.truncatedBefore).toBeDefined();
+    expect(truncatedBeforeOf(targetReplay)).toBeDefined();
   });
 
   describe("archived decision provenance", () => {
@@ -854,7 +855,8 @@ describe("archival identity import window bounds", () => {
   // `destinationFloor` back to `Math.max(highestRestoredRevision + 1,
   // carriedWatermark ?? 0)` in `importIdentityTransitionsIntoTarget`
   // (service-interchange-write.ts) and this test's final assertion fails —
-  // `truncatedBefore` swallows the target's own never-pruned transition.
+  // the reported retention cut swallows the target's own never-pruned
+  // transition.
   it("does not misclassify the destination's own later transitions as pruned after an archival restore", async () => {
     const [source] = await createAdapterStoreWithSchema(
       graph,
@@ -897,7 +899,7 @@ describe("archival identity import window bounds", () => {
     const retractedNow = requireDefined(
       replay.steps.find((step) => step.transition.cause === "retract"),
     );
-    const truncatedBefore = requireDefined(replay.truncatedBefore);
+    const truncatedBefore = requireDefined(truncatedBeforeOf(replay));
     expect(
       retractedNow.transition.recorded.localeCompare(truncatedBefore),
     ).toBeGreaterThanOrEqual(0);
@@ -965,7 +967,7 @@ describe("archival identity import window bounds", () => {
     );
 
     const replay = await target.identity.replay(alice);
-    expect(replay.truncatedBefore).toBeDefined();
+    expect(truncatedBeforeOf(replay)).toBeDefined();
     // Every restored transition sits strictly below the destination's own
     // floor, so none of them may surface as a fabricated replay step.
     const restoredTransitionIds = new Set(
@@ -1052,7 +1054,7 @@ describe("archival identity import window bounds", () => {
         false,
       );
     }
-    expect(replay.truncatedBefore).toBeDefined();
+    expect(truncatedBeforeOf(replay)).toBeDefined();
   });
 
   // Load-bearing: an archival restore that brings in unrelated foreign
@@ -1081,7 +1083,7 @@ describe("archival identity import window bounds", () => {
     await target.identity.retractAssertion(carolDave.assertion.id);
     const carolReplayBefore = await target.identity.replay(carol);
     expect(carolReplayBefore.steps.length).toBeGreaterThan(0);
-    expect(carolReplayBefore.truncatedBefore).toBeUndefined();
+    expect(truncatedBeforeOf(carolReplayBefore)).toBeUndefined();
 
     // An archive from a source that never mentions carol or dave.
     const [source] = await createAdapterStoreWithSchema(
