@@ -502,6 +502,7 @@ import {
   type GraphNodeCollections,
   type GraphNodeForKinds,
   type GraphNodeReference,
+  type GraphNodeReferenceInput,
   type HeterogeneousNodeUpsertInput,
   type HeterogeneousNodeUpsertResult,
   type HistoryStoreOptions,
@@ -913,11 +914,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options?: BatchOnceOptions,
   ) => Promise<OneStatementBatchResults<Queries>>;
   neighbors?: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: NeighborReadOptions<G, K>,
   ) => Promise<readonly NeighborResult<G, K>[]>;
   countNeighbors?: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ) => Promise<number>;
   bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(
@@ -1017,11 +1018,11 @@ type StoreTransactions<G extends GraphDef> = Readonly<{
 /** Builds cold reads that {@link Store.batchOnce} can compose in one statement. */
 export type BatchReadBuilder<G extends GraphDef> = Readonly<{
   neighbors: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: NeighborReadOptions<G, K>,
   ) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
   countNeighbors: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ) => CompiledOneStatementRead<number>;
   subgraph: <
@@ -1045,11 +1046,11 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
     options?: BatchOnceOptions,
   ) => Promise<OneStatementBatchResults<Queries>>;
   neighbors: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: NeighborReadOptions<G, K>,
   ) => Promise<readonly NeighborResult<G, K>[]>;
   countNeighbors: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ) => Promise<number>;
   subgraph: <
@@ -1073,11 +1074,11 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     options?: BatchOnceOptions,
   ) => Promise<OneStatementBatchResults<Queries>>;
   neighbors?: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: NeighborReadOptions<G, K>,
   ) => Promise<readonly NeighborResult<G, K>[]>;
   countNeighbors?: <const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ) => Promise<number>;
   lineageRevisionNow?: () => Promise<EngineRevision | undefined>;
@@ -2676,9 +2677,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       reference: Readonly<{ kind: string; id: string }>,
     ): Promise<unknown> =>
       readNodeByReference(
+        this.#graph,
         (kind) => getNodeCollection(kind),
         reference,
-        this.graphId,
       );
     return {
       getNodeCollection,
@@ -2719,13 +2720,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   ): DynamicNodeCollection<K>;
   getNodeCollectionOrThrow(kindOrToken: string | RuntimeNodeKind): unknown {
     const kind = this.#resolveRuntimeKind(kindOrToken, "node");
-    const collection = this.#resolveDynamicNodeCollection(this.nodes, kind);
-    if (collection === undefined) {
-      throw new KindNotFoundError(kind, "node", {
-        graphId: this.graphId,
-      });
-    }
-    return collection;
+    assertRegisteredNodeKinds(this.#graph, [kind]);
+    return this.#resolveDynamicNodeCollection(this.nodes, kind);
   }
 
   /**
@@ -3773,7 +3769,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** Reads hydrated adjacent nodes and their connecting edges in one statement. */
   async neighbors<const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: NeighborReadOptions<G, K>,
   ): Promise<readonly NeighborResult<G, K>[]> {
     this.#assertNeighborKinds(source, options.edges);
@@ -3782,7 +3778,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** Counts visible relationships to adjacent nodes without hydrating them. */
   async countNeighbors<const K extends EdgeKinds<G>>(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ): Promise<number> {
     this.#assertNeighborKinds(source, options.edges);
@@ -3803,7 +3799,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   #assertNeighborKinds(
-    source: GraphNodeReference<G>,
+    source: GraphNodeReferenceInput<G>,
     edgeKinds: readonly EdgeKinds<G>[],
   ): void {
     assertRegisteredNodeKinds(this.#graph, [source.kind]);
@@ -3850,9 +3846,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       params.sources.map((group) => group.kind),
     );
     assertRegisteredEdgeKinds(this.#graph, params.edgeKinds);
-    const sources: readonly GraphNodeReference<G>[] = params.sources.flatMap(
-      (group) => group.ids.map((id) => ({ kind: group.kind, id })),
-    );
+    // The kinds are registered (asserted above); each id is the caller's own
+    // pairing, echoed back as the result's reference.
+    const sources = params.sources.flatMap((group) =>
+      group.ids.map((id) => ({ kind: group.kind, id })),
+    ) as readonly GraphNodeReference<G>[];
 
     if (sources.length === 0 || params.edgeKinds.length === 0) {
       return sources.map((source) => ({ source, edges: [] }));

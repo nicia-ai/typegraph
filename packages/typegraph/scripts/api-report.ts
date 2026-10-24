@@ -1117,9 +1117,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `SubsumptionEndpointKeys`): 544 → 553. The seven Store-bearing
   // entrypoints reach all fifteen only transitively: +15 apiece. No other
   // entrypoint renders an edge collection, so none moves.
+  // Widened endpoint references as inputs: `EdgeEndpointRef`, the bulk
+  // endpoint reads' `BulkEdgeSourceGroup` and the `neighbors` source now
+  // spell their widened arm with `SubsumedNodeReference` (the `neighbors`
+  // source as `GraphNodeReferenceInput`). `.` exports both and gains only
+  // the two unexported helpers they are spelled with (`BrandedNodeReference`,
+  // `NodeReferenceGroup`): 553 → 555. The seven Store-bearing entrypoints
+  // reach all four only transitively: +4 apiece. No other entrypoint moves.
   ".": {
-    count: 553,
-    sha256: "94983ceda939943f5c1e5f75b9513b97b900a69650682bb291f55155dcf86a27",
+    count: 555,
+    sha256: "9806758f8430356647c62cc95ad587766c173edf9023aeaebf70d78f6a579be1",
   },
   "./adapters/drizzle/engine": {
     count: 347,
@@ -1153,8 +1160,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // through the identity facade and gain exactly those three forgotten names
   // (+3 apiece), no other name moved.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 962,
-    sha256: "66bfbf816d1ef6a335645406215a1d42418800262c208c7e6c327db31b4a1a67",
+    count: 966,
+    sha256: "5d9d4a8ad8a047725a9bf2e69015ef89ccec293d7d0ce91aa1f8743adb1438f0",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 281,
@@ -1200,28 +1207,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 956,
-    sha256: "261d2ad492a0019a8290e0aac60026691ba00a2d0cfb1c0fe569892ef387dc5e",
+    count: 960,
+    sha256: "4ff35943186e2c9c3e77bf684a54bbd2e2c93c86a16637d56400d557f5f5345a",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 941,
-    sha256: "07b6a0ef2df63ad0d13b70005f8b093c08030af12514da4ab074fedd07e63164",
+    count: 945,
+    sha256: "0ef14d03d9aed9a6a10b79a196845d0e3ed5983c0006546ac5b40a87c3794c2e",
   },
   "./postgres/pglite": {
-    count: 947,
-    sha256: "5ad6d584544406c765ea1ec51a7db5b804f6d8a9bbec721fbc12f3868621892e",
+    count: 951,
+    sha256: "f8479330bf5ffbf8062f01f48f20445ee1745515904ad7862f0cff88fe510512",
   },
   "./profiler": {
-    count: 943,
-    sha256: "38583124ad7aeef51f03641817f8476f2203943134571e7e53a8b04655c26a5a",
+    count: 947,
+    sha256: "1355fe718b31fbe6a2046f6de58278e8a6585db73e9dc959a0fcec89fa7c846c",
   },
   "./provenance": {
-    count: 956,
-    sha256: "a66a4fcb159f9062a1f06db9850d523d9ceddb1973424281c4cf54b3ee50a80f",
+    count: 960,
+    sha256: "675a45174b4f2400d162162e025d97c4e3ca922aed09c71ec935b40c2a85b5b6",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1237,8 +1244,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "43cfec34867c5ab909e9e52593be02de833262a50f63fc55189e0e902f75b693",
   },
   "./sqlite/local": {
-    count: 947,
-    sha256: "5ad6d584544406c765ea1ec51a7db5b804f6d8a9bbec721fbc12f3868621892e",
+    count: 951,
+    sha256: "f8479330bf5ffbf8062f01f48f20445ee1745515904ad7862f0cff88fe510512",
   },
 };
 
