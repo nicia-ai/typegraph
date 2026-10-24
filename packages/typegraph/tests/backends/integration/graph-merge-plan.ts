@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -22,6 +22,7 @@ import {
 import { branch } from "../../../src/graph-merge/branch";
 import {
   BranchError,
+  CandidatePlanningScopeError,
   MergePlanCapabilityError,
   MergePlanningStaleError,
   MergePlanSchemaMismatchError,
@@ -316,7 +317,23 @@ export function registerGraphMergePlanIntegrationTests(
         ],
         edges: [],
       };
-      const mergePlan = unwrap(
+      const scopedBackend = vi.fn(() => context.createIsolatedBackend());
+      const scoped = await planCandidateWriteSetForEvolution({
+        target,
+        evolutionPlan,
+        makeBackend: scopedBackend,
+        writeSet,
+        planningScope: "candidate",
+      });
+      if (!isErr(scoped))
+        throw new Error("expected a candidate planning scope refusal");
+      expect(scoped.error).toBeInstanceOf(CandidatePlanningScopeError);
+      expect(scoped.error.details).toEqual({
+        planningScope: { scope: "whole-target", reason: "planned-evolution" },
+      });
+      expect(scopedBackend).not.toHaveBeenCalled();
+
+      const { plan: mergePlan, planningScope } = unwrap(
         await planCandidateWriteSetForEvolution({
           target,
           evolutionPlan,
@@ -324,6 +341,10 @@ export function registerGraphMergePlanIntegrationTests(
           writeSet,
         }),
       );
+      expect(planningScope).toEqual({
+        scope: "whole-target",
+        reason: "planned-evolution",
+      });
       expect(mergePlan.target.schema).toEqual({
         managed: true,
         version: evolutionPlan.result.version,
@@ -422,7 +443,7 @@ export function registerGraphMergePlanIntegrationTests(
             },
           },
         }),
-      );
+      ).plan;
       expect(mergePlan.review.conflicts).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

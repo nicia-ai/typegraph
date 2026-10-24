@@ -369,27 +369,6 @@ before the affected nodes can be deleted.
   live required part with no live whole) and ships no repair step.
   `store.verifyConstraintFences()` reports the same finding on an already-live
   graph but does not fix it.
-- **Graph merge's `existence: "required"` audit has one residual gap: a
-  composition edge silently DROPPED by canonicalization, with no explicit
-  write for anything to intercept.** Merge's composition-orphan check
-  (`compositionOrphansAmong` — a delete orphans a part the plan does not also
-  delete — plus its sibling `unattachedRequiredPartOrphansAmong`, reported at
-  plan time and re-verified at apply) catches a required part that this merge
-  writes, or whose composition edge this merge explicitly deletes or ends,
-  and resolves to no live whole at all. It does NOT catch a composition edge
-  removed from the write set entirely because canonicalization repointed it
-  onto a finally-deleted endpoint (`ENDPOINT_DELETED_DROP_REASON`,
-  `src/graph-merge/edge-repoint.ts`): that drop issues no delete or update
-  call for any per-write guard (`MergeCompositionOrphan` included) to see,
-  and `DroppedEdge` carries no endpoint data to recover the orphaned part
-  from after the fact. The gap is caught after the fact by
-  `store.verifyConstraintFences()`'s `compositionExistence` family run
-  separately against the merged store. A composition attachment a branch made
-  is outside this gap — an edge it created, or an ended `oneActive` row it
-  reopened: when another branch's deletion removes one of its endpoints and the
-  other survives, planning refuses with `MergeCompositionOrphanError` (see
-  [Composition orphans](/graph-merge#composition-orphans)). The gap is limited
-  to composition edges that already attached their part at the branch point.
 - **Graph merge does not protect a reopened composition row from a
   concurrent deletion of that same row.** If one branch moves a part back
   under a whole by reopening an ended `oneActive` row (`clearValidTo`) while

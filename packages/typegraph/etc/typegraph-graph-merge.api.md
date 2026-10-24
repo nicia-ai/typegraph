@@ -721,6 +721,27 @@ type CandidatePair<K extends NodeType = NodeType> = Readonly<{
 }>;
 
 // @public
+export type CandidatePlanningScope = Readonly<{
+    scope: "candidate";
+}> | WholeTargetPlanningScope;
+
+// @public
+export class CandidatePlanningScopeError extends MergeError {
+    constructor(planningScope: WholeTargetPlanningScope);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE";
+    // (undocumented)
+    readonly details: Readonly<{
+        planningScope: WholeTargetPlanningScope;
+    }>;
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export type CandidatePlanningScopeReason = "revision-tracking-disabled" | "composition" | "acyclic-relation" | "target-side-cardinality" | "missing-active-source-read" | "missing-match-identity-read" | "missing-scoped-identity-reads" | "match-identity-owners-unavailable" | "match-identity-owner-not-clone-visible" | "planned-evolution";
+
+// @public
 export type CandidateSource = Readonly<{
     readonly id: string;
     generate(scope: SourceScope): Promise<SourceResult>;
@@ -744,6 +765,12 @@ export class CandidateWriteSetError extends MergeError {
     // (undocumented)
     protected static readonly errorCategory = "user";
 }
+
+// @public
+export type CandidateWriteSetPlan = Readonly<{
+    plan: MergePlanArtifact;
+    planningScope: CandidatePlanningScope;
+}>;
 
 // @public
 export const CandidateWriteSetSchema: z.ZodObject<{
@@ -5162,6 +5189,7 @@ export const MERGE_ERROR_CODES: {
     readonly candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE";
     readonly evidence: "GRAPH_MERGE_EVIDENCE";
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
+    readonly candidatePlanningScope: "GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE";
     readonly review: "GRAPH_MERGE_REVIEW";
     readonly operation: "GRAPH_MERGE_OPERATION";
     readonly operationRequest: "GRAPH_MERGE_OPERATION_REQUEST";
@@ -6531,7 +6559,7 @@ type PlainNodeRef = Readonly<{
 }>;
 
 // @public
-export function planCandidateWriteSet<G extends GraphDef>(args: PlanCandidateWriteSetArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+export function planCandidateWriteSet<G extends GraphDef>(args: PlanCandidateWriteSetArgs<G>): Promise<Result<CandidateWriteSetPlan, MergeError>>;
 
 // @public
 export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
@@ -6539,10 +6567,11 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
+    planningScope?: "candidate";
 }>;
 
 // @public
-export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<CandidateWriteSetPlan, MergeError>>;
 
 // @public
 export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target"> & Readonly<{
@@ -9735,6 +9764,12 @@ type WeightedShortestPathResult = Readonly<{
     nodes: readonly PathNode[];
     depth: number;
     totalWeight: number;
+}>;
+
+// @public
+export type WholeTargetPlanningScope = Readonly<{
+    scope: "whole-target";
+    reason: CandidatePlanningScopeReason;
 }>;
 
 // @public

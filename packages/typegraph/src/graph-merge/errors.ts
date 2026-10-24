@@ -1,5 +1,6 @@
 import { requireDefined } from "../utils/presence";
 import type { MergePlanCompositionOrphan } from "./plan-schema";
+import type { WholeTargetPlanningScope } from "./sparse-candidate-branch";
 import type { TypeGraphErrorOptions } from "./typegraph-internal";
 import { TransactionConflictError, TypeGraphError } from "./typegraph-internal";
 
@@ -39,6 +40,7 @@ export const MERGE_ERROR_CODES = {
   candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE",
   evidence: "GRAPH_MERGE_EVIDENCE",
   candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET",
+  candidatePlanningScope: "GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE",
   review: "GRAPH_MERGE_REVIEW",
   operation: "GRAPH_MERGE_OPERATION",
   operationRequest: "GRAPH_MERGE_OPERATION_REQUEST",
@@ -548,6 +550,31 @@ export class CandidateWriteSetError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "CandidateWriteSetError";
+  }
+}
+
+/**
+ * Raised instead of planning against the whole target when a caller requests
+ * `planningScope: "candidate"`. `details.planningScope.reason` names why the
+ * target or candidate cannot be planned from the candidate's own rows.
+ */
+export class CandidatePlanningScopeError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = MERGE_ERROR_CODES.candidatePlanningScope;
+  declare readonly details: Readonly<{
+    planningScope: WholeTargetPlanningScope;
+  }>;
+
+  constructor(planningScope: WholeTargetPlanningScope) {
+    super(
+      `Candidate-scoped planning was requested, but this candidate must be planned against the whole target (${planningScope.reason}).`,
+      {
+        details: { planningScope },
+        suggestion:
+          "Omit planningScope to accept whole-target planning, or remove the cause named by details.planningScope.reason.",
+      },
+    );
+    this.name = "CandidatePlanningScopeError";
   }
 }
 

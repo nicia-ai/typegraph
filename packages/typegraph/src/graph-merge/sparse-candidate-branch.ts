@@ -2,6 +2,7 @@ import type { EdgeRow } from "../backend/types";
 import type { GraphData } from "../interchange";
 import { validateImportProperties } from "../interchange/import";
 import { acyclicEdgeRelations } from "../store/acyclicity";
+import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
 import {
   edgeCardinalityAxisReferences,
   edgeCardinalitySpec,
@@ -14,6 +15,8 @@ import {
 import type { CandidateWriteSet } from "./candidate-write-set";
 import { parseRowProps } from "./canonical-props";
 import { CandidateWriteSetError } from "./errors";
+import { captureMergePlanTargetFence } from "./merge";
+import type { MergePlanTargetFence } from "./plan-schema";
 import type {
   GraphBackend,
   GraphDef,
@@ -39,6 +42,43 @@ import { graphWithoutNodeUniqueness } from "./working-copy";
 type EntityReference = Readonly<{ kind: string; id: string }>;
 
 /**
+ * Why candidate planning stages the whole target instead of the candidate's
+ * own rows. Each scope produces a correct plan; the reason names the cost.
+ */
+export type CandidatePlanningScopeReason =
+  | "revision-tracking-disabled"
+  | "composition"
+  | "acyclic-relation"
+  | "target-side-cardinality"
+  | "missing-active-source-read"
+  | "missing-match-identity-read"
+  | "missing-scoped-identity-reads"
+  | "match-identity-owners-unavailable"
+  | "match-identity-owner-not-clone-visible"
+  | "planned-evolution";
+
+/** The rows candidate planning stages, and why when it is not the candidate's own. */
+export type CandidatePlanningScope =
+  Readonly<{ scope: "candidate" }> | WholeTargetPlanningScope;
+
+/** {@link CandidatePlanningScope}'s whole-target decision. */
+export type WholeTargetPlanningScope = Readonly<{
+  scope: "whole-target";
+  reason: CandidatePlanningScopeReason;
+}>;
+
+const CANDIDATE_SCOPE = { scope: "candidate" } as const;
+
+export function wholeTargetPlanningScope(
+  reason: CandidatePlanningScopeReason,
+): WholeTargetPlanningScope {
+  return { scope: "whole-target", reason };
+}
+
+/**
+ * The scope a target admits before any candidate is read: the one owner of
+ * candidate-planning eligibility.
+ *
  * Cardinality peers use the exact claim key and holder liveness. `oneActive`
  * needs the optional active-only source read so ended history cannot make a
  * candidate lookup grow with the graph. Durable match identity requires an
@@ -50,26 +90,89 @@ type EntityReference = Readonly<{ kind: string; id: string }>;
  * paths between its endpoints. A graph declaring any of them plans against
  * the whole target instead.
  */
-export function canUseSparseCandidatePlanning<G extends GraphDef>(
+export function candidatePlanningScope<G extends GraphDef>(
   target: Store<G>,
-): boolean {
-  const hasActiveSourceRead =
-    storeBackend(target).findActiveEdgesBySourceV1 !== undefined;
-  return (
-    target.revisionTrackingEnabled &&
-    acyclicEdgeRelations(target.graph, target.registry).length === 0 &&
-    (target.graph.identity === undefined ||
-      hasScopedIdentityReads(storeRuntime(target))) &&
-    Object.values(target.graph.edges).every(
-      (edge) =>
-        edgeCardinalityAxisReferences(edge).every(
-          (axis) => axis.direction === "source",
-        ) &&
-        (edge.cardinality !== "oneActive" || hasActiveSourceRead) &&
-        (edge.matchIdentity === undefined ||
-          storeBackend(target).findEdgesByMatchIdentity !== undefined),
+): CandidatePlanningScope {
+  if (!target.revisionTrackingEnabled)
+    return wholeTargetPlanningScope("revision-tracking-disabled");
+  const acyclicRelations = acyclicEdgeRelations(target.graph, target.registry);
+  if (
+    acyclicRelations.some(
+      (relation) => relation.name === COMPOSITION_RELATION_NAME,
     )
-  );
+  )
+    return wholeTargetPlanningScope("composition");
+  if (acyclicRelations.length > 0)
+    return wholeTargetPlanningScope("acyclic-relation");
+  const edges = Object.values(target.graph.edges);
+  if (
+    edges.some((edge) =>
+      edgeCardinalityAxisReferences(edge).some(
+        (axis) => axis.direction === "target",
+      ),
+    )
+  )
+    return wholeTargetPlanningScope("target-side-cardinality");
+  const backend = storeBackend(target);
+  if (
+    backend.findActiveEdgesBySourceV1 === undefined &&
+    edges.some((edge) => edge.cardinality === "oneActive")
+  )
+    return wholeTargetPlanningScope("missing-active-source-read");
+  if (
+    backend.findEdgesByMatchIdentity === undefined &&
+    edges.some((edge) => edge.matchIdentity !== undefined)
+  )
+    return wholeTargetPlanningScope("missing-match-identity-read");
+  if (
+    target.graph.identity !== undefined &&
+    !hasScopedIdentityReads(storeRuntime(target))
+  )
+    return wholeTargetPlanningScope("missing-scoped-identity-reads");
+  return CANDIDATE_SCOPE;
+}
+
+/**
+ * The decided scope. A candidate scope carries what seeds its sparse base: the
+ * durable match-identity owners its edges name, read under `fence`.
+ */
+export type CandidatePlanningScopeResolution =
+  | Readonly<{
+      planningScope: typeof CANDIDATE_SCOPE;
+      fence: MergePlanTargetFence;
+      matchIdentityOwners: readonly EdgeRow[];
+    }>
+  | Readonly<{
+      planningScope: WholeTargetPlanningScope;
+    }>;
+
+/**
+ * {@link candidatePlanningScope} refined by the candidate itself. The owner
+ * query controls whether sparse import sees an existing edge, so it is bound
+ * to one target revision with the sparse seed; an owner that cannot be read,
+ * or is excluded from the clone projection, plans against the whole target.
+ */
+export async function resolveCandidatePlanningScope<G extends GraphDef>(
+  target: Store<G>,
+  writeSet: CandidateWriteSet,
+): Promise<CandidatePlanningScopeResolution> {
+  const planningScope = candidatePlanningScope(target);
+  if (planningScope.scope === "whole-target") return { planningScope };
+  const fence = await captureMergePlanTargetFence(target);
+  const owners = await readCandidateMatchIdentityOwners(target, writeSet);
+  if (owners === undefined)
+    return {
+      planningScope: wholeTargetPlanningScope(
+        "match-identity-owners-unavailable",
+      ),
+    };
+  if (!matchIdentityOwnersAreCloneVisible(owners))
+    return {
+      planningScope: wholeTargetPlanningScope(
+        "match-identity-owner-not-clone-visible",
+      ),
+    };
+  return { planningScope, fence, matchIdentityOwners: owners };
 }
 
 /**

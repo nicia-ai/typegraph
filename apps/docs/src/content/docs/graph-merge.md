@@ -312,8 +312,11 @@ bounded candidate batch. First use
 `captureCandidateWriteSetTargetForEvolution(target, evolutionPlan)` when
 authoring the JSON document; it records the evolution plan's resulting schema
 identity rather than the currently active one. The planner stages the candidate
-against that resulting graph and returns the same resulting-schema merge
-artifact accepted by `withEvolvedTransaction()`.
+against that resulting graph and returns, as `plan`, the same resulting-schema
+merge artifact accepted by `withEvolvedTransaction()`. It always stages the
+whole resulting graph, so its `planningScope` is
+`{ scope: "whole-target", reason: "planned-evolution" }` and
+`planningScope: "candidate"` is refused.
 
 Candidate resolution still includes the committed target as an accepted source.
 Existing unique matches and property conflicts are therefore visible in the
@@ -334,7 +337,7 @@ const writeSet = {
   }],
   edges: [],
 };
-const mergePlan = unwrap(await planCandidateWriteSetForEvolution({
+const { plan: mergePlan } = unwrap(await planCandidateWriteSetForEvolution({
   target,
   evolutionPlan,
   makeBackend: makeIsolatedBackend,
@@ -438,8 +441,9 @@ On an eligible revision-tracked graph, candidate planning reads existing
 candidate ids and edge endpoints by key, then seeds only those rows in the
 transient working copy. A graph that declares a target-side cardinality, an
 `acyclic` edge or a composition pair is not eligible: those constraints depend
-on rows the sparse base never reads, so planning there silently uses the
-complete clone, whole-target path. On identity-enabled graphs, it also follows live same-id peers and
+on rows the sparse base never reads, so planning there uses the
+complete clone, whole-target path and reports why in `planningScope`
+(see [Planning scope](#planning-scope)). On identity-enabled graphs, it also follows live same-id peers and
 current identity assertions from those references to a fixed point. The
 planner reads peers of a candidate edge with `one` cardinality by source,
 peers of a `unique` edge by its endpoint pair, and the active peer of a
@@ -604,10 +608,13 @@ set again.
 
 An explicitly requested candidate review scope (`reviewScope: "candidate"`) is
 refused with `details.reason: "candidate-scope-ineligible"` on a graph outside
-the eligibility rules. Candidate write-set planning is not refused for
-ineligibility: `planCandidateWriteSet`, and a review planned without
-`reviewScope`, silently fall back to the complete-clone, whole-target planner
-there and yield the plan and conflicts that planner yields. Revalidating a
+the eligibility rules, and `details.planningScope` carries the
+[planning scope](#planning-scope) decision that refused it. Candidate
+write-set planning is not refused for ineligibility unless it is called with
+`planningScope: "candidate"`: `planCandidateWriteSet`, and a review planned
+without `reviewScope`, use the complete-clone, whole-target planner there,
+yield the plan and conflicts that planner yields, and report the reason in
+`planningScope`. Revalidating a
 stored candidate-scoped review is refused with the same reason when the target
 can no longer be read sparsely, for example after a custom backend loses
 `findActiveEdgesBySourceV1` on a `oneActive` graph.
@@ -1165,11 +1172,15 @@ on before approving the plan. `applyMergePlan` re-verifies the same finding
 inside the apply transaction, under the per-graph write lock, and refuses with
 `MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
 if it still recurs there — so a plan-time report that comes back empty is not
-a guarantee against a concurrent attach racing the eventual apply. The
-`"unattached"` cause has its own residual blind spot: a composition edge
-silently dropped by canonicalization's endpoint-deleted repointing issues no
-write for any per-write guard to see — see
-[Limitations](/limitations#composition-existence-existence-required).
+a guarantee against a concurrent attach racing the eventual apply. A
+composition edge canonicalization drops as `edge:endpoint-deleted` issues no
+write, and none is needed to catch it. If a branch made that attachment,
+planning refuses as described above. If the edge already attached its part at
+the branch point, the plan deletes its whole, and the `"deleted"` check reads
+the target's live parts of every whole the plan deletes: a surviving part is
+reported at plan time and refused inside the apply transaction. Running
+`store.verifyConstraintFences()` after a merge is a generic audit, not a step
+the merge relies on.
 
 A branch's composition writes merge as the unit they were written as. Apply
 replays a plan one row at a time, so it postpones the per-write
@@ -2564,8 +2575,10 @@ For a bounded candidate batch, `planCandidateWriteSet()` hides the transient
 branch lifecycle completely. It accepts a validated, versioned JSON document,
 stages it through the same constraint-aware ingestion implementation, delegates
 to incremental merge planning, and closes the working copy on every outcome.
-The result is the ordinary `MergePlanArtifact`, so review and application use
-the same APIs as every other merge plan.
+The result's `plan` is the ordinary `MergePlanArtifact`, so review and
+application use the same APIs as every other merge plan; beside it,
+`planningScope` reports whether staging was bounded to the candidate (see
+[Planning scope](#planning-scope)).
 
 On eligible revision-tracked graphs, planning
 seeds existing candidate rows, edge
@@ -2603,7 +2616,7 @@ const writeSet = {
   edges: [],
 } as const;
 
-const plan = unwrap(
+const { plan, planningScope } = unwrap(
   await planCandidateWriteSet({
     target: store,
     makeBackend,
@@ -2729,6 +2742,40 @@ expose a general reopen/resume API. Deferral is not an in-memory flag and does
 not disable database constraints ad hoc. Ingestion branches require a backend
 with the batch uniqueness operations needed for atomic final validation.
 Unsupported backends are refused rather than falling back to sequential checks.
+
+#### Planning scope
+
+`planCandidateWriteSet()` returns `{ plan, planningScope }`. `plan` is the
+ordinary `MergePlanArtifact`; `planningScope` records which rows seeded the
+transient working copy. It is a planning-cost fact rather than plan content:
+both scopes produce the same correct plan, so the scope is not part of the
+artifact or its digest.
+
+```typescript
+type CandidatePlanningScope =
+  | { scope: "candidate" }
+  | { scope: "whole-target"; reason: CandidatePlanningScopeReason };
+```
+
+| `reason` | Cause |
+| --- | --- |
+| `revision-tracking-disabled` | The target does not track revisions |
+| `composition` | The graph declares a `partOf`/`hasPart` pair |
+| `acyclic-relation` | An edge is declared `acyclic: true` |
+| `target-side-cardinality` | An edge declares `targetCardinality` |
+| `missing-active-source-read` | A `oneActive` edge on a backend without `findActiveEdgesBySourceV1` |
+| `missing-match-identity-read` | A `matchIdentity` edge on a backend without `findEdgesByMatchIdentity` |
+| `missing-scoped-identity-reads` | An identity graph whose Store runtime lacks the endpoint- and assertion-ID-scoped identity reads |
+| `match-identity-owners-unavailable` | A durable owner key cannot be derived from a candidate edge |
+| `match-identity-owner-not-clone-visible` | A candidate edge names a durable owner the clone projection excludes |
+| `planned-evolution` | `planCandidateWriteSetForEvolution()` always stages the whole resulting graph |
+
+Pass `planningScope: "candidate"` to make the candidate scope a requirement
+rather than a preference, for example to bound planning cost on a large
+target. When the target or candidate needs the whole target, planning is
+refused with `CandidatePlanningScopeError`
+(`GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE`) before any staging backend is
+created, and `details.planningScope.reason` names the cause.
 
 ## Valid-time windows
 
