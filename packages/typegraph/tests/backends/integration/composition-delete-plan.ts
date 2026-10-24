@@ -28,6 +28,7 @@ import {
   type NodeDeletePlan,
   partOf,
   RestrictedDeleteError,
+  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
@@ -109,6 +110,17 @@ function cascadedPart(
     whole: { kind: whole.kind, id: whole.id },
     viaEdgeKind,
   };
+}
+
+async function rejectionOf(
+  operation: () => Promise<unknown>,
+): Promise<unknown> {
+  try {
+    await operation();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 function endedNow(): Readonly<{ validTo: string }> {
@@ -370,7 +382,7 @@ export function registerCompositionDeletePlanIntegrationTests(
       });
     });
 
-    it("writes nothing on either form: a revision-tracked store's revision does not move", async () => {
+    it("writes no graph or revision row on either form: a revision-tracked store's revision does not move", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()), {
         revisionTracking: true,
       });
@@ -400,6 +412,60 @@ export function registerCompositionDeletePlanIntegrationTests(
       expect(receipt.writes.total).toBe(0);
       expect(await store.revisionNow()).toEqual(before);
       expect(await store.nodes.DpPodcast.getById(podcast.id)).toBeDefined();
+    });
+
+    it("refuses the transactional form inside a read-only transaction before any statement, for a whole and a non-whole kind", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      await store.nodes.DpEpisode.create(
+        { title: "e" },
+        { partOf: { whole: podcast } },
+      );
+      const tag = await store.nodes.DpTag.create({ name: "t" });
+
+      // MUTATION CHECK: drop the `ctx.readOnlyTransaction` refusal from
+      // `executeNodeDeletePlan` (src/store/operations/node-operations.ts):
+      // SQLite then answers a plan, and server PostgreSQL rejects the whole's
+      // fence-row advance with a raw read-only driver error that also aborts
+      // the transaction, so the read after it fails — verified and reverted.
+      const refusals = await store.transactionWithReceipt(
+        async (tx) => {
+          const errors = [
+            await rejectionOf(() => tx.nodes.DpPodcast.planDelete(podcast.id)),
+            await rejectionOf(() => tx.nodes.DpTag.planDelete(tag.id)),
+            await rejectionOf(() =>
+              tx.measure((scoped) =>
+                scoped.nodes.DpPodcast.planDelete(podcast.id),
+              ),
+            ),
+          ];
+          // The refusal issued no statement, so the read-only transaction is
+          // still usable after it.
+          expect(await tx.nodes.DpPodcast.getById(podcast.id)).toBeDefined();
+          return errors;
+        },
+        { accessMode: "read_only" },
+      );
+
+      const kinds = ["DpPodcast", "DpTag", "DpPodcast"];
+      expect(refusals.result).toHaveLength(kinds.length);
+      for (const [index, refusal] of refusals.result.entries()) {
+        const kind = requireDefined(kinds[index]);
+        expect(refusal).toBeInstanceOf(UnsupportedBackendCapabilityError);
+        const error = refusal as UnsupportedBackendCapabilityError;
+        expect(error.code).toBe("UNSUPPORTED_BACKEND_CAPABILITY");
+        expect(error.details).toMatchObject({
+          operation: `tx.nodes.${kind}.planDelete()`,
+          capability: "write transaction access",
+          accessMode: "read_only",
+        });
+        expect(error.suggestion).toContain(
+          `store.nodes.${kind}.planDelete(id)`,
+        );
+      }
+      expect(refusals.receipt.writes.total).toBe(0);
+      const storeFormPlan = await store.nodes.DpPodcast.planDelete(podcast.id);
+      expect(storeFormPlan?.cascadedParts).toHaveLength(1);
     });
   });
 }

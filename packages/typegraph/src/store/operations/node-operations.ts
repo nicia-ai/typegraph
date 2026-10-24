@@ -335,6 +335,7 @@ import {
   hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
   memoizeLeasedSchemaFence,
+  refuseReadOnlyTransactionWrite,
   resolveWriteTransactionMode,
   runOwnedMutationSetTransaction,
   type WriteTransactionMode,
@@ -347,6 +348,12 @@ import {
 export type NodeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
+  /**
+   * The context belongs to `store.transaction(fn, { accessMode: "read_only" })`.
+   * Operations that would take a write lock there refuse up front instead
+   * (`refuseReadOnlyTransactionWrite`).
+   */
+  readOnlyTransaction: boolean;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -6915,6 +6922,11 @@ export async function executeNodeDelete<G extends GraphDef>(
  * plan folds nothing. Anywhere else there is no transaction to hold that lock
  * in, so the plan is a best-effort unlocked read, as merge plan time reads
  * the cascade (`uncapturedGraphWriteLock`).
+ *
+ * That lock is a write (on PostgreSQL a composition whole's delete advances
+ * the per-graph fence row), so a read-only transaction refuses the preview
+ * before any statement, on every backend, rather than leave the engine to
+ * reject it for some kinds and dialects only.
  */
 export async function executeNodeDeletePlan<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -6922,6 +6934,13 @@ export async function executeNodeDeletePlan<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<NodeDeletePlan | undefined> {
+  if (ctx.readOnlyTransaction) {
+    refuseReadOnlyTransactionWrite(
+      `tx.nodes.${kind}.planDelete()`,
+      ctx.graphId,
+      `Call store.nodes.${kind}.planDelete(id) outside the transaction for an unlocked preview, or remove accessMode: "read_only" so the preview holds the delete's lock.`,
+    );
+  }
   if (resolveWriteTransactionMode(backend) !== "existing") {
     return planLiveNodeDelete(
       ctx,

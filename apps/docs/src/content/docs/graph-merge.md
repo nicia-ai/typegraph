@@ -730,7 +730,10 @@ accepts the same two. An apply option neither path declares is refused with
 The transaction acquires the schema fence before the graph write lock, validates
 schema, revision origin, and revision, and then calls `beforeApply`. This context
 exposes node and edge collection reads and, for identity-enabled graphs, identity
-reads. Write methods, native SQL, and a root Store are absent. Application writes
+reads. Its `planDelete` is the transactional form: it writes no graph row, but it
+takes the delete's lock, which apply already holds (see
+[Previewing a delete](/limitations#previewing-a-delete)). Write methods, native
+SQL, and a root Store are absent. Application writes
 before plan application are deliberately unsupported: an uncommitted write can
 change the reviewed state without changing its durable revision yet.
 

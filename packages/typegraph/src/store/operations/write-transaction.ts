@@ -86,6 +86,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   StaleVersionError,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql } from "../../query/sql-fragment";
@@ -641,6 +642,25 @@ export function resolveWriteTransactionMode(
   return backend.capabilities.execution.interactiveTransactions ?
       "opened"
     : "none";
+}
+
+/**
+ * The one refusal for an operation that needs write access inside
+ * `store.transaction(fn, { accessMode: "read_only" })`. Callers raise it
+ * before the operation issues any statement, so the engine never reports its
+ * own read-only error and the caller's transaction stays usable.
+ */
+export function refuseReadOnlyTransactionWrite(
+  operation: string,
+  graphId: string,
+  suggestion: string,
+): never {
+  throw new UnsupportedBackendCapabilityError(
+    operation,
+    "write transaction access",
+    { graphId, accessMode: "read_only" },
+    suggestion,
+  );
 }
 
 /**
