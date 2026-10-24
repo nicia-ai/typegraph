@@ -788,8 +788,9 @@ type RawNativeTransitionExistsRow = Readonly<{ transition_id: unknown }>;
  * set the retention watermark, passing the revision its own first commit
  * takes: a graph with earlier history of its own has honest boundaries the
  * restore never touched, and a restore-derived floor over them would
- * misreport `truncatedBefore` (or the `IDENTITY_REPLAY_HISTORY_TRUNCATED`
- * refusal) for classes the restore had nothing to do with.
+ * misreport the `retention-truncated` completeness reason (or the
+ * `IDENTITY_REPLAY_HISTORY_TRUNCATED` refusal) for classes the restore had
+ * nothing to do with.
  *
  * The bound is what keeps the restore's OWN notes out of the answer. Importing
  * an archive's nodes and assertions notes ordinary native transitions (a
@@ -854,7 +855,7 @@ type RawRetentionDetailsRow = Readonly<{
  * the latter is the prune operation's own instant, not the original commit
  * time of the pruned revision (which pruning destroys), but is the only
  * wall-time evidence retained once that history is gone. Used only to name a
- * `truncatedBefore` / `IDENTITY_REPLAY_HISTORY_TRUNCATED` boundary.
+ * `retention-truncated` / `IDENTITY_REPLAY_HISTORY_TRUNCATED` boundary.
  */
 export async function readTransitionRetentionDetails(
   target: IdentityTarget,
@@ -940,7 +941,7 @@ export function requireIdentityTransitionLog(
  * `WHERE` guard makes the write itself monotonic: a `resolvedWatermark` at or
  * below what is already stored is a no-op, so neither caller needs its own
  * read-compare-write race guard beyond the one each already has for its own
- * return value (prune's `pruned` count, restore's `truncatedBefore` honesty).
+ * return value (prune's `pruned` count, restore's `retention-truncated` honesty).
  */
 export async function writeIdentityTransitionRetentionWatermark(
   target: IdentityTarget,

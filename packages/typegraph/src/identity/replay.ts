@@ -24,7 +24,10 @@ import {
 import { IdentityReplayError, ValidationError } from "../errors";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { requireDefined } from "../utils/presence";
-import { readIdentityEvidenceNeighbours } from "./lineage-evidence";
+import {
+  readEverRecordedReferences,
+  readIdentityEvidenceNeighbours,
+} from "./lineage-evidence";
 import { identityActiveKinds } from "./service-components";
 import {
   type HistoricalClass,
@@ -256,6 +259,15 @@ function requireWindowRevision(
  *   graph before the archive was taken, so a member that had already left its
  *   class there cannot be traced to the restored rows that explain it. The
  *   count is graph-wide, so it is the same on every page.
+ * - `uncaptured-members`: `count` members of the reference's CURRENT class
+ *   (of more than one member) arrived through writes history capture did not
+ *   see: changes committed before `history: true` was enabled, or writes that
+ *   bypassed capture. Either the member's node has no recorded version or no
+ *   recorded evidence ties it to the reference, so the log cannot explain
+ *   how it joined, and transitions that involved it can be missing from the
+ *   page. The count is about the current class, so it is the same on every
+ *   page. Not reported alongside `pending-transaction-notes`, whose
+ *   uncommitted changes capture has not recorded yet either.
  * - `restored-not-reconstructed` (`replay` only): `count` restored
  *   transitions on this page belong to the lineage but are not `steps`,
  *   because no before/after can be reconstructed on this graph for a
@@ -270,13 +282,18 @@ export type IdentityHistoryIncompleteReason =
   | Readonly<{ reason: "more-pages"; nextCursor: TransitionPageCursor }>
   | Readonly<{ reason: "retention-truncated"; before: RecordedInstant }>
   | Readonly<{ reason: "unattributed-restored"; count: number }>
+  | Readonly<{ reason: "uncaptured-members"; count: number }>
   | Readonly<{ reason: "restored-not-reconstructed"; count: number }>
   | Readonly<{ reason: "pending-transaction-notes" }>;
 
 /**
- * Whether a `transitionsOf` / `replay` page is the whole answer: the one
- * place to check before treating a short or empty page as "nothing else
- * happened". Every step is reconstructed under the graph's current schema
+ * Whether a `transitionsOf` / `replay` page is the whole answer the
+ * transition log can give: the one place to check before treating a short or
+ * empty page as "nothing else happened". The log holds only what history
+ * capture saw. `uncaptured-members` reports the current members it never
+ * saw; a change made before capture was enabled that the current class no
+ * longer shows, or that involved a node before capture first recorded it,
+ * leaves nothing to detect. Every step is reconstructed under the graph's current schema
  * whatever this says; that is a property of replay, not of a page.
  */
 export type IdentityHistoryCompleteness =
@@ -369,8 +386,9 @@ function publicTransition<G extends GraphDef>(
 }
 
 /**
- * Resolves `ref`'s CURRENT class canonical (one closure probe), one of the seeds of the lineage WALK (see
- * {@link lineageWalkSeeds}) — never the historical reconstruction.
+ * Resolves `ref`'s CURRENT class (one closure probe), canonical first. The
+ * canonical is one of the seeds of the lineage WALK (see
+ * {@link lineageWalkStart}) — never the historical reconstruction.
  * Every transition note names the class canonical — never an arbitrary
  * member — as its `class` / `priorClass` columns, so `walkClassLineage` must
  * be seeded from the canonical, not from `ref` itself: in a k-member class,
@@ -390,18 +408,17 @@ function publicTransition<G extends GraphDef>(
  * oracle (`store.asOfRecorded(r).identity.membersOf(seed)`, using that same
  * original `ref`) is checked against.
  */
-async function currentClassCanonicalSeed<G extends GraphDef>(
+async function currentClassMembers<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: PlainNodeRef,
-): Promise<PlainNodeRef> {
+): Promise<readonly PlainNodeRef[]> {
   const classes = await loadCurrentStructuralClasses(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
     [ref],
   );
-  const members = requireDefined(classes.get(refKey(ref)));
-  return requireDefined(members[0]);
+  return requireDefined(classes.get(refKey(ref)));
 }
 
 /**
@@ -411,7 +428,7 @@ async function currentClassCanonicalSeed<G extends GraphDef>(
  * This is what makes a DEPARTED member's lineage discoverable. Once a member
  * leaves its class its current canonical is itself, and its own departure is
  * noted against the surviving class's canonical (`diffClosureTransitions`'s
- * "absent from the new state" branch), so {@link currentClassCanonicalSeed}
+ * "absent from the new state" branch), so {@link currentClassMembers}'s canonical
  * alone seeds a walk that matches nothing. The evidence that once put the
  * member in the class still names it, and every canonical its classes ever
  * carried is reachable through that evidence, so seeding the walk with this
@@ -448,21 +465,68 @@ async function everConnectedReferences<G extends GraphDef>(
   return [...connected.values()];
 }
 
+type LineageWalkStart = Readonly<{
+  seeds: readonly PlainNodeRef[];
+  uncapturedMembers: number;
+}>;
+
 /**
- * The references the lineage walk starts from: `ref`'s current class canonical
- * (see {@link currentClassCanonicalSeed}) together with everything recorded
- * evidence ever tied `ref` to (see {@link everConnectedReferences}). The ONE
- * owner of "where does a lineage walk begin", so `transitionsOf` and `replay`
- * cannot discover different lineages for the same reference.
+ * Where the lineage walk begins: `ref`'s current class canonical (see
+ * {@link currentClassMembers}) together with everything recorded evidence
+ * ever tied `ref` to (see {@link everConnectedReferences}). The ONE owner of
+ * "where does a lineage walk begin", so `transitionsOf` and `replay` cannot
+ * discover different lineages for the same reference.
+ *
+ * It also counts the current class members history capture has no record
+ * of ({@link uncapturedClassMembers}).
  */
-async function lineageWalkSeeds<G extends GraphDef>(
+async function lineageWalkStart<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: PlainNodeRef,
-): Promise<readonly PlainNodeRef[]> {
-  return [
-    await currentClassCanonicalSeed(ctx, ref),
-    ...(await everConnectedReferences(ctx, ref)),
-  ];
+): Promise<LineageWalkStart> {
+  const members = await currentClassMembers(ctx, ref);
+  const connected = await everConnectedReferences(ctx, ref);
+  return {
+    seeds: [requireDefined(members[0]), ...connected],
+    uncapturedMembers: await uncapturedClassMembers(ctx, members, connected),
+  };
+}
+
+/**
+ * How many members of a class of more than one member history capture has
+ * no record of (`0` when it has a record of all of them, and for a singleton,
+ * whose membership needs no explaining).
+ *
+ * A member is unrecorded when its node has no recorded version, so the
+ * historical reader that decides which transitions belong to the reference
+ * cannot place it in any class, or when no recorded evidence connects it to
+ * the reference. Every member of a class is tied to every other by `same`
+ * assertions and same-id peers; capture records each of those it sees, and
+ * {@link everConnectedReferences} follows every recorded one, so a member it
+ * does not reach joined through evidence capture never saw. Either way the
+ * member arrived through a write capture did not see: one committed before
+ * `history: true` was enabled, or one that bypassed capture.
+ */
+async function uncapturedClassMembers<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  members: readonly PlainNodeRef[],
+  connected: readonly PlainNodeRef[],
+): Promise<number> {
+  if (members.length < 2) return 0;
+  const recorded = await readEverRecordedReferences(
+    ctx.backend,
+    ctx.schema,
+    ctx.graphId,
+    members,
+  );
+  const recordedKeys = new Set(recorded.map((member) => refKey(member)));
+  const connectedKeys = new Set(
+    connected.map((reference) => refKey(reference)),
+  );
+  return members.filter(
+    (member) =>
+      !recordedKeys.has(refKey(member)) || !connectedKeys.has(refKey(member)),
+  ).length;
 }
 
 /**
@@ -515,7 +579,7 @@ const IDENTITY_REPLAY_WALK_ROW_CEILING = 2_000_000;
 
 /**
  * The fixed-point class-lineage walk: starting from
- * {@link lineageWalkSeeds}, repeatedly reads every transition touching the
+ * {@link lineageWalkStart}'s seeds, repeatedly reads every transition touching the
  * known set of class keys (forward AND reverse — a note's `class` or
  * `priorClass`), adding any newly discovered keys, until a round adds
  * nothing new.
@@ -985,6 +1049,7 @@ type HistoryCompletenessFacts = Readonly<{
   nextCursor?: TransitionPageCursor | undefined;
   truncatedBefore?: RecordedInstant | undefined;
   unattributedRestored: number;
+  uncapturedMembers: number;
   restoredNotReconstructed: number;
   pendingTransactionNotes: boolean;
 }>;
@@ -992,8 +1057,8 @@ type HistoryCompletenessFacts = Readonly<{
 /**
  * The ONE owner of a page's completeness, so `transitionsOf` and `replay`
  * cannot report the same facts differently. Reasons are listed in a fixed
- * order: pagination, retention, then what discovery and reconstruction could
- * not account for, then the enclosing transaction.
+ * order: pagination, retention, then what discovery, capture and
+ * reconstruction could not account for, then the enclosing transaction.
  */
 function historyCompleteness(
   facts: HistoryCompletenessFacts,
@@ -1010,6 +1075,14 @@ function historyCompleteness(
     reasons.push({
       reason: "unattributed-restored",
       count: facts.unattributedRestored,
+    });
+  // A transaction's own uncommitted changes reach the recorded relations only
+  // when it commits, so while it holds pending notes a member it joined
+  // would count as uncaptured; the pending reason already covers that page.
+  if (facts.uncapturedMembers > 0 && !facts.pendingTransactionNotes)
+    reasons.push({
+      reason: "uncaptured-members",
+      count: facts.uncapturedMembers,
     });
   if (facts.restoredNotReconstructed > 0)
     reasons.push({
@@ -1085,10 +1158,8 @@ async function walkedTransitionsFor<G extends GraphDef>(
       undefined
     : requireCursorRevision(options.cursor, seed);
   const fromRevision = laterRevision(windowFromRevision, cursorRevision);
-  const discovered = await walkClassLineage(
-    ctx,
-    await lineageWalkSeeds(ctx, seed),
-  );
+  const start = await lineageWalkStart(ctx, seed);
+  const discovered = await walkClassLineage(ctx, start.seeds);
   const unattributedRestored = await unattributedRestoredTransitions(
     ctx,
     discovered,
@@ -1113,6 +1184,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
       nextCursor: page.nextCursor,
       truncatedBefore: truncatedBeforeFor(retention, fromRevision),
       unattributedRestored,
+      uncapturedMembers: start.uncapturedMembers,
       pendingTransactionNotes: hasPendingIdentityTransitionNotes(
         ctx.backend,
         ctx.graphId,
@@ -1220,9 +1292,11 @@ export async function identityReplay<G extends GraphDef>(
       steps.push({ transition: recordedTransition<G>(row), before, after });
     }
   }
-  const restoredNotReconstructed = boundaries
-    .flatMap((boundary) => boundary.rows)
-    .filter((row) => isRestoredTransitionRow(row)).length;
+  const pageRows = boundaries.reduce(
+    (total, boundary) => total + boundary.rows.length,
+    0,
+  );
+  const restoredNotReconstructed = pageRows - steps.length;
 
   const { nextCursor } = completenessFacts;
   return {

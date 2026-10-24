@@ -18,7 +18,7 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
-import { referenceCondition } from "./service-read";
+import { referenceCondition, refKey } from "./service-read";
 import {
   identityChunkSize,
   type IdentityTarget,
@@ -136,4 +136,21 @@ export async function readIdentityEvidenceNeighbours(
     references,
   );
   return [...asserted, ...folded];
+}
+
+/** The references among `references` that have at least one recorded node version. */
+export async function readEverRecordedReferences(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+  references: readonly PlainNodeRef[],
+): Promise<readonly PlainNodeRef[]> {
+  const wanted = new Set(references.map((reference) => refKey(reference)));
+  const sameId = await readEverRecordedSameIdReferences(
+    target,
+    schema,
+    graphId,
+    references,
+  );
+  return sameId.filter((reference) => wanted.has(refKey(reference)));
 }

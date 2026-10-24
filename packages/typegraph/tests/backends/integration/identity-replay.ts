@@ -116,6 +116,13 @@ function personRef(id: string) {
   return { kind: "Person" as const, id };
 }
 
+function uncapturedCount(count: number) {
+  return {
+    status: "partial",
+    reasons: [{ reason: "uncaptured-members", count }],
+  };
+}
+
 const DISJOINT_PAIR_COUNT = 6;
 
 function disjointPair(index: number) {
@@ -849,6 +856,89 @@ export function registerIdentityReplayIntegrationTests(
       expect(
         completenessReason(history, "restored-not-reconstructed"),
       ).toBeUndefined();
+    });
+
+    it("reports current class members history capture never saw, instead of an empty page that looks complete", async () => {
+      const backend = context.getStore().backend;
+      const graph = departedLineageGraph("identity_completeness_uncaptured");
+      const [untracked] = await createStoreWithSchema(graph, backend, {
+        history: false,
+      });
+      const [store] = await createStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      // A node capture never saw that is alone in its class has no
+      // membership to explain.
+      const lone = personRef("uncaptured-lone");
+      await untracked.nodes.Person.create({}, { id: lone.id });
+      const loneHistory = await store.identity.transitionsOf(lone);
+      expect(loneHistory.completeness).toEqual({ status: "complete" });
+
+      // Merged before capture was enabled: neither node nor assertion recorded.
+      const a = personRef("uncaptured-a");
+      const b = personRef("uncaptured-b");
+      await untracked.nodes.Person.create({}, { id: a.id });
+      await untracked.nodes.Person.create({}, { id: b.id });
+      await untracked.identity.assertSame(a, b);
+      expect(await store.identity.membersOf(a)).toHaveLength(2);
+      for (const ref of [a, b]) {
+        const history = await store.identity.transitionsOf(ref);
+        const replay = await store.identity.replay(ref);
+        console.log(
+          `pre-capture merge read from ${ref.id}:`,
+          history.transitions.length,
+          "transitions,",
+          JSON.stringify(history.completeness),
+        );
+        expect(history.transitions).toEqual([]);
+        expect(history.completeness).toEqual(uncapturedCount(2));
+        expect(replay.completeness).toEqual(uncapturedCount(2));
+      }
+
+      // Both nodes rewritten under capture: the nodes are recorded, the
+      // assertion that joined them still is not.
+      await store.nodes.Person.update(asNodeId(a.id), {});
+      await store.nodes.Person.update(asNodeId(b.id), {});
+      const rewritten = await store.identity.transitionsOf(a);
+      console.log(
+        "nodes rewritten, assertion not:",
+        JSON.stringify(rewritten.completeness),
+      );
+      expect(rewritten.completeness).toEqual(uncapturedCount(1));
+
+      // Created before capture, merged under it: the merge is logged, but the
+      // historical reader has no record of either node, so the page cannot
+      // show it.
+      const c = personRef("uncaptured-c");
+      const d = personRef("uncaptured-d");
+      await untracked.nodes.Person.create({}, { id: c.id });
+      await untracked.nodes.Person.create({}, { id: d.id });
+      await store.identity.assertSame(c, d);
+      const capturedMerge = await store.identity.transitionsOf(c);
+      console.log(
+        "captured merge of pre-capture nodes:",
+        capturedMerge.transitions.length,
+        "transitions,",
+        JSON.stringify(capturedMerge.completeness),
+      );
+      expect(capturedMerge.transitions).toEqual([]);
+      expect(capturedMerge.completeness).toEqual(uncapturedCount(2));
+
+      // A pre-capture node written again under capture, then merged with one
+      // created under it: fully captured, so complete.
+      const f = personRef("uncaptured-f");
+      const g = personRef("uncaptured-g");
+      await untracked.nodes.Person.create({}, { id: f.id });
+      await store.nodes.Person.update(asNodeId(f.id), {});
+      await store.nodes.Person.create({}, { id: g.id });
+      await store.identity.assertSame(f, g);
+      const captured = await store.identity.transitionsOf(f);
+      expect(
+        captured.transitions.map((transition) => transition.cause),
+      ).toEqual(["assert"]);
+      expect(captured.completeness).toEqual({ status: "complete" });
+      const capturedReplay = await store.identity.replay(f);
+      expect(capturedReplay.completeness).toEqual({ status: "complete" });
     });
 
     it("reports a transaction's own pending identity changes on tx.identity reads, and nothing once committed", async () => {

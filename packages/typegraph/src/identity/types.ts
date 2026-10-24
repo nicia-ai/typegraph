@@ -254,8 +254,10 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * `completeness` carries the `pending-transaction-notes` reason.
      *
      * `completeness` is the one place to check whether a page is the whole
-     * answer: more pages, a retention cut, and restored transitions discovery
-     * could not attribute are all reported there.
+     * answer the log can give: more pages, a retention cut, restored
+     * transitions discovery could not attribute, and current class members
+     * that arrived through writes history capture never saw (for example
+     * before `history: true` was enabled) are all reported there.
      *
      * Deliberately absent from {@link IdentityReadFacade}: it answers across
      * every recorded coordinate, not the one a read-only lens is pinned to.
