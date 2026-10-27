@@ -89,11 +89,7 @@ import {
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
-import {
-  checkDisjointness,
-  checkWherePredicate,
-  computeUniqueKey,
-} from "../../constraints";
+import { checkDisjointness, uniqueConstraintKey } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -2358,6 +2354,15 @@ async function resurrectPreparedNode<G extends GraphDef>(
 // unique constraint entries across all applicable kinds.
 // ============================================================
 
+interface UniqueMatchRow {
+  node_id: string;
+  concrete_kind: string;
+  deleted_at: string | undefined;
+}
+
+/** One claim row a lookup found for a key, and the axis it sits at. */
+type ClaimCandidate = Readonly<{ axis: string; claim: UniqueMatchRow }>;
+
 /**
  * THE preference rule when a key has claim rows at more than one kind — which a
  * database carrying pre-axis rows legitimately can, at the axis AND at a
@@ -2373,29 +2378,33 @@ async function resurrectPreparedNode<G extends GraphDef>(
  *    delivers.
  *
  * Stated rather than left to iteration order because `getOrCreateByConstraint`
- * decides which node to revive from it.
+ * decides which node to revive from it. The candidates arrive in visiting
+ * order (rule 1); this is the stable partition that applies rules 2 and 3.
+ * It ORDERS rather than picks, because a released candidate can turn out
+ * inert ({@link claimedNodeRow}), and the next eligible one must then answer.
  */
-function prefersClaimRow(
-  incumbent: UniqueMatchRow | undefined,
-  candidate: UniqueMatchRow,
-): boolean {
-  if (incumbent === undefined) return true;
-  return (
-    incumbent.deleted_at !== undefined && candidate.deleted_at === undefined
-  );
+function orderClaimCandidates(
+  candidates: readonly ClaimCandidate[],
+): readonly ClaimCandidate[] {
+  return [
+    ...candidates.filter(
+      (candidate) => candidate.claim.deleted_at === undefined,
+    ),
+    ...candidates.filter(
+      (candidate) => candidate.claim.deleted_at !== undefined,
+    ),
+  ];
 }
 
-async function findUniqueRowAcrossKinds(
+async function findClaimCandidatesAcrossKinds(
   backend: WriteTarget,
   graphId: string,
   constraintName: string,
   key: string,
   kindsToCheck: readonly string[],
   includeDeleted: boolean,
-): Promise<UniqueMatchRow | undefined> {
-  // `let` earns its place: a tombstoned hit does not end the search, because a
-  // live row later in the order outranks it (rule 2).
-  let preferred: UniqueMatchRow | undefined;
+): Promise<readonly ClaimCandidate[]> {
+  const candidates: ClaimCandidate[] = [];
   for (const kindToCheck of kindsToCheck) {
     const row = await backend.checkUnique({
       graphId,
@@ -2404,21 +2413,14 @@ async function findUniqueRowAcrossKinds(
       key,
       includeDeleted,
     });
-    if (row === undefined) continue;
-    if (!prefersClaimRow(preferred, row)) continue;
-    preferred = row;
-    if (row.deleted_at === undefined) return row;
+    // Every axis is read, never only up to the first live row: that row may
+    // name a node that no longer exists, and the next live row then answers.
+    if (row !== undefined) candidates.push({ axis: kindToCheck, claim: row });
   }
-  return preferred;
+  return orderClaimCandidates(candidates);
 }
 
-interface UniqueMatchRow {
-  node_id: string;
-  concrete_kind: string;
-  deleted_at: string | undefined;
-}
-
-async function batchCheckUniqueAcrossKinds(
+async function batchFindClaimCandidatesAcrossKinds(
   backend: WriteTarget,
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>,
   graphId: string,
@@ -2426,8 +2428,14 @@ async function batchCheckUniqueAcrossKinds(
   uniqueKeys: readonly string[],
   kindsToCheck: readonly string[],
   includeDeleted: boolean,
-): Promise<Map<string, UniqueMatchRow>> {
-  const existingByKey = new Map<string, UniqueMatchRow>();
+): Promise<ReadonlyMap<string, readonly ClaimCandidate[]>> {
+  const candidatesByKey = new Map<string, ClaimCandidate[]>();
+  const addCandidate = (axis: string, row: UniqueRow): void => {
+    const candidate = { axis, claim: row };
+    const existing = candidatesByKey.get(row.key);
+    if (existing === undefined) candidatesByKey.set(row.key, [candidate]);
+    else existing.push(candidate);
+  };
   const boundCheckUniqueBatch = bindExtraIfReachable(
     backend,
     uniqueSidecarBatch.extras.checkUniqueBatch,
@@ -2437,10 +2445,6 @@ async function batchCheckUniqueAcrossKinds(
   for (const kindToCheck of kindsToCheck) {
     if (boundCheckUniqueBatch === undefined) {
       for (const key of uniqueKeys) {
-        const incumbent = existingByKey.get(key);
-        if (incumbent !== undefined && incumbent.deleted_at === undefined) {
-          continue;
-        }
         const row = await backend.checkUnique({
           graphId,
           nodeKind: kindToCheck,
@@ -2448,9 +2452,7 @@ async function batchCheckUniqueAcrossKinds(
           key,
           includeDeleted,
         });
-        if (row !== undefined && prefersClaimRow(incumbent, row)) {
-          existingByKey.set(row.key, row);
-        }
+        if (row !== undefined) addCandidate(kindToCheck, row);
       }
     } else {
       const rows = await boundCheckUniqueBatch.checkUniqueBatch({
@@ -2460,15 +2462,129 @@ async function batchCheckUniqueAcrossKinds(
         keys: uniqueKeys,
         includeDeleted,
       });
-      for (const row of rows) {
-        if (prefersClaimRow(existingByKey.get(row.key), row)) {
-          existingByKey.set(row.key, row);
-        }
-      }
+      for (const row of rows) addCandidate(kindToCheck, row);
     }
   }
 
-  return existingByKey;
+  return new Map(
+    [...candidatesByKey].map(([key, candidates]) => [
+      key,
+      orderClaimCandidates(candidates),
+    ]),
+  );
+}
+
+/**
+ * The constraint the claim's OWNER declares under the name being looked up,
+ * provided its current scope still reads the axis the claim sits at — or
+ * `undefined`, in which case the owner holds nothing under that name there.
+ *
+ * Related kinds may each declare a constraint of the same name over different
+ * fields, collations or predicates, and a scope can change after a claim was
+ * written. Whether the owner still holds a key is a question about the
+ * owner's declaration, never the requesting kind's.
+ */
+function ownerClaimConstraint<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  ownerKind: string,
+  constraintName: string,
+  axis: string,
+): UniqueConstraint | undefined {
+  if (!hasOwnKey(ctx.graph.nodes, ownerKind)) return undefined;
+  const constraint = getNodeRegistration(ctx.graph, ownerKind).unique?.find(
+    (candidate) => candidate.name === constraintName,
+  );
+  if (constraint === undefined) return undefined;
+  const coveredAxes = uniquenessProbeKinds(
+    ownerKind,
+    constraint.scope,
+    ctx.registry,
+  );
+  return coveredAxes.includes(axis) ? constraint : undefined;
+}
+
+/**
+ * THE decision whether a claim candidate a constraint lookup found still
+ * names the node it should act on — the row it returns — or is inert. Every
+ * find and getOrCreate lookup reads it, through {@link resolveClaimedNode}.
+ *
+ * A LIVE claim names its holder. A RELEASED claim is a soft-deleted
+ * reservation, and a delete is not the only thing that releases one: an update
+ * that changes the key releases the old key while its owner lives on, and a
+ * tombstone can move off the key before its delete. So a released row names
+ * its node only while that node — live or deleted — still holds this key
+ * under its OWN declaration of the constraint ({@link ownerClaimConstraint}):
+ * a tombstone to revive, or a node a peer revived after the lookup read the
+ * claim. Any other released row — owner gone, owner on another key, owner no
+ * longer claiming here — is inert, which is what keeps a lookup from handing
+ * back, or rewriting, a node the key no longer belongs to. Read rather than
+ * written away because databases already carry such rows.
+ */
+function claimedNodeRow<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  candidate: ClaimCandidate,
+  node: BackendNodeRow | undefined,
+  constraintName: string,
+  key: string,
+): BackendNodeRow | undefined {
+  if (candidate.claim.deleted_at === undefined || node === undefined) {
+    return node;
+  }
+  const ownerConstraint = ownerClaimConstraint(
+    ctx,
+    node.kind,
+    constraintName,
+    candidate.axis,
+  );
+  if (ownerConstraint === undefined) return undefined;
+  const heldKey = uniqueConstraintKey(
+    ownerConstraint,
+    rowPropsToObject(node.props),
+  );
+  return heldKey === key ? node : undefined;
+}
+
+/**
+ * The node a key resolves to — for getOrCreate, and for the find lookups,
+ * whose live-only reads hand it live candidates alone: the first candidate, in
+ * preference order, that {@link claimedNodeRow} does not find inert. An inert
+ * released candidate never hides an eligible one behind it; no eligible
+ * candidate means the key is absent.
+ *
+ * Live candidates never fall through to released ones. A live claim is a
+ * reservation in force, so while any exists only a live claim may answer —
+ * even when none of them names a node that still exists. Reviving a tombstone
+ * over a live reservation would hand back a node the key is not reserved
+ * for; the key instead reads as absent, and the create that follows meets
+ * the live reservation exactly as it did before released claims were
+ * resolved at all.
+ */
+async function resolveClaimedNode<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: WriteTarget,
+  candidates: readonly ClaimCandidate[],
+  constraintName: string,
+  key: string,
+): Promise<BackendNodeRow | undefined> {
+  const liveCandidates = candidates.filter(
+    (candidate) => candidate.claim.deleted_at === undefined,
+  );
+  const answering = liveCandidates.length > 0 ? liveCandidates : candidates;
+  for (const candidate of answering) {
+    const node = claimedNodeRow(
+      ctx,
+      candidate,
+      await backend.getNode(
+        ctx.graphId,
+        candidate.claim.concrete_kind,
+        candidate.claim.node_id,
+      ),
+      constraintName,
+      key,
+    );
+    if (node !== undefined) return node;
+  }
+  return undefined;
 }
 
 // ============================================================
@@ -4258,7 +4374,8 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
 
-  if (!checkWherePredicate(constraint, validatedProps)) {
+  const key = uniqueConstraintKey(constraint, validatedProps);
+  if (key === undefined) {
     const node = await executeNodeCreate(
       ctx,
       { kind, props: validatedProps },
@@ -4267,12 +4384,6 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     );
     return { node, action: "created" };
   }
-
-  const key = computeUniqueKey(
-    validatedProps,
-    constraint.fields,
-    constraint.collation,
-  );
 
   const kindsToCheck = uniquenessProbeKinds(
     kind,
@@ -4284,11 +4395,12 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
   // and each write leg opens its own hooked transaction. A concurrent create
   // can therefore reserve the key between the probe and the create — that
   // surfaces as UniquenessError, and the caller retries the probe once to
-  // converge on the row the winner created.
-  async function attempt(): Promise<
+  // converge on the row the winner created. An arrow, not a declaration, so
+  // it keeps the narrowing of `key` above.
+  const attempt = async (): Promise<
     Readonly<{ node: Node; action: GetOrCreateAction }>
-  > {
-    const existingUniqueRow = await findUniqueRowAcrossKinds(
+  > => {
+    const candidates = await findClaimCandidatesAcrossKinds(
       backend,
       ctx.graphId,
       constraint.name,
@@ -4296,23 +4408,14 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
       kindsToCheck,
       true,
     );
-
-    if (existingUniqueRow === undefined) {
-      const node = await executeNodeCreate(
-        ctx,
-        { kind, props: validatedProps },
-        backend,
-        { propsPreValidated: true },
-      );
-      return { node, action: "created" };
-    }
-
-    // Fetch using concrete_kind (may differ from requested kind
-    // when scope is "kindWithSubClasses" and the match is on a sibling/parent kind)
-    const existingRow = await backend.getNode(
-      ctx.graphId,
-      existingUniqueRow.concrete_kind,
-      existingUniqueRow.node_id,
+    // The row's own kind may differ from the requested kind when the scope
+    // is "kindWithSubClasses" and the match is on a sibling/parent kind.
+    const existingRow = await resolveClaimedNode(
+      ctx,
+      backend,
+      candidates,
+      constraint.name,
+      key,
     );
 
     if (existingRow === undefined) {
@@ -4328,11 +4431,10 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     const isSoftDeleted = existingRow.deleted_at !== undefined;
 
     if (isSoftDeleted || ifExists === "update") {
-      const concreteKind = existingUniqueRow.concrete_kind;
       const node = await executeNodeUpsertUpdate(
         ctx,
         {
-          kind: concreteKind,
+          kind: existingRow.kind,
           id: existingRow.id as UpdateNodeInput["id"],
           props: validatedProps,
         },
@@ -4343,7 +4445,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     }
 
     return { node: rowToNode(existingRow), action: "found" };
-  }
+  };
 
   try {
     return await attempt();
@@ -4372,13 +4474,8 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   });
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
-  if (!checkWherePredicate(constraint, validatedProps)) return undefined;
-
-  const key = computeUniqueKey(
-    validatedProps,
-    constraint.fields,
-    constraint.collation,
-  );
+  const key = uniqueConstraintKey(constraint, validatedProps);
+  if (key === undefined) return undefined;
 
   const kindsToCheck = uniquenessProbeKinds(
     kind,
@@ -4386,7 +4483,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
     ctx.registry,
   );
 
-  const existingUniqueRow = await findUniqueRowAcrossKinds(
+  const liveCandidates = await findClaimCandidatesAcrossKinds(
     backend,
     ctx.graphId,
     constraint.name,
@@ -4394,13 +4491,12 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
     kindsToCheck,
     false,
   );
-
-  if (existingUniqueRow === undefined) return undefined;
-
-  const existingRow = await backend.getNode(
-    ctx.graphId,
-    existingUniqueRow.concrete_kind,
-    existingUniqueRow.node_id,
+  const existingRow = await resolveClaimedNode(
+    ctx,
+    backend,
+    liveCandidates,
+    constraint.name,
+    key,
   );
 
   if (existingRow === undefined || existingRow.deleted_at !== undefined)
@@ -4433,15 +4529,7 @@ function validateAndComputeKeys(
       kind,
       operation: "create",
     });
-    const applies = checkWherePredicate(constraint, validatedProps);
-    const key =
-      applies ?
-        computeUniqueKey(
-          validatedProps,
-          constraint.fields,
-          constraint.collation,
-        )
-      : undefined;
+    const key = uniqueConstraintKey(constraint, validatedProps);
     validated.push({ validatedProps, key });
   }
 
@@ -4482,9 +4570,9 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
     ctx.registry,
   );
 
-  const existingByKey =
+  const candidatesByKey =
     uniqueKeys.length > 0 ?
-      await batchCheckUniqueAcrossKinds(
+      await batchFindClaimCandidatesAcrossKinds(
         backend,
         ctx.uniqueSidecarBatch,
         ctx.graphId,
@@ -4493,7 +4581,7 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
         kindsToCheck,
         false,
       )
-    : new Map<string, { node_id: string; concrete_kind: string }>();
+    : new Map<string, readonly ClaimCandidate[]>();
 
   // Assemble results, deduplicating keys seen within the batch
   const results: (Node | undefined)[] = Array.from({ length: items.length });
@@ -4512,16 +4600,12 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
     }
     seenKeys.set(key, index);
 
-    const existing = existingByKey.get(key);
-    if (existing === undefined) {
-      results[index] = undefined;
-      continue;
-    }
-
-    const existingRow = await backend.getNode(
-      ctx.graphId,
-      existing.concrete_kind,
-      existing.node_id,
+    const existingRow = await resolveClaimedNode(
+      ctx,
+      backend,
+      candidatesByKey.get(key) ?? [],
+      constraint.name,
+      key,
     );
 
     if (existingRow === undefined || existingRow.deleted_at !== undefined) {
@@ -4970,9 +5054,9 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   // outright, which is the asymmetry #428 called out.
   async function attempt(): Promise<Result[]> {
     // Step 2: Batch-check existing keys
-    const existingByKey =
+    const candidatesByKey =
       uniqueKeys.length > 0 ?
-        await batchCheckUniqueAcrossKinds(
+        await batchFindClaimCandidatesAcrossKinds(
           backend,
           ctx.uniqueSidecarBatch,
           ctx.graphId,
@@ -4981,21 +5065,14 @@ export async function executeNodeBulkGetOrCreateByConstraint<
           kindsToCheck,
           true,
         )
-      : new Map<
-          string,
-          {
-            node_id: string;
-            concrete_kind: string;
-            deleted_at: string | undefined;
-          }
-        >();
+      : new Map<string, readonly ClaimCandidate[]>();
 
     // Step 3: Partition into toCreate, toFetch, and duplicates
     const toCreate: { index: number; input: CreateNodeInput }[] = [];
     const toFetch: {
       index: number;
-      nodeId: string;
-      concreteKind: string;
+      candidates: readonly ClaimCandidate[];
+      key: string;
       validatedProps: Record<string, unknown>;
     }[] = [];
     const duplicateOf: { index: number; sourceIndex: number }[] = [];
@@ -5015,16 +5092,11 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
       seenKeys.set(key, index);
 
-      const existing = existingByKey.get(key);
-      if (existing === undefined) {
+      const candidates = candidatesByKey.get(key);
+      if (candidates === undefined) {
         toCreate.push({ index, input: { kind, props: validatedProps } });
       } else {
-        toFetch.push({
-          index,
-          nodeId: existing.node_id,
-          concreteKind: existing.concrete_kind,
-          validatedProps,
-        });
+        toFetch.push({ index, candidates, key, validatedProps });
       }
     }
 
@@ -5049,12 +5121,14 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
     // Step 5: Handle existing nodes (fetch/update/resurrect)
     for (const entry of toFetch) {
-      const { index, concreteKind, validatedProps, nodeId } = entry;
+      const { index, candidates, key, validatedProps } = entry;
 
-      const existingRow = await backend.getNode(
-        ctx.graphId,
-        concreteKind,
-        nodeId,
+      const existingRow = await resolveClaimedNode(
+        ctx,
+        backend,
+        candidates,
+        constraint.name,
+        key,
       );
 
       if (existingRow === undefined) {
@@ -5081,7 +5155,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         const node = await executeNodeUpsertUpdate(
           ctx,
           {
-            kind: concreteKind,
+            kind: existingRow.kind,
             id: existingRow.id as UpdateNodeInput["id"],
             props: validatedProps,
           },

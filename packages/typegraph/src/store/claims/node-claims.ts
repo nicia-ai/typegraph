@@ -27,7 +27,7 @@ import {
   type UniqueConstraintBackend,
   type UniqueRow,
 } from "../../backend/types";
-import { checkWherePredicate, computeUniqueKey } from "../../constraints";
+import { uniqueConstraintKey } from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
 import {
   type ConfigurationError,
@@ -148,13 +148,7 @@ function claimKeyFor(
   props: Record<string, unknown>,
 ): string | undefined {
   if (refusal.kind === "disjointness") return id;
-  return checkWherePredicate(refusal.constraint, props) ?
-      computeUniqueKey(
-        props,
-        refusal.constraint.fields,
-        refusal.constraint.collation,
-      )
-    : undefined;
+  return uniqueConstraintKey(refusal.constraint, props);
 }
 
 /**
