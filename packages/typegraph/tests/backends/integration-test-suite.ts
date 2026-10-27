@@ -94,6 +94,7 @@ import {
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
   registerRecursiveStopExpansionIntegrationTests,
+  registerRefusedCreateClaimIntegrationTests,
   registerRelationalCompositionIntegrationTests,
   registerReleasedClaimLookupIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
@@ -340,6 +341,7 @@ export function createIntegrationTestSuite<
     registerClaimCompensationIntegrationTests(context);
     registerClaimLookupPreferenceIntegrationTests(context);
     registerReleasedClaimLookupIntegrationTests(context);
+    registerRefusedCreateClaimIntegrationTests(context);
     registerConstraintFenceErrorIntegrationTests(context);
     registerConstraintFenceTransactionHealthTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);

@@ -29,7 +29,10 @@ import {
   sqlNull,
   type Tables,
 } from "./shared";
-import { buildInsertUniqueFromSource } from "./uniques";
+import {
+  buildForeignClaimHoldersFromSource,
+  buildInsertUniqueFromSource,
+} from "./uniques";
 
 /** The fixed alias shared by the node CTE and all projection strategies. */
 export const INSERTED_NODE_PROJECTION_CTE_ALIAS = "inserted_node";
@@ -247,16 +250,17 @@ export function buildAtomicNodeProjectionStatements(
     for (const rows of chunkArray(group.upserts, chunkSize)) {
       const fragments =
         vectorStrategy?.buildUpsertBatch === undefined ?
-          rows.flatMap((row) =>
-            vectorStrategy?.buildUpsert(
-              group.slot,
-              {
-                ...group.slot,
-                nodeId: row.nodeId,
-                embedding: row.embedding,
-              },
-              timestamp,
-            ) ?? [],
+          rows.flatMap(
+            (row) =>
+              vectorStrategy?.buildUpsert(
+                group.slot,
+                {
+                  ...group.slot,
+                  nodeId: row.nodeId,
+                  embedding: row.embedding,
+                },
+                timestamp,
+              ) ?? [],
           )
         : vectorStrategy.buildUpsertBatch(
             group.slot,
@@ -269,10 +273,12 @@ export function buildAtomicNodeProjectionStatements(
     }
     for (const nodeIds of chunkArray(group.deletes, chunkSize)) {
       statements.push(
-        ...(vectorStrategy?.buildDeleteBatch(group.slot, {
-          ...group.slot,
-          nodeIds,
-        }) ?? []).map((statement) => toDrizzleSql(statement, dialect)),
+        ...(
+          vectorStrategy?.buildDeleteBatch(group.slot, {
+            ...group.slot,
+            nodeIds,
+          }) ?? []
+        ).map((statement) => toDrizzleSql(statement, dialect)),
       );
     }
   }
@@ -384,6 +390,36 @@ function claimVerdictCte(
         ON ${claimed}.${sql.identifier("axis")} = ${input}.${sql.identifier("axis")}
        AND ${claimed}.${sql.identifier("constraint_name")} = ${input}.${sql.identifier("constraint_name")}
        AND ${claimed}.${sql.identifier("key")} = ${input}.${sql.identifier("key")}
+    )
+  `;
+}
+
+/**
+ * The claim rows of `inputAlias`, carried through only when `gateAlias` holds
+ * a row — how a claim upsert is made conditional on a decision taken earlier in
+ * the same statement.
+ */
+function gatedClaimSourceCte(
+  alias: string,
+  inputAlias: string,
+  gateAlias: string,
+): SQL {
+  const input = sql.identifier(inputAlias);
+  const columns = sql.join(
+    CLAIM_INPUT_COLUMNS.map((column) => sql.identifier(column)),
+    sql`, `,
+  );
+  const qualifiedColumns = sql.join(
+    CLAIM_INPUT_COLUMNS.map(
+      (column) => sql`${input}.${sql.identifier(column)}`,
+    ),
+    sql`, `,
+  );
+  return sql`
+    ${sql.identifier(alias)} (${columns}) AS (
+      SELECT ${qualifiedColumns}
+      FROM ${input}
+      CROSS JOIN ${sql.identifier(gateAlias)}
     )
   `;
 }
@@ -541,6 +577,79 @@ function buildGatedNodeInsert(
   `;
 }
 
+/** The snapshot reads deciding whether one claim phase is refused. */
+type ClaimRefusalReads = Readonly<{
+  ctes: readonly SQL[];
+  /** Each true exactly when its read found no refusal. */
+  checks: readonly SQL[];
+  hasLegacyProbe: boolean;
+  hasDisjointProbe: boolean;
+}>;
+
+/**
+ * Builds the reads that find every refusal one claim phase would meet — a
+ * foreign live owner of a claim's own row, a live legacy row under another
+ * covered kind, a live disjoint partner — without writing any of them. The
+ * phase's VALUES relation is emitted here under `aliases.input`.
+ */
+function claimRefusalReads(
+  tables: Tables,
+  params: InsertNodeParams,
+  claims: readonly NodeInsertClaim[],
+  aliases: Readonly<{
+    input: string;
+    holder: string;
+    legacyProbe: string;
+    disjointProbe: string;
+  }>,
+): ClaimRefusalReads {
+  if (claims.length === 0) {
+    return {
+      ctes: [],
+      checks: [],
+      hasLegacyProbe: false,
+      hasDisjointProbe: false,
+    };
+  }
+  const ctes: SQL[] = [
+    claimInputCte(aliases.input, claims, params),
+    sql`${sql.identifier(aliases.holder)} AS (${buildForeignClaimHoldersFromSource(tables, aliases.input)})`,
+  ];
+  const checks: SQL[] = [
+    sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(aliases.holder)})`,
+  ];
+  const legacyProbe = legacyUniqueProbeCte(
+    tables,
+    aliases.legacyProbe,
+    claims,
+    params,
+  );
+  if (legacyProbe !== undefined) {
+    ctes.push(legacyProbe);
+    checks.push(
+      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(aliases.legacyProbe)})`,
+    );
+  }
+  const disjointProbe = disjointNodeProbeCte(
+    tables,
+    aliases.disjointProbe,
+    claims,
+    params,
+  );
+  if (disjointProbe !== undefined) {
+    ctes.push(disjointProbe);
+    checks.push(
+      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(aliases.disjointProbe)})`,
+    );
+  }
+  return {
+    ctes,
+    checks,
+    hasLegacyProbe: legacyProbe !== undefined,
+    hasDisjointProbe: disjointProbe !== undefined,
+  };
+}
+
 function buildNodeClaimsAndProjections(
   tables: Tables,
   params: InsertNodeParams,
@@ -558,73 +667,76 @@ function buildNodeClaimsAndProjections(
   );
   const ctes: SQL[] = [];
   const preInputAlias = "node_pre_claim_input";
+  const preHolderAlias = "node_pre_claim_holder";
+  const preSourceAlias = "node_pre_claim_source";
   const preClaimedAlias = "node_pre_claimed";
   const preVerdictAlias = "node_pre_claim_verdict";
   const preLegacyProbeAlias = "node_pre_legacy_unique_probe";
   const preDisjointProbeAlias = "node_pre_disjoint_node_probe";
-  const preHasLegacyProbe = preClaims.some(
-    (claim) =>
-      claim.verdict.kind === "uniqueness" &&
-      claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
-  );
-  const preHasDisjointProbe = preClaims.some(
-    (claim) =>
-      claim.verdict.kind === "disjointness" &&
-      claim.verdict.conflictingKinds.length > 0,
+  const postValuesAlias = "node_post_claim_values";
+  const postHolderAlias = "node_post_claim_holder";
+  const postInputAlias = "node_post_claim_input";
+  const postClaimedAlias = "node_post_claimed";
+  const postVerdictAlias = "node_post_claim_verdict";
+  const postLegacyProbeAlias = "node_post_legacy_unique_probe";
+  const postDisjointProbeAlias = "node_post_disjoint_node_probe";
+  const admittedAlias = "node_claim_admitted";
+  const preGateAlias = "node_pre_gate";
+  const nodeInsertedAlias = "node_inserted";
+
+  // Every claim refusal is READ before the statement writes anything: the
+  // claim upserts and the node insert are data-modifying CTEs, which run to
+  // completion whatever a later gate decides, so a write taken beside a
+  // refused claim would outlive the refusal — a pre-insert sibling claim, or
+  // the node row itself under a refused post-insert claim. The writes draw
+  // their rows through the admission row, and the verdicts the upserts return
+  // still gate the node row and the returned row.
+  const preReads = claimRefusalReads(tables, params, preClaims, {
+    input: preInputAlias,
+    holder: preHolderAlias,
+    legacyProbe: preLegacyProbeAlias,
+    disjointProbe: preDisjointProbeAlias,
+  });
+  const postReads = claimRefusalReads(tables, params, postClaims, {
+    input: postValuesAlias,
+    holder: postHolderAlias,
+    legacyProbe: postLegacyProbeAlias,
+    disjointProbe: postDisjointProbeAlias,
+  });
+  const admissionChecks = [...preReads.checks, ...postReads.checks];
+  ctes.push(
+    ...preReads.ctes,
+    ...postReads.ctes,
+    sql`
+      ${sql.identifier(admittedAlias)} AS (
+        SELECT 1 AS admitted
+        WHERE ${sql.join(admissionChecks, sql` AND `)}
+      )
+    `,
   );
 
   if (preClaims.length > 0) {
     ctes.push(
-      claimInputCte(preInputAlias, preClaims, params),
-      sql`${sql.identifier(preClaimedAlias)} AS (${buildInsertUniqueFromSource(tables, dialect, preInputAlias)})`,
+      gatedClaimSourceCte(preSourceAlias, preInputAlias, admittedAlias),
+      sql`${sql.identifier(preClaimedAlias)} AS (${buildInsertUniqueFromSource(tables, dialect, preSourceAlias)})`,
       claimVerdictCte(preVerdictAlias, preInputAlias, preClaimedAlias),
-    );
-    const legacyProbe = legacyUniqueProbeCte(
-      tables,
-      preLegacyProbeAlias,
-      preClaims,
-      params,
-    );
-    if (legacyProbe !== undefined) ctes.push(legacyProbe);
-    const disjointProbe = disjointNodeProbeCte(
-      tables,
-      preDisjointProbeAlias,
-      preClaims,
-      params,
-    );
-    if (disjointProbe !== undefined) ctes.push(disjointProbe);
-  }
-
-  const preGateAlias = "node_pre_gate";
-  const preGateChecks: SQL[] = [
-    sql`
-      NOT EXISTS (
+      sql`
+        ${sql.identifier(preGateAlias)} AS (
+          SELECT 1 AS gate
+          FROM ${sql.identifier(admittedAlias)}
+          WHERE NOT EXISTS (
             SELECT 1
             FROM ${sql.identifier(preVerdictAlias)}
             WHERE accepted = FALSE
           )
-    `,
-  ];
-  if (preHasLegacyProbe) {
-    preGateChecks.push(
-      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(preLegacyProbeAlias)})`,
+        )
+      `,
+    );
+  } else {
+    ctes.push(
+      sql`${sql.identifier(preGateAlias)} AS (SELECT 1 AS gate FROM ${sql.identifier(admittedAlias)})`,
     );
   }
-  if (preHasDisjointProbe) {
-    preGateChecks.push(
-      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(preDisjointProbeAlias)})`,
-    );
-  }
-  ctes.push(
-    preClaims.length === 0 ?
-      sql`${sql.identifier(preGateAlias)} AS (SELECT 1 AS gate)`
-    : sql`
-      ${sql.identifier(preGateAlias)} AS (
-        SELECT 1 AS gate
-        WHERE ${sql.join(preGateChecks, sql` AND `)}
-      )
-    `,
-  );
 
   const nodeInsert = buildGatedNodeInsert(
     tables,
@@ -632,66 +744,16 @@ function buildNodeClaimsAndProjections(
     timestamp,
     preGateAlias,
   );
-  const nodeInsertedAlias = "node_inserted";
   ctes.push(
     sql`${sql.identifier(nodeInsertedAlias)} AS MATERIALIZED (${nodeInsert})`,
   );
 
-  const postInputAlias = "node_post_claim_input";
-  const postClaimedAlias = "node_post_claimed";
-  const postVerdictAlias = "node_post_claim_verdict";
-  const postLegacyProbeAlias = "node_post_legacy_unique_probe";
-  const postDisjointProbeAlias = "node_post_disjoint_node_probe";
-  const postHasLegacyProbe = postClaims.some(
-    (claim) =>
-      claim.verdict.kind === "uniqueness" &&
-      claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
-  );
-  const postHasDisjointProbe = postClaims.some(
-    (claim) =>
-      claim.verdict.kind === "disjointness" &&
-      claim.verdict.conflictingKinds.length > 0,
-  );
   if (postClaims.length > 0) {
-    const postValuesAlias = "node_post_claim_values";
-    ctes.push(claimInputCte(postValuesAlias, postClaims, params));
-    const postValues = sql.identifier(postValuesAlias);
-    const nodeInserted = sql.identifier(nodeInsertedAlias);
-    const columns = sql.join(
-      CLAIM_INPUT_COLUMNS.map((column) => sql.identifier(column)),
-      sql`, `,
-    );
-    const qualifiedColumns = sql.join(
-      CLAIM_INPUT_COLUMNS.map(
-        (column) => sql`${postValues}.${sql.identifier(column)}`,
-      ),
-      sql`, `,
-    );
     ctes.push(
-      sql`
-        ${sql.identifier(postInputAlias)} (${columns}) AS (
-          SELECT ${qualifiedColumns}
-          FROM ${postValues}
-          CROSS JOIN ${nodeInserted}
-        )
-      `,
+      gatedClaimSourceCte(postInputAlias, postValuesAlias, nodeInsertedAlias),
       sql`${sql.identifier(postClaimedAlias)} AS (${buildInsertUniqueFromSource(tables, dialect, postInputAlias)})`,
       claimVerdictCte(postVerdictAlias, postInputAlias, postClaimedAlias),
     );
-    const legacyProbe = legacyUniqueProbeCte(
-      tables,
-      postLegacyProbeAlias,
-      postClaims,
-      params,
-    );
-    if (legacyProbe !== undefined) ctes.push(legacyProbe);
-    const disjointProbe = disjointNodeProbeCte(
-      tables,
-      postDisjointProbeAlias,
-      postClaims,
-      params,
-    );
-    if (disjointProbe !== undefined) ctes.push(disjointProbe);
   }
 
   const insertedNodeAlias = INSERTED_NODE_PROJECTION_CTE_ALIAS;
@@ -705,12 +767,12 @@ function buildNodeClaimsAndProjections(
           )
     `,
   ];
-  if (postHasLegacyProbe) {
+  if (postReads.hasLegacyProbe) {
     postGateChecks.push(
       sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(postLegacyProbeAlias)})`,
     );
   }
-  if (postHasDisjointProbe) {
+  if (postReads.hasDisjointProbe) {
     postGateChecks.push(
       sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(postDisjointProbeAlias)})`,
     );
@@ -747,14 +809,15 @@ function buildNodeClaimsAndProjections(
   const conflictQueries: SQL[] = [];
   if (preClaims.length > 0) {
     conflictQueries.push(
+      sql`SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(preHolderAlias)}`,
       sql`SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(preVerdictAlias)} WHERE accepted = FALSE`,
     );
-    if (preHasLegacyProbe) {
+    if (preReads.hasLegacyProbe) {
       conflictQueries.push(
         sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(preLegacyProbeAlias)}`,
       );
     }
-    if (preHasDisjointProbe) {
+    if (preReads.hasDisjointProbe) {
       conflictQueries.push(
         sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(preDisjointProbeAlias)}`,
       );
@@ -762,14 +825,15 @@ function buildNodeClaimsAndProjections(
   }
   if (postClaims.length > 0) {
     conflictQueries.push(
+      sql`SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(postHolderAlias)}`,
       sql`SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(postVerdictAlias)} WHERE accepted = FALSE`,
     );
-    if (postHasLegacyProbe) {
+    if (postReads.hasLegacyProbe) {
       conflictQueries.push(
         sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(postLegacyProbeAlias)}`,
       );
     }
-    if (postHasDisjointProbe) {
+    if (postReads.hasDisjointProbe) {
       conflictQueries.push(
         sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(postDisjointProbeAlias)}`,
       );

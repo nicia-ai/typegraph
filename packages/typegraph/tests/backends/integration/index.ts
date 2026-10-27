@@ -66,6 +66,7 @@ export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-bin
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerRecursiveStopExpansionIntegrationTests } from "./recursive-stop-expansion";
+export { registerRefusedCreateClaimIntegrationTests } from "./refused-create-claims";
 export { registerRelationalCompositionIntegrationTests } from "./relational-composition";
 export { registerReleasedClaimLookupIntegrationTests } from "./released-claim-lookup";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
