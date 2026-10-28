@@ -371,6 +371,58 @@ export function buildInsertUniqueFromSource(
 }
 
 /**
+ * Reads, without writing, the claims of a source relation that
+ * {@link buildInsertUniqueFromSource} would refuse: one row per source claim
+ * whose key a LIVE row holds for a different owner, naming that holder.
+ *
+ * The fused node write gates its writes on this read being empty. Its
+ * data-modifying CTEs all run to completion, so an upsert's own verdict can
+ * only withhold the writes that follow it — never one the same statement
+ * already made. Reading the refusal first is what lets a refused claim leave
+ * nothing behind. The source relation has the same fixed columns as the
+ * upsert's, and the refusal is the complement of the upsert's take arms.
+ */
+export function buildForeignClaimHoldersFromSource(
+  tables: Tables,
+  sourceAlias: string,
+): SQL {
+  const { uniques } = tables;
+  const source = sql.identifier(sourceAlias);
+  const sourceColumn = (name: string): SQL =>
+    sql`${source}.${quotedColumn({ name })}`;
+  const held = sql.identifier("held_claim");
+  const heldColumn = (column: Readonly<{ name: string }>): SQL =>
+    sql`${held}.${quotedColumn(column)}`;
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => sql`${held}.${quotedColumn({ name: columnName })}`,
+    (columnName) =>
+      columnName === uniques.nodeId.name ?
+        sourceColumn("node_id")
+      : sourceColumn("concrete_kind"),
+    ownerColumnNames(uniques),
+  );
+
+  return sql`
+    SELECT
+      ${sourceColumn("ordinal")} AS ordinal,
+      ${sourceColumn("axis")} AS axis,
+      ${sourceColumn("constraint_name")} AS constraint_name,
+      ${sourceColumn("key")} AS key,
+      ${heldColumn(uniques.nodeId)} AS holder_id,
+      ${heldColumn(uniques.concreteKind)} AS holder_kind
+    FROM ${source}
+    JOIN ${uniques} AS ${held}
+      ON ${heldColumn(uniques.graphId)} = ${sourceColumn("graph_id")}
+     AND ${heldColumn(uniques.nodeKind)} = ${sourceColumn("axis")}
+     AND ${heldColumn(uniques.constraintName)} = ${sourceColumn("constraint_name")}
+     AND ${heldColumn(uniques.key)} = ${sourceColumn("key")}
+    WHERE ${heldColumn(uniques.deletedAt)} IS NULL
+      AND NOT (${ownerMatches})
+  `;
+}
+
+/**
  * Builds the owner-scoped soft DELETE that releases a uniqueness claim.
  * Uses raw column name in SET clause.
  *
