@@ -1,5 +1,14 @@
 # @nicia-ai/typegraph
 
+## 0.73.3
+
+### Patch Changes
+
+- [#793](https://github.com/nicia-ai/typegraph/pull/793) [`891c091`](https://github.com/nicia-ai/typegraph/commit/891c091ebc9b258bdd49abdb31a6b3bcfc6f88bc) Thanks [@pdlug](https://github.com/pdlug)! - Fix two uniqueness-claim defects that could return or strand the wrong reservation.
+  
+  - `getOrCreateByConstraint()` and `bulkGetOrCreateByConstraint()` no longer return a node whose unique key has moved. An update that changes a unique key releases the old key, and the lookup used to read that released row as a tombstone to revive. Looking up the old key returned the updated node as `found`. With `ifExists: "update"`, it rewrote the node back onto the old key and reported `updated`. A released row now resolves the lookup only while the node it names still holds the key under that node's own declaration of the constraint, at an axis its scope still claims. Any other released row, including rows already in existing databases, is ignored, and a later eligible row still answers; with none, the lookup creates a new node.
+  - On PostgreSQL, a node create refused by one of its uniqueness or disjointness claims no longer leaves part of its write behind. If one claim was held, the create threw `UniquenessError` or `DisjointError`. The claims it was not refused on stayed written, and if the refused claim was an own-kind unique key, so did the node row. A caller who caught the error inside `store.transaction()` and committed kept either a live reservation owned by a node that did not exist, which blocked that key or id for every later write, or a second live node holding a key its constraint declares unique. The fused create statement now reads every claim refusal before it writes anything, so a create refused by a claim that is already held writes nothing.
+
 ## 0.73.2
 
 ### Patch Changes
