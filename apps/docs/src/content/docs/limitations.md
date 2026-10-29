@@ -308,7 +308,7 @@ are not what happens:
   follow an ended `population: "oneActive"` row, the history a `reparent`
   leaves behind, and an `includeEnded` read does. So the export can name
   fewer or more parts than a delete removes. To know what a delete will do,
-  use [`planDelete`](#previewing-a-delete).
+  use [`planDelete`](/ontology#previewing-a-delete).
 - **A subgraph result is keyed by node id.** The export's closure walk
   follows each edge from the `(kind, id)` it reached, exactly as the cascade
   does, but `subgraph()` returns one node per id: where a node of the unit
@@ -333,57 +333,6 @@ any node in such a cycle throws `CompositionCycleError` (see
 [Errors](/errors#compositioncycleerror)) rather than looping. Break the cycle
 by hand (delete or reassign one of the composition edges that closes it)
 before the affected nodes can be deleted.
-
-### Previewing a delete
-
-`nodes.<Kind>.planDelete(id)` answers what `delete(id)` would do, computed by
-the planner the delete itself runs, with every write skipped. It returns
-`{ cascadedParts, removedEdgeIds }`: the parts the cascade would delete, in
-the shape and order the delete reports them as `cascadedParts`, and the ids
-of every edge the delete would remove. It returns `undefined` for a node that
-is absent or already deleted, where `delete(id)` is a no-op. A delete the
-planner refuses is refused by `planDelete` with the same error, such as
-`RestrictedDeleteError` for an `onDelete: "restrict"` node or part that still
-has an ordinary edge. A `hardDelete(id)` of a live node cascades through the
-same parts.
-
-Call it on the transaction's collections when the decision must hold:
-
-```typescript
-await store.transaction(async (tx) => {
-  const plan = await tx.nodes.Podcast.planDelete(podcast.id);
-  if (plan === undefined) return;
-  if (plan.cascadedParts.length > 100) {
-    throw new Error(`refusing to delete ${plan.cascadedParts.length} parts`);
-  }
-  await tx.nodes.Podcast.delete(podcast.id);
-});
-```
-
-`tx.nodes.<Kind>.planDelete` reads the plan under the per-graph write lock
-the delete takes and keeps it until the transaction ends, so no concurrent
-attach or reparent can add a part between the preview and the delete. Writes
-that take no per-graph lock can still change the outcome: a part detached or
-deleted concurrently drops out of the delete's cascade, and an ordinary edge
-created concurrently changes `removedEdgeIds` or a restrict verdict. On the
-store's collections, `store.nodes.<Kind>.planDelete` is an unlocked read and
-only a best-effort answer.
-
-Neither form writes a graph, sidecar, history or revision row. The
-transactional form does take the delete's lock, and for a composition whole on
-PostgreSQL that lock advances the graph's fence row as the delete does. Two
-consequences follow:
-
-- It fails the way the delete's fence fails: a `REPEATABLE READ` or
-  `SERIALIZABLE` transaction whose snapshot predates a concurrent attach gets a
-  serialization failure, and a custom backend with no fence row refuses at
-  those levels (see the isolation bullet under
-  [Composition Cascade](#composition-cascade)).
-- It needs a read-write transaction. Inside
-  `store.transaction(fn, { accessMode: "read_only" })`,
-  `tx.nodes.<Kind>.planDelete` refuses before any statement, on every backend
-  and for every kind, with `UnsupportedBackendCapabilityError`. Call
-  `store.nodes.<Kind>.planDelete` instead for an unlocked preview.
 
 ## Composition Existence (`existence: "required"`)
 

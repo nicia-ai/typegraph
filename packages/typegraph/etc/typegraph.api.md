@@ -626,7 +626,7 @@ export type BulkFindEdgesFromParams<G extends GraphDef, K extends EdgeKinds<G>> 
 
 // @public
 export type BulkFindEdgesFromResult<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
-    source: GraphNodeReference<G>;
+    source: GraphNodeReferenceInput<G>;
     edges: readonly GraphEdgeForKinds<G, K>[];
 }>;
 
@@ -638,7 +638,7 @@ export type BulkFindEdgesToParams<G extends GraphDef, K extends EdgeKinds<G>> = 
 
 // @public
 export type BulkFindEdgesToResult<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
-    target: GraphNodeReference<G>;
+    target: GraphNodeReferenceInput<G>;
     edges: readonly GraphEdgeForKinds<G, K>[];
 }>;
 

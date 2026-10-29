@@ -1218,12 +1218,15 @@ export type BulkFindEdgesFromParams<
   edgeKinds: readonly K[];
 }>;
 
-/** One source bucket returned by {@link Store.bulkFindEdgesFrom}. */
+/**
+ * One source bucket returned by {@link Store.bulkFindEdgesFrom}. `source` is
+ * the reference the caller passed in, so it is typed as the input is.
+ */
 export type BulkFindEdgesFromResult<
   G extends GraphDef,
   K extends EdgeKinds<G>,
 > = Readonly<{
-  source: GraphNodeReference<G>;
+  source: GraphNodeReferenceInput<G>;
   edges: readonly GraphEdgeForKinds<G, K>[];
 }>;
 
@@ -1236,12 +1239,15 @@ export type BulkFindEdgesToParams<
   edgeKinds: readonly K[];
 }>;
 
-/** One target bucket returned by {@link Store.bulkFindEdgesTo}. */
+/**
+ * One target bucket returned by {@link Store.bulkFindEdgesTo}. `target` is
+ * the reference the caller passed in, so it is typed as the input is.
+ */
 export type BulkFindEdgesToResult<
   G extends GraphDef,
   K extends EdgeKinds<G>,
 > = Readonly<{
-  target: GraphNodeReference<G>;
+  target: GraphNodeReferenceInput<G>;
   edges: readonly GraphEdgeForKinds<G, K>[];
 }>;
 

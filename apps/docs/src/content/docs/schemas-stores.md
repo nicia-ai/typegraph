@@ -2359,7 +2359,7 @@ them.
 
 To see what a delete will cascade through before running it, call
 `nodes.<Kind>.planDelete(id)`; see
-[Previewing a delete](/limitations#previewing-a-delete).
+[Previewing a delete](/ontology#previewing-a-delete).
 
 #### Rollback and error propagation
 

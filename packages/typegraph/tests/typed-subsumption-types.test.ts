@@ -21,6 +21,7 @@ import {
   defineNode,
   equivalentTo,
   type FulltextSearchOptions,
+  type GraphNodeReferenceInput,
   type HybridSearchOptions,
   type Node,
   type NodeId,
@@ -1328,6 +1329,28 @@ describe("typed edge collections under subsumption", () => {
       ReturnType<AffectedStore["bulkFindEdgesFrom"]>
     >[number]["edges"][number];
     expectTypeOf<BulkEdge["toKind"]>().toEqualTypeOf<string>();
+  });
+
+  it("types a bulk read's echoed reference as the input it accepted", () => {
+    type FromBucket = Awaited<
+      ReturnType<AffectedStore["bulkFindEdgesFrom"]>
+    >[number];
+    type ToBucket = Awaited<
+      ReturnType<AffectedStore["bulkFindEdgesTo"]>
+    >[number];
+    type PlainBucket = Awaited<
+      ReturnType<PlainStore["bulkFindEdgesFrom"]>
+    >[number];
+    expectTypeOf<FromBucket["source"]>().toEqualTypeOf<
+      GraphNodeReferenceInput<typeof affectedGraph>
+    >();
+    expectTypeOf<ToBucket["target"]>().toEqualTypeOf<
+      GraphNodeReferenceInput<typeof affectedGraph>
+    >();
+    expectTypeOf<FromBucket["source"]["kind"]>().toEqualTypeOf<string>();
+    expectTypeOf<PlainBucket["source"]["kind"]>().toEqualTypeOf<
+      keyof typeof nodes
+    >();
   });
 
   it("keeps declared endpoint literals when the graph declares no subsumption", () => {

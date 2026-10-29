@@ -739,7 +739,7 @@ schema, revision origin, and revision, and then calls `beforeApply`. This contex
 exposes node and edge collection reads and, for identity-enabled graphs, identity
 reads. Its `planDelete` is the transactional form: it writes no graph row, but it
 takes the delete's lock, which apply already holds (see
-[Previewing a delete](/limitations#previewing-a-delete)). Write methods, native
+[Previewing a delete](/ontology#previewing-a-delete)). Write methods, native
 SQL, and a root Store are absent. Application writes
 before plan application are deliberately unsupported: an uncommitted write can
 change the reviewed state without changing its durable revision yet.
