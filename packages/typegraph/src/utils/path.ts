@@ -66,17 +66,17 @@ export function normalizePath(value: unknown): readonly string[] {
 }
 
 /**
- * Separator woven into the composite `kind || SEP || id` path tokens that
- * identity-expanded traversals use for cycle detection, so folded peers (same
- * id, different kind) stay distinct. U+001F (unit separator) is a control
- * character that cannot occur in a node kind, so `kind || SEP || id` never
- * collides across distinct (kind, id) pairs the way a printable delimiter
- * could.
+ * Separator woven into the composite `kind || SEP || id` path tokens that a
+ * recursive walk able to visit more than one kind uses for cycle detection, so
+ * same-id nodes of different kinds stay distinct. U+001F (unit separator) is a
+ * control character that cannot occur in a node kind, so `kind || SEP || id`
+ * never collides across distinct (kind, id) pairs the way a printable
+ * delimiter could.
  */
-export const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
+export const KIND_QUALIFIED_PATH_TOKEN_SEPARATOR = "\u001F";
 
 /**
- * Strips the composite wrapper from identity-expanded traversal path tokens,
+ * Strips the composite wrapper from kind-qualified recursive path tokens,
  * restoring the bare node ids that the public path contract promises.
  *
  * Splits at the FIRST separator: node kinds are identifier-like and cannot
@@ -84,16 +84,18 @@ export const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
  * everything after it is the id verbatim — including an id that itself contains
  * the separator. Tokens with no separator are returned unchanged.
  */
-export function stripIdentityPathTokens(
+export function stripKindQualifiedPathTokens(
   path: readonly string[],
 ): readonly string[] {
-  return path.map((token) => stripIdentityPathToken(token));
+  return path.map((token) => stripKindQualifiedPathToken(token));
 }
 
-function stripIdentityPathToken(token: string): string {
-  const separatorIndex = token.indexOf(IDENTITY_PATH_TOKEN_SEPARATOR);
+function stripKindQualifiedPathToken(token: string): string {
+  const separatorIndex = token.indexOf(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
   if (separatorIndex === -1) return token;
-  return token.slice(separatorIndex + IDENTITY_PATH_TOKEN_SEPARATOR.length);
+  return token.slice(
+    separatorIndex + KIND_QUALIFIED_PATH_TOKEN_SEPARATOR.length,
+  );
 }
 
 /**

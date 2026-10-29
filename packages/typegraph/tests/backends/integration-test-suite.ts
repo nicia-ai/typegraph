@@ -93,6 +93,7 @@ import {
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
+  registerRecursiveSharedIdIntegrationTests,
   registerRecursiveStopExpansionIntegrationTests,
   registerRefusedCreateClaimIntegrationTests,
   registerRelationalCompositionIntegrationTests,
@@ -352,6 +353,7 @@ export function createIntegrationTestSuite<
     registerSchemaCheckedReadIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
+    registerRecursiveSharedIdIntegrationTests(context);
     registerRecursiveStopExpansionIntegrationTests(context);
     registerPaginationIntegrationTests(context);
     registerTraversalIntegrationTests(context);

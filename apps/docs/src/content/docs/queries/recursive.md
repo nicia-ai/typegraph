@@ -349,6 +349,10 @@ Under the hood, the compiled SQL maintains a path structure at each recursive st
 whether the next node has already been visited. On PostgreSQL this uses `ARRAY` operations; on
 SQLite it uses string-delimited path tracking.
 
+A node is identified by its kind and id together, so when a traversal can visit more than one
+kind, two nodes of different kinds that share an id are distinct: reaching the second is not a
+revisit. The `path` output still lists bare node ids.
+
 ### cyclePolicy: "allow"
 
 Skips cycle checking entirely. The traversal relies solely on `maxHops` to terminate. Use this when:

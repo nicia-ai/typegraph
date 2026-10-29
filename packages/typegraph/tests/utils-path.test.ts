@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import { isSqlitePath, normalizePath, parseSqlitePath } from "../src/utils";
 import {
-  IDENTITY_PATH_TOKEN_SEPARATOR,
-  stripIdentityPathTokens,
+  KIND_QUALIFIED_PATH_TOKEN_SEPARATOR,
+  stripKindQualifiedPathTokens,
 } from "../src/utils/path";
 
 describe("parseSqlitePath", () => {
@@ -49,12 +49,12 @@ describe("isSqlitePath", () => {
   });
 });
 
-describe("stripIdentityPathTokens", () => {
-  const separator = IDENTITY_PATH_TOKEN_SEPARATOR;
+describe("stripKindQualifiedPathTokens", () => {
+  const separator = KIND_QUALIFIED_PATH_TOKEN_SEPARATOR;
 
   it("unwraps composite kind/id tokens to bare ids", () => {
     expect(
-      stripIdentityPathTokens([
+      stripKindQualifiedPathTokens([
         `Person${separator}alice`,
         `Company${separator}alice`,
       ]),
@@ -65,20 +65,23 @@ describe("stripIdentityPathTokens", () => {
     // Split at the FIRST separator only: kinds cannot contain it, so
     // everything after the first one is the id verbatim.
     expect(
-      stripIdentityPathTokens([`Person${separator}a${separator}b`]),
+      stripKindQualifiedPathTokens([`Person${separator}a${separator}b`]),
     ).toEqual([`a${separator}b`]);
   });
 
   it("returns tokens without a separator unchanged", () => {
-    expect(stripIdentityPathTokens(["plain-id", ""])).toEqual(["plain-id", ""]);
+    expect(stripKindQualifiedPathTokens(["plain-id", ""])).toEqual([
+      "plain-id",
+      "",
+    ]);
   });
 
   it("returns an empty id for a token that is only a kind and separator", () => {
-    expect(stripIdentityPathTokens([`Person${separator}`])).toEqual([""]);
+    expect(stripKindQualifiedPathTokens([`Person${separator}`])).toEqual([""]);
   });
 
   it("returns an empty path unchanged", () => {
-    expect(stripIdentityPathTokens([])).toEqual([]);
+    expect(stripKindQualifiedPathTokens([])).toEqual([]);
   });
 });
 
