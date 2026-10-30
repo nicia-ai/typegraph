@@ -673,7 +673,7 @@ const pastEmployees = await store
 `store.subgraph()` and `store.algorithms.*` accept the same `temporalMode`
 and `asOf` options, defaulting to `graph.defaults.temporalMode`. See
 [Temporal Behavior](/graph-algorithms#temporal-behavior) for the algorithm
-surface and [`store.subgraph()` options](/schemas-stores#storesubgraphrootid-options)
+surface and [`store.subgraph()` options](/schemas-stores#storesubgraphroot-options)
 for subgraph.
 
 ## Real-World Examples

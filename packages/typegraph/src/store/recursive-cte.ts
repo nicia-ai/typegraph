@@ -6,6 +6,7 @@ import { type RecordedInstant } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
 import { type RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
+import { compileKindQualifiedPathToken } from "../query/compiler/recursive";
 import {
   type RecordedReadBinding,
   recordedReadSchemaFor,
@@ -19,6 +20,13 @@ import { type DialectAdapter } from "../query/dialect/types";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type TraversalDirection } from "./algorithms/types";
 import { edgeOrderColumnName, type EdgeReadWindow } from "./neighbors";
+
+/**
+ * A node the walk starts from. A seed with a kind names exactly one node; a
+ * seed without one starts from every node of any kind that holds the id and is
+ * visible at the read's coordinate.
+ */
+export type ReachableSeed = Readonly<{ kind?: string; id: string }>;
 
 type BuildReachableCteOptions = Readonly<{
   graphId: string;
@@ -53,10 +61,24 @@ type BuildReachableCteOptions = Readonly<{
   edgeWindows?: Readonly<Record<string, EdgeReadWindow | undefined>>;
 }> &
   (
-    | Readonly<{ sourceId: string; sourceIds?: never }>
-    | Readonly<{ sourceId?: never; sourceIds: readonly string[] }>
+    | Readonly<{ source: ReachableSeed; sources?: never }>
+    | Readonly<{ source?: never; sources: readonly ReachableSeed[] }>
   );
 
+function compileSeedFilter(seed: ReachableSeed): SqlFragment {
+  return seed.kind === undefined ?
+      sql`n.id = ${seed.id}`
+    : sql`(n.kind = ${seed.kind} AND n.id = ${seed.id})`;
+}
+
+/**
+ * Builds the `reachable(id, kind, depth[, path][, origin_kind, origin_id])`
+ * walk. Every step is keyed on the (kind, id) pair: node rows are keyed by
+ * (kind, id), so two nodes of different kinds may share an id, and a step
+ * keyed on the id alone would follow the other node's edges or read reaching
+ * it as a revisit. Multi-seed walks (`sources`) tag each row with the seed it
+ * descends from.
+ */
 export function buildReachableCte(
   options: BuildReachableCteOptions,
 ): SqlFragment {
@@ -97,15 +119,16 @@ export function buildReachableCte(
     (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
   );
 
+  const pathToken = compileKindQualifiedPathToken("n");
   const initialPath =
-    trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
+    trackPath ? options.dialect.initializePath(pathToken) : undefined;
   const pathExtension =
     trackPath ?
-      options.dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
+      options.dialect.extendPath(sql.raw("r.path"), pathToken)
     : undefined;
   const cycleCheck =
     options.cyclePolicy === "prevent" ?
-      options.dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
+      options.dialect.cycleCheck(pathToken, sql.raw("r.path"))
     : undefined;
 
   const baseColumns: SqlFragment[] = [sql`n.id`, sql`n.kind`, sql`0 AS depth`];
@@ -113,13 +136,14 @@ export function buildReachableCte(
     baseColumns.push(sql`${initialPath} AS path`);
   }
 
-  if (options.sourceIds !== undefined) baseColumns.push(sql`n.id AS origin_id`);
+  if (options.sources !== undefined)
+    baseColumns.push(sql`n.kind AS origin_kind`, sql`n.id AS origin_id`);
   const sourceFilter =
-    options.sourceIds === undefined ? sql`n.id = ${options.sourceId}`
-    : options.sourceIds.length === 0 ? sql`1 = 0`
-    : sql`n.id IN (${sql.join(
-        options.sourceIds.map((id) => sql`${id}`),
-        sql`, `,
+    options.sources === undefined ? compileSeedFilter(options.source)
+    : options.sources.length === 0 ? sql`1 = 0`
+    : sql`(${sql.join(
+        options.sources.map((seed) => compileSeedFilter(seed)),
+        sql` OR `,
       )})`;
   const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND ${sourceFilter} AND ${nodeTemporalFilter}`;
 
@@ -132,7 +156,8 @@ export function buildReachableCte(
     recursiveColumns.push(sql`${pathExtension} AS path`);
   }
 
-  if (options.sourceIds !== undefined) recursiveColumns.push(sql`r.origin_id`);
+  if (options.sources !== undefined)
+    recursiveColumns.push(sql`r.origin_kind`, sql`r.origin_id`);
 
   const recursiveWhere: SqlFragment[] = [
     sql`e.graph_id = ${options.graphId}`,
@@ -158,6 +183,7 @@ export function buildReachableCte(
         sql.identifier("typegraph_windowed_edges")
       : schema.edgesTable,
     ...(usesOrientedEdges && {
+      joinKindField: "typegraph_source_kind",
       joinField: "typegraph_source_id",
       targetField: "typegraph_target_id",
       targetKindField: "typegraph_target_kind",
@@ -192,6 +218,7 @@ type CompileRecursiveBranchOptions = Readonly<{
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
   edgesTable: SqlFragment;
+  joinKindField?: "from_kind" | "to_kind" | "typegraph_source_kind";
   joinField?: "from_id" | "to_id" | "typegraph_source_id";
   targetField?: "from_id" | "to_id" | "typegraph_target_id";
   targetKindField?: "from_kind" | "to_kind" | "typegraph_target_kind";
@@ -207,6 +234,7 @@ function compileRecursiveBranch(
       return buildDirectionalBranch({
         selectClause,
         whereClauses: options.whereClauses,
+        joinKindField: options.joinKindField ?? "from_kind",
         joinField: options.joinField ?? "from_id",
         targetField: options.targetField ?? "to_id",
         targetKindField: options.targetKindField ?? "to_kind",
@@ -219,6 +247,7 @@ function compileRecursiveBranch(
       return buildDirectionalBranch({
         selectClause,
         whereClauses: options.whereClauses,
+        joinKindField: "to_kind",
         joinField: "to_id",
         targetField: "from_id",
         targetKindField: "from_kind",
@@ -242,6 +271,7 @@ function compileRecursiveBranch(
 type DirectionalBranchOptions = Readonly<{
   selectClause: SqlFragment;
   whereClauses: readonly SqlFragment[];
+  joinKindField: "from_kind" | "to_kind" | "typegraph_source_kind";
   joinField: "from_id" | "to_id" | "typegraph_source_id";
   targetField: "from_id" | "to_id" | "typegraph_target_id";
   targetKindField: "from_kind" | "to_kind" | "typegraph_target_kind";
@@ -255,15 +285,14 @@ function buildDirectionalBranch(
 ): SqlFragment {
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(options.targetField)} AND n.kind = e.${sql.raw(options.targetKindField)}`;
 
+  const worktableJoin = sql`e.${sql.raw(options.joinKindField)} = r.kind AND e.${sql.raw(options.joinField)} = r.id`;
+
   if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`e.${sql.raw(options.joinField)} = r.id`,
-    ];
+    const allWhere = [...options.whereClauses, worktableJoin];
     return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
   }
 
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON e.${sql.raw(options.joinField)} = r.id ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON ${worktableJoin} ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
 }
 
 type BidirectionalBranchOptions = Readonly<{
@@ -279,17 +308,15 @@ function buildBidirectionalBranch(
 ): SqlFragment {
   // PostgreSQL rejects multiple non-recursive terms, so both directions are
   // folded into a single UNION ALL branch via an OR on the join condition.
-  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
+  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_kind = r.kind AND e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_kind = r.kind AND e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
+  const worktableJoin = sql`((e.from_kind = r.kind AND e.from_id = r.id) OR (e.to_kind = r.kind AND e.to_id = r.id))`;
 
   if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`(e.from_id = r.id OR e.to_id = r.id)`,
-    ];
+    const allWhere = [...options.whereClauses, worktableJoin];
     return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
   }
 
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON ${worktableJoin} ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
 }
 
 export function buildWindowedEdgesCte(

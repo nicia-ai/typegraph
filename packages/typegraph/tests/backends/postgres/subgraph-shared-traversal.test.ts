@@ -1,13 +1,13 @@
 /**
  * Subgraph shared traversal on Postgres: the recursive BFS closure is
- * computed ONCE and its ids passed to the node and edge fetches as a
- * single text[] parameter, instead of embedding the recursive CTE in
+ * computed ONCE and its kinds and ids passed to the node and edge fetches
+ * as a pair of text[] parameters, instead of embedding the recursive CTE in
  * both statements (which re-ran the traversal twice per call).
  *
  * Pinned here:
  * 1. Statement shape — exactly one executed statement contains the
  *    recursive traversal; the node/edge fetches semi-join an unnest of
- *    the id-array parameter instead of re-declaring the CTE.
+ *    the kind and id array parameters instead of re-declaring the CTE.
  * 2. Array-literal escaping — user-supplied ids containing quotes,
  *    backslashes, commas, and braces survive the text[] round trip.
  * 3. Plan mode — the id-filtered fetches run as UNNAMED statements.

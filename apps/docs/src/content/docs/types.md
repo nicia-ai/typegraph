@@ -387,7 +387,7 @@ Recorded-time views retain their narrower reconstructing-read API.
 
 ## Subgraph Types
 
-These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphrootid-options) for
+These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphroot-options) for
 typed neighborhood extraction.
 
 ### `AnyNode<G>`
@@ -435,10 +435,20 @@ import type { SubsetEdge } from "@nicia-ai/typegraph";
 type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
 ```
 
+### `SubgraphRoot<G>`
+
+The node `store.subgraph()` starts from: a bare node id, or a `{ kind, id }` reference whose
+kind and branded id stay correlated. A bare id held by more than one visible kind is refused
+with `SubgraphAmbiguousNodeIdError`; pass a reference to choose the node.
+
+```typescript
+type SubgraphRoot<G> = NodeId<AllNodeTypes<G>> | GraphNodeReference<G>;
+```
+
 ### `SubgraphOptions<G, EK, NK>`
 
 Options for `store.subgraph()`. See the
-[store reference](/schemas-stores#storesubgraphrootid-options) for the full
+[store reference](/schemas-stores#storesubgraphroot-options) for the full
 parameter table.
 
 ```typescript

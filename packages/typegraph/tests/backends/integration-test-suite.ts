@@ -105,6 +105,7 @@ import {
   registerStoreAnalysisIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
+  registerSubgraphSharedIdIntegrationTests,
   registerTemporalIntegrationTests,
   registerTemporalOracleIntegrationTests,
   registerTransactionReceiptIntegrationTests,
@@ -358,6 +359,7 @@ export function createIntegrationTestSuite<
     registerEdgePropertyIntegrationTests(context);
     registerAdvancedEdgePropertyIntegrationTests(context);
     registerSubgraphIntegrationTests(context);
+    registerSubgraphSharedIdIntegrationTests(context);
     registerStoreViewIntegrationTests(context);
     registerStoreAnalysisIntegrationTests(context);
     registerClearIntegrationTests(context);

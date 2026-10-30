@@ -549,7 +549,7 @@ export type BatchOnceOptions = Readonly<{
 export type BatchReadBuilder<G extends GraphDef> = Readonly<{
     neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
     countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => CompiledOneStatementRead<number>;
-    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: SubgraphRoot<G>, options: SubgraphOptions<G, EK, NK, P>) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
 }>;
 
 // @public
@@ -1241,7 +1241,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     shortestPath(from: NodeIdentifier, to: NodeIdentifier, options: StoreViewShortestPathOptions<G>): Promise<ShortestPathResult | undefined>;
     // (undocumented)
     protected readonly store: Store<G>;
-    subgraph<const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: StoreViewSubgraphOptions<G, EK, NK, P>): Promise<SubgraphResult<G, NK, EK, P>>;
+    subgraph<const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: SubgraphRoot<G>, options: StoreViewSubgraphOptions<G, EK, NK, P>): Promise<SubgraphResult<G, NK, EK, P>>;
     weaklyConnectedComponents(options: StoreViewWeaklyConnectedComponentsOptions<G>): Promise<readonly WeaklyConnectedComponentMembership[]>;
     weightedShortestPath(from: NodeIdentifier, to: NodeIdentifier, options: StoreViewWeightedShortestPathOptions<G>): Promise<WeightedShortestPathResult | undefined>;
 }
@@ -8440,7 +8440,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
-    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: SubgraphRoot<G>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     clear: (options?: Readonly<{
         preserveContributionMaterializations?: boolean;
     }>) => Promise<void>;
@@ -8569,7 +8569,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
-    subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
+    subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: SubgraphRoot<G>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
@@ -9004,6 +9004,23 @@ type StringPredicate = Readonly<{
 // @public
 export function subClassOf(child: NodeType, parent: NodeType): OntologyRelation;
 
+// @public
+export class SubgraphAmbiguousNodeIdError extends TypeGraphError {
+    constructor(details: SubgraphAmbiguousNodeIdErrorDetails);
+    // (undocumented)
+    readonly details: SubgraphAmbiguousNodeIdErrorDetails;
+}
+
+// @public
+export type SubgraphAmbiguousNodeIdErrorDetails = Readonly<{
+    situation: SubgraphAmbiguousNodeIdSituation;
+    id: string;
+    kinds: readonly string[];
+}>;
+
+// @public
+export type SubgraphAmbiguousNodeIdSituation = "result" | "root";
+
 // @public (undocumented)
 type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> = EdgeProjectionPropertyKey<E> | "meta";
 
@@ -9064,6 +9081,9 @@ export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKin
     adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>>;
     reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>>;
 }>;
+
+// @public
+export type SubgraphRoot<G extends GraphDef> = NodeId<AllNodeTypes<G>> | GraphNodeReference<G>;
 
 // @public
 export type SubsetEdge<G extends GraphDef, K extends EdgeKinds<G>> = {
@@ -9245,7 +9265,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
     batchOnce: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
-    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: SubgraphRoot<G>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
 }>;
 
 // @public

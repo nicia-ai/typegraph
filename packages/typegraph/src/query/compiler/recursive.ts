@@ -99,6 +99,14 @@ function compilePathToken(tableAlias: string, composite: boolean): SqlFragment {
   if (!composite) {
     return sql.raw(`${tableAlias}.id`);
   }
+  return compileKindQualifiedPathToken(tableAlias);
+}
+
+/**
+ * The composite `kind || SEP || id` path token for a node table alias, which
+ * keeps same-id nodes of different kinds distinct on a recursive walk's path.
+ */
+export function compileKindQualifiedPathToken(tableAlias: string): SqlFragment {
   // Parenthesized so dialect path builders that splice this fragment into a
   // larger `||` chain keep it one text operand — PostgreSQL's `text[] || x`
   // would otherwise re-associate and coerce the separator as an array literal.

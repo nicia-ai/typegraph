@@ -1234,6 +1234,35 @@ try {
 }
 ```
 
+### `SubgraphAmbiguousNodeIdError`
+
+Thrown by `store.subgraph()` (and the transaction, `batchOnce()`, and view forms) when it cannot
+key its result by node id without conflating two nodes. Node rows are keyed by `(kind, id)`, so
+different kinds may share an id, while the subgraph result's `root`, `nodes`, and adjacency maps
+are keyed by id alone.
+
+`details.situation` says which case applies:
+
+- `"root"`: a bare root id is held by more than one node kind visible at the read's temporal
+  coordinate. Pass the root as a `{ kind, id }` reference.
+- `"result"`: the root and the nodes the read returns share an id across kinds. The root counts
+  even when `excludeRoot` drops it or `includeKinds` omits its kind. Narrow the walk with
+  `includeKinds` or `edges`, or read the nodes with `store.query()`, which keeps kind and id together.
+
+`details.id` is the shared id (the first in code-unit order when several are shared) and
+`details.kinds` the kinds holding it, sorted.
+
+```typescript
+try {
+  await store.subgraph(sharedId, { edges: ["features"] });
+} catch (error) {
+  if (error instanceof SubgraphAmbiguousNodeIdError) {
+    console.log(error.code); // "SUBGRAPH_AMBIGUOUS_NODE_ID"
+    console.log(error.details); // { situation: "root", id: "m", kinds: ["Clip", "Show"] }
+  }
+}
+```
+
 ## Transaction Errors
 
 ### `TransactionClosedError`
@@ -1479,6 +1508,7 @@ try {
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
+| `SUBGRAPH_AMBIGUOUS_NODE_ID` | `SubgraphAmbiguousNodeIdError` | user | A subgraph root id, or the subgraph's id-keyed result, would name more than one node kind. `details.situation` is `"root"` or `"result"` |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |

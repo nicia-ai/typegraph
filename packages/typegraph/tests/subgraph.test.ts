@@ -21,10 +21,11 @@ import {
   defineNode,
   defineSubgraphProject,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
+  type SubgraphRoot,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
-import { ValidationError } from "../src/errors";
+import { KindNotFoundError, ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import {
@@ -778,6 +779,54 @@ describe("store.subgraph()", () => {
         // @ts-expect-error - "NonExistent" is not a valid node kind
         includeKinds: ["NonExistent"],
       });
+    });
+
+    it("accepts a { kind, id } reference root on every subgraph surface", async () => {
+      const root = { kind: "Run", id: ids.runId } as const;
+      const options = { edges: ["has_task"], maxDepth: 1 } as const;
+
+      const direct = await store.subgraph(root, options);
+      const transactional = await store.transaction((tx) =>
+        tx.subgraph(root, options),
+      );
+      const [batched] = await store.batchOnce(
+        (read) => [read.subgraph(root, options)] as const,
+      );
+      const pinned = await store.asOf(new Date().toISOString()).subgraph(root, {
+        edges: ["has_task"],
+        maxDepth: 1,
+      });
+
+      expectTypeOf(direct).toEqualTypeOf(
+        await store.subgraph(ids.runId, options),
+      );
+      expectTypeOf(transactional).toEqualTypeOf(direct);
+      expectTypeOf(batched).toEqualTypeOf(direct);
+      expectTypeOf(pinned).toEqualTypeOf(direct);
+      expect(direct.root?.id).toBe(ids.runId);
+      expect(transactional.root?.id).toBe(ids.runId);
+      expect(batched.root?.id).toBe(ids.runId);
+      expect(pinned.root?.id).toBe(ids.runId);
+      expectTypeOf<Parameters<typeof store.subgraph>[0]>().toEqualTypeOf<
+        SubgraphRoot<TestGraph>
+      >();
+    });
+
+    it("rejects a reference root whose kind and id disagree at compile time", async () => {
+      await expect(
+        store.subgraph(
+          // @ts-expect-error - a Run id cannot be referenced as a Task
+          { kind: "Task", id: ids.runId },
+          { edges: ["has_task"] },
+        ),
+      ).resolves.toBeDefined();
+      await expect(
+        store.subgraph(
+          // @ts-expect-error - "Episode" is not a node kind of this graph
+          { kind: "Episode", id: ids.runId },
+          { edges: ["has_task"] },
+        ),
+      ).rejects.toThrow(KindNotFoundError);
     });
 
     it("accepts valid edge and node kinds", async () => {

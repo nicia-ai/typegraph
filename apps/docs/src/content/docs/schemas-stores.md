@@ -2651,11 +2651,32 @@ than silently running without the schema check.
 
 ### Subgraph Extraction
 
-#### `store.subgraph(rootId, options)`
+#### `store.subgraph(root, options)`
 
 Extracts a typed subgraph by performing a BFS traversal from a root node, following
 the specified edge kinds. Returns an indexed result with adjacency maps for immediate
 traversal.
+
+`root` is a `{ kind, id }` node reference or a bare node id. Node rows are keyed by
+`(kind, id)`, so two nodes of different kinds may share an id; the walk starts from the node
+the reference names and steps along each edge only from the node whose kind and id the edge's
+endpoint names. A bare id resolves to the one node kind that holds it visibly at the read's
+temporal coordinate (`temporalMode`/`asOf`, or the pinned coordinate of a `store.asOf()` /
+`store.asOfRecorded()` view). When no visible node holds it the result is empty; when several
+kinds hold it the read throws [`SubgraphAmbiguousNodeIdError`](/errors#subgraphambiguousnodeiderror)
+with `details.situation: "root"`, and you pass a reference instead:
+
+```typescript
+const sg = await store.subgraph({ kind: "Show", id: showId }, { edges: ["features"] });
+```
+
+The result is keyed by id. When the root and the nodes the read returns would share an id
+across kinds, the read throws `SubgraphAmbiguousNodeIdError` with
+`details.situation: "result"` instead of letting one node replace another in `nodes`. The root
+counts even when `excludeRoot` drops it or `includeKinds` omits its kind, because you address
+the result by the root's id; nodes that `includeKinds` omits do not count. Graphs whose ids
+never repeat across kinds, which includes every graph using generated ids, never see either
+refusal.
 
 `maxDepth` defaults to 10 and accepts integers from 0 through 1000. Zero returns only the root
 (unless excluded). Values outside that range are rejected; they are never silently clamped.
@@ -2698,7 +2719,7 @@ though it uses more round trips.
 
 ```typescript
 store.subgraph<EK, NK>(
-  rootId: NodeId<AllNodeTypes<G>>,
+  root: SubgraphRoot<G>, // NodeId<AllNodeTypes<G>> | GraphNodeReference<G>
   options: SubgraphOptions<G, EK, NK>,
 ): Promise<SubgraphResult<G, NK, EK>>;
 ```
@@ -2731,7 +2752,7 @@ type SubgraphResult<G, NK, EK> = Readonly<{
 | Field | Description |
 |-------|-------------|
 | `root` | The root node, or `undefined` if it was not found or `excludeRoot` is set |
-| `nodes` | All reachable nodes keyed by string ID |
+| `nodes` | All returned nodes keyed by string ID. Each ID names one node; a read that would return two kinds under one ID refuses |
 | `adjacency` | Forward adjacency: `fromId → edgeKind → edges[]` |
 | `reverseAdjacency` | Reverse adjacency: `toId → edgeKind → edges[]` |
 
@@ -3224,7 +3245,7 @@ coordinate:
 | `view.bulkFindEdgesFrom(params, options?)` | pinned |
 | `view.bulkFindEdgesTo(params, options?)` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
-| `view.subgraph(rootId, options)` | pinned |
+| `view.subgraph(root, options)` | pinned |
 | `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |
 | `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
 | `view.search` reads (`fulltext` / `vector` / `hybrid`) | delegate to the live search on a `"current"` view; reject on any other pin |

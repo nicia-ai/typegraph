@@ -11,7 +11,6 @@ import {
   type TransactionBackend,
 } from "../backend/types";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type NodeKinds,
@@ -36,6 +35,7 @@ import {
   type InternalSubgraphOptions,
   type SubgraphProject,
   type SubgraphResult,
+  type SubgraphRoot,
 } from "./subgraph";
 import {
   type Edge,
@@ -149,7 +149,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: SubgraphRoot<G>,
     options: InternalSubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
   algorithmsAtCoordinate: (

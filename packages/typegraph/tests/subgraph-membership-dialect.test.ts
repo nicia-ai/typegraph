@@ -1,15 +1,15 @@
 /**
  * Subgraph CTE membership emission.
  *
- * The subgraph extractor's final fetches filter node/edge ids against the
- * `included_ids` CTE. On SQLite this is inlined as `IN (subquery)` — evaluated
- * with a transient index and optimal as-is. On PostgreSQL the same
+ * The subgraph extractor's final fetches filter node/edge (kind, id) pairs
+ * against the `included_ids` CTE. On SQLite this is inlined as a row-value
+ * `IN (subquery)` — evaluated with a transient index and optimal as-is. On PostgreSQL the same
  * `IN (subquery)` form is pulled up into a join whose recursive-CTE row
  * estimate (~10 rows for a single-row seed) drives the planner into a
  * nested-loop join FILTER (measured at ~10M discarded rows / 383ms on the
  * depth-3 subgraph stress bench), so the PG path instead fetches the closure
- * ids once and passes them as a single `text[]` parameter, filtered via an
- * `unnest` semi-join (see `store/subgraph.ts`).
+ * once and passes its kinds and ids as two `text[]` parameters, filtered via
+ * an `unnest` semi-join (see `store/subgraph.ts`).
  *
  * This test pins SQLite's emitted membership form and that the subgraph fetches
  * actually route through it; cross-backend subgraph semantics — including the
@@ -63,7 +63,7 @@ describe("subgraph fetches inline the SQLite CTE membership form", () => {
       );
       expect(membershipStatements.length).toBeGreaterThanOrEqual(2);
       for (const text of membershipStatements) {
-        expect(text).toContain("IN (SELECT id FROM included_ids)");
+        expect(text).toContain("IN (SELECT kind, id FROM included_ids)");
       }
     } finally {
       await raw.close();
