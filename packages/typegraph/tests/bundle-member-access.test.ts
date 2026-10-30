@@ -45,7 +45,9 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Candidate one-active and durable edge identity planning add four accesses.
 // The graph storage inventory resolves the graph-relation names once and reads
 // the session isolation expression once: 123 -> 125.
-const REASONED_FLOOR = 125;
+// The endpoint/delete row-lock pairing reads `lockNodes` once, in its store
+// owner: 125 -> 126.
+const REASONED_FLOOR = 126;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -71,7 +73,7 @@ const REASONED_FLOOR = 125;
 const DEFERRED_LIVE_TOTAL = 238;
 const DEFERRED_DECLARED_TOTAL = 243;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 377;
+const TOTAL_ROW_COUNT = 378;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

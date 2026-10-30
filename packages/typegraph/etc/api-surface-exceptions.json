@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildLockNodes",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy is built only by the two bundled engine builders; an engine profile's `strategy` is non-derivable (absent from DERIVABLE_ENGINE_PROFILE_KEYS) and its opaque bundled `assembly` closes over it, so no external consumer can author or replace this type.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildLockNodesForAtomicDeleteWithSchemaFence",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy is built only by the two bundled engine builders; an engine profile's `strategy` is non-derivable (absent from DERIVABLE_ENGINE_PROFILE_KEYS) and its opaque bundled `assembly` closes over it, so no external consumer can author or replace this type.",
+    "issue": "#795"
+  }
+]

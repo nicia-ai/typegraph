@@ -127,6 +127,7 @@ import {
   type NodeCreateDraft,
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
+import { lockNodeRows } from "../store/operations/node-row-locks";
 import {
   type OverlaidSessionMint,
   runWritePlan,
@@ -2818,32 +2819,30 @@ async function processEdgeSlice(
     candidates.push({ edge, props: propsResult.data });
   }
 
-  // Batch the endpoint-liveness reads: one getNodes per endpoint kind for
-  // every key the import itself didn't create. Falls back to per-row
-  // getNode inside the routing loop when the backend lacks getNodes.
+  // Batch the endpoint-liveness reads: one edge-endpoint-locked read per
+  // endpoint kind, in sorted kind order, covering every endpoint — including
+  // nodes this import created, updated or skipped, so a skipped live node is
+  // locked too. The lock holds to the end of the import frame: a concurrent
+  // delete of a referenced node either waits for this import and sees its
+  // edges, or makes the read wait and see its tombstone.
   const liveEndpointKeys = new Set<string>();
-  const checkedEndpointKeys = new Set<string>();
-  const boundGetNodesForEndpoints = bindExtraIfReachable(
-    frame.target,
-    frame.batchPointRead.extras.getNodes,
-    BATCH_POINT_READ.id,
-  );
-  if (options.validateReferences && boundGetNodesForEndpoints !== undefined) {
+  if (options.validateReferences) {
     const idsByKind = new Map<string, Set<string>>();
     for (const { edge } of candidates) {
       for (const endpoint of [edge.from, edge.to]) {
-        const key = makeNodeKey(endpoint.kind, endpoint.id);
-        if (importedNodeIds.has(key) || checkedEndpointKeys.has(key)) continue;
-        checkedEndpointKeys.add(key);
         const ids = idsByKind.get(endpoint.kind) ?? new Set<string>();
         ids.add(endpoint.id);
         idsByKind.set(endpoint.kind, ids);
       }
     }
-    for (const [kind, ids] of idsByKind) {
-      const rows = await boundGetNodesForEndpoints.getNodes(graphId, kind, [
-        ...ids,
-      ]);
+    for (const kind of [...idsByKind.keys()].toSorted()) {
+      const rows = await lockNodeRows(
+        frame.target,
+        graphId,
+        kind,
+        [...requireDefined(idsByKind.get(kind))],
+        "edgeEndpoint",
+      );
       for (const row of rows) {
         if (isLiveNodeRow(row)) {
           liveEndpointKeys.add(makeNodeKey(kind, row.id));
@@ -2852,16 +2851,8 @@ async function processEdgeSlice(
     }
   }
 
-  const endpointIsLive = async (endpoint: {
-    kind: string;
-    id: string;
-  }): Promise<boolean> => {
-    const key = makeNodeKey(endpoint.kind, endpoint.id);
-    if (importedNodeIds.has(key)) return true;
-    if (checkedEndpointKeys.has(key)) return liveEndpointKeys.has(key);
-    const row = await frame.target.getNode(graphId, endpoint.kind, endpoint.id);
-    return row !== undefined && isLiveNodeRow(row);
-  };
+  const endpointIsLive = (endpoint: { kind: string; id: string }): boolean =>
+    liveEndpointKeys.has(makeNodeKey(endpoint.kind, endpoint.id));
 
   // Batch the existence reads. Falls back to per-row getEdge when the
   // backend lacks getEdges.
@@ -2892,14 +2883,14 @@ async function processEdgeSlice(
     const { edge, props } = candidate;
 
     if (options.validateReferences) {
-      if (!(await endpointIsLive(edge.from))) {
+      if (!endpointIsLive(edge.from)) {
         record(edge, {
           status: "error",
           error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
         });
         continue;
       }
-      if (!(await endpointIsLive(edge.to))) {
+      if (!endpointIsLive(edge.to)) {
         record(edge, {
           status: "error",
           error: `To node not found: ${edge.to.kind}:${edge.to.id}`,

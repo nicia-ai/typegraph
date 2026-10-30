@@ -104,17 +104,23 @@ describe("bundled root atomic node batch", () => {
     ).resolves.toEqual({ affectedCount: 3, schemaFenceMatched: true });
 
     expect(transaction).toHaveBeenCalledOnce();
-    expect(query).toHaveBeenCalledTimes(7);
+    expect(query).toHaveBeenCalledTimes(10);
+    // The delete lock leads the program, before any delete's edge check.
     for (const [sqlText, params] of query.mock.calls.slice(0, 3)) {
-      expect(sqlText).toContain("UPDATE");
+      expect(sqlText).toContain("FOR UPDATE");
+      expect(sqlText).not.toContain('UPDATE "');
       expect(params.length).toBeLessThanOrEqual(7);
     }
     for (const [sqlText, params] of query.mock.calls.slice(3, 6)) {
       expect(sqlText).toContain("UPDATE");
+      expect(params.length).toBeLessThanOrEqual(7);
+    }
+    for (const [sqlText, params] of query.mock.calls.slice(6, 9)) {
+      expect(sqlText).toContain("UPDATE");
       expect(sqlText).toContain("typegraph_node_uniques");
       expect(params.length).toBeLessThanOrEqual(7);
     }
-    expect(query.mock.calls[6]?.[0]).toContain("SELECT");
+    expect(query.mock.calls[9]?.[0]).toContain("SELECT");
   });
 
   it.each([

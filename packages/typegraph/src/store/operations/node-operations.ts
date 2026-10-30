@@ -229,6 +229,7 @@ import {
   canFuseSchemaFenceInFirstWrite,
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
+import { lockNodeRow, lockNodeRowsById } from "./node-row-locks";
 import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
   atomicResolvedUpdateAttemptBudget,
@@ -4106,8 +4107,16 @@ export async function executeNodeDelete<G extends GraphDef>(
       // This preflight is NOT removable round-trip fat: the soft-delete
       // pipeline consumes the pre-image (uniqueness entries are keyed by
       // props-derived constraint keys), and this in-transaction read is
-      // the concurrency-correct source for it.
-      const preflight = await target.getNode(ctx.graphId, kind, id);
+      // the concurrency-correct source for it. It takes the delete lock
+      // before the pipeline reads connected edges, so an edge write that
+      // holds this node as a locked endpoint commits first and is seen.
+      const preflight = await lockNodeRow(
+        target,
+        ctx.graphId,
+        kind,
+        id,
+        "delete",
+      );
       if (!preflight || !isLiveNodeRow(preflight)) return false;
 
       // The cascade (connected edges, uniques, embeddings, fulltext, node) is
@@ -4214,12 +4223,22 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
       const identity = ctx.identity;
       const registration = getNodeRegistration(ctx.graph, kind);
       let affectedCount = 0;
+      // One delete-lock statement for the whole batch, in id order, before
+      // any member's connected-edge read: concurrent batches with overlapping
+      // ids then lock in one order instead of deadlocking member by member.
+      const preflights = await lockNodeRowsById(
+        target,
+        ctx.graphId,
+        kind,
+        ids,
+        "delete",
+      );
 
       for (const id of ids) {
         // This is both the existence gate and the concurrency-correct
         // pre-image consumed by uniqueness cleanup. It must stay inside the
         // batch transaction after the graph write lock is held.
-        const preflight = await target.getNode(ctx.graphId, kind, id);
+        const preflight = preflights.get(id);
         if (!preflight || !isLiveNodeRow(preflight)) continue;
 
         await session.retireNode({
@@ -4326,13 +4345,15 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     async (session, target) => {
       const identity = ctx.identity;
       const registration = getNodeRegistration(ctx.graph, kind);
-      // No in-transaction preflight (unlike soft delete, whose pipeline
+      // The delete lock, before the delete-behavior check reads connected
+      // edges. Its row is not needed (unlike soft delete, whose pipeline
       // consumes the pre-image for uniqueness-key cleanup): every hard
       // cascade member is id-keyed and idempotent — the delete-behavior
       // check re-reads edges itself, `hardDeleteNode` deletes by primary
       // key, and embeddings clean up by id — so a node concurrently
       // removed between the gate and the write lock makes each statement
       // a 0-row no-op.
+      await lockNodeRow(target, ctx.graphId, kind, id, "delete");
 
       // The cascade (edges, node, embeddings) is not individually atomic, so
       // it runs in one write transaction. Embeddings live in strategy-owned

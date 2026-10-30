@@ -671,44 +671,44 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // transitive forgotten-export set is recorded here.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 499,
-    sha256: "1b3e0e5c5503e6ef84cca4f2713edae05d3040fc69228cd2c61bf510972f0b2d",
+    count: 500,
+    sha256: "62e325f352ed2a6ff47081301d548aa1a7a0091d1282028a1aa4c9c3d71116a5",
   },
   "./adapters/drizzle/engine": {
-    count: 337,
-    sha256: "2a266d74eb02d4562fcd96673e5fb435eb906b3b0fb43fcd083f2f1f0bf74514",
+    count: 338,
+    sha256: "8a3135da686dc142f7a44c5007b0d4e33f9312aca060d16c3da852dc5f485c97",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 266,
-    sha256: "d8fd2a3b26a54ffd093c05e0cc46fa3f929035192641458eb0f3cbe90558f103",
+    count: 267,
+    sha256: "b55da11ff55ec6cef66aef6ea2c114f87f982ce3ebd044831401bba4770c47d1",
   },
   // The dedicated working-copy adapter exposes Store and durable strategy
   // signatures, making their portable implementation types transitively
   // visible here. Keep that large type graph isolated from the established
   // PostgreSQL adapter and pin its exact symbol set.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 875,
-    sha256: "f2b80fac099e4bdefa511ca56b100500424aded7a185b8f97ea1eed39580fe1d",
+    count: 876,
+    sha256: "0693b4b6f2768f3d19ebadb05bd2728083eb8b71ff2085836e48d4bab53c285c",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 270,
-    sha256: "4e5b09c9a0259e3e64ce8587662a3800bd1849be18556dd60872ee8fd718e58b",
+    count: 271,
+    sha256: "2ad46f21aac8a3f0326abbc01ef3ce5e8cd9f9ad6dad2ee0f1606e6551f87bd9",
   },
   "./adapters/drizzle/sqlite": {
-    count: 267,
-    sha256: "abe52973f03e0e5b841ac9c10b5749f8eef0bd87e68754dbf407d231be604330",
+    count: 268,
+    sha256: "b45a0946c6112c386bed33d23429b4fffe1f3bd20f804bd9ff54e6f13a6f4076",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 270,
-    sha256: "7098e9ab95e756f945fcd32af87d3759769f774b2283a69b5d5cf7167d3c01a4",
+    count: 271,
+    sha256: "efb847db078349a0ed272928b0990da9fbea595f42b89a6e6372b862eb780d65",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 270,
-    sha256: "7098e9ab95e756f945fcd32af87d3759769f774b2283a69b5d5cf7167d3c01a4",
+    count: 271,
+    sha256: "efb847db078349a0ed272928b0990da9fbea595f42b89a6e6372b862eb780d65",
   },
   "./backend": {
     count: 18,
@@ -727,36 +727,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 870,
-    sha256: "1da763c22c47557915f6765f0a0bd03eb6e7a593096e9362758e94942360cc86",
+    count: 871,
+    sha256: "3d5867de3fe9f7cc1d84b523b4291c0c92d7ff13745841b0c1b88f2279a02bc6",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 854,
-    sha256: "ef2e2d6df69778fcc3c127e0fa49b03487bcd89558177dfffd14423fa62f2bfc",
+    count: 855,
+    sha256: "96c5564c531a6697560fec8292ef8c34a6117d8d2b7cd6eed4b5e802e2304f70",
   },
   "./postgres/pglite": {
-    count: 860,
-    sha256: "bb3247d5c4f5d50528f45f97a132d07cd37da175ffbf5b797dbf820cc9946f31",
+    count: 861,
+    sha256: "8c0582c84a81ed44eb8913e3c262ab0783f454a9f8f702744ab9fa2c0624206a",
   },
   "./profiler": {
-    count: 856,
-    sha256: "68afcd561de825dd5827b55fb5f775ea0da7af4a4272195bf5e034346ead3716",
+    count: 857,
+    sha256: "73c9f4414abacdac3f5dbecf620c5911b122e1bafb494ac1ec45089bca64c67f",
   },
   "./provenance": {
-    count: 869,
-    sha256: "afba2e6674cb988fac97f37ee00a27499fb86d7aa07297792fe7fea1fbad7f72",
+    count: 870,
+    sha256: "f34b5201f7e07c2b87c9ac738e3935224c75b5464ef7dec0c112ee08d355779a",
   },
   "./schema": {
-    count: 289,
-    sha256: "b3c9a59a2504b2a0529b7e5706367e05ed3cfa07843953652d7bd00e62137ec6",
+    count: 290,
+    sha256: "c4030c73857791586eb0134a1947ed4a5c540176d83103437b9d7cbbc2d62a16",
   },
   "./sqlite/local": {
-    count: 860,
-    sha256: "bb3247d5c4f5d50528f45f97a132d07cd37da175ffbf5b797dbf820cc9946f31",
+    count: 861,
+    sha256: "8c0582c84a81ed44eb8913e3c262ab0783f454a9f8f702744ab9fa2c0624206a",
   },
 };
 

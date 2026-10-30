@@ -2651,6 +2651,7 @@ export type GraphBackend = Readonly<{
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
+    lockNodes?: (this: void, graphId: string, kind: string, ids: readonly string[], lock: NodeRowLock) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
     commands: GraphCommandPort;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
@@ -3345,7 +3346,7 @@ export type NodeCreateCommandResult = Readonly<{
 }>;
 
 // @public (undocumented)
-export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
+export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "lockNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
 export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
@@ -3428,6 +3429,9 @@ export type NodeRow = Readonly<{
     updated_at: string;
     deleted_at: string | undefined;
 }>;
+
+// @public
+export type NodeRowLock = "edgeEndpoint" | "delete";
 
 // @public
 export type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
@@ -4342,6 +4346,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "reasoned";
         readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
         readonly accesses: 7;
+    };
+    readonly lockNodes: {
+        readonly kind: "reasoned";
+        readonly reason: "The endpoint/delete row-lock pairing read through one store owner; a missing member keeps the unlocked getNodes/getNode reads, which hold the endpoint invariant only on an engine that serializes writers.";
+        readonly accesses: 1;
     };
     readonly bootstrapTables: {
         readonly kind: "reasoned";

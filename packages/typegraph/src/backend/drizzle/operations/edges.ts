@@ -30,6 +30,7 @@ import {
   expectedValidFromPredicate,
   quotedColumn,
   quotedTableName,
+  type RowLockClause,
   sqlNull,
   type Tables,
 } from "./shared";
@@ -117,11 +118,34 @@ function atomicEdgeUpdatePostimage(
 }
 
 /**
+ * The aliases an endpoint-guarded statement reads its source and target node
+ * rows under — the rows its endpoint lock names.
+ */
+export const LIVE_ENDPOINT_ALIASES = ["from_node", "to_node"] as const;
+
+/**
+ * The alias a durable convergence reads its identity incumbent under. That
+ * branch admits the statement without the endpoint predicate — an incumbent
+ * is returned through `ON CONFLICT`, never re-inserted — so it holds the
+ * incumbent row with the same key-share lock: an incumbent hard-deleted
+ * concurrently (with its endpoint) makes the branch wait and re-evaluate to
+ * false instead of admitting a fresh insert the endpoint branch refused.
+ */
+const IDENTITY_OWNER_ALIAS = "identity_owner";
+
+/**
  * Requires the exact source and target nodes to be live. All endpoint-guarded
  * edge insert statements use this one predicate so their liveness semantics
  * cannot diverge.
+ *
+ * Every statement that evaluates it also locks the two rows it reads with the
+ * dialect's edge-endpoint lock, in the same `SELECT`: under PostgreSQL READ
+ * COMMITTED a concurrent delete's row lock then makes this predicate wait and
+ * be re-evaluated against the committed row, so an endpoint tombstoned by a
+ * delete that read no edge for it fails the predicate instead of passing on
+ * the stale live version.
  */
-function buildLiveEndpointPredicate(
+export function buildLiveEndpointPredicate(
   nodes: Tables["nodes"],
   params: InsertEdgeParams,
 ): SQL {
@@ -210,6 +234,7 @@ export function buildInsertEdgeIfEndpointsLive(
   tables: Tables,
   params: InsertEdgeParams,
   timestamp: string,
+  endpointLock: RowLockClause,
 ): SQL {
   const { edges, nodes } = tables;
   const propsJson = JSON.stringify(params.props);
@@ -227,6 +252,7 @@ export function buildInsertEdgeIfEndpointsLive(
     FROM ${nodeTable} AS "from_node"
     CROSS JOIN ${nodeTable} AS "to_node"
     WHERE ${buildLiveEndpointPredicate(nodes, params)}
+    ${endpointLock(LIVE_ENDPOINT_ALIASES)}
     RETURNING *
   `;
 }
@@ -247,6 +273,7 @@ export function buildInsertEdgeIfEndpointsLive(
 export function buildConvergeEdgeCreate(
   tables: Tables,
   input: ConvergeEdgeCreateParams,
+  endpointLock: RowLockClause,
 ): SQL {
   const { edges, nodes } = tables;
   const { params, match, timestamp } = input;
@@ -296,6 +323,7 @@ export function buildConvergeEdgeCreate(
         FROM ${nodeTable} AS "from_node"
         CROSS JOIN ${nodeTable} AS "to_node"
         WHERE ${buildLiveEndpointPredicate(nodes, params)}
+        ${endpointLock(LIVE_ENDPOINT_ALIASES)}
       ) OR EXISTS (
         SELECT 1
         FROM ${edges} AS "identity_owner"
@@ -303,6 +331,7 @@ export function buildConvergeEdgeCreate(
           AND ${qualifiedColumn("identity_owner", edges.kind)} = ${params.kind}
           AND ${qualifiedColumn("identity_owner", edges.matchIdentityName)} = ${match.identity.name}
           AND ${qualifiedColumn("identity_owner", edges.matchIdentityKey)} = ${match.identity.key}
+        ${endpointLock([IDENTITY_OWNER_ALIAS])}
       )
       ON CONFLICT (${sql.identifier(edges.graphId.name)}, ${sql.identifier(edges.kind.name)}, ${matchIdentityName}, ${matchIdentityKey})
       DO UPDATE SET ${matchIdentityKey} = excluded.${matchIdentityKey}
@@ -337,6 +366,7 @@ export function buildConvergeEdgeCreate(
       CROSS JOIN ${nodeTable} AS "to_node"
       WHERE NOT EXISTS (SELECT 1 FROM existing)
         AND ${buildLiveEndpointPredicate(nodes, params)}
+      ${endpointLock(LIVE_ENDPOINT_ALIASES)}
       RETURNING *, 1::integer AS write_discriminator
     )
     SELECT * FROM existing
@@ -361,6 +391,7 @@ export function buildConvergeEdgeCreate(
 export function buildAtomicConvergeEdges(
   tables: Tables,
   input: AtomicConvergeEdgesParams,
+  endpointLock: RowLockClause,
 ): SQL {
   const { edges, nodes, schemaVersions } = tables;
   const { entries, timestamp, schemaFence, schemaLockClause } = input;
@@ -449,6 +480,7 @@ export function buildAtomicConvergeEdges(
         AND ${qualifiedColumn("to_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.toKind)}
         AND ${qualifiedColumn("to_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.toId)}
         AND ${qualifiedColumn("to_node", nodes.deletedAt)} IS NULL
+      ${endpointLock(LIVE_ENDPOINT_ALIASES)}
     )
   `;
   const identityOwnerPredicate = sql`
@@ -459,6 +491,7 @@ export function buildAtomicConvergeEdges(
         AND ${qualifiedColumn("identity_owner", edges.kind)} = ${qualifiedColumn("input_rows", edges.kind)}
         AND ${qualifiedColumn("identity_owner", edges.matchIdentityName)} = ${qualifiedColumn("input_rows", edges.matchIdentityName)}
         AND ${qualifiedColumn("identity_owner", edges.matchIdentityKey)} = ${qualifiedColumn("input_rows", edges.matchIdentityKey)}
+      ${endpointLock([IDENTITY_OWNER_ALIAS])}
     )
   `;
   const fence = sql`
@@ -571,8 +604,9 @@ export function buildAtomicConvergeEdgesTombstoneRefusal(
 
 /**
  * Combines the schema-version shared fence, both live endpoint predicates and
- * the edge insert. PostgreSQL supplies `FOR SHARE`; SQLite supplies an empty
- * clause because its surrounding `BEGIN IMMEDIATE` is the fence.
+ * the edge insert. PostgreSQL supplies `FOR SHARE` for the schema fence and
+ * `FOR KEY SHARE` for the endpoints; SQLite supplies empty clauses because its
+ * surrounding `BEGIN IMMEDIATE` is the fence.
  */
 export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
   tables: Tables,
@@ -580,6 +614,7 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
   timestamp: string,
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
+  endpointLock: RowLockClause,
 ): SQL {
   const { edges, nodes, schemaVersions } = tables;
   const propsJson = JSON.stringify(params.props);
@@ -605,6 +640,7 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
       ${schemaLockClause}
     ) AS "schema_fence"
     WHERE ${buildLiveEndpointPredicate(nodes, params)}
+    ${endpointLock(LIVE_ENDPOINT_ALIASES)}
     RETURNING *
   `;
 }
@@ -681,6 +717,7 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
   timestamp: string,
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
+  endpointLock: RowLockClause,
   returning: boolean,
 ): SQL {
   const { edges, nodes, schemaVersions } = tables;
@@ -787,6 +824,7 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
           AND ${qualifiedColumn("from_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.fromKind)}
           AND ${qualifiedColumn("from_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.fromId)}
           AND ${qualifiedColumn("from_node", nodes.deletedAt)} IS NULL
+        ${endpointLock(["from_node"])}
       )
         AND EXISTS (
           SELECT 1
@@ -795,6 +833,7 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
             AND ${qualifiedColumn("to_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.toKind)}
             AND ${qualifiedColumn("to_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.toId)}
             AND ${qualifiedColumn("to_node", nodes.deletedAt)} IS NULL
+          ${endpointLock(["to_node"])}
         )
     ), "invalid_endpoint" AS (
       SELECT 1 AS "present"
@@ -827,6 +866,7 @@ export function buildInsertEdgesBatchWithSchemaFence(
   timestamp: string,
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
+  endpointLock: RowLockClause,
 ): SQL {
   return buildInsertEdgesBatchWithSchemaFenceStatement(
     tables,
@@ -834,6 +874,7 @@ export function buildInsertEdgesBatchWithSchemaFence(
     timestamp,
     schemaFence,
     schemaLockClause,
+    endpointLock,
     false,
   );
 }
@@ -845,6 +886,7 @@ export function buildInsertEdgesBatchReturningWithSchemaFence(
   timestamp: string,
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
+  endpointLock: RowLockClause,
 ): SQL {
   return buildInsertEdgesBatchWithSchemaFenceStatement(
     tables,
@@ -852,6 +894,7 @@ export function buildInsertEdgesBatchReturningWithSchemaFence(
     timestamp,
     schemaFence,
     schemaLockClause,
+    endpointLock,
     true,
   );
 }

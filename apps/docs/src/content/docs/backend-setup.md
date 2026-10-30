@@ -2344,6 +2344,48 @@ it finds violations that predate the claim tables; it writes nothing, and it
 repairs nothing — choosing which claimant keeps the axis is a data-loss decision
 that stays with you.
 
+### Edge endpoints and concurrent node deletes
+
+A live edge never names a deleted endpoint. Every edge write that creates or
+resurrects a live edge checks that both endpoint nodes are live, and every node
+delete reads the node's connected edges and removes or refuses them by its
+`onDelete` behavior. On SQLite the two writes cannot interleave: each takes the
+single writer slot before its first read. On PostgreSQL they can, so the two
+checks are paired with row locks — the same pairing a foreign key's referential
+check makes with a delete of the referenced row:
+
+- An edge write locks both endpoint rows `FOR KEY SHARE` in the statement that
+  checks their liveness, and holds the lock to the end of its transaction.
+  Endpoint locks do not conflict with each other or with ordinary node updates,
+  so concurrent edge writes and property updates on a heavily connected node are
+  not serialized.
+- A node delete — single, bulk, hard, and the closed restrict-delete program —
+  locks its row(s) `FOR UPDATE`, in id order, before it reads connected edges.
+
+The outcome depends on which write runs first and on the delete's isolation
+level (edge writes at the default READ COMMITTED):
+
+| Order | Delete at READ COMMITTED (default) | Delete at REPEATABLE READ / SERIALIZABLE |
+| --- | --- | --- |
+| Delete first | The edge write waits for the delete, re-reads the endpoint, and is refused with `EndpointNotFoundError` | Same. An edge write itself running above READ COMMITTED fails with `TransactionConflictError` instead |
+| Edge write first | The delete waits for the edge write; its connected-edge read then sees the committed edge, which `cascade` / `disconnect` remove and `restrict` refuses with `RestrictedDeleteError` | **Not closed.** The delete waits, but its transaction snapshot predates the edge's commit, so it does not see the edge and commits a tombstone under it — unless both writers run at SERIALIZABLE, where PostgreSQL aborts the delete with a serialization failure (`TransactionConflictError`) |
+
+The open cell is a PostgreSQL property, not a missing lock: an edge write only
+locks the endpoint row and never updates it, and PostgreSQL raises a
+serialization failure at REPEATABLE READ only for a row that was updated after
+the snapshot. Delete endpoints at READ COMMITTED, or run both the delete and the
+writers that may create edges to its node at SERIALIZABLE. See
+[Limitations](/limitations#concurrent-endpoint-deletes-above-read-committed-postgresql).
+
+A bulk delete that covers both endpoints of an edge being created concurrently
+can deadlock with that edge write; PostgreSQL aborts one of the two, surfaced as
+`TransactionConflictError` and retryable with `store.transaction(fn, { retry })`.
+
+A custom backend opts in by implementing `lockNodes(graphId, kind, ids, lock)`,
+which reads the same rows as `getNodes` and locks them for `lock`:
+`"edgeEndpoint"` or `"delete"`. A backend without it gets unlocked `getNode`
+reads, which keep the invariant only on an engine that serializes writers.
+
 ### SQLite ↔ PostgreSQL parity
 
 The **query language is fully portable** between SQLite and PostgreSQL. Predicates (comparison, string/`ILIKE`,
@@ -2376,6 +2418,7 @@ TypeGraph choosing separate query semantics per backend:
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
 | Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on bundled recognized PostgreSQL drivers, including neon-http | `root` means the exact backend owns the atomic boundary; `session` means the exact object is already bound to an open transaction and the outer transaction owns commit/rollback. Both require identity-keyed executor registration. Neon HTTP uses its native transaction batch; session-capable `pg`, postgres-js, neon-serverless, and PGlite drivers can execute programs on one pinned Drizzle transaction. Unrecognized drivers remain `none`. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
 | Eligible registered managed writes                    | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative create statement. Eligible node updates may carry fulltext/vector replacements; unconstrained non-durable-identity edge updates, direct edge deletes, and plain restricted node deletes use one authoritative read/gate plus one registered atomic mutation. Generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches compose supported multi-claim/cross-scope claim sets with projections in one schema-fenced native program; direct edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same mutation profile. Eligible mixed `bulkUpsertById` sets, including node projections, use the profile on serverless roots and on exact bundled PostgreSQL transaction sessions; a generic derived backend still loses the evidence. A custom backend may opt in per family only after registering its exact transport and semantic executor. Unregistered or otherwise ineligible families, projected/identity-enabled node deletes, over-budget claimed members, cascade/disconnect deletes, and other managed writes retain the existing path |
+| Edge write racing a delete of its endpoint            | ✓ writers serialize on the writer slot            | ✓ for READ COMMITTED deletes; ✗ for a REPEATABLE READ / SERIALIZABLE delete whose snapshot predates the edge's commit, unless both writers run at SERIALIZABLE | The open case commits a tombstone under the edge — see [Edge endpoints and concurrent node deletes](#edge-endpoints-and-concurrent-node-deletes) |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |

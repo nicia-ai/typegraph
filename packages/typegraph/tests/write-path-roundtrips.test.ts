@@ -42,6 +42,7 @@ const COUNTED_METHODS = [
   "getEdge",
   "getEdges",
   "getNode",
+  "lockNodes",
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
 ] as const;
@@ -307,7 +308,7 @@ describe("delete round trips", () => {
     }
   });
 
-  it("node hard delete reads once; soft delete keeps its consumed preflight", async () => {
+  it("node deletes read a gate, then lock the row before reading edges", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -318,16 +319,23 @@ describe("delete round trips", () => {
       await store.nodes.Spoke.create({ name: "a" }, { id: "a" });
       await store.nodes.Spoke.create({ name: "b" }, { id: "b" });
 
+      // The gate is the one plain read. The in-transaction delete lock is
+      // what makes the cascade's edge read see an edge a concurrent writer
+      // created against this node (#795), so a hard delete pays it too.
       counts["getNode"] = 0;
+      counts["lockNodes"] = 0;
       await store.nodes.Spoke.hardDelete("a" as never);
       expect(counts["getNode"]).toBe(1);
+      expect(counts["lockNodes"]).toBe(1);
       expect(await store.nodes.Spoke.getById("a" as never)).toBeUndefined();
 
-      // Soft delete's pipeline consumes the pre-image (uniqueness keys),
-      // so its in-transaction preflight is deliberate: gate + preflight.
+      // Soft delete's pipeline consumes the pre-image (uniqueness keys); the
+      // locked read IS that preflight, so it costs no extra read.
       counts["getNode"] = 0;
+      counts["lockNodes"] = 0;
       await store.nodes.Spoke.delete("b" as never);
-      expect(counts["getNode"]).toBe(2);
+      expect(counts["getNode"]).toBe(1);
+      expect(counts["lockNodes"]).toBe(1);
       expect(await store.nodes.Spoke.getById("b" as never)).toBeUndefined();
     } finally {
       await rawBackend.close();

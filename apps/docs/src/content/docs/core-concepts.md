@@ -517,6 +517,17 @@ nodes: {
 await store.nodes.Review.delete(reviewId);
 ```
 
+### Deletes and concurrent edge writes
+
+A delete behavior applies to every edge that exists when the delete commits,
+including one another writer creates while the delete runs: the edge write and
+the delete wait for each other, so the edge write is refused with
+`EndpointNotFoundError` or the delete sees the edge and removes or refuses it.
+Creating or resurrecting an edge always requires both endpoints to be live.
+On PostgreSQL this holds for deletes at the default READ COMMITTED isolation;
+see [Limitations](/limitations#concurrent-endpoint-deletes-above-read-committed-postgresql)
+for a delete at REPEATABLE READ or SERIALIZABLE.
+
 ## Uniqueness Constraints
 
 Ensure unique values within node types:

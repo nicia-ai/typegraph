@@ -904,6 +904,26 @@ export type DeleteNodeParams = Readonly<{
 }>;
 
 /**
+ * Why {@link GraphBackend.lockNodes} locks the rows it reads. The two purposes
+ * are the halves of one pairing — the pairing a foreign key's referential
+ * check makes with a referenced-row delete — so a live edge can never be left
+ * naming a deleted endpoint by writers that interleave:
+ *
+ * - `"edgeEndpoint"`: an edge write's endpoint liveness read. Endpoint locks do
+ *   not exclude each other or ordinary node updates, but one waits on a
+ *   concurrent delete's lock and then re-reads the committed row. PostgreSQL
+ *   spells it `FOR KEY SHARE`.
+ * - `"delete"`: a node delete's lock, taken before the delete reads the
+ *   node's connected edges. It waits on every endpoint lock an uncommitted
+ *   edge write holds, so the edge read that follows sees that edge once it
+ *   commits. PostgreSQL spells it `FOR UPDATE`.
+ *
+ * An engine that admits one writer at a time (SQLite) already serializes the
+ * two writes, so its lock clause is empty.
+ */
+export type NodeRowLock = "edgeEndpoint" | "delete";
+
+/**
  * Parameters for inserting an edge.
  */
 export type InsertEdgeParams = Readonly<{
@@ -2355,6 +2375,24 @@ export type GraphBackend = Readonly<{
     kind: string,
     ids: readonly string[],
   ) => Promise<readonly NodeRow[]>;
+  /**
+   * Reads the rows {@link GraphBackend.getNodes} reads — live and tombstoned
+   * alike — and locks them until the surrounding transaction ends, in `id`
+   * order, as {@link NodeRowLock} describes. Every store edge write reads its
+   * endpoints' liveness through this member, and every store node delete
+   * reads its row(s) through it before it reads their connected edges.
+   *
+   * Optional for custom backends. Without it the store falls back to the
+   * unlocked `getNodes` / `getNode` reads, which keep the endpoint invariant
+   * only on an engine that serializes writers.
+   */
+  lockNodes?: (
+    this: void,
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    lock: NodeRowLock,
+  ) => Promise<readonly NodeRow[]>;
 
   // === Edge Operations ===
   insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
@@ -3710,6 +3748,7 @@ export type NodeEntityReadBackend = Pick<
   GraphBackend,
   | "getNode"
   | "getNodes"
+  | "lockNodes"
   | "findNodesByKind"
   | "findNodesAcrossKinds"
   | "countNodesByKind"

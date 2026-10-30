@@ -20,7 +20,11 @@ import {
   projectBackendWithout,
 } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  GraphBackend,
+  NodeRowLock,
+  TransactionBackend,
+} from "../src/backend/types";
 import { ValidationError } from "../src/errors";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
@@ -1469,16 +1473,21 @@ describe("Bulk Operations (SQLite)", () => {
     it("batch-prefetches endpoint existence checks for bulkInsert edge batches", async () => {
       const baseBackend = createSqliteBackend(createTestDatabase());
       let getNodeCalls = 0;
-      let getNodesCalls = 0;
+      let lockNodesCalls = 0;
 
       const backendWithNodeCounter: GraphBackend = deriveBackend(baseBackend, {
         async getNode(graphId, kind, id) {
           getNodeCalls += 1;
           return baseBackend.getNode(graphId, kind, id);
         },
-        async getNodes(graphId, kind, ids) {
-          getNodesCalls += 1;
-          return requireDefined(baseBackend.getNodes)(graphId, kind, ids);
+        async lockNodes(graphId, kind, ids, lock) {
+          lockNodesCalls += 1;
+          return requireDefined(baseBackend.lockNodes)(
+            graphId,
+            kind,
+            ids,
+            lock,
+          );
         },
         async transaction(fn, options) {
           return baseBackend.transaction(async (tx) => {
@@ -1488,13 +1497,14 @@ describe("Bulk Operations (SQLite)", () => {
                 getNodeCalls += 1;
                 return tx.getNode(graphId, kind, id);
               },
-              async getNodes(
+              async lockNodes(
                 graphId: string,
                 kind: string,
                 ids: readonly string[],
+                lock: NodeRowLock,
               ) {
-                getNodesCalls += 1;
-                return requireDefined(tx.getNodes)(graphId, kind, ids);
+                lockNodesCalls += 1;
+                return requireDefined(tx.lockNodes)(graphId, kind, ids, lock);
               },
             };
             return fn(wrappedTx);
@@ -1507,7 +1517,7 @@ describe("Bulk Operations (SQLite)", () => {
       const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
 
       getNodeCalls = 0;
-      getNodesCalls = 0;
+      lockNodesCalls = 0;
       await localStore.edges.worksAt.bulkInsert([
         {
           id: "edge-cache-1",
@@ -1529,12 +1539,12 @@ describe("Bulk Operations (SQLite)", () => {
         },
       ]);
 
-      // The batch is prefetched with one getNodes() call per distinct
+      // The batch is prefetched with one endpoint-locked read per distinct
       // endpoint kind (Person for `from`, Company for `to`) instead of a
       // getNode() probe per edge — zero individual endpoint lookups even
       // though the batch references two distinct nodes across three edges.
       expect(getNodeCalls).toBe(0);
-      expect(getNodesCalls).toBe(2);
+      expect(lockNodesCalls).toBe(2);
     });
   });
 

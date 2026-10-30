@@ -57,6 +57,9 @@ const IDENTITY_MEMBERS = [
 const READ_MEMBERS = [
   "getNode",
   "getNodes",
+  // A read that row-locks what it returns. It writes no row: the lock is what
+  // an edge write's endpoint check and a delete's preflight pair on.
+  "lockNodes",
   "findNodesByKind",
   "findNodesAcrossKinds",
   "countNodesByKind",
