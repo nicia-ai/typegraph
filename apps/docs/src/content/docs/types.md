@@ -446,6 +446,21 @@ correlated.
 type SubgraphNodeKey<K extends string = string> = Readonly<{ kind: K; id: string }>;
 ```
 
+### `indexSubgraph(result)` and `SubgraphIndex<N, E>`
+
+Builds `(kind, id)` lookups over a subgraph result, which itself stays plain data. `N` and `E` are
+the result's node and edge element types, so lookups narrow by kind without naming the graph.
+
+```typescript
+type SubgraphIndex<N, E> = Readonly<{
+  node: SubgraphNodeLookup<N>; // (key) => node | undefined; a literal kind narrows
+  outgoing: SubgraphEdgeLookup<E>; // (key, edgeKind?) => edges whose source is key
+  incoming: SubgraphEdgeLookup<E>; // (key, edgeKind?) => edges whose target is key
+}>;
+
+const { node, outgoing, incoming } = indexSubgraph(await store.subgraph(run, options));
+```
+
 ### `SubgraphOptions<G, EK, NK>`
 
 Options for `store.subgraph()`. See the
@@ -465,18 +480,15 @@ type SubgraphOptions<G, EK, NK> = Readonly<{
 
 ### `SubgraphResult<G, NK, EK>`
 
-The return type of `store.subgraph()`. Contains the root node, the returned nodes and edges, and
-`(kind, id)` lookups for immediate traversal. Two nodes of different kinds that share an id are
-both returned, each under its own kind.
+The return type of `store.subgraph()`: plain data holding the root node and the returned nodes
+and edges. Two nodes of different kinds that share an id are both returned, each under its own
+kind. Use `indexSubgraph(result)` for `(kind, id)` lookups.
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
   nodes: readonly SubgraphNodeResult<G, NK>[]; // ordered by kind, then id
   edges: readonly SubgraphEdgeResult<G, EK>[]; // ordered by id
-  node: SubgraphNodeLookup<G, NK>; // (key: SubgraphNodeKey) => node | undefined
-  outgoing: SubgraphEdgeLookup<G, EK>; // (key, edgeKind?) => edges whose source is key
-  incoming: SubgraphEdgeLookup<G, EK>; // (key, edgeKind?) => edges whose target is key
 }>;
 ```
 

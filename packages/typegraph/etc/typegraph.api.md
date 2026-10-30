@@ -5020,6 +5020,12 @@ type IndexState = Readonly<{
     invalid: boolean;
 }>;
 
+// @public
+export function indexSubgraph<N extends SubgraphNodeKey, E extends SubgraphEdgeKey>(subgraph: Readonly<{
+    nodes: readonly N[];
+    edges: readonly E[];
+}>): SubgraphIndex<N, E>;
+
 // @public (undocumented)
 type IndexWhereComparableValue<T> = NonNullable<T> extends string ? string : NonNullable<T> extends number ? number : NonNullable<T> extends boolean ? boolean : NonNullable<T> extends Date ? Date | string : never;
 
@@ -9005,11 +9011,23 @@ type StringPredicate = Readonly<{
 export function subClassOf(child: NodeType, parent: NodeType): OntologyRelation;
 
 // @public
-export interface SubgraphEdgeLookup<G extends GraphDef, EK extends EdgeKinds<G>, P> {
+export type SubgraphEdgeKey = Readonly<{
+    id: string;
+    kind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
     // (undocumented)
-    <const K extends EK>(node: SubgraphNodeKey, edgeKind: K): readonly SubgraphEdgeResult<G, K, P>[];
+    <const K extends E["kind"]>(node: SubgraphNodeKey, edgeKind: K): readonly Extract<E, Readonly<{
+        kind: K;
+    }>>[];
     // (undocumented)
-    (node: SubgraphNodeKey): readonly SubgraphEdgeResult<G, EK, P>[];
+    (node: SubgraphNodeKey, edgeKind?: E["kind"]): readonly E[];
 }
 
 // @public (undocumented)
@@ -9029,18 +9047,22 @@ export type SubgraphEdgeResult<G extends GraphDef, EK extends EdgeKinds<G> = Edg
 type SubgraphEdgeResultForKind<G extends GraphDef, Kind extends EdgeKinds<G>, P> = ProjectionSelection<P, "edges", Kind> extends readonly string[] ? ProjectedEdgeResult<G["edges"][Kind]["type"], ProjectionSelection<P, "edges", Kind>> : Edge<G["edges"][Kind]["type"]>;
 
 // @public
+export type SubgraphIndex<N extends SubgraphNodeKey, E extends SubgraphEdgeKey> = Readonly<{
+    node: SubgraphNodeLookup<N>;
+    outgoing: SubgraphEdgeLookup<E>;
+    incoming: SubgraphEdgeLookup<E>;
+}>;
+
+// @public
 export type SubgraphNodeKey<K extends string = string> = Readonly<{
     kind: K;
     id: string;
 }>;
 
 // @public
-export interface SubgraphNodeLookup<G extends GraphDef, NK extends NodeKinds<G>, P> {
-    // (undocumented)
-    <const K extends NK>(node: SubgraphNodeKey<K>): SubgraphNodeResult<G, K, P> | undefined;
-    // (undocumented)
-    (node: SubgraphNodeKey): SubgraphNodeResult<G, NK, P> | undefined;
-}
+export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <const K extends string>(node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>) => (string extends K ? N : Extract<N, Readonly<{
+    kind: K;
+}>>) | undefined;
 
 // @public (undocumented)
 type SubgraphNodeProjectionField<N extends NodeType = NodeType> = NodeProjectionPropertyKey<N> | "meta";
@@ -9084,9 +9106,6 @@ export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKin
     root: SubgraphNodeResult<G, NK, P> | undefined;
     nodes: readonly SubgraphNodeResult<G, NK, P>[];
     edges: readonly SubgraphEdgeResult<G, EK, P>[];
-    node: SubgraphNodeLookup<G, NK, P>;
-    outgoing: SubgraphEdgeLookup<G, EK, P>;
-    incoming: SubgraphEdgeLookup<G, EK, P>;
 }>;
 
 // @public

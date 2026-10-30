@@ -4,31 +4,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -36,7 +12,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -44,7 +20,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -52,31 +28,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -84,7 +36,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -92,7 +44,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -100,31 +52,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -132,7 +60,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -140,7 +68,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -148,31 +76,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -180,7 +84,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -188,7 +92,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -196,31 +100,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -228,7 +108,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -236,7 +116,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -244,31 +124,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -276,7 +132,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -284,7 +140,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -292,31 +148,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -324,7 +156,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -332,7 +164,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -340,31 +172,7 @@
     "declaration": "SubgraphResult",
     "member": "edges",
     "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "SubgraphResult",
-    "member": "node",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "SubgraphResult",
-    "member": "outgoing",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
-    "issue": "#791"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "SubgraphResult",
-    "member": "incoming",
-    "kind": "required-member-added",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -372,7 +180,7 @@
     "declaration": "SubgraphResult",
     "member": "adjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   },
   {
@@ -380,7 +188,7 @@
     "declaration": "SubgraphResult",
     "member": "reverseAdjacency",
     "kind": "member-removed",
-    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed adjacency/reverseAdjacency maps are replaced by edges plus node/outgoing/incoming (kind, id) lookups. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
+    "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
   }
 ]

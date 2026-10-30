@@ -31,6 +31,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  indexSubgraph,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
@@ -236,13 +237,14 @@ describe("subgraph shared traversal (Postgres)", () => {
       maxDepth: 2,
     });
 
+    const { node, outgoing } = indexSubgraph(result);
+
     expect(result.nodes.length).toBe(hostileIds.length + 1);
     for (const id of hostileIds) {
       expect(
-        (result.node({ kind: "Doc", id }) as { title?: string } | undefined)
-          ?.title,
+        (node({ kind: "Doc", id }) as { title?: string } | undefined)?.title,
       ).toBe(id);
     }
-    expect(result.outgoing(root, "references")).toHaveLength(hostileIds.length);
+    expect(outgoing(root, "references")).toHaveLength(hostileIds.length);
   });
 });

@@ -53,7 +53,7 @@ import {
 } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
-import { compareStrings } from "../utils/compare";
+import { compareCodePoints } from "../utils/compare";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
@@ -425,37 +425,15 @@ export type SubgraphNodeKey<K extends string = string> = Readonly<{
   id: string;
 }>;
 
-/**
- * Looks up a returned node by kind and id. A literal kind narrows the result
- * to that kind; a `string` kind (such as an edge's `toKind`) returns any
- * returned kind.
- */
-export interface SubgraphNodeLookup<
-  G extends GraphDef,
-  NK extends NodeKinds<G>,
-  P,
-> {
-  <const K extends NK>(
-    node: SubgraphNodeKey<K>,
-  ): SubgraphNodeResult<G, K, P> | undefined;
-  (node: SubgraphNodeKey): SubgraphNodeResult<G, NK, P> | undefined;
-}
-
-/**
- * Lists the returned edges leaving (`outgoing`) or entering (`incoming`) a
- * node, optionally of one edge kind, in edge-id order.
- */
-export interface SubgraphEdgeLookup<
-  G extends GraphDef,
-  EK extends EdgeKinds<G>,
-  P,
-> {
-  <const K extends EK>(
-    node: SubgraphNodeKey,
-    edgeKind: K,
-  ): readonly SubgraphEdgeResult<G, K, P>[];
-  (node: SubgraphNodeKey): readonly SubgraphEdgeResult<G, EK, P>[];
-}
+/** The structural fields of a returned edge that {@link indexSubgraph} reads. */
+export type SubgraphEdgeKey = Readonly<{
+  id: string;
+  kind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
 
 export type SubgraphResult<
   G extends GraphDef,
@@ -465,16 +443,49 @@ export type SubgraphResult<
 > = Readonly<{
   /** The root node, or undefined if the root was not found or excluded. */
   root: SubgraphNodeResult<G, NK, P> | undefined;
-  /** Every returned node once, ordered by kind then id. */
+  /** Every returned node once, ordered by kind then id (code points). */
   nodes: readonly SubgraphNodeResult<G, NK, P>[];
-  /** Every returned edge once, ordered by id. Both endpoints are in `nodes`. */
+  /**
+   * Every returned edge once, ordered by id (code points). Both endpoints are
+   * in `nodes`. Use {@link indexSubgraph} for (kind, id) lookups.
+   */
   edges: readonly SubgraphEdgeResult<G, EK, P>[];
+}>;
+
+/**
+ * Looks up a returned node by kind and id. A literal kind narrows the result
+ * to that kind and must be a kind the result can hold; a `string` kind (such
+ * as an edge's `toKind`) returns any returned kind.
+ */
+export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <
+  const K extends string,
+>(
+  node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>,
+) => (string extends K ? N : Extract<N, Readonly<{ kind: K }>>) | undefined;
+
+/**
+ * Lists the returned edges leaving (`outgoing`) or entering (`incoming`) a
+ * node, optionally of one edge kind, in edge-id order.
+ */
+export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
+  <const K extends E["kind"]>(
+    node: SubgraphNodeKey,
+    edgeKind: K,
+  ): readonly Extract<E, Readonly<{ kind: K }>>[];
+  (node: SubgraphNodeKey, edgeKind?: E["kind"]): readonly E[];
+}
+
+/** (kind, id) lookups over a subgraph result, built by {@link indexSubgraph}. */
+export type SubgraphIndex<
+  N extends SubgraphNodeKey,
+  E extends SubgraphEdgeKey,
+> = Readonly<{
   /** The returned node with this kind and id, if any. */
-  node: SubgraphNodeLookup<G, NK, P>;
+  node: SubgraphNodeLookup<N>;
   /** Returned edges whose source is this node. */
-  outgoing: SubgraphEdgeLookup<G, EK, P>;
+  outgoing: SubgraphEdgeLookup<E>;
   /** Returned edges whose target is this node. */
-  incoming: SubgraphEdgeLookup<G, EK, P>;
+  incoming: SubgraphEdgeLookup<E>;
 }>;
 
 // ============================================================
@@ -1395,38 +1406,104 @@ function nodeKeyedSlot<T>(
   return created;
 }
 
-function indexEdgesByEndpoint(
-  edges: readonly Edge[],
+/** One endpoint's edges: all of them, and by edge kind, each in id order. */
+type EndpointEdges<E> = Readonly<{
+  all: readonly E[];
+  byKind: ReadonlyMap<string, readonly E[]>;
+}>;
+
+function indexEdgesByEndpoint<E extends SubgraphEdgeKey>(
+  edges: readonly E[],
   endpoint: "source" | "target",
-): NodeKeyedIndex<Edge[]> {
-  const index: NodeKeyedIndex<Edge[]> = new Map();
+): NodeKeyedIndex<EndpointEdges<E>> {
+  const grouped: NodeKeyedIndex<E[]> = new Map();
   for (const edge of edges) {
     const kind = endpoint === "source" ? edge.fromKind : edge.toKind;
     const id = endpoint === "source" ? edge.fromId : edge.toId;
-    const slot = nodeKeyedSlot(index, kind);
+    const slot = nodeKeyedSlot(grouped, kind);
     const list = slot.get(id);
     if (list === undefined) slot.set(id, [edge]);
     else list.push(edge);
   }
+  const index: NodeKeyedIndex<EndpointEdges<E>> = new Map();
+  for (const [kind, byId] of grouped) {
+    const slot = nodeKeyedSlot(index, kind);
+    for (const [id, list] of byId) {
+      const byKind = new Map<string, E[]>();
+      for (const edge of list) {
+        const kindList = byKind.get(edge.kind);
+        if (kindList === undefined) byKind.set(edge.kind, [edge]);
+        else kindList.push(edge);
+      }
+      slot.set(id, {
+        all: Object.freeze(list),
+        byKind: new Map(
+          [...byKind].map(([edgeKind, kindList]) => [
+            edgeKind,
+            Object.freeze(kindList),
+          ]),
+        ),
+      });
+    }
+  }
   return index;
 }
 
-const NO_EDGES: readonly Edge[] = Object.freeze([]);
+const NO_EDGES: readonly never[] = Object.freeze([]);
 
-function createEdgeLookup(
-  index: NodeKeyedIndex<Edge[]>,
-): (node: SubgraphNodeKey, edgeKind?: string) => readonly Edge[] {
+function createEdgeLookup<E extends SubgraphEdgeKey>(
+  index: NodeKeyedIndex<EndpointEdges<E>>,
+): (node: SubgraphNodeKey, edgeKind?: string) => readonly E[] {
   return (node, edgeKind) => {
-    const edges = index.get(node.kind)?.get(node.id) ?? NO_EDGES;
-    return edgeKind === undefined ? edges : (
-        edges.filter((edge) => edge.kind === edgeKind)
-      );
+    const endpoint = index.get(node.kind)?.get(node.id);
+    if (endpoint === undefined) return NO_EDGES;
+    if (edgeKind === undefined) return endpoint.all;
+    return endpoint.byKind.get(edgeKind) ?? NO_EDGES;
+  };
+}
+
+/**
+ * Builds (kind, id) lookups over a subgraph result. The result itself stays
+ * plain data (it survives `structuredClone`, `postMessage`, and serialization);
+ * index it once where lookups are needed.
+ *
+ * @example
+ * ```ts
+ * const sg = await store.subgraph(run, { edges: ["has_task"] });
+ * const { node, outgoing } = indexSubgraph(sg);
+ * const tasks = outgoing(run, "has_task").map((edge) =>
+ *   node({ kind: edge.toKind, id: edge.toId }),
+ * );
+ * ```
+ */
+export function indexSubgraph<
+  N extends SubgraphNodeKey,
+  E extends SubgraphEdgeKey,
+>(
+  subgraph: Readonly<{ nodes: readonly N[]; edges: readonly E[] }>,
+): SubgraphIndex<N, E> {
+  const nodeIndex: NodeKeyedIndex<N> = new Map();
+  for (const node of subgraph.nodes) {
+    nodeKeyedSlot(nodeIndex, node.kind).set(node.id, node);
+  }
+  function lookupNode(key: SubgraphNodeKey): N | undefined {
+    return nodeIndex.get(key.kind)?.get(key.id);
+  }
+  return {
+    node: lookupNode as SubgraphNodeLookup<N>,
+    outgoing: createEdgeLookup(
+      indexEdgesByEndpoint(subgraph.edges, "source"),
+    ) as SubgraphEdgeLookup<E>,
+    incoming: createEdgeLookup(
+      indexEdgesByEndpoint(subgraph.edges, "target"),
+    ) as SubgraphEdgeLookup<E>,
   };
 }
 
 function compareNodeKeys(left: SubgraphNodeKey, right: SubgraphNodeKey) {
   return (
-    compareStrings(left.kind, right.kind) || compareStrings(left.id, right.id)
+    compareCodePoints(left.kind, right.kind) ||
+    compareCodePoints(left.id, right.id)
   );
 }
 
@@ -1444,22 +1521,15 @@ function assembleSubgraphResult<
     compareNodeKeys(left, right),
   );
   const edges = edgeValues.toSorted((left, right) =>
-    compareStrings(left.id, right.id),
+    compareCodePoints(left.id, right.id),
   );
-  const nodeIndex: NodeKeyedIndex<Node> = new Map();
-  for (const node of nodes)
-    nodeKeyedSlot(nodeIndex, node.kind).set(node.id, node);
-  function lookupNode(key: SubgraphNodeKey): Node | undefined {
-    return nodeIndex.get(key.kind)?.get(key.id);
-  }
-
+  const rootNode = nodes.find(
+    (node) => node.kind === root.kind && node.id === root.id,
+  );
   return {
-    root: lookupNode(root),
+    root: rootNode,
     nodes,
     edges,
-    node: lookupNode,
-    outgoing: createEdgeLookup(indexEdgesByEndpoint(edges, "source")),
-    incoming: createEdgeLookup(indexEdgesByEndpoint(edges, "target")),
   } as unknown as SubgraphResult<G, NK, EK, P>;
 }
 

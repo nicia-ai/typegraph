@@ -19,6 +19,7 @@ import {
   defineGraph,
   defineNode,
   type GraphNodeReference,
+  indexSubgraph,
   KindNotFoundError,
   type NodeKinds,
   type SubgraphOptions,
@@ -30,6 +31,7 @@ import type { InspectableStore, IntegrationTestContext } from "./test-context";
 const Show = defineNode("Show", { schema: z.object({}) });
 const Clip = defineNode("Clip", { schema: z.object({}) });
 const linked = defineEdge("linked", { schema: z.object({}) });
+const cites = defineEdge("cites", { schema: z.object({}) });
 
 const sharedIdGraph = defineGraph({
   id: "subgraph_shared_id_kinds",
@@ -39,6 +41,7 @@ const sharedIdGraph = defineGraph({
   },
   edges: {
     linked: { type: linked, from: [Show, Clip], to: [Show, Clip] },
+    cites: { type: cites, from: [Show, Clip], to: [Show, Clip] },
   },
 });
 
@@ -51,6 +54,7 @@ const foldedIdGraph = defineGraph({
   },
   edges: {
     linked: { type: linked, from: [Show, Clip], to: [Show, Clip] },
+    cites: { type: cites, from: [Show, Clip], to: [Show, Clip] },
   },
   identity: { sameIdAcrossKinds: "fold" },
 });
@@ -190,7 +194,7 @@ export function registerSubgraphSharedIdIntegrationTests(
         expect(rootKey(result)).toBe("Show:b");
         expect(nodeKeys(result)).toEqual(["Clip:x", "Show:b"]);
         expect(edgeKeys(result.edges)).toEqual(["Show:b->Clip:x"]);
-        expect(result.node(ref("Show", "x"))).toBeUndefined();
+        expect(indexSubgraph(result).node(ref("Show", "x"))).toBeUndefined();
       });
 
       it("returns both same-id nodes it reaches, each under its own kind", async () => {
@@ -204,17 +208,19 @@ export function registerSubgraphSharedIdIntegrationTests(
           "Show:a",
           "Show:m",
         ]);
-        expect(result.node(ref("Clip", "m"))?.kind).toBe("Clip");
-        expect(result.node(ref("Show", "m"))?.kind).toBe("Show");
-        expect(edgeKeys(result.outgoing(ref("Clip", "m")))).toEqual([
+        const { node, outgoing, incoming } = indexSubgraph(result);
+        expect(node(ref("Clip", "m"))?.kind).toBe("Clip");
+        expect(node(ref("Show", "m"))?.kind).toBe("Show");
+        expect(edgeKeys(outgoing(ref("Clip", "m")))).toEqual([
           "Clip:m->Show:m",
         ]);
-        expect(edgeKeys(result.outgoing(ref("Show", "m")))).toEqual([
+        expect(edgeKeys(outgoing(ref("Show", "m")))).toEqual([
           "Show:m->Clip:z",
         ]);
-        expect(edgeKeys(result.incoming(ref("Show", "m"), "linked"))).toEqual([
+        expect(edgeKeys(incoming(ref("Show", "m"), "linked"))).toEqual([
           "Clip:m->Show:m",
         ]);
+        expect(structuredClone(result)).toEqual(result);
       });
 
       it("walks through a same-id node of another kind to the nodes beyond it", async () => {
@@ -320,8 +326,9 @@ export function registerSubgraphSharedIdIntegrationTests(
         expect(result.nodes.map((node) => node.id).toSorted()).toEqual(
           [show.id, clip.id, sequel.id].toSorted(),
         );
-        expect(result.outgoing(show, "linked")[0]?.toId).toBe(clip.id);
-        expect(result.incoming(sequel)[0]?.fromId).toBe(clip.id);
+        const index = indexSubgraph(result);
+        expect(index.outgoing(show, "linked")[0]?.toId).toBe(clip.id);
+        expect(index.incoming(sequel)[0]?.fromId).toBe(clip.id);
 
         const withoutRoot = await form.read(store, show, {
           ...LINKED,
@@ -338,11 +345,12 @@ export function registerSubgraphSharedIdIntegrationTests(
       await seedChainThroughSharedId(store);
 
       const result = await store.subgraph(ref("Show", "a"), LINKED);
+      const { node } = indexSubgraph(result);
       const targets = result.edges.map((edge) =>
-        result.node({ kind: edge.toKind, id: edge.toId }),
+        node({ kind: edge.toKind, id: edge.toId }),
       );
       const sources = result.edges.map((edge) =>
-        result.node({ kind: edge.fromKind, id: edge.fromId }),
+        node({ kind: edge.fromKind, id: edge.fromId }),
       );
       expect(targets.map((node) => `${node?.kind}:${node?.id}`)).toEqual(
         result.edges.map((edge) => `${edge.toKind}:${edge.toId}`),
@@ -394,9 +402,64 @@ export function registerSubgraphSharedIdIntegrationTests(
         "Show:p",
         "Show:q",
       ]);
-      expect(result.incoming(showQ).map((edge) => edge.fromKind)).toEqual(
-        expect.arrayContaining(["Clip", "Show"]),
+      expect(
+        indexSubgraph(result)
+          .incoming(showQ)
+          .map((edge) => edge.fromKind)
+          .toSorted(),
+      ).toEqual(["Clip", "Show"]);
+    });
+
+    it("filters a node's edges by edge kind and lists all kinds without one", async () => {
+      const showA = await store.nodes.Show.create({}, { id: "a" });
+      const clipB = await store.nodes.Clip.create({}, { id: "b" });
+      const showC = await store.nodes.Show.create({}, { id: "c" });
+      await store.edges.linked.create(showA, clipB, {}, { id: "linked-a-b" });
+      await store.edges.cites.create(showA, showC, {}, { id: "cites-a-c" });
+      await store.edges.cites.create(clipB, showC, {}, { id: "cites-b-c" });
+
+      const result = await store.subgraph(showA, {
+        edges: ["linked", "cites"],
+      });
+      const { outgoing, incoming } = indexSubgraph(result);
+      expect(outgoing(showA, "linked").map((edge) => edge.id)).toEqual([
+        "linked-a-b",
+      ]);
+      expect(outgoing(showA, "cites").map((edge) => edge.id)).toEqual([
+        "cites-a-c",
+      ]);
+      expect(outgoing(showA).map((edge) => edge.id)).toEqual([
+        "cites-a-c",
+        "linked-a-b",
+      ]);
+      expect(incoming(showC, "cites").map((edge) => edge.id)).toEqual([
+        "cites-a-c",
+        "cites-b-c",
+      ]);
+      expect(incoming(showC, "linked")).toEqual([]);
+      expect(incoming(clipB).map((edge) => edge.id)).toEqual(["linked-a-b"]);
+      const optionalKind = undefined as "cites" | "linked" | undefined;
+      expect(outgoing(showA, optionalKind)).toEqual(outgoing(showA));
+    });
+
+    it("orders edges by id regardless of insertion order", async () => {
+      const showA = await store.nodes.Show.create({}, { id: "a" });
+      const targets = await Promise.all(
+        ["t1", "t2", "t3"].map((id) => store.nodes.Clip.create({}, { id })),
       );
+      for (const [index, edgeId] of ["e3", "e1", "e2"].entries()) {
+        const target = targets[index];
+        if (target === undefined) throw new Error("Seed every target");
+        await store.edges.linked.create(showA, target, {}, { id: edgeId });
+      }
+
+      const result = await store.subgraph(showA, LINKED);
+      expect(result.edges.map((edge) => edge.id)).toEqual(["e1", "e2", "e3"]);
+      expect(
+        indexSubgraph(result)
+          .outgoing(showA)
+          .map((edge) => edge.id),
+      ).toEqual(["e1", "e2", "e3"]);
     });
 
     it("reads the nodes visible at the read's valid-time coordinate", async () => {

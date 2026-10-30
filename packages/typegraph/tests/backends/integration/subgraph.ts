@@ -6,6 +6,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { indexSubgraph } from "../../../src";
 import { ValidationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -108,10 +109,11 @@ export function registerSubgraphIntegrationTests(
         edges: ["knows"],
         maxDepth: 2,
       });
+      const index = indexSubgraph(result);
 
-      expect(result.node(seeded.alice)).toBeDefined();
-      expect(result.node(seeded.bob)).toBeDefined();
-      expect(result.node(seeded.charlie)).toBeDefined();
+      expect(index.node(seeded.alice)).toBeDefined();
+      expect(index.node(seeded.bob)).toBeDefined();
+      expect(index.node(seeded.charlie)).toBeDefined();
     });
 
     it("applies per-edge-kind ordering and limits during traversal", async () => {
@@ -134,10 +136,11 @@ export function registerSubgraphIntegrationTests(
           },
         },
       });
+      const index = indexSubgraph(result);
 
-      expect(result.node(dave)).toBeDefined();
-      expect(result.node(seeded.bob)).toBeUndefined();
-      expect(result.outgoing(seeded.alice, "knows")).toHaveLength(1);
+      expect(index.node(dave)).toBeDefined();
+      expect(index.node(seeded.bob)).toBeUndefined();
+      expect(index.outgoing(seeded.alice, "knows")).toHaveLength(1);
     });
 
     it("partitions edge windows independently at later hops", async () => {
@@ -149,10 +152,11 @@ export function registerSubgraphIntegrationTests(
           knows: { limit: 1, orderBy: { field: "id", direction: "asc" } },
         },
       });
+      const index = indexSubgraph(result);
 
-      expect(result.node(seeded.bob)).toBeDefined();
-      expect(result.node(seeded.charlie)).toBeDefined();
-      expect(result.outgoing(seeded.bob, "knows")).toHaveLength(1);
+      expect(index.node(seeded.bob)).toBeDefined();
+      expect(index.node(seeded.charlie)).toBeDefined();
+      expect(index.outgoing(seeded.bob, "knows")).toHaveLength(1);
     });
 
     it("keeps unwindowed kinds and supports per-kind traversal directions", async () => {
@@ -162,9 +166,10 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 1,
         edgeWindows: { knows: { limit: 1 } },
       });
+      const index = indexSubgraph(result);
 
-      expect(result.node(seeded.bob)).toBeDefined();
-      expect(result.node(seeded.acme)).toBeDefined();
+      expect(index.node(seeded.bob)).toBeDefined();
+      expect(index.node(seeded.acme)).toBeDefined();
       const incoming = await store.subgraph(seeded.bob, {
         edges: ["knows", "worksAt"],
         edgeWindows: {
@@ -172,16 +177,18 @@ export function registerSubgraphIntegrationTests(
           worksAt: { direction: "out", limit: 1 },
         },
       });
-      expect(incoming.node(seeded.alice)).toBeDefined();
-      expect(incoming.node(seeded.acme)).toBeDefined();
+      const incomingIndex = indexSubgraph(incoming);
+      expect(incomingIndex.node(seeded.alice)).toBeDefined();
+      expect(incomingIndex.node(seeded.acme)).toBeDefined();
 
       const both = await store.subgraph(seeded.bob, {
         edges: ["knows"],
         direction: "both",
         edgeWindows: { knows: { limit: 1 } },
       });
-      expect(both.node(seeded.alice)).toBeDefined();
-      expect(both.node(seeded.charlie)).toBeDefined();
+      const bothIndex = indexSubgraph(both);
+      expect(bothIndex.node(seeded.alice)).toBeDefined();
+      expect(bothIndex.node(seeded.charlie)).toBeDefined();
       await expect(
         store.subgraph(seeded.alice, {
           edges: ["knows"],
@@ -237,8 +244,9 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 1,
         excludeRoot: true,
       });
+      const index = indexSubgraph(result);
 
-      expect(result.node(seeded.alice)).toBeUndefined();
+      expect(index.node(seeded.alice)).toBeUndefined();
       expect(result.nodes.length).toBe(1);
     });
 
@@ -250,11 +258,12 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 1,
         direction: "both",
       });
+      const index = indexSubgraph(result);
 
       // Outbound: bob → charlie
-      expect(result.node(seeded.charlie)).toBeDefined();
+      expect(index.node(seeded.charlie)).toBeDefined();
       // Inbound: alice → bob (reversed)
-      expect(result.node(seeded.alice)).toBeDefined();
+      expect(index.node(seeded.alice)).toBeDefined();
     });
 
     it("returns edges only when both endpoints are in result", async () => {
@@ -264,13 +273,14 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 2,
         includeKinds: ["Person"],
       });
+      const index = indexSubgraph(result);
 
       const allEdges = result.edges;
       for (const edge of allEdges) {
         expect(
-          result.node({ kind: edge.fromKind, id: edge.fromId }),
+          index.node({ kind: edge.fromKind, id: edge.fromId }),
         ).toBeDefined();
-        expect(result.node({ kind: edge.toKind, id: edge.toId })).toBeDefined();
+        expect(index.node({ kind: edge.toKind, id: edge.toId })).toBeDefined();
       }
 
       // worksAt edges connect Person→Company, but Company is excluded
@@ -307,10 +317,11 @@ export function registerSubgraphIntegrationTests(
         edges: ["knows"],
         maxDepth: 2,
       });
+      const index = indexSubgraph(result);
 
-      expect(result.node(seeded.bob)).toBeUndefined();
+      expect(index.node(seeded.bob)).toBeUndefined();
       // charlie is unreachable since bob (the intermediate node) is deleted
-      expect(result.node(seeded.charlie)).toBeUndefined();
+      expect(index.node(seeded.charlie)).toBeUndefined();
     });
 
     it("returns empty for non-existent root", async () => {
@@ -520,18 +531,14 @@ export function registerSubgraphIntegrationTests(
       );
 
       expect(results).toHaveLength(4);
-      expect({
-        root: results[0]?.root,
-        nodes: results[0]?.nodes,
-        edges: results[0]?.edges,
-      }).toEqual({
-        root: results[2]?.root,
-        nodes: results[2]?.nodes,
-        edges: results[2]?.edges,
-      });
+      expect(results[0]).toEqual(results[2]);
       expect(results[0]).not.toBe(results[2]);
-      expect(results[0]?.node(seeded.acme)).toBeDefined();
-      expect(results[1]?.node(seeded.acme)).toBeDefined();
+      expect(
+        indexSubgraph(requireDefined(results[0])).node(seeded.acme),
+      ).toBeDefined();
+      expect(
+        indexSubgraph(requireDefined(results[1])).node(seeded.acme),
+      ).toBeDefined();
       expect(results[3]?.root).toBeUndefined();
       expect(results[3]?.nodes.length).toBe(0);
       expect(results[3]?.edges).toHaveLength(0);

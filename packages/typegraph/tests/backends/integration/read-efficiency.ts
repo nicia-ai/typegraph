@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { indexSubgraph } from "../../../src";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -434,7 +435,7 @@ export function registerReadEfficiencyIntegrationTests(
       expect(neighbors).toHaveLength(1);
       expect(neighbors).toEqual(directNeighbors);
       expect(count).toBe(1);
-      expect(subgraph.node(target)).toBeDefined();
+      expect(indexSubgraph(subgraph).node(target)).toBeDefined();
       expect(statements).toHaveLength(1);
     });
 
@@ -465,7 +466,7 @@ export function registerReadEfficiencyIntegrationTests(
         });
 
         expect(neighbors[0]?.node.id).toBe(target.id);
-        expect(directSubgraph.node(target)).toBeDefined();
+        expect(indexSubgraph(directSubgraph).node(target)).toBeDefined();
         expect(statements).toHaveLength(3);
 
         statements.length = 0;
@@ -485,7 +486,7 @@ export function registerReadEfficiencyIntegrationTests(
         expect(people).toEqual(["root", "target"]);
         expect(batchedNeighbors).toEqual(neighbors);
         expect(count).toBe(1);
-        expect(batchedSubgraph.node(target)).toBeDefined();
+        expect(indexSubgraph(batchedSubgraph).node(target)).toBeDefined();
         expect(statements).toHaveLength(1);
         expect(attempts).toEqual([1]);
       });

@@ -8,7 +8,13 @@ import fc from "fast-check";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { asNodeId, defineEdge, defineGraph, defineNode } from "../../src";
+import {
+  asNodeId,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  indexSubgraph,
+} from "../../src";
 import type { GraphBackend } from "../../src/backend/types";
 import { createStore, type Store } from "../../src/store";
 import { requireDefined } from "../../src/utils/presence";
@@ -141,12 +147,13 @@ describe("subgraph property tests", () => {
               },
             );
 
+            const index = indexSubgraph(result);
             for (const edge of result.edges) {
               expect(
-                result.node({ kind: edge.fromKind, id: edge.fromId }),
+                index.node({ kind: edge.fromKind, id: edge.fromId }),
               ).toBeDefined();
               expect(
-                result.node({ kind: edge.toKind, id: edge.toId }),
+                index.node({ kind: edge.toKind, id: edge.toId }),
               ).toBeDefined();
             }
           },
@@ -259,7 +266,9 @@ describe("subgraph property tests", () => {
             // Without root should have exactly one fewer node
             expect(withoutRoot.nodes.length).toBe(withRoot.nodes.length - 1);
             // And that missing node is the root
-            expect(withoutRoot.node(itemRef(centerId))).toBeUndefined();
+            expect(
+              indexSubgraph(withoutRoot).node(itemRef(centerId)),
+            ).toBeUndefined();
           },
         ),
         { numRuns: 20 },

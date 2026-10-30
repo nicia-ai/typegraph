@@ -6,6 +6,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  indexSubgraph,
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
@@ -56,22 +57,13 @@ async function main(): Promise<void> {
         read.subgraph(root, { edges: ["knows"], maxDepth: 2 }),
       ),
     );
-    assert.equal(
-      disjoint[0]?.node({ kind: "Person", id: cara.id }) !== undefined,
-      true,
+    const [fromAda, fromDana] = disjoint.map((subgraph) =>
+      indexSubgraph(subgraph),
     );
-    assert.equal(
-      disjoint[0]?.node({ kind: "Person", id: dana.id }) !== undefined,
-      false,
-    );
-    assert.equal(
-      disjoint[1]?.node({ kind: "Person", id: eli.id }) !== undefined,
-      true,
-    );
-    assert.equal(
-      disjoint[1]?.node({ kind: "Person", id: ada.id }) !== undefined,
-      false,
-    );
+    assert.ok(fromAda?.node(cara));
+    assert.equal(fromAda?.node(dana), undefined);
+    assert.ok(fromDana?.node(eli));
+    assert.equal(fromDana?.node(ada), undefined);
 
     // The same overlapping Ada/Bea roots are also cheap on the default path
     // when callers need identities only. Empty projections omit properties.
@@ -84,15 +76,12 @@ async function main(): Promise<void> {
         }),
       ),
     );
-    assert.equal(
-      identityOnly[0]?.node({ kind: "Person", id: cara.id }) !== undefined,
-      true,
+    const [identityFromAda, identityFromBea] = identityOnly.map((subgraph) =>
+      indexSubgraph(subgraph),
     );
-    assert.equal(
-      identityOnly[1]?.node({ kind: "Person", id: cara.id }) !== undefined,
-      true,
-    );
-    const identityAda = identityOnly[0]?.node({ kind: "Person", id: ada.id });
+    assert.ok(identityFromAda?.node(cara));
+    assert.ok(identityFromBea?.node(cara));
+    const identityAda = identityFromAda?.node(ada);
     assert.ok(identityAda);
     assert.equal("biography" in identityAda, false);
 
@@ -108,14 +97,9 @@ async function main(): Promise<void> {
       { shareSubgraphs: true },
     );
     assert.equal(subgraphs.length, 2);
-    assert.equal(
-      subgraphs[0]?.node({ kind: "Person", id: cara.id }) !== undefined,
-      true,
-    );
-    assert.equal(
-      subgraphs[1]?.node({ kind: "Person", id: cara.id }) !== undefined,
-      true,
-    );
+    for (const subgraph of subgraphs) {
+      assert.ok(indexSubgraph(subgraph).node(cara));
+    }
 
     const paths = await store
       .query()

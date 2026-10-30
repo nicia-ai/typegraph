@@ -3630,8 +3630,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Extracts a typed subgraph by traversing from a root node.
    *
    * Performs a BFS traversal from `root` following the specified edge kinds,
-   * returning the reached nodes and edges with (kind, id) lookups for
-   * immediate traversal.
+   * returning the reached nodes and edges as plain data; `indexSubgraph`
+   * builds (kind, id) lookups over them.
    *
    * `root` is a `{ kind, id }` reference. Node rows are keyed by (kind, id),
    * so two nodes of different kinds may share an id; every lookup takes both,
@@ -3643,21 +3643,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   edges: ["has_task", "runs_agent", "uses_skill"],
    *   maxDepth: 4,
    * });
+   * const { node, outgoing, incoming } = indexSubgraph(sg);
    *
    * // Root node (the traversal starting point)
    * console.log(sg.root?.kind);
    *
    * // Lookup by kind and id
-   * const task = sg.node({ kind: "Task", id: taskId });
+   * const task = node({ kind: "Task", id: taskId });
    *
    * // Outgoing edges of a kind from a node, and the nodes they reach
-   * const taskEdges = sg.outgoing(run, "has_task");
+   * const taskEdges = outgoing(run, "has_task");
    * const tasks = taskEdges.map((edge) =>
-   *   sg.node({ kind: edge.toKind, id: edge.toId }),
+   *   node({ kind: edge.toKind, id: edge.toId }),
    * );
    *
    * // Incoming edges of a kind pointing to a node
-   * const parentEdges = sg.incoming({ kind: "Task", id: taskId }, "has_task");
+   * const parentEdges = incoming({ kind: "Task", id: taskId }, "has_task");
    * ```
    */
   async subgraph<

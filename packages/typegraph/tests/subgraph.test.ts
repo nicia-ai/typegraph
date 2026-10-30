@@ -20,7 +20,9 @@ import {
   defineGraph,
   defineNode,
   defineSubgraphProject,
+  type Edge,
   type GraphNodeReference,
+  indexSubgraph,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   type Node,
 } from "../src";
@@ -255,10 +257,11 @@ describe("store.subgraph()", () => {
           maxDepth: 1,
         },
       );
+      const index = indexSubgraph(result);
 
       const nodeKinds = result.nodes.map((n) => n.kind).toSorted();
       expect(nodeKinds).toEqual(["Agent", "Run", "Task", "Task"]);
-      expect(result.node({ kind: "Run", id: ids.runId })).toBeDefined();
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeDefined();
     });
 
     it("follows multi-hop paths", async () => {
@@ -269,14 +272,13 @@ describe("store.subgraph()", () => {
           maxDepth: 4,
         },
       );
+      const index = indexSubgraph(result);
 
-      expect(result.node({ kind: "Run", id: ids.runId })).toBeDefined();
-      expect(result.node({ kind: "Task", id: ids.task1Id })).toBeDefined();
-      expect(
-        result.node({ kind: "Attempt", id: ids.attempt1Id }),
-      ).toBeDefined();
-      expect(result.node({ kind: "ToolDef", id: ids.tool1Id })).toBeDefined();
-      expect(result.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeDefined();
+      expect(index.node({ kind: "Task", id: ids.task1Id })).toBeDefined();
+      expect(index.node({ kind: "Attempt", id: ids.attempt1Id })).toBeDefined();
+      expect(index.node({ kind: "ToolDef", id: ids.tool1Id })).toBeDefined();
+      expect(index.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
     });
 
     it("only follows specified edge kinds", async () => {
@@ -337,11 +339,12 @@ describe("store.subgraph()", () => {
           direction: "both",
         },
       );
+      const index = indexSubgraph(result);
 
       // Inbound: task1 ← has_task ← run
-      expect(result.node({ kind: "Run", id: ids.runId })).toBeDefined();
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeDefined();
       // Then outbound from run: run → has_task → task2
-      expect(result.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
+      expect(index.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
     });
   });
 
@@ -398,9 +401,10 @@ describe("store.subgraph()", () => {
           excludeRoot: true,
         },
       );
+      const index = indexSubgraph(result);
 
       expect(result.root).toBeUndefined();
-      expect(result.node({ kind: "Run", id: ids.runId })).toBeUndefined();
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeUndefined();
       expect(result.nodes.length).toBe(2);
     });
 
@@ -414,11 +418,12 @@ describe("store.subgraph()", () => {
           excludeRoot: true,
         },
       );
+      const index = indexSubgraph(result);
 
-      expect(result.node({ kind: "Run", id: ids.runId })).toBeUndefined();
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeUndefined();
 
       // depends_on edge should still appear since both task1 and task2 are in the set
-      const depEdges = result.outgoing(
+      const depEdges = index.outgoing(
         { kind: "Task", id: ids.task1Id },
         "depends_on",
       );
@@ -453,13 +458,14 @@ describe("store.subgraph()", () => {
           includeKinds: ["Task", "ToolDef"],
         },
       );
+      const index = indexSubgraph(result);
 
       const allEdges = result.edges;
       for (const edge of allEdges) {
         expect(
-          result.node({ kind: edge.fromKind, id: edge.fromId }),
+          index.node({ kind: edge.fromKind, id: edge.fromId }),
         ).toBeDefined();
-        expect(result.node({ kind: edge.toKind, id: edge.toId })).toBeDefined();
+        expect(index.node({ kind: edge.toKind, id: edge.toId })).toBeDefined();
       }
 
       // has_attempt: Task→Attempt — Attempt excluded, so edge excluded
@@ -589,10 +595,11 @@ describe("store.subgraph()", () => {
           maxDepth: 1,
         },
       );
+      const index = indexSubgraph(result);
 
-      expect(result.node({ kind: "Task", id: ids.task1Id })).toBeUndefined();
+      expect(index.node({ kind: "Task", id: ids.task1Id })).toBeUndefined();
       // task2 is still alive
-      expect(result.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
+      expect(index.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
     });
 
     it("excludes soft-deleted edges from traversal", async () => {
@@ -612,9 +619,10 @@ describe("store.subgraph()", () => {
           maxDepth: 3,
         },
       );
+      const index = indexSubgraph(result);
 
       // task1 should not be reachable since the edge to it is deleted
-      expect(result.node({ kind: "Task", id: ids.task1Id })).toBeUndefined();
+      expect(index.node({ kind: "Task", id: ids.task1Id })).toBeUndefined();
     });
 
     it("does not traverse through soft-deleted intermediate nodes", async () => {
@@ -640,8 +648,9 @@ describe("store.subgraph()", () => {
           maxDepth: 4,
         },
       );
+      const index = indexSubgraph(result);
 
-      expect(result.node({ kind: "ToolDef", id: ids.tool1Id })).toBeUndefined();
+      expect(index.node({ kind: "ToolDef", id: ids.tool1Id })).toBeUndefined();
     });
 
     it("excludes soft-deleted edges from result set", async () => {
@@ -929,15 +938,38 @@ describe("store.subgraph()", () => {
         { kind: "Run", id: ids.runId },
         { edges: ["has_task"], maxDepth: 1 },
       );
+      const index = indexSubgraph(result);
 
-      const task = result.node({ kind: "Task", id: ids.task1Id });
+      const task = index.node({ kind: "Task", id: ids.task1Id });
       expectTypeOf(task).toEqualTypeOf<Node<typeof Task> | undefined>();
       expect(task?.title).toBe("t1");
 
       for (const edge of result.edges) {
-        const target = result.node({ kind: edge.toKind, id: edge.toId });
+        const target = index.node({ kind: edge.toKind, id: edge.toId });
         expect(target).toBeDefined();
       }
+      if (result.root !== undefined) {
+        expectTypeOf(index.node(result.root)).toEqualTypeOf<
+          (typeof result.nodes)[number] | undefined
+        >();
+      }
+      // @ts-expect-error - "Tsak" is not a kind this result can hold
+      index.node({ kind: "Tsak", id: ids.task1Id });
+
+      expectTypeOf(
+        index.outgoing({ kind: "Run", id: ids.runId }, "has_task"),
+      ).toEqualTypeOf<readonly Edge<typeof hasTask>[]>();
+      const optionalKind = undefined as "has_task" | undefined;
+      expect(
+        index.outgoing({ kind: "Run", id: ids.runId }, optionalKind),
+      ).toEqual(index.outgoing({ kind: "Run", id: ids.runId }));
+      // @ts-expect-error - "runs_agent" is not an edge kind of this result
+      index.outgoing({ kind: "Run", id: ids.runId }, "runs_agent");
+
+      expect(structuredClone(result)).toEqual(result);
+      expect(
+        Object.isFrozen(index.outgoing({ kind: "Run", id: ids.runId })),
+      ).toBe(true);
     });
 
     it("rejects a reference root whose kind and id disagree at compile time", async () => {
@@ -1036,6 +1068,7 @@ describe("store.subgraph()", () => {
           includeKinds: ["Run", "Task"],
         },
       );
+      const index = indexSubgraph(result);
 
       // root is Run | Task | undefined — narrows via kind check
       if (result.root?.kind === "Run") {
@@ -1045,7 +1078,7 @@ describe("store.subgraph()", () => {
 
       // a string-kind key returns Run | Task | undefined; a literal kind narrows
       const key: { kind: string; id: string } = { kind: "Run", id: ids.runId };
-      const node = result.node(key);
+      const node = index.node(key);
       if (node?.kind === "Task") {
         const title: string = node.title;
         void title;
@@ -1065,8 +1098,9 @@ describe("store.subgraph()", () => {
           },
         },
       );
+      const index = indexSubgraph(result);
 
-      const edges = result.outgoing(
+      const edges = index.outgoing(
         { kind: "Task", id: ids.task1Id },
         "uses_skill",
       );
@@ -1081,7 +1115,7 @@ describe("store.subgraph()", () => {
       }
 
       // incoming has the same type
-      const reverseEdges = result.incoming(
+      const reverseEdges = index.incoming(
         { kind: "Skill", id: ids.skill1Id },
         "uses_skill",
       );
@@ -1484,10 +1518,11 @@ describe("store.subgraph temporal behavior", () => {
         maxDepth: 1,
       },
     );
+    const index = indexSubgraph(result);
 
-    expect(result.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.endedTaskId })).toBeUndefined();
-    expect(result.node({ kind: "Task", id: ids.futureTaskId })).toBeUndefined();
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeUndefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeUndefined();
   });
 
   it("asOf = BEFORE surfaces the historically-valid task and edge", async () => {
@@ -1500,11 +1535,12 @@ describe("store.subgraph temporal behavior", () => {
         asOf: BEFORE,
       },
     );
+    const index = indexSubgraph(result);
 
     // Active and ended were both valid at BEFORE; future was not.
-    expect(result.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.futureTaskId })).toBeUndefined();
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeUndefined();
   });
 
   it("rejects non-canonical asOf timestamps", async () => {
@@ -1547,13 +1583,14 @@ describe("store.subgraph temporal behavior", () => {
         temporalMode: "includeEnded",
       },
     );
+    const index = indexSubgraph(result);
 
     // Ended rows surface; deleted tombstone does not.
-    expect(result.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.futureTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeDefined();
     expect(
-      result.node({ kind: "Task", id: ids.tombstoneTaskId }),
+      index.node({ kind: "Task", id: ids.tombstoneTaskId }),
     ).toBeUndefined();
   });
 
@@ -1566,16 +1603,15 @@ describe("store.subgraph temporal behavior", () => {
         temporalMode: "includeTombstones",
       },
     );
+    const index = indexSubgraph(result);
 
     // Everything shows up under includeTombstones.
-    expect(result.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
-    expect(result.node({ kind: "Task", id: ids.futureTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.tombstoneTaskId })).toBeDefined();
     expect(
-      result.node({ kind: "Task", id: ids.tombstoneTaskId }),
-    ).toBeDefined();
-    expect(
-      result.node({ kind: "Task", id: ids.futureEdgeTargetId }),
+      index.node({ kind: "Task", id: ids.futureEdgeTargetId }),
     ).toBeDefined();
   });
 
@@ -1590,8 +1626,9 @@ describe("store.subgraph temporal behavior", () => {
         maxDepth: 1,
       },
     );
+    const index = indexSubgraph(result);
     expect(
-      result.node({ kind: "Task", id: ids.futureEdgeTargetId }),
+      index.node({ kind: "Task", id: ids.futureEdgeTargetId }),
     ).toBeUndefined();
   });
 
@@ -1606,8 +1643,9 @@ describe("store.subgraph temporal behavior", () => {
         temporalMode: "includeEnded",
       },
     );
+    const index = indexSubgraph(result);
     expect(
-      result.node({ kind: "Task", id: ids.futureEdgeTargetId }),
+      index.node({ kind: "Task", id: ids.futureEdgeTargetId }),
     ).toBeDefined();
   });
 
@@ -1639,6 +1677,7 @@ describe("store.subgraph temporal behavior", () => {
       edges: ["has_task"],
       maxDepth: 1,
     });
-    expect(result.node(ended)).toBeDefined();
+    const index = indexSubgraph(result);
+    expect(index.node(ended)).toBeDefined();
   });
 });

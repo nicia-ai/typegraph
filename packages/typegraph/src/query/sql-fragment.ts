@@ -144,6 +144,15 @@ function placeholderNode(value: Placeholder): SqlPlaceholderChunk {
   return Object.freeze({ kind: "placeholder", value });
 }
 
+/**
+ * Appends a fragment's chunks one at a time. A spread (`push(...chunks)`)
+ * passes every chunk as a call argument, and a statement composed from many
+ * reads holds more chunks than the engine's argument limit.
+ */
+function appendChunks(target: SqlChunk[], fragment: SqlFragment): void {
+  for (const chunk of getChunks(fragment)) target.push(chunk);
+}
+
 function templateSql(
   strings: TemplateStringsArray,
   ...values: readonly unknown[]
@@ -157,7 +166,7 @@ function templateSql(
     if (index >= values.length) continue;
     const value = values[index];
     if (isSqlFragment(value)) {
-      chunks.push(...getChunks(value));
+      appendChunks(chunks, value);
       intentSources.push(value);
     } else if (isSqlPlaceholder(value)) {
       chunks.push(placeholderNode(value));
@@ -185,8 +194,8 @@ function joinSql(
   const intentSources: SqlFragment[] = [separator];
 
   for (const [index, fragment] of fragments.entries()) {
-    if (index > 0) chunks.push(...getChunks(separator));
-    chunks.push(...getChunks(fragment));
+    if (index > 0) appendChunks(chunks, separator);
+    appendChunks(chunks, fragment);
     intentSources.push(fragment);
   }
 

@@ -8045,14 +8045,6 @@ type StringPredicate = Readonly<{
     pattern: string | ParameterRef;
 }>;
 
-// @public
-interface SubgraphEdgeLookup<G extends GraphDef, EK extends EdgeKinds<G>, P> {
-    // (undocumented)
-    <const K extends EK>(node: SubgraphNodeKey, edgeKind: K): readonly SubgraphEdgeResult<G, K, P>[];
-    // (undocumented)
-    (node: SubgraphNodeKey): readonly SubgraphEdgeResult<G, EK, P>[];
-}
-
 // @public (undocumented)
 type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> = EdgeProjectionPropertyKey<E> | "meta";
 
@@ -8068,20 +8060,6 @@ type SubgraphEdgeResult<G extends GraphDef, EK extends EdgeKinds<G> = EdgeKinds<
 
 // @public (undocumented)
 type SubgraphEdgeResultForKind<G extends GraphDef, Kind extends EdgeKinds<G>, P> = ProjectionSelection<P, "edges", Kind> extends readonly string[] ? ProjectedEdgeResult<G["edges"][Kind]["type"], ProjectionSelection<P, "edges", Kind>> : Edge<G["edges"][Kind]["type"]>;
-
-// @public
-type SubgraphNodeKey<K extends string = string> = Readonly<{
-    kind: K;
-    id: string;
-}>;
-
-// @public
-interface SubgraphNodeLookup<G extends GraphDef, NK extends NodeKinds<G>, P> {
-    // (undocumented)
-    <const K extends NK>(node: SubgraphNodeKey<K>): SubgraphNodeResult<G, K, P> | undefined;
-    // (undocumented)
-    (node: SubgraphNodeKey): SubgraphNodeResult<G, NK, P> | undefined;
-}
 
 // @public (undocumented)
 type SubgraphNodeProjectionField<N extends NodeType = NodeType> = NodeProjectionPropertyKey<N> | "meta";
@@ -8125,9 +8103,6 @@ type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, 
     root: SubgraphNodeResult<G, NK, P> | undefined;
     nodes: readonly SubgraphNodeResult<G, NK, P>[];
     edges: readonly SubgraphEdgeResult<G, EK, P>[];
-    node: SubgraphNodeLookup<G, NK, P>;
-    outgoing: SubgraphEdgeLookup<G, EK, P>;
-    incoming: SubgraphEdgeLookup<G, EK, P>;
 }>;
 
 // @public (undocumented)

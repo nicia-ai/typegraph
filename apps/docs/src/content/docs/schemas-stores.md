@@ -2733,29 +2733,37 @@ store.subgraph<EK, NK>(
 **Result:**
 
 ```typescript
-type SubgraphNodeKey = Readonly<{ kind: string; id: string }>;
-
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
   nodes: readonly SubgraphNodeResult<G, NK>[];
   edges: readonly SubgraphEdgeResult<G, EK>[];
-  node(key: SubgraphNodeKey): SubgraphNodeResult<G, NK> | undefined;
-  outgoing(key: SubgraphNodeKey, edgeKind?: EK): readonly SubgraphEdgeResult<G, EK>[];
-  incoming(key: SubgraphNodeKey, edgeKind?: EK): readonly SubgraphEdgeResult<G, EK>[];
 }>;
 ```
 
 | Field | Description |
 |-------|-------------|
 | `root` | The root node, or `undefined` if it was not found, `excludeRoot` is set, or `includeKinds` omits its kind |
-| `nodes` | Every returned node once, ordered by kind then id |
-| `edges` | Every returned edge once, ordered by id |
-| `node(key)` | The returned node with that kind and id. A literal `kind` narrows the result type; a `string` kind such as an edge's `toKind` returns any returned kind |
+| `nodes` | Every returned node once, ordered by kind then id (code points) |
+| `edges` | Every returned edge once, ordered by id (code points) |
+
+The result is plain data, so it survives `structuredClone`, `postMessage`, React Server Component
+props, and JSON serialization. For lookups, index it once with `indexSubgraph()`:
+
+```typescript
+import { indexSubgraph } from "@nicia-ai/typegraph";
+
+const { node, outgoing, incoming } = indexSubgraph(sg);
+```
+
+| Lookup | Description |
+|--------|-------------|
+| `node(key)` | The returned node with that kind and id. A literal `kind` narrows the result type and must be a kind the result can hold; a `string` kind such as an edge's `toKind` returns any returned kind |
 | `outgoing(key, edgeKind?)` | Returned edges whose source is that node, optionally of one edge kind, in id order |
 | `incoming(key, edgeKind?)` | Returned edges whose target is that node, optionally of one edge kind, in id order |
 
 Every lookup takes a `{ kind, id }` key: a node, a `GraphNodeReference`, or an edge's endpoint
-(`{ kind: edge.toKind, id: edge.toId }`) all fit, so following an edge needs no cast.
+(`{ kind: edge.toKind, id: edge.toId }`) all fit, so following an edge needs no cast. Per-kind
+lookups are constant-time and return frozen arrays.
 
 Edges are only included when **both** endpoints appear in the result set.
 Nodes and edges are filtered by the resolved `temporalMode` — by default,
@@ -2765,33 +2773,36 @@ multiple paths) are deduplicated.
 **Example:**
 
 ```typescript
+import { indexSubgraph } from "@nicia-ai/typegraph";
+
 const sg = await store.subgraph(run, {
   edges: ["has_task", "runs_agent", "uses_skill"],
   maxDepth: 4,
 });
+const { node, outgoing, incoming } = indexSubgraph(sg);
 
 // Root node (the traversal starting point)
 console.log(sg.root?.kind);
 
 // Lookup by kind and id
-const task = sg.node({ kind: "Task", id: taskId });
+const task = node({ kind: "Task", id: taskId });
 
 // Outgoing edges of a kind from a node, and the nodes they reach
-const taskEdges = sg.outgoing(run, "has_task");
-const tasks = taskEdges.map((edge) => sg.node({ kind: edge.toKind, id: edge.toId }));
+const taskEdges = outgoing(run, "has_task");
+const tasks = taskEdges.map((edge) => node({ kind: edge.toKind, id: edge.toId }));
 
 // Incoming edges of a kind pointing to a node
-const parentEdges = sg.incoming({ kind: "Task", id: taskId }, "has_task");
+const parentEdges = incoming({ kind: "Task", id: taskId }, "has_task");
 
 // Narrow by kind with a switch
-for (const node of sg.nodes) {
-  switch (node.kind) {
+for (const member of sg.nodes) {
+  switch (member.kind) {
     case "Task": {
-      console.log(node.title, node.status);
+      console.log(member.title, member.status);
       break;
     }
     case "Agent": {
-      console.log(node.model);
+      console.log(member.model);
       break;
     }
   }

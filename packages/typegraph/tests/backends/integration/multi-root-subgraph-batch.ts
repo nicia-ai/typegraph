@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { indexSubgraph } from "../../../src";
+import { ConfigurationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
-function snapshotOf(result: {
-  root: unknown;
-  nodes: readonly unknown[];
-  edges: readonly unknown[];
-}): unknown {
-  return { root: result.root, nodes: result.nodes, edges: result.edges };
-}
+/**
+ * Hydrating 500 subgraphs in one statement takes about 3.5s alone on
+ * PostgreSQL, too close to the 15s default on a loaded CI host.
+ */
+const FULL_BATCH_CAP_TIMEOUT_MS = 60_000;
 
 type MultiRootTestStore = ReturnType<IntegrationTestContext["getStore"]>;
 type PersonNode = Awaited<
@@ -77,6 +77,58 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
         seeded = await seedMultiRootSubgraphData(context.getStore());
       });
 
+      it(
+        "composes the full 500-read cap into one statement or refuses it by bind budget",
+        async () => {
+          const store = context.getStore();
+          const people = [seeded.alice, seeded.bob, seeded.charlie] as const;
+          const roots = Array.from(
+            { length: 500 },
+            (_, index) => people[index % people.length] ?? seeded.alice,
+          );
+
+          // Composing 500 reads must never overflow the call stack. A backend
+          // whose bind budget cannot hold the statement refuses it with the
+          // typed budget error instead; every other backend runs it.
+          const outcome = await store
+            .batchOnce(
+              (read) =>
+                roots.map((rootNode) =>
+                  read.subgraph(rootNode, {
+                    edges: ["knows", "worksAt"],
+                    maxDepth: 2,
+                  }),
+                ),
+              { shareSubgraphs },
+            )
+            .then(
+              (results) => ({ results }) as const,
+              (error: unknown) => ({ error }) as const,
+            );
+
+          const observed =
+            "error" in outcome ?
+              {
+                outcome: "refused",
+                typedBudgetRefusal:
+                  outcome.error instanceof ConfigurationError &&
+                  outcome.error.details["operation"] === "batchOnce" &&
+                  Number(outcome.error.details["bindCount"]) >
+                    Number(outcome.error.details["bindBudget"]),
+              }
+            : {
+                outcome: "ran",
+                rootIds: outcome.results.map((result) => result.root?.id),
+              };
+          expect(observed).toEqual(
+            observed.outcome === "refused" ?
+              { outcome: "refused", typedBudgetRefusal: true }
+            : { outcome: "ran", rootIds: roots.map((rootNode) => rootNode.id) },
+          );
+        },
+        FULL_BATCH_CAP_TIMEOUT_MS,
+      );
+
       it("preserves independent result slots for duplicate, missing, overlapping, and cyclic roots", async () => {
         const store = context.getStore();
         const roots = [
@@ -100,20 +152,19 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           { shareSubgraphs },
         );
 
-        expect(batched.map((result) => snapshotOf(result))).toEqual(
-          independent.map((result) => snapshotOf(result)),
-        );
+        expect(batched).toEqual(independent);
         expect(batched).toHaveLength(roots.length);
-        expect(snapshotOf(requireDefined(batched[0]))).toEqual(
-          snapshotOf(requireDefined(batched[2])),
-        );
+        expect(batched[0]).toEqual(batched[2]);
         expect(batched[0]).not.toBe(batched[2]);
         expect(batched[0]?.nodes).not.toBe(batched[2]?.nodes);
-        const duplicateBob = batched[2]?.node(seeded.bob);
+        const duplicateBob = indexSubgraph(requireDefined(batched[2])).node(
+          seeded.bob,
+        );
         expect(duplicateBob).toBeDefined();
         if (duplicateBob === undefined) throw new Error("Bob must be present");
         Reflect.set(duplicateBob, "name", "Changed in duplicate");
-        expect(batched[0]?.node(seeded.bob)).toHaveProperty("name", "Bob");
+        const firstIndex = indexSubgraph(requireDefined(batched[0]));
+        expect(firstIndex.node(seeded.bob)).toHaveProperty("name", "Bob");
         const duplicateNodes = requireDefined(batched[2]).nodes;
         const duplicateBobIndex = duplicateNodes.findIndex(
           (node) => node.id === seeded.bob.id,
@@ -125,9 +176,11 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
         expect(
           batched[2]?.nodes.some((node) => node.id === seeded.bob.id),
         ).toBe(false);
-        expect(batched[0]?.node(seeded.bob)).toBeDefined();
-        expect(batched[0]?.node(seeded.charlie)).toBeDefined();
-        expect(batched[1]?.node(seeded.alice)).toBeDefined();
+        expect(firstIndex.node(seeded.bob)).toBeDefined();
+        expect(firstIndex.node(seeded.charlie)).toBeDefined();
+        expect(
+          indexSubgraph(requireDefined(batched[1])).node(seeded.alice),
+        ).toBeDefined();
         expect(batched[3]?.root).toBeUndefined();
         expect(batched[3]?.nodes).toHaveLength(0);
       });
@@ -178,19 +231,20 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           { shareSubgraphs },
         );
 
-        expect(batched.map((result) => snapshotOf(result))).toEqual(
-          independent.map((result) => snapshotOf(result)),
-        );
-        expect(batched[0].node(seeded.bob)).toBeDefined();
-        expect(batched[0].node(seeded.charlie)).toBeDefined();
-        expect(batched[0].node(seeded.dave)).toBeUndefined();
-        expect(batched[0].node(seeded.erin)).toBeUndefined();
-        expect(batched[1].node(seeded.bob)).toBeUndefined();
-        expect(batched[2].node(seeded.alice)).toBeDefined();
-        expect(batched[2].node(seeded.bob)).toBeDefined();
+        expect(batched).toEqual(independent);
+        const projectedWindowIndex = indexSubgraph(requireDefined(batched[0]));
+        const withoutRootIndex = indexSubgraph(requireDefined(batched[1]));
+        const incomingIndex = indexSubgraph(requireDefined(batched[2]));
+        expect(projectedWindowIndex.node(seeded.bob)).toBeDefined();
+        expect(projectedWindowIndex.node(seeded.charlie)).toBeDefined();
+        expect(projectedWindowIndex.node(seeded.dave)).toBeUndefined();
+        expect(projectedWindowIndex.node(seeded.erin)).toBeUndefined();
+        expect(withoutRootIndex.node(seeded.bob)).toBeUndefined();
+        expect(incomingIndex.node(seeded.alice)).toBeDefined();
+        expect(incomingIndex.node(seeded.bob)).toBeDefined();
         expect(batched[3].nodes).toHaveLength(0);
 
-        const projectedAlice = batched[0].node(seeded.alice);
+        const projectedAlice = projectedWindowIndex.node(seeded.alice);
         expect(projectedAlice).toHaveProperty("name", "Alice");
         expect(projectedAlice).not.toHaveProperty("age");
         expect(projectedAlice).not.toHaveProperty("meta");
@@ -241,12 +295,10 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           );
 
         expect(names).toEqual(independentNames);
-        expect(snapshotOf(alice)).toEqual(snapshotOf(independentAlice));
-        expect(snapshotOf(projectedAlice)).toEqual(
-          snapshotOf(independentProjected),
-        );
-        expect(snapshotOf(bob)).toEqual(snapshotOf(independentBob));
-        expect(snapshotOf(aliceAgain)).toEqual(snapshotOf(independentAlice));
+        expect(alice).toEqual(independentAlice);
+        expect(projectedAlice).toEqual(independentProjected);
+        expect(bob).toEqual(independentBob);
+        expect(aliceAgain).toEqual(independentAlice);
 
         const aliceEdgeIds = alice.edges.map((edge) => edge.id).toSorted();
         const bobEdgeIds = bob.edges.map((edge) => edge.id).toSorted();
@@ -314,9 +366,7 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           );
 
           expect(currentBeforeAdvance.root).toBeUndefined();
-          expect(snapshotOf(currentAfterAdvance)).toEqual(
-            snapshotOf(currentBeforeAdvance),
-          );
+          expect(currentAfterAdvance).toEqual(currentBeforeAdvance);
           expect(explicitBefore.root).toBeUndefined();
           expect(explicitAfter.root?.id).toBe(futureRoot.id);
         } finally {
