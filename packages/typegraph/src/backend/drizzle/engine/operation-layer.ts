@@ -122,6 +122,7 @@ export type CommonOperationOptionsDeps = Readonly<{
   operationStrategy: CommonOperationOptions["operationStrategy"];
   rowMappers: CommonOperationOptions["rowMappers"];
   schemaFenceLockClause: CommonOperationOptions["schemaFenceLockClause"];
+  writersSerialize: CommonOperationOptions["writersSerialize"];
   contributionMaterializer: ContributionMaterializer;
   fusion: OperationFusionHooks;
 }>;
@@ -168,6 +169,7 @@ export function buildCommonOperationOptions(
     operationStrategy: deps.operationStrategy,
     rowMappers: deps.rowMappers,
     schemaFenceLockClause: deps.schemaFenceLockClause,
+    writersSerialize: deps.writersSerialize,
     async resolveAtomicNodeProjectionEvidence(creates, updates) {
       const requirements = resolveAtomicNodeProjectionRequirements(
         creates,

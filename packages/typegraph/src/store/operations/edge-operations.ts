@@ -105,6 +105,7 @@ import {
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
+  type NodeRow,
   rowPropsToObject,
   runOptionallyInTransaction,
   type TransactionBackend,
@@ -132,6 +133,7 @@ import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
+import { compareCodePoints } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -220,6 +222,7 @@ import {
   withUnmatchedEdgeUpdateRefusal,
 } from "./edge-write-fences";
 import { type EdgeUpdateWork } from "./edge-write-pipeline";
+import { lockNodeRows, lockNodeRowsById } from "./node-row-locks";
 import {
   atomicResolvedUpdateAttemptBudget,
   type OverlaidSessionMint,
@@ -497,6 +500,13 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
  * Gives endpoint refusals their public ordering: source wins when both inputs
  * are unavailable. The fused INSERT uses this only after its predicate
  * produced no row, so it never spends the reads on a successful create.
+ *
+ * Both endpoints are read under the edge-endpoint lock, held to the end of the
+ * write transaction, so a concurrent delete of either endpoint either waits
+ * for this write and sees its edge, or makes this read wait and see its
+ * tombstone. They are locked in (kind, id) code-point order — one statement
+ * when they share a kind — the order every delete lock statement takes its
+ * rows in; the verdicts are still checked source first.
  */
 async function assertLiveEdgeEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -507,11 +517,42 @@ async function assertLiveEdgeEndpoints<G extends GraphDef>(
   toId: string,
   backend: WriteTarget,
 ): Promise<void> {
-  const fromNode = await backend.getNode(ctx.graphId, fromKind, fromId);
-  assertEndpointRowLive(edgeKindName, "from", fromKind, fromId, fromNode);
-
-  const toNode = await backend.getNode(ctx.graphId, toKind, toId);
-  assertEndpointRowLive(edgeKindName, "to", toKind, toId, toNode);
+  const kinds =
+    fromKind === toKind ?
+      [fromKind]
+    : [fromKind, toKind].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      );
+  const rowsByKey = new Map<string, NodeRow>();
+  for (const kind of kinds) {
+    const ids = [
+      ...(kind === fromKind ? [fromId] : []),
+      ...(kind === toKind ? [toId] : []),
+    ];
+    for (const row of await lockNodeRows(
+      backend,
+      ctx.graphId,
+      kind,
+      ids,
+      "edgeEndpoint",
+    )) {
+      rowsByKey.set(edgeEndpointRowKey(kind, row.id), row);
+    }
+  }
+  assertEndpointRowLive(
+    edgeKindName,
+    "from",
+    fromKind,
+    fromId,
+    rowsByKey.get(edgeEndpointRowKey(fromKind, fromId)),
+  );
+  assertEndpointRowLive(
+    edgeKindName,
+    "to",
+    toKind,
+    toId,
+    rowsByKey.get(edgeEndpointRowKey(toKind, toId)),
+  );
 }
 
 /** The single owner of an edge endpoint row's live/refusal verdict. */
@@ -1165,15 +1206,21 @@ async function primeEdgeBatchValidationCache<G extends GraphDef>(
     row: Awaited<ReturnType<GraphBackend["getNode"]>>,
   ) => void,
 ): Promise<void> {
-  const readNodes = bindBatchNodeRead(ctx, backend);
-  if (readNodes === undefined) return;
-
   const idsByKind = collectEdgeEndpointIdsByKind(inputs);
 
-  for (const [kind, ids] of idsByKind) {
-    const orderedIds = [...ids];
-    const rows = await readNodes(kind, orderedIds);
-    const rowsById = new Map(rows.map((row) => [row.id, row]));
+  // Kinds in sorted order, ids sorted by the lock owner: one acquisition order
+  // across batches whose endpoint sets overlap.
+  for (const kind of [...idsByKind.keys()].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  )) {
+    const orderedIds = [...requireDefined(idsByKind.get(kind))];
+    const rowsById = await lockNodeRowsById(
+      backend,
+      ctx.graphId,
+      kind,
+      orderedIds,
+      "edgeEndpoint",
+    );
     for (const id of orderedIds) {
       seedEndpointRow(ctx.graphId, kind, id, rowsById.get(id));
     }
@@ -1935,6 +1982,20 @@ async function performEdgeUpdate<G extends GraphDef>(
   const cardinality = edgeCardinality(ctx, input.identity.kind);
   const reentersLivePopulation =
     options?.clearDeleted === true && existing.deleted_at !== undefined;
+  if (reentersLivePopulation) {
+    // A resurrection makes a live edge exactly as a create does, so it owes
+    // the create's endpoint verdict — under the same lock — before it revives
+    // a row whose endpoint may have been deleted while it was tombstoned.
+    await assertLiveEdgeEndpoints(
+      ctx,
+      input.identity.kind,
+      existing.from_kind,
+      existing.from_id,
+      existing.to_kind,
+      existing.to_id,
+      target,
+    );
+  }
   // `let` earns its place: the claim is decided inside the re-entry branch and
   // consumed by the work record built after it, and there is no expression form
   // that keeps the branch's two other statements (probe, then decide) together.

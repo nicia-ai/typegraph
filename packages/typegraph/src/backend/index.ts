@@ -413,6 +413,7 @@ export type {
   NodeInsertProjection,
   NodePropertyExpectation,
   NodeRow,
+  NodeRowLock,
   NormalizedColumnKind,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,

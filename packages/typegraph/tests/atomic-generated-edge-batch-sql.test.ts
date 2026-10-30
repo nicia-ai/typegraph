@@ -4,6 +4,7 @@ import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it } from "vitest";
 
 import { buildInsertEdgesBatchWithSchemaFence } from "../src/backend/drizzle/operations/edges";
+import { NODE_ROW_LOCK_CLAUSES } from "../src/backend/drizzle/operations/strategy";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 
@@ -40,6 +41,7 @@ describe("schema-fenced generated edge batch SQL", () => {
       "2026-08-24T00:00:00.000Z",
       schemaFence,
       drizzleSql`FOR SHARE`,
+      NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
     );
     const rendered = new PgDialect().sqlToQuery(query);
     const statement = rendered.sql.toLowerCase();
@@ -67,6 +69,7 @@ describe("schema-fenced generated edge batch SQL", () => {
       "2026-08-24T00:00:00.000Z",
       schemaFence,
       drizzleSql.empty(),
+      NODE_ROW_LOCK_CLAUSES.sqlite.edgeEndpoint,
     );
     const rendered = new SQLiteSyncDialect().sqlToQuery(query);
     const statement = rendered.sql.toLowerCase();

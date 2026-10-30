@@ -13,6 +13,7 @@ import {
   buildAtomicNodeBatchWithSchemaFence,
   buildAtomicNodeResolvedUpdateBatch,
 } from "../src/backend/drizzle/operations/nodes";
+import { NODE_ROW_LOCK_CLAUSES } from "../src/backend/drizzle/operations/strategy";
 import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { rowPropsToObject } from "../src/backend/types";
@@ -223,6 +224,7 @@ describe("resolved update sets on a real PostgreSQL engine", () => {
               timestamp,
               schemaFence,
               drizzleSql`FOR SHARE`,
+              NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
             ),
             buildAtomicEdgeResolvedUpdateBatch(
               tables,

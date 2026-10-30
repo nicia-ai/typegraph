@@ -13,6 +13,7 @@ import {
   buildInsertEdgesBatchWithSchemaFence,
 } from "../src/backend/drizzle/operations/edges";
 import { buildInsertNodesBatchWithSchemaFence } from "../src/backend/drizzle/operations/nodes";
+import { NODE_ROW_LOCK_CLAUSES } from "../src/backend/drizzle/operations/strategy";
 import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
@@ -106,6 +107,7 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
             timestamp,
             schemaFence,
             drizzleSql`FOR SHARE`,
+            NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
           ),
         ].map((statement) => compile(statement));
 
@@ -220,6 +222,7 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
           timestamp,
           schemaFence,
           drizzleSql`FOR SHARE`,
+          NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
         ),
       );
       const inserted = await client.query<Record<string, unknown>>(
@@ -238,6 +241,7 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
           timestamp,
           { graphId: graph.id, expectedVersion: 99 },
           drizzleSql`FOR SHARE`,
+          NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
         ),
       );
       const staleResult = await client.query(stale.sql, stale.params);
@@ -256,6 +260,7 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
           timestamp,
           schemaFence,
           drizzleSql`FOR SHARE`,
+          NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
         ),
       );
       await expect(client.query(missing.sql, missing.params)).rejects.toThrow(

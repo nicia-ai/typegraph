@@ -5,6 +5,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
   EndpointPairError,
 } from "../../../src";
 import {
@@ -62,6 +63,42 @@ async function expectEdgeIdentityMismatch(
       ]),
     );
   }
+}
+
+type IntegrationStore = ReturnType<IntegrationTestContext["getStore"]>;
+
+/** A worksAt edge tombstoned before one of its endpoints was deleted. */
+async function seedTombstonedEdgeOnDeletedEndpoint(
+  store: IntegrationStore,
+  deleted: "from" | "to",
+) {
+  const alice = await store.nodes.Person.create({ name: "Alice" });
+  const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+  const edge = await store.edges.worksAt.create(alice, acme, {
+    role: "Engineer",
+  });
+  await store.edges.worksAt.delete(edge.id);
+  await (deleted === "to" ?
+    store.nodes.Company.delete(acme.id)
+  : store.nodes.Person.delete(alice.id));
+  return { store, alice, acme, edge };
+}
+
+async function expectEndpointRefusal(
+  operation: Promise<unknown>,
+  endpoint: "from" | "to",
+): Promise<void> {
+  const error: unknown = await operation.then(
+    () => {
+      throw new Error("Expected the resurrection to be refused.");
+    },
+    (error_: unknown) => error_,
+  );
+  expect(error).toBeInstanceOf(EndpointNotFoundError);
+  expect((error as EndpointNotFoundError).details).toMatchObject({
+    edgeKind: "worksAt",
+    endpoint,
+  });
 }
 
 export function registerEdgeOperationIntegrationTests(
@@ -570,6 +607,47 @@ export function registerEdgeOperationIntegrationTests(
       expect(resurrected.action).toBe("resurrected");
       expect(resurrected.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
       expect(resurrected.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    describe("resurrecting a tombstoned edge whose endpoint was deleted", () => {
+      // A resurrection makes a live edge, so it owes the same endpoint verdict
+      // a create does. Without it, an edge tombstoned before its endpoint was
+      // deleted came back live on the deleted node.
+      it("getOrCreateByEndpoints refuses with the deleted endpoint", async () => {
+        const { store, alice, acme } =
+          await seedTombstonedEdgeOnDeletedEndpoint(context.getStore(), "to");
+        await expectEndpointRefusal(
+          store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+            role: "Engineer",
+          }),
+          "to",
+        );
+        expect(await store.edges.worksAt.findFrom(alice)).toEqual([]);
+      });
+
+      it("bulkGetOrCreateByEndpoints refuses with the deleted endpoint", async () => {
+        const { store, alice, acme } =
+          await seedTombstonedEdgeOnDeletedEndpoint(context.getStore(), "from");
+        await expectEndpointRefusal(
+          store.edges.worksAt.bulkGetOrCreateByEndpoints([
+            { from: alice, to: acme, props: { role: "Engineer" } },
+          ]),
+          "from",
+        );
+        expect(await store.edges.worksAt.findTo(acme)).toEqual([]);
+      });
+
+      it("bulkUpsertById refuses with the deleted endpoint", async () => {
+        const { store, alice, acme, edge } =
+          await seedTombstonedEdgeOnDeletedEndpoint(context.getStore(), "to");
+        await expectEndpointRefusal(
+          store.edges.worksAt.bulkUpsertById([
+            { id: edge.id, from: alice, to: acme, props: { role: "Lead" } },
+          ]),
+          "to",
+        );
+        expect(await store.edges.worksAt.findFrom(alice)).toEqual([]);
+      });
     });
 
     it("restating the bound a live edge already holds is accepted", async () => {

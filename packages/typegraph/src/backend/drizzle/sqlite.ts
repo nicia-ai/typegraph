@@ -101,6 +101,7 @@ import {
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
+  serializesWriters,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -924,6 +925,7 @@ function createSqliteOperationBackend(
         toUniqueRow,
       },
       schemaFenceLockClause: sql.raw(""),
+      writersSerialize: serializesWriters(resolveWriteFencePlan(fenceTarget)),
       contributionMaterializer,
       fusion: { atomicProgramsAtTransactionScope: false },
     }),
