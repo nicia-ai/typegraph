@@ -597,7 +597,7 @@ path:
 - The statement's execution semantics ride on the compiled SQL object rather than its text, which no
   amount of `executeRaw` support changes. **Approximate vector search**
   (`similarTo(..., { approximate: true })`) carries the engine's iterative-scan wrapper, and
-  `store.subgraph()` on PostgreSQL forces a custom plan for its id-array fetches. Flattening either
+  `store.subgraph()` on PostgreSQL forces a custom plan for its (kind, id)-array fetches. Flattening either
   to cacheable text would drop the behavior it depends on, so both are excluded deliberately.
 
 ## Query Debugging

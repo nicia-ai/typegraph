@@ -10,6 +10,7 @@ import {
   PG_PATH_ELEMENT_SEPARATOR,
   SQLITE_PATH_DELIMITER,
 } from "../constants";
+import { ConfigurationError } from "../errors";
 
 /**
  * Parses a SQLite path string into an array of node IDs.
@@ -67,20 +68,35 @@ export function normalizePath(value: unknown): readonly string[] {
 
 /**
  * Separator woven into the composite `kind || SEP || id` path tokens that
- * identity-expanded traversals use for cycle detection, so folded peers (same
- * id, different kind) stay distinct. U+001F (unit separator) is a control
- * character that cannot occur in a node kind, so `kind || SEP || id` never
- * collides across distinct (kind, id) pairs the way a printable delimiter
- * could.
+ * recursive walks use for cycle detection, so same-id nodes of different kinds
+ * stay distinct. {@link assertPathTokenSafeKind} refuses it in node kind names
+ * at graph-definition time, so `kind || SEP || id` never collides across
+ * distinct (kind, id) pairs the way a printable delimiter could.
  */
 export const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
+
+/**
+ * Refuses a node kind name containing {@link IDENTITY_PATH_TOKEN_SEPARATOR}.
+ * With it, `("A" + SEP + "B", "c")` and `("A", "B" + SEP + "c")` would spell
+ * one path token, and a walk would drop the second node as a revisit.
+ */
+export function assertPathTokenSafeKind(kind: string): void {
+  if (!kind.includes(IDENTITY_PATH_TOKEN_SEPARATOR)) return;
+  throw new ConfigurationError(
+    `Node kind name ${JSON.stringify(kind)} contains U+001F, which TypeGraph reserves for recursive path tokens.`,
+    { name: kind },
+    {
+      suggestion: "Rename it without the U+001F (unit separator) character.",
+    },
+  );
+}
 
 /**
  * Strips the composite wrapper from identity-expanded traversal path tokens,
  * restoring the bare node ids that the public path contract promises.
  *
- * Splits at the FIRST separator: node kinds are identifier-like and cannot
- * contain U+001F, so the first occurrence is always the (kind, id) boundary and
+ * Splits at the FIRST separator: node kinds cannot contain U+001F (see
+ * {@link assertPathTokenSafeKind}), so the first occurrence is always the (kind, id) boundary and
  * everything after it is the id verbatim — including an id that itself contains
  * the separator. Tokens with no separator are returned unchanged.
  */

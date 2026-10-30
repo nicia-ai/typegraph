@@ -924,7 +924,7 @@ Two things fall back to compiling on every call:
 - **Statements whose execution semantics ride on the compiled SQL object rather than its text**,
   even on PostgreSQL with `executeRaw` fully available. Two query shapes do: **approximate vector
   search** (`similarTo(..., { approximate: true })`, which carries the pgvector / `sqlite-vec`
-  iterative-scan wrapper) and **`store.subgraph()` on PostgreSQL**, whose id-array fetches are
+  iterative-scan wrapper) and **`store.subgraph()` on PostgreSQL**, whose (kind, id)-array fetches are
   marked to force a custom plan so the planner sizes them against the actual array rather than
   reusing a generic one. Flattening either to cacheable text would silently drop the behavior it
   depends on, so they are excluded deliberately — the trade is a template hit against correct

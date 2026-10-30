@@ -1246,8 +1246,9 @@ are keyed by id alone.
 - `"root"`: a bare root id is held by more than one node kind visible at the read's temporal
   coordinate. Pass the root as a `{ kind, id }` reference.
 - `"result"`: the root and the nodes the read returns share an id across kinds. The root counts
-  even when `excludeRoot` drops it or `includeKinds` omits its kind. Narrow the walk with
-  `includeKinds` or `edges`, or read the nodes with `store.query()`, which keeps kind and id together.
+  even when `excludeRoot` drops it or `includeKinds` omits its kind. Narrow the walk with `edges`
+  or `maxDepth` (`includeKinds` helps only when the shared id is not the root's), or read the nodes
+  with `store.query()`, which keeps kind and id together.
 
 `details.id` is the shared id (the first in code-unit order when several are shared) and
 `details.kinds` the kinds holding it, sorted.

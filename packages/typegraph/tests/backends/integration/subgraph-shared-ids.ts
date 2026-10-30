@@ -86,7 +86,7 @@ const READ_FORMS: readonly ReadForm[] = [
           [read.subgraph(root, options), read.subgraph(root, options)] as const,
         { shareSubgraphs: true },
       );
-      if (nodeKeys(repeated).join(',') !== nodeKeys(result).join(',')) {
+      if (nodeKeys(repeated).join(",") !== nodeKeys(result).join(",")) {
         throw new Error(
           "Shared requests for one root returned different nodes",
         );
@@ -149,6 +149,18 @@ async function seedUnreachableSharedId(store: SharedIdStore): Promise<void> {
   const showY = await store.nodes.Show.create({}, { id: "y" });
   await store.edges.linked.create(showB, clipX, {});
   await store.edges.linked.create(showX, showY, {});
+}
+
+/**
+ * Adds `Show:w → Show:x` to {@link seedUnreachableSharedId}: an edge INTO the
+ * node that shares `Clip:x`'s id, so an incoming step keyed on the id alone
+ * would reach `Show:w`.
+ */
+async function seedEdgeIntoSharedId(store: SharedIdStore): Promise<void> {
+  const showW = await store.nodes.Show.create({}, { id: "w" });
+  const showX = await store.nodes.Show.getById("x" as never);
+  if (showX === undefined) throw new Error("Seed Show:x before this edge");
+  await store.edges.linked.create(showW, showX, {});
 }
 
 /** `Show:a → Clip:k` and an unconnected `Clip:a`. */
@@ -252,6 +264,7 @@ export function registerSubgraphSharedIdIntegrationTests(
 
       it("keys both directions of a step on the node it stands on", async () => {
         await seedUnreachableSharedId(store);
+        await seedEdgeIntoSharedId(store);
         const options = { ...LINKED, direction: "both" } as const;
 
         const result = await form.read(
@@ -266,6 +279,20 @@ export function registerSubgraphSharedIdIntegrationTests(
         await expect(form.read(store, "x" as Root, options)).rejects.toEqual(
           ambiguousNodeId("root", "x", ["Clip", "Show"]),
         );
+      });
+
+      it("keys a windowed incoming step on the node it stands on", async () => {
+        await seedUnreachableSharedId(store);
+        await seedEdgeIntoSharedId(store);
+
+        const result = await form.read(
+          store,
+          { kind: "Clip", id: "x" } as Root,
+          { ...LINKED, edgeWindows: { linked: { direction: "in", limit: 5 } } },
+        );
+        expect(rootKey(result)).toBe("Clip:x");
+        expect(nodeKeys(result)).toEqual(["Clip:x", "Show:b"]);
+        expect(edgeKeys(result)).toEqual(["Show:b->Clip:x"]);
       });
 
       it("returns an empty result for a reference root that is not visible", async () => {

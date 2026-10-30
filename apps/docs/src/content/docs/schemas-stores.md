@@ -2711,8 +2711,8 @@ only their physical execution strategy differs.
 
 Under the hood the traversal is a `WITH RECURSIVE` CTE and all filtering and hydration happen in
 the database. Direct `subgraph()` calls use a backend-tuned fixed cost: 2 statements on SQLite
-(nodes and edges, each embedding the CTE) and 3 on PostgreSQL (the closure ids once, then nodes and
-edges). Batch-scoped `read.subgraph()` uses 1 statement on both backends. Prefer direct
+(nodes and edges, each embedding the CTE) and 3 on PostgreSQL (the closure's (kind, id) pairs once,
+then nodes and edges). Batch-scoped `read.subgraph()` uses 1 statement on both backends. Prefer direct
 `store.subgraph()` unless the read must compose with other independent reads in `batchOnce()`;
 PostgreSQL can execute the split hydration plan substantially faster for larger closures even
 though it uses more round trips.
@@ -2910,7 +2910,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Set-based BFS frontier or a single `COUNT` — see [Graph Algorithms](/graph-algorithms) |
 
 **Key insight:** `subgraph()` costs a fixed number of statements — 2 on SQLite (nodes, edges) and 3
-on PostgreSQL (closure ids, then nodes and edges) — regardless of how many edge types it traverses
+on PostgreSQL (the closure's (kind, id) pairs, then nodes and edges) — regardless of how many edge types it traverses
 or how much it returns. Parallel `findFrom` calls scale linearly instead: one per edge type, plus
 additional queries for node resolution. The gap widens as relationship count grows.
 

@@ -1728,7 +1728,7 @@ const SUBGRAPH_AMBIGUOUS_NODE_ID_SITUATIONS: Readonly<
     message:
       "Subgraph would return more than one node kind under the same id, and its result is keyed by id",
     suggestion:
-      "Narrow the walk with includeKinds or edges so one kind holds each id, or read the nodes with store.query(), which keeps kind and id together.",
+      "Narrow the walk with edges or maxDepth so one kind holds each id (includeKinds helps only when the shared id is not the root's, because the root always counts), or read the nodes with store.query(), which keeps kind and id together.",
   },
 };
 

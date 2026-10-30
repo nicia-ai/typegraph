@@ -933,7 +933,7 @@ function combineSubgraphBatchItems(
     filters.push(compileKindFilter(sql.raw("kind"), ctx.includeKinds));
   if (ctx.excludeRoot)
     filters.push(sql`NOT (kind = origin_kind AND id = origin_id)`);
-  const included = sql`, included_ids AS (SELECT DISTINCT origin_kind, origin_id, kind, id FROM reachable ${filters.length === 0 ? sql.empty() : sql`WHERE ${sql.join(filters, sql` AND `)}`}), typegraph_shared_roots AS (SELECT DISTINCT kind, id FROM reachable WHERE depth = 0)`;
+  const included = sql`, included_ids AS (SELECT DISTINCT origin_kind, origin_id, kind, id FROM reachable ${filters.length === 0 ? sql.empty() : sql`WHERE ${sql.join(filters, sql` AND `)}`}), ${subgraphRootsCte("typegraph_shared_roots")}`;
   // A bare root id matches every seed holding it; a reference matches one.
   const requests = roots.map(
     (root, index) =>
@@ -1186,6 +1186,13 @@ function dedupeSeeds(
 // SQL Generation
 // ============================================================
 
+/** Declares, under `name`, the nodes the `reachable` walk started from. */
+function subgraphRootsCte(
+  name: "subgraph_roots" | "typegraph_shared_roots",
+): SqlFragment {
+  return sql`${sql.raw(name)} AS (SELECT DISTINCT kind, id FROM reachable WHERE depth = 0)`;
+}
+
 /**
  * Declares `subgraph_roots` (the nodes the walk started from) and
  * `included_ids` (the (kind, id) pairs the read returns).
@@ -1206,7 +1213,7 @@ function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
   const whereClause =
     filters.length > 0 ? sql` WHERE ${sql.join(filters, sql` AND `)}` : sql``;
 
-  return sql`, subgraph_roots AS (SELECT DISTINCT kind, id FROM reachable WHERE depth = 0), included_ids AS (SELECT DISTINCT r.kind, r.id FROM reachable r${whereClause})`;
+  return sql`, ${subgraphRootsCte("subgraph_roots")}, included_ids AS (SELECT DISTINCT r.kind, r.id FROM reachable r${whereClause})`;
 }
 
 function buildSubgraphEdgeSource(
