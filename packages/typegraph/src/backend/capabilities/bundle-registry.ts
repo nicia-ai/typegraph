@@ -930,12 +930,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
     accesses: 7,
   },
-  lockNodes: {
-    kind: "reasoned",
-    reason:
-      "The endpoint/delete row-lock pairing read through one store owner; a missing member keeps the unlocked getNodes/getNode reads, which hold the endpoint invariant only on an engine that serializes writers.",
-    accesses: 1,
-  },
   bootstrapTables: {
     kind: "reasoned",
     reason:

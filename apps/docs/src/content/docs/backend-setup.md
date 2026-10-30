@@ -2381,10 +2381,13 @@ A bulk delete that covers both endpoints of an edge being created concurrently
 can deadlock with that edge write; PostgreSQL aborts one of the two, surfaced as
 `TransactionConflictError` and retryable with `store.transaction(fn, { retry })`.
 
-A custom backend opts in by implementing `lockNodes(graphId, kind, ids, lock)`,
-which reads the same rows as `getNodes` and locks them for `lock`:
-`"edgeEndpoint"` or `"delete"`. A backend without it gets unlocked `getNode`
-reads, which keep the invariant only on an engine that serializes writers.
+Every backend implements the required `lockNodes(graphId, kind, ids, lock)`
+member: it reads the same rows as `getNodes`, in `id` order, and holds them
+locked for `lock` — `"edgeEndpoint"` or `"delete"` — until the transaction
+ends. The bundled backends implement it on every driver. A custom backend on
+an engine that admits one writer at a time may implement it as its plain
+`getNodes` read; any other custom backend must take the two locks above, or
+the store cannot keep the invariant on it.
 
 ### SQLite ↔ PostgreSQL parity
 

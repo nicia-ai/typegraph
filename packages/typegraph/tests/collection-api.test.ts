@@ -1491,8 +1491,7 @@ describe("Bulk Operations (SQLite)", () => {
         },
         async transaction(fn, options) {
           return baseBackend.transaction(async (tx) => {
-            const wrappedTx = {
-              ...tx,
+            const wrappedTx = deriveBackend(tx, {
               async getNode(graphId: string, kind: string, id: string) {
                 getNodeCalls += 1;
                 return tx.getNode(graphId, kind, id);
@@ -1504,9 +1503,9 @@ describe("Bulk Operations (SQLite)", () => {
                 lock: NodeRowLock,
               ) {
                 lockNodesCalls += 1;
-                return requireDefined(tx.lockNodes)(graphId, kind, ids, lock);
+                return tx.lockNodes(graphId, kind, ids, lock);
               },
-            };
+            });
             return fn(wrappedTx);
           }, options);
         },

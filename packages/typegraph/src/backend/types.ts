@@ -2382,11 +2382,14 @@ export type GraphBackend = Readonly<{
    * endpoints' liveness through this member, and every store node delete
    * reads its row(s) through it before it reads their connected edges.
    *
-   * Optional for custom backends. Without it the store falls back to the
-   * unlocked `getNodes` / `getNode` reads, which keep the endpoint invariant
-   * only on an engine that serializes writers.
+   * Required, because the store has no sound fallback: an unlocked read
+   * would let a concurrent edge write and endpoint delete each miss the
+   * other. A backend whose engine admits one writer at a time may implement
+   * it as the plain `getNodes` read — the bundled SQLite backends do, with an
+   * empty lock clause — but that is its declaration to make, not the store's
+   * inference.
    */
-  lockNodes?: (
+  lockNodes: (
     this: void,
     graphId: string,
     kind: string,
@@ -3748,7 +3751,6 @@ export type NodeEntityReadBackend = Pick<
   GraphBackend,
   | "getNode"
   | "getNodes"
-  | "lockNodes"
   | "findNodesByKind"
   | "findNodesAcrossKinds"
   | "countNodesByKind"
@@ -3771,6 +3773,9 @@ export type NodeEntityWriteBackend = Pick<
   | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"
+  // A read, but a locking one, so it belongs to the write surface rather than
+  // to the portable read projections built from the read types.
+  | "lockNodes"
 >;
 
 export type EdgeEntityReadBackend = Pick<

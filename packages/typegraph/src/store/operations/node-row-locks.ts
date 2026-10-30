@@ -7,9 +7,6 @@
  * node delete reads its row(s) here with the `"delete"` lock before it reads
  * their connected edges. Fused write statements that check endpoint liveness
  * in SQL take the same endpoint lock inside the statement instead.
- *
- * A backend without `lockNodes` gets unlocked `getNode` reads: the invariant
- * then rests on the engine serializing writers, as SQLite does.
  */
 import {
   type GraphBackend,
@@ -17,31 +14,26 @@ import {
   type NodeRowLock,
 } from "../../backend/types";
 
-type NodeRowLockBackend = Pick<GraphBackend, "getNode" | "lockNodes">;
+type NodeRowLockMembers = Pick<GraphBackend, "lockNodes">;
 
 /**
  * Reads one kind's rows by id — live and tombstoned alike — locked for `lock`
  * until the surrounding transaction ends.
  */
 export async function lockNodeRows(
-  backend: NodeRowLockBackend,
+  backend: NodeRowLockMembers,
   graphId: string,
   kind: string,
   ids: readonly string[],
   lock: NodeRowLock,
 ): Promise<readonly NodeRow[]> {
   if (ids.length === 0) return [];
-  const lockNodes = backend.lockNodes;
-  if (lockNodes !== undefined) return lockNodes(graphId, kind, ids, lock);
-  const rows = await Promise.all(
-    [...new Set(ids)].map((id) => backend.getNode(graphId, kind, id)),
-  );
-  return rows.filter((row): row is NodeRow => row !== undefined);
+  return backend.lockNodes(graphId, kind, ids, lock);
 }
 
 /** {@link lockNodeRows} for one id. */
 export async function lockNodeRow(
-  backend: NodeRowLockBackend,
+  backend: NodeRowLockMembers,
   graphId: string,
   kind: string,
   id: string,
@@ -53,7 +45,7 @@ export async function lockNodeRow(
 
 /** {@link lockNodeRows}, keyed by id. */
 export async function lockNodeRowsById(
-  backend: NodeRowLockBackend,
+  backend: NodeRowLockMembers,
   graphId: string,
   kind: string,
   ids: readonly string[],
