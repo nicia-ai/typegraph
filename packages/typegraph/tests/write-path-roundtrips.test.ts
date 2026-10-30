@@ -15,7 +15,9 @@
  *
  * 3. ENDPOINT LOCKS — a resurrection reads both endpoints under the
  *    edge-endpoint lock, in one statement when they share a kind, and still
- *    refuses the source first.
+ *    refuses the source first. An import reads each endpoint once per
+ *    attempt, and none it skipped as already live on a writer-serializing
+ *    engine.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -34,6 +36,7 @@ import {
 } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import { type GraphData, importGraph } from "../src/interchange";
 
 // ============================================================
 // Call-counting overlay (follows the write transaction)
@@ -502,6 +505,26 @@ describe("getOrCreate validates props once", () => {
   });
 });
 
+/** An import payload of `edgeCount` Person `a` -> `b` edges. */
+function importPayload(
+  nodes: GraphData["nodes"],
+  edgeCount: number,
+): GraphData {
+  return {
+    formatVersion: "2.0",
+    exportedAt: "2026-01-01T00:00:00.000Z",
+    source: { type: "external" },
+    nodes,
+    edges: Array.from({ length: edgeCount }, (_, index) => ({
+      kind: "knows",
+      id: `imported-${index}`,
+      from: { kind: "Person", id: "a" },
+      to: { kind: "Person", id: "b" },
+      properties: {},
+    })),
+  };
+}
+
 describe("endpoint lock round trips", () => {
   const Person = defineNode("Person", {
     schema: z.object({ name: z.string() }),
@@ -547,6 +570,54 @@ describe("endpoint lock round trips", () => {
       expect((refusal as EndpointNotFoundError).details).toMatchObject({
         endpoint: "from",
       });
+    } finally {
+      await rawBackend.close();
+    }
+  });
+  it("an import reads an endpoint it did not write once per attempt, across slices", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(graph, backend);
+      await store.nodes.Person.create({ name: "a" }, { id: "a" });
+      await store.nodes.Person.create({ name: "b" }, { id: "b" });
+
+      counts["lockNodes"] = 0;
+      const result = await importGraph(store, importPayload([], 3), {
+        onConflict: "error",
+        batchSize: 1,
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.edges.created).toBe(3);
+      // Three slices name the same two endpoints; the first slice's read is
+      // reused by the other two.
+      expect(counts["lockNodes"]).toBe(1);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
+  it("an import on a writer-serializing engine does not re-read nodes it skipped as live", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(graph, backend);
+      await store.nodes.Person.create({ name: "a" }, { id: "a" });
+      await store.nodes.Person.create({ name: "b" }, { id: "b" });
+      const nodes: GraphData["nodes"] = ["a", "b"].map((id) => ({
+        kind: "Person",
+        id,
+        properties: { name: id },
+      }));
+
+      counts["lockNodes"] = 0;
+      const result = await importGraph(store, importPayload(nodes, 2), {
+        onConflict: "skip",
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.nodes.skipped).toBe(2);
+      expect(result.edges.created).toBe(2);
+      expect(counts["lockNodes"]).toBe(0);
     } finally {
       await rawBackend.close();
     }

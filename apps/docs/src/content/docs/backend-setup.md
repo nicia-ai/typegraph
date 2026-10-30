@@ -1715,10 +1715,12 @@ backend that omits the member retains the exact per-pair fallback.
 ### Node-row locks (`lockNodes`)
 
 Every `GraphBackend` implements the required
-`lockNodes(graphId, kind, ids, lock)` member. It is the read every store edge
-write's endpoint check and every store node delete's preflight goes through
-(see [Edge endpoints and concurrent node deletes](#edge-endpoints-and-concurrent-node-deletes)).
-The contract:
+`lockNodes(graphId, kind, ids, lock)` member. The store's portable edge writes
+check endpoint liveness through it, and its portable node deletes take their
+preflight through it (see
+[Edge endpoints and concurrent node deletes](#edge-endpoints-and-concurrent-node-deletes)).
+Single-statement commands and closed atomic programs take the same locks inside
+their own SQL. The contract:
 
 - Return the rows `getNodes(graphId, kind, ids)` returns, live and tombstoned
   alike.
@@ -1734,6 +1736,13 @@ The contract:
 
 The bundled backends implement it on every driver. There is no fallback: the
 store calls it unconditionally.
+
+A custom command port carries the same obligation: when it reports `created`
+for `edge.create` or `edge.converge-create`, the statement that inserts must
+check both endpoints live and take the `"edgeEndpoint"` lock on both rows
+(`FOR KEY SHARE` or equivalent), in (kind, id) code-point order, until the
+transaction ends. A port that cannot returns `unsupported` with the
+`endpointPredicate` dimension, and the store's portable path takes the lock.
 
 ### Validity-end clearing capability
 
@@ -2388,7 +2397,11 @@ check makes with a delete of the referenced row:
 - A node delete — single, bulk, hard, and the closed restrict-delete program —
   locks its row(s) `FOR UPDATE` before it reads connected edges.
 - `store.clear()` deletes the graph's nodes before its edges, so it waits for
-  an uncommitted edge write and then removes the edge it committed.
+  an uncommitted edge write and then removes the edge it committed. Edge
+  cardinality claims clear earlier in the sequence, so a claim row the waited-for
+  edge wrote can survive. It names an edge that no longer exists, so the next
+  write on that axis takes it over; until then `inspectGraphStorage` counts
+  one `edgeClaims` row for the cleared graph.
 - Both sides take their locks in (kind, id) code-point order: a single-edge
   write names its two endpoints in that order, and a delete locks a kind's
   rows in `id` code-point order.
@@ -2412,11 +2425,14 @@ Because both sides lock in one order, a single-edge write and a bulk delete
 of one kind that covers both its endpoints wait on each other instead of
 deadlocking. A deadlock is still possible when a transaction deletes both
 endpoints of an edge being created concurrently through several statements
-in another order (one endpoint, then the other), or when the edge write locks
-many endpoints at once: a transaction that creates several edges, or one
-closed batch edge program, whose rows lock endpoints row by row. PostgreSQL
-then aborts one of the two, surfaced as `TransactionConflictError` and
-retryable with `store.transaction(fn, { retry })`.
+in another order (one endpoint, then the other), when `store.clear()` deletes
+a graph's nodes while an edge write holds one endpoint and waits on the other,
+or when the edge write locks many endpoints at once: a transaction that creates
+several edges, or one closed batch edge program, whose rows lock endpoints row
+by row. PostgreSQL then aborts one of the two. Inside `store.transaction()`
+the abort surfaces as `TransactionConflictError`, retryable with
+`store.transaction(fn, { retry })`; a direct store call surfaces the driver's
+deadlock error (SQLSTATE `40P01`) unchanged, as it does any other conflict.
 
 Two writes skip the check by design: `importGraph` with
 `validateReferences: false` inserts edges without reading their endpoints,

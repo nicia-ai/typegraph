@@ -97,7 +97,8 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "getNode",
   "getNodes",
   // Locks the rows it reads and writes none, so it cannot bypass a capture
-  // flush; without it a history store's endpoint and delete reads go unlocked.
+  // flush; the store's endpoint and delete reads call it unconditionally, so a
+  // history store's projection must carry it.
   "lockNodes",
   "getPendingKindRemovals",
   "getReconciliationMarker",

@@ -59,6 +59,10 @@ import {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
+import {
+  resolveWriteFencePlan,
+  serializesWriters,
+} from "../backend/capabilities/write-fence";
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import {
   acquireSerializedStreamLease,
@@ -315,16 +319,20 @@ type ImportWriteFrame = Readonly<{
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   /** Threaded `statementExecution` verdict — resolved once, from `backend`. */
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+  /**
+   * Endpoint liveness verdicts this attempt already read, by node key. An
+   * attempt is one write plan: inside its transaction the endpoint locks the
+   * reads took are still held, so a later slice can reuse the verdict.
+   */
+  endpointLiveness: Map<string, boolean>;
+  /**
+   * Whether other writers can contend for endpoint rows — false when the
+   * target's declared write fence serializes writers, where a skipped live
+   * node needs no locked re-read.
+   */
+  endpointLocksContend: boolean;
 }>;
 
-/**
- * The counters, error list, and imported-id set one import write-plan attempt
- * accumulates. Never shared across attempts: a rolled-back commit's growth in
- * these must not leak into the attempt that succeeds. Exported for the same
- * declaration-file reason as {@link NodeSchemaEntry} — it is
- * {@link runImportWritePlanAttempt}'s return type, and that function is
- * test-only.
- */
 /**
  * How a node the import accounted for became a valid edge endpoint:
  * `"written"` — created or updated by this attempt, inside its own write
@@ -334,6 +342,15 @@ type ImportedNodeOrigin = "written" | "skippedLive";
 
 /** The nodes this attempt accounted for, by node key. */
 type ImportedNodes = Map<string, ImportedNodeOrigin>;
+
+/**
+ * The counters, error list, and imported-id set one import write-plan attempt
+ * accumulates. Never shared across attempts: a rolled-back commit's growth in
+ * these must not leak into the attempt that succeeds. Exported for the same
+ * declaration-file reason as {@link NodeSchemaEntry} — it is
+ * {@link runImportWritePlanAttempt}'s return type, and that function is
+ * test-only.
+ */
 
 export type ImportAttemptState = Readonly<{
   result: ImportResult;
@@ -405,6 +422,8 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     batchPointRead: inputs.batchPointRead,
     uniqueSidecarBatch: inputs.uniqueSidecarBatch,
     statementExecution: inputs.statementExecution,
+    endpointLiveness: new Map<string, boolean>(),
+    endpointLocksContend: !serializesWriters(resolveWriteFencePlan(target)),
   };
   await processNodes(
     frame,
@@ -2462,12 +2481,14 @@ async function processNode(
  *
  * A node this attempt wrote is live without a read — a created row is
  * invisible to every other transaction, and an updated one is held by the
- * import's own row lock, which a delete's lock waits on. Every other endpoint,
- * including an existing live row the import skipped, is read under the
- * edge-endpoint lock (see `node-row-locks.ts`), one statement per kind in
- * code-point kind order, and stays locked to the end of the import frame: a
- * concurrent delete of it either waits for this import and sees its edges, or
- * makes the read wait and see its tombstone.
+ * import's own row lock, which a delete's lock waits on. So is a live node the
+ * import skipped, where the target's write fence serializes writers. Every
+ * other endpoint is read under the edge-endpoint lock (see
+ * `node-row-locks.ts`), one statement per kind in code-point kind order, and
+ * stays locked to the end of the attempt's transaction: a concurrent delete of
+ * it either waits for this import and sees its edges, or makes the read wait
+ * and see its tombstone. A verdict read once is reused by later slices of the
+ * same attempt.
  */
 async function readLiveImportEndpoints(
   frame: ImportWriteFrame,
@@ -2479,8 +2500,17 @@ async function readLiveImportEndpoints(
   const idsByKind = new Map<string, Set<string>>();
   for (const endpoint of endpoints) {
     const key = makeNodeKey(endpoint.kind, endpoint.id);
-    if (importedNodeIds.get(key) === "written") {
+    const origin = importedNodeIds.get(key);
+    if (
+      origin === "written" ||
+      (origin === "skippedLive" && !frame.endpointLocksContend)
+    ) {
       liveKeys.add(key);
+      continue;
+    }
+    const known = frame.endpointLiveness.get(key);
+    if (known !== undefined) {
+      if (known) liveKeys.add(key);
       continue;
     }
     const ids = idsByKind.get(endpoint.kind) ?? new Set<string>();
@@ -2490,15 +2520,21 @@ async function readLiveImportEndpoints(
   for (const kind of [...idsByKind.keys()].toSorted((left, right) =>
     compareCodePoints(left, right),
   )) {
+    const ids = [...requireDefined(idsByKind.get(kind))];
     const rows = await lockNodeRows(
       frame.target,
       graphId,
       kind,
-      [...requireDefined(idsByKind.get(kind))],
+      ids,
       "edgeEndpoint",
     );
-    for (const row of rows) {
-      if (isLiveNodeRow(row)) liveKeys.add(makeNodeKey(kind, row.id));
+    const live = new Set(
+      rows.filter((row) => isLiveNodeRow(row)).map((row) => row.id),
+    );
+    for (const id of ids) {
+      const key = makeNodeKey(kind, id);
+      frame.endpointLiveness.set(key, live.has(id));
+      if (live.has(id)) liveKeys.add(key);
     }
   }
   return liveKeys;

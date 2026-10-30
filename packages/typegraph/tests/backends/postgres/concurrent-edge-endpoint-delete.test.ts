@@ -53,6 +53,7 @@ import {
   defineGraph,
   defineNode,
   EndpointNotFoundError,
+  inspectGraphStorage,
   RestrictedDeleteError,
   type Store,
   TransactionConflictError,
@@ -1130,10 +1131,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     describe("store.clear()", () => {
-      it(
-        "insert first: clear removes an edge committed while it waited",
+      it.each([
+        { name: "an unconstrained edge", constrained: false, claims: 0 },
+        // Claims clear before nodes, so a claim the waited-for edge wrote
+        // survives; it names a gone edge, so the axis is still takeable.
+        { name: "a cardinality-one edge", constrained: true, claims: 1 },
+      ])(
+        "insert first: clear removes $name committed while it waited",
         { timeout: CASE_TIMEOUT_MS },
-        async () => {
+        async ({ constrained, claims }) => {
           // A graph of its own: clearing drops the graph's schema rows, which
           // the managed stores every other case uses depend on.
           const clearedGraph = defineGraph({
@@ -1156,7 +1162,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
           const release = deferred();
           const creation = settle(
             writer.transaction(async (tx) => {
-              await tx.edges.knows.create(alice, bob, {});
+              await (constrained ?
+                tx.edges.mentors.create(alice, bob, {})
+              : tx.edges.knows.create(alice, bob, {}));
               inserted.resolve();
               await release.promise;
             }),
@@ -1177,17 +1185,34 @@ describe.runIf(process.env["POSTGRES_URL"])(
                     (SELECT count(*)::int FROM typegraph_nodes WHERE graph_id = $1) AS nodes`,
             [CLEARED_GRAPH_ID],
           );
+          const storage = await inspectGraphStorage(clearer);
+          const claimRows =
+            storage.relations.find(
+              (relation) => relation.relation === "edgeClaims",
+            )?.rows ?? 0;
+          await clearer.nodes.Person.create({ name: "Alice" }, { id: ALICE });
+          await clearer.nodes.Person.create({ name: "Bob" }, { id: BOB });
+          const recreated = settle(
+            constrained ?
+              clearer.edges.mentors.create(alice, bob, {})
+            : clearer.edges.knows.create(alice, bob, {}),
+          );
           expect({
             clearState,
             edge: describeOutcome(edgeOutcome),
             clear: describeOutcome(clearOutcome),
             remaining: remaining.rows[0],
+            claimRows,
+            recreated: describeOutcome(await recreated),
           }).toEqual({
             clearState: "blocked",
             edge: "ok",
             clear: "ok",
             remaining: { edges: 0, nodes: 0 },
+            claimRows: claims,
+            recreated: "ok",
           });
+          await clearer.clear();
         },
       );
     });
@@ -1206,15 +1231,23 @@ describe.runIf(process.env["POSTGRES_URL"])(
       const LOWER = "a";
       const UPPER = "B";
 
-      async function seedOrderedPair(): Promise<void> {
+      /**
+       * Skips the case on a database whose default collation already sorts
+       * `"B"` before `"a"` (a `C`-collated one): there code-point and
+       * collation order agree, so the case cannot tell them apart.
+       */
+      async function seedOrderedPair(
+        skip: (condition: boolean, note?: string) => void,
+      ): Promise<void> {
         const live = requireLive();
         const collation = await live.probe.query<{ linguistic: boolean }>(
           `SELECT $1::text < $2::text AS linguistic`,
           [LOWER, UPPER],
         );
-        // The cases below distinguish code-point from collation order only
-        // where the two disagree.
-        expect(collation.rows[0]?.linguistic).toBe(true);
+        skip(
+          collation.rows[0]?.linguistic !== true,
+          "The database collation orders ids by code point, so lock order cannot be told apart from collation order.",
+        );
         await live.deleteStore.nodes.Person.create(
           { name: "lower" },
           { id: LOWER },
@@ -1228,9 +1261,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
       it(
         "a bulk delete locks its rows in code-point order",
         { timeout: CASE_TIMEOUT_MS },
-        async () => {
+        async ({ skip }) => {
           const live = requireLive();
-          await seedOrderedPair();
+          await seedOrderedPair(skip);
           const holder = await holdRowLock(live.probe, LOWER, "FOR KEY SHARE");
           const deletion = settle(
             live.deleteStore.nodes.Person.bulkDelete([
@@ -1249,15 +1282,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
         },
       );
 
-      it.each([
+      it.for([
         { name: "create", cardinalityOne: false },
         { name: "create (cardinality one)", cardinalityOne: true },
       ])(
         "an edge write ($name) locks its endpoints in code-point order",
         { timeout: CASE_TIMEOUT_MS },
-        async ({ cardinalityOne }) => {
+        async ({ cardinalityOne }, { skip }) => {
           const live = requireLive();
-          await seedOrderedPair();
+          await seedOrderedPair(skip);
           const holder = await holdRowLock(live.probe, LOWER, "FOR UPDATE");
           const from = { kind: "Person", id: LOWER } as const;
           const to = { kind: "Person", id: UPPER } as const;

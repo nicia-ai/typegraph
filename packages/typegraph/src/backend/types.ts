@@ -1204,7 +1204,19 @@ export type NodeCreateCommand = Readonly<{
   plan: ManagedNodeCreatePlan;
 }>;
 
-/** An edge create command accepted by the authoritative command port. */
+/**
+ * An edge create command accepted by the authoritative command port.
+ *
+ * A port that reports `created` for it, or for an
+ * {@link EdgeConvergeCreateCommand}, has applied the `endpointPredicate`
+ * dimension: the statement that inserts checked both endpoints live and took
+ * the lock {@link GraphBackend.lockNodes} takes for `"edgeEndpoint"`
+ * (PostgreSQL `FOR KEY SHARE`, or equivalent) on both rows, in (kind, id)
+ * code-point order, held to the end of the transaction. Without that lock a
+ * concurrent endpoint delete can leave the edge live on a deleted node; a port
+ * that cannot take it returns `unsupported` with `endpointPredicate`, and the
+ * store's portable path takes it instead.
+ */
 export type EdgeCreateCommand = Readonly<{
   kind: "edge.create";
   plan: ManagedEdgeCreatePlan;
@@ -2378,9 +2390,12 @@ export type GraphBackend = Readonly<{
   /**
    * Reads the rows {@link GraphBackend.getNodes} reads — live and tombstoned
    * alike — and locks them until the surrounding transaction ends, acquiring
-   * them in code-point order of `id`, as {@link NodeRowLock} describes. Every store edge write reads its
-   * endpoints' liveness through this member, and every store node delete
-   * reads its row(s) through it before it reads their connected edges.
+   * them in code-point order of `id`, as {@link NodeRowLock} describes. The
+   * store's portable edge writes read their endpoints' liveness through this
+   * member, and its portable node deletes read their row(s) through it before
+   * they read connected edges. Single-statement commands and closed atomic
+   * programs take the same locks inside their own SQL instead (see
+   * {@link EdgeCreateCommand}).
    *
    * Required, because the store has no sound fallback: an unlocked read
    * would let a concurrent edge write and endpoint delete each miss the
