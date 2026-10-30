@@ -126,12 +126,17 @@ export { RecordedStoreView, StoreView } from "./store-view";
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphEdgeKey,
+  SubgraphEdgeLookup,
+  SubgraphIndex,
+  SubgraphNodeKey,
+  SubgraphNodeLookup,
   SubgraphOptions,
   SubgraphResult,
   SubsetEdge,
   SubsetNode,
 } from "./subgraph";
-export { defineSubgraphProject } from "./subgraph";
+export { defineSubgraphProject, indexSubgraph } from "./subgraph";
 
 // Store
 export type { ClaimOwner, ClaimTarget } from "./claims/axis";

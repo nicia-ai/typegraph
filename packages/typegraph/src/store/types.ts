@@ -11,7 +11,6 @@ import {
   type TransactionReadBackend,
 } from "../backend/types";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type GraphIdentityConfig,
@@ -2340,7 +2339,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
       const NK extends NodeKinds<G> = NodeKinds<G>,
       const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
     >(
-      rootId: NodeId<AllNodeTypes<G>>,
+      root: GraphNodeReference<G>,
       options: SubgraphOptions<G, EK, NK, P>,
     ) => Promise<SubgraphResult<G, NK, EK, P>>;
   }>;

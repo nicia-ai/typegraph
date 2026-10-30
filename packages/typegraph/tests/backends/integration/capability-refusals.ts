@@ -161,7 +161,7 @@ export function registerCapabilityRefusalIntegrationTests(
       const refusingStore = createStore(integrationTestGraph, refusingBackend);
 
       const caught = await refusingStore
-        .subgraph(person.id, { edges: ["knows"], maxDepth: 2 })
+        .subgraph(person, { edges: ["knows"], maxDepth: 2 })
         .catch((error: unknown) => error);
 
       expect(caught).toBeInstanceOf(ConfigurationError);

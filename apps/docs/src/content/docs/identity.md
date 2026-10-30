@@ -50,6 +50,12 @@ assertion row is manufactured for that implicit membership. Use
 `sameIdAcrossKinds: "ignore"` to enable the assertion ledger without joining
 equal IDs across kinds; only explicit `same` assertions then join classes.
 
+[`store.subgraph()`](/schemas-stores#storesubgraphroot-options) follows edges,
+not identity classes, under either mode. It starts from the `{ kind, id }`
+reference it is given, returns a folded peer only when an edge reaches it, and
+returns each peer under its own kind, so same-id peers never overwrite one
+another in the result.
+
 ## Write and read identity
 
 ```typescript

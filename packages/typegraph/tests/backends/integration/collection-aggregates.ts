@@ -822,13 +822,17 @@ export function registerCollectionAggregateIntegrationTests(
       statements.length = 0;
       const [first, second, result] = await store.batchOnce(
         (read) => [
-          read.subgraph(document.id, { edges: [], maxDepth: 0 }),
-          read.subgraph(document.id, { edges: [], maxDepth: 0 }),
+          read.subgraph(document, { edges: [], maxDepth: 0 }),
+          read.subgraph(document, { edges: [], maxDepth: 0 }),
           records,
         ],
         { shareSubgraphs: true },
       );
-      expect(second).toEqual(first);
+      expect({
+        root: second.root,
+        nodes: second.nodes,
+        edges: second.edges,
+      }).toEqual({ root: first.root, nodes: first.nodes, edges: first.edges });
       expect(result).toEqual([{ records: [{ title: "Shared", publishedAt }] }]);
       expect(statements).toHaveLength(1);
       expect(statements[0]).toContain("typegraph_shared_hydrated");

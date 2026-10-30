@@ -20,18 +20,18 @@ import {
   defineGraph,
   defineNode,
   defineSubgraphProject,
+  type Edge,
+  type GraphNodeReference,
+  indexSubgraph,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
+  type Node,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
-import { ValidationError } from "../src/errors";
+import { KindNotFoundError, ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
-import {
-  collectAllEdges,
-  createTestBackend,
-  TEMPORAL_ANCHORS,
-} from "./test-utils";
+import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -174,61 +174,75 @@ describe("store.subgraph()", () => {
 
   describe("boundary conditions", () => {
     it("returns only root when edges array is empty", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: [],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: [],
+        },
+      );
 
       expect(result.root).toBeDefined();
       expect(requireDefined(result.root).id).toBe(ids.runId);
-      expect(result.nodes.size).toBe(1);
-      expect(result.adjacency.size).toBe(0);
-      expect(result.reverseAdjacency.size).toBe(0);
+      expect(result.nodes.length).toBe(1);
+      expect(result.edges).toEqual([]);
     });
 
     it("returns empty result for non-existent root", async () => {
-      const result = await store.subgraph("nonexistent_id" as never, {
-        edges: ["has_task"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: "nonexistent_id" as NodeId<typeof Run> },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+        },
+      );
 
       expect(result.root).toBeUndefined();
-      expect(result.nodes.size).toBe(0);
+      expect(result.nodes.length).toBe(0);
     });
 
     it("returns only the root when maxDepth is 0", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "uses_skill"],
-        maxDepth: 0,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "uses_skill"],
+          maxDepth: 0,
+        },
+      );
 
-      expect(result.nodes.size).toBe(1);
+      expect(result.nodes.length).toBe(1);
       expect(result.root).toBeDefined();
       expect(requireDefined(result.root).id).toBe(ids.runId);
     });
 
     it("returns empty result when maxDepth 0 and excludeRoot", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 0,
-        excludeRoot: true,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 0,
+          excludeRoot: true,
+        },
+      );
 
       expect(result.root).toBeUndefined();
-      expect(result.nodes.size).toBe(0);
-      expect(result.adjacency.size).toBe(0);
+      expect(result.nodes.length).toBe(0);
+      expect(result.edges).toEqual([]);
     });
 
     it("returns root even when no outgoing edges of the specified kind exist", async () => {
       // agent1 has no outgoing has_task edges
-      const result = await store.subgraph(ids.agent1Id, {
-        edges: ["has_task"],
-        maxDepth: 5,
-      });
+      const result = await store.subgraph(
+        { kind: "Agent", id: ids.agent1Id },
+        {
+          edges: ["has_task"],
+          maxDepth: 5,
+        },
+      );
 
-      expect(result.nodes.size).toBe(1);
+      expect(result.nodes.length).toBe(1);
       expect(result.root).toBeDefined();
       expect(requireDefined(result.root).id).toBe(ids.agent1Id);
-      expect(result.adjacency.size).toBe(0);
+      expect(result.edges).toEqual([]);
     });
   });
 
@@ -236,38 +250,47 @@ describe("store.subgraph()", () => {
 
   describe("traversal", () => {
     it("extracts immediate neighbors with depth 1", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "runs_agent"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "runs_agent"],
+          maxDepth: 1,
+        },
+      );
+      const index = indexSubgraph(result);
 
-      const nodeKinds = [...result.nodes.values()]
-        .map((n) => n.kind)
-        .toSorted();
+      const nodeKinds = result.nodes.map((n) => n.kind).toSorted();
       expect(nodeKinds).toEqual(["Agent", "Run", "Task", "Task"]);
-      expect(result.nodes.has(ids.runId as string)).toBe(true);
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeDefined();
     });
 
     it("follows multi-hop paths", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "has_attempt", "used_tool"],
-        maxDepth: 4,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "has_attempt", "used_tool"],
+          maxDepth: 4,
+        },
+      );
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.runId as string)).toBe(true);
-      expect(result.nodes.has(ids.task1Id as string)).toBe(true);
-      expect(result.nodes.has(ids.attempt1Id as string)).toBe(true);
-      expect(result.nodes.has(ids.tool1Id as string)).toBe(true);
-      expect(result.nodes.has(ids.task2Id as string)).toBe(true);
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeDefined();
+      expect(index.node({ kind: "Task", id: ids.task1Id })).toBeDefined();
+      expect(index.node({ kind: "Attempt", id: ids.attempt1Id })).toBeDefined();
+      expect(index.node({ kind: "ToolDef", id: ids.tool1Id })).toBeDefined();
+      expect(index.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
     });
 
     it("only follows specified edge kinds", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 3,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 3,
+        },
+      );
 
-      const kinds = new Set([...result.nodes.values()].map((n) => n.kind));
+      const kinds = new Set(result.nodes.map((n) => n.kind));
       expect(kinds.has("Run")).toBe(true);
       expect(kinds.has("Task")).toBe(true);
       expect(kinds.has("Agent")).toBe(false);
@@ -276,10 +299,13 @@ describe("store.subgraph()", () => {
 
     it("refuses maxDepth above MAX_EXPLICIT_RECURSIVE_DEPTH", async () => {
       await expect(
-        store.subgraph(ids.runId, {
-          edges: ["has_task"],
-          maxDepth: MAX_EXPLICIT_RECURSIVE_DEPTH + 1,
-        }),
+        store.subgraph(
+          { kind: "Run", id: ids.runId },
+          {
+            edges: ["has_task"],
+            maxDepth: MAX_EXPLICIT_RECURSIVE_DEPTH + 1,
+          },
+        ),
       ).rejects.toThrow(
         `maxDepth must be an integer from 0 through ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
       );
@@ -291,27 +317,34 @@ describe("store.subgraph()", () => {
   describe("direction", () => {
     it("follows outbound edges by default", async () => {
       // Starting from task1, has_task points Run→Task, so outbound from task1 yields nothing for has_task
-      const result = await store.subgraph(ids.task1Id, {
-        edges: ["has_task"],
-        maxDepth: 2,
-      });
+      const result = await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["has_task"],
+          maxDepth: 2,
+        },
+      );
 
       // Only task1 itself — has_task edges go FROM Run, not from Task
-      expect(result.nodes.size).toBe(1);
+      expect(result.nodes.length).toBe(1);
       expect(requireDefined(result.root).id).toBe(ids.task1Id);
     });
 
     it("follows both directions with direction: both", async () => {
-      const result = await store.subgraph(ids.task1Id, {
-        edges: ["has_task"],
-        maxDepth: 2,
-        direction: "both",
-      });
+      const result = await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["has_task"],
+          maxDepth: 2,
+          direction: "both",
+        },
+      );
+      const index = indexSubgraph(result);
 
       // Inbound: task1 ← has_task ← run
-      expect(result.nodes.has(ids.runId as string)).toBe(true);
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeDefined();
       // Then outbound from run: run → has_task → task2
-      expect(result.nodes.has(ids.task2Id as string)).toBe(true);
+      expect(index.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
     });
   });
 
@@ -319,17 +352,20 @@ describe("store.subgraph()", () => {
 
   describe("includeKinds", () => {
     it("filters result nodes by kind", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "has_attempt", "used_tool"],
-        maxDepth: 4,
-        includeKinds: ["Task", "ToolDef"],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "has_attempt", "used_tool"],
+          maxDepth: 4,
+          includeKinds: ["Task", "ToolDef"],
+        },
+      );
 
-      for (const node of result.nodes.values()) {
+      for (const node of result.nodes) {
         expect(["Task", "ToolDef"]).toContain(node.kind);
       }
 
-      const kinds = [...result.nodes.values()].map((n) => n.kind as string);
+      const kinds = result.nodes.map((n) => n.kind as string);
       expect(kinds).not.toContain("Attempt");
       expect(kinds).not.toContain("Run");
     });
@@ -337,14 +373,17 @@ describe("store.subgraph()", () => {
     it("traverses through excluded kinds to reach included kinds", async () => {
       // Path: Run → has_task → Task → has_attempt → Attempt → used_tool → ToolDef
       // Exclude Attempt from results but ToolDef should still be reachable
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "has_attempt", "used_tool"],
-        maxDepth: 4,
-        includeKinds: ["ToolDef"],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "has_attempt", "used_tool"],
+          maxDepth: 4,
+          includeKinds: ["ToolDef"],
+        },
+      );
 
-      expect(result.nodes.size).toBeGreaterThan(0);
-      const kinds = [...result.nodes.values()].map((n) => n.kind as string);
+      expect(result.nodes.length).toBeGreaterThan(0);
+      const kinds = result.nodes.map((n) => n.kind as string);
       expect(kinds).toContain("ToolDef");
       expect(kinds).not.toContain("Attempt");
     });
@@ -354,43 +393,56 @@ describe("store.subgraph()", () => {
 
   describe("excludeRoot", () => {
     it("excludes root node from results", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        excludeRoot: true,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          excludeRoot: true,
+        },
+      );
+      const index = indexSubgraph(result);
 
       expect(result.root).toBeUndefined();
-      expect(result.nodes.has(ids.runId as string)).toBe(false);
-      expect(result.nodes.size).toBe(2);
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeUndefined();
+      expect(result.nodes.length).toBe(2);
     });
 
     it("excludes root but keeps edges that connect remaining nodes", async () => {
       // depends_on connects task1→task2, both are non-root
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "depends_on"],
-        maxDepth: 2,
-        excludeRoot: true,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "depends_on"],
+          maxDepth: 2,
+          excludeRoot: true,
+        },
+      );
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.runId as string)).toBe(false);
+      expect(index.node({ kind: "Run", id: ids.runId })).toBeUndefined();
 
       // depends_on edge should still appear since both task1 and task2 are in the set
-      const depEdges =
-        result.adjacency.get(ids.task1Id)?.get("depends_on") ?? [];
+      const depEdges = index.outgoing(
+        { kind: "Task", id: ids.task1Id },
+        "depends_on",
+      );
       expect(depEdges).toHaveLength(1);
     });
 
     it("excludes edges connected to root when root is excluded", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        excludeRoot: true,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          excludeRoot: true,
+        },
+      );
 
       // has_task edges go from Run to Task — but Run is excluded,
       // so no has_task edges should appear (from endpoint missing)
-      expect(result.adjacency.size).toBe(0);
+      expect(result.edges).toEqual([]);
     });
   });
 
@@ -398,16 +450,22 @@ describe("store.subgraph()", () => {
 
   describe("edge result semantics", () => {
     it("only returns edges where both endpoints are in the result set", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "has_attempt", "used_tool"],
-        maxDepth: 4,
-        includeKinds: ["Task", "ToolDef"],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "has_attempt", "used_tool"],
+          maxDepth: 4,
+          includeKinds: ["Task", "ToolDef"],
+        },
+      );
+      const index = indexSubgraph(result);
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       for (const edge of allEdges) {
-        expect(result.nodes.has(edge.fromId as string)).toBe(true);
-        expect(result.nodes.has(edge.toId as string)).toBe(true);
+        expect(
+          index.node({ kind: edge.fromKind, id: edge.fromId }),
+        ).toBeDefined();
+        expect(index.node({ kind: edge.toKind, id: edge.toId })).toBeDefined();
       }
 
       // has_attempt: Task→Attempt — Attempt excluded, so edge excluded
@@ -418,12 +476,15 @@ describe("store.subgraph()", () => {
     });
 
     it("returns only edges of the specified kinds", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 2,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 2,
+        },
+      );
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       for (const edge of allEdges) {
         expect(edge.kind).toBe("has_task");
       }
@@ -443,12 +504,15 @@ describe("store.subgraph()", () => {
       const task1Ref = { kind: "Task" as const, id: ids.task1Id };
       await store.edges.depends_on.create(task2Ref, task1Ref);
 
-      const result = await store.subgraph(ids.task1Id, {
-        edges: ["depends_on"],
-        maxDepth: 10,
-      });
+      const result = await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["depends_on"],
+          maxDepth: 10,
+        },
+      );
 
-      expect(result.nodes.size).toBe(2); // task1, task2 — each visited once
+      expect(result.nodes.length).toBe(2); // task1, task2 — each visited once
     });
 
     it("allows revisiting with cyclePolicy: allow", async () => {
@@ -458,14 +522,17 @@ describe("store.subgraph()", () => {
       const task1Ref = { kind: "Task" as const, id: ids.task1Id };
       await store.edges.depends_on.create(task2Ref, task1Ref);
 
-      const result = await store.subgraph(ids.task1Id, {
-        edges: ["depends_on"],
-        maxDepth: 3,
-        cyclePolicy: "allow",
-      });
+      const result = await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["depends_on"],
+          maxDepth: 3,
+          cyclePolicy: "allow",
+        },
+      );
 
       // Nodes are still deduplicated in the result (DISTINCT in SQL)
-      expect(result.nodes.size).toBe(2);
+      expect(result.nodes.length).toBe(2);
     });
   });
 
@@ -476,14 +543,15 @@ describe("store.subgraph()", () => {
       // skill1 is reachable via:
       //   run → has_task → task1 → uses_skill → skill1
       //   run → has_task → task2 → uses_skill → skill1
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "uses_skill"],
-        maxDepth: 3,
-      });
-
-      const skillNodes = [...result.nodes.values()].filter(
-        (n) => n.kind === "Skill",
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "uses_skill"],
+          maxDepth: 3,
+        },
       );
+
+      const skillNodes = result.nodes.filter((n) => n.kind === "Skill");
       expect(skillNodes).toHaveLength(1);
       expect(requireDefined(skillNodes[0]).id).toBe(ids.skill1Id);
     });
@@ -520,14 +588,18 @@ describe("store.subgraph()", () => {
 
       await store.nodes.Task.delete(ids.task1Id);
 
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+        },
+      );
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.task1Id as string)).toBe(false);
+      expect(index.node({ kind: "Task", id: ids.task1Id })).toBeUndefined();
       // task2 is still alive
-      expect(result.nodes.has(ids.task2Id as string)).toBe(true);
+      expect(index.node({ kind: "Task", id: ids.task2Id })).toBeDefined();
     });
 
     it("excludes soft-deleted edges from traversal", async () => {
@@ -540,13 +612,17 @@ describe("store.subgraph()", () => {
         await store.edges.has_task.delete(edge.id);
       }
 
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "uses_skill"],
-        maxDepth: 3,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "uses_skill"],
+          maxDepth: 3,
+        },
+      );
+      const index = indexSubgraph(result);
 
       // task1 should not be reachable since the edge to it is deleted
-      expect(result.nodes.has(ids.task1Id as string)).toBe(false);
+      expect(index.node({ kind: "Task", id: ids.task1Id })).toBeUndefined();
     });
 
     it("does not traverse through soft-deleted intermediate nodes", async () => {
@@ -565,12 +641,16 @@ describe("store.subgraph()", () => {
 
       await store.nodes.Attempt.delete(ids.attempt1Id);
 
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "has_attempt", "used_tool"],
-        maxDepth: 4,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "has_attempt", "used_tool"],
+          maxDepth: 4,
+        },
+      );
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.tool1Id as string)).toBe(false);
+      expect(index.node({ kind: "ToolDef", id: ids.tool1Id })).toBeUndefined();
     });
 
     it("excludes soft-deleted edges from result set", async () => {
@@ -586,13 +666,16 @@ describe("store.subgraph()", () => {
         await store.edges.has_task.delete(edgeToTask1.id);
       }
 
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+        },
+      );
 
       // The deleted edge should not appear in results
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       const edgeToIds = allEdges.map((edge) => edge.toId);
       expect(edgeToIds).not.toContain(ids.task1Id);
     });
@@ -613,15 +696,18 @@ describe("store.subgraph()", () => {
 
       await store.nodes.Run.delete(ids.runId);
 
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+        },
+      );
 
       // Root doesn't match base case (deleted_at IS NULL), so empty
       expect(result.root).toBeUndefined();
-      expect(result.nodes.size).toBe(0);
-      expect(result.adjacency.size).toBe(0);
+      expect(result.nodes.length).toBe(0);
+      expect(result.edges).toEqual([]);
     });
   });
 
@@ -629,14 +715,17 @@ describe("store.subgraph()", () => {
 
   describe("result hydration", () => {
     it("returns fully hydrated nodes with props and metadata", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        includeKinds: ["Task"],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          includeKinds: ["Task"],
+        },
+      );
 
-      expect(result.nodes.size).toBe(2);
-      for (const node of result.nodes.values()) {
+      expect(result.nodes.length).toBe(2);
+      for (const node of result.nodes) {
         expect(node.kind).toBe("Task");
         expect(node).toHaveProperty("title");
         expect(node).toHaveProperty("status");
@@ -647,12 +736,15 @@ describe("store.subgraph()", () => {
     });
 
     it("returns fully hydrated edges with props and metadata", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+        },
+      );
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       expect(allEdges.length).toBeGreaterThan(0);
       for (const edge of allEdges) {
         expect(edge).toHaveProperty("id");
@@ -670,17 +762,20 @@ describe("store.subgraph()", () => {
 
   describe("projection", () => {
     it("applies projection to the root node when its kind is projected", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 0,
-        project: {
-          nodes: {
-            Run: ["name"],
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 0,
+          project: {
+            nodes: {
+              Run: ["name"],
+            },
           },
         },
-      });
+      );
 
-      expect(result.nodes.size).toBe(1);
+      expect(result.nodes.length).toBe(1);
       expect(result.root).toMatchObject({
         kind: "Run",
         id: ids.runId,
@@ -690,19 +785,22 @@ describe("store.subgraph()", () => {
     });
 
     it("projects node props and full metadata while preserving identity", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        includeKinds: ["Task"],
-        project: {
-          nodes: {
-            Task: ["title", "meta"],
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          includeKinds: ["Task"],
+          project: {
+            nodes: {
+              Task: ["title", "meta"],
+            },
           },
         },
-      });
+      );
 
-      expect(result.nodes.size).toBe(2);
-      for (const node of result.nodes.values()) {
+      expect(result.nodes.length).toBe(2);
+      for (const node of result.nodes) {
         expect(node.kind).toBe("Task");
         expect(node).toHaveProperty("id");
         expect(node).toHaveProperty("title");
@@ -713,17 +811,20 @@ describe("store.subgraph()", () => {
     });
 
     it("keeps unprojected kinds fully hydrated", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "runs_agent"],
-        maxDepth: 1,
-        project: {
-          nodes: {
-            Task: ["title"],
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "runs_agent"],
+          maxDepth: 1,
+          project: {
+            nodes: {
+              Task: ["title"],
+            },
           },
         },
-      });
+      );
 
-      const nodes = [...result.nodes.values()];
+      const nodes = result.nodes;
       const task = nodes.find((node) => node.kind === "Task");
       const agent = nodes.find((node) => node.kind === "Agent");
 
@@ -739,17 +840,20 @@ describe("store.subgraph()", () => {
     });
 
     it("projects edges while preserving structural endpoint fields", async () => {
-      const result = await store.subgraph(ids.task1Id, {
-        edges: ["uses_skill"],
-        maxDepth: 1,
-        project: {
-          edges: {
-            uses_skill: ["meta"],
+      const result = await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["uses_skill"],
+          maxDepth: 1,
+          project: {
+            edges: {
+              uses_skill: ["meta"],
+            },
           },
         },
-      });
+      );
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       expect(allEdges).toHaveLength(1);
       const edge = requireDefined(allEdges[0]);
       expect(edge.kind).toBe("uses_skill");
@@ -768,45 +872,156 @@ describe("store.subgraph()", () => {
 
   describe("compile-time type safety", () => {
     it("rejects invalid edge kinds at compile time", async () => {
-      // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
-      await store.subgraph(ids.runId, { edges: ["nonexistent_edge"] });
+      await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
+        { edges: ["nonexistent_edge"] },
+      );
     });
 
     it("rejects invalid includeKinds at compile time", async () => {
-      await store.subgraph(ids.runId, {
+      await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          // @ts-expect-error - "NonExistent" is not a valid node kind
+          includeKinds: ["NonExistent"],
+        },
+      );
+    });
+
+    it("accepts a { kind, id } reference root on every subgraph surface", async () => {
+      const root = { kind: "Run", id: ids.runId } as const;
+      const options = { edges: ["has_task"], maxDepth: 1 } as const;
+
+      const direct = await store.subgraph(root, options);
+      const transactional = await store.transaction((tx) =>
+        tx.subgraph(root, options),
+      );
+      const [batched] = await store.batchOnce(
+        (read) => [read.subgraph(root, options)] as const,
+      );
+      const pinned = await store.asOf(new Date().toISOString()).subgraph(root, {
         edges: ["has_task"],
-        // @ts-expect-error - "NonExistent" is not a valid node kind
-        includeKinds: ["NonExistent"],
+        maxDepth: 1,
       });
+
+      expectTypeOf(transactional).toEqualTypeOf(direct);
+      expectTypeOf(batched).toEqualTypeOf(direct);
+      expectTypeOf(pinned).toEqualTypeOf(direct);
+      expect(direct.root?.id).toBe(ids.runId);
+      expect(transactional.root?.id).toBe(ids.runId);
+      expect(batched.root?.id).toBe(ids.runId);
+      expect(pinned.root?.id).toBe(ids.runId);
+      expectTypeOf<Parameters<typeof store.subgraph>[0]>().toEqualTypeOf<
+        GraphNodeReference<TestGraph>
+      >();
+    });
+
+    it("accepts a node as the subgraph root", async () => {
+      const run = await store.nodes.Run.create({ name: "run-2" });
+
+      const result = await store.subgraph(run, { edges: ["has_task"] });
+
+      expect(result.root?.id).toBe(run.id);
+    });
+
+    it("rejects a bare id root at compile time and at runtime", async () => {
+      await expect(
+        // @ts-expect-error - a bare id is not a subgraph root
+        store.subgraph(ids.runId, { edges: ["has_task"] }),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it("looks up nodes by kind with a narrowed type", async () => {
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        { edges: ["has_task"], maxDepth: 1 },
+      );
+      const index = indexSubgraph(result);
+
+      const task = index.node({ kind: "Task", id: ids.task1Id });
+      expectTypeOf(task).toEqualTypeOf<Node<typeof Task> | undefined>();
+      expect(task?.title).toBe("t1");
+
+      for (const edge of result.edges) {
+        const target = index.node({ kind: edge.toKind, id: edge.toId });
+        expect(target).toBeDefined();
+      }
+      if (result.root !== undefined) {
+        expectTypeOf(index.node(result.root)).toEqualTypeOf<
+          (typeof result.nodes)[number] | undefined
+        >();
+      }
+      // @ts-expect-error - "Tsak" is not a kind this result can hold
+      index.node({ kind: "Tsak", id: ids.task1Id });
+
+      expectTypeOf(
+        index.outgoing({ kind: "Run", id: ids.runId }, "has_task"),
+      ).toEqualTypeOf<readonly Edge<typeof hasTask>[]>();
+      const optionalKind = undefined as "has_task" | undefined;
+      expect(
+        index.outgoing({ kind: "Run", id: ids.runId }, optionalKind),
+      ).toEqual(index.outgoing({ kind: "Run", id: ids.runId }));
+      // @ts-expect-error - "runs_agent" is not an edge kind of this result
+      index.outgoing({ kind: "Run", id: ids.runId }, "runs_agent");
+
+      expect(structuredClone(result)).toEqual(result);
+      expect(
+        Object.isFrozen(index.outgoing({ kind: "Run", id: ids.runId })),
+      ).toBe(true);
+    });
+
+    it("rejects a reference root whose kind and id disagree at compile time", async () => {
+      await expect(
+        store.subgraph(
+          // @ts-expect-error - a Run id cannot be referenced as a Task
+          { kind: "Task", id: ids.runId },
+          { edges: ["has_task"] },
+        ),
+      ).resolves.toBeDefined();
+      await expect(
+        store.subgraph(
+          // @ts-expect-error - "Episode" is not a node kind of this graph
+          { kind: "Episode", id: ids.runId },
+          { edges: ["has_task"] },
+        ),
+      ).rejects.toThrow(KindNotFoundError);
     });
 
     it("accepts valid edge and node kinds", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "runs_agent"],
-        includeKinds: ["Task", "Agent"],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "runs_agent"],
+          includeKinds: ["Task", "Agent"],
+        },
+      );
 
       // Type narrowing should work — these are Task | Agent nodes
-      expect(result.nodes.size).toBeGreaterThan(0);
-      for (const node of result.nodes.values()) {
+      expect(result.nodes.length).toBeGreaterThan(0);
+      for (const node of result.nodes) {
         expect(["Task", "Agent"]).toContain(node.kind);
       }
     });
 
     it("narrows projected node fields at compile time", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "runs_agent"],
-        maxDepth: 1,
-        includeKinds: ["Task", "Agent"],
-        project: {
-          nodes: {
-            Task: ["title"],
-            Agent: ["meta"],
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "runs_agent"],
+          maxDepth: 1,
+          includeKinds: ["Task", "Agent"],
+          project: {
+            nodes: {
+              Task: ["title"],
+              Agent: ["meta"],
+            },
           },
         },
-      });
+      );
 
-      for (const node of result.nodes.values()) {
+      for (const node of result.nodes) {
         if (node.kind === "Task") {
           const title: string = node.title;
           void title;
@@ -822,17 +1037,20 @@ describe("store.subgraph()", () => {
     });
 
     it("narrows projected edge fields at compile time", async () => {
-      const result = await store.subgraph(ids.task1Id, {
-        edges: ["uses_skill"],
-        maxDepth: 1,
-        project: {
-          edges: {
-            uses_skill: [],
+      const result = await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["uses_skill"],
+          maxDepth: 1,
+          project: {
+            edges: {
+              uses_skill: [],
+            },
           },
         },
-      });
+      );
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       const edge = requireDefined(allEdges[0]);
       const fromId: string = edge.fromId;
       const toId: string = edge.toId;
@@ -842,11 +1060,15 @@ describe("store.subgraph()", () => {
     });
 
     it("narrows root type with kind discrimination", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "runs_agent"],
-        maxDepth: 1,
-        includeKinds: ["Run", "Task"],
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "runs_agent"],
+          maxDepth: 1,
+          includeKinds: ["Run", "Task"],
+        },
+      );
+      const index = indexSubgraph(result);
 
       // root is Run | Task | undefined — narrows via kind check
       if (result.root?.kind === "Run") {
@@ -854,40 +1076,49 @@ describe("store.subgraph()", () => {
         void name;
       }
 
-      // nodes.get returns Run | Task | undefined
-      const node = result.nodes.get(ids.runId);
+      // a string-kind key returns Run | Task | undefined; a literal kind narrows
+      const key: { kind: string; id: string } = { kind: "Run", id: ids.runId };
+      const node = index.node(key);
       if (node?.kind === "Task") {
         const title: string = node.title;
         void title;
       }
     });
 
-    it("narrows edge types via adjacency map access", async () => {
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "uses_skill"],
-        maxDepth: 2,
-        project: {
-          edges: {
-            uses_skill: ["priority"],
+    it("narrows edge types via outgoing and incoming lookups", async () => {
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "uses_skill"],
+          maxDepth: 2,
+          project: {
+            edges: {
+              uses_skill: ["priority"],
+            },
           },
         },
-      });
+      );
+      const index = indexSubgraph(result);
 
-      const edges = result.adjacency.get(ids.task1Id)?.get("uses_skill") ?? [];
+      const edges = index.outgoing(
+        { kind: "Task", id: ids.task1Id },
+        "uses_skill",
+      );
       for (const edge of edges) {
         // Structural fields are always present
         const fromId: string = edge.fromId;
         void fromId;
-        if (edge.kind === "uses_skill") {
-          const priority: number = edge.priority;
-          void priority;
-          expectTypeOf(edge).not.toHaveProperty("meta");
-        }
+        // The edge-kind argument narrows each edge to uses_skill
+        const priority: number = edge.priority;
+        void priority;
+        expectTypeOf(edge).not.toHaveProperty("meta");
       }
 
-      // reverseAdjacency has the same type
-      const reverseEdges =
-        result.reverseAdjacency.get(ids.skill1Id)?.get("uses_skill") ?? [];
+      // incoming has the same type
+      const reverseEdges = index.incoming(
+        { kind: "Skill", id: ids.skill1Id },
+        "uses_skill",
+      );
       for (const edge of reverseEdges) {
         const toId: string = edge.toId;
         void toId;
@@ -895,53 +1126,65 @@ describe("store.subgraph()", () => {
     });
 
     it("rejects partial meta fields at compile time", async () => {
-      await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        project: {
-          nodes: {
-            // @ts-expect-error - "meta.createdAt" is not a valid projection field; use "meta" for all-or-nothing
-            Task: ["title", "meta.createdAt"],
+      await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          project: {
+            nodes: {
+              // @ts-expect-error - "meta.createdAt" is not a valid projection field; use "meta" for all-or-nothing
+              Task: ["title", "meta.createdAt"],
+            },
           },
         },
-      });
+      );
 
-      await store.subgraph(ids.task1Id, {
-        edges: ["uses_skill"],
-        maxDepth: 1,
-        project: {
-          edges: {
-            // @ts-expect-error - "meta.updatedAt" is not a valid edge projection field; use "meta" for all-or-nothing
-            uses_skill: ["meta.updatedAt"],
+      await store.subgraph(
+        { kind: "Task", id: ids.task1Id },
+        {
+          edges: ["uses_skill"],
+          maxDepth: 1,
+          project: {
+            edges: {
+              // @ts-expect-error - "meta.updatedAt" is not a valid edge projection field; use "meta" for all-or-nothing
+              uses_skill: ["meta.updatedAt"],
+            },
           },
         },
-      });
+      );
     });
 
     it("rejects projection keys for kinds outside includeKinds/edges", async () => {
-      await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        includeKinds: ["Task"],
-        project: {
-          nodes: {
-            Task: ["title"],
-            // @ts-expect-error - Agent is not in includeKinds
-            Agent: ["model"],
+      await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          includeKinds: ["Task"],
+          project: {
+            nodes: {
+              Task: ["title"],
+              // @ts-expect-error - Agent is not in includeKinds
+              Agent: ["model"],
+            },
           },
         },
-      });
+      );
 
-      await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        project: {
-          edges: {
-            // @ts-expect-error - runs_agent is not in edges
-            runs_agent: [],
+      await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          project: {
+            edges: {
+              // @ts-expect-error - runs_agent is not in edges
+              runs_agent: [],
+            },
           },
         },
-      });
+      );
     });
 
     it("projects correctly with very long kind and field names", async () => {
@@ -997,7 +1240,7 @@ describe("store.subgraph()", () => {
 
       await longStore.edges.very_long_edge.create(root, child);
 
-      const result = await longStore.subgraph(root.id, {
+      const result = await longStore.subgraph(root, {
         edges: ["very_long_edge"],
         maxDepth: 1,
         project: {
@@ -1009,8 +1252,8 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.nodes.size).toBe(2);
-      for (const node of result.nodes.values()) {
+      expect(result.nodes.length).toBe(2);
+      for (const node of result.nodes) {
         expect(
           node.a_field_name_that_is_also_unreasonably_long_for_testing_purposes,
         ).toBeDefined();
@@ -1049,7 +1292,7 @@ describe("store.subgraph()", () => {
       const child = await collection.create({ value: "child" });
       await mbStore.edges.mb_link.create(root, child);
 
-      const result = await mbStore.subgraph(root.id, {
+      const result = await mbStore.subgraph(root, {
         edges: ["mb_link"] as never,
         maxDepth: 1,
         project: {
@@ -1057,8 +1300,8 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.nodes.size).toBe(2);
-      for (const node of result.nodes.values()) {
+      expect(result.nodes.length).toBe(2);
+      for (const node of result.nodes) {
         expect((node as Record<string, unknown>)["value"]).toBeDefined();
       }
     });
@@ -1068,15 +1311,18 @@ describe("store.subgraph()", () => {
       const reservedNodeKeys = ["id", "kind"];
       for (const key of reservedNodeKeys) {
         await expect(
-          store.subgraph(ids.runId as never, {
-            edges: ["has_task"],
-            maxDepth: 1,
-            project: {
-              nodes: {
-                Task: [key] as never,
+          store.subgraph(
+            { kind: "Run", id: ids.runId },
+            {
+              edges: ["has_task"],
+              maxDepth: 1,
+              project: {
+                nodes: {
+                  Task: [key] as never,
+                },
               },
             },
-          }),
+          ),
         ).rejects.toThrow(/reserved structural key/);
       }
     });
@@ -1093,15 +1339,18 @@ describe("store.subgraph()", () => {
       ];
       for (const key of reservedEdgeKeys) {
         await expect(
-          store.subgraph(ids.runId as never, {
-            edges: ["has_task"],
-            maxDepth: 1,
-            project: {
-              edges: {
-                has_task: [key] as never,
+          store.subgraph(
+            { kind: "Run", id: ids.runId },
+            {
+              edges: ["has_task"],
+              maxDepth: 1,
+              project: {
+                edges: {
+                  has_task: [key] as never,
+                },
               },
             },
-          }),
+          ),
         ).rejects.toThrow(/reserved structural key/);
       }
     });
@@ -1110,15 +1359,18 @@ describe("store.subgraph()", () => {
       const dangerousKeys = ["__proto__", "constructor", "prototype"];
       for (const key of dangerousKeys) {
         await expect(
-          store.subgraph(ids.runId as never, {
-            edges: ["has_task"],
-            maxDepth: 1,
-            project: {
-              nodes: {
-                Task: [key] as never,
+          store.subgraph(
+            { kind: "Run", id: ids.runId },
+            {
+              edges: ["has_task"],
+              maxDepth: 1,
+              project: {
+                nodes: {
+                  Task: [key] as never,
+                },
               },
             },
-          }),
+          ),
         ).rejects.toThrow(/not allowed/);
       }
     });
@@ -1133,14 +1385,17 @@ describe("store.subgraph()", () => {
         },
       });
 
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task", "uses_skill"],
-        maxDepth: 2,
-        includeKinds: ["Task", "Skill"],
-        project,
-      });
+      const result = await store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task", "uses_skill"],
+          maxDepth: 2,
+          includeKinds: ["Task", "Skill"],
+          project,
+        },
+      );
 
-      for (const node of result.nodes.values()) {
+      for (const node of result.nodes) {
         if (node.kind === "Task") {
           const title: string = node.title;
           void title;
@@ -1149,7 +1404,7 @@ describe("store.subgraph()", () => {
         }
       }
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       for (const edge of allEdges) {
         if (edge.kind === "uses_skill") {
           const priority: number = edge.priority;
@@ -1171,12 +1426,12 @@ describe("store.subgraph temporal behavior", () => {
   const { PAST, BEFORE, EDGE_ENDED, FUTURE } = TEMPORAL_ANCHORS;
 
   type TemporalFixture = Readonly<{
-    runId: string;
-    activeTaskId: string;
-    endedTaskId: string;
-    futureTaskId: string;
-    tombstoneTaskId: string;
-    futureEdgeTargetId: string;
+    runId: NodeId<typeof Run>;
+    activeTaskId: NodeId<typeof Task>;
+    endedTaskId: NodeId<typeof Task>;
+    futureTaskId: NodeId<typeof Task>;
+    tombstoneTaskId: NodeId<typeof Task>;
+    futureEdgeTargetId: NodeId<typeof Task>;
   }>;
 
   let backend: GraphBackend;
@@ -1256,38 +1511,49 @@ describe("store.subgraph temporal behavior", () => {
   });
 
   it("defaults to current mode — excludes ended and future entities", async () => {
-    const result = await store.subgraph(ids.runId as never, {
-      edges: ["has_task"],
-      maxDepth: 1,
-    });
+    const result = await store.subgraph(
+      { kind: "Run", id: ids.runId },
+      {
+        edges: ["has_task"],
+        maxDepth: 1,
+      },
+    );
+    const index = indexSubgraph(result);
 
-    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
-    expect(result.nodes.has(ids.endedTaskId)).toBe(false);
-    expect(result.nodes.has(ids.futureTaskId)).toBe(false);
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeUndefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeUndefined();
   });
 
   it("asOf = BEFORE surfaces the historically-valid task and edge", async () => {
-    const result = await store.subgraph(ids.runId as never, {
-      edges: ["has_task"],
-      maxDepth: 1,
-      temporalMode: "asOf",
-      asOf: BEFORE,
-    });
+    const result = await store.subgraph(
+      { kind: "Run", id: ids.runId },
+      {
+        edges: ["has_task"],
+        maxDepth: 1,
+        temporalMode: "asOf",
+        asOf: BEFORE,
+      },
+    );
+    const index = indexSubgraph(result);
 
     // Active and ended were both valid at BEFORE; future was not.
-    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
-    expect(result.nodes.has(ids.endedTaskId)).toBe(true);
-    expect(result.nodes.has(ids.futureTaskId)).toBe(false);
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeUndefined();
   });
 
   it("rejects non-canonical asOf timestamps", async () => {
     await expect(
-      store.subgraph(ids.runId as never, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        temporalMode: "asOf",
-        asOf: "2021-01-01T00:00:00Z",
-      }),
+      store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          temporalMode: "asOf",
+          asOf: "2021-01-01T00:00:00Z",
+        },
+      ),
     ).rejects.toThrow(ValidationError);
   });
 
@@ -1296,64 +1562,91 @@ describe("store.subgraph temporal behavior", () => {
     // resolves current via the DB clock and would drop the pin. Reject it so
     // the contract matches collection, query(), algorithms, and StoreView.
     await expect(
-      store.subgraph(ids.runId as never, {
-        edges: ["has_task"],
-        maxDepth: 1,
-        temporalMode: "current",
-        asOf: BEFORE,
-      }),
+      store.subgraph(
+        { kind: "Run", id: ids.runId },
+        {
+          edges: ["has_task"],
+          maxDepth: 1,
+          temporalMode: "current",
+          asOf: BEFORE,
+        },
+      ),
     ).rejects.toThrow(ValidationError);
   });
 
   it("includeEnded traverses through validity-ended rows", async () => {
-    const result = await store.subgraph(ids.runId as never, {
-      edges: ["has_task"],
-      maxDepth: 1,
-      temporalMode: "includeEnded",
-    });
+    const result = await store.subgraph(
+      { kind: "Run", id: ids.runId },
+      {
+        edges: ["has_task"],
+        maxDepth: 1,
+        temporalMode: "includeEnded",
+      },
+    );
+    const index = indexSubgraph(result);
 
     // Ended rows surface; deleted tombstone does not.
-    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
-    expect(result.nodes.has(ids.endedTaskId)).toBe(true);
-    expect(result.nodes.has(ids.futureTaskId)).toBe(true);
-    expect(result.nodes.has(ids.tombstoneTaskId)).toBe(false);
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeDefined();
+    expect(
+      index.node({ kind: "Task", id: ids.tombstoneTaskId }),
+    ).toBeUndefined();
   });
 
   it("includeTombstones surfaces soft-deleted nodes and edges", async () => {
-    const result = await store.subgraph(ids.runId as never, {
-      edges: ["has_task"],
-      maxDepth: 1,
-      temporalMode: "includeTombstones",
-    });
+    const result = await store.subgraph(
+      { kind: "Run", id: ids.runId },
+      {
+        edges: ["has_task"],
+        maxDepth: 1,
+        temporalMode: "includeTombstones",
+      },
+    );
+    const index = indexSubgraph(result);
 
     // Everything shows up under includeTombstones.
-    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
-    expect(result.nodes.has(ids.endedTaskId)).toBe(true);
-    expect(result.nodes.has(ids.futureTaskId)).toBe(true);
-    expect(result.nodes.has(ids.tombstoneTaskId)).toBe(true);
-    expect(result.nodes.has(ids.futureEdgeTargetId)).toBe(true);
+    expect(index.node({ kind: "Task", id: ids.activeTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.endedTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.futureTaskId })).toBeDefined();
+    expect(index.node({ kind: "Task", id: ids.tombstoneTaskId })).toBeDefined();
+    expect(
+      index.node({ kind: "Task", id: ids.futureEdgeTargetId }),
+    ).toBeDefined();
   });
 
   it("excludes edges with future validFrom under current mode", async () => {
     // The edge run→futureEdgeTarget has validFrom: FUTURE even though the
     // target node is currently valid. Under current mode, neither the edge
     // nor (therefore) the target should appear in the traversal result.
-    const result = await store.subgraph(ids.runId as never, {
-      edges: ["has_task"],
-      maxDepth: 1,
-    });
-    expect(result.nodes.has(ids.futureEdgeTargetId)).toBe(false);
+    const result = await store.subgraph(
+      { kind: "Run", id: ids.runId },
+      {
+        edges: ["has_task"],
+        maxDepth: 1,
+      },
+    );
+    const index = indexSubgraph(result);
+    expect(
+      index.node({ kind: "Task", id: ids.futureEdgeTargetId }),
+    ).toBeUndefined();
   });
 
   it("surfaces edges with future validFrom under includeEnded", async () => {
     // `includeEnded` only filters `deleted_at IS NULL` — it ignores both
     // ends of the validity window, so future-valid edges participate too.
-    const result = await store.subgraph(ids.runId as never, {
-      edges: ["has_task"],
-      maxDepth: 1,
-      temporalMode: "includeEnded",
-    });
-    expect(result.nodes.has(ids.futureEdgeTargetId)).toBe(true);
+    const result = await store.subgraph(
+      { kind: "Run", id: ids.runId },
+      {
+        edges: ["has_task"],
+        maxDepth: 1,
+        temporalMode: "includeEnded",
+      },
+    );
+    const index = indexSubgraph(result);
+    expect(
+      index.node({ kind: "Task", id: ids.futureEdgeTargetId }),
+    ).toBeDefined();
   });
 
   it("respects graph.defaults.temporalMode when no per-call override", async () => {
@@ -1380,10 +1673,11 @@ describe("store.subgraph temporal behavior", () => {
     );
 
     // No per-call override — graph's includeEnded default applies.
-    const result = await altStore.subgraph(run.id, {
+    const result = await altStore.subgraph(run, {
       edges: ["has_task"],
       maxDepth: 1,
     });
-    expect(result.nodes.has(ended.id as string)).toBe(true);
+    const index = indexSubgraph(result);
+    expect(index.node(ended)).toBeDefined();
   });
 });

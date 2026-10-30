@@ -14,21 +14,15 @@ import {
 } from "../backend/row-mappers";
 import type { GraphBackend } from "../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../constants";
-import type {
-  AllNodeTypes,
-  EdgeKinds,
-  GraphDef,
-  NodeKinds,
-} from "../core/define-graph";
+import type { EdgeKinds, GraphDef, NodeKinds } from "../core/define-graph";
 import { type RecordedInstant, resolveReadCoordinate } from "../core/temporal";
 import type { KindEntity } from "../core/types";
-import type {
-  AnyEdgeType,
-  NodeId,
-  NodeType,
-  TemporalMode,
-} from "../core/types";
-import { ConfigurationError, ValidationError } from "../errors";
+import type { AnyEdgeType, NodeType, TemporalMode } from "../core/types";
+import {
+  ConfigurationError,
+  KindNotFoundError,
+  ValidationError,
+} from "../errors";
 import type { RecursiveCyclePolicy } from "../query/ast";
 import {
   type OneStatementBatchItem,
@@ -59,12 +53,17 @@ import {
 } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
+import { compareCodePoints } from "../utils/compare";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
-import { buildReachableCte, buildWindowedEdgesCte } from "./recursive-cte";
+import {
+  buildReachableCte,
+  buildWindowedEdgesCte,
+  type ReachableSeed,
+} from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -74,7 +73,13 @@ import {
   rowToNode,
   rowToNodeMeta,
 } from "./row-mappers";
-import type { Edge, EdgeMeta, Node, NodeMeta } from "./types";
+import type {
+  Edge,
+  EdgeMeta,
+  GraphNodeReference,
+  Node,
+  NodeMeta,
+} from "./types";
 
 // ============================================================
 // Constants
@@ -225,7 +230,7 @@ export type SubgraphProject<
  *   nodes: { Task: ["title", "meta"] },
  *   edges: { uses_skill: [] },
  * });
- * const result = await store.subgraph(rootId, { edges: ["uses_skill"], project });
+ * const result = await store.subgraph(task, { edges: ["uses_skill"], project });
  * // result.nodes narrowed correctly — task.status is a type error
  * ```
  */
@@ -409,6 +414,27 @@ export type SubgraphEdgeResult<
   [Kind in EK]: SubgraphEdgeResultForKind<G, Kind, P>;
 }[EK];
 
+/**
+ * A node's identity inside a subgraph result. Node rows are keyed by
+ * (kind, id), so two nodes of different kinds may share an id; every lookup
+ * takes both. A node, a `GraphNodeReference`, or an edge's endpoint
+ * (`{ kind: edge.toKind, id: edge.toId }`) all fit.
+ */
+export type SubgraphNodeKey<K extends string = string> = Readonly<{
+  kind: K;
+  id: string;
+}>;
+
+/** The structural fields of a returned edge that {@link indexSubgraph} reads. */
+export type SubgraphEdgeKey = Readonly<{
+  id: string;
+  kind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
 export type SubgraphResult<
   G extends GraphDef,
   NK extends NodeKinds<G> = NodeKinds<G>,
@@ -417,17 +443,49 @@ export type SubgraphResult<
 > = Readonly<{
   /** The root node, or undefined if the root was not found or excluded. */
   root: SubgraphNodeResult<G, NK, P> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK, P>>;
-  /** Forward adjacency: fromId → edgeKind → edges to targets. */
-  adjacency: ReadonlyMap<
-    string,
-    ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>
-  >;
-  /** Reverse adjacency: toId → edgeKind → edges from sources. */
-  reverseAdjacency: ReadonlyMap<
-    string,
-    ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>
-  >;
+  /** Every returned node once, ordered by kind then id (code points). */
+  nodes: readonly SubgraphNodeResult<G, NK, P>[];
+  /**
+   * Every returned edge once, ordered by id (code points). Both endpoints are
+   * in `nodes`. Use {@link indexSubgraph} for (kind, id) lookups.
+   */
+  edges: readonly SubgraphEdgeResult<G, EK, P>[];
+}>;
+
+/**
+ * Looks up a returned node by kind and id. A literal kind narrows the result
+ * to that kind and must be a kind the result can hold; a `string` kind (such
+ * as an edge's `toKind`) returns any returned kind.
+ */
+export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <
+  const K extends string,
+>(
+  node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>,
+) => (string extends K ? N : Extract<N, Readonly<{ kind: K }>>) | undefined;
+
+/**
+ * Lists the returned edges leaving (`outgoing`) or entering (`incoming`) a
+ * node, optionally of one edge kind, in edge-id order.
+ */
+export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
+  <const K extends E["kind"]>(
+    node: SubgraphNodeKey,
+    edgeKind: K,
+  ): readonly Extract<E, Readonly<{ kind: K }>>[];
+  (node: SubgraphNodeKey, edgeKind?: E["kind"]): readonly E[];
+}
+
+/** (kind, id) lookups over a subgraph result, built by {@link indexSubgraph}. */
+export type SubgraphIndex<
+  N extends SubgraphNodeKey,
+  E extends SubgraphEdgeKey,
+> = Readonly<{
+  /** The returned node with this kind and id, if any. */
+  node: SubgraphNodeLookup<N>;
+  /** Returned edges whose source is this node. */
+  outgoing: SubgraphEdgeLookup<E>;
+  /** Returned edges whose target is this node. */
+  incoming: SubgraphEdgeLookup<E>;
 }>;
 
 // ============================================================
@@ -436,7 +494,7 @@ export type SubgraphResult<
 
 type SubgraphContext = Readonly<{
   graphId: string;
-  rootId: string;
+  root: ReachableSeed;
   edgeKinds: readonly string[];
   maxDepth: number;
   includeKinds: readonly string[] | undefined;
@@ -486,7 +544,7 @@ type SubgraphExecutionParams<
 > = Readonly<{
   graph: G;
   graphId: string;
-  rootId: NodeId<AllNodeTypes<G>>;
+  root: GraphNodeReference<G>;
   backend: GraphBackend;
   dialect: DialectAdapter;
   schema: SqlSchema | undefined;
@@ -524,7 +582,7 @@ function buildSubgraphPlan<
   const baseSchema = params.schema ?? DEFAULT_SQL_SCHEMA;
   const ctx: SubgraphContext = {
     graphId: params.graphId,
-    rootId: params.rootId,
+    root: resolveSubgraphRoot(params.graph, params.graphId, params.root),
     edgeKinds: [...options.edges],
     maxDepth: options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
     includeKinds:
@@ -579,15 +637,51 @@ function buildSubgraphPlan<
   };
 }
 
+/**
+ * Validates the caller's root reference. The walk starts from exactly the node
+ * it names, so an unregistered kind is refused rather than read as empty.
+ */
+function resolveSubgraphRoot(
+  graph: GraphDef,
+  graphId: string,
+  root: unknown,
+): ReachableSeed {
+  if (
+    typeof root === "object" &&
+    root !== null &&
+    "kind" in root &&
+    "id" in root &&
+    typeof root.kind === "string" &&
+    typeof root.id === "string"
+  ) {
+    if (!Object.hasOwn(graph.nodes, root.kind)) {
+      throw new KindNotFoundError(root.kind, "node", { graphId });
+    }
+    return { kind: root.kind, id: root.id };
+  }
+  throw new ValidationError(
+    "Subgraph root must be a { kind, id } node reference",
+    {
+      issues: [
+        {
+          path: "root",
+          message: "Received an unsupported root",
+          code: "invalid_type",
+        },
+      ],
+    },
+  );
+}
+
 function buildSubgraphReachableCte(
   ctx: SubgraphContext,
   baseSchema: SqlSchema,
   surface: SubgraphSurface,
-  sourceIds?: readonly string[],
+  sources?: readonly ReachableSeed[],
 ): SqlFragment {
   return buildReachableCte({
     graphId: ctx.graphId,
-    ...(sourceIds === undefined ? { sourceId: ctx.rootId } : { sourceIds }),
+    ...(sources === undefined ? { source: ctx.root } : { sources }),
     edgeKinds: ctx.edgeKinds,
     maxHops: ctx.maxDepth,
     direction: ctx.direction,
@@ -631,8 +725,8 @@ export async function executeSubgraph<
 
   // The node and edge fetches both need the traversal closure. Embedding
   // the recursive CTE in each statement runs the BFS twice; on Postgres
-  // the closure ids are fetched ONCE and passed to both fetches as a
-  // single text[] parameter, filtered via a hashed semi-join
+  // the closure is fetched ONCE and passed to both fetches as a pair of
+  // text[] parameters (kinds and ids), filtered via a hashed semi-join
   // (EXISTS over unnest — measured faster than `= ANY` on the same
   // closure). SQLite keeps the embedded form: its in-process traversal
   // is cheap, an id list would bind one parameter per id (bind-budget
@@ -643,16 +737,17 @@ export async function executeSubgraph<
     ctx.dialect.capabilities.subgraphMembershipStrategy;
   switch (membershipStrategy) {
     case "materialized-ids": {
-      const includedIds = await fetchIncludedIds(
+      const members = await fetchIncludedNodes(
         ctx,
         reachableCte,
         includedIdsCte,
       );
-      const idsArray = textArrayParam(includedIds);
+      const kindsArray = textArrayParam(members.map((member) => member.kind));
+      const idsArray = textArrayParam(members.map((member) => member.id));
       membership = {
         prefix: sql``,
-        idFilter: (column) =>
-          sql`EXISTS (SELECT 1 FROM unnest(${idsArray}) AS tg_included(id) WHERE tg_included.id = ${column})`,
+        memberFilter: (kindColumn, idColumn) =>
+          sql`EXISTS (SELECT 1 FROM unnest(${kindsArray}, ${idsArray}) AS tg_included(kind, id) WHERE tg_included.kind = ${kindColumn} AND tg_included.id = ${idColumn})`,
         parameterDependentPlan: true,
       };
       break;
@@ -660,10 +755,11 @@ export async function executeSubgraph<
     case "inline-cte": {
       membership = {
         prefix: sql`${reachableCte}${includedIdsCte} `,
-        // `column IN (subquery)` evaluates via a transient index — optimal
+        // `row IN (subquery)` evaluates via a transient index — optimal
         // as-is. (The materialized-ids strategy takes the parameterized
         // array form above instead.)
-        idFilter: (column) => sql`${column} IN (SELECT id FROM included_ids)`,
+        memberFilter: (kindColumn, idColumn) =>
+          sql`(${kindColumn}, ${idColumn}) IN (SELECT kind, id FROM included_ids)`,
         parameterDependentPlan: false,
       };
       break;
@@ -682,7 +778,7 @@ export async function executeSubgraph<
   ]);
 
   return assembleSubgraphResult<G, NK, EK, P>(
-    ctx.rootId,
+    ctx.root,
     nodeRows.map((row) => mapSubgraphNodeRow(row, nodeProjectionPlan)),
     edgeRows.map((row) => mapSubgraphEdgeRow(row, edgeProjectionPlan)),
   );
@@ -722,7 +818,7 @@ export function createSubgraphRead<
     rows: readonly Record<string, unknown>[],
   ): SubgraphResult<G, NK, EK, P> {
     return mapOneStatementSubgraphRows(
-      ctx.rootId,
+      ctx.root,
       rows as readonly OneStatementSubgraphRow[],
       nodePlan,
       edgePlan,
@@ -805,19 +901,25 @@ function combineSubgraphBatchItems(
     nodeProjectionPlan: nodePlan,
     edgeProjectionPlan: edgePlan,
   } = requireDefined(plans[0]);
-  const roots = plans.map((plan) => plan.ctx.rootId);
+  const roots = plans.map((plan) => plan.ctx.root);
   const reachable = buildSubgraphReachableCte(
     ctx,
     baseSchema,
     "batchOnce.subgraph",
-    dedupeStrings(roots),
+    dedupeSeeds(roots),
   );
   const filters: SqlFragment[] = [];
   if (ctx.includeKinds !== undefined && ctx.includeKinds.length > 0)
     filters.push(compileKindFilter(sql.raw("kind"), ctx.includeKinds));
-  if (ctx.excludeRoot) filters.push(sql`id != origin_id`);
-  const included = sql`, included_ids AS (SELECT DISTINCT origin_id, id FROM reachable ${filters.length === 0 ? sql.empty() : sql`WHERE ${sql.join(filters, sql` AND `)}`})`;
-  const requests = roots.map((root, index) => sql`(${index}, ${root})`);
+  if (ctx.excludeRoot)
+    filters.push(sql`NOT (kind = origin_kind AND id = origin_id)`);
+  const included = sql`, included_ids AS (SELECT DISTINCT origin_kind, origin_id, kind, id FROM reachable ${filters.length === 0 ? sql.empty() : sql`WHERE ${sql.join(filters, sql` AND `)}`})`;
+  const requests = roots.map(
+    (root, index) => sql`(${index}, ${root.kind}, ${root.id})`,
+  );
+  function requestMatches(kindColumn: string, idColumn: string): SqlFragment {
+    return sql`requests.root_kind = ${sql.raw(kindColumn)} AND requests.root_id = ${sql.raw(idColumn)}`;
+  }
   const hydration = buildOneStatementSubgraphQuery(
     ctx,
     sql.empty(),
@@ -840,20 +942,20 @@ function combineSubgraphBatchItems(
   );
   const query = asCompiledRowsSql(sql`
     ${reachable}${included},
-        typegraph_shared_requests(request_id, root_id) AS (VALUES ${sql.join(requests, sql`, `)}),
+        typegraph_shared_requests(request_id, root_kind, root_id) AS (VALUES ${sql.join(requests, sql`, `)}),
         typegraph_shared_hydrated AS (${hydration}),
         typegraph_shared_membership AS (
           SELECT requests.request_id, h.typegraph_entity, h.kind, h.id
           FROM typegraph_shared_hydrated h
-          JOIN included_ids included ON h.id = included.id
-          JOIN typegraph_shared_requests requests ON requests.root_id = included.origin_id
+          JOIN included_ids included ON h.kind = included.kind AND h.id = included.id
+          JOIN typegraph_shared_requests requests ON ${requestMatches("included.origin_kind", "included.origin_id")}
           WHERE h.typegraph_entity = 'node'
           UNION ALL
           SELECT requests.request_id, h.typegraph_entity, h.kind, h.id
           FROM typegraph_shared_hydrated h
-          JOIN included_ids source_membership ON h.from_id = source_membership.id
-          JOIN included_ids target_membership ON h.to_id = target_membership.id AND source_membership.origin_id = target_membership.origin_id
-          JOIN typegraph_shared_requests requests ON requests.root_id = source_membership.origin_id
+          JOIN included_ids source_membership ON h.from_kind = source_membership.kind AND h.from_id = source_membership.id
+          JOIN included_ids target_membership ON h.to_kind = target_membership.kind AND h.to_id = target_membership.id AND source_membership.origin_kind = target_membership.origin_kind AND source_membership.origin_id = target_membership.origin_id
+          JOIN typegraph_shared_requests requests ON ${requestMatches("source_membership.origin_kind", "source_membership.origin_id")}
           WHERE h.typegraph_entity = 'edge'
         ),
         typegraph_shared_ordered_membership AS (
@@ -1036,10 +1138,21 @@ function dedupeStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
 }
 
+function dedupeSeeds(
+  seeds: readonly ReachableSeed[],
+): readonly ReachableSeed[] {
+  return [
+    ...new Map(
+      seeds.map((seed) => [JSON.stringify([seed.kind, seed.id]), seed]),
+    ).values(),
+  ];
+}
+
 // ============================================================
 // SQL Generation
 // ============================================================
 
+/** Declares `included_ids`: the (kind, id) pairs the read returns. */
 function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
   const filters: SqlFragment[] = [];
 
@@ -1048,13 +1161,13 @@ function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
   }
 
   if (ctx.excludeRoot) {
-    filters.push(sql`id != ${ctx.rootId}`);
+    filters.push(sql`NOT (kind = ${ctx.root.kind} AND id = ${ctx.root.id})`);
   }
 
   const whereClause =
     filters.length > 0 ? sql` WHERE ${sql.join(filters, sql` AND `)}` : sql``;
 
-  return sql`, included_ids AS (SELECT DISTINCT id FROM reachable${whereClause})`;
+  return sql`, included_ids AS (SELECT DISTINCT kind, id FROM reachable${whereClause})`;
 }
 
 function buildSubgraphEdgeSource(
@@ -1102,11 +1215,11 @@ function buildSubgraphEdgeSource(
  * How the node/edge fetches restrict rows to the traversal closure:
  * either a statement prefix re-declaring the recursive CTE with an
  * `included_ids` membership subquery (SQLite), or an empty prefix with a
- * pre-fetched id-array filter (Postgres).
+ * pre-fetched (kind, id) array filter (Postgres).
  */
 type SubgraphMembership = Readonly<{
   prefix: SqlFragment;
-  idFilter: (column: SqlFragment) => SqlFragment;
+  memberFilter: (kindColumn: SqlFragment, idColumn: SqlFragment) => SqlFragment;
   /**
    * True in id-array mode: the fetch plans depend on the array
    * cardinality, so the statements must never fall onto a prepared
@@ -1130,18 +1243,17 @@ function textArrayParam(values: readonly string[]): SqlFragment {
   return sql`${`{${elements.join(",")}}`}::text[]`;
 }
 
-/** Runs the traversal once and returns the closure's node ids. */
-async function fetchIncludedIds(
+/** Runs the traversal once and returns the (kind, id) pairs the read returns. */
+async function fetchIncludedNodes(
   ctx: SubgraphContext,
   reachableCte: SqlFragment,
   includedIdsCte: SqlFragment,
-): Promise<readonly string[]> {
-  const rows = await ctx.backend.execute<{ id: string }>(
+): Promise<readonly SubgraphNodeKey[]> {
+  return ctx.backend.execute<SubgraphNodeKey>(
     asCompiledRowsSql(
-      sql`${reachableCte}${includedIdsCte} SELECT id FROM included_ids`,
+      sql`${reachableCte}${includedIdsCte} SELECT kind, id FROM included_ids`,
     ),
   );
-  return rows.map((row) => row.id);
 }
 
 type OneStatementSubgraphRow = SubgraphNodeFetchRow &
@@ -1252,9 +1364,9 @@ function buildOneStatementSubgraphQuery(
   const edgeSource = buildSubgraphEdgeSource(ctx, edgeTemporal);
   const edgeMembership =
     sharedOrigins ?
-      sql`EXISTS (SELECT 1 FROM included_ids source_membership JOIN included_ids target_membership ON source_membership.origin_id = target_membership.origin_id WHERE source_membership.id = e.from_id AND target_membership.id = e.to_id)`
-    : sql`e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
-  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND n.id IN (SELECT id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporal} AND ${edgeMembership}`;
+      sql`EXISTS (SELECT 1 FROM included_ids source_membership JOIN included_ids target_membership ON source_membership.origin_kind = target_membership.origin_kind AND source_membership.origin_id = target_membership.origin_id WHERE source_membership.kind = e.from_kind AND source_membership.id = e.from_id AND target_membership.kind = e.to_kind AND target_membership.id = e.to_id)`
+    : sql`(e.from_kind, e.from_id) IN (SELECT kind, id FROM included_ids) AND (e.to_kind, e.to_id) IN (SELECT kind, id FROM included_ids)`;
+  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND (n.kind, n.id) IN (SELECT kind, id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporal} AND ${edgeMembership}`;
 }
 
 function mapOneStatementSubgraphRows<
@@ -1263,7 +1375,7 @@ function mapOneStatementSubgraphRows<
   EK extends EdgeKinds<G>,
   P extends SubgraphProject<G, NK, EK> | undefined,
 >(
-  rootId: string,
+  root: SubgraphNodeKey,
   rows: readonly OneStatementSubgraphRow[],
   nodePlan: ProjectionPlan,
   edgePlan: ProjectionPlan,
@@ -1277,7 +1389,122 @@ function mapOneStatementSubgraphRows<
     }
     edges.push(mapSubgraphEdgeRow(row, edgePlan));
   }
-  return assembleSubgraphResult<G, NK, EK, P>(rootId, nodes, edges);
+  return assembleSubgraphResult<G, NK, EK, P>(root, nodes, edges);
+}
+
+/** Values keyed by node kind, then node id: (kind, id) without an encoded key. */
+type NodeKeyedIndex<T> = Map<string, Map<string, T>>;
+
+function nodeKeyedSlot<T>(
+  index: NodeKeyedIndex<T>,
+  kind: string,
+): Map<string, T> {
+  const existing = index.get(kind);
+  if (existing !== undefined) return existing;
+  const created = new Map<string, T>();
+  index.set(kind, created);
+  return created;
+}
+
+/** One endpoint's edges: all of them, and by edge kind, each in id order. */
+type EndpointEdges<E> = Readonly<{
+  all: readonly E[];
+  byKind: ReadonlyMap<string, readonly E[]>;
+}>;
+
+function indexEdgesByEndpoint<E extends SubgraphEdgeKey>(
+  edges: readonly E[],
+  endpoint: "source" | "target",
+): NodeKeyedIndex<EndpointEdges<E>> {
+  const grouped: NodeKeyedIndex<E[]> = new Map();
+  for (const edge of edges) {
+    const kind = endpoint === "source" ? edge.fromKind : edge.toKind;
+    const id = endpoint === "source" ? edge.fromId : edge.toId;
+    const slot = nodeKeyedSlot(grouped, kind);
+    const list = slot.get(id);
+    if (list === undefined) slot.set(id, [edge]);
+    else list.push(edge);
+  }
+  const index: NodeKeyedIndex<EndpointEdges<E>> = new Map();
+  for (const [kind, byId] of grouped) {
+    const slot = nodeKeyedSlot(index, kind);
+    for (const [id, list] of byId) {
+      const byKind = new Map<string, E[]>();
+      for (const edge of list) {
+        const kindList = byKind.get(edge.kind);
+        if (kindList === undefined) byKind.set(edge.kind, [edge]);
+        else kindList.push(edge);
+      }
+      slot.set(id, {
+        all: Object.freeze(list),
+        byKind: new Map(
+          [...byKind].map(([edgeKind, kindList]) => [
+            edgeKind,
+            Object.freeze(kindList),
+          ]),
+        ),
+      });
+    }
+  }
+  return index;
+}
+
+const NO_EDGES: readonly never[] = Object.freeze([]);
+
+function createEdgeLookup<E extends SubgraphEdgeKey>(
+  index: NodeKeyedIndex<EndpointEdges<E>>,
+): (node: SubgraphNodeKey, edgeKind?: string) => readonly E[] {
+  return (node, edgeKind) => {
+    const endpoint = index.get(node.kind)?.get(node.id);
+    if (endpoint === undefined) return NO_EDGES;
+    if (edgeKind === undefined) return endpoint.all;
+    return endpoint.byKind.get(edgeKind) ?? NO_EDGES;
+  };
+}
+
+/**
+ * Builds (kind, id) lookups over a subgraph result. The result itself stays
+ * plain data (it survives `structuredClone`, `postMessage`, and serialization);
+ * index it once where lookups are needed.
+ *
+ * @example
+ * ```ts
+ * const sg = await store.subgraph(run, { edges: ["has_task"] });
+ * const { node, outgoing } = indexSubgraph(sg);
+ * const tasks = outgoing(run, "has_task").map((edge) =>
+ *   node({ kind: edge.toKind, id: edge.toId }),
+ * );
+ * ```
+ */
+export function indexSubgraph<
+  N extends SubgraphNodeKey,
+  E extends SubgraphEdgeKey,
+>(
+  subgraph: Readonly<{ nodes: readonly N[]; edges: readonly E[] }>,
+): SubgraphIndex<N, E> {
+  const nodeIndex: NodeKeyedIndex<N> = new Map();
+  for (const node of subgraph.nodes) {
+    nodeKeyedSlot(nodeIndex, node.kind).set(node.id, node);
+  }
+  function lookupNode(key: SubgraphNodeKey): N | undefined {
+    return nodeIndex.get(key.kind)?.get(key.id);
+  }
+  return {
+    node: lookupNode as SubgraphNodeLookup<N>,
+    outgoing: createEdgeLookup(
+      indexEdgesByEndpoint(subgraph.edges, "source"),
+    ) as SubgraphEdgeLookup<E>,
+    incoming: createEdgeLookup(
+      indexEdgesByEndpoint(subgraph.edges, "target"),
+    ) as SubgraphEdgeLookup<E>,
+  };
+}
+
+function compareNodeKeys(left: SubgraphNodeKey, right: SubgraphNodeKey) {
+  return (
+    compareCodePoints(left.kind, right.kind) ||
+    compareCodePoints(left.id, right.id)
+  );
 }
 
 function assembleSubgraphResult<
@@ -1286,24 +1513,23 @@ function assembleSubgraphResult<
   EK extends EdgeKinds<G>,
   P extends SubgraphProject<G, NK, EK> | undefined,
 >(
-  rootId: string,
+  root: SubgraphNodeKey,
   nodeValues: readonly Node[],
   edgeValues: readonly Edge[],
 ): SubgraphResult<G, NK, EK, P> {
-  const nodes = new Map<string, Node>();
-  for (const node of nodeValues) nodes.set(node.id, node);
-
-  const adjacency = new Map<string, Map<string, Edge[]>>();
-  const reverseAdjacency = new Map<string, Map<string, Edge[]>>();
-  for (const edge of edgeValues) {
-    insertAdjacencyEntry(adjacency, edge.fromId, edge.kind, edge);
-    insertAdjacencyEntry(reverseAdjacency, edge.toId, edge.kind, edge);
-  }
+  const nodes = nodeValues.toSorted((left, right) =>
+    compareNodeKeys(left, right),
+  );
+  const edges = edgeValues.toSorted((left, right) =>
+    compareCodePoints(left.id, right.id),
+  );
+  const rootNode = nodes.find(
+    (node) => node.kind === root.kind && node.id === root.id,
+  );
   return {
-    root: nodes.get(rootId),
+    root: rootNode,
     nodes,
-    adjacency,
-    reverseAdjacency,
+    edges,
   } as unknown as SubgraphResult<G, NK, EK, P>;
 }
 
@@ -1335,7 +1561,7 @@ async function fetchSubgraphNodes(
     ...buildProjectedPropertyColumns("n", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${membership.idFilter(sql.raw("n.id"))}`;
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${membership.memberFilter(sql.raw("n.kind"), sql.raw("n.id"))}`;
   if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphNodeFetchRow>(
@@ -1376,7 +1602,7 @@ async function fetchSubgraphEdges(
   ];
 
   const edgesSource = buildSubgraphEdgeSource(ctx, edgeTemporalFilter);
-  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${edgesSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.idFilter(sql.raw("e.from_id"))} AND ${membership.idFilter(sql.raw("e.to_id"))}`;
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${edgesSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.memberFilter(sql.raw("e.from_kind"), sql.raw("e.from_id"))} AND ${membership.memberFilter(sql.raw("e.to_kind"), sql.raw("e.to_id"))}`;
   if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(
@@ -1540,29 +1766,6 @@ function buildProjectedPropertyColumns(
   }
 
   return columns;
-}
-
-// ============================================================
-// Adjacency Index Builder
-// ============================================================
-
-function insertAdjacencyEntry(
-  index: Map<string, Map<string, Edge[]>>,
-  nodeId: string,
-  edgeKind: string,
-  edge: Edge,
-): void {
-  let kindMap = index.get(nodeId);
-  if (kindMap === undefined) {
-    kindMap = new Map();
-    index.set(nodeId, kindMap);
-  }
-  const edges = kindMap.get(edgeKind);
-  if (edges === undefined) {
-    kindMap.set(edgeKind, [edge]);
-  } else {
-    edges.push(edge);
-  }
 }
 
 // ============================================================

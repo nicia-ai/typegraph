@@ -694,14 +694,19 @@ export type {
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphEdgeKey,
+  SubgraphEdgeLookup,
   SubgraphEdgeResult,
+  SubgraphIndex,
+  SubgraphNodeKey,
+  SubgraphNodeLookup,
   SubgraphNodeResult,
   SubgraphOptions,
   SubgraphResult,
   SubsetEdge,
   SubsetNode,
 } from "./store/subgraph";
-export { defineSubgraphProject } from "./store/subgraph";
+export { defineSubgraphProject, indexSubgraph } from "./store/subgraph";
 export type {
   AdapterTransactionContext,
   BaseStoreOptions,

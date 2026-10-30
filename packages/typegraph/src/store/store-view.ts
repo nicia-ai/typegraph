@@ -20,7 +20,6 @@
  */
 import { assertRecordedInstantOwnershipMatch } from "../backend/capabilities/recorded-time-ownership";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type NodeKinds,
@@ -35,7 +34,6 @@ import {
 } from "../core/temporal";
 import {
   type AnyEdgeType,
-  type NodeId,
   type NodeType,
   type TemporalMode,
 } from "../core/types";
@@ -92,6 +90,7 @@ import {
   type DynamicStoreViewEdgeCollection,
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
+  type GraphNodeReference,
   type NodeCollection,
   type NodeCurrentReads,
   type RecordedStoreViewEdgeCollection,
@@ -898,17 +897,14 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: StoreViewSubgraphOptions<G, EK, NK, P>,
   ): Promise<SubgraphResult<G, NK, EK, P>> {
     const internalOptions = {
       ...options,
       ...withCoordinate(this.coordinate),
     } as InternalSubgraphOptions<G, EK, NK, P>;
-    return storeRuntime(this.store).subgraphAtCoordinate(
-      rootId,
-      internalOptions,
-    );
+    return storeRuntime(this.store).subgraphAtCoordinate(root, internalOptions);
   }
 
   /** Shortest path between two nodes at this view's pinned coordinate. */

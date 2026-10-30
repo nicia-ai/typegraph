@@ -35,9 +35,9 @@ export type DialectVectorPredicateStrategy = "native" | "unsupported";
 /**
  * Strategy for computing subgraph reachable-node membership.
  *
- * `"materialized-ids"` fetches the traversal closure's ids in one extra
- * round trip and filters the node/edge fetches against that materialized
- * array. `"inline-cte"` embeds the recursive traversal CTE directly in each
+ * `"materialized-ids"` fetches the traversal closure's (kind, id) pairs in one
+ * extra round trip and filters the node/edge fetches against those
+ * materialized arrays. `"inline-cte"` embeds the recursive traversal CTE directly in each
  * fetch statement instead. This is a control-flow and prepared-plan choice,
  * not SQL text a token could express identically on both engines.
  */

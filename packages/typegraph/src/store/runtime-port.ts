@@ -11,7 +11,6 @@ import {
   type TransactionBackend,
 } from "../backend/types";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type NodeKinds,
@@ -39,6 +38,7 @@ import {
 } from "./subgraph";
 import {
   type Edge,
+  type GraphNodeReference,
   type Node,
   type RecordedScanOptions,
   type RecordedScanPage,
@@ -149,7 +149,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: InternalSubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
   algorithmsAtCoordinate: (
