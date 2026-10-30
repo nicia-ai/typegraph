@@ -84,6 +84,7 @@ import {
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { type NodeDeletePlan } from "../types";
 
 type Backend = GraphBackend | TransactionBackend;
 
@@ -159,38 +160,52 @@ export type NodeDeletePolicy = Readonly<{
 }>;
 
 /**
- * Whether a stated {@link NodeDeletePolicy} carries a POLICY-SHAPED dimension
- * the fused atomic delete command cannot honor.
+ * What a caller states about one node delete beyond its target: the
+ * {@link NodeDeletePolicy} an internal caller (merge apply, provenance)
+ * narrows enforcement with, and the `expect` plan a public
+ * `delete(id, { expect })` must still match (`node-delete-expectation.ts`).
+ */
+export type NodeDeleteRequest = Readonly<{
+  policy?: NodeDeletePolicy | undefined;
+  expect?: NodeDeletePlan | undefined;
+}>;
+
+/**
+ * Whether a stated {@link NodeDeleteRequest} carries a REQUEST-SHAPED
+ * dimension the fused atomic delete command cannot honor.
  *
  * The fused command is a single, read-free SQL shape: it has no notion of
- * `consumedEdgeIds` and cannot skip its own delete-behavior enforcement. A
- * policy stating EITHER dimension — `enforceDeleteBehavior: false` or a
- * non-empty `consumedEdgeIds` — must therefore route around the fused
- * command to the portable path (`enforceNodeDeleteBehavior`), which is the
- * only path that reads and honors a policy at all. This is the ONE place
- * that decision is made for these two fields: a caller choosing between the
- * fused and portable delete for `enforceDeleteBehavior` / `consumedEdgeIds`
- * must call this rather than re-deriving the answer from either field
- * directly.
+ * `consumedEdgeIds`, cannot skip its own delete-behavior enforcement, and
+ * computes no plan to compare an `expect` plan against. A request stating
+ * ANY of these — `policy.enforceDeleteBehavior: false`, a non-empty
+ * `policy.consumedEdgeIds`, or an `expect` plan — must therefore route around
+ * the fused command to the portable path, the only path that reads and
+ * honors them (`enforceNodeDeleteBehavior` for the policy,
+ * `assertNodeDeletePlanExpected` for the plan). This is the ONE place that
+ * decision is made for these fields: a caller choosing between the fused and
+ * portable delete must call this rather than re-deriving the answer from any
+ * field directly.
  *
  * This predicate does NOT own `cascadeComposition`, and is not the only
  * fused-vs-portable gate in the store. That dimension is registry-shaped,
- * not policy-shaped — "does this kind participate in composition at all"
- * is knowable from the graph's declaration alone, before any policy is
+ * not request-shaped — "does this kind participate in composition at all"
+ * is knowable from the graph's declaration alone, before any request is
  * constructed — so it is decided statically by
  * `resolveAtomicNodeDeleteBatchExecutor`'s composition guard
  * (`atomic-mutation-program.ts`), which returns no executor for a kind that
  * is a composition whole (`registry.isCompositionWhole`) or part
  * (`registry.isCompositionPart`) on either side, unconditionally on the
- * caller's policy. Together these are the two EXHAUSTIVE owners of "should this
- * delete run the portable path": one for policy fields, one for static
+ * caller's request. Together these are the two EXHAUSTIVE owners of "should
+ * this delete run the portable path": one for request fields, one for static
  * composition participation. A future third dimension must extend one of
  * these two predicates (or, if neither shape fits, add and name a third
  * owner here) — never re-derive the routing decision inline at a call site.
  */
-export function nodeDeletePolicyRequiresPortablePath(
-  policy: NodeDeletePolicy | undefined,
+export function nodeDeleteRequiresPortablePath(
+  request: NodeDeleteRequest,
 ): boolean {
+  const { policy, expect } = request;
+  if (expect !== undefined) return true;
   return (
     policy !== undefined &&
     (!policy.enforceDeleteBehavior || (policy.consumedEdgeIds?.size ?? 0) > 0)

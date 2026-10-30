@@ -276,7 +276,7 @@ type BaseStoreOptions = Readonly<{
 type BaseTraversalOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeMemoryOptions & Readonly<{
     edges: readonly EdgeKinds<G>[];
     maxHops?: number;
-    direction?: TraversalDirection_2;
+    direction?: TraversalDirection$1;
     cyclePolicy?: AlgorithmCyclePolicy;
 }>;
 
@@ -1276,7 +1276,7 @@ type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
 // @public
 type DegreeOptions<G extends GraphDef> = TemporalAlgorithmOptions & Readonly<{
     edges?: readonly EdgeKinds<G>[];
-    direction?: TraversalDirection_2;
+    direction?: TraversalDirection$1;
 }>;
 
 // @public
@@ -5018,7 +5018,7 @@ type NeighborResult<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
 type NeighborsOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeMemoryOptions & Readonly<{
     edges: readonly EdgeKinds<G>[];
     depth?: number;
-    direction?: TraversalDirection_2;
+    direction?: TraversalDirection$1;
     cyclePolicy?: AlgorithmCyclePolicy;
 }>;
 
@@ -5107,7 +5107,7 @@ type NodeCollection<N extends NodeType, CN extends string = string, WholeKind ex
         id: NodeId<N>;
         options: NodeReparentOptions<Via, WholeKind>;
     }>[]) => Promise<readonly NodeReparentResult<Via>[]>;
-    delete: (id: NodeId<N>) => Promise<void>;
+    delete: (id: NodeId<N>, options?: NodeDeleteOptions) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
     find: (filter?: Readonly<{
@@ -5195,6 +5195,11 @@ type NodeCreateOptions<Via extends CompositionViaRef | undefined = CompositionVi
 
 // @public
 type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
+
+// @public
+type NodeDeleteOptions = Readonly<{
+    expect: NodeDeletePlan;
+}>;
 
 // @public
 type NodeDeletePlan = Readonly<{
@@ -5626,7 +5631,7 @@ type OuterReferenceExpressionNode = Readonly<{
 type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeMemoryOptions & Readonly<{
     edges: readonly EdgeKinds<G>[];
     nodeKinds?: readonly NodeKinds<G>[];
-    direction?: TraversalDirection_2;
+    direction?: TraversalDirection$1;
     dampingFactor?: number;
     tolerance?: number;
     maxIterations?: number;
@@ -8026,10 +8031,10 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
 }
 
 // @public
-type TraversalDirection = "out" | "in";
+type TraversalDirection$1 = "out" | "in" | "both";
 
 // @public
-type TraversalDirection_2 = "out" | "in" | "both";
+type TraversalDirection = "out" | "in";
 
 // @public
 type TraversalExpansion = "none" | "implying" | "inverse" | "all";

@@ -6707,7 +6707,7 @@ export type NodeCollection<N extends NodeType, CN extends string = string, Whole
         id: NodeId<N>;
         options: NodeReparentOptions<Via, WholeKind>;
     }>[]) => Promise<readonly NodeReparentResult<Via>[]>;
-    delete: (id: NodeId<N>) => Promise<void>;
+    delete: (id: NodeId<N>, options?: NodeDeleteOptions) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
     find: (filter?: Readonly<{
@@ -6812,10 +6812,38 @@ export type NodeCreateOptions<Via extends CompositionViaRef | undefined = Compos
 export type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
 // @public
+export type NodeDeleteOptions = Readonly<{
+    expect: NodeDeletePlan;
+}>;
+
+// @public
 export type NodeDeletePlan = Readonly<{
     cascadedParts: readonly CompositionCascadedPart[];
     removedEdgeIds: readonly string[];
 }>;
+
+// @public
+export class NodeDeletePlanMismatchError extends TypeGraphError {
+    constructor(details: NodeDeletePlanMismatchErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: NodeDeletePlanMismatchErrorDetails;
+}
+
+// @public
+export type NodeDeletePlanMismatchErrorDetails = Readonly<{
+    kind: string;
+    id: string;
+}> & (Readonly<{
+    situation: "notLive";
+}> | Readonly<{
+    situation: "changed";
+    addedParts: readonly CompositionCascadedPart[];
+    droppedParts: readonly CompositionCascadedPart[];
+    addedEdgeIds: readonly string[];
+    droppedEdgeIds: readonly string[];
+}>);
 
 // @public
 type NodeDeletePolicy = Readonly<{

@@ -195,10 +195,10 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * Deletes one node under an explicit {@link NodeDeletePolicy}, going through
    * `executeNodeDelete` — the SAME entry point (fused-atomic-or-portable
    * routing included) the public collection facade uses — against `target`
-   * directly. The public collection `delete(id)` takes no options by design
-   * (a merge-only flag does not belong on it, the `bulkInsert` precedent), so
-   * a caller that needs a non-default policy reaches an internal port
-   * instead.
+   * directly. The public collection `delete(id, { expect })` takes no policy
+   * by design (a merge-only flag does not belong on it, the `bulkInsert`
+   * precedent), so a caller that needs a non-default policy reaches an
+   * internal port instead.
    *
    * This Store-scoped variant builds its OWN operation context — an
    * immediate (unbuffered) hook runner and `attempt: 1` — so it is correct
@@ -754,9 +754,10 @@ export function transactionBackend(
  * delete the instant it runs even when the enclosing transaction later rolls
  * back, which is why this delete-behavior-carrying escape hatch is
  * transaction-scoped rather than Store-scoped: the public collection
- * `delete(id)` takes no options by design (a merge-only flag does not belong
- * on it, the `bulkInsert` precedent), so a caller that needs a non-default
- * policy — today, merge apply — reaches this internal port instead.
+ * `delete(id, { expect })` takes no policy by design (a merge-only flag does
+ * not belong on it, the `bulkInsert` precedent), so a caller that needs a
+ * non-default policy — today, merge apply — reaches this internal port
+ * instead.
  */
 export function transactionDeleteNodeWithPolicy(
   transaction: TransactionRuntimePort,

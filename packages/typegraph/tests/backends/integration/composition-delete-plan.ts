@@ -26,6 +26,7 @@ import {
   defineGraph,
   defineNode,
   type NodeDeletePlan,
+  NodeDeletePlanMismatchError,
   partOf,
   RestrictedDeleteError,
   UnsupportedBackendCapabilityError,
@@ -466,6 +467,267 @@ export function registerCompositionDeletePlanIntegrationTests(
       expect(refusals.receipt.writes.total).toBe(0);
       const storeFormPlan = await store.nodes.DpPodcast.planDelete(podcast.id);
       expect(storeFormPlan?.cascadedParts).toHaveLength(1);
+    });
+  });
+
+  describe("Guarded delete (delete with expect)", () => {
+    it("deletes on a plan that still holds, whatever its order and after a JSON round trip", async () => {
+      const store = await context.createStore(
+        buildGraph(nextGraphId(), { podcast: "disconnect" }),
+      );
+      const tag = await store.nodes.DpTag.create({ name: "t" });
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      for (const title of ["a", "b"]) {
+        const episode = await store.nodes.DpEpisode.create(
+          { title },
+          { partOf: { whole: podcast } },
+        );
+        await store.nodes.DpSegment.create(
+          { title: `${title}-s` },
+          { partOf: { whole: episode } },
+        );
+      }
+      await store.edges.dpTagged.create(podcast, tag, {});
+      const plan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(podcast.id),
+      );
+      expect(plan.cascadedParts).toHaveLength(4);
+      expect(plan.removedEdgeIds).toHaveLength(5);
+
+      // MUTATION CHECK: compare the two plans positionally in
+      // `diffNodeDeletePlans` (src/store/operations/node-delete-expectation.ts)
+      // and the reversed lists refuse — verified and reverted.
+      // The plan crosses a request boundary as JSON text.
+      const wire = JSON.stringify({
+        cascadedParts: plan.cascadedParts.toReversed(),
+        removedEdgeIds: plan.removedEdgeIds.toReversed(),
+      });
+      const confirmed = JSON.parse(wire) as NodeDeletePlan;
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        await tx.nodes.DpPodcast.delete(podcast.id, { expect: confirmed });
+      });
+
+      expect(receipt.cascadedParts).toEqual(plan.cascadedParts);
+      expect(await store.nodes.DpPodcast.getById(podcast.id)).toBeUndefined();
+      expect(await store.edges.dpTagged.find()).toEqual([]);
+    });
+
+    it("refuses a part attached after the preview, before any write", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()), {
+        revisionTracking: true,
+      });
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      const episode = await store.nodes.DpEpisode.create(
+        { title: "e" },
+        { partOf: { whole: podcast } },
+      );
+      const plan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(podcast.id),
+      );
+      const late = await store.nodes.DpEpisode.create(
+        { title: "late" },
+        { partOf: { whole: podcast } },
+      );
+      const [lateEdge] = await store.edges.dpEpisodeOf.findFrom(late);
+      const before = await store.revisionNow();
+
+      // MUTATION CHECK: drop the in-frame `assertNodeDeletePlanExpected`
+      // call from `executeNodeDelete`
+      // (src/store/operations/node-operations.ts) and the delete cascades
+      // through both episodes — verified and reverted.
+      const refusal = await rejectionOf(() =>
+        store.nodes.DpPodcast.delete(podcast.id, { expect: plan }),
+      );
+
+      expect(refusal).toBeInstanceOf(NodeDeletePlanMismatchError);
+      const error = refusal as NodeDeletePlanMismatchError;
+      expect(error.code).toBe("NODE_DELETE_PLAN_MISMATCH");
+      expect(error.details).toEqual({
+        kind: "DpPodcast",
+        id: podcast.id,
+        situation: "changed",
+        addedParts: [cascadedPart(late, podcast, "dpEpisodeOf")],
+        droppedParts: [],
+        addedEdgeIds: [requireDefined(lateEdge).id],
+        droppedEdgeIds: [],
+      });
+      expect(await store.revisionNow()).toEqual(before);
+      for (const node of [podcast, episode, late]) {
+        expect(await store.getNodeByRef(node)).toBeDefined();
+      }
+      expect(await store.edges.dpEpisodeOf.find()).toHaveLength(2);
+    });
+
+    it("refuses a part detached after the preview", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      const kept = await store.nodes.DpEpisode.create(
+        { title: "kept" },
+        { partOf: { whole: podcast } },
+      );
+      const detached = await store.nodes.DpEpisode.create(
+        { title: "detached" },
+        { partOf: { whole: podcast } },
+      );
+      const plan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(podcast.id),
+      );
+      const [detachedEdge] = await store.edges.dpEpisodeOf.findFrom(detached);
+      await store.edges.dpEpisodeOf.delete(requireDefined(detachedEdge).id);
+
+      await expect(
+        store.nodes.DpPodcast.delete(podcast.id, { expect: plan }),
+      ).rejects.toThrow(
+        matchingObject({
+          name: "NodeDeletePlanMismatchError",
+          details: {
+            kind: "DpPodcast",
+            id: podcast.id,
+            situation: "changed",
+            addedParts: [],
+            droppedParts: [cascadedPart(detached, podcast, "dpEpisodeOf")],
+            addedEdgeIds: [],
+            droppedEdgeIds: [requireDefined(detachedEdge).id],
+          },
+        }),
+      );
+      expect(await store.nodes.DpEpisode.getById(kept.id)).toBeDefined();
+    });
+
+    it("compares a part's whole, not only its id", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      const episode = await store.nodes.DpEpisode.create(
+        { title: "e" },
+        { partOf: { whole: podcast } },
+      );
+      const plan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(podcast.id),
+      );
+      const [part] = plan.cascadedParts;
+      const elsewhere = {
+        ...requireDefined(part),
+        whole: { kind: "DpPodcast", id: "elsewhere" },
+      };
+
+      // MUTATION CHECK: key parts by `(kind, id)` alone in
+      // `cascadedPartKey` (src/store/operations/node-delete-expectation.ts)
+      // and the stated whole is ignored, so the delete runs — verified and
+      // reverted.
+      await expect(
+        store.nodes.DpPodcast.delete(podcast.id, {
+          expect: { ...plan, cascadedParts: [elsewhere] },
+        }),
+      ).rejects.toThrow(
+        matchingObject({
+          name: "NodeDeletePlanMismatchError",
+          details: matchingObject({
+            addedParts: [requireDefined(part)],
+            droppedParts: [elsewhere],
+          }),
+        }),
+      );
+      expect(await store.nodes.DpEpisode.getById(episode.id)).toBeDefined();
+    });
+
+    it("compares the root's own removed edges, for a node with no parts", async () => {
+      const store = await context.createStore(
+        buildGraph(nextGraphId(), { podcast: "cascade" }),
+      );
+      const tag = await store.nodes.DpTag.create({ name: "t" });
+      const unchanged = await store.nodes.DpPodcast.create({ title: "a" });
+      const tagged = await store.nodes.DpPodcast.create({ title: "b" });
+      const keptEdge = await store.edges.dpTagged.create(unchanged, tag, {});
+      const unchangedPlan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(unchanged.id),
+      );
+      const taggedPlan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(tagged.id),
+      );
+      const lateEdge = await store.edges.dpTagged.create(tagged, tag, {});
+
+      // MUTATION CHECK: pass `judgeRoot: false` to `planCascadingNodeDelete`
+      // from `executeNodeDelete` (src/store/operations/node-operations.ts)
+      // and the part-less root's own edge drops out of the delete's plan:
+      // the first delete refuses and the second runs — verified and
+      // reverted.
+      expect(unchangedPlan.removedEdgeIds).toEqual([keptEdge.id]);
+      await store.nodes.DpPodcast.delete(unchanged.id, {
+        expect: unchangedPlan,
+      });
+      expect(await store.nodes.DpPodcast.getById(unchanged.id)).toBeUndefined();
+
+      await expect(
+        store.nodes.DpPodcast.delete(tagged.id, { expect: taggedPlan }),
+      ).rejects.toThrow(
+        matchingObject({
+          name: "NodeDeletePlanMismatchError",
+          details: matchingObject({ addedEdgeIds: [lateEdge.id] }),
+        }),
+      );
+      expect(await store.edges.dpTagged.getById(lateEdge.id)).toBeDefined();
+    });
+
+    it("refuses a node deleted after the preview instead of a silent no-op", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      const plan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(podcast.id),
+      );
+      await store.nodes.DpPodcast.delete(podcast.id);
+
+      // MUTATION CHECK: drop the gate's `assertNodeDeletePlanExpected` call
+      // from `executeNodeDelete` (src/store/operations/node-operations.ts)
+      // and the store form returns as a no-op — verified and reverted.
+      const notLive = matchingObject({
+        name: "NodeDeletePlanMismatchError",
+        details: { kind: "DpPodcast", id: podcast.id, situation: "notLive" },
+      });
+      await expect(
+        store.nodes.DpPodcast.delete(podcast.id, { expect: plan }),
+      ).rejects.toThrow(notLive);
+      await expect(
+        store.transaction((tx) =>
+          tx.nodes.DpPodcast.delete(podcast.id, { expect: plan }),
+        ),
+      ).rejects.toThrow(notLive);
+      await expect(
+        store.nodes.DpPodcast.delete("missing" as never, { expect: plan }),
+      ).rejects.toBeInstanceOf(NodeDeletePlanMismatchError);
+    });
+
+    it("refuses on a transaction's collections before the delete writes, leaving the transaction usable", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      await store.nodes.DpEpisode.create(
+        { title: "e" },
+        { partOf: { whole: podcast } },
+      );
+
+      const { receipt, result } = await store.transactionWithReceipt(
+        async (tx) => {
+          const plan = requireDefined(
+            await tx.nodes.DpPodcast.planDelete(podcast.id),
+          );
+          await tx.nodes.DpEpisode.create(
+            { title: "pending" },
+            { partOf: { whole: podcast } },
+          );
+          const refusal = await rejectionOf(() =>
+            tx.nodes.DpPodcast.delete(podcast.id, { expect: plan }),
+          );
+          const replanned = requireDefined(
+            await tx.nodes.DpPodcast.planDelete(podcast.id),
+          );
+          await tx.nodes.DpPodcast.delete(podcast.id, { expect: replanned });
+          return { refusal, replanned };
+        },
+      );
+
+      expect(result.refusal).toBeInstanceOf(NodeDeletePlanMismatchError);
+      expect(result.replanned.cascadedParts).toHaveLength(2);
+      expect(receipt.cascadedParts).toEqual(result.replanned.cascadedParts);
+      expect(receipt.writes.nodes).toEqual({ DpEpisode: 1, DpPodcast: 1 });
     });
   });
 }

@@ -441,10 +441,10 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   // to exclude them from its restrict count — the fused command's read-free
   // refusal diagnosis has no such filter and would misreport a composition
   // edge as a live restrict obstacle. This is the second, declared owner
-  // `nodeDeletePolicyRequiresPortablePath`'s doc cross-references: that
-  // predicate owns the two `NodeDeletePolicy`-shaped dimensions
-  // (`enforceDeleteBehavior`, `consumedEdgeIds`); this guard owns the
-  // registry-shaped one (static composition participation).
+  // `nodeDeleteRequiresPortablePath`'s doc cross-references: that predicate
+  // owns the request-shaped dimensions (`enforceDeleteBehavior`,
+  // `consumedEdgeIds`, an `expect` plan); this guard owns the registry-shaped
+  // one (static composition participation).
   if (
     input.registry.isCompositionWhole(input.kind) ||
     input.registry.isCompositionPart(input.kind)

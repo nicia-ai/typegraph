@@ -298,12 +298,14 @@ import {
   endCompositionEdgeWindow,
   validateAndPrepareEdgeCreate,
 } from "./edge-operations";
+import { assertNodeDeletePlanExpected } from "./node-delete-expectation";
 import {
   judgeNodeDeleteBehavior,
   nodeClaimTransition,
   type NodeDeleteMode,
   type NodeDeletePolicy,
-  nodeDeletePolicyRequiresPortablePath,
+  type NodeDeleteRequest,
+  nodeDeleteRequiresPortablePath,
   type NodeInsertSyncItem,
 } from "./node-write-pipeline";
 import {
@@ -6791,13 +6793,23 @@ function nodeDeleteOperationFacts(
   return { cascadedParts: outcome.cascadedParts };
 }
 
+/**
+ * Soft-deletes one node, cascading through its composition parts.
+ *
+ * `request.policy` is an internal caller's narrowed enforcement (merge apply,
+ * provenance). `request.expect` is the public `delete(id, { expect })` guard:
+ * the delete's own plan, read in its frame under its lock, must equal it, or
+ * the delete refuses before its first write — an absent or tombstoned node
+ * included, which is otherwise a no-op.
+ */
 export async function executeNodeDelete<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
   backend: GraphBackend | TransactionBackend,
-  policy?: NodeDeletePolicy,
+  request: NodeDeleteRequest = {},
 ): Promise<void> {
+  const { policy, expect } = request;
   // Gate outside hooks and execution (matching edge deletes): an absent or
   // already-tombstoned node is a no-op, so it neither fires hooks nor submits
   // a write. Eligible plain deletes carry the live/restrict/schema verdicts in
@@ -6805,21 +6817,26 @@ export async function executeNodeDelete<G extends GraphDef>(
   // so a node concurrently deleted between this gate and the write lock is
   // still handled correctly.
   const gate = await backend.getNode(ctx.graphId, kind, id);
-  if (!gate || gate.deleted_at) return;
+  if (!gate || gate.deleted_at) {
+    if (expect !== undefined) {
+      assertNodeDeletePlanExpected({ kind, id }, expect, undefined);
+    }
+    return;
+  }
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  // The fused atomic executor has no notion of `policy`: its restrict check
-  // is a single, read-free SQL shape that cannot narrow the edges it counts
-  // and cannot skip its own enforcement. A policy stating a dimension it
-  // cannot honor therefore always takes the portable path below, which is
-  // the only path that reads and honors `policy` (see
-  // `enforceNodeDeleteBehavior`) — the fused command is an optimization
-  // attempt, not evidence its dimensions ran, and must not be reached when a
-  // dimension it cannot honor is in play. `nodeDeletePolicyRequiresPortablePath`
-  // is the one owner of that decision across every policy dimension.
+  // The fused atomic executor has no notion of `policy` or `expect`: its
+  // restrict check is a single, read-free SQL shape that cannot narrow the
+  // edges it counts, cannot skip its own enforcement, and plans nothing to
+  // compare. A request stating a dimension it cannot honor therefore always
+  // takes the portable path below, the only path that reads and honors them
+  // — the fused command is an optimization attempt, not evidence its
+  // dimensions ran, and must not be reached when a dimension it cannot honor
+  // is in play. `nodeDeleteRequiresPortablePath` is the one owner of that
+  // decision across every request dimension.
   const atomicExecutor =
-    nodeDeletePolicyRequiresPortablePath(policy) ? undefined : (
+    nodeDeleteRequiresPortablePath(request) ? undefined : (
       resolveAtomicNodeDeleteBatchExecutor({
         backend,
         graph: ctx.graph,
@@ -6862,21 +6879,34 @@ export async function executeNodeDelete<G extends GraphDef>(
       // the concurrency-correct source for it.
       const preflight = await target.getNode(ctx.graphId, kind, id);
       if (preflight === undefined || !isLiveNodeRow(preflight)) {
+        if (expect !== undefined) {
+          assertNodeDeletePlanExpected({ kind, id }, expect, undefined);
+        }
         return NODE_DELETE_NOT_WRITTEN;
       }
 
       // Composition parts, leaf-first, BEFORE the whole itself — under the
       // per-graph write lock this write plan already fenced for a
-      // composition whole (`nodeDeleteConstraintProbe`).
+      // composition whole (`nodeDeleteConstraintProbe`). A guarded delete
+      // judges its root here too: the root's own removed edges belong to the
+      // plan it compares, and the comparison must precede every write.
+      const effects = noPlannedDeleteEffects();
       const cascadePlan = await planCascadingNodeDelete(
         ctx,
         { kind, id },
         target,
         lock,
         policy,
-        noPlannedDeleteEffects(),
-        false,
+        effects,
+        expect !== undefined,
       );
+      if (expect !== undefined) {
+        assertNodeDeletePlanExpected(
+          { kind, id },
+          expect,
+          nodeDeletePlanOf(cascadePlan, effects),
+        );
+      }
       await applyCompositionCascade(ctx, cascadePlan, target, "soft", session);
 
       // The cascade (connected edges, uniques, embeddings, fulltext, node) is
@@ -6979,6 +7009,19 @@ async function planLiveNodeDelete<G extends GraphDef>(
     effects,
     true,
   );
+  return nodeDeletePlanOf(cascadePlan, effects);
+}
+
+/**
+ * THE projection of one delete's planning into a {@link NodeDeletePlan}: what
+ * `planDelete` answers and what a guarded delete compares against `expect`.
+ * `effects` must come from a {@link planCascadingNodeDelete} call that judged
+ * the root, so the root's own removed edges are in it.
+ */
+function nodeDeletePlanOf(
+  cascadePlan: CompositionCascadePlan,
+  effects: PlannedDeleteEffects,
+): NodeDeletePlan {
   return {
     cascadedParts: cascadedPartReferences(cascadePlan),
     removedEdgeIds: [...effects.removedEdgeIds].toSorted((left, right) =>

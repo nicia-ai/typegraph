@@ -1,8 +1,8 @@
 /**
- * `nodeDeletePolicyRequiresPortablePath` — proof that a stated
- * {@link NodeDeletePolicy} routes `executeNodeDelete` around the fused atomic
- * delete command, on the ONE backend configuration where that command is
- * actually reachable.
+ * `nodeDeleteRequiresPortablePath` — proof that a stated
+ * {@link NodeDeletePolicy}, or a public `delete(id, { expect })` plan, routes
+ * `executeNodeDelete` around the fused atomic delete command, on the ONE
+ * backend configuration where that command is actually reachable.
  *
  * `resolveAtomicNodeDeleteBatchExecutor` only ever resolves a `deleteNodes`
  * executor against a backend whose execution capabilities advertise
@@ -14,7 +14,9 @@
  * (SQLite) AND from merge apply's transaction-scoped
  * `transactionDeleteNodeWithPolicy` calls — the ONLY way to exercise it, in a
  * test or otherwise, is `StoreRuntime.deleteNodeWithPolicy` called directly
- * against a PGlite ROOT backend, exactly as this file does.
+ * against a PGlite ROOT backend, exactly as this file does. The public
+ * `store.nodes.<Kind>.delete` runs against that same root backend, so the
+ * `expect` cases below reach the decision through the collection itself.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -23,8 +25,10 @@ import { withAtomicMutationProgramDispatchObserver } from "../src/backend/capabi
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
+import { NodeDeletePlanMismatchError } from "../src/errors";
 import { createStoreWithSchema } from "../src/store";
 import { STORE_RUNTIME } from "../src/store/runtime-port";
+import { requireDefined } from "../src/utils/presence";
 
 // Deliberately atomic-eligible: `onDelete: "restrict"`, no uniques, no
 // identity, no searchable/embedding fields (see
@@ -139,6 +143,65 @@ describe("NodeDeletePolicy bypasses the fused atomic delete on a root backend", 
       // cases above are genuinely exercising a bypass, not an executor that
       // was never eligible in the first place.
       expect(dispatched).toContain("deleteNodes");
+    } finally {
+      await local.backend.close();
+    }
+  });
+});
+
+describe("A delete expect plan bypasses the fused atomic delete on a root backend", () => {
+  it("compares the plan on the portable path, deleting on a match and refusing a mismatch, though the fused delete is eligible", async () => {
+    const local = await createLocalPgliteBackend({ vector: false });
+    const backend = createPostgresBackend(local.db, { vector: false });
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const unguarded = await store.nodes.RestrictNode.create({});
+      const matched = await store.nodes.RestrictNode.create({});
+      const mismatched = await store.nodes.RestrictNode.create({});
+      const matchedPlan = requireDefined(
+        await store.nodes.RestrictNode.planDelete(matched.id),
+      );
+      expect(matchedPlan).toEqual({ cascadedParts: [], removedEdgeIds: [] });
+
+      const dispatched: string[] = [];
+      const refusal = await withAtomicMutationProgramDispatchObserver(
+        backend,
+        (variant) => dispatched.push(variant),
+        async () => {
+          await store.nodes.RestrictNode.delete(unguarded.id);
+          // The premise: the public delete of this shape IS fused.
+          expect(dispatched).toEqual(["deleteNodes"]);
+          await store.nodes.RestrictNode.delete(matched.id, {
+            expect: matchedPlan,
+          });
+          try {
+            await store.nodes.RestrictNode.delete(mismatched.id, {
+              expect: { cascadedParts: [], removedEdgeIds: ["stale-edge"] },
+            });
+          } catch (error) {
+            return error;
+          }
+          return;
+        },
+      );
+
+      // MUTATION CHECK: drop the `expect` arm of
+      // `nodeDeleteRequiresPortablePath`
+      // (src/store/operations/node-write-pipeline.ts) and both guarded
+      // deletes take the fused command, which compares nothing, so the
+      // mismatched node is deleted — verified and reverted.
+      expect(dispatched).toEqual(["deleteNodes"]);
+      expect(refusal).toBeInstanceOf(NodeDeletePlanMismatchError);
+      expect((refusal as NodeDeletePlanMismatchError).details).toMatchObject({
+        situation: "changed",
+        droppedEdgeIds: ["stale-edge"],
+      });
+      await expect(
+        store.nodes.RestrictNode.getById(matched.id),
+      ).resolves.toBeUndefined();
+      await expect(
+        store.nodes.RestrictNode.getById(mismatched.id),
+      ).resolves.toBeDefined();
     } finally {
       await local.backend.close();
     }

@@ -34,6 +34,7 @@ import type { ConstraintFenceViolation } from "../store/claims/verify";
 // type-only imports are erased at runtime so these back-edges do not create
 // a value cycle.
 import type { MaterializeIndexesResult } from "../store/materialize-indexes";
+import type { CompositionCascadedPart } from "../store/types";
 
 // ============================================================
 // Types
@@ -1182,6 +1183,71 @@ export class CompositionCycleError extends TypeGraphError {
       },
     );
     this.name = "CompositionCycleError";
+  }
+}
+
+/**
+ * Details for NodeDeletePlanMismatchError, one shape per `situation`.
+ *
+ * - `"notLive"`: the node is absent or already deleted, so the delete has no
+ *   plan to compare.
+ * - `"changed"`: the delete's own plan differs from `expect`. `addedParts` and
+ *   `addedEdgeIds` are in the delete's plan but not in `expect`;
+ *   `droppedParts` and `droppedEdgeIds` are in `expect` but no longer in the
+ *   delete's plan. A part is one entry per `(kind, id, whole, viaEdgeKind)`, so
+ *   a part whose whole or edge kind changed appears in both lists.
+ */
+export type NodeDeletePlanMismatchErrorDetails = Readonly<{
+  kind: string;
+  id: string;
+}> &
+  (
+    | Readonly<{ situation: "notLive" }>
+    | Readonly<{
+        situation: "changed";
+        addedParts: readonly CompositionCascadedPart[];
+        droppedParts: readonly CompositionCascadedPart[];
+        addedEdgeIds: readonly string[];
+        droppedEdgeIds: readonly string[];
+      }>
+  );
+
+function describeNodeDeletePlanMismatch(
+  details: NodeDeletePlanMismatchErrorDetails,
+): string {
+  const target = `${details.kind}/${details.id}`;
+  if (details.situation === "notLive") {
+    return `Delete of ${target} was given an expected plan, but the node is absent or already deleted.`;
+  }
+  return `Delete of ${target} no longer matches the expected plan: ${details.addedParts.length} part(s) added, ${details.droppedParts.length} dropped; ${details.addedEdgeIds.length} edge id(s) added, ${details.droppedEdgeIds.length} dropped.`;
+}
+
+/**
+ * Thrown by `nodes.<Kind>.delete(id, { expect })` when the plan the delete
+ * computes for itself is not the `expect` plan a caller took from
+ * `planDelete(id)` — parts or edges changed since the preview, or the node is
+ * no longer live. Reached before any write. Category `"system"`, like
+ * {@link VersionConflictError}: another writer changed the state the caller
+ * decided on, and the remedy is a fresh preview, not different input.
+ */
+export class NodeDeletePlanMismatchError extends TypeGraphError {
+  declare readonly details: NodeDeletePlanMismatchErrorDetails;
+
+  constructor(
+    details: NodeDeletePlanMismatchErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      describeNodeDeletePlanMismatch(details),
+      "NODE_DELETE_PLAN_MISMATCH",
+      {
+        details,
+        category: "system",
+        suggestion: `Preview again with planDelete(id), confirm the new plan, and retry delete(id, { expect: newPlan }).`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "NodeDeletePlanMismatchError";
   }
 }
 

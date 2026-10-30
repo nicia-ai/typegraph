@@ -134,6 +134,7 @@ export type NodeOperations = Readonly<{
     kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
+    expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,

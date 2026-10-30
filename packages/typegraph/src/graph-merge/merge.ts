@@ -2410,7 +2410,7 @@ async function applyNodeRows<G extends GraphDef>(
     },
     async () => {
       // Routed through the internal runtime port rather than the collection
-      // facade, whose `delete(id)` takes no options by design: enforcement
+      // facade, whose `delete(id)` takes no policy by design: enforcement
       // stays on, so a part's own `restrict` edge still aborts the merge, while
       // `cascadeComposition: false` leaves the parts to the plan, which already
       // enumerates every one a composition delete would cascade to

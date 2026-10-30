@@ -1672,7 +1672,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           work.kind,
           work.id,
           target,
-          policy,
+          { policy },
         ),
       applyResolvedNodeUniqueness: async (target, writes, apply) => {
         const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
@@ -3034,8 +3034,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeReparentBatch(ctx, kind, items, backend, {
           onIncumbent: "replace",
         }),
-      executeDelete: (kind, id, backend) =>
-        executeNodeDelete(ctx, kind, id, backend),
+      executeDelete: (kind, id, backend, expect) =>
+        executeNodeDelete(ctx, kind, id, backend, { expect }),
       executeDeleteBatch: (kind, ids, backend) =>
         executeNodeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
@@ -5020,7 +5020,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               work.kind,
               work.id,
               outerRuntime.backend,
-              policy,
+              { policy },
             ),
           reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
             executeNodeRevive(
@@ -5394,7 +5394,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             work.kind,
             work.id,
             txBackend,
-            policy,
+            { policy },
           ),
         reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
           executeNodeRevive(

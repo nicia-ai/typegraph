@@ -439,10 +439,12 @@ partOf(Episode, Podcast, { via: episodeOf });
 ```
 
 Deleting a whole deletes its parts with it, leaf-first and in the same
-transaction, and resurrecting the whole later does not bring them back. If
+transaction, and resurrecting the whole later does not bring them back (see
+[Undoing a cascading delete](#undoing-a-cascading-delete) for a recipe). If
 parts must outlive their whole, use the aggregation tier instead (see
 [Choosing a containment tier](#choosing-a-containment-tier)). To see what a
-delete will remove before running it, call `planDelete` (see
+delete will remove before running it, and to delete only if that still holds,
+call `planDelete` and pass its plan to `delete` (see
 [Previewing a delete](#previewing-a-delete)).
 
 `via`'s realizing edge must declare a whole-side cardinality of `"one"` or
@@ -822,7 +824,48 @@ planner refuses is refused by `planDelete` with the same error, such as
 has an ordinary edge. A `hardDelete(id)` of a live node cascades through the
 same parts.
 
-Call it on the transaction's collections when the decision must hold:
+The usual flow spans two requests: show "delete this and these N parts", and
+delete once the user confirms. No lock can be held across that gap, so pass
+the confirmed plan back as `expect`:
+
+```typescript
+// Request 1: preview.
+const plan = await store.nodes.Podcast.planDelete(podcast.id);
+if (plan === undefined) return; // nothing to delete
+// ...show plan.cascadedParts to the user and keep the plan with the page...
+
+// Request 2: the user confirmed this plan.
+await store.nodes.Podcast.delete(podcast.id, { expect: plan });
+```
+
+The delete computes its own plan with the same planner, inside its
+transaction and under the per-graph write lock it takes, and compares the two
+in any order: the same parts, each with the same `whole` and `viaEdgeKind`
+(so a reparented part counts as changed), and the same `removedEdgeIds`. If
+anything differs — a part attached, detached or moved since the preview, an
+edge added or removed — it refuses with
+[`NodeDeletePlanMismatchError`](/errors#nodedeleteplanmismatcherror) before
+any write, and `details` names the parts and edge ids added to and dropped
+from the plan. A node deleted since the preview refuses the same way
+(`situation: "notLive"`) instead of being a silent no-op. Preview again and
+ask the user to confirm the new plan.
+
+The plan is plain data and survives a JSON round trip. Once you pass options,
+`expect` is required: `planDelete`'s `undefined` is not a plan, and
+`{ expect: undefined }` is refused with `ValidationError` like any other
+options of the wrong shape. A guarded delete always takes the portable delete
+path. `hardDelete` takes no `expect`, because it also purges a tombstoned node
+and the soft-deleted edge rows at each deleted node, which the plan does not
+name. `bulkDelete` takes no `expect` either.
+
+The guard covers the moment the delete plans. A write that takes no per-graph
+lock (an ordinary edge, a detach, a part's own delete) and commits between
+that plan and the delete's statements is not compared. SQLite admits no such
+write, and on PostgreSQL a `REPEATABLE READ` or `SERIALIZABLE` delete fails
+with a serialization failure instead.
+
+When the decision and the delete happen in one transaction, call the
+transaction's collections:
 
 ```typescript
 await store.transaction(async (tx) => {
@@ -831,7 +874,7 @@ await store.transaction(async (tx) => {
   if (plan.cascadedParts.length > 100) {
     throw new Error(`refusing to delete ${plan.cascadedParts.length} parts`);
   }
-  await tx.nodes.Podcast.delete(podcast.id);
+  await tx.nodes.Podcast.delete(podcast.id, { expect: plan });
 });
 ```
 
@@ -840,9 +883,10 @@ the delete takes and keeps it until the transaction ends, so no concurrent
 attach or reparent can add a part between the preview and the delete. Writes
 that take no per-graph lock can still change the outcome: a part detached or
 deleted concurrently drops out of the delete's cascade, and an ordinary edge
-created concurrently changes `removedEdgeIds` or a restrict verdict. On the
-store's collections, `store.nodes.<Kind>.planDelete` is an unlocked read and
-only a best-effort answer.
+created concurrently changes `removedEdgeIds` or a restrict verdict. Passing
+the plan as `expect` turns such a change into a refusal. On the store's
+collections, `store.nodes.<Kind>.planDelete` is an unlocked read and only a
+best-effort answer.
 
 Neither form writes a graph, sidecar, history or revision row. The
 transactional form does take the delete's lock, and for a composition whole on
@@ -859,6 +903,63 @@ consequences follow:
   `tx.nodes.<Kind>.planDelete` refuses before any statement, on every backend
   and for every kind, with `UnsupportedBackendCapabilityError`. Call
   `store.nodes.<Kind>.planDelete` instead for an unlocked preview.
+
+#### Undoing a cascading delete
+
+Restoring a soft-deleted whole brings back the whole alone. TypeGraph has no
+undo for the cascade, but you can capture what it will remove and recreate
+it. Before the delete, read the whole, the parts the plan names, and their
+props, in the same transaction as the delete:
+
+```typescript
+function propsOf<N extends Node>(node: N): Omit<N, "kind" | "id" | "meta"> {
+  const { kind: _kind, id: _id, meta: _meta, ...props } = node;
+  return props;
+}
+
+const snapshot = await store.transaction(async (tx) => {
+  const plan = await tx.nodes.Podcast.planDelete(podcast.id);
+  const whole = await tx.nodes.Podcast.getById(podcast.id);
+  if (plan === undefined || whole === undefined) return;
+  const parts: {
+    part: CompositionCascadedPart;
+    props: Record<string, unknown>;
+  }[] = [];
+  for (const part of plan.cascadedParts) {
+    const node = await tx.getNodeByRef(part);
+    if (node !== undefined) parts.push({ part, props: propsOf(node) });
+  }
+  await tx.nodes.Podcast.delete(podcast.id, { expect: plan });
+  return { whole: propsOf(whole), parts };
+});
+```
+
+To undo, recreate the whole with its id, then each part with its id and its
+`partOf`. `cascadedParts` is leaf-first, so reverse it to create every part
+after its whole. `create` with the id of a soft-deleted node restores that
+node with the props you pass:
+
+```typescript
+if (snapshot !== undefined) {
+  await store.transaction(async (tx) => {
+    await tx.nodes.Podcast.create(snapshot.whole, { id: podcast.id });
+    for (const { part, props } of snapshot.parts.toReversed()) {
+      const collection = tx.getNodeCollection(part.kind);
+      if (collection === undefined) throw new Error(part.kind);
+      await collection.create(props, {
+        id: part.id,
+        partOf: { whole: part.whole, via: part.viaEdgeKind },
+      });
+    }
+  });
+}
+```
+
+This brings back the nodes and their composition edges, not everything the
+delete removed. The ordinary edges in `removedEdgeIds` stay deleted, and the
+composition edges come back as new edges with new ids, without their props
+or validity windows unless you capture and pass those too (`partOf.props`,
+`partOf.validFrom`). Each restored node also starts a fresh validity window.
 
 #### Choosing a containment tier
 

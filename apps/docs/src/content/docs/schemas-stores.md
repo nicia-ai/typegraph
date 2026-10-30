@@ -1128,13 +1128,21 @@ await store.nodes.Person.updateWhere({
 });
 ```
 
-#### `delete(id)`
+#### `delete(id, options?)`
 
-Soft-deletes a node.
+Soft-deletes a node. A no-op for a node that is absent or already deleted.
 
 ```typescript
-store.nodes.Person.delete(id: NodeId<Person>): Promise<void>;
+store.nodes.Person.delete(
+  id: NodeId<Person>,
+  options?: { expect: NodeDeletePlan },
+): Promise<void>;
 ```
+
+`expect` takes a plan from `planDelete(id)` and refuses the delete with
+`NodeDeletePlanMismatchError`, before any write, when the delete's own plan no
+longer matches it or the node is no longer live. See
+[Previewing a delete](/ontology#previewing-a-delete).
 
 #### `hardDelete(id)`
 

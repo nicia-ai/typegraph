@@ -40,6 +40,7 @@ import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import { readNodeDeleteOptions } from "../operations/node-delete-expectation";
 import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
@@ -53,6 +54,7 @@ import {
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
   type NodeCreateOptions,
+  type NodeDeleteOptions,
   type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
@@ -307,6 +309,7 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
+    expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
@@ -757,8 +760,9 @@ export function createNodeCollection<
       >;
     },
 
-    async delete(id: NodeId<N>): Promise<void> {
-      await executeNodeDelete(kind, id, backend);
+    async delete(id: NodeId<N>, options?: NodeDeleteOptions): Promise<void> {
+      const expect = readNodeDeleteOptions(options, { kind, id });
+      await executeNodeDelete(kind, id, backend, expect);
     },
 
     async hardDelete(id: NodeId<N>): Promise<void> {

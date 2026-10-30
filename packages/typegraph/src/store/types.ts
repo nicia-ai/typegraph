@@ -232,6 +232,24 @@ export type NodeDeletePlan = Readonly<{
 }>;
 
 /**
+ * Options for `nodes.<Kind>.delete(id, options)`. See
+ * {@link NodeCollection.delete}.
+ */
+export type NodeDeleteOptions = Readonly<{
+  /**
+   * The plan `planDelete(id)` returned, which this delete must still match.
+   * The delete computes its own plan, under its own lock and inside its own
+   * transaction, and refuses with `NodeDeletePlanMismatchError` before any
+   * write when the two differ or when the node is no longer live.
+   *
+   * Required once options are passed: `planDelete` answers `undefined` for a
+   * node there is nothing to delete, and that answer is not an expectation.
+   * Omit the options for an unguarded delete.
+   */
+  expect: NodeDeletePlan;
+}>;
+
+/**
  * The edge that holds a part after an attachment write.
  *
  * Not a schema-typed {@link Edge}: the realizing kind is chosen at runtime
@@ -1485,8 +1503,34 @@ export type NodeCollection<
     }>[],
   ) => Promise<readonly NodeReparentResult<Via>[]>;
 
-  /** Delete a node (soft delete - sets deletedAt timestamp) */
-  delete: (id: NodeId<N>) => Promise<void>;
+  /**
+   * Delete a node (soft delete - sets deletedAt timestamp). A no-op for a
+   * node that is absent or already deleted.
+   *
+   * `options.expect` guards the delete with a plan from
+   * {@link NodeCollection.planDelete}, for a preview the caller confirms
+   * before deleting, possibly in a later request. The delete computes its own
+   * plan with the same planner, inside its transaction and under its own
+   * per-graph write lock, and compares the two: the same parts (each with
+   * its `whole` and `viaEdgeKind`, so a reparented part counts as changed)
+   * and the same `removedEdgeIds`, in any order. A difference refuses with
+   * `NodeDeletePlanMismatchError` (`situation: "changed"`, naming the parts
+   * and edge ids added to and dropped from the plan) before any node, edge,
+   * sidecar, history or revision write and before `onOperationEnd`; a node
+   * that is absent or already deleted refuses the same way
+   * (`situation: "notLive"`) instead of being a no-op. A guarded delete always
+   * takes the portable delete path, never a fused single-statement command.
+   *
+   * The guard covers the moment the delete plans. A write that takes no
+   * per-graph lock (an ordinary edge, a detach, a part's own delete) and
+   * commits between that plan and the delete's statements is not compared;
+   * SQLite admits no such write, and PostgreSQL `REPEATABLE READ` or
+   * `SERIALIZABLE` turns it into a serialization failure.
+   *
+   * An `options` object of the wrong shape, or one without a plan in
+   * `expect`, is refused with `ValidationError`.
+   */
+  delete: (id: NodeId<N>, options?: NodeDeleteOptions) => Promise<void>;
 
   /**
    * Permanently delete a node from the database.
@@ -1496,6 +1540,11 @@ export type NodeCollection<
    *
    * **Warning:** This operation is irreversible and should be used carefully.
    * Consider using soft delete (`delete()`) for most use cases.
+   *
+   * Takes no `expect` guard: {@link NodeCollection.planDelete} plans the soft
+   * delete, and a hard delete also purges a tombstoned node and the
+   * soft-deleted edge rows at each deleted node, which that plan does not
+   * name.
    *
    * @throws Error if edges are still connected to this node (delete edges first)
    */
@@ -1513,6 +1562,12 @@ export type NodeCollection<
    * `CompositionCycleError` for a cycle in the stored parts), so a preview is
    * read exactly like the delete it previews.
    *
+   * To act on a preview someone confirms later, possibly in another request,
+   * pass it back as `delete(id, { expect: plan })`: the delete refuses with
+   * `NodeDeletePlanMismatchError` before any write when its own plan differs
+   * (see {@link NodeCollection.delete}). No lock spans two requests; the
+   * guard is what makes that flow safe.
+   *
    * On a transaction's collections (`tx.nodes.<Kind>.planDelete`), the plan
    * is read under the same per-graph write lock the delete takes and holds it
    * until the transaction ends, so no concurrent attach or reparent can add a
@@ -1520,7 +1575,8 @@ export type NodeCollection<
    * no per-graph lock still can change the answer: a concurrent detach or
    * part delete drops that part from the later delete's cascade, and a
    * concurrent ordinary edge changes `removedEdgeIds` or a restrict verdict.
-   * On the store's collections the plan is an unlocked, best-effort read.
+   * Passing the plan as `expect` turns such a change into a refusal. On the
+   * store's collections the plan is an unlocked, best-effort read.
    *
    * Neither form writes a graph, sidecar, history or revision row. The
    * transactional form takes the lock the delete takes, which for a

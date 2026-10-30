@@ -252,7 +252,9 @@ are not what happens:
 
 - **Resurrecting a soft-deleted whole restores the whole alone.** Ownership
   of its parts ended when the cascade ran; the parts stay deleted. There is
-  no opt-in to cascade a resurrection back onto them.
+  no opt-in to cascade a resurrection back onto them. To make a delete
+  undoable, capture the parts it removes first; see
+  [Undoing a cascading delete](/ontology#undoing-a-cascading-delete).
 - **Ending a whole's validity window is still not a cascade.** Closing an
   `oneActive` composition edge's currency leaves the part node itself
   untouched — it is not deleted, and a later reattach of the SAME part to a

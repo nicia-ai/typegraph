@@ -1008,6 +1008,40 @@ The affected nodes stay undeletable through the ordinary delete path until
 one of the composition edges that closes the cycle is removed or reassigned
 by hand.
 
+### `NodeDeletePlanMismatchError`
+
+Thrown by `nodes.<Kind>.delete(id, { expect: plan })` when the plan the delete
+computes for itself no longer matches the `plan` from `planDelete(id)`, or
+when the node is absent or already deleted. It is raised before any write.
+The code is `NODE_DELETE_PLAN_MISMATCH` and the category is `"system"`:
+another writer changed what the caller decided on, and the remedy is a fresh
+preview rather than different input. See
+[Previewing a delete](/ontology#previewing-a-delete).
+
+| `details.situation` | Meaning |
+| --- | --- |
+| `"changed"` | The delete's plan differs from `expect` |
+| `"notLive"` | The node is absent or already deleted |
+
+On `"changed"`, `addedParts` and `addedEdgeIds` are in the delete's plan but
+not in `expect`, and `droppedParts` and `droppedEdgeIds` are in `expect` but
+no longer in the delete's plan. Parts compare by `(kind, id, whole,
+viaEdgeKind)`, so a part moved to another whole appears in both part lists.
+
+```typescript
+try {
+  await store.nodes.Podcast.delete(podcast.id, { expect: confirmedPlan });
+} catch (error) {
+  if (error instanceof NodeDeletePlanMismatchError) {
+    console.log(error.details);
+    // { kind: "Podcast", id: "<podcast-id>", situation: "changed",
+    //   addedParts: [{ kind: "Episode", id: "<new-episode>", whole: { kind: "Podcast", id: "<podcast-id>" }, viaEdgeKind: "episodeOf" }],
+    //   droppedParts: [], addedEdgeIds: ["<its episodeOf edge>"], droppedEdgeIds: [] }
+    // Preview again and ask the user to confirm the new plan.
+  }
+}
+```
+
 ## Configuration Errors
 
 ### `ConfigurationError`
