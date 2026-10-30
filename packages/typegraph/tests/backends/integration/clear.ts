@@ -24,12 +24,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   defineGraph,
   defineNode,
   DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   resolveGraphVectorSlots,
   searchable,
+  UnsupportedBackendCapabilityError,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../../src/backend/derive-backend";
 import type { StrategyTableContribution } from "../../../src/backend/table-contribution";
 import type {
   ContributionMaterializationIdentity,
@@ -115,6 +121,35 @@ function deploymentMarkerIdentity(
   contribution: StrategyTableContribution,
 ): ContributionMaterializationIdentity {
   return graphMarkerIdentity(DEPLOYMENT_CONTRIBUTION_GRAPH_ID, contribution);
+}
+
+const PRESERVING_CLEAR_MEMBER =
+  "clearGraphPreservingContributionMaterializations";
+
+/**
+ * The shape of a custom backend that implements `clearGraph` only: neither the
+ * backend nor the transactions it opens carry the preserving clear.
+ */
+function withoutPreservingClear(backend: GraphBackend): GraphBackend {
+  return deriveBackend(
+    projectBackendWithout(backend, [PRESERVING_CLEAR_MEMBER]),
+    {
+      transaction: (fn, options) =>
+        backend.transaction(
+          (tx) => fn(projectBackendWithout(tx, [PRESERVING_CLEAR_MEMBER])),
+          options,
+        ),
+    },
+  );
+}
+
+function seedArticle(store: IntegrationStore) {
+  return store.nodes.Article.create({
+    title: "Kept or cleared",
+    body: "A row the clear either removes or never reaches.",
+    category: "health",
+    published: true,
+  });
 }
 
 // Postgres returns COUNT(*) as a string/bigint, SQLite as a number, so the
@@ -318,6 +353,76 @@ export function registerClearIntegrationTests(
         limit: 10,
       });
       expect(hits.map((hit) => hit.node.id)).toContain(article.id);
+    });
+
+    describe("on a backend without the preserving clear", () => {
+      it("refuses a stated preserve and deletes nothing", async () => {
+        const store = context.getStore();
+        const read = requireDefined(
+          store.backend.getContributionMaterialization,
+          "backend must read contribution markers",
+        );
+        const markerIdentity = graphMarkerIdentity(
+          store.graphId,
+          fulltextContribution(store.backend),
+        );
+        const markerBefore = await read(markerIdentity);
+        expect(markerBefore).toBeDefined();
+        const article = await seedArticle(store);
+        const limited = createStore(
+          integrationTestGraph,
+          withoutPreservingClear(store.backend),
+        );
+
+        const refusal = await limited
+          .clear({ preserveContributionMaterializations: true })
+          .catch((error: unknown) => error);
+
+        console.log("stated-preserve refusal", refusal);
+        expect(refusal).toBeInstanceOf(UnsupportedBackendCapabilityError);
+        expect(
+          (refusal as UnsupportedBackendCapabilityError).details,
+        ).toMatchObject({ capability: PRESERVING_CLEAR_MEMBER });
+        await expect(read(markerIdentity)).resolves.toEqual(markerBefore);
+        await expect(
+          store.nodes.Article.getById(article.id),
+        ).resolves.toMatchObject({ id: article.id });
+        expect(await countFulltextRows(store, store.graphId)).toBe(1);
+      });
+
+      it.each([
+        ["an omitted option", undefined],
+        ["a stated false", { preserveContributionMaterializations: false }],
+      ] as const)(
+        "clears through clearGraph for %s",
+        async (_label, options) => {
+          const store = context.getStore();
+          const read = requireDefined(
+            store.backend.getContributionMaterialization,
+            "backend must read contribution markers",
+          );
+          const markerIdentity = graphMarkerIdentity(
+            store.graphId,
+            fulltextContribution(store.backend),
+          );
+          expect(await read(markerIdentity)).toBeDefined();
+          const article = await seedArticle(store);
+          const limited = createStore(
+            integrationTestGraph,
+            withoutPreservingClear(store.backend),
+          );
+
+          await limited.clear(options);
+
+          await expect(
+            store.nodes.Article.getById(article.id),
+          ).resolves.toBeUndefined();
+          expect(await countFulltextRows(store, store.graphId)).toBe(0);
+          // The bundled clearGraph removes graph-local markers, and this
+          // backend has no member that would keep them.
+          await expect(read(markerIdentity)).resolves.toBeUndefined();
+        },
+      );
     });
 
     it("removes graph-local contribution markers when explicitly requested", async () => {

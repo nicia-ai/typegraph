@@ -24,7 +24,10 @@ import {
   type GraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
-import { type OperationHookContext } from "../types";
+import {
+  type OperationHookContext,
+  type OperationOutcomeFacts,
+} from "../types";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import { type RowWorkKind, type WritePlan } from "./write-plan";
 import {
@@ -80,16 +83,22 @@ export type HookedWritePlanContext = WritePlanContext &
 export type WritePlanOptions<T> = Omit<
   WriteTransactionOptions<T>,
   "fencesConstraintProbe"
->;
+> &
+  Readonly<{
+    /**
+     * What this operation learned while it ran, folded onto the context
+     * `onOperationEnd` receives ({@link OperationOutcomeFacts}). Read from
+     * the row work's own result, so a fact the write did not produce cannot
+     * be reported: the node delete's composition `cascadedParts` is the one
+     * caller today. Hook-only — {@link planTransactionOptions} strips it
+     * before the transaction layer, which has no notion of hooks.
+     */
+    operationFacts?: (result: T) => OperationOutcomeFacts | undefined;
+  }>;
 
 /** Classifies a successful command whose contract guarantees a mutation. */
 export function writeResultAlwaysChanges(): boolean {
   return true;
-}
-
-/** Classifies a command that returns its authoritative mutation verdict. */
-export function booleanWriteResultChanges(result: boolean): boolean {
-  return result;
 }
 
 /**
@@ -211,18 +220,20 @@ function planTransactionOptions<K extends RowWorkKind, T>(
   plan: WritePlan<K>,
   options: WritePlanOptions<T> | undefined,
 ): WriteTransactionOptions<T> {
-  return { ...options, fencesConstraintProbe: plan.constraintProbe };
+  const { operationFacts: _operationFacts, ...transactionOptions } =
+    options ?? {};
+  return { ...transactionOptions, fencesConstraintProbe: plan.constraintProbe };
 }
 
 /**
  * Runs one managed write under its plan.
  *
- * Retrying under the `"optimistic-retry"` tier is `runInWriteTransaction`'s
- * own concern (`write-transaction.ts`), not re-spelled here: that function
- * wraps its whole attempt — opening the transaction, taking the locks, and
- * calling `rowWork` — in `runRetriedUnit` whenever `backend`'s tier requires
- * it, so a retried attempt re-enters this call from the top with brand-new
- * everything.
+ * Retrying is `runInWriteTransaction`'s own concern (`write-transaction.ts`),
+ * not re-spelled here: that function wraps its whole attempt — opening the
+ * transaction, taking the locks, and calling `rowWork` — in `runRetriedUnit`
+ * whenever `backend`'s tier is `"optimistic-retry"` or the store owns a unit
+ * its keyed fence can refuse for a stale snapshot, so a retried attempt
+ * re-enters this call from the top with brand-new everything.
  */
 export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
@@ -262,6 +273,7 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
     backend,
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
+    options?.operationFacts,
   );
 }
 

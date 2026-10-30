@@ -1,7 +1,12 @@
 import type { EdgeRow } from "../backend/types";
 import type { GraphData } from "../interchange";
 import { validateImportProperties } from "../interchange/import";
-import { EDGE_CARDINALITY_SPECS } from "../store/claims/edge-claims";
+import { acyclicEdgeRelations } from "../store/acyclicity";
+import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalitySpec,
+} from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import {
   type CandidateIdentityScope,
@@ -10,6 +15,8 @@ import {
 import type { CandidateWriteSet } from "./candidate-write-set";
 import { parseRowProps } from "./canonical-props";
 import { CandidateWriteSetError } from "./errors";
+import { captureMergePlanTargetFence } from "./merge";
+import type { MergePlanTargetFence } from "./plan-schema";
 import type {
   GraphBackend,
   GraphDef,
@@ -35,90 +42,223 @@ import { graphWithoutNodeUniqueness } from "./working-copy";
 type EntityReference = Readonly<{ kind: string; id: string }>;
 
 /**
+ * Why candidate planning stages the whole target instead of the candidate's
+ * own rows. Each scope produces a correct plan; the reason names the cost.
+ */
+export type CandidatePlanningScopeReason =
+  | "composition"
+  | "acyclic-relation"
+  | "target-side-cardinality"
+  | "missing-active-source-read"
+  | "missing-match-identity-read"
+  | "missing-scoped-identity-reads"
+  | "match-identity-owner-not-clone-visible"
+  | "planned-evolution";
+
+/** The rows candidate planning stages, and why when it is not the candidate's own. */
+export type CandidatePlanningScope =
+  Readonly<{ scope: "candidate" }> | WholeTargetPlanningScope;
+
+/** {@link CandidatePlanningScope}'s whole-target decision. */
+export type WholeTargetPlanningScope = Readonly<{
+  scope: "whole-target";
+  reason: CandidatePlanningScopeReason;
+}>;
+
+const CANDIDATE_SCOPE = Object.freeze({ scope: "candidate" } as const);
+
+export function wholeTargetPlanningScope(
+  reason: CandidatePlanningScopeReason,
+): WholeTargetPlanningScope {
+  return { scope: "whole-target", reason };
+}
+
+/**
+ * The scope a target admits before any candidate is read: the one owner of
+ * candidate-planning eligibility. Callers have already established that the
+ * target can carry a public merge plan (revision tracking included).
+ *
  * Cardinality peers use the exact claim key and holder liveness. `oneActive`
  * needs the optional active-only source read so ended history cannot make a
  * candidate lookup grow with the graph. Durable match identity requires an
  * exact keyed owner read. Ontology disjointness uses live same-id siblings.
+ *
+ * A target-side cardinality, an acyclic relation and composition (which is
+ * both a one-whole claim and an acyclic relation) each constrain rows the
+ * sparse base never reads: the holders at an edge's target endpoint, and the
+ * paths between its endpoints. A graph declaring any of them plans against
+ * the whole target instead.
  */
-export function canUseSparseCandidatePlanning<G extends GraphDef>(
+export function candidatePlanningScope<G extends GraphDef>(
   target: Store<G>,
-): boolean {
-  const hasActiveSourceRead =
-    storeBackend(target).findActiveEdgesBySourceV1 !== undefined;
-  return (
-    target.revisionTrackingEnabled &&
-    (target.graph.identity === undefined ||
-      hasScopedIdentityReads(storeRuntime(target))) &&
-    Object.values(target.graph.edges).every(
-      (edge) =>
-        (edge.cardinality !== "oneActive" || hasActiveSourceRead) &&
-        (edge.matchIdentity === undefined ||
-          storeBackend(target).findEdgesByMatchIdentity !== undefined),
+): CandidatePlanningScope {
+  const acyclicRelations = acyclicEdgeRelations(target.graph, target.registry);
+  if (
+    acyclicRelations.some(
+      (relation) => relation.name === COMPOSITION_RELATION_NAME,
     )
-  );
+  )
+    return wholeTargetPlanningScope("composition");
+  if (acyclicRelations.length > 0)
+    return wholeTargetPlanningScope("acyclic-relation");
+  const edges = Object.values(target.graph.edges);
+  if (
+    edges.some((edge) =>
+      edgeCardinalityAxisReferences(edge).some(
+        (axis) => axis.direction === "target",
+      ),
+    )
+  )
+    return wholeTargetPlanningScope("target-side-cardinality");
+  const backend = storeBackend(target);
+  if (
+    backend.findActiveEdgesBySourceV1 === undefined &&
+    edges.some((edge) => edge.cardinality === "oneActive")
+  )
+    return wholeTargetPlanningScope("missing-active-source-read");
+  if (
+    backend.findEdgesByMatchIdentity === undefined &&
+    edges.some((edge) => edge.matchIdentity !== undefined)
+  )
+    return wholeTargetPlanningScope("missing-match-identity-read");
+  if (
+    target.graph.identity !== undefined &&
+    !hasScopedIdentityReads(storeRuntime(target))
+  )
+    return wholeTargetPlanningScope("missing-scoped-identity-reads");
+  return CANDIDATE_SCOPE;
 }
 
 /**
- * Reads only the durable owners named by candidate edges. `undefined` means
- * the exact lookup cannot be performed safely (for example, a custom backend
- * omits the optional capability or a candidate key cannot be derived).
+ * The durable match-identity owners named by candidate edges. `malformed`
+ * lists the edges whose owner key cannot be derived (an unknown kind, invalid
+ * properties, or an identity value that cannot be stored); `owners` still
+ * covers every edge whose key can be. Import refuses each malformed edge
+ * itself, so staging such a candidate reports its own validation error.
+ */
+export type CandidateMatchIdentityOwnerRead =
+  | Readonly<{ status: "complete"; owners: readonly EdgeRow[] }>
+  | Readonly<{
+      status: "malformed";
+      owners: readonly EdgeRow[];
+      malformed: readonly EntityReference[];
+    }>;
+
+/**
+ * The decided scope. A candidate scope carries what seeds its sparse base: the
+ * durable match-identity owners its edges name, read under `fence`.
+ */
+export type CandidatePlanningScopeResolution =
+  | Readonly<{
+      planningScope: typeof CANDIDATE_SCOPE;
+      fence: MergePlanTargetFence;
+      ownerRead: CandidateMatchIdentityOwnerRead;
+    }>
+  | Readonly<{
+      planningScope: WholeTargetPlanningScope;
+    }>;
+
+/**
+ * {@link candidatePlanningScope} refined by the candidate itself. The owner
+ * query controls whether sparse import sees an existing edge, so it is bound
+ * to one target revision with the sparse seed; an owner excluded from the
+ * clone projection plans against the whole target.
+ */
+export async function resolveCandidatePlanningScope<G extends GraphDef>(
+  target: Store<G>,
+  writeSet: CandidateWriteSet,
+): Promise<CandidatePlanningScopeResolution> {
+  const planningScope = candidatePlanningScope(target);
+  if (planningScope.scope === "whole-target") return { planningScope };
+  const fence = await captureMergePlanTargetFence(target);
+  const ownerRead = await readCandidateMatchIdentityOwners(target, writeSet);
+  if (!matchIdentityOwnersAreCloneVisible(ownerRead.owners))
+    return {
+      planningScope: wholeTargetPlanningScope(
+        "match-identity-owner-not-clone-visible",
+      ),
+    };
+  return { planningScope, fence, ownerRead };
+}
+
+/**
+ * Reads only the durable owners named by candidate edges. Requires the keyed
+ * owner read whenever a candidate edge declares a match identity, which
+ * {@link candidatePlanningScope} establishes before this runs.
  */
 export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
   target: Store<G>,
   writeSet: CandidateWriteSet,
-): Promise<readonly EdgeRow[] | undefined> {
-  const backend = storeBackend(target);
-  const readOwners = backend.findEdgesByMatchIdentity;
-  if (readOwners === undefined) {
-    return (
-        Object.values(target.graph.edges).some(
-          (edge) => edge.matchIdentity !== undefined,
-        )
-      ) ?
-        undefined
-      : [];
-  }
+): Promise<CandidateMatchIdentityOwnerRead> {
   const identities = new Map<
     string,
     Readonly<{ kind: string; name: string; key: string }>
   >();
-  try {
-    for (const edge of writeSet.edges) {
-      const registration = target.graph.edges[edge.kind];
-      if (registration === undefined) return undefined;
-      const validatedProperties = validateImportProperties(
-        edge.properties,
-        registration.type.schema,
-        "allow",
-      );
-      if (!validatedProperties.success) return undefined;
-      const identity = resolveEdgeMatchIdentityStorage(
-        registration.matchIdentity,
-        {
-          fromKind: edge.from.kind,
-          fromId: edge.from.id,
-          toKind: edge.to.kind,
-          toId: edge.to.id,
-          props: validatedProperties.data,
-        },
-        { graphId: target.graphId, edgeKind: edge.kind },
-      );
-      if (identity === undefined) continue;
-      identities.set(JSON.stringify([edge.kind, identity.name, identity.key]), {
-        kind: edge.kind,
-        name: identity.name,
-        key: identity.key,
-      });
+  const malformed: EntityReference[] = [];
+  for (const edge of writeSet.edges) {
+    const identity = candidateEdgeMatchIdentity(target, edge);
+    if (identity === "malformed") {
+      malformed.push({ kind: edge.kind, id: edge.id });
+      continue;
     }
-  } catch {
-    // Let the full-clone/import path own malformed candidate validation.
-    return undefined;
+    if (identity === undefined) continue;
+    identities.set(JSON.stringify([edge.kind, identity.name, identity.key]), {
+      kind: edge.kind,
+      name: identity.name,
+      key: identity.key,
+    });
   }
-  if (identities.size === 0) return [];
-  return readOwners({
-    graphId: target.graphId,
-    identities: [...identities.values()],
-  });
+  const owners = await readMatchIdentityOwners(target, [
+    ...identities.values(),
+  ]);
+  return malformed.length === 0 ?
+      { status: "complete", owners }
+    : { status: "malformed", owners, malformed };
+}
+
+/** The durable owner key one candidate edge names, as import would derive it. */
+function candidateEdgeMatchIdentity<G extends GraphDef>(
+  target: Store<G>,
+  edge: CandidateWriteSet["edges"][number],
+): Readonly<{ name: string; key: string }> | "malformed" | undefined {
+  const registration = target.graph.edges[edge.kind];
+  if (registration === undefined) return "malformed";
+  if (registration.matchIdentity === undefined) return undefined;
+  const validatedProperties = validateImportProperties(
+    edge.properties,
+    registration.type.schema,
+    "allow",
+  );
+  if (!validatedProperties.success) return "malformed";
+  try {
+    return resolveEdgeMatchIdentityStorage(
+      registration.matchIdentity,
+      {
+        fromKind: edge.from.kind,
+        fromId: edge.from.id,
+        toKind: edge.to.kind,
+        toId: edge.to.id,
+        props: validatedProperties.data,
+      },
+      { graphId: target.graphId, edgeKind: edge.kind },
+    );
+  } catch {
+    return "malformed";
+  }
+}
+
+async function readMatchIdentityOwners<G extends GraphDef>(
+  target: Store<G>,
+  identities: readonly Readonly<{ kind: string; name: string; key: string }>[],
+): Promise<readonly EdgeRow[]> {
+  if (identities.length === 0) return [];
+  const readOwners = storeBackend(target).findEdgesByMatchIdentity;
+  if (readOwners === undefined) {
+    throw new CandidateWriteSetError(
+      "Candidate planning requires the keyed durable match-identity owner read.",
+    );
+  }
+  return readOwners({ graphId: target.graphId, identities });
 }
 
 /** Whether every returned owner is included in the default clone projection. */
@@ -189,7 +329,7 @@ async function sparseBaseDocument<G extends GraphDef>(
   for (const edge of writeSet.edges) {
     const cardinality = target.graph.edges[edge.kind]?.cardinality ?? "many";
     if (cardinality === "many") continue;
-    const spec = EDGE_CARDINALITY_SPECS[cardinality];
+    const spec = edgeCardinalitySpec({ direction: "source", cardinality });
     if (spec.holderLiveness === "liveAndActive") {
       addActiveRead(edge.kind, edge.from.kind, edge.from.id);
       continue;

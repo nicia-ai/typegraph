@@ -6,7 +6,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { ValidationError } from "../../../src/errors";
+import { KindNotFoundError, ValidationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import { collectAllEdges } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
@@ -516,6 +516,52 @@ export function registerSubgraphIntegrationTests(
       expect(results[3]?.root).toBeUndefined();
       expect(results[3]?.nodes.size).toBe(0);
       expect(results[3]?.adjacency.size).toBe(0);
+    });
+
+    it("refuses an unregistered edge or node kind on every subgraph surface", async () => {
+      const store = context.getStore();
+      const root = ids.aliceId as never;
+      const unknownEdge = { edges: ["knowz"] } as never;
+      const unknownNode = {
+        edges: ["knows"],
+        includeKinds: ["Persn"],
+      } as never;
+      const surfaces: Record<string, (options: never) => Promise<unknown>> = {
+        "store.subgraph": (options) => store.subgraph(root, options),
+        "tx.subgraph": (options) =>
+          store.transaction((tx) => tx.subgraph(root, options)),
+        "batchOnce.subgraph": (options) =>
+          store.batchOnce((read) => [read.subgraph(root, options)] as const),
+        "view.subgraph": (options) =>
+          store.view({ mode: "current" }).subgraph(root, options),
+      };
+
+      const refusals: Record<string, unknown> = {};
+      for (const [surface, read] of Object.entries(surfaces)) {
+        for (const [label, options] of [
+          ["edges", unknownEdge],
+          ["includeKinds", unknownNode],
+        ] as const) {
+          refusals[`${surface} ${label}`] = await Promise.resolve()
+            .then(() => read(options))
+            .then(
+              () => "answered",
+              (error: unknown) =>
+                error instanceof KindNotFoundError ?
+                  `${error.entity}:${error.kindName}`
+                : error,
+            );
+        }
+      }
+
+      expect(refusals).toEqual(
+        Object.fromEntries(
+          Object.keys(surfaces).flatMap((surface) => [
+            [`${surface} edges`, "edge:knowz"],
+            [`${surface} includeKinds`, "node:Persn"],
+          ]),
+        ),
+      );
     });
   });
 }

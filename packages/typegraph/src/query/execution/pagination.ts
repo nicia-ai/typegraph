@@ -156,6 +156,116 @@ export function buildCursorPredicate(
   };
 }
 
+/** The parts of a query a cursor is applied to. */
+type CursorFilterTarget = Readonly<{
+  startAlias: string;
+  /**
+   * Whether the cursor is a property of the completed match row rather than
+   * of the start node alone — see {@link applyCursorFilters}.
+   */
+  positionsCompletedMatch: boolean;
+  predicates: readonly NodePredicate[];
+  resultPredicate?: PredicateExpression | undefined;
+}>;
+
+/** A query's filters with one page's cursor applied. */
+type CursorFilters = Readonly<{
+  predicates: readonly NodePredicate[];
+  resultPredicate: PredicateExpression | undefined;
+}>;
+
+/**
+ * Applies a cursor to a query: WHERE the keyset position is tested.
+ *
+ * A node predicate is compiled against its target alias alone, so it can
+ * only carry a cursor whose every key reads that alias — the start alias of a
+ * query with no traversal. Once a traversal is present the keyset names
+ * traversal aliases too (the caller's own order keys, and the row-identity
+ * tiebreaker), and the position is a property of the COMPLETED match row. It
+ * is then applied as the completed-match predicate, which resolves every
+ * alias, ANDed with any `where()` the caller stated.
+ *
+ * For a traversal query the leading keys that read the start alias are also
+ * pushed into the start alias's own filter, non-strictly ("at or after the
+ * cursor's start row"): every row strictly after the cursor satisfies it, and
+ * it keeps a page from re-reading every start row before the cursor.
+ */
+export function applyCursorFilters(
+  target: CursorFilterTarget,
+  cursorData: CursorData,
+  orderBy: readonly OrderSpec[],
+  direction: "forward" | "backward",
+): CursorFilters {
+  const position = buildCursorPredicate(
+    cursorData,
+    orderBy,
+    direction,
+    target.startAlias,
+  );
+  if (!target.positionsCompletedMatch) {
+    return {
+      predicates: [...target.predicates, position],
+      resultPredicate: target.resultPredicate,
+    };
+  }
+  const startPrefix = buildStartPrefixPredicate(
+    cursorData,
+    orderBy,
+    direction,
+    target.startAlias,
+  );
+  return {
+    predicates:
+      startPrefix === undefined ?
+        target.predicates
+      : [...target.predicates, startPrefix],
+    resultPredicate:
+      target.resultPredicate === undefined ?
+        position.expression
+      : {
+          __type: "and",
+          predicates: [target.resultPredicate, position.expression],
+        },
+  };
+}
+
+/**
+ * "At or after the cursor" over the leading order keys that read the start
+ * alias: strictly after on that prefix, or equal on all of it. `undefined`
+ * when the first key reads another alias, which leaves nothing to push down.
+ */
+function buildStartPrefixPredicate(
+  cursorData: CursorData,
+  orderBy: readonly OrderSpec[],
+  direction: "forward" | "backward",
+  startAlias: string,
+): NodePredicate | undefined {
+  const firstOtherAlias = orderBy.findIndex(
+    (spec) => requireCursorField(spec.field).alias !== startAlias,
+  );
+  const prefixLength =
+    firstOtherAlias === -1 ? orderBy.length : firstOtherAlias;
+  if (prefixLength === 0) return undefined;
+  const prefixOrderBy = orderBy.slice(0, prefixLength);
+  const prefixValues = cursorData.vals.slice(0, prefixLength);
+  const strictlyAfter = buildCursorPredicate(
+    { ...cursorData, vals: prefixValues },
+    prefixOrderBy,
+    direction,
+    startAlias,
+  ).expression;
+  const equalities = prefixOrderBy.map((spec, index) =>
+    buildEqualityPredicate(requireCursorField(spec.field), prefixValues[index]),
+  );
+  return {
+    targetAlias: startAlias,
+    expression: {
+      __type: "or",
+      predicates: [strictlyAfter, { __type: "and", predicates: equalities }],
+    },
+  };
+}
+
 /** Uses row values only when SQL NULL semantics cannot change the ordering. */
 function buildTupleComparisonPredicate(
   values: readonly unknown[],

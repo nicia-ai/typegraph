@@ -19,8 +19,14 @@ import {
   ExportStreamCancelledError,
   ExportStreamIdleTimeoutError,
 } from "../errors";
+import {
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
+} from "../identity/transition-log";
+import { activeOnlyAxisReferences } from "../store/claims/edge-claims";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { compareStrings } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { serializedStreamRefusal } from "./import";
@@ -35,6 +41,7 @@ import {
   type GraphInterchangeChunk,
   type InterchangeEdge,
   type InterchangeIdentityAssertion,
+  type InterchangeIdentityTransition,
   type InterchangeNode,
 } from "./types";
 
@@ -67,6 +74,7 @@ export async function exportGraph<G extends GraphDef>(
   const nodes: InterchangeNode[] = [];
   const edges: InterchangeEdge[] = [];
   const identityAssertions: InterchangeIdentityAssertion[] = [];
+  const identityTransitions: InterchangeIdentityTransition[] = [];
   let header: GraphDataHeader | undefined;
   for await (const chunk of exportGraphStream(store, options)) {
     switch (chunk.type) {
@@ -86,6 +94,10 @@ export async function exportGraph<G extends GraphDef>(
         identityAssertions.push(...chunk.assertions);
         break;
       }
+      case "identity-transitions": {
+        identityTransitions.push(...chunk.transitions);
+        break;
+      }
     }
   }
   if (header === undefined) {
@@ -96,10 +108,24 @@ export async function exportGraph<G extends GraphDef>(
     ...headerWithoutIdentity,
     nodes,
     edges,
+    // Rebuilt field-by-field rather than spread: the header's `identity`
+    // also carries `hasTransitions`, a streaming-only announcement with no
+    // place in the full envelope — the real `transitions` array right below
+    // already says everything it would.
     ...(identity === undefined ?
       {}
     : {
-        identity: { ...identity, assertions: identityAssertions },
+        identity: {
+          profile: identity.profile,
+          mode: identity.mode,
+          ...(identity.retention === undefined ?
+            {}
+          : { retention: identity.retention }),
+          assertions: identityAssertions,
+          ...(identity.mode === "archival" ?
+            { transitions: identityTransitions }
+          : {}),
+        },
       }),
   };
 }
@@ -172,24 +198,32 @@ export function exportGraphStream<G extends GraphDef>(
   );
 }
 
-async function* exportGraphStreamFromBackend<G extends GraphDef>(
-  store: Store<G>,
-  backend: GraphBackend,
-  options?: ExportStreamOptionsInput,
-): AsyncIterable<GraphInterchangeChunk> {
-  const parsed = ExportStreamOptionsSchema.parse(options ?? {});
-  // Identity rows carry their effective-time windows unconditionally. Their
-  // endpoint rows must therefore carry temporal bounds too, or the store's own
-  // export could not prove on re-import that each endpoint existed throughout
-  // an assertion's window.
-  const exportsIdentity = store.graph.identity !== undefined;
-  const explicitlyDisabledTemporalFields = options?.includeTemporal === false;
-  if (exportsIdentity && explicitlyDisabledTemporalFields) {
-    throw new ConfigurationError(
+/**
+ * Why this graph's export must carry temporal fields, as the refusal an
+ * explicit `includeTemporal: false` earns — or `undefined` when the caller's
+ * choice stands. A graph that requires them exports them by default.
+ *
+ * - Identity rows carry their effective-time windows unconditionally. Their
+ *   endpoint rows must therefore carry temporal bounds too, or the store's
+ *   own export could not prove on re-import that each endpoint existed
+ *   throughout an assertion's window.
+ * - An active-only cardinality axis (`cardinality` or `targetCardinality`
+ *   `"oneActive"` — which is also how a `oneActive` composition pair's
+ *   population is declared) counts a row only while its window is open. An
+ *   ended row exported without its `validTo` would re-import as current:
+ *   a reparented part attached to its former whole again, or a second
+ *   active edge refused against the first.
+ */
+function requiredTemporalFieldsRefusal(
+  graph: GraphDef,
+  identityMode: string,
+): ConfigurationError | undefined {
+  if (graph.identity !== undefined) {
+    return new ConfigurationError(
       "Identity export requires temporal endpoint fields.",
       {
         code: "IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
-        identityMode: parsed.identityMode,
+        identityMode,
         includeTemporal: false,
       },
       {
@@ -198,8 +232,46 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       },
     );
   }
+  const activeOnlyEdgeKinds = Object.entries(graph.edges)
+    .filter(
+      ([, registration]) => activeOnlyAxisReferences(registration).length > 0,
+    )
+    .map(([edgeKind]) => edgeKind)
+    .toSorted(compareStrings);
+  if (activeOnlyEdgeKinds.length === 0) return undefined;
+  return new ConfigurationError(
+    "Export of a graph with an active-only edge cardinality requires temporal fields.",
+    {
+      code: "ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+      edgeKinds: activeOnlyEdgeKinds,
+      includeTemporal: false,
+    },
+    {
+      suggestion: `Remove includeTemporal or set it to true: ${activeOnlyEdgeKinds.map((edgeKind) => `"${edgeKind}"`).join(", ")} count a row only while its window is open, so an ended row exported without its validTo would re-import as current.`,
+    },
+  );
+}
+
+async function* exportGraphStreamFromBackend<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend,
+  options?: ExportStreamOptionsInput,
+): AsyncIterable<GraphInterchangeChunk> {
+  const parsed = ExportStreamOptionsSchema.parse(options ?? {});
+  const temporalFieldsRequirement = requiredTemporalFieldsRefusal(
+    store.graph,
+    parsed.identityMode,
+  );
+  if (
+    temporalFieldsRequirement !== undefined &&
+    options?.includeTemporal === false
+  ) {
+    throw temporalFieldsRequirement;
+  }
   const resolved =
-    exportsIdentity ? { ...parsed, includeTemporal: true } : parsed;
+    temporalFieldsRequirement === undefined ? parsed : (
+      { ...parsed, includeTemporal: true }
+    );
   const signal = resolved.signal;
   const idleTimeoutMs = resolved.idleTimeoutMs;
   const channel = createRendezvousChannel<GraphInterchangeChunk>();
@@ -465,6 +537,23 @@ function claimSnapshotExportLeaseOrRefuse(
   return lease.release;
 }
 
+/**
+ * Whether `store`'s archival transitions section will carry at least one
+ * row — a cheap existence probe (never the full page), read for the
+ * streaming header's `hasTransitions` announcement (see
+ * `produceExportChunks`'s call site).
+ */
+async function graphHasIdentityTransitions<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend | TransactionBackend,
+): Promise<boolean> {
+  const probe = await storeRuntime(store).readIdentityTransitionPageAtTarget(
+    backend,
+    { limit: 1 },
+  );
+  return probe.transitions.length > 0;
+}
+
 async function produceExportChunks<G extends GraphDef>(
   store: Store<G>,
   backend: GraphBackend | TransactionBackend,
@@ -475,6 +564,36 @@ async function produceExportChunks<G extends GraphDef>(
   const nodeKinds = options.nodeKinds ?? getNodeKinds(store.graph);
   const edgeKinds = options.edgeKinds ?? getEdgeKinds(store.graph);
   const schemaVersion = await backend.getActiveSchema(graphId);
+  const archivalIdentityEnabled =
+    store.graph.identity !== undefined && options.identityMode === "archival";
+  // The source graph's own retention watermark, so a reader of the raw
+  // payload knows the transitions section excludes anything the source had
+  // already pruned. Read from the same snapshot the rest of the export reads
+  // from, before the header is emitted, so a transactional export's header
+  // is consistent with everything that follows it. Omitted entirely when
+  // nothing has EVER been pruned (`prunedBeforeRevision === 0`):
+  // `identityTransitionRetentionAtTarget`'s "nothing pruned" default stamps a
+  // fresh `prunedAt` on every read (it names no real prune event), which
+  // would otherwise make two archival exports of an unchanged graph compare
+  // unequal on that field alone.
+  const rawRetention =
+    archivalIdentityEnabled ?
+      await storeRuntime(store).identityTransitionRetentionAtTarget(backend)
+    : undefined;
+  const retention =
+    rawRetention === undefined || rawRetention.prunedBeforeRevision === 0 ?
+      undefined
+    : rawRetention;
+  // Read for the SAME reason as `retention` above: a streaming importer's
+  // header handler is the only place it can refuse an archival-transitions
+  // restore into a `history: false` target BEFORE any node or edge write —
+  // the "identity-transitions" chunk itself always arrives last. A cheap
+  // existence probe (never the full page) answers that from the same
+  // snapshot the header's other fields come from.
+  const hasTransitions =
+    archivalIdentityEnabled ?
+      await graphHasIdentityTransitions(store, backend)
+    : false;
 
   await emit({
     type: "header",
@@ -492,6 +611,8 @@ async function produceExportChunks<G extends GraphDef>(
           identity: {
             profile: "typegraph-identity-v1" as const,
             mode: options.identityMode,
+            ...(retention === undefined ? {} : { retention }),
+            ...(hasTransitions ? { hasTransitions: true } : {}),
           },
         }),
     },
@@ -533,6 +654,91 @@ async function produceExportChunks<G extends GraphDef>(
     );
     if (page.assertions.length > 0) {
       await emit({ type: "identity", assertions: [...page.assertions] });
+    }
+    if (page.done) break;
+    after = requireDefined(page.nextAfter);
+  }
+  // Explanation, not truth: `archival` mode alone carries transitions —
+  // `state` mode carries current truth only, and neither branch cloning nor a
+  // fresh graph's own history should carry explanation for events it never
+  // lived through.
+  //
+  // Deliberately NOT scoped by `options.nodeKinds`, unlike the assertions
+  // page above: `readIdentityTransitionPageForInterchange` walks the whole
+  // log every archival export, so a `nodeKinds`-filtered archival export
+  // still carries transitions naming excluded kinds. Restoring such an
+  // export into a target that never receives those kinds' nodes inserts
+  // transitions whose class refs the target's shape-only restore validation
+  // does not check for referential presence (identity.md, "Archival
+  // transitions and the retention watermark").
+  if (options.identityMode === "archival") {
+    await produceIdentityTransitionChunks(
+      store,
+      backend,
+      emit,
+      options.batchSize,
+    );
+  }
+}
+
+/**
+ * Widens the internal transfer shape's `readonly` array fields
+ * (`assertionIds`, `decision.branchAncestry`) to the mutable arrays the wire
+ * schema's `z.array(...)` fields infer — a structural, value-preserving copy,
+ * never a semantic transform.
+ */
+function wireTransition(
+  transition: IdentityTransitionTransfer,
+): InterchangeIdentityTransition {
+  const { decision, ...rest } = transition;
+  const { branchAncestry, ...decisionRest } = decision ?? {};
+  return {
+    ...rest,
+    assertionIds: [...transition.assertionIds],
+    ...(decision === undefined ?
+      {}
+    : {
+        decision: {
+          ...decisionRest,
+          ...(branchAncestry === undefined ?
+            {}
+          : { branchAncestry: [...branchAncestry] }),
+        },
+      }),
+  };
+}
+
+async function produceIdentityTransitionChunks<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend | TransactionBackend,
+  emit: (chunk: GraphInterchangeChunk) => Promise<void>,
+  batchSize: number,
+): Promise<void> {
+  let after: IdentityTransitionCursor | undefined;
+  // At least one "identity-transitions" chunk is ALWAYS emitted, even when
+  // the graph has zero retained transitions (a fully-pruned source) — this is
+  // what lets the streaming importer set `identity.transitions` (possibly to
+  // `[]`) at all, so a carried retention watermark still reaches the restore
+  // path. `exportGraph`'s accumulator gets this for free (it always assigns
+  // `transitions: identityTransitions` for archival mode); the stream must
+  // emit the chunk itself to give an incremental consumer the same signal.
+  let emittedAny = false;
+  for (;;) {
+    const page = await storeRuntime(store).readIdentityTransitionPageAtTarget(
+      backend,
+      {
+        ...(after === undefined ? {} : { after }),
+        limit: batchSize,
+      },
+    );
+    if (page.transitions.length > 0 || !emittedAny) {
+      await emit({
+        type: "identity-transitions",
+        transitions: page.transitions.map((transition) =>
+          wireTransition(transition),
+        ),
+      });
+      emittedAny = true;
     }
     if (page.done) return;
     after = requireDefined(page.nextAfter);

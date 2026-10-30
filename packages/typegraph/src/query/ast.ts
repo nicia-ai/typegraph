@@ -10,6 +10,7 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
+import { type AliasExpansionAxis } from "./builder/alias-expansion";
 import { type DatabaseExpression } from "./expressions";
 import { type JsonPointer } from "./json-pointer";
 
@@ -398,8 +399,15 @@ export type PredicateExpression =
  */
 type QueryStart = Readonly<{
   alias: string;
-  kinds: readonly string[]; // Expanded via ontology if includeSubClasses
-  includeSubClasses: boolean;
+  kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
+  /**
+   * Which expansion axis produced `kinds` — see
+   * `src/query/builder/alias-expansion.ts`. Diagnostic only: error details and
+   * suggestions report it, but no compilation or execution decision may read
+   * it. `kinds` is the resolved decision; a later recursive stage re-roots on a
+   * traversal alias and labels it `"exact"` whatever axis resolved that alias.
+   */
+  expansion: AliasExpansionAxis;
 }>;
 
 // ============================================================
@@ -434,6 +442,12 @@ export type VariableLengthSpec = Readonly<{
   minDepth: number;
   /** Maximum number of hops (-1 = unlimited, default: -1) */
   maxDepth: number;
+  /**
+   * Walk to the end of every path with no hop ceiling: termination rests on
+   * cycle prevention, so it requires `cyclePolicy: "prevent"`, and it is
+   * mutually exclusive with a stated `maxDepth` (leave it at -1).
+   */
+  exhaustive?: boolean;
   /**
    * Cycle handling mode.
    *

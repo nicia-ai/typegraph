@@ -1,7 +1,8 @@
 /**
- * The four schema-commit members every SQL engine profile exposes:
+ * The five schema-commit members every SQL engine profile exposes:
  * `commitSchemaVersion`, `commitSchemaVersionIfKindsEmpty`,
- * `commitSchemaVersionWithPreflight`, and `setActiveVersion`. All four are a
+ * `commitSchemaVersionWithPreflight`, `setActiveVersion`, and
+ * `setActiveVersionWithPreflight`. All five are a
  * full mirror — same body, same delegation — because every dialect
  * difference already lives one layer down, inside the write-fence-holding
  * transaction runner this group calls through `runSchemaWriteTransaction`
@@ -70,12 +71,17 @@ export type SchemaVersionMembers = Readonly<{
     preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
   setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
+  setActiveVersionWithPreflight: (
+    params: SetActiveVersionParams,
+    preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
+  ) => Promise<void>;
 }>;
 
 /**
  * Builds the schema-commit member group. Moved out of the two dialect files
  * unchanged: same fenced commit, same populated-kind guard, same
- * preflight-then-commit sequencing, same fenced `setActiveVersion`.
+ * preflight-then-commit sequencing, same fenced `setActiveVersion`, whose
+ * preflight form sequences its flip exactly as a commit does.
  */
 export function createSchemaVersionMembers(
   deps: CreateSchemaVersionMembersDeps,
@@ -114,6 +120,16 @@ export function createSchemaVersionMembers(
       await runSchemaWriteTransaction(params.graphId, (target) =>
         target.setActiveVersion(params),
       );
+    },
+
+    async setActiveVersionWithPreflight(
+      params: SetActiveVersionParams,
+      preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
+    ): Promise<void> {
+      await runSchemaWriteTransaction(params.graphId, async (target) => {
+        await preflight(target);
+        await target.setActiveVersion(params);
+      });
     },
   };
 }

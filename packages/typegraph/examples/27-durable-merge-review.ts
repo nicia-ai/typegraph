@@ -174,11 +174,15 @@ export async function main(): Promise<void> {
         db,
         async (tx) => {
           // Apply first: the plan fence must be checked before any other write
-          // to this target graph in the caller-owned transaction.
+          // to this target graph in the caller-owned transaction. Passing the
+          // revalidation records its review digest on every identity
+          // transition the apply causes; it is refused unless it names this
+          // plan.
           const applied = await applyMergePlanInTransaction(
             store,
             tx,
             checked.plan,
+            { review: checked },
           );
 
           // Additional graph writes may follow the apply. They share its one

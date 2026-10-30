@@ -34,6 +34,7 @@ import {
   registerAggregateIntegrationTests,
   registerAlgorithmIntegrationTests,
   registerBackendProvenanceIntegrationTests,
+  registerBatchWriteVerdictIntegrationTests,
   registerBulkFindByIndexIntegrationTests,
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
@@ -48,6 +49,12 @@ import {
   registerClearIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
   registerCollectionAggregateIntegrationTests,
+  registerCompositionAttachmentIntegrationTests,
+  registerCompositionDeletePlanIntegrationTests,
+  registerCompositionExistenceIntegrationTests,
+  registerCompositionFenceIntegrationTests,
+  registerCompositionNavigationIntegrationTests,
+  registerCompositionTighteningIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
   registerConstraintFenceVerificationIntegrationTests,
@@ -56,22 +63,32 @@ import {
   registerCurrentIdentityTraversalTests,
   registerDatabaseExpressionQueryIntegrationTests,
   registerDurableEdgeMatchIdentityIntegrationTests,
+  registerEdgeAcyclicityIntegrationTests,
+  registerEdgeCardinalityTighteningIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
+  registerEdgeTargetCardinalityIntegrationTests,
+  registerEdgeTargetCardinalityTemporalIntegrationTests,
   registerExpressionSubqueryQueryIntegrationTests,
   registerFulltextIntegrationTests,
   registerGraphAnnotationsIntegrationTests,
   registerGraphMergeCallbackIntegrationTests,
+  registerGraphMergeCompositionIntegrationTests,
   registerGraphMergePlanIntegrationTests,
   registerGraphMergeReviewIntegrationTests,
   registerGraphMergeReviewV2IntegrationTests,
+  registerGraphMergeTargetCardinalityIntegrationTests,
   registerGraphStorageIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
+  registerIdentityReplayIntegrationTests,
   registerIdentitySeparationIntegrationTests,
+  registerImportDuplicateEdgeOrderIntegrationTests,
+  registerImportRequiredPartPurgeIntegrationTests,
+  registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
@@ -82,6 +99,9 @@ import {
   registerMultiKindQueryIntegrationTests,
   registerMultiRecursiveTraversalIntegrationTests,
   registerMultiRootSubgraphBatchIntegrationTests,
+  registerOntologyEquivalenceIntegrationTests,
+  registerOntologyTighteningIntegrationTests,
+  registerOntologyTypedSubsumptionIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -110,6 +130,7 @@ import {
   registerTransactionReceiptIntegrationTests,
   registerTraversalIntegrationTests,
   registerTrustedImportIntegrationTests,
+  registerUniquenessClaimGateIntegrationTests,
   registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
   registerWeightedShortestPathExtractionIntegrationTests,
@@ -182,6 +203,11 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
    * `true`.
    */
   serverLaneConcurrency?: boolean;
+  /**
+   * See {@link IntegrationTestContext.recoversFailedStatementInTransaction}.
+   * Defaults to `true`.
+   */
+  recoversFailedStatementInTransaction?: boolean;
 }>;
 
 /**
@@ -269,6 +295,8 @@ export function createIntegrationTestSuite<
         return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
       serverLaneConcurrency: options.serverLaneConcurrency ?? false,
+      recoversFailedStatementInTransaction:
+        options.recoversFailedStatementInTransaction ?? true,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {
@@ -316,6 +344,11 @@ export function createIntegrationTestSuite<
     registerCapabilityPortBindingIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerCompositionAttachmentIntegrationTests(context);
+    registerCompositionDeletePlanIntegrationTests(context);
+    registerCompositionExistenceIntegrationTests(context);
+    registerCompositionFenceIntegrationTests(context);
+    registerCompositionNavigationIntegrationTests(context);
     registerGraphAnnotationsIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
     registerValidityEndClearingIntegrationTests(context);
@@ -333,6 +366,8 @@ export function createIntegrationTestSuite<
     registerAdoptedEvolutionConcurrencyTests(context);
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
+    registerOntologyEquivalenceIntegrationTests(context);
+    registerOntologyTypedSubsumptionIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
@@ -345,6 +380,10 @@ export function createIntegrationTestSuite<
     registerConstraintFenceErrorIntegrationTests(context);
     registerConstraintFenceTransactionHealthTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);
+    registerOntologyTighteningIntegrationTests(context);
+    registerUniquenessClaimGateIntegrationTests(context);
+    registerEdgeCardinalityTighteningIntegrationTests(context);
+    registerCompositionTighteningIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);
@@ -366,17 +405,27 @@ export function createIntegrationTestSuite<
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerGraphMergeCallbackIntegrationTests(context);
+    registerGraphMergeCompositionIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
+    registerGraphMergeTargetCardinalityIntegrationTests(context);
     registerGraphMergeReviewIntegrationTests(context);
     registerGraphMergeReviewV2IntegrationTests(context);
+    registerImportDuplicateEdgeOrderIntegrationTests(context);
+    registerImportRequiredPartPurgeIntegrationTests(context);
+    registerImportTargetCardinalityIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);
+    registerIdentityReplayIntegrationTests(context);
     registerHistoricalIdentityTraversalTests(context);
     registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
+    registerEdgeAcyclicityIntegrationTests(context);
     registerEdgeClaimSelfHealIntegrationTests(context);
+    registerEdgeTargetCardinalityIntegrationTests(context);
+    registerBatchWriteVerdictIntegrationTests(context);
+    registerEdgeTargetCardinalityTemporalIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerDurableEdgeMatchIdentityIntegrationTests(context);
     registerTrustedImportIntegrationTests(context);

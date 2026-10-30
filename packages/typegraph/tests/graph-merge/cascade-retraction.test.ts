@@ -74,6 +74,20 @@ async function atOneInstant(body: () => Promise<void>): Promise<void> {
   }
 }
 
+/** Runs `body` with the app clock pinned to `instant`. Only `Date` is faked. */
+async function atInstant(
+  instant: string,
+  body: () => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(instant));
+  try {
+    await body();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 const BRANCH_C = asBranchId("branch-c");
@@ -373,6 +387,75 @@ describe.each(backendMatrix())("cascade retraction [$name]", (entry) => {
     expect(result.data.dropped.some((item) => item.id === "cascade-id")).toBe(
       false,
     );
+  });
+
+  it("ends a surviving retraction at the explicit instant, not an overruled cascade's", async () => {
+    // Branch A deletes b early, cascading an ending onto x-id. Branch B
+    // retracts x-id explicitly, later. Branch C modifies b, so A's deletion is
+    // overruled and b stays live. The retraction survives on B's intent
+    // alone, so the instant it commits must be B's: ending the assertion at
+    // A's instant would let a rejected deletion decide when the pair stopped
+    // being asserted.
+    const cascadeInstant = "2021-01-01T00:00:00.000Z";
+    const explicitInstant = "2022-06-01T00:00:00.000Z";
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredGraph,
+      await makeBackend(),
+    );
+    for (const id of ["a", "b"]) {
+      await forkPoint.nodes.Anchor.create(
+        { name: id },
+        { id, validFrom: "2019-01-01T00:00:00.000Z" },
+      );
+    }
+    const imported = await importGraph(
+      forkPoint,
+      identityAssertionDocument(
+        "Anchor",
+        "x-id",
+        "a",
+        "b",
+        "2020-01-01T00:00:00.000Z",
+      ),
+      { onConflict: "skip" },
+    );
+    expect(imported.success).toBe(true);
+    const deleteBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await atInstant(cascadeInstant, async () => {
+      await deleteBranch.store.nodes.Anchor.delete("b" as never);
+    });
+    const retractBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await atInstant(explicitInstant, async () => {
+      await retractBranch.store.identity.retractAssertion(
+        asIdentityAssertionId("x-id"),
+      );
+    });
+    const modifyBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_C }),
+    );
+    await modifyBranch.store.nodes.Anchor.update("b" as never, {
+      name: "b-modified",
+    });
+
+    const result = await merge(
+      forkPoint,
+      [deleteBranch, retractBranch, modifyBranch],
+      { branchOrder: [BRANCH_A, BRANCH_B, BRANCH_C] },
+    );
+    if (isErr(result)) throw result.error;
+    const live = await forkPoint.nodes.Anchor.getById("b" as never);
+    expect(live?.name).toBe("b-modified");
+    const rows = await storeRuntime(forkPoint).identityAssertionRowsByIds([
+      "x-id",
+    ]);
+    const stored = requireDefined(rows.get("x-id"));
+    console.info("committed retraction", stored);
+    expect(stored.validTo).toBe(explicitInstant);
+    expect(stored.endedBy).toBeUndefined();
   });
 
   it("drops a hard-delete cascade when the deletion is overruled", async () => {

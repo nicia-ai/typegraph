@@ -1,9 +1,10 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  defineEdge,
   defineGraph,
   defineGraphExtension,
   defineNode,
@@ -50,6 +51,7 @@ import {
   pgvectorStrategy,
 } from "../../../src/query/dialect/vector/pgvector-strategy";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
+import { rollbackSchema } from "../../../src/schema";
 import { storeBackend } from "../../../src/store/runtime-port";
 import { createStore, createStoreWithSchema } from "../../../src/store/store";
 import { sha256Hex } from "../../../src/utils/hash";
@@ -127,6 +129,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
         if (names === undefined)
           throw new Error("Missing allocated table names.");
         const prefix = names.nodes.slice(0, -"nodes".length);
+        expect(new Set(Object.values(names)).size).toBe(
+          Object.keys(names).length,
+        );
         const inventory = await pool.query<{ tablename: string }>(
           "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND left(tablename, length($1)) = $1 ORDER BY tablename",
           [prefix],
@@ -1475,6 +1480,18 @@ describe.runIf(process.env["POSTGRES_URL"])(
             version: 1,
           }),
         ).rejects.toThrow(/fixed schema/);
+        const preflight = vi.fn(() => Promise.resolve());
+        await expect(
+          storeBackend(copy).setActiveVersionWithPreflight?.(
+            {
+              graphId: graph.id,
+              expected: { kind: "active", version: 1 },
+              version: 1,
+            },
+            preflight,
+          ),
+        ).rejects.toThrow(/fixed schema/);
+        expect(preflight).not.toHaveBeenCalled();
         const systemIndexes = await copy.materializeSystemIndexes();
         expect(
           systemIndexes.results.some((entry) => entry.status === "failed"),
@@ -1502,6 +1519,79 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(unowned.rows[0]?.present).toBeNull();
         await storeBackend(copy).close();
         expect(await manager.listUnsealedAllocations()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses a rollback that owes a preflight and keeps the active version", async () => {
+      const Source = defineNode("Source", { schema: z.object({}) });
+      const Target = defineNode("Target", { schema: z.object({}) });
+      const link = defineEdge("link", { schema: z.object({}) });
+      const graphId = "postgres-working-copy-fixed-rollback";
+      const nodes = { Source: { type: Source }, Target: { type: Target } };
+      const tight = defineGraph({
+        id: graphId,
+        nodes,
+        edges: {
+          link: {
+            type: link,
+            from: [Source],
+            to: [Target],
+            cardinality: "one",
+          },
+        },
+      });
+      const loose = defineGraph({
+        id: graphId,
+        nodes,
+        edges: {
+          link: {
+            type: link,
+            from: [Source],
+            to: [Target],
+            cardinality: "many",
+          },
+        },
+      });
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 6 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const storeOptions = { history: true, revisionTracking: true };
+        await createStoreWithSchema(tight, control, storeOptions);
+        const [source] = await createStoreWithSchema(
+          loose,
+          control,
+          storeOptions,
+        );
+        const manager = createPostgresWorkingCopyManager<typeof loose>({
+          control,
+          connect: (names) =>
+            Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+            ),
+        });
+        const { branch } = unwrap(
+          await branchDurable(source, manager.durable, {
+            id: asBranchId("fixed-rollback"),
+            allocationId: "fixed-rollback-allocation",
+          }),
+        );
+        const backend = storeBackend(branch.store);
+        const before = await backend.getActiveSchema(graphId);
+        console.log("active schema before rollback", before?.version);
+        expect(before?.version).toBe(2);
+
+        // Reactivating the tighter cardinality owes a preflight, so the
+        // rollback reaches the preflight-carrying member, not setActiveVersion.
+        await expect(rollbackSchema(backend, graphId, 1)).rejects.toThrow(
+          /fixed schema; setActiveVersionWithPreflight is unsupported/u,
+        );
+        const after = await backend.getActiveSchema(graphId);
+        expect(after?.version).toBe(2);
+        await branch.close();
       } finally {
         await pool.end();
       }

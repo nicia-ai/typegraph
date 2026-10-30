@@ -33,11 +33,12 @@ export const NODE_TEMPORAL_READ_NAMES = [
   "count",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
-/** Current-state-only node reads (constraint / index lookups). */
+/** Current-state-only node reads (constraint / index lookups, delete plans). */
 export const CURRENT_ONLY_READ_NAMES = [
   "findByConstraint",
   "bulkFindByConstraint",
   "bulkFindByIndex",
+  "planDelete",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
 /** Node write method names: never available on a read-only StoreView. */
@@ -45,6 +46,8 @@ export const NODE_WRITE_NAMES = [
   "create",
   "createFromRecord",
   "update",
+  "reparent",
+  "bulkReparent",
   "compareAndSet",
   "updateWhere",
   "delete",
@@ -116,6 +119,18 @@ export const IDENTITY_READ_NAMES = [
   "areDifferent",
   "assertionsOf",
   "explainSame",
+] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
+
+/**
+ * Identity facade methods that answer across every recorded coordinate
+ * (transition history), never available on a coordinate-pinned StoreView —
+ * and not receipt-tracked writes either, so they are neither a "read" (the
+ * `IdentityReadFacade` split) nor a "write" (the receipt counters) in the
+ * senses those two buckets mean.
+ */
+export const IDENTITY_HISTORY_NAMES = [
+  "transitionsOf",
+  "replay",
 ] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
 
 /** Identity facade write method names: never available on a read-only view. */

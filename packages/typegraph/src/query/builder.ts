@@ -10,6 +10,7 @@
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { resolveDefaultAliasExpansion } from "./builder/alias-expansion";
 import {
   type CreateQueryBuilderOptions,
   type EmptyAliasMap,
@@ -24,7 +25,7 @@ import {
   type QueryBuilderInternalContext,
   registerQueryBuilderInternalContext,
 } from "./builder/internal-context";
-import { createSchemaIntrospector } from "./schema-introspector";
+import { schemaIntrospectorFor } from "./schema-introspector";
 
 // Re-export all classes
 export {
@@ -57,10 +58,13 @@ export {
 export type {
   AggregateResult,
   AliasMap,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
   CommonPropertyKeys,
   CompiledOneStatementRead,
+  CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
@@ -99,6 +103,7 @@ export type {
   SelectableNode,
   SelectContext,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./builder/index";
 
@@ -176,10 +181,7 @@ function createQueryBuilderWithContext<
   registry: KindRegistry,
   options?: InternalCreateQueryBuilderOptions,
 ): InitialQueryBuilder<G, CoordinateState> {
-  const schemaIntrospector = createSchemaIntrospector(
-    registry.nodeKinds,
-    registry.edgeKinds,
-  );
+  const schemaIntrospector = schemaIntrospectorFor(registry);
   if (options?.identityEnabled === true && registry.identity === undefined) {
     throw new ConfigurationError(
       "Identity-aware query compilation requires an identity-enabled graph registry.",
@@ -210,6 +212,10 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
+    defaultExpansion: resolveDefaultAliasExpansion(
+      options?.defaultExpansion,
+      "defaultExpansion",
+    ),
     identityEnabled:
       options?.identityEnabled ?? registry.identity !== undefined,
     identitySameIdAcrossKinds:
@@ -244,7 +250,8 @@ function createQueryBuilderWithContext<
     startAlias: "",
     currentAlias: "",
     startKinds: [],
-    includeSubClasses: false,
+    startRequestedKinds: [],
+    startExpansion: "exact",
     traversals: [],
     predicates: [],
     projection: [],

@@ -92,6 +92,31 @@ consistently.
 and `DerivableEngineProfileOverrides<TTx>`) is the exact set above, as an
 `as const` array.
 
+### Base-schema adoption DDL (`baseSchemaRuntime`)
+
+`baseSchemaRuntime` carries the DDL each numbered base-schema adoption step
+runs (see [Upgrading deployment-wide base
+storage](/backend-setup/#upgrading-deployment-wide-base-storage)). Members a
+release added after profiles already existed are optional, so a profile written
+before them still constructs; the adoption step that needs a missing member is
+where its absence is an error. Version 6 reads two of them:
+
+| Member | What it holds |
+| --- | --- |
+| `identityTransitionsTableDdl` | The identity transition log's idempotent `CREATE TABLE`, followed by its `CREATE INDEX` statements, in run order. |
+| `identityTransitionRetentionTableDdl` | The retention watermark relation's idempotent `CREATE TABLE`. |
+
+Render both from your dialect's own DDL generators over the profile's table
+bindings, as the bundled profiles do, so a custom table name reaches the
+statements. A derived profile that leaves `baseSchemaRuntime` alone keeps the
+bundled members; one that replaces it must carry them over. When either is
+absent, version-6 adoption refuses with a `ConfigurationError` whose
+`details.missingDependencies` names what is missing and
+`details.adoptionVersion` is `6`; nothing is stamped, so adoption retries from
+version 5 once the profile supplies them. A profile whose adoption-step registry
+stops below the current version fails to construct with
+`CompilerInvariantError` ("adoption registry must end at the current version").
+
 ### The adapter-backed carve-out
 
 `declaredCapabilities` and `resourceAudit` are otherwise freely derivable,

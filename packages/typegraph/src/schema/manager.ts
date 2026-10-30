@@ -8,7 +8,10 @@
  * - Error reporting for breaking changes
  */
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
-import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
+import {
+  countSchemaKindRows,
+  schemaKindHasRows,
+} from "../backend/schema-kind-emptiness";
 import {
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
@@ -17,6 +20,7 @@ import {
   type SchemaCommitPreflightBackend,
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
+  type SetActiveVersionParams,
   type TransactionBackend,
 } from "../backend/types";
 import {
@@ -39,6 +43,7 @@ import {
   identityKindCascadeNeeded,
   identityKindCascadePreflight,
   identitySchemaCommitPreflight,
+  resolveSchemaCommitCapture,
   withIdentityDdlRaceRetry,
 } from "../identity/schema-transition";
 import {
@@ -49,6 +54,7 @@ import {
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
+import { canonicalEqual } from "./canonical";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -58,12 +64,23 @@ import {
 } from "./migration";
 import { prepareNewSchemaVersion } from "./new-schema-version";
 import {
+  canonicalStoredSchemaDocument,
   computeSchemaHash,
   getSchemaHash,
   serializeSchema,
   serializeSchemaPreservingUnknownFields,
 } from "./serializer";
-import { type SerializedSchema, serializedSchemaZod } from "./types";
+import {
+  type AtomicPreflightCapabilityError,
+  prepareSchemaTighteningPreflight,
+  type SchemaTighteningPreflight,
+} from "./tightening-preflight";
+import {
+  type SchemaHash,
+  type SerializedEdgeDef,
+  type SerializedSchema,
+  serializedSchemaZod,
+} from "./types";
 
 /**
  * Bounded LRU cache for `parseSerializedSchema` results, keyed on the
@@ -127,6 +144,66 @@ export function parseSerializedSchema(json: string): SerializedSchema {
   }
   PARSE_CACHE.set(json, validated);
   return validated;
+}
+
+/**
+ * Recomputed hashes, keyed on the parsed document `parseSerializedSchema`
+ * caches, so a document is hashed at most once while it stays cached.
+ */
+const ACTIVE_SCHEMA_HASH_CACHE = new WeakMap<SerializedSchema, SchemaHash>();
+
+/**
+ * THE hash of a stored schema version: its document, in the form this release
+ * serializes it ({@link canonicalStoredSchemaDocument}), hashed by
+ * `computeSchemaHash`.
+ *
+ * Every comparison of a stored version against a graph serialized today, or
+ * against another stored version, reads this rather than the row's
+ * `schema_hash` column. The column records the hash the WRITING release
+ * computed; a release that changes how a document is serialized without
+ * changing what it states (the meta-edge fields and `equivalentTo` closures
+ * this release dropped) leaves that column describing a serialization nobody
+ * produces any more, and a schema the diff calls unchanged would compare
+ * unequal to its own graph forever. Recomputing on read keeps the stored
+ * document and the column untouched, so a reader still running an earlier
+ * release is unaffected.
+ *
+ * For a document written by this release the result equals the column. The
+ * hash is taken over the document as stored (validated by
+ * {@link parseSerializedSchema}, then read raw), never over the parsed form:
+ * the parser defaults keys the serializer omits (a unique constraint's
+ * `scope` and `collation`), and a defaulted key cannot be told from the same
+ * value written explicitly.
+ *
+ * @throws DatabaseOperationError when the stored document is not a valid
+ *   schema document.
+ */
+export async function activeSchemaHash(
+  row: Pick<SchemaVersionRow, "schema_doc">,
+): Promise<SchemaHash> {
+  const document = parseSerializedSchema(row.schema_doc);
+  const cached = ACTIVE_SCHEMA_HASH_CACHE.get(document);
+  if (cached !== undefined) return cached;
+  const storedDocument = JSON.parse(row.schema_doc) as SerializedSchema;
+  const hash = await computeSchemaHash(
+    canonicalStoredSchemaDocument(storedDocument),
+  );
+  ACTIVE_SCHEMA_HASH_CACHE.set(document, hash);
+  return hash;
+}
+
+/**
+ * Whether the stored version hashes equal to `currentHash`. The column is
+ * checked first because it is equal whenever this release wrote the row.
+ */
+async function storedSchemaHashMatches(
+  row: SchemaVersionRow,
+  currentHash: SchemaHash,
+): Promise<boolean> {
+  return (
+    row.schema_hash === currentHash ||
+    (await activeSchemaHash(row)) === currentHash
+  );
 }
 
 // ============================================================
@@ -346,6 +423,57 @@ export type SchemaManagerOptions = Readonly<{
   schema?: SqlSchema;
 }>;
 
+/**
+ * Extends {@link ensureSchema}'s public options with the pre-fetched loader
+ * snapshot `createStoreWithSchema` passes through — an established public
+ * capability of the standalone entry point (see the field's own doc), so it
+ * stays on the type every `ensureSchema` caller sees.
+ */
+type EnsureSchemaPreloadedOptions = Readonly<{
+  /**
+   * Pre-fetched active row + parsed stored schema. When the loader
+   * (`createStoreWithSchema`) has already paid for `getActiveSchema`
+   * and `parseSerializedSchema` to peek at `extension`, it
+   * passes the results through here so `ensureSchema` doesn't repeat
+   * the round trip + Zod walk on every Store boot.
+   */
+  preloaded?: Readonly<{
+    activeRow: SchemaVersionRow | undefined;
+    storedSchema: SerializedSchema | undefined;
+  }>;
+}>;
+
+/**
+ * Internal-only extra `ensureSchema` needs from store construction but must
+ * never accept from a caller of the public entry point: this bag exists
+ * precisely so `historyEnabled` cannot reach `ensureSchema` through
+ * `SchemaManagerOptions`, the type its standalone (`initializeSchema` /
+ * `migrateSchema` / public `ensureSchema`) callers see. Only
+ * {@link ensureSchemaInternal} — imported directly by `store.ts`, never
+ * re-exported from the package's public entry points — accepts it.
+ */
+type EnsureSchemaInternalOptions = EnsureSchemaPreloadedOptions &
+  Readonly<{
+    /**
+     * The driving Store's capture flag: whether TypeGraph captures recorded
+     * history for its writes (`history: true` under TypeGraph-owned recorded
+     * time). Threaded so a schema commit that runs BEFORE any Store exists to
+     * wrap the backend — every commit `prepareStoreWithSchema` drives, first
+     * enablement included — binds its identity preflight's ledger touches and
+     * transition-log notes to a capture session exactly as the Store's own
+     * writes are. Absent for the standalone `initializeSchema` /
+     * `migrateSchema` / public `ensureSchema` entry points called outside a
+     * Store: there, the graph's own recorded relations decide
+     * ({@link resolveSchemaCommitCapture}'s `"database"` source), so a
+     * standalone migration of a history database still records its ledger
+     * pre-images and transition notes. Kept off `SchemaManagerOptions` so a
+     * caller of the public entry point cannot override that evidence:
+     * TypeScript's excess-property check rejects it on an object literal, and
+     * `ensureSchema` below does not forward it.
+     */
+    historyEnabled?: boolean;
+  }>;
+
 // ============================================================
 // Schema Manager
 // ============================================================
@@ -368,19 +496,22 @@ export type SchemaManagerOptions = Readonly<{
 export async function ensureSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
-  options?: SchemaManagerOptions & {
-    /**
-     * Pre-fetched active row + parsed stored schema. When the loader
-     * (`createStoreWithSchema`) has already paid for `getActiveSchema`
-     * and `parseSerializedSchema` to peek at `extension`, it
-     * passes the results through here so `ensureSchema` doesn't repeat
-     * the round trip + Zod walk on every Store boot.
-     */
-    preloaded?: Readonly<{
-      activeRow: SchemaVersionRow | undefined;
-      storedSchema: SerializedSchema | undefined;
-    }>;
-  },
+  options?: SchemaManagerOptions & EnsureSchemaPreloadedOptions,
+): Promise<SchemaValidationResult> {
+  return ensureSchemaInternal(backend, graph, options);
+}
+
+/**
+ * The real implementation behind {@link ensureSchema}, additionally taking
+ * {@link EnsureSchemaInternalOptions} — the store-construction-only extras a
+ * caller of the public entry point must never be able to set. Exported for
+ * `store.ts` to import directly (as `ensureSchemaImpl`); not part of any
+ * public entry point.
+ */
+export async function ensureSchemaInternal<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  options?: SchemaManagerOptions & EnsureSchemaInternalOptions,
 ): Promise<SchemaValidationResult> {
   const autoMigrate = options?.autoMigrate ?? true;
   const throwOnBreaking = options?.throwOnBreaking ?? true;
@@ -411,6 +542,9 @@ export async function ensureSchema<G extends GraphDef>(
     const result = await initializeSchemaImpl(backend, graph, {
       ...(options?.schema === undefined ? {} : { schema: options.schema }),
       baseSchemaPrepared: true,
+      ...(options?.historyEnabled === undefined ?
+        {}
+      : { historyEnabled: options.historyEnabled }),
     });
     return {
       status: "initialized",
@@ -424,10 +558,9 @@ export async function ensureSchema<G extends GraphDef>(
   // SHA-256 walk. When the hash matches, we never need the
   // `currentSchema` or the `storedSchema` (no diff is computed), so
   // defer those allocations until they're actually needed.
-  const storedHash = activeSchema.schema_hash;
   const currentHash = await getSchemaHash(graph, activeSchema.version + 1);
 
-  if (storedHash === currentHash) {
+  if (await storedSchemaHashMatches(activeSchema, currentHash)) {
     return { status: "unchanged", version: activeSchema.version };
   }
 
@@ -461,15 +594,36 @@ export async function ensureSchema<G extends GraphDef>(
       // preflight, whichever public path drove it. It is derived HERE —
       // never accepted from the caller — so it cannot be substituted or
       // suppressed; `options.schema` only points it at the effective tables.
-      const preflight =
+      const identityPreflight =
         graph.identity === undefined ?
           undefined
         : await prepareIdentitySchemaCommit(backend, graph, {
             enablement: storedSchema.identity === undefined,
+            ...(options?.historyEnabled === undefined ?
+              {}
+            : { historyEnabled: options.historyEnabled }),
             ...(options?.schema === undefined ?
               {}
             : { schema: options.schema }),
           });
+      // Same reasoning, for the schema tightening probe (ontology and edge
+      // cardinality): derived here from the actual before/after documents
+      // this commit is about to publish, never accepted from the caller.
+      const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
+        graphId: graph.id,
+        fromVersion: activeSchema.version,
+        toVersion: activeSchema.version + 1,
+        before: storedSchema,
+        after: currentSchema,
+        // `diff` above already classified this exact before/after pair.
+        changes: diff.ontology,
+      });
+      const preflight = composeSchemaCommitPreflight({
+        structural: undefined,
+        edgeMatchIdentity: undefined,
+        tightening: schemaTighteningPreflight,
+        identity: identityPreflight,
+      });
       const committedRow =
         preflight === undefined ?
           await commitNewSchemaVersion(
@@ -484,6 +638,10 @@ export async function ensureSchema<G extends GraphDef>(
             activeSchema.version,
             preflight,
             storedSchema,
+            schemaCommitCapabilityError(
+              identityPreflight !== undefined,
+              schemaTighteningPreflight,
+            ),
           );
       await options?.onAfterMigrate?.(hookContext);
       return {
@@ -559,7 +717,13 @@ export async function ensureSchema<G extends GraphDef>(
  *   the version required by the backend.
  * @throws ConfigurationError if no schema has been initialized for
  *   `graph.id` (the privileged migration step has not run, or the base
- *   tables do not exist on this connection).
+ *   tables do not exist on this connection); also if the stored or the
+ *   current ontology adds or removes a relation and cannot be interpreted
+ *   (`computeSchemaDiff` → `classifyOntologyChanges` — a schema document
+ *   written under an older, laxer validator can hold an ontology today's
+ *   hardening rejects). Callers built on this — `createVerifiedStore` and
+ *   `assertSchemaCurrent` — inherit this throw and do not distinguish it
+ *   from the uninitialized-schema case above.
  * @throws MigrationError if the persisted schema is behind the code
  *   graph — for **any** pending change, safe or breaking. The
  *   least-privilege runtime cannot migrate; "behind" means the
@@ -585,9 +749,8 @@ export async function loadAndVerifyGraph<G extends GraphDef>(
   // Hash short-circuit avoids the serialize + diff walk on the steady-
   // state warm path. A semantic no-op (hash differs but `hasChanges` is
   // false) takes the same return path.
-  const storedHash = activeRow.schema_hash;
   const currentHash = await getSchemaHash(merged, activeRow.version + 1);
-  if (storedHash !== currentHash) {
+  if (!(await storedSchemaHashMatches(activeRow, currentHash))) {
     const currentSchema = serializeSchemaPreservingUnknownFields(
       merged,
       activeRow.version + 1,
@@ -740,25 +903,146 @@ function schemaNotInitializedError(
 }
 
 /**
+ * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
+ * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
+ * for a tightening-only commit would misdirect an operator on a graph with
+ * identity disabled, so the primitive takes this bag rather than hardcoding
+ * one message. The tightening-specific bags live in `./tightening-preflight`,
+ * beside the decision that picks between them.
+ */
+const IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically commit identity data with a schema transition.",
+  };
+
+/**
  * Returns the backend's atomic preflight-commit primitive, throwing
- * `IDENTITY_REQUIRES_ATOMIC_BACKEND` if the backend doesn't support
- * committing identity data atomically with a schema transition.
+ * `capabilityError` if the backend doesn't support committing a preflight
+ * atomically with a schema transition.
  */
 function requireCommitWithPreflight(
   backend: GraphBackend,
   graph: GraphDef,
+  capabilityError: AtomicPreflightCapabilityError,
 ): NonNullable<GraphBackend["commitSchemaVersionWithPreflight"]> {
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
-    throw new ConfigurationError(
-      "This backend cannot atomically commit identity data with a schema transition.",
-      {
-        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-        graphId: graph.id,
-      },
-    );
+    throw atomicPreflightUnsupportedError(graph.id, capabilityError);
   }
   return commitWithPreflight;
+}
+
+/** The refusal for a backend that cannot run a schema preflight atomically. */
+function atomicPreflightUnsupportedError(
+  graphId: string,
+  capabilityError: AtomicPreflightCapabilityError,
+): ConfigurationError {
+  return new ConfigurationError(
+    capabilityError.message,
+    { code: capabilityError.code, graphId },
+    capabilityError.suggestion === undefined ?
+      undefined
+    : { suggestion: capabilityError.suggestion },
+  );
+}
+
+/** One step of a composed schema-commit preflight; `undefined` drops out. */
+type SchemaCommitPreflightStep =
+  ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
+
+type SchemaCommitPreflightFunction = (
+  target: SchemaCommitPreflightBackend,
+) => Promise<void>;
+
+/**
+ * The steps a schema-commit preflight is composed from, by role. Every key is
+ * required — a path with nothing to run for a role passes `undefined` — so a
+ * commit path cannot drop a role by forgetting it, and never spells the order
+ * the roles run in.
+ */
+export type SchemaCommitPreflightSteps = Readonly<{
+  /** Gates deciding whether the commit is legal at all (dropped/required kinds empty). */
+  structural: SchemaCommitPreflightStep;
+  edgeMatchIdentity: SchemaCommitPreflightStep;
+  tightening: SchemaTighteningPreflight | undefined;
+  identity: SchemaCommitPreflightStep;
+}>;
+
+/**
+ * THE atomic-preflight capability error a commit owes, given whether identity
+ * contributed a preflight step of its own and which tightening preflight (if
+ * any) this commit carries.
+ *
+ * Identity's error wins whenever identity contributed a step, because its
+ * preflight is the one that cannot be split from the commit; a
+ * tightening-only commit names the axis it is actually about (see
+ * {@link SchemaTighteningPreflight.capabilityError}). One owner, because
+ * every commit path that relies on the backend's atomic preflight primitive
+ * (`ensureSchema`'s auto-migrate branch, `migrateSchema`, `Store.evolve`)
+ * owes the same decision and a copy that drifts would blame the wrong
+ * subsystem in an operator-facing refusal. `withEvolvedTransaction` runs its
+ * preflight inside the caller's adopted transaction and owes no such error.
+ */
+export function schemaCommitCapabilityError(
+  hasIdentityPreflight: boolean,
+  tightening: SchemaTighteningPreflight | undefined,
+): AtomicPreflightCapabilityError | undefined {
+  if (hasIdentityPreflight || tightening === undefined) return undefined;
+  return tightening.capabilityError;
+}
+
+/**
+ * THE order a schema-commit preflight runs its steps in, and the one place
+ * that order is spelled — called by every commit path that publishes a
+ * changed schema document (`ensureSchema`'s auto-migrate branch,
+ * `migrateSchema`, `Store.evolve`, `Store.withEvolvedTransaction`): structural
+ * gates that decide whether the commit is legal at all (dropped-kinds /
+ * required-kinds-empty), then `edgeMatchIdentityPreflight`, then the
+ * ontology-tightening preflight, then the identity preflight (whose last act
+ * is the closure rebuild).
+ *
+ * Ontology precedes identity because the identity closure is DERIVED from
+ * the ontology being committed (`identitySchemaCommitPreflight` rebuilds it
+ * from the target registry), so rebuilding it under an ontology the data
+ * falsifies is work a refusal would only throw away.
+ *
+ * `undefined` steps drop out; an all-`undefined` set yields `undefined`,
+ * which is the caller's signal to take the plain commit primitive and pay
+ * for no transaction it does not need. The first overload is for a caller
+ * with an unconditional structural gate (`assertDroppedKindsEmpty` and
+ * `assertEvolvedSchemaRequiredKindsEmpty` are both no-ops on an empty list,
+ * so they are safe to run unconditionally): its result is guaranteed
+ * defined, which lets `migrateSchema`, `Store.evolve`, and
+ * `withEvolvedTransaction` run it without an unsound narrowing.
+ *
+ * @internal Not re-exported through `src/schema/index.ts` or the package
+ * root, the same convention `commitNewSchemaVersionWithPreflight` uses.
+ */
+export function composeSchemaCommitPreflight(
+  steps: SchemaCommitPreflightSteps &
+    Readonly<{ structural: SchemaCommitPreflightFunction }>,
+): SchemaCommitPreflightFunction;
+export function composeSchemaCommitPreflight(
+  steps: SchemaCommitPreflightSteps,
+): SchemaCommitPreflightFunction | undefined;
+export function composeSchemaCommitPreflight(
+  steps: SchemaCommitPreflightSteps,
+): SchemaCommitPreflightFunction | undefined {
+  const ordered: readonly SchemaCommitPreflightStep[] = [
+    steps.structural,
+    steps.edgeMatchIdentity,
+    steps.tightening?.run,
+    steps.identity,
+  ];
+  const defined = ordered.filter(
+    (step): step is SchemaCommitPreflightFunction => step !== undefined,
+  );
+  if (defined.length === 0) return undefined;
+  return async (target: SchemaCommitPreflightBackend): Promise<void> => {
+    for (const step of defined) await step(target);
+  };
 }
 
 async function commitInitialEdgeIdentityOnEmptyKinds(
@@ -790,7 +1074,7 @@ async function commitInitialEdgeIdentityOnEmptyKinds(
 
   throw edgeMatchIdentityRekeyPopulatedError(
     graph.id,
-    0,
+    { fromVersion: 0, toVersion: 1 },
     result.kinds.map((entry) => entry.kind),
   );
 }
@@ -820,6 +1104,8 @@ type InitializeSchemaImplOptions = InitializeSchemaOptions &
   Readonly<{
     /** The caller already completed the deployment-wide adoption gate. */
     baseSchemaPrepared: boolean;
+    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. */
+    historyEnabled?: boolean;
   }>;
 
 export async function initializeSchema<G extends GraphDef>(
@@ -866,7 +1152,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
   const edgeMatchIdentityPreflight = prepareEdgeMatchIdentityCommitPreflight(
     graph,
     edgeIdentityKinds,
-    0,
+    { fromVersion: 0, toVersion: 1 },
   );
 
   const schema = serializeSchema(graph, 1);
@@ -894,7 +1180,11 @@ async function initializeSchemaImpl<G extends GraphDef>(
       : commitWithPreflight(commit, edgeMatchIdentityPreflight);
   }
 
-  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
+  const commitWithPreflight = requireCommitWithPreflight(
+    backend,
+    graph,
+    IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+  );
 
   // An identity-enabled graph's FIRST schema commit is an enablement: a
   // legacy database populated through an unmanaged Store can already hold
@@ -907,6 +1197,9 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // accepts while identity reads answer from a never-built closure.
   const preflight = await prepareIdentitySchemaCommit(backend, graph, {
     enablement: true,
+    ...(options.historyEnabled === undefined ?
+      {}
+    : { historyEnabled: options.historyEnabled }),
     ...(options.schema === undefined ? {} : { schema: options.schema }),
   });
   // The preflight issues idempotent identity DDL INSIDE this transaction (see
@@ -1069,13 +1362,31 @@ export async function migrateSchema<G extends GraphDef>(
   const edgeMatchIdentityPreflight = prepareEdgeMatchIdentityCommitPreflight(
     target,
     rekeyedEdgeKinds,
-    currentVersion,
+    { fromVersion: currentVersion, toVersion: currentVersion + 1 },
   );
+
+  // No BEFORE document, no ontology to tighten against: a v1 initial commit
+  // has nothing preceding it (mirrors `initializeSchema`'s exclusion).
+  const schemaTighteningPreflight =
+    storedSchema === undefined ? undefined : (
+      prepareSchemaTighteningPreflight({
+        graphId: target.id,
+        fromVersion: currentVersion,
+        toVersion: currentVersion + 1,
+        before: storedSchema,
+        after: serializeSchemaPreservingUnknownFields(
+          target,
+          currentVersion + 1,
+          storedSchema,
+        ),
+      })
+    );
 
   const committed =
     (
       identityPreflight === undefined &&
-      edgeMatchIdentityPreflight === undefined
+      edgeMatchIdentityPreflight === undefined &&
+      schemaTighteningPreflight === undefined
     ) ?
       guardedDrops.length > 0 ?
         await commitDroppedKindsOnlyWhenEmpty(
@@ -1095,21 +1406,29 @@ export async function migrateSchema<G extends GraphDef>(
         backend,
         target,
         currentVersion,
-        async (transactionBackend) => {
-          // The emptiness fence moves inside the commit transaction here: the
-          // preflight-carrying primitive is the only one that can also run the
-          // identity rebuild atomically, so the probe runs alongside it rather
-          // than through `commitSchemaVersionIfKindsEmpty`.
-          await assertDroppedKindsEmpty(
-            transactionBackend,
-            target.id,
-            currentVersion,
-            guardedDrops,
-          );
-          await edgeMatchIdentityPreflight?.(transactionBackend);
-          await identityPreflight?.(transactionBackend);
-        },
+        // The emptiness fence moves inside the commit transaction here: the
+        // preflight-carrying primitive is the only one that can also run the
+        // identity rebuild atomically, so the probe runs alongside it rather
+        // than through `commitSchemaVersionIfKindsEmpty`. Ordering — and the
+        // "ontology before identity" reasoning — is spelled once, at
+        // `composeSchemaCommitPreflight`.
+        composeSchemaCommitPreflight({
+          structural: (transactionBackend) =>
+            assertDroppedKindsEmpty(
+              transactionBackend,
+              target.id,
+              currentVersion,
+              guardedDrops,
+            ),
+          edgeMatchIdentity: edgeMatchIdentityPreflight,
+          tightening: schemaTighteningPreflight,
+          identity: identityPreflight,
+        }),
         storedSchema,
+        schemaCommitCapabilityError(
+          identityPreflight !== undefined,
+          schemaTighteningPreflight,
+        ),
       );
   return committed.version;
 }
@@ -1121,6 +1440,10 @@ export async function migrateSchema<G extends GraphDef>(
  * Bundled backends use a durable version marker, so a warm privileged open is
  * one read and no base-adoption DDL. Runtime-only construction remains
  * DDL-free.
+ *
+ * A caller that checks identity storage before `ensureSchema` reaches this
+ * adoption runs both through
+ * {@link ensureIdentityStorageOnAdoptedBaseSchema}.
  */
 async function adoptBaseSchemaStorage(backend: GraphBackend): Promise<void> {
   if (backend.adoptBaseSchema !== undefined) {
@@ -1128,6 +1451,28 @@ async function adoptBaseSchemaStorage(backend: GraphBackend): Promise<void> {
     return;
   }
   await backend.ensureEdgeMatchIdentityStorage?.();
+}
+
+/**
+ * THE identity-storage check a Store runs ahead of a schema commit: base
+ * storage adopted first, then {@link ensureIdentitySchemaStorage}.
+ *
+ * The order is the point. That check treats an identity relation missing from
+ * an already-enabled graph as ledger data loss, and a relation this library
+ * version added since the database was last opened by a privileged entry
+ * point is an upgrade, not data loss. Every caller that runs the check before
+ * `ensureSchema`'s own adoption — opening a store with its schema, and
+ * `Store.evolve` — reaches it through here, so neither can run the check
+ * against storage the upgrade has not caught up to. Adoption is idempotent by
+ * its durable version marker: one read when there is nothing to adopt.
+ */
+export async function ensureIdentityStorageOnAdoptedBaseSchema(
+  backend: GraphBackend,
+  schema: SqlSchema,
+  options: Parameters<typeof ensureIdentitySchemaStorage>[2],
+): ReturnType<typeof ensureIdentitySchemaStorage> {
+  await adoptBaseSchemaStorage(backend);
+  return ensureIdentitySchemaStorage(backend, schema, options);
 }
 
 function assertGraphEdgeMatchIdentitySupport(
@@ -1150,35 +1495,64 @@ function edgeKindsRequiringMatchIdentityMaterialization(
   target: GraphDef,
   storedSchema?: SerializedSchema,
 ): readonly string[] {
-  return getEdgeKinds(target).filter((kind) => {
-    const after = target.edges[kind]?.matchIdentity;
-    if (after === undefined) return false;
-    const before = storedSchema?.edges[kind]?.matchIdentity;
-    return !matchIdentitiesEqual(before, after);
-  });
+  return matchIdentityRekeyedEdgeKinds(
+    getEdgeKinds(target).map(
+      (kind) => [kind, target.edges[kind]?.matchIdentity] as const,
+    ),
+    storedSchema,
+  );
+}
+
+/**
+ * The edge kinds whose `after` match identity is declared and differs from
+ * `before`'s — the kinds whose durable keys a transition must materialize.
+ */
+function matchIdentityRekeyedEdgeKinds(
+  after: readonly (readonly [
+    kind: string,
+    matchIdentity: SerializedEdgeDef["matchIdentity"],
+  ])[],
+  before: SerializedSchema | undefined,
+): readonly string[] {
+  return after
+    .filter(
+      ([kind, matchIdentity]) =>
+        matchIdentity !== undefined &&
+        !matchIdentitiesEqual(
+          before?.edges[kind]?.matchIdentity,
+          matchIdentity,
+        ),
+    )
+    .map(([kind]) => kind);
 }
 
 /** Refuses identity activation/re-keying while rows still lack target keys. */
+/** The versions a schema transition moves the active pointer between. */
+type SchemaVersionTransition = Readonly<{
+  fromVersion: number;
+  toVersion: number;
+}>;
+
 function prepareEdgeMatchIdentityCommitPreflight(
-  target: GraphDef,
+  target: Readonly<{ id: string }>,
   edgeKinds: readonly string[],
-  currentVersion: number,
+  transition: SchemaVersionTransition,
 ): ((backend: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
   if (edgeKinds.length === 0) return undefined;
   return async (backend): Promise<void> => {
     const populated: string[] = [];
     for (const kind of edgeKinds) {
-      const count = await countSchemaKindRows(backend, target.id, {
+      const hasRows = await schemaKindHasRows(backend, target.id, {
         entity: "edge",
         kind,
         rows: "all",
       });
-      if (count > 0) populated.push(kind);
+      if (hasRows) populated.push(kind);
     }
     if (populated.length === 0) return;
     throw edgeMatchIdentityRekeyPopulatedError(
       target.id,
-      currentVersion,
+      transition,
       populated,
     );
   };
@@ -1186,15 +1560,15 @@ function prepareEdgeMatchIdentityCommitPreflight(
 
 function edgeMatchIdentityRekeyPopulatedError(
   graphId: string,
-  currentVersion: number,
+  transition: SchemaVersionTransition,
   edgeKinds: readonly string[],
 ): MigrationError {
   return new MigrationError(
     `Refusing to activate or change match identity for populated edge kinds: ${edgeKinds.join(", ")}. Export and hard-delete those edges, migrate the schema, then import them so TypeGraph can materialize the new durable keys.`,
     {
       graphId,
-      fromVersion: currentVersion,
-      toVersion: currentVersion + 1,
+      fromVersion: transition.fromVersion,
+      toVersion: transition.toVersion,
       reason: "edge-match-identity-rekey",
       edgeKinds,
     },
@@ -1244,6 +1618,7 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
   return identityKindCascadePreflight(
     { graphId: target.id, schema },
     options.droppedNodeKinds,
+    resolveSchemaCommitCapture(backend, undefined),
   );
 }
 
@@ -1264,6 +1639,8 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     enablement: boolean;
     schema?: SqlSchema;
     droppedNodeKinds?: readonly string[];
+    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. */
+    historyEnabled?: boolean;
   }>,
 ): Promise<
   (transactionBackend: SchemaCommitPreflightBackend) => Promise<void>
@@ -1305,6 +1682,10 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
       enablement: options.enablement,
       droppedNodeKinds: options.droppedNodeKinds ?? [],
       provisionDerivedRelations: provisioning.provisionInCommit,
+      // Resolved against the ROOT `GraphBackend` — available here, not inside
+      // `identitySchemaCommitPreflight`, which sees only the schema-commit
+      // TRANSACTION target.
+      capture: resolveSchemaCommitCapture(backend, options.historyEnabled),
     },
   );
 }
@@ -1511,20 +1892,34 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
   };
 }
 
-/** @internal Commits a data preflight and schema CAS in one transaction. */
+/**
+ * @internal Commits a data preflight and schema CAS in one transaction.
+ *
+ * `capabilityError` names the reason a preflight is owed when the backend
+ * cannot commit one atomically. Defaults to the identity capability error —
+ * every caller that composes an ontology preflight alongside (or instead of)
+ * an identity one passes `ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR`
+ * when identity contributed no step of its own, so the refusal names the
+ * state that actually required atomicity.
+ */
 export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
   preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   previous: SerializedSchema | undefined,
+  capabilityError: AtomicPreflightCapabilityError = IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
     // structurally invalid graph before probing backend capability.
     buildKindRegistry(graph);
   }
-  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
+  const commitWithPreflight = requireCommitWithPreflight(
+    backend,
+    graph,
+    capabilityError,
+  );
   // Same catalog-race retry as `initializeSchema`, for the same in-transaction
   // identity DDL. The commit payload is built once, outside the retry, so a
   // re-run commits the identical version and hash rather than recomputing one.
@@ -1547,10 +1942,24 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
  * version. Concurrent rollbacks or commits surface as
  * `StaleVersionError`.
  *
+ * Reactivating a version is a schema transition like any commit, and owes
+ * the same preflight steps (see `prepareRollbackPreflight`): a tightening the
+ * target declares is checked against existing rows, and an edge kind the
+ * target re-keys must be empty. A rollback that changes identity-relevant
+ * schema on an identity-enabled target is refused, because rebuilding the
+ * identity closure needs the graph definition a stored document cannot
+ * reconstruct. Owed steps run under the same schema write fence as the flip
+ * (`setActiveVersionWithPreflight`) and refuse with the same errors a forward
+ * commit raises.
+ *
  * @param backend - The database backend
  * @param graphId - The graph ID
  * @param targetVersion - The version to roll back to
- * @throws MigrationError if the target version does not exist
+ * @throws MigrationError if the target version does not exist, or if
+ *   existing rows violate a tightening the target version declares
+ * @throws ConfigurationError if a preflight is owed and the backend cannot
+ *   run it atomically with the flip, or (`IDENTITY_ROLLBACK_REQUIRES_MIGRATION`)
+ *   if the rollback changes identity-relevant schema
  * @throws StaleVersionError if another writer changed the active version concurrently
  */
 export async function rollbackSchema(
@@ -1570,11 +1979,159 @@ export async function rollbackSchema(
       },
     );
   }
-  await backend.setActiveVersion({
+  const params: SetActiveVersionParams = {
     graphId,
     expected: { kind: "active", version: activeRow.version },
     version: targetVersion,
+  };
+  // An absent target row owes no preflight: `setActiveVersion` refuses it.
+  const targetRow = await backend.getSchemaVersion(graphId, targetVersion);
+  const preflight =
+    targetRow === undefined ? undefined : (
+      prepareRollbackPreflight(
+        graphId,
+        { version: activeRow.version, schemaDoc: activeRow.schema_doc },
+        { version: targetVersion, schemaDoc: targetRow.schema_doc },
+      )
+    );
+  if (preflight === undefined) {
+    await backend.setActiveVersion(params);
+    return;
+  }
+  const setActiveWithPreflight = backend.setActiveVersionWithPreflight;
+  if (setActiveWithPreflight === undefined) throw preflight.unsupportedError;
+  await setActiveWithPreflight(params, preflight.run);
+}
+
+/**
+ * The preflight reactivating `target` owes, composed through
+ * {@link composeSchemaCommitPreflight} like every other schema commit, or
+ * `undefined` when it owes none.
+ *
+ * - `structural`: none. A rollback deletes no rows: rows of a kind the
+ *   target lacks stay stored and reappear when a later version declares the
+ *   kind again, so there is no emptiness gate to run.
+ * - `edgeMatchIdentity`: an edge kind whose match identity the target
+ *   declares differently must hold no rows, exactly as on a forward commit.
+ * - `tightening`: the target's ontology and edge cardinalities against the
+ *   active document.
+ * - `identity`: refuses when {@link rollbackChangesIdentityDerivation}.
+ *   Every other commit path rebuilds the closure from the target graph's
+ *   registry; a stored document carries no node kind definitions to rebuild
+ *   one from (`buildRegistryFromSerializedSchema` registers no node kinds), so
+ *   a rebuild here would derive an empty closure. Refusing inside the fence,
+ *   after the tightening step, keeps the refusal order every path shares.
+ */
+function prepareRollbackPreflight(
+  graphId: string,
+  active: Readonly<{ version: number; schemaDoc: string }>,
+  target: Readonly<{ version: number; schemaDoc: string }>,
+):
+  | Readonly<{
+      run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+      /**
+       * What a backend without `setActiveVersionWithPreflight` is refused
+       * with. When the identity refusal is owed, that refusal itself: it
+       * reads no data and refuses the rollback on every backend, so the
+       * missing atomic primitive is not why the rollback cannot run.
+       */
+      unsupportedError: Error;
+    }>
+  | undefined {
+  const before = parseSerializedSchema(active.schemaDoc);
+  const after = parseSerializedSchema(target.schemaDoc);
+  const tightening = prepareSchemaTighteningPreflight({
+    graphId,
+    fromVersion: active.version,
+    toVersion: target.version,
+    before,
+    after,
   });
+  const identity =
+    rollbackChangesIdentityDerivation(before, after) ?
+      () =>
+        Promise.reject(
+          identityRollbackRequiresMigrationError(
+            graphId,
+            active.version,
+            target.version,
+          ),
+        )
+    : undefined;
+  const edgeMatchIdentity = prepareEdgeMatchIdentityCommitPreflight(
+    { id: graphId },
+    matchIdentityRekeyedEdgeKinds(
+      Object.entries(after.edges).map(
+        ([kind, edge]) => [kind, edge.matchIdentity] as const,
+      ),
+      before,
+    ),
+    { fromVersion: active.version, toVersion: target.version },
+  );
+  const run = composeSchemaCommitPreflight({
+    structural: undefined,
+    edgeMatchIdentity,
+    tightening,
+    identity,
+  });
+  if (run === undefined) return undefined;
+  return {
+    run,
+    unsupportedError:
+      identity === undefined ?
+        atomicPreflightUnsupportedError(
+          graphId,
+          schemaCommitCapabilityError(false, tightening) ??
+            IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+        )
+      : identityRollbackRequiresMigrationError(
+          graphId,
+          active.version,
+          target.version,
+        ),
+  };
+}
+
+/**
+ * Whether reactivating `after` would change what an identity-enabled target
+ * derives its closure from: enabling identity, changing its profile, or
+ * changing the ontology or the node kinds the closure folds over. A target
+ * with identity disabled derives nothing (its retained ledger is rebuilt by
+ * whichever later commit re-enables it).
+ */
+function rollbackChangesIdentityDerivation(
+  before: SerializedSchema,
+  after: SerializedSchema,
+): boolean {
+  if (after.identity === undefined) return false;
+  return (
+    !canonicalEqual(before.identity, after.identity) ||
+    !canonicalEqual(before.ontology.relations, after.ontology.relations) ||
+    !canonicalEqual(
+      Object.keys(before.nodes).toSorted(),
+      Object.keys(after.nodes).toSorted(),
+    )
+  );
+}
+
+function identityRollbackRequiresMigrationError(
+  graphId: string,
+  fromVersion: number,
+  toVersion: number,
+): ConfigurationError {
+  return new ConfigurationError(
+    "rollbackSchema cannot rebuild the identity closure for a version whose identity-relevant schema differs from the active one.",
+    {
+      code: "IDENTITY_ROLLBACK_REQUIRES_MIGRATION",
+      graphId,
+      fromVersion,
+      toVersion,
+    },
+    {
+      suggestion:
+        "Commit the target version's graph definition forward with migrateSchema(), which rebuilds the closure from that definition.",
+    },
+  );
 }
 
 /**
@@ -1618,6 +2175,19 @@ export async function isSchemaInitialized(
  * @param backend - The database backend
  * @param graph - The current graph definition
  * @returns The diff, or undefined if schema not initialized
+ * @throws ConfigurationError when the stored or the current ontology adds or
+ *   removes a relation and cannot be interpreted (`computeSchemaDiff` →
+ *   `classifyOntologyChanges`) — a schema document written under an older,
+ *   laxer validator can hold an ontology today's hardening rejects.
+ *   `requiresMigration`, built on this function, does not propagate this
+ *   throw; see its own docblock.
+ * @throws ConfigurationError when the current graph's
+ *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy is not a structural
+ *   subtype of its target — reported HERE, before an upgrade, rather than
+ *   only at commit, and whether or not anything changed: the diff enforces
+ *   the contract whenever the graph declares such a relation (see
+ *   `computeSchemaDiff`'s own docblock), and the live registry the commit
+ *   and `createStore` build judges a pair the stored document cannot.
  */
 export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,
@@ -1640,6 +2210,11 @@ export async function getSchemaChanges<G extends GraphDef>(
     storedSchema,
   );
   const diff = computeSchemaDiff(storedSchema, currentSchema);
+  // The diff judges subsumption from documents, which skip any pair holding a
+  // field JSON Schema cannot express. The commit path and `createStore` judge
+  // that pair field by field from the live graph, so the pre-flight builds the
+  // same live registry over the same merged graph and refuses what they do.
+  buildKindRegistry(merged);
 
   return diff.hasChanges ? diff : { ...diff, toVersion: diff.fromVersion };
 }
@@ -1649,12 +2224,26 @@ export async function getSchemaChanges<G extends GraphDef>(
  * pre-flight with no DDL and no writes.
  *
  * Returns `true` when the schema has not been initialized yet (the privileged
- * bootstrap is required) and when the committed schema is behind `graph`.
+ * bootstrap is required), when the committed schema is behind `graph`, and
+ * when the stored or the current ontology adds or removes a relation whose
+ * coherence `getSchemaChanges` could not determine (`ConfigurationError` from
+ * `classifyOntologyChanges` — a schema document written under an older,
+ * laxer validator can hold an ontology today's hardening rejects), or when
+ * the current graph declares a `subClassOf`/`equivalentTo`/`sameAs` hierarchy
+ * the structural-subsumption check refuses, whether or not anything changed.
+ * A document this predicate cannot interpret is, by construction, one the privileged
+ * path must look at, so this function never throws for that reason: it is
+ * the routing check a least-privilege runtime relies on to decide *before* a
+ * write discovers the migration wall mid-request, and a throw here would
+ * defeat that routing exactly when it matters most.
+ *
  * This is the predicate a least-privilege runtime checks to route to the
  * privileged path *before* a write discovers the migration wall mid-request.
  *
  * For the additive-vs-incompatible distinction, use `getSchemaChanges` and
- * {@link classifySchemaChanges} instead — this collapses both to `true`.
+ * {@link classifySchemaChanges} instead — this collapses both to `true`, and
+ * unlike `getSchemaChanges` it never throws `ConfigurationError` for an
+ * unclassifiable ontology.
  *
  * @param backend - The database backend
  * @param graph - The current graph definition
@@ -1664,7 +2253,13 @@ export async function requiresMigration<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
 ): Promise<boolean> {
-  const diff = await getSchemaChanges(backend, graph);
+  let diff: SchemaDiff | undefined;
+  try {
+    diff = await getSchemaChanges(backend, graph);
+  } catch (error) {
+    if (error instanceof ConfigurationError) return true;
+    throw error;
+  }
   if (diff === undefined) return true;
   return diff.hasChanges;
 }

@@ -530,6 +530,50 @@ describe("provenance retraction contract", () => {
     await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
   });
 
+  it("closes and names a live fact whose justification never fired", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    // An ordinary, fully validated seeding that still leaves a live fact with
+    // no firing justification: the justification needs BOTH premises, and one
+    // of its sources is created with its retracted flag already set. Nothing
+    // here violates a constraint, so no audit reports this state.
+    const available = await store.nodes.Source.create(
+      { label: "available", retracted: false },
+      { id: "source-available" },
+    );
+    const retracted = await store.nodes.Source.create(
+      { label: "retracted", retracted: true },
+      { id: "source-retracted" },
+    );
+    const fact = await store.nodes.Fact.create(
+      { label: "never-grounded" },
+      { id: "never-grounded" },
+    );
+    const justification = await store.nodes.Justification.create(
+      { label: "needs-both" },
+      { id: "needs-both" },
+    );
+    await store.edges.premiseOf.create(available, justification);
+    await store.edges.premiseOf.create(retracted, justification);
+    await store.edges.derives.create(justification, fact);
+
+    const provenance = createRetractionCapability(store, config);
+    await expect(provenance.holding()).resolves.toEqual([]);
+
+    const report = await provenance.retract(available);
+
+    // The transition ends this row's currency, so it must say so — `died` is
+    // the set of facts the close pass wrote, not a filter over what was
+    // believed beforehand.
+    expect(report.died).toEqual([{ kind: "Fact", id: "never-grounded" }]);
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
+  });
+  // MUTATION CHECK: restore the `believedBefore` filter in `buildReport`
+  // (src/provenance/index.ts) so `died` keeps only facts believed before the
+  // transition. The fact is still tombstoned and `died` comes back empty.
+
   it("supports no-premise justifications as axioms", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(graph, backend, {

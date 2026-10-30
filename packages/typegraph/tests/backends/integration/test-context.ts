@@ -130,4 +130,12 @@ export type IntegrationTestContext = Readonly<{
    * actually known.
    */
   serverLaneConcurrency: boolean;
+  /**
+   * Whether a statement that fails inside a transaction and is rolled back
+   * to a TypeGraph savepoint leaves the transaction able to commit. `false`
+   * on the postgres-js lane, whose `sql.begin` rethrows the first failed
+   * query at commit unless the savepoint was opened through `sql.savepoint()`
+   * (#787); `true` everywhere else.
+   */
+  recoversFailedStatementInTransaction: boolean;
 }>;

@@ -308,14 +308,14 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
   });
 
-  it("merges convergent retract + reassert of one pair", async () => {
+  it("refuses a retraction another branch overrules by retracting and reasserting", async () => {
     const { store, first, second, assertion } = await createBase(true);
     if (assertion === undefined) throw new Error("Missing base assertion");
     const retractBranch = unwrap(await branch(store, () => makeBackend()));
     const reassertBranch = unwrap(await branch(store, () => makeBackend()));
-    // Both branches AGREE the inherited assertion dies; one went further and
-    // re-asserted the pair under a new id. That is convergence, not a race, so
-    // both effects apply: the old id is retracted and the new one is asserted.
+    // One branch ends the pair; the other ends it and asserts it again under a
+    // new id. The branches disagree about whether the pair is the same at all,
+    // so keeping the reassertion would silently overrule the first branch.
     await retractBranch.store.identity.retractAssertion(assertion.id);
     await reassertBranch.store.identity.retractAssertion(assertion.id);
     const reasserted = await reassertBranch.store.identity.assertSame(
@@ -324,11 +324,42 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     );
 
     const result = await merge(store, [retractBranch, reassertBranch], {});
+    if (isOk(result)) {
+      console.info("merged", result.data.merged.identity);
+      throw new Error("Expected a retract/reassert race refusal");
+    }
+    console.info("refusal", result.error.message, result.error.details);
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    expect(result.error.message).toBe(
+      "Branches contain a retract/reassert race for one identity pair.",
+    );
+    expect(result.error.details).toMatchObject({
+      retractedAssertion: { id: assertion.id },
+      retractedBy: retractBranch.id,
+      reassertedAssertion: { id: reasserted.assertion.id },
+      reassertedBy: reassertBranch.id,
+    });
+    // Nothing applied: the base assertion is still the pair's only truth.
+    const current = await store.identity.assertionsOf(first);
+    expect(current.map((entry) => entry.id)).toEqual([assertion.id]);
+  });
+
+  it("merges a retract and reassert every retracting branch agrees on", async () => {
+    const { store, first, second, assertion } = await createBase(true);
+    if (assertion === undefined) throw new Error("Missing base assertion");
+    const firstBranch = unwrap(await branch(store, () => makeBackend()));
+    const secondBranch = unwrap(await branch(store, () => makeBackend()));
+    await firstBranch.store.identity.retractAssertion(assertion.id);
+    const kept = await firstBranch.store.identity.assertSame(first, second);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await secondBranch.store.identity.retractAssertion(assertion.id);
+    await secondBranch.store.identity.assertSame(first, second);
+
+    const result = await merge(store, [firstBranch, secondBranch], {});
     if (isErr(result)) throw result.error;
     expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 1 });
-
     const current = await store.identity.assertionsOf(first);
-    expect(current.map((entry) => entry.id)).toEqual([reasserted.assertion.id]);
+    expect(current.map((entry) => entry.id)).toEqual([kept.assertion.id]);
     expect(await store.identity.areSame(first, second)).toBe(true);
   });
 
@@ -769,7 +800,14 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(report.warnings).toEqual(expectedWarnings);
   });
 
-  it("rejects opposing relations created by endpoint reconciliation", async () => {
+  /**
+   * Branch A asserts `p-anna` the same as `anchor`; branch B asserts `p-ana`
+   * different from `anchor`. Fusing the two staged patients would turn those
+   * into opposing relations on one endpoint pair, so the separation veto —
+   * which reads both branches' staged assertions — drops the scored match and
+   * reports it, and the merge lands both assertions with the patients apart.
+   */
+  it("vetoes a scored match endpoint reconciliation would turn into opposing relations", async () => {
     const backend = await makeBackend();
     const [baseStore] = await createStoreWithSchema(patientGraph, backend);
     const anchor = await baseStore.nodes.Patient.create(
@@ -805,12 +843,21 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       branchOrder: [BRANCH_A, BRANCH_B],
     });
 
-    expect(isErr(result)).toBe(true);
-    if (isOk(result)) throw new Error("Expected identity merge conflict");
-    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    if (isErr(result)) throw result.error;
+    console.info("identity conflicts", result.data.identityConflicts);
+    expect(result.data.identityConflicts).toMatchObject([
+      {
+        kind: "separation",
+        a: { kind: "Patient", id: "p-ana" },
+        b: { kind: "Patient", id: "p-anna" },
+      },
+    ]);
+    expect(await baseStore.identity.areSame(anna, anchor)).toBe(true);
+    expect(await baseStore.identity.areDifferent(ana, anchor)).toBe(true);
+    expect(await baseStore.identity.areSame(anna, ana)).toBe(false);
   });
 
-  it("rejects a different assertion collapsed to one reconciled survivor", async () => {
+  it("keeps apart a scored pair the merged branch itself asserts different", async () => {
     const backend = await makeBackend();
     const [baseStore] = await createStoreWithSchema(patientGraph, backend);
     const branchA = unwrap(
@@ -838,9 +885,19 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       branchOrder: [BRANCH_A],
     });
 
-    expect(isErr(result)).toBe(true);
-    if (isOk(result)) throw new Error("Expected identity merge conflict");
-    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    // The branch's own `different` assertion vetoes the scored match: the
+    // pair is reported, both rows land, and the assertion lands with them.
+    if (isErr(result)) throw result.error;
+    expect(result.data.identityConflicts).toEqual([
+      expect.objectContaining({ kind: "separation" }),
+    ]);
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 0 });
+    const patients = await baseStore.nodes.Patient.find();
+    expect(patients.map((patient) => patient.id).toSorted()).toEqual([
+      "p-ana",
+      "p-anna",
+    ]);
+    expect(await baseStore.identity.areDifferent(anna, ana)).toBe(true);
   });
 
   it("drops a same assertion collapsed to one reconciled survivor (#5)", async () => {
@@ -1001,12 +1058,34 @@ describe("planIdentityChanges retract/reassert rules", () => {
     ).toThrow(IdentityMergeConflictError);
   });
 
-  it("accepts a reassert by a branch that retracted the pair itself", () => {
-    // Convergent: branch B retracted the inherited assertion before re-asserting,
-    // so both branches agree the old id dies.
+  it("rejects a reassert when another branch only retracted the pair", () => {
+    // Branch B retracted and re-asserted; branch A retracted and stopped. The
+    // reassertion would overrule A's retraction, so the plan is refused.
+    expect(() =>
+      planIdentityChanges(
+        stagingWithIdentityChanges(
+          [{ branchId: BRANCH_B, assertion: reasserted }],
+          [
+            { branchId: BRANCH_A, assertion: inherited },
+            { branchId: BRANCH_B, assertion: inherited },
+          ],
+        ),
+        new Map(),
+      ),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("accepts a reassert when every retracting branch reasserted the pair", () => {
+    const reassertedByA: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "a-3",
+    };
     const planned = planIdentityChanges(
       stagingWithIdentityChanges(
-        [{ branchId: BRANCH_B, assertion: reasserted }],
+        [
+          { branchId: BRANCH_A, assertion: reassertedByA },
+          { branchId: BRANCH_B, assertion: reasserted },
+        ],
         [
           { branchId: BRANCH_A, assertion: inherited },
           { branchId: BRANCH_B, assertion: inherited },
@@ -1021,7 +1100,13 @@ describe("planIdentityChanges retract/reassert rules", () => {
     expect(planned.assertions.map((entry) => entry.id)).toEqual([
       reasserted.id,
     ]);
-    expect(planned.dropped).toEqual([]);
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: reassertedByA.id,
+        reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+      },
+    ]);
   });
 
   it("accepts a single branch that retracts then re-asserts the pair", () => {

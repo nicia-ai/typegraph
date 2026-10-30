@@ -316,17 +316,82 @@ deletion bounds. Future or inverted identity windows are user-category input
 errors. A second non-identical open window and an endpoint-window conflict are
 constraint-category errors. Both classes are package-root exports.
 
+### `IdentityReplayError`
+
+Thrown by `store.identity.replay` / `transitionsOf` (and by
+`pruneIdentityTransitions`'s own history precondition) when the transition log
+cannot answer a request. Its code names the reason:
+
+- `IDENTITY_REPLAY_REQUIRES_HISTORY` — the store was opened without
+  `history: true`; there is no transition log to annotate reads with. Open
+  with `createStore(graph, backend, { history: true })`. Also thrown by
+  `importGraph`/`importGraphStream` when an archival document's `transitions`
+  section targets a history-off store: without `history: true` those rows
+  could never be read back through `transitionsOf` / `replay` either, so the
+  import refuses rather than writing them write-only.
+- `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` — the backend owns recorded
+  time itself (it declares `recordedTime`), so TypeGraph performs no recorded
+  capture and keeps no transition log for it, with or without
+  `history: true`. Raised by the same operations as
+  `IDENTITY_REPLAY_REQUIRES_HISTORY`, including an archival-transitions
+  import.
+- `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
+  below the graph's retention watermark (see
+  [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
+  names the watermark.
+- `IDENTITY_REPLAY_WALK_INCOMPLETE` — the lineage walk keyset-pages through
+  every matching row with no per-round limit, so ordinary lineages — however
+  many rows they hold — never hit this refusal; it fires only when a single
+  class lineage's transition rows exceed an internal total safety ceiling
+  (`details.ceiling`), which is a backstop against a pathologically large or
+  corrupted log, not a cap on legitimate history. Its only remedy is
+  destructive: prune older history with `pruneIdentityTransitions`.
+  Narrowing `fromRecorded`/`toRecorded` does not help: lineage discovery
+  reads the whole log deliberately, so that a requested window can never
+  hide the notes that name a class.
+- `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` — `pruneIdentityTransitions` was
+  given a `beforeRecorded` beyond every revision the graph holds: its next
+  commit's revision, or one past the highest retained transition when an
+  archival restore carried in higher revisions
+  (`details.highestPrunableRevision`). A prune there would claim history that
+  does not exist yet as already pruned, so it is refused and nothing is
+  deleted. Pass an instant
+  the graph has reached, such as `store.recordedNow()`.
+
+A range with more boundaries than the requested `limit` is not an error —
+`replay` and `transitionsOf` page, returning a `nextCursor` on the
+result (see [Replay and identity history](/identity/#replay-and-identity-history)).
+
+```typescript
+import { IdentityReplayError } from "@nicia-ai/typegraph";
+
+try {
+  await store.identity.replay(alice, { limit: 50 });
+} catch (error) {
+  if (error instanceof IdentityReplayError) {
+    console.log(error.details.code);
+  }
+}
+```
+
 ### `IdentityMergeConflictError`
 
 Detected at merge **plan time** when the branches being merged carry opposing
 or otherwise contradictory identity truth: one branch asserts a pair `same`
 while another asserts it `different` (directly, or transitively through a
 chain of `same` assertions no single branch ever wrote), a branch retracts an
-assertion that a different branch reasserts under a new id (a retract/reassert
-race — a branch that reasserts a pair it *also* retracted itself is
-convergent, not a conflict, and merges cleanly), or a branch asserts an
+assertion that a different branch reasserts under a new id, or retracts one
+that a different branch both retracts and reasserts (a retract/reassert race —
+a retraction and a reassertion are convergent, and merge cleanly, only when
+every branch that retracts the pair also reasserts it), or a branch asserts an
 identity relation over a node another branch deleted. Extends `MergeError`, so
 an `instanceof MergeError` catch covers it alongside the other merge failures.
+
+The same error class also covers the identity separation veto (see the
+[graph merge guide](/graph-merge/#identity-separation-veto)): a definitional
+match, or a transitive cluster, crossing a class-lifted `different` assertion
+(`GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`). Check `error.code` to
+distinguish it from the default `GRAPH_MERGE_IDENTITY_CONFLICT`.
 
 `merge()` and `IdentityMergeConflictError` are both exported from
 `@nicia-ai/typegraph/graph-merge`, not the package root. `merge()` takes an
@@ -339,7 +404,7 @@ import { merge, IdentityMergeConflictError, isErr } from "@nicia-ai/typegraph/gr
 const result = await merge(store, [branch]);
 if (isErr(result)) {
   if (result.error instanceof IdentityMergeConflictError) {
-    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT"
+    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT" or "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT"
     console.log(result.error.details);
   }
   throw result.error;
@@ -379,6 +444,84 @@ Identity truth conflicts retain `IdentityMergeConflictError`; backend,
 environment, and stale-plan failures retain their existing system errors.
 Constraint failure is atomic: neither graph writes nor merge provenance records
 survive.
+
+### `AcyclicityMergeConflictError`
+
+Detected at merge **plan time**, alongside `IdentityMergeConflictError`, when
+the resolved plan's edge writes — after canonicalization and repointing,
+layered onto the target's current live edges — would close a cycle in a
+declared-`acyclic: true` relation. This includes a cycle formed entirely from
+edges the plan itself proposes, with nothing live on the target yet.
+
+```typescript
+import {
+  AcyclicityMergeConflictError,
+  isErr,
+  merge,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof AcyclicityMergeConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_ACYCLICITY_CONFLICT"
+  console.log(result.error.details.relation); // the declared-acyclic relation
+  console.log(result.error.details.edges); // every offending edge on the cycle
+}
+```
+
+A cycle that only arises from a write racing the plan-time check (which holds
+no per-graph lock, since planning does no write) is not caught here — the
+unchanged apply-time write path still refuses it as
+`MergeConstraintConflictError` wrapping `EdgeAcyclicityError`.
+
+### `MergeCompositionOrphanError`
+
+Thrown from inside `applyMergePlan`'s transaction when applying the plan would
+delete a composition whole while one of its live parts is not itself among
+the plan's node deletions — the target gained that part after the branch
+point (or independently of it), and the branch's diff carries no deletion for
+it. Applying the plan as trusted would leave the part's composition edge
+pointing at a whole that no longer exists. The mirror case is refused the same
+way: the plan deletes a part (directly, or through the branch's cascade from
+its old whole) that the target has meanwhile moved under another live whole
+the plan leaves standing.
+
+```typescript
+import {
+  applyMergePlan,
+  isErr,
+  MergeCompositionOrphanError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const applied = await applyMergePlan(store, plan);
+if (isErr(applied) && applied.error instanceof MergeCompositionOrphanError) {
+  console.log(applied.error.code); // "GRAPH_MERGE_COMPOSITION_ORPHAN"
+  console.log(applied.error.details.part); // { kind, id }
+  console.log(applied.error.details.cause); // "deleted" | "moved" | "unattached"
+  console.log(applied.error.details.whole); // { kind, id } — absent for cause: "unattached"
+  console.log(applied.error.details.viaEdgeKind);
+}
+```
+
+`planMerge` and `planMergeIncremental` surface the same finding, best-effort,
+in `MergePlanReview.compositionOrphans` — a dry-run report computed against
+the target's state at plan time. This error is the authoritative,
+apply-time re-verification of that same check, run under the per-graph write
+lock so it cannot miss an orphan the plan-time report's unlocked read raced
+past. `cause: "deleted"` names the whole a branch deletes while a part
+survives; `cause: "moved"` names the live whole the target holds a part under
+that the plan would delete; `cause: "unattached"` (a part that requires a
+whole) has no whole to name — recompute the merge plan against the target's
+current state, or delete, attach or reconcile the part in the branch before
+merging.
+
+Every planning entry point (`merge`, `mergeIncremental`, `planMerge`,
+`planMergeIncremental`) also returns this error when two branches conflict
+over one composition attachment: one branch moves, attaches or re-attaches
+(reopens an ended `oneActive` row) a part while another deletes the part (`cause: "moved"`, `whole` is the surviving whole
+the part was moved under) or the whole (`cause: "deleted"`, `whole` is the
+deleted whole). `details.branchId` names the attaching branch; it is absent on
+every finding about the target's own state. See
+[Composition orphans](/graph-merge#composition-orphans).
 
 ### Merge plan and evidence errors
 
@@ -495,12 +638,220 @@ try {
   if (error instanceof CardinalityError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { edgeKind: "worksAt", fromKind: "Person", fromId: "<alice-id>", cardinality: "one", existingCount: 1 }
+    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1 }
     console.log(error.suggestion);
     // "Remove the existing edge before creating a new one, or update the existing edge..."
   }
 }
 ```
+
+`details.direction` names which endpoint's population was overrun —
+`"source"` for a `cardinality` violation, `"target"` for a
+`targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
+name both endpoints, regardless of direction.
+
+### `EdgeAcyclicityError`
+
+Thrown when a write would give a declared `acyclic: true` edge relation a
+cycle.
+
+```typescript
+// If dependsOn declares acyclic: true:
+await store.edges.dependsOn.create(taskA, taskB, {});
+
+try {
+  await store.edges.dependsOn.create(taskB, taskA, {});
+} catch (error) {
+  if (error instanceof EdgeAcyclicityError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { relation: "dependsOn", edgeKind: "dependsOn", edgeId: "<new-edge-id>",
+    //   fromKind: "Task", fromId: "<taskB-id>", toKind: "Task", toId: "<taskA-id>",
+    //   selfLoop: false }
+  }
+}
+```
+
+Carries no witness path — reconstructing one requires path tracking, which
+the underlying set-semantics reachability check gives up in exchange for
+terminating without a depth bound. Run `store.verifyConstraintFences()` to
+list every edge already on a cycle in the relation, or a `.recursive()`
+traversal from the endpoints for a human to inspect.
+
+### `EdgeAcyclicityIndeterminateError`
+
+Thrown when the engine cuts an acyclicity search short — a statement
+timeout, a resource limit — before it can prove or refute a cycle. An
+incomplete search is never reported as "no cycle".
+
+```typescript
+console.log(error.details);
+// { relation: "dependsOn", operation: "edges.create", graphId: "..." }
+```
+
+The suggestion names the two ways out: raise the statement budget for the
+operation, or drop `acyclic: true` from the edge and enforce it in
+application code. Retrying is not suggested — a relation too large for the
+budget will not shrink.
+
+### `CompositionError`
+
+Thrown when a `partOf`/`hasPart` write breaks one of the rules that keep a
+part's attachment a fact of its row. `details.situation` names which one, and
+`code` says the same thing:
+
+| `situation` | `code` | Meaning |
+| --- | --- | --- |
+| `"occupied"` | `COMPOSITION_WHOLE_OCCUPIED` | The write would give a part a second whole |
+| `"futureStart"` | `COMPOSITION_VALIDITY_FUTURE_START` | A composition edge write states a `validFrom` later than the operation clock |
+| `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
+| `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+
+A part holds exactly one whole across **every** declared composition pair,
+enforced by a single reserved claim axis — two different realizing edge
+kinds (or two orientations of one part kind) contend for the same row.
+
+```typescript
+// If Chapter partOf Book (via chapterOf) and Chapter partOf Anthology
+// (via includedIn) are both declared:
+await store.edges.chapterOf.create(chapter, book, {});
+
+try {
+  await store.edges.includedIn.create(chapter, anthology, {});
+} catch (error) {
+  if (error instanceof CompositionError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { situation: "occupied", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", incumbentEdgeId: "<the chapterOf edge's id>" }
+    console.log(error.suggestion);
+    // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
+    //  move the part — it retires the incumbent attachment and creates the
+    //  new one in one transaction. ..."
+  }
+}
+```
+
+Moving a part is [`reparent`](/ontology#reparent-moving-a-part-to-a-new-whole)'s
+job: it retires the incumbent attachment and creates the new one in one
+transaction, which is the only order in which both the one-whole-per-part rule and
+`existence: "required"` hold.
+
+`details.incumbentEdgeId` names the edge that already holds the axis — the
+one fact the claim statement's own result reports. It never names the
+incumbent whole's kind or id: reading that would be a second query this
+refusal path does not make. The refusal is the same class with the same
+detail wherever it is decided: by the claim row, or by the pre-write probe a
+batch, a custom command port's fallback, or a backend without claim
+relations runs instead. That probe counts the part's attachments across
+every realizing edge kind, and reports composition ahead of the edge kind's
+own `CardinalityError`. `incumbentEdgeId` is absent only when the incumbent
+is an earlier row of the same batch, which has no stored edge to name. Run `store.verifyConstraintFences()` (the
+`family: "composition"` entries) to find every part already holding more
+than one whole.
+
+**A composition window never starts or ends later than its write.** A row
+with no `validTo` is the part's current attachment and an ended row is
+history, for good — which is what lets the claim, the delete cascade, the
+acyclicity check and every current-time read agree on which whole a part
+holds. A window scheduled to open or close later would make the same row a
+membership at one read instant and history at another, so every write of a
+realizing edge refuses one: `partOf` on every create and get-or-create
+entry, `store.edges.<via>` creates, updates, upserts and their batch forms,
+import (as a per-row error carrying the code) and a graph merge's apply. The
+`"futureStart"` / `"futureEnd"` details carry the stated `bound` and the
+`operationInstant` it was judged against, plus `edgeId` when the edge
+exists already; `partId` is absent while a `partOf` create has not assigned
+the part its id yet. `"futureMove"` carries `at` instead. Record a change
+when it happens: a past `validTo` writes history, and `reparent` moves a part
+now (or at a past `at`).
+
+A move ends a `oneActive` incumbent's window at its `at`, so an `at` earlier
+than that window's `validFrom` would close it before it opened:
+`"moveBeforeIncumbent"` refuses it before any write, carrying `at` and the
+incumbent's `incumbentEdgeKind`, `incumbentEdgeId` and `incumbentValidFrom`.
+An omitted `at` is never refused for this; see
+[reparent](/ontology#reparent-moving-a-part-to-a-new-whole).
+
+The composition claim rides `typegraph_edge_claims`, the same relation
+`CardinalityError`'s claims do. A deployment initialized before that
+relation existed raises `ConfigurationError` (`EDGE_CLAIM_RELATION_MISSING`)
+on the first `partOf`/`hasPart` write and must be migrated under owner
+credentials before declaring one.
+
+### `CompositionExistenceError`
+
+Thrown when a write would leave an `existence: "required"` composition part
+with no live whole: a bare create with no `partOf`, a detach (ending,
+soft-deleting, or hard-deleting the composition edge) of a live part, or a
+`getOrCreateByConstraint` call stating `partOf` against a node that already
+exists.
+
+```typescript
+// Segment partOf Episode (via segmentOf, existence: "required"):
+try {
+  await store.nodes.Segment.create({ text: "..." });
+} catch (error) {
+  if (error instanceof CompositionExistenceError) {
+    console.log(error.details);
+    // { partKind: "Segment", situation: "create" }
+  }
+}
+```
+
+`details.situation` distinguishes the four shapes: `"create"` (no `partId`
+yet — deciding the refusal is what keeps the row from ever being written),
+`"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller
+tried to end), `"existing"` (a `getOrCreateByConstraint` call whose `partOf`
+postcondition the already-existing node contradicts — carries
+`currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move
+the caller would have to make is visible in the error), and `"props"` (a
+`getOrCreateByConstraint` or `reparent` call resolving to an attachment that
+already holds — same whole, same realizing edge — whose stated `props` are
+schema-valid but canonically different from the edge's live stored props —
+carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
+is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
+present even when the call omitted `via`.
+
+The error's `code` names the same four shapes, so a handler that routes on
+`code` alone can tell them apart:
+
+| `details.situation` | `code` |
+| --- | --- |
+| `"create"` | `COMPOSITION_WHOLE_REQUIRED` |
+| `"detach"` | `COMPOSITION_DETACH_REFUSED` |
+| `"existing"` | `COMPOSITION_WHOLE_CONFLICT` |
+| `"props"` | `COMPOSITION_PROPS_CONFLICT` |
+
+Pass `partOf: { whole, via? }` naming a live, declared whole to fix a
+create refusal; soft-delete or hard-delete the part itself (which frees its
+edge — a retired part is not orphaned by losing it) to fix a detach refusal;
+call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
+to fix an `"existing"` refusal, which is the operation that actually moves a
+part; call `store.edges.<via>.update(edgeId, props)` to fix a `"props"`
+refusal, which changes the realizing edge's own properties directly.
+
+An `"existing"` or `"props"` refusal fires only for a CONTRADICTION. A
+`getOrCreateByConstraint` (or `reparent`) call whose `partOf` matches the
+node's live whole, realizing edge, and (when stated) props succeeds and is
+idempotent, and one whose node has no live whole writes the attachment — see
+[`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
+
+A `partOf` the graph cannot resolve raises `ConfigurationError` rather than
+`CompositionExistenceError` — the option is accepted-shaped but names no
+declared pair, regardless of the part kind's `existence` and regardless of
+whether the call created the node or found it (the attachment is resolved
+before the match is even read, so the refusal cannot depend on what the
+constraint matched):
+
+| `details.code` | when |
+| --- | --- |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.whole.kind` |
+| `COMPOSITION_VIA_NOT_DECLARED` | `via` names an edge kind that realizes no declared pair between the two kinds |
+| `COMPOSITION_VIA_AMBIGUOUS` | `via` was omitted while more than one pair is declared between the two kinds |
+| `COMPOSITION_NOT_A_PART` | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair at all |
 
 ### `UniquenessError`
 
@@ -625,6 +976,73 @@ try {
 }
 ```
 
+### `CompositionCycleError`
+
+Thrown when the composition parts closure of a whole revisits a node already
+in the walk — an instance-level cycle among composition edges (for example a
+`Section partOf Section` ring). Reflexive composition is permitted at the
+kind level, and the store refuses the corresponding **instance** cycle at
+write time: every realizing edge kind belongs to the oriented composition
+union, probed for acyclicity on each composition edge write
+([`EdgeAcyclicityError`](#edgeacyclicityerror)). A ring therefore only
+reaches this walk through rows that bypassed that fence — written before the
+`partOf`/`hasPart` pair was declared, by trusted import, or by direct SQL.
+Deleting any node in the cycle throws this error instead of looping or
+silently truncating the closure.
+
+```typescript
+try {
+  await store.nodes.Section.delete(sectionA.id);
+} catch (error) {
+  if (error instanceof CompositionCycleError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { wholeKind: "Section", wholeId: "<a>", revisitedKind: "Section", revisitedId: "<a>" }
+    console.log(error.suggestion);
+    // "Delete or reassign one of the composition edges that closes this cycle..."
+  }
+}
+```
+
+The affected nodes stay undeletable through the ordinary delete path until
+one of the composition edges that closes the cycle is removed or reassigned
+by hand.
+
+### `NodeDeletePlanMismatchError`
+
+Thrown by `nodes.<Kind>.delete(id, { expect: plan })` when the plan the delete
+computes for itself no longer matches the `plan` from `planDelete(id)`, or
+when the node is absent or already deleted. It is raised before any write.
+The code is `NODE_DELETE_PLAN_MISMATCH` and the category is `"constraint"`,
+like `RestrictedDeleteError`: the graph's current state refuses the delete the
+caller confirmed, and the remedy is a fresh preview the user confirms again.
+See
+[Previewing a delete](/ontology#previewing-a-delete).
+
+| `details.situation` | Meaning |
+| --- | --- |
+| `"changed"` | The delete's plan differs from `expect` |
+| `"notLive"` | The node is absent or already deleted |
+
+On `"changed"`, `addedParts` and `addedEdgeIds` are in the delete's plan but
+not in `expect`, and `droppedParts` and `droppedEdgeIds` are in `expect` but
+no longer in the delete's plan. Parts compare by `(kind, id, whole,
+viaEdgeKind)`, so a part moved to another whole appears in both part lists.
+
+```typescript
+try {
+  await store.nodes.Podcast.delete(podcast.id, { expect: confirmedPlan });
+} catch (error) {
+  if (error instanceof NodeDeletePlanMismatchError) {
+    console.log(error.details);
+    // { kind: "Podcast", id: "<podcast-id>", situation: "changed",
+    //   addedParts: [{ kind: "Episode", id: "<new-episode>", whole: { kind: "Podcast", id: "<podcast-id>" }, viaEdgeKind: "episodeOf" }],
+    //   droppedParts: [], addedEdgeIds: ["<its episodeOf edge>"], droppedEdgeIds: [] }
+    // Preview again and ask the user to confirm the new plan.
+  }
+}
+```
+
 ## Configuration Errors
 
 ### `ConfigurationError`
@@ -682,6 +1100,24 @@ check applies to node kinds whose schema exposes an object shape; edge `unique`
 constraints are not validated here. Statically typed callers were already unable
 to name an undeclared field, so this bites untyped or generated definitions.
 
+#### Provenance fact kinds and required composition parts
+
+`createRetractionCapability` refuses a configuration whose fact kinds own
+required composition parts it cannot reach, with
+`PROVENANCE_REQUIRED_PART_NOT_A_FACT`. A required part's belief status follows
+its whole's, and the close that enforces that runs over facts, so a fact kind
+that is the whole of an `existence: "required"` pair whose part kind is missing
+from `fact.kinds` is a hole no transition can fill: closing the whole would
+leave a live required part hanging from a closed whole. `details` names the
+`wholeKind` and the `partKind`, and `requiredParts` lists every such pair.
+
+Both sides are read through subsumption, so a fact kind that is a subclass of
+the kind a pair declared its whole against counts, and so does a subclass of a
+declared required part kind. Fix it by adding the part kind to `fact.kinds`
+(with a `derives` endpoint for it) or by declaring the pair
+`existence: "optional"`. See [Composition and
+retraction](/provenance#composition-and-retraction).
+
 #### Definition-time `__proto__` property refusal
 
 `defineNode()` / `defineEdge()` refuse a schema that declares a property named
@@ -718,7 +1154,9 @@ cannot fence constrained writes" is unusable advice while "your
 
 | `details.constraint` | The write it describes |
 | --- | --- |
-| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`. |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true`. No claim row backs this axis — a cycle spans a whole reachable subgraph, not a tuple — so it is fenced by the per-graph lock alone. |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` (`one`, `unique`, `oneActive`) or `targetCardinality` (`one`, `oneActive`) constrains it, on either endpoint. |
+| `edgeComposition` | Creating or resurrecting an edge that realizes a declared `partOf`/`hasPart` pair. Backed by the same `typegraph_edge_claims` relation as `edgeCardinality` — reported in preference to it, so the refusal names the composition declaration rather than a generic cardinality one. |
 | `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
@@ -872,6 +1310,25 @@ and `store.search.hybrid` refuse every mismatched override on their own broader
 rule. See
 [Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
 
+#### Edge integrity option codes
+
+`defineGraph` refuses an edge registration whose integrity options are stated
+outside their domain. TypeScript rejects these at compile time; the runtime
+check is for untyped callers:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
+
+#### Export temporal-field codes
+
+`exportGraph` / `exportGraphStream` refuse to drop valid-time fields a graph's
+rows cannot be read without:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An export explicitly set `includeTemporal: false` on a graph with an edge kind whose `cardinality` or `targetCardinality` is `"oneActive"` (a `oneActive` composition pair included). Those kinds count a row only while its window is open, so an ended row exported without its `validTo` would re-import as current. `details.edgeKinds` lists them. Remove `includeTemporal` (such exports default it to `true`) or set it to `true`. |
+
 #### Durable edge match identity guard codes
 
 Durable edge match identity uses stable `ConfigurationError` detail codes:
@@ -899,6 +1356,15 @@ guessing how incident and exact-pair rows should be interpreted:
 | --- | --- |
 | `EDGE_HETEROGENEOUS_READ_MIXED_ENDPOINT_MODES` | The request contains both incident-endpoint rows (without an opposite endpoint) and exact directed-pair rows. Supply an opposite endpoint for every row to request exact-pair matching. |
 | `EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED` | The endpoint set cannot fit within the backend's bind-parameter budget. Split the request into smaller calls. |
+
+#### Pagination guard codes
+
+`paginate()`, `page()` and `stream()` refuse a query whose cursor could not
+position itself, instead of returning pages that silently lose rows:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECURSIVE_PAGINATION_UNSUPPORTED` | The query contains a recursive traversal (`recursive()`, `parts()` or `wholes()`). A recursive row has no single edge to extend the start node's keyset cursor with, so the rows of one start node that straddle a page boundary would be dropped. `details.operation` names the refused surface. Read the walk with `execute()` and an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the walk for each page. See [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated). |
 
 #### Operational Identity guard codes
 
@@ -949,6 +1415,25 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_WITHOUT_END` | An assertion names an `endedBy` cause but carries no `validTo`; only an ended assertion has a cause. |
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
+
+Archival transitions carry four `ValidationError` codes of their own, each a
+precondition failure on the identity section as a whole rather than a per-row
+outcome — unlike the table above, these THROW uncaught and are never recorded
+in `result.errors`:
+
+| Issue `code` | Meaning |
+| --- | --- |
+| `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. Refused before any write. |
+| `IDENTITY_STATE_IMPORT_RETENTION` | A `state`-mode document carries a `retention` watermark; only archival exports carry one. Refused before any write. |
+| `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` are not ordered by non-decreasing `recordedRevision` — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. |
+| `IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING` | An `importGraphStream` header announced a transition restore (`hasTransitions`, or a non-zero `retention`), but the stream ended without an `identity-transitions` chunk. Raised at the end of the stream, after its earlier chunks committed. |
+
+A write that records an identity transition on a database whose transition-log
+relations were never created (base-schema version 6 not yet adopted; see
+[Base-schema version 6](/backend-setup/#base-schema-version-6-the-identity-transition-log))
+throws a `ConfigurationError` whose `details.code` is
+`IDENTITY_TRANSITION_RELATIONS_MISSING` and whose `details.relations` names
+both relations.
 
 #### Merge provenance sidecar codes
 
@@ -1182,6 +1667,109 @@ try {
   }
 }
 ```
+
+The `details.reason` value `"ontology-tightening-violated"` means an ontology
+change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or
+`partOf`/`hasPart`, or removing `subClassOf` or `equivalentTo` — is false
+against rows that already exist. `details.changes` carries only the ontology
+changes in this diff that required a data check (a `safe` or `breaking`
+change in the same commit is never included, even one alongside the change
+that was refused); `details.violations` carries the offending rows in
+exactly the shape `store.verifyConstraintFences()` returns — including
+`family: "composition"` entries when a newly-declared `partOf`/`hasPart`
+pair finds a part already holding two live wholes, or a cycle in the
+proposed composition relation, and `family: "compositionFutureWindow"`
+entries when the pair's realizing edge kind already holds a row whose
+window starts or ends later than the commit. Resolve those rows (delete them, change
+their kind, or narrow the ontology change) and retry. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+for what each meta-edge checks.
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
+    console.log(error.details.violations);
+    // [{ family: "nodeDisjointness", target: {...}, owners: [...] }, ...]
+  }
+}
+```
+
+The `details.reason` value `"unique-constraint-requires-empty-kind"` means the
+commit would leave a uniqueness constraint unenforced over rows that already
+exist: it adds or reshapes a unique constraint on a kind that holds rows
+(including a kind the commit re-adds over rows a discarded drop left behind),
+or drops a member that sorts before the kind from the subclass component of a
+populated kind's `kindWithSubClasses` constraint (a removed `subClassOf` /
+`equivalentTo`, or a removed kind). A schema
+commit neither validates existing rows against a unique constraint nor
+rebuilds its claims, so the kind must be empty. `details.constraints` names
+each blocked constraint — `kind`, `constraintName`, `cause`
+(`"constraint-added"`, `"constraint-reshaped"` or `"claim-axis-moved"`) and
+the claim `axis`, plus `lostKinds` for a component that dropped members. Declare the
+constraint before the kind is populated, or empty the kind, commit, and write
+the rows back. See
+[Unique constraints need an empty kind](/schema-evolution#unique-constraints-need-an-empty-kind).
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "unique-constraint-requires-empty-kind") {
+    console.log(error.details.constraints);
+    // [{ cause: "constraint-added", kind: "Person", constraintName: "person_email", axis: "Person" }]
+  }
+}
+```
+
+The `details.reason` value `"edge-cardinality-tightening-violated"` is the
+same shape for edge cardinality: newly declaring or tightening `cardinality`
+or `targetCardinality` on an edge kind is false against rows that already
+exist. `details.axes` names the axes this commit newly constrains (each an
+`{direction, cardinality, edgeKind}` triple); `details.violations` carries
+the offending rows in exactly the shape `store.verifyConstraintFences()`
+returns. An axis is probed whenever the proposed value is constrained and
+differs from the stored one — including a genuine loosening, which costs one
+read of an already-clean population rather than risk missing a tightening.
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "edge-cardinality-tightening-violated") {
+    console.log(error.details.axes);
+    // [{ direction: "target", cardinality: "one", edgeKind: "assignedTo" }]
+    console.log(error.details.violations);
+  }
+}
+```
+
+The `details.reason` value `"custom-relation-removal"` means
+`store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would drop a
+stored relation that names a custom meta-edge from the removed `metaEdge()`
+factory. The stored schema holds the last copy of that relation, so these verbs
+refuse before writing anything. `details.relations` names each relation as
+written, such as `governs(Team, Project)`. Move them into
+`defineGraph({ annotations })`, commit once with `migrateSchema()`, then retry.
+See
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis).
+
+#### Schema-tightening and constraint-fence audit guard codes
+
+Committing a schema tightening — ontology, edge cardinality, or a gated
+unique-constraint change — uses stable
+`ConfigurationError` detail codes when the backend cannot run the required
+data check atomically:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the ontology-tightening data check atomically with the schema-version compare-and-swap. A commit that adds an edge kind owes this check too: rows a previous removal left under that name (`discardDroppedKindRows`) must sit on endpoint pairs the new declaration admits, and must not form a cycle if it declares `acyclic: true`. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the edge-cardinality-tightening data check atomically with the schema-version compare-and-swap. Any commit that newly declares a constrained `cardinality` or `targetCardinality` on an edge kind — including declaring one on a brand-new kind — owes this same atomic check. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND` | The backend cannot verify that a kind is empty atomically with the schema-version compare-and-swap. A commit that adds or reshapes a unique constraint on a kind — a kind the commit adds included, since it may own rows a previous removal left behind — or moves a `kindWithSubClasses` claim, owes that check even when the kind is empty. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` | The backend does not implement `readConstraintFenceViolations` at all, so neither `store.verifyConstraintFences()` nor a schema-tightening preflight can run. |
+| `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED` | The backend ran the audit but did not answer the `edgeEndpointAssignability` family it was asked for (`misassignedEdgeEndpointRows` was left `undefined`). An empty report there would be indistinguishable from a clean database, so the audit refuses rather than reporting one. |
+| `SCHEMA_WRITE_REQUIRES_READ_COMMITTED` | A PostgreSQL schema write took the advisory schema fence on a session that reports an isolation other than `read_committed` (`details.isolation`). Managed writers hold the schema row `FOR SHARE` without changing it, so only a fresh snapshot per statement lets the data check see what they committed while the schema write waited. TypeGraph opens its own schema-write transactions at `read_committed`, so this is raised for a caller-owned `REPEATABLE READ` or `SERIALIZABLE` transaction it cannot move: one handed to `adoptSchemaWriteTransaction`, or one under a transaction-scoped backend (`createPostgresTransactionBackend(tx)`), where every schema write — a commit, an activation, an identity schema transition, the provenance sidecar claim, removal materialization, a contribution rebuild — runs in a savepoint of the caller's transaction. Run the schema write in a `READ COMMITTED` transaction. The caller's transaction is left as it was: no lock held, no setting changed. |
 
 ### `BaseSchemaMigrationError`
 
@@ -1462,11 +2050,31 @@ try {
 | `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
+| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
+| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store whose backend owns recorded time (engine-native) |
+| `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
+| `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
+| `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` | `IdentityReplayError` | constraint | A prune named a recorded instant beyond every revision the graph holds |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
+| `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
+| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps; or, at planning, one branch's composition attachment loses its part or whole to another branch's deletion |
+| `GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE` | `CandidatePlanningScopeError` | user | `planCandidateWriteSet` was called with `planningScope: "candidate"`, but the target or candidate must be planned against the whole target; `details.planningScope.reason` names why |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
+| `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
+| `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
+| `COMPOSITION_WHOLE_OCCUPIED` | `CompositionError` | constraint | A `partOf`/`hasPart` write would give a part a second whole |
+| `COMPOSITION_VALIDITY_FUTURE_START` | `CompositionError` | constraint | A composition edge write states a `validFrom` later than the operation clock |
+| `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
+| `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
+| `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
+| `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
+| `COMPOSITION_PROPS_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |
@@ -1474,7 +2082,9 @@ try {
 | `KIND_NOT_FOUND` | `KindNotFoundError` | user | Unknown node/edge type |
 | `ENDPOINT_NOT_FOUND` | `EndpointNotFoundError` | user | Edge endpoint node doesn't exist |
 | `RESTRICTED_DELETE` | `RestrictedDeleteError` | constraint | Delete blocked by existing edges |
+| `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level composition cycle survives from rows that bypassed the write-time acyclicity fence |
 | `CONFIGURATION_ERROR` | `ConfigurationError` | system | Invalid configuration |
+| `PROVENANCE_REQUIRED_PART_NOT_A_FACT` | `ConfigurationError` | system | A `createRetractionCapability` fact kind is the whole of an `existence: "required"` composition pair whose part kind is not itself a fact kind |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |

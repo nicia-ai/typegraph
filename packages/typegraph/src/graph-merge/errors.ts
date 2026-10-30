@@ -1,3 +1,6 @@
+import { requireDefined } from "../utils/presence";
+import type { MergePlanCompositionOrphan } from "./plan-schema";
+import type { WholeTargetPlanningScope } from "./sparse-candidate-branch";
 import type { TypeGraphErrorOptions } from "./typegraph-internal";
 import { TransactionConflictError, TypeGraphError } from "./typegraph-internal";
 
@@ -22,6 +25,8 @@ export const MERGE_ERROR_CODES = {
   conflict: "GRAPH_MERGE_CONFLICT",
   constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT",
   identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
+  identitySeparationConflict: "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT",
+  acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
   planCapability: "GRAPH_MERGE_PLAN_CAPABILITY",
   planInvalid: "GRAPH_MERGE_PLAN_INVALID",
@@ -35,6 +40,7 @@ export const MERGE_ERROR_CODES = {
   candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE",
   evidence: "GRAPH_MERGE_EVIDENCE",
   candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET",
+  candidatePlanningScope: "GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE",
   review: "GRAPH_MERGE_REVIEW",
   operation: "GRAPH_MERGE_OPERATION",
   operationRequest: "GRAPH_MERGE_OPERATION_REQUEST",
@@ -42,6 +48,7 @@ export const MERGE_ERROR_CODES = {
   operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED",
   operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE",
   operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED",
+  compositionOrphan: "GRAPH_MERGE_COMPOSITION_ORPHAN",
 } as const;
 
 /**
@@ -230,13 +237,182 @@ export function translateMergeCommitError(error: unknown): unknown {
   return new MergeConstraintConflictError(error);
 }
 
-/** Raised when identity branches contain opposing or retract/reassert truth. */
+/**
+ * Raised at PLAN time when two branches conflict over a composition
+ * attachment — one branch attaches a part to a whole while another deletes
+ * one end of it (`details.branchId` names the attaching branch) — and at
+ * APPLY when the plan would separate a composition part from its
+ * whole behind the target's back: a live part of a whole the plan deletes is
+ * not itself among the plan's node deletions (the target gained that part
+ * AFTER the branch point, or independently of it), or a part the plan
+ * deletes is held by the target under a live whole the plan leaves standing
+ * (the target moved it there after the branch point). Applying the plan as
+ * trusted would leave the part pointing at a whole that no longer exists, or
+ * take it from a whole that does.
+ *
+ * `planMerge`/`planMergeIncremental` surface the SAME finding, computed by the
+ * same `planCompositionCascade` / `unattachedRequiredPartOrphansAmong` owners
+ * against the target's state at plan time, as
+ * `MergePlanReview.compositionOrphans` — a best-effort, racy dry-run report.
+ * This error is the authoritative one: it is thrown from inside the apply
+ * transaction, under the per-graph write lock, so it cannot miss an orphan
+ * the plan-time report's unlocked read raced past.
+ *
+ * `details` is typed as {@link MergePlanCompositionOrphan} — the SAME shape
+ * `assertNoCompositionOrphans`/`assertNoUnattachedRequiredParts` (`merge.ts`)
+ * pass straight into this constructor — rather than a second,
+ * structurally-identical type. Two names for one finding is exactly the kind
+ * of drift a future field (say, the realizing edge id) could silently
+ * introduce between the dry-run report and the apply-time refusal.
+ *
+ * `details.cause` picks the message: `"deleted"` names the whole this plan
+ * would delete; `"moved"` names the live whole the target holds a part under
+ * that this plan would delete; `"unattached"` has no whole to name at all —
+ * the part's composition edge was dropped or collapsed by canonicalization
+ * while the part itself survives. With `details.branchId`, the attachment at
+ * stake is that branch's, not the target's.
+ */
+export class MergeCompositionOrphanError extends MergeError {
+  protected static override readonly errorCategory = "constraint";
+  override readonly code = MERGE_ERROR_CODES.compositionOrphan;
+  declare readonly details: MergePlanCompositionOrphan;
+
+  constructor(details: MergePlanCompositionOrphan) {
+    super(compositionOrphanMessage(details), { details });
+    this.name = "MergeCompositionOrphanError";
+  }
+}
+
+/** The `MergeCompositionOrphanError` messages, one per `cause` and attaching side. */
+function compositionOrphanMessage(details: MergePlanCompositionOrphan): string {
+  if (details.branchId !== undefined) {
+    return branchAttachmentLossMessage(details, details.branchId);
+  }
+  if (details.cause === "moved") {
+    // `cause: "moved"` always carries `whole` — the only producer,
+    // `compositionMovedPartsAmong` (`merge.ts`), sets both together.
+    const holder = requireDefined(
+      details.whole,
+      'MergePlanCompositionOrphan.whole for cause "moved"',
+    );
+    return (
+      `Applying this merge plan would delete part "${details.part.kind}:${details.part.id}", ` +
+      `which the target holds under live whole "${holder.kind}:${holder.id}" (via "${details.viaEdgeKind}") ` +
+      "that the plan neither deletes nor detaches it from. Stop the branch from deleting the part, " +
+      "or detach the part from that whole on the target, before merging."
+    );
+  }
+  if (details.cause === "unattached") {
+    return (
+      `Applying this merge plan would leave part "${details.part.kind}:${details.part.id}" ` +
+      `(via "${details.viaEdgeKind}") with no live whole — this composition pair requires one ` +
+      '(`existence: "required"`). Recompute the merge plan against the target\'s current ' +
+      "state, or attach the part to a whole in the branch before merging."
+    );
+  }
+  // `cause: "deleted"` always carries `whole` — the only producer,
+  // `compositionOrphansAmong` (`merge.ts`), sets both together.
+  const whole = requireDefined(
+    details.whole,
+    'MergePlanCompositionOrphan.whole for cause "deleted"',
+  );
+  return (
+    `Applying this merge plan would delete whole "${whole.kind}:${whole.id}" ` +
+    `while its part "${details.part.kind}:${details.part.id}" (via "${details.viaEdgeKind}") ` +
+    "is not itself among the plan's node deletions. Recompute the merge plan against the " +
+    "target's current state, or delete the orphaned part in the branch before merging."
+  );
+}
+
+/**
+ * The message for a cross-branch finding: `whole` is always set, because the
+ * only producer, `lostBranchAttachment` (`merge.ts`), reads it off the
+ * attaching edge.
+ */
+function branchAttachmentLossMessage(
+  details: MergePlanCompositionOrphan,
+  branchId: string,
+): string {
+  const whole = requireDefined(
+    details.whole,
+    "MergePlanCompositionOrphan.whole for a branch attachment",
+  );
+  const attachment =
+    `branch "${branchId}" attaches part "${details.part.kind}:${details.part.id}" ` +
+    `to whole "${whole.kind}:${whole.id}" (via "${details.viaEdgeKind}")`;
+  const deletedEnd = details.cause === "moved" ? "part" : "whole";
+  return (
+    `Merging these branches would lose a composition attachment: ${attachment}, ` +
+    `but the merge also deletes that ${deletedEnd}. ` +
+    "Drop either the deletion or the attachment from its branch before merging."
+  );
+}
+
+/**
+ * The identity dimension of a merge refusal: opposing or retract/reassert
+ * truth, or a class-lifted `different` that vetoes a match.
+ *
+ * ONE class, two codes. Each of those is a distinct machine-readable
+ * `MERGE_ERROR_CODES` entry so a caller can branch precisely, but they share
+ * this class — and therefore `category: "conflict"` — so every consumer that
+ * already handles an identity merge conflict keeps handling all of them, and
+ * `GRAPH_MERGE_IDENTITY_CONFLICT` keeps every case it raises today.
+ */
 export class IdentityMergeConflictError extends MergeError {
-  override readonly code = MERGE_ERROR_CODES.identityConflict;
+  override readonly code: IdentityMergeConflictCode;
+
+  constructor(
+    message: string,
+    options: MergeErrorOptions &
+      Readonly<{ code?: IdentityMergeConflictCode }> = {},
+  ) {
+    super(message, options);
+    this.code = options.code ?? MERGE_ERROR_CODES.identityConflict;
+    this.name = "IdentityMergeConflictError";
+  }
+}
+
+/** The two codes {@link IdentityMergeConflictError} can carry. */
+export type IdentityMergeConflictCode =
+  | typeof MERGE_ERROR_CODES.identityConflict
+  | typeof MERGE_ERROR_CODES.identitySeparationConflict;
+
+/** One offending edge named in an {@link AcyclicityMergeConflictError}. */
+export type AcyclicityMergeConflictEdge = Readonly<{
+  edgeId: string;
+  edgeKind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/** `details` carried by {@link AcyclicityMergeConflictError}. */
+export type AcyclicityMergeConflictDetails = Readonly<{
+  /** The declared acyclic relation the resolved plan would close a cycle in. */
+  relation: string;
+  /** Every edge of `relation` the plan-time probe found on the cycle. */
+  edges: readonly AcyclicityMergeConflictEdge[];
+  [key: string]: unknown;
+}>;
+
+/**
+ * Raised at plan time when the resolved merge plan's projected
+ * edge writes — after canonicalization and repointing, layered onto the
+ * target's current live edges — would close a cycle in a declared-acyclic
+ * relation. Reviewable, like {@link IdentityMergeConflictError}: the plan is
+ * not applied, and the target is untouched. Apply-time re-verification (a
+ * cycle that only appears due to a write that lands between planning and
+ * commit) remains a refusal, not a conflict — see `EdgeAcyclicityError` via
+ * {@link MergeConstraintConflictError}.
+ */
+export class AcyclicityMergeConflictError extends MergeError {
+  override readonly code = MERGE_ERROR_CODES.acyclicityConflict;
+  declare readonly details: AcyclicityMergeConflictDetails;
 
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
-    this.name = "IdentityMergeConflictError";
+    this.name = "AcyclicityMergeConflictError";
   }
 }
 
@@ -374,6 +550,31 @@ export class CandidateWriteSetError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "CandidateWriteSetError";
+  }
+}
+
+/**
+ * Raised instead of planning against the whole target when a caller requests
+ * `planningScope: "candidate"`. `details.planningScope.reason` names why the
+ * target or candidate cannot be planned from the candidate's own rows.
+ */
+export class CandidatePlanningScopeError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = MERGE_ERROR_CODES.candidatePlanningScope;
+  declare readonly details: Readonly<{
+    planningScope: WholeTargetPlanningScope;
+  }>;
+
+  constructor(planningScope: WholeTargetPlanningScope) {
+    super(
+      `Candidate-scoped planning was requested, but this candidate must be planned against the whole target (${planningScope.reason}).`,
+      {
+        details: { planningScope },
+        suggestion:
+          "Omit planningScope to accept whole-target planning, or remove the cause named by details.planningScope.reason.",
+      },
+    );
+    this.name = "CandidatePlanningScopeError";
   }
 }
 

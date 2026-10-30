@@ -75,14 +75,20 @@ import {
   withCoordinate,
   withValidCoordinate,
 } from "./collections/temporal-read-params";
+import {
+  type NodeByIdReader,
+  readNodeByReference,
+} from "./node-reference-read";
 import { storeRuntime } from "./runtime-port";
 import { type StoreSearch } from "./search-facade";
 import { type Store, type ViewIdentityAccess } from "./store";
 import {
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphOptions,
-  type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   type BulkFindEdgesFromParams,
@@ -92,6 +98,8 @@ import {
   type DynamicStoreViewEdgeCollection,
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
+  type GraphNodeForKinds,
+  type Node,
   type NodeCollection,
   type NodeCurrentReads,
   type RecordedStoreViewEdgeCollection,
@@ -128,9 +136,10 @@ export type StoreViewSubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Omit<
-  SubgraphOptions<G, EK, NK, P>,
+  SubgraphOptions<G, EK, NK, P, C>,
   "temporalMode" | "asOf" | "recordedAsOf"
 >;
 
@@ -262,6 +271,65 @@ const NON_KIND_KEYS: ReadonlySet<string> = new Set([
   "finally",
   "toJSON",
 ]);
+
+/** The option keys a read states its own temporal coordinate with. */
+const STATED_COORDINATE_KEYS = [
+  "temporalMode",
+  "asOf",
+  "recordedAsOf",
+] as const;
+
+/**
+ * Refuses a read that states its own temporal coordinate.
+ *
+ * The view's option types omit the temporal keys, but an untyped caller (or
+ * a cast) can still state them. Answering at the pin anyway would drop a
+ * stated value without a word, and honoring it would break the seal, so the
+ * read is refused — the same answer `view.query().temporal(...)` gives, on a
+ * `current` view and an `asOf` view alike. `stated` is whatever argument sits
+ * where the live collection would take its options.
+ *
+ * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
+ */
+function assertNoStatedCoordinate(
+  method: string,
+  stated: unknown,
+  coordinate: ReadCoordinate,
+): void {
+  if (typeof stated !== "object" || stated === null) return;
+  const statedKeys = STATED_COORDINATE_KEYS.filter(
+    (key) => (stated as Readonly<Record<string, unknown>>)[key] !== undefined,
+  );
+  if (statedKeys.length === 0) return;
+  throw new ConfigurationError(
+    `'${method}' on a StoreView does not accept ${statedKeys.map((key) => `\`${key}\``).join(", ")} — the view's ` +
+      `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+      `Read at another coordinate through the live Store or store.view(...).`,
+    {
+      code: "STORE_VIEW_SEALED_COORDINATE",
+      method,
+      stated: statedKeys,
+      ...coordinateContext(coordinate),
+    },
+  );
+}
+
+/**
+ * A view read's options with the view's coordinate applied: the one place a
+ * pinned read merges the two, so no read can spread the pin over a
+ * coordinate its caller stated ({@link assertNoStatedCoordinate}).
+ *
+ * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
+ */
+function pinnedOptions<Options extends object, Pin extends object>(
+  method: string,
+  options: Options | undefined,
+  coordinate: ReadCoordinate,
+  pin: Pin,
+): Options & Pin {
+  assertNoStatedCoordinate(method, options, coordinate);
+  return { ...options, ...pin } as Options & Pin;
+}
 
 /**
  * Returns a function that refuses a write or unsupported-read method on a
@@ -492,10 +560,22 @@ function pinnedNodeCollection(
         Method in (typeof NODE_TEMPORAL_READ_NAMES)[number]
       ]: StoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) => live.getById(id, temporal),
-    getByIds: (ids) => live.getByIds(ids, temporal),
-    find: (filter) => live.find(filter, temporal),
-    count: () => live.count(temporal),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return live.getById(id, temporal);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return live.getByIds(ids, temporal);
+    },
+    find: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("find", stated, coordinate);
+      return live.find(filter, temporal);
+    },
+    count: async (stated?: unknown) => {
+      assertNoStatedCoordinate("count", stated, coordinate);
+      return live.count(temporal);
+    },
   };
   return readOnlyCollectionProxy(
     reads,
@@ -516,18 +596,45 @@ function pinnedEdgeCollection(
         Method in (typeof EDGE_TEMPORAL_READ_NAMES)[number]
       ]: StoreViewEdgeCollection<AnyEdgeType, NodeType, NodeType>[Method];
     }> = {
-    getById: (id) => live.getById(id, temporal),
-    getByIds: (ids) => live.getByIds(ids, temporal),
-    find: (filter) => live.find(filter, temporal),
-    count: (filter) => live.count(filter, temporal),
-    findFrom: (from) => live.findFrom(from, temporal),
-    findTo: (to) => live.findTo(to, temporal),
-    bulkFindFrom: (froms, options) =>
-      live.bulkFindFrom(froms, { ...options, ...temporal }),
-    bulkFindTo: (tos, options) =>
-      live.bulkFindTo(tos, { ...options, ...temporal }),
-    findByEndpoints: (from, to, options) =>
-      live.findByEndpoints(from, to, options, temporal),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return live.getById(id, temporal);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return live.getByIds(ids, temporal);
+    },
+    find: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("find", stated, coordinate);
+      return live.find(filter, temporal);
+    },
+    count: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("count", stated, coordinate);
+      return live.count(filter, temporal);
+    },
+    findFrom: async (from, stated?: unknown) => {
+      assertNoStatedCoordinate("findFrom", stated, coordinate);
+      return live.findFrom(from, temporal);
+    },
+    findTo: async (to, stated?: unknown) => {
+      assertNoStatedCoordinate("findTo", stated, coordinate);
+      return live.findTo(to, temporal);
+    },
+    bulkFindFrom: async (froms, options) =>
+      live.bulkFindFrom(
+        froms,
+        pinnedOptions("bulkFindFrom", options, coordinate, temporal),
+      ),
+    bulkFindTo: async (tos, options) =>
+      live.bulkFindTo(
+        tos,
+        pinnedOptions("bulkFindTo", options, coordinate, temporal),
+      ),
+    findByEndpoints: async (from, to, options, stated?: unknown) => {
+      assertNoStatedCoordinate("findByEndpoints", options, coordinate);
+      assertNoStatedCoordinate("findByEndpoints", stated, coordinate);
+      return live.findByEndpoints(from, to, options, temporal);
+    },
   };
   return readOnlyCollectionProxy(reads, live, coordinate, "edge");
 }
@@ -620,12 +727,18 @@ function recordedNodeCollection<G extends GraphDef>(
         Method in (typeof RECORDED_POINT_READ_NAMES)[number]
       ]: RecordedStoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) =>
-      storeRuntime(store).recordedNodeGetById(kind, id, coordinate),
-    getByIds: (ids) =>
-      storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate),
-    scan: (options) =>
-      storeRuntime(store).recordedNodeScan(kind, coordinate, options),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return storeRuntime(store).recordedNodeGetById(kind, id, coordinate);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate);
+    },
+    scan: async (options) => {
+      assertNoStatedCoordinate("scan", options, coordinate);
+      return storeRuntime(store).recordedNodeScan(kind, coordinate, options);
+    },
   };
   return recordedCollectionProxy(reads, live, coordinate, "node");
 }
@@ -650,12 +763,18 @@ function recordedEdgeCollection<G extends GraphDef>(
         NodeType
       >[Method];
     }> = {
-    getById: (id) =>
-      storeRuntime(store).recordedEdgeGetById(kind, id, coordinate),
-    getByIds: (ids) =>
-      storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate),
-    scan: (options) =>
-      storeRuntime(store).recordedEdgeScan(kind, coordinate, options),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return storeRuntime(store).recordedEdgeGetById(kind, id, coordinate);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate);
+    },
+    scan: async (options) => {
+      assertNoStatedCoordinate("scan", options, coordinate);
+      return storeRuntime(store).recordedEdgeScan(kind, coordinate, options);
+    },
   };
   return recordedCollectionProxy(reads, live, coordinate, "edge");
 }
@@ -866,6 +985,29 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     return storeRuntime(this.store).sealedQuery(this.coordinate);
   }
 
+  /**
+   * Reads the node a `{ kind, id }` reference names at this view's
+   * coordinate, mirroring `Store.getNodeByRef`.
+   */
+  getNodeByRef<const K extends NodeKinds<G>>(
+    reference: Readonly<{ kind: K; id: string }>,
+  ): Promise<GraphNodeForKinds<G, K> | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<GraphNodeForKinds<G, NodeKinds<G>> | Node | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<unknown> {
+    return readNodeByReference(
+      this.store.graph,
+      (kind) => (this.nodes as Readonly<Record<string, NodeByIdReader>>)[kind],
+      reference,
+    );
+  }
+
+  /** The view's pinned node collections, keyed by kind. */
+  abstract get nodes(): object;
+
   protected internalAlgorithms(): InternalGraphAlgorithms<G> {
     this.#internalAlgorithms ??= storeRuntime(
       this.store,
@@ -893,18 +1035,21 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   }
 
   /** Extracts a subgraph at this view's pinned coordinate. */
-  subgraph<
+  async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: StoreViewSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
-    const internalOptions = {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    } as InternalSubgraphOptions<G, EK, NK, P>;
+    options: StoreViewSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+    const internalOptions = pinnedOptions(
+      "subgraph",
+      options,
+      this.coordinate,
+      withCoordinate(this.coordinate),
+    ) as InternalSubgraphOptions<G, EK, NK, P, C>;
     return storeRuntime(this.store).subgraphAtCoordinate(
       rootId,
       internalOptions,
@@ -912,112 +1057,161 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   }
 
   /** Shortest path between two nodes at this view's pinned coordinate. */
-  shortestPath(
+  async shortestPath(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewShortestPathOptions<G>,
   ): Promise<ShortestPathResult | undefined> {
-    return this.internalAlgorithms().shortestPath(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().shortestPath(
+      from,
+      to,
+      pinnedOptions(
+        "shortestPath",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Minimum-total-weight path at this view's pinned coordinate. */
-  weightedShortestPath(
+  async weightedShortestPath(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewWeightedShortestPathOptions<G>,
   ): Promise<WeightedShortestPathResult | undefined> {
-    return this.internalAlgorithms().weightedShortestPath(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().weightedShortestPath(
+      from,
+      to,
+      pinnedOptions(
+        "weightedShortestPath",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Nodes reachable from `from` at this view's pinned coordinate. */
-  reachable(
+  async reachable(
     from: NodeIdentifier,
     options: StoreViewReachableOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.internalAlgorithms().reachable(from, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().reachable(
+      from,
+      pinnedOptions(
+        "reachable",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Whether `to` is reachable from `from` at this view's pinned coordinate. */
-  canReach(
+  async canReach(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewCanReachOptions<G>,
   ): Promise<boolean> {
-    return this.internalAlgorithms().canReach(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().canReach(
+      from,
+      to,
+      pinnedOptions(
+        "canReach",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** The k-hop neighborhood of `node` at this view's pinned coordinate. */
-  neighbors(
+  async neighbors(
     node: NodeIdentifier,
     options: StoreViewNeighborsOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.internalAlgorithms().neighbors(node, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().neighbors(
+      node,
+      pinnedOptions(
+        "neighbors",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Counts active edges incident to `node` at this view's pinned coordinate. */
-  degree(
+  async degree(
     node: NodeIdentifier,
     options?: StoreViewDegreeOptions<G>,
   ): Promise<number> {
-    return this.internalAlgorithms().degree(node, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().degree(
+      node,
+      pinnedOptions(
+        "degree",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Deterministic label-propagation memberships at this view's coordinate. */
-  labelPropagation(
+  async labelPropagation(
     options: StoreViewLabelPropagationOptions<G>,
   ): Promise<readonly LabelPropagationMembership[]> {
-    return this.internalAlgorithms().labelPropagation({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().labelPropagation(
+      pinnedOptions(
+        "labelPropagation",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Exact WCC memberships at this view's pinned coordinate. */
-  weaklyConnectedComponents(
+  async weaklyConnectedComponents(
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ): Promise<readonly WeaklyConnectedComponentMembership[]> {
-    return this.internalAlgorithms().weaklyConnectedComponents({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().weaklyConnectedComponents(
+      pinnedOptions(
+        "weaklyConnectedComponents",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Global PageRank scores at this view's pinned coordinate. */
-  pageRank(
+  async pageRank(
     options: StoreViewPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
-    return this.internalAlgorithms().pageRank({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().pageRank(
+      pinnedOptions(
+        "pageRank",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Personalized PageRank scores at this view's pinned coordinate. */
-  personalizedPageRank(
+  async personalizedPageRank(
     options: StoreViewPersonalizedPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
-    return this.internalAlgorithms().personalizedPageRank({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().personalizedPageRank(
+      pinnedOptions(
+        "personalizedPageRank",
+        options,
+        this.coordinate,
+        withCoordinate(this.coordinate),
+      ),
+    );
   }
 }
 
@@ -1093,25 +1287,35 @@ class StoreViewImplementation<
   }
 
   /** Heterogeneous multi-kind edge read pinned to this view's coordinate. */
-  bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
+  async bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
     params: BulkFindEdgesFromParams<G, K>,
     options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
   ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
-    return this.store.bulkFindEdgesFrom(params, {
-      ...options,
-      ...withValidCoordinate(this.coordinate),
-    });
+    return this.store.bulkFindEdgesFrom(
+      params,
+      pinnedOptions(
+        "bulkFindEdgesFrom",
+        options,
+        this.coordinate,
+        withValidCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /** Inbound multi-kind edge read pinned to this view's coordinate. */
-  bulkFindEdgesTo<const K extends EdgeKinds<G>>(
+  async bulkFindEdgesTo<const K extends EdgeKinds<G>>(
     params: BulkFindEdgesToParams<G, K>,
     options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
   ): Promise<readonly BulkFindEdgesToResult<G, K>[]> {
-    return this.store.bulkFindEdgesTo(params, {
-      ...options,
-      ...withValidCoordinate(this.coordinate),
-    });
+    return this.store.bulkFindEdgesTo(
+      params,
+      pinnedOptions(
+        "bulkFindEdgesTo",
+        options,
+        this.coordinate,
+        withValidCoordinate(this.coordinate),
+      ),
+    );
   }
 
   /**

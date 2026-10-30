@@ -2,7 +2,8 @@
  * PostgreSQL's fused schema-version + graph-advisory write fence: a single
  * statement whose graph lock only acquires once the expected active schema
  * row has been read `FOR SHARE`, so a stale schema version can never win the
- * advisory lock ahead of the read that would have diagnosed it as stale.
+ * advisory lock ahead of the read that would have diagnosed it as stale, and
+ * whose optional fence-row advance only runs once that lock is held.
  * `createPostgresOperationStrategy`'s only PostgreSQL-only strategy
  * override.
  *
@@ -18,11 +19,12 @@
  * portable lock sites take: both read `fenceSql.advisoryLockExpression`, so
  * neither can drift to a different spelling than the other.
  */
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import { sql as portableSql } from "../../query/sql-fragment";
 import { requireDefined } from "../../utils/presence";
-import type { FenceSql } from "../capabilities/write-fence";
-import type { SchemaWriteFenceParams } from "../types";
+import { fenceRowAdvanceAfter, type FenceSql } from "../capabilities/write-fence";
+import type { SchemaGraphWriteFenceParams } from "../types";
 import { toDrizzleSql } from "./execution/types";
 import type { PostgresTables } from "./schema/postgres";
 
@@ -35,6 +37,16 @@ import type { PostgresTables } from "./schema/postgres";
  * yields no rows and cannot acquire the graph lock. The caller interprets that
  * zero-row result through the ordinary active-version diagnostic.
  *
+ * With `params.fenceRow: "advance"` — a writer that goes on to make a
+ * decision only the fence protects — a third CTE, `fence_row`, advances the
+ * graph's fence row. It reads exclusively from `graph_write_lock`, so the row
+ * is written only after the advisory lock is held — the same lock-then-row
+ * order, the same row and the same generation rule as the portable
+ * acquisition (`fenceRowAdvanceAfter` is the one owner of that write). A
+ * session at a snapshot isolation whose snapshot predates another decider's
+ * commit fails on that row instead of proceeding. With `"leave"` the
+ * statement stops at the lock, writes nothing and reports no `generation`.
+ *
  * `fenceSql` is the resolved fence target's OWN spelling — the bundled
  * `postgresFenceSql` for a bundled backend, or a derived profile's own
  * `FenceSql` override — never imported directly, so a derived profile's
@@ -42,11 +54,11 @@ import type { PostgresTables } from "./schema/postgres";
  */
 export function buildLockSchemaVersionAndGraphWrite(
   tables: PostgresTables,
-  params: SchemaWriteFenceParams,
+  params: SchemaGraphWriteFenceParams,
   advisoryLockNamespace: string,
   fenceSql: FenceSql,
 ): SQL {
-  const { schemaVersions } = tables;
+  const { fences, schemaVersions } = tables;
   // Both members are optional on `FenceSql` in general (a `row`-mechanism
   // target supplies neither), but this statement is only ever composed
   // behind a resolved `mechanism: "advisory"` plan — `postgres.ts` gates
@@ -64,7 +76,7 @@ export function buildLockSchemaVersionAndGraphWrite(
     fenceSql.isolationFactExpression,
     "buildLockSchemaVersionAndGraphWrite: isolationFactExpression was validated present by the resolved advisory plan",
   );
-  return sql`
+  const schemaFenceAndGraphLock = sql`
     WITH "schema_fence" AS MATERIALIZED (
       SELECT ${schemaVersions.version}
       FROM ${schemaVersions}
@@ -77,9 +89,41 @@ export function buildLockSchemaVersionAndGraphWrite(
       SELECT ${toDrizzleSql(advisoryLockExpression(advisoryLockNamespace, params.graphId), "postgres")} AS "lock_token"
       FROM "schema_fence"
     )
-    SELECT
-      TRUE AS "fence_acquired",
-      ${toDrizzleSql(isolationFactExpression(), "postgres")} AS "transaction_isolation"
-    FROM "graph_write_lock"
   `;
+  const isolationFact = toDrizzleSql(isolationFactExpression(), "postgres");
+  switch (params.fenceRow) {
+    case "leave": {
+      return sql`
+        ${schemaFenceAndGraphLock}
+            SELECT
+              TRUE AS "fence_acquired",
+              ${isolationFact} AS "transaction_isolation"
+            FROM "graph_write_lock"
+      `;
+    }
+    case "advance": {
+      return sql`
+        ${schemaFenceAndGraphLock},
+            "fence_row" AS (
+              ${toDrizzleSql(
+        fenceRowAdvanceAfter(
+          portableSql.identifier(getTableName(fences)),
+          advisoryLockNamespace,
+          params.graphId,
+          portableSql.raw('"graph_write_lock"'),
+        ),
+        "postgres",
+      )}
+            )
+            SELECT
+              TRUE AS "fence_acquired",
+              "fence_row"."generation" AS "generation",
+              ${isolationFact} AS "transaction_isolation"
+            FROM "fence_row"
+      `;
+    }
+    default: {
+      return params.fenceRow satisfies never;
+    }
+  }
 }

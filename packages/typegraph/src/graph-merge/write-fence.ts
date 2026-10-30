@@ -1,5 +1,8 @@
 import { resolveWriteFencePlan } from "../backend/capabilities/write-fence";
-import { graphCommandCoordinationIsolation } from "../backend/command-contract";
+import {
+  graphCommandCoordinationAcquisition,
+  observesEveryEarlierFenceHolder,
+} from "../backend/command-contract";
 import { type TransactionBackend } from "../backend/types";
 import { TypeGraphError } from "../errors";
 import { lockSchemaVersionForStoreWrite } from "../store/operations/write-transaction";
@@ -35,24 +38,38 @@ export async function lockMergeTargetWrite(
   }
   if (input.graphLock === "required") {
     const lock = await lockRecordedGraphWrite(txBackend, input.graphId);
-    // Serialized engines already own the writer slot. An advisory-lock token
-    // carries the isolation observed by the lock statement on this session.
+    // Serialized engines already own the writer slot. A keyed acquisition's
+    // token carries what the fence statement observed on this session; a plan
+    // that yields no token has no evidence to offer.
+    //
+    // The applier's reads span the whole target, not one lock-only decision,
+    // so it must observe EVERY earlier holder of the fence. The fence row
+    // tells a session only about the holders that advanced it, so advancing
+    // it here would not make a snapshot isolation safe.
     if (
       input.requireFreshSnapshot &&
       resolveWriteFencePlan(txBackend).kind !== "engine-serialized"
     ) {
-      const isolation =
+      const acquisition =
         lock.coordination === undefined ?
           undefined
-        : graphCommandCoordinationIsolation(
+        : graphCommandCoordinationAcquisition(
             txBackend.commands,
-            input.graphId,
             lock.coordination,
+            input.graphId,
           );
-      if (isolation !== "read_committed") {
+      if (
+        acquisition === undefined ||
+        !observesEveryEarlierFenceHolder(acquisition)
+      ) {
         throw new MergePlanCapabilityError(
           "Composed merge application requires observed read-committed isolation so reads observe the target after acquiring its graph lock.",
-          { details: { capability: "mergeCallbackIsolation", isolation } },
+          {
+            details: {
+              capability: "mergeCallbackIsolation",
+              isolation: acquisition?.isolation,
+            },
+          },
         );
       }
     }

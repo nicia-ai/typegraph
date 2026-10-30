@@ -1,15 +1,15 @@
 /**
- * Example 08: Advanced Ontology and Custom Meta-Edges
+ * Example 08: Advanced Ontology and Type-Level Annotations
  *
  * This example builds a research knowledge graph and demonstrates:
  * - The core meta-edges working together: subClassOf, broader/narrower,
  *   equivalentTo (with an external IRI), disjointWith, partOf, inverseOf,
  *   and implies — each with an observable registry or query effect.
- * - Custom meta-edges (`metaEdge(...)`) registered in `ontology: []`:
- *   what the library does with them (persists, introspects, serializes)
- *   and what it deliberately does not (no built-in inference — the
- *   KindRegistry computes closures only for the core meta-edges, so
- *   custom semantics are interpreted by your application, as shown here).
+ * - Free-form type-level semantics via `defineGraph({ annotations })`:
+ *   vocabulary the built-in KindRegistry has no closure for (it only
+ *   computes closures for the core meta-edges above) — persisted,
+ *   introspectable, serialized with the schema, and interpreted entirely
+ *   by your application, as shown here.
  * - Ontology relations are TYPE-level (between kinds), never instance-level.
  *   That is why research fields are modeled as node kinds below: a SKOS
  *   statement like "DeepLearning narrower-than ArtificialIntelligence"
@@ -28,11 +28,7 @@ import {
   equivalentTo,
   implies,
   inverseOf,
-  type MetaEdge,
-  metaEdge,
   narrower,
-  type NodeType,
-  type OntologyRelation,
   partOf,
   relatedTo,
   subClassOf,
@@ -48,7 +44,8 @@ import { createExampleBackend } from "./_helpers";
 const SCHEMA_ORG_PERSON_IRI = "https://schema.org/Person";
 const DEEP_LEARNING_NAME = "Deep Learning";
 const ATTENTION_PAPER_TITLE = "Attention Is All You Need";
-const SEQ2SEQ_PAPER_TITLE = "Sequence to Sequence Learning with Neural Networks";
+const SEQ2SEQ_PAPER_TITLE =
+  "Sequence to Sequence Learning with Neural Networks";
 
 // ============================================================
 // Part 1: Node and Edge Kinds
@@ -121,45 +118,35 @@ const affiliatedWith = defineEdge("affiliatedWith", {
 const belongsTo = defineEdge("belongsTo", { schema: z.object({}) });
 
 // ============================================================
-// Part 2: Custom Meta-Edges
+// Part 2: Type-Level Semantics via Annotations
 // ============================================================
 
-// A custom meta-edge is a TYPE-level vocabulary term. The library stores
-// its relations in the graph definition, exposes them through
-// `store.introspect().ontology`, and serializes them with the schema —
-// but the built-in KindRegistry computes closures ONLY for the core
-// meta-edges. Custom semantics (like the transitive walk below) are
-// interpreted by your application.
-
-// Learning prerequisite between topic kinds:
-// "you should know the from-kind before studying the to-kind".
-const prerequisiteOfMetaEdge = metaEdge("prerequisiteOf", {
-  transitive: true, // AI prereq ML, ML prereq DL => AI prereq DL
-  inference: "hierarchy",
-  description: "Learning prerequisite between research-field kinds",
-});
-
-// Replacement between publication kinds:
-// "the from-kind is the authoritative successor of the to-kind".
-const supersedesMetaEdge = metaEdge("supersedes", {
-  inference: "substitution",
-  description: "The from-kind is the authoritative successor of the to-kind",
-});
-
-// Factory functions in the same style as the core `subClassOf`, `broader`, ...
-function prerequisiteOf(
-  prerequisite: NodeType,
-  dependent: NodeType,
-): OntologyRelation {
-  return { metaEdge: prerequisiteOfMetaEdge, from: prerequisite, to: dependent };
-}
-
-function supersedes(
-  newerKind: NodeType,
-  olderKind: NodeType,
-): OntologyRelation {
-  return { metaEdge: supersedesMetaEdge, from: newerKind, to: olderKind };
-}
+// `defineGraph({ annotations })` is a consumer-owned, free-form JSON bag
+// for the graph as a whole (`GraphAnnotations`) — the place for TYPE-level
+// vocabulary the library itself has no built-in reasoning for. It travels
+// with the graph definition the same way the core meta-edges do: stored,
+// introspectable (`store.introspect()`), and serialized with the schema —
+// but with no KindRegistry closure computed over it. Your application
+// interprets it, as `relatesVia` below does with a breadth-first walk.
+//
+// Two research-field/publication vocabularies, each a set of (from, to)
+// kind-name pairs plus whether the relation composes transitively:
+//   - "prerequisiteOf": "you should know the from-kind before the to-kind".
+//   - "supersedes": "the from-kind is the authoritative successor of the
+//     to-kind".
+const GRAPH_ANNOTATIONS = {
+  prerequisiteOf: {
+    transitive: true, // AI prereq ML, ML prereq DL => AI prereq DL
+    pairs: [
+      ["ArtificialIntelligence", "MachineLearning"],
+      ["MachineLearning", "DeepLearning"],
+    ],
+  },
+  supersedes: {
+    transitive: false,
+    pairs: [["Paper", "Preprint"]],
+  },
+} as const;
 
 // ============================================================
 // Part 3: The Graph and Its Ontology
@@ -213,7 +200,15 @@ const graph = defineGraph({
       ],
     },
     affiliatedWith: { type: affiliatedWith, from: [Author], to: [Institution] },
-    belongsTo: { type: belongsTo, from: [Department], to: [Institution] },
+    // `cardinality: "one"` — each Department belongs to exactly one
+    // Institution — is what makes `belongsTo` eligible to realize the
+    // `partOf` composition below.
+    belongsTo: {
+      type: belongsTo,
+      from: [Department],
+      to: [Institution],
+      cardinality: "one",
+    },
   },
   ontology: [
     // === Subsumption (is-a) ===
@@ -243,7 +238,11 @@ const graph = defineGraph({
     // Institution — `subClassOf(Department, Institution)` would wrongly
     // claim every Department IS an Institution. Model is-a with
     // subClassOf and part-of with partOf; hasPart is derived as its inverse.
-    partOf(Department, Institution),
+    // `via: belongsTo` names the edge whose live rows realize the
+    // composition; `belongsTo`'s `cardinality: "one"` is the whole-side
+    // fence that makes "one Institution per Department" an enforced
+    // invariant, not just a modeling convention.
+    partOf(Department, Institution, { via: belongsTo }),
 
     // === Edge semantics ===
     inverseOf(cites, citedBy),
@@ -254,43 +253,36 @@ const graph = defineGraph({
     // or committed as a schema version — since `expand: "implying"` would
     // otherwise traverse the mismatched edges.
     implies(buildsOn, cites),
-
-    // === Custom meta-edge relations ===
-    prerequisiteOf(ArtificialIntelligence, MachineLearning),
-    prerequisiteOf(MachineLearning, DeepLearning),
-    supersedes(Paper, Preprint),
   ],
+  annotations: GRAPH_ANNOTATIONS,
 });
 
 // ============================================================
-// Part 4: Application-Level Inference over Custom Meta-Edges
+// Part 4: Application-Level Inference over Annotated Semantics
 // ============================================================
 
-function endpointKindName(endpoint: OntologyRelation["from"]): string {
-  return typeof endpoint === "string" ? endpoint : endpoint.kind;
-}
+type AnnotatedRelation = Readonly<{
+  transitive: boolean;
+  pairs: readonly (readonly [string, string])[];
+}>;
 
 /**
- * Answers "does `fromKind` relate to `toKind` via this custom meta-edge?"
- * by reading the graph's own ontology relations. Honors the meta-edge's
- * declared `transitive` property with a breadth-first walk — this is the
- * pattern for giving custom meta-edges real semantics in your application.
+ * Answers "does `fromKind` relate to `toKind` via this annotated
+ * vocabulary term?" by reading the graph's own `annotations` — no registry
+ * involved, since the KindRegistry never computes a closure over
+ * consumer-owned annotations. Honors the declared `transitive` flag with a
+ * breadth-first walk — this is the pattern for giving free-form,
+ * application-defined semantics real behavior.
  */
 function relatesVia(
-  ontology: readonly OntologyRelation[],
-  customMetaEdge: MetaEdge,
+  relation: AnnotatedRelation,
   fromKind: string,
   toKind: string,
 ): boolean {
-  const directPairs = ontology
-    .filter((relation) => relation.metaEdge.name === customMetaEdge.name)
-    .map(
-      (relation) =>
-        [endpointKindName(relation.from), endpointKindName(relation.to)] as const,
+  if (!relation.transitive) {
+    return relation.pairs.some(
+      ([from, to]) => from === fromKind && to === toKind,
     );
-
-  if (!customMetaEdge.properties.transitive) {
-    return directPairs.some(([from, to]) => from === fromKind && to === toKind);
   }
 
   const visited = new Set<string>([fromKind]);
@@ -298,7 +290,7 @@ function relatesVia(
   while (queue.length > 0) {
     const current = queue.shift();
     if (current === undefined) break;
-    for (const [from, to] of directPairs) {
+    for (const [from, to] of relation.pairs) {
       if (from !== current || visited.has(to)) continue;
       if (to === toKind) return true;
       visited.add(to);
@@ -323,7 +315,7 @@ export async function main() {
     const store = createStore(graph, backend);
     const registry = store.registry;
 
-    console.log("=== Advanced Ontology and Custom Meta-Edges ===\n");
+    console.log("=== Advanced Ontology and Type-Level Annotations ===\n");
 
     // --- Instance data ---------------------------------------------
 
@@ -439,30 +431,30 @@ export async function main() {
     console.log("\n=== Queries Shaped by the Ontology ===\n");
 
     // Subsumption expansion: one query over the whole publication hierarchy.
-    console.log("All publications (from 'Publication', includeSubClasses):");
+    console.log("All publications (from 'Publication', expansion: subclasses):");
     const publications = await store
       .query()
-      .from("Publication", "pub", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.pub["title"], kind: ctx.pub.kind }))
+      .from("Publication", "pub", { expansion: "subclasses" })
+      .select((ctx) => ({ title: ctx.pub.title, kind: ctx.pub.kind }))
       .execute();
     for (const row of publications) {
-      console.log(`  [${row.kind}] "${String(row.title)}"`);
+      console.log(`  [${row.kind}] "${row.title}"`);
     }
 
     // Bound topic filter: only papers tagged with the Deep Learning field.
-    // `includeSubClasses` widens the target alias to the base kind, so we
+    // `expansion: "subclasses"` widens the target alias to the base kind, so we
     // bind on `kind` (always statically typed) rather than a schema field.
     console.log(`\nPapers about ${DEEP_LEARNING_NAME}:`);
     const dlPapers = await store
       .query()
       .from("Paper", "p")
       .traverse("about", "a")
-      .to("Topic", "t", { includeSubClasses: true })
+      .to("Topic", "t", { expansion: "subclasses" })
       .whereNode("t", (topic) => topic.kind.eq(DeepLearning.kind))
-      .select((ctx) => ({ title: ctx.p.title, topic: ctx.t["name"] }))
+      .select((ctx) => ({ title: ctx.p.title, topic: ctx.t.name }))
       .execute();
     for (const row of dlPapers) {
-      console.log(`  "${row.title}" is about ${String(row.topic)}`);
+      console.log(`  "${row.title}" is about ${row.topic}`);
     }
 
     // SKOS closure feeding a query: publications about AI or any narrower
@@ -470,14 +462,14 @@ export async function main() {
     console.log("\nPublications about AI or any narrower field:");
     const aiPublications = await store
       .query()
-      .from("Publication", "pub", { includeSubClasses: true })
+      .from("Publication", "pub", { expansion: "subclasses" })
       .traverse("about", "a")
-      .to("Topic", "t", { includeSubClasses: true })
+      .to("Topic", "t", { expansion: "subclasses" })
       .whereNode("t", (topic) => topic.kind.in([...aiOrNarrower]))
-      .select((ctx) => ({ title: ctx.pub["title"], field: ctx.t["name"] }))
+      .select((ctx) => ({ title: ctx.pub.title, field: ctx.t.name }))
       .execute();
     for (const row of aiPublications) {
-      console.log(`  "${String(row.title)}" (via ${String(row.field)})`);
+      console.log(`  "${row.title}" (via ${row.field})`);
     }
 
     // Implication expansion: the published paper has NO explicit cites edge,
@@ -488,8 +480,8 @@ export async function main() {
       .from("Paper", "p")
       .whereNode("p", ({ title }) => title.eq(ATTENTION_PAPER_TITLE))
       .traverse("cites", "c", { expand: "none" })
-      .to("Publication", "cited", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.cited["title"] }))
+      .to("Publication", "cited", { expansion: "subclasses" })
+      .select((ctx) => ({ title: ctx.cited.title }))
       .execute();
     console.log(`  Explicit cites edges: ${explicitCites.length}`);
     const impliedCites = await store
@@ -497,11 +489,13 @@ export async function main() {
       .from("Paper", "p")
       .whereNode("p", ({ title }) => title.eq(ATTENTION_PAPER_TITLE))
       .traverse("cites", "c", { expand: "implying" })
-      .to("Publication", "cited", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.cited["title"] }))
+      .to("Publication", "cited", { expansion: "subclasses" })
+      .select((ctx) => ({ title: ctx.cited.title }))
       .execute();
     for (const row of impliedCites) {
-      console.log(`  With expand "implying": cites "${String(row.title)}" (via buildsOn)`);
+      console.log(
+        `  With expand "implying": cites "${row.title}" (via buildsOn)`,
+      );
     }
 
     // Inverse + implication combined: nothing ever wrote a citedBy edge,
@@ -512,59 +506,42 @@ export async function main() {
       .from("Paper", "s")
       .whereNode("s", ({ title }) => title.eq(SEQ2SEQ_PAPER_TITLE))
       .traverse("citedBy", "cb", { expand: "all" })
-      .to("Publication", "citing", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.citing["title"] }))
+      .to("Publication", "citing", { expansion: "subclasses" })
+      .select((ctx) => ({ title: ctx.citing.title }))
       .execute();
     for (const row of citingPublications) {
-      console.log(`  Cited by "${String(row.title)}"`);
+      console.log(`  Cited by "${row.title}"`);
     }
 
-    // --- Custom meta-edges in practice ------------------------------
+    // --- Type-level annotations in practice --------------------------
 
-    console.log("\n=== Custom Meta-Edges in Practice ===\n");
+    console.log("\n=== Type-Level Annotations in Practice ===\n");
 
-    console.log("Custom relations visible via store.introspect().ontology:");
-    const customRelations = store
-      .introspect()
-      .ontology.filter(
-        (relation) =>
-          relation.metaEdge === prerequisiteOfMetaEdge.name ||
-          relation.metaEdge === supersedesMetaEdge.name,
-      );
-    for (const relation of customRelations) {
-      console.log(
-        `  ${relation.from} --${relation.metaEdge}--> ${relation.to}` +
-          ` (origin: ${relation.origin})`,
-      );
-    }
-
-    console.log("\nMeta-edge properties travel with the definition:");
+    const annotations = store.introspect().annotations;
     console.log(
-      `  prerequisiteOf: transitive=${prerequisiteOfMetaEdge.properties.transitive},` +
-        ` inference=${prerequisiteOfMetaEdge.properties.inference}`,
-    );
-    console.log(
-      `  supersedes: transitive=${supersedesMetaEdge.properties.transitive},` +
-        ` inference=${supersedesMetaEdge.properties.inference}`,
+      "Annotated vocabulary visible via store.introspect().annotations:",
+      annotations === undefined ? [] : Object.keys(annotations),
     );
 
     console.log(
       "\nApplication-level inference (the registry only reasons over core" +
-        "\nmeta-edges, so we walk the declared relations ourselves):",
+        "\nmeta-edges, so we walk the annotated pairs ourselves):",
+    );
+    const isAiPrerequisiteOfDl = relatesVia(
+      GRAPH_ANNOTATIONS.prerequisiteOf,
+      "ArtificialIntelligence",
+      "DeepLearning",
     );
     console.log(
       "  ArtificialIntelligence prerequisiteOf DeepLearning (transitive)?",
-      relatesVia(
-        graph.ontology,
-        prerequisiteOfMetaEdge,
-        "ArtificialIntelligence",
-        "DeepLearning",
-      ),
+      isAiPrerequisiteOfDl,
     );
-    console.log(
-      "  Paper supersedes Preprint?",
-      relatesVia(graph.ontology, supersedesMetaEdge, "Paper", "Preprint"),
+    const paperSupersedesPreprint = relatesVia(
+      GRAPH_ANNOTATIONS.supersedes,
+      "Paper",
+      "Preprint",
     );
+    console.log("  Paper supersedes Preprint?", paperSupersedesPreprint);
 
     // --- Verified summary -------------------------------------------
 
@@ -622,21 +599,19 @@ export async function main() {
       citingPublications.length === 2,
     );
     assertClaim(
-      "custom meta-edge relations are introspectable",
-      customRelations.length === 3,
+      "graph annotations are introspectable",
+      annotations !== undefined &&
+        Object.keys(annotations).length === 2 &&
+        "prerequisiteOf" in annotations &&
+        "supersedes" in annotations,
     );
     assertClaim(
-      "custom transitive inference: AI is a prerequisite of DL",
-      relatesVia(
-        graph.ontology,
-        prerequisiteOfMetaEdge,
-        "ArtificialIntelligence",
-        "DeepLearning",
-      ),
+      "annotated transitive inference: AI is a prerequisite of DL",
+      isAiPrerequisiteOfDl,
     );
     assertClaim(
-      "custom non-transitive inference: Paper supersedes Preprint",
-      relatesVia(graph.ontology, supersedesMetaEdge, "Paper", "Preprint"),
+      "annotated non-transitive inference: Paper supersedes Preprint",
+      paperSupersedesPreprint,
     );
 
     console.log("\n=== Custom Ontology example complete ===");

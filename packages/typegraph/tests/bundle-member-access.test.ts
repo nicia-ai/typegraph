@@ -45,7 +45,14 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Candidate one-active and durable edge identity planning add four accesses.
 // The graph storage inventory resolves the graph-relation names once and reads
 // the session isolation expression once: 123 -> 125.
-const REASONED_FLOOR = 125;
+// `rollbackSchema` reads the optional preflight flip once; edge acyclicity
+// and composition tightening add four table-name reads: 125 -> 130.
+// The managed PostgreSQL copy guards the preflight-carrying version flip
+// beside its five other schema-writing ports: 130 -> 131.
+// Reopening a durable working copy below the current base schema checks and
+// calls adoptBaseSchema (+2), and the tightening probe reads its acyclic and
+// composition relations through one table-name read (-1): 131 -> 132.
+const REASONED_FLOOR = 132;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -68,10 +75,12 @@ const REASONED_FLOOR = 125;
 // The graph storage inventory and the namespace fork's fulltext provisioning
 // check each add one guarded strategy access: 236 -> 238 live, 241 -> 243
 // declared.
-const DEFERRED_LIVE_TOTAL = 238;
-const DEFERRED_DECLARED_TOTAL = 243;
+// The composition cascade and unattached-part read each add one heterogeneous
+// endpoint-set read: 238 -> 240 live, 243 -> 245 declared.
+const DEFERRED_LIVE_TOTAL = 240;
+const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 377;
+const TOTAL_ROW_COUNT = 386;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -218,7 +227,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 377)", () => {
+  it("the class partition covers every scanned row (total 385)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.
