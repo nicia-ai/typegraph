@@ -330,7 +330,7 @@ executing Store API:
 const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
   store.query().from("Person", "p").select((ctx) => ctx.p),
   read.neighbors(person, { edges: ["knows"], limit: 5 }),
-  read.subgraph(person.id, { edges: ["knows"], maxDepth: 2 }),
+  read.subgraph(person, { edges: ["knows"], maxDepth: 2 }),
 ]);
 ```
 
@@ -346,7 +346,7 @@ trips into one statement:
 ```typescript
 const subgraphs = await store.batchOnce((read) =>
   roots.map((root) =>
-    read.subgraph(root.id, {
+    read.subgraph(root, {
       edges: ["knows"],
       maxDepth: 2,
       project: { nodes: { Person: ["name"] } },
@@ -362,7 +362,7 @@ opt into shared traversal and hydration:
 const subgraphs = await store.batchOnce(
   (read) =>
     roots.map((root) =>
-      read.subgraph(root.id, {
+      read.subgraph(root, {
         edges: ["knows"],
         maxDepth: 2,
         project: { nodes: { Person: ["name", "profile"] } },
@@ -384,12 +384,12 @@ needs heterogeneous neighborhoods:
 
 ```typescript
 const [social, employment] = await store.batchOnce((read) => [
-  read.subgraph(person.id, {
+  read.subgraph(person, {
     edges: ["knows"],
     maxDepth: 2,
     edgeWindows: { knows: { limit: 20 } },
   }),
-  read.subgraph(person.id, {
+  read.subgraph(person, {
     edges: ["worksAt"],
     maxDepth: 1,
     project: {

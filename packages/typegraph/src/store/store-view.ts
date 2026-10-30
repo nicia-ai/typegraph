@@ -81,7 +81,6 @@ import {
   type SubgraphOptions,
   type SubgraphProject,
   type SubgraphResult,
-  type SubgraphRoot,
 } from "./subgraph";
 import {
   type BulkFindEdgesFromParams,
@@ -91,6 +90,7 @@ import {
   type DynamicStoreViewEdgeCollection,
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
+  type GraphNodeReference,
   type NodeCollection,
   type NodeCurrentReads,
   type RecordedStoreViewEdgeCollection,
@@ -897,7 +897,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    root: SubgraphRoot<G>,
+    root: GraphNodeReference<G>,
     options: StoreViewSubgraphOptions<G, EK, NK, P>,
   ): Promise<SubgraphResult<G, NK, EK, P>> {
     const internalOptions = {

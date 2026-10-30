@@ -2360,7 +2360,7 @@ database:
 ```typescript
 const subgraphs = await store.batchOnce((read) =>
   roots.map((root) =>
-    read.subgraph(root.id, { edges: ["knows"], maxDepth: 2 }),
+    read.subgraph(root, { edges: ["knows"], maxDepth: 2 }),
   ),
 );
 ```
@@ -2378,12 +2378,12 @@ shapes in the same call:
 
 ```typescript
 const [social, work] = await store.batchOnce((read) => [
-  read.subgraph(person.id, {
+  read.subgraph(person, {
     edges: ["knows"],
     maxDepth: 2,
     edgeWindows: { knows: { limit: 25 } },
   }),
-  read.subgraph(person.id, {
+  read.subgraph(person, {
     edges: ["worksAt"],
     maxDepth: 1,
     project: {
@@ -2401,7 +2401,7 @@ hydrate each shared entity once:
 
 ```typescript
 const details = await store.batchOnce(
-  (read) => roots.map((root) => read.subgraph(root.id, options)),
+  (read) => roots.map((root) => read.subgraph(root, options)),
   { shareSubgraphs: true },
 );
 ```
@@ -2654,29 +2654,21 @@ than silently running without the schema check.
 #### `store.subgraph(root, options)`
 
 Extracts a typed subgraph by performing a BFS traversal from a root node, following
-the specified edge kinds. Returns an indexed result with adjacency maps for immediate
-traversal.
+the specified edge kinds. Returns the reached nodes and edges with `(kind, id)` lookups for
+immediate traversal.
 
-`root` is a `{ kind, id }` node reference or a bare node id. Node rows are keyed by
-`(kind, id)`, so two nodes of different kinds may share an id; the walk starts from the node
-the reference names and steps along each edge only from the node whose kind and id the edge's
-endpoint names. A bare id resolves to the one node kind that holds it visibly at the read's
-temporal coordinate (`temporalMode`/`asOf`, or the pinned coordinate of a `store.asOf()` /
-`store.asOfRecorded()` view). When no visible node holds it the result is empty; when several
-kinds hold it the read throws [`SubgraphAmbiguousNodeIdError`](/errors#subgraphambiguousnodeiderror)
-with `details.situation: "root"`, and you pass a reference instead:
+`root` is a `{ kind, id }` node reference; a node returned by a collection read is one. Node rows
+are keyed by `(kind, id)`, so two nodes of different kinds may share an id. The walk starts from
+the node the reference names, steps along each edge only from the node whose kind and id the
+edge's endpoint names, and returns every node it reaches, including both nodes of a same-id pair.
+An unregistered kind throws `KindNotFoundError`; a root that is not visible at the read's temporal
+coordinate yields an empty result. On a graph with `identity: { sameIdAcrossKinds: "fold" }`, the
+walk follows edges, not identity classes: a folded peer is returned only when an edge reaches it,
+and it is returned under its own kind.
 
 ```typescript
 const sg = await store.subgraph({ kind: "Show", id: showId }, { edges: ["features"] });
 ```
-
-The result is keyed by id. When the root and the nodes the read returns would share an id
-across kinds, the read throws `SubgraphAmbiguousNodeIdError` with
-`details.situation: "result"` instead of letting one node replace another in `nodes`. The root
-counts even when `excludeRoot` drops it or `includeKinds` omits its kind, because you address
-the result by the root's id; nodes that `includeKinds` omits do not count. Graphs whose ids
-never repeat across kinds, which includes every graph using generated ids, never see either
-refusal.
 
 `maxDepth` defaults to 10 and accepts integers from 0 through 1000. Zero returns only the root
 (unless excluded). Values outside that range are rejected; they are never silently clamped.
@@ -2687,7 +2679,7 @@ The ranking is applied inside the recursive traversal and again during edge hydr
 so omitted targets are not loaded and do not remain as orphan nodes.
 
 ```typescript
-const detail = await store.subgraph(document.id, {
+const detail = await store.subgraph(document, {
   edges: ["hasVersion", "hasSection"],
   maxDepth: 3,
   edgeWindows: {
@@ -2719,7 +2711,7 @@ though it uses more round trips.
 
 ```typescript
 store.subgraph<EK, NK>(
-  root: SubgraphRoot<G>, // NodeId<AllNodeTypes<G>> | GraphNodeReference<G>
+  root: GraphNodeReference<G>, // { kind, id } with a matching branded id
   options: SubgraphOptions<G, EK, NK>,
 ): Promise<SubgraphResult<G, NK, EK>>;
 ```
@@ -2741,20 +2733,29 @@ store.subgraph<EK, NK>(
 **Result:**
 
 ```typescript
+type SubgraphNodeKey = Readonly<{ kind: string; id: string }>;
+
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
-  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
-  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  nodes: readonly SubgraphNodeResult<G, NK>[];
+  edges: readonly SubgraphEdgeResult<G, EK>[];
+  node(key: SubgraphNodeKey): SubgraphNodeResult<G, NK> | undefined;
+  outgoing(key: SubgraphNodeKey, edgeKind?: EK): readonly SubgraphEdgeResult<G, EK>[];
+  incoming(key: SubgraphNodeKey, edgeKind?: EK): readonly SubgraphEdgeResult<G, EK>[];
 }>;
 ```
 
 | Field | Description |
 |-------|-------------|
-| `root` | The root node, or `undefined` if it was not found or `excludeRoot` is set |
-| `nodes` | All returned nodes keyed by string ID. Each ID names one node; a read that would return two kinds under one ID refuses |
-| `adjacency` | Forward adjacency: `fromId → edgeKind → edges[]` |
-| `reverseAdjacency` | Reverse adjacency: `toId → edgeKind → edges[]` |
+| `root` | The root node, or `undefined` if it was not found, `excludeRoot` is set, or `includeKinds` omits its kind |
+| `nodes` | Every returned node once, ordered by kind then id |
+| `edges` | Every returned edge once, ordered by id |
+| `node(key)` | The returned node with that kind and id. A literal `kind` narrows the result type; a `string` kind such as an edge's `toKind` returns any returned kind |
+| `outgoing(key, edgeKind?)` | Returned edges whose source is that node, optionally of one edge kind, in id order |
+| `incoming(key, edgeKind?)` | Returned edges whose target is that node, optionally of one edge kind, in id order |
+
+Every lookup takes a `{ kind, id }` key: a node, a `GraphNodeReference`, or an edge's endpoint
+(`{ kind: edge.toKind, id: edge.toId }`) all fit, so following an edge needs no cast.
 
 Edges are only included when **both** endpoints appear in the result set.
 Nodes and edges are filtered by the resolved `temporalMode` — by default,
@@ -2764,7 +2765,7 @@ multiple paths) are deduplicated.
 **Example:**
 
 ```typescript
-const sg = await store.subgraph(run.id, {
+const sg = await store.subgraph(run, {
   edges: ["has_task", "runs_agent", "uses_skill"],
   maxDepth: 4,
 });
@@ -2772,18 +2773,18 @@ const sg = await store.subgraph(run.id, {
 // Root node (the traversal starting point)
 console.log(sg.root?.kind);
 
-// Lookup by ID
-const task = sg.nodes.get(taskId);
+// Lookup by kind and id
+const task = sg.node({ kind: "Task", id: taskId });
 
-// Forward adjacency: edges of a kind from a node
-const taskEdges = sg.adjacency.get(String(run.id))?.get("has_task") ?? [];
-const tasks = taskEdges.map((edge) => sg.nodes.get(String(edge.toId)));
+// Outgoing edges of a kind from a node, and the nodes they reach
+const taskEdges = sg.outgoing(run, "has_task");
+const tasks = taskEdges.map((edge) => sg.node({ kind: edge.toKind, id: edge.toId }));
 
-// Reverse adjacency: edges of a kind pointing to a node
-const parentEdges = sg.reverseAdjacency.get(taskId)?.get("has_task") ?? [];
+// Incoming edges of a kind pointing to a node
+const parentEdges = sg.incoming({ kind: "Task", id: taskId }, "has_task");
 
 // Narrow by kind with a switch
-for (const node of sg.nodes.values()) {
+for (const node of sg.nodes) {
   switch (node.kind) {
     case "Task": {
       console.log(node.title, node.status);
@@ -2800,20 +2801,20 @@ for (const node of sg.nodes.values()) {
 **Filtering to specific node kinds:**
 
 ```typescript
-const tasksOnly = await store.subgraph(run.id, {
+const tasksOnly = await store.subgraph(run, {
   edges: ["has_task", "depends_on"],
   includeKinds: ["Task"],
   excludeRoot: true,
 });
 
-// tasksOnly.nodes values are typed as Node<typeof Task>
+// tasksOnly.nodes entries are typed as Node<typeof Task>
 ```
 
 **Bidirectional traversal:**
 
 ```typescript
 // Find all nodes connected to a skill, regardless of edge direction
-const neighborhood = await store.subgraph(skill.id, {
+const neighborhood = await store.subgraph(skill, {
   edges: ["uses_skill", "has_task"],
   direction: "both",
   maxDepth: 3,
@@ -2827,7 +2828,7 @@ specify which properties to keep per kind, reducing payload size and enabling SQ
 extraction via `json_extract()` / JSONB paths.
 
 ```typescript
-const result = await store.subgraph(rootId, {
+const result = await store.subgraph(root, {
   edges: ["has_task", "uses_skill"],
   maxDepth: 2,
   project: {
@@ -2861,7 +2862,7 @@ Result types narrow per-kind based on the projection. Accessing an omitted field
 compile-time error:
 
 ```typescript
-for (const node of result.nodes.values()) {
+for (const node of result.nodes) {
   if (node.kind === "Task") {
     console.log(node.title);  // OK
     console.log(node.status); // TypeScript error — status was not projected
@@ -2888,7 +2889,7 @@ const agentProjection = defineSubgraphProject<typeof graph>()({
 });
 
 // Reuse across calls — types are preserved
-const result = await store.subgraph(rootId, {
+const result = await store.subgraph(root, {
   edges: ["has_task", "uses_skill"],
   project: agentProjection,
 });
@@ -3230,7 +3231,7 @@ const names = await past
   .select((ctx) => ctx.p.name)
   .execute();
 const reach = await past.reachable(aliceId, { edges: ["knows"] });
-const sg = await past.subgraph(aliceId, { edges: ["knows"] });
+const sg = await past.subgraph({ kind: "Person", id: aliceId }, { edges: ["knows"] });
 ```
 
 #### Surface

@@ -129,7 +129,7 @@ function buildReachableCteRequiresVerdict(
   // is not assignable to its options parameter.
   buildReachableCte({
     graphId: "g",
-    source: { id: "n1" },
+    source: { kind: "Person", id: "n1" },
     edgeKinds: ["knows"],
     maxHops: 3,
     direction: "out",
@@ -143,7 +143,7 @@ function buildReachableCteRequiresVerdict(
 
   buildReachableCte({
     graphId: "g",
-    source: { id: "n1" },
+    source: { kind: "Person", id: "n1" },
     edgeKinds: ["knows"],
     maxHops: 3,
     direction: "out",
@@ -161,7 +161,7 @@ function buildReachableCteRequiresVerdict(
   // The sanctioned form compiles.
   buildReachableCte({
     graphId: "g",
-    source: { id: "n1" },
+    source: { kind: "Person", id: "n1" },
     edgeKinds: ["knows"],
     maxHops: 3,
     direction: "out",

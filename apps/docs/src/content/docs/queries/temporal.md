@@ -88,7 +88,7 @@ const past = store.asOf("2024-01-01T00:00:00.000Z");
 const alice = await past.nodes.Person.getById(aliceId);
 const jobs = await past.edges.worksAt.findFrom(alice);
 const peers = await past.reachable(aliceId, { edges: ["knows"] });
-const team = await past.subgraph(aliceId, { edges: ["reportsTo"] });
+const team = await past.subgraph({ kind: "Person", id: aliceId }, { edges: ["reportsTo"] });
 
 const names = await past
   .query()

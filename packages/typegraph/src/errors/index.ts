@@ -1697,66 +1697,6 @@ export class InvalidEdgeWeightError extends TypeGraphError {
   }
 }
 
-/**
- * Where a subgraph read found one id held by nodes of more than one kind:
- * `"root"` when a bare root id names several visible nodes, `"result"` when
- * the root and the nodes it reaches would share an id across kinds.
- */
-export type SubgraphAmbiguousNodeIdSituation = "result" | "root";
-
-/** Details for SubgraphAmbiguousNodeIdError. */
-export type SubgraphAmbiguousNodeIdErrorDetails = Readonly<{
-  situation: SubgraphAmbiguousNodeIdSituation;
-  /** The shared id, the first in code-unit order when several are shared. */
-  id: string;
-  /** The kinds holding the id, in code-unit order. */
-  kinds: readonly string[];
-}>;
-
-const SUBGRAPH_AMBIGUOUS_NODE_ID_SITUATIONS: Readonly<
-  Record<
-    SubgraphAmbiguousNodeIdSituation,
-    Readonly<{ message: string; suggestion: string }>
-  >
-> = {
-  root: {
-    message: "Subgraph root id is held by more than one visible node kind",
-    suggestion:
-      "Pass the root as a { kind, id } reference to choose which node to start from.",
-  },
-  result: {
-    message:
-      "Subgraph would return more than one node kind under the same id, and its result is keyed by id",
-    suggestion:
-      "Narrow the walk with edges or maxDepth so one kind holds each id (includeKinds helps only when the shared id is not the root's, because the root always counts), or read the nodes with store.query(), which keeps kind and id together.",
-  },
-};
-
-/**
- * Thrown when a subgraph read cannot key its result by node id without
- * conflating two nodes. Node rows are keyed by (kind, id), so different kinds
- * may share an id; the subgraph result's `root`, `nodes`, and adjacency maps
- * are keyed by id alone, so the read refuses instead of letting one node
- * silently replace another.
- */
-export class SubgraphAmbiguousNodeIdError extends TypeGraphError {
-  declare readonly details: SubgraphAmbiguousNodeIdErrorDetails;
-
-  constructor(details: SubgraphAmbiguousNodeIdErrorDetails) {
-    const situation = SUBGRAPH_AMBIGUOUS_NODE_ID_SITUATIONS[details.situation];
-    super(
-      `${situation.message}: id '${details.id}' is held by kinds ${details.kinds.map((kind) => `'${kind}'`).join(", ")}.`,
-      "SUBGRAPH_AMBIGUOUS_NODE_ID",
-      {
-        details: { ...details, kinds: [...details.kinds] },
-        category: "user",
-        suggestion: situation.suggestion,
-      },
-    );
-    this.name = "SubgraphAmbiguousNodeIdError";
-  }
-}
-
 /** Thrown when an operation requires a backend capability it does not expose. */
 export class UnsupportedBackendCapabilityError extends TypeGraphError {
   constructor(

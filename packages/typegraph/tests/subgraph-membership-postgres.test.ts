@@ -56,7 +56,7 @@ describe("subgraph fetches route through PostgreSQL's materialized-ids membershi
       await store.edges.knows.create(alice, bob);
 
       executed.length = 0;
-      const result = await store.subgraph(alice.id, {
+      const result = await store.subgraph(alice, {
         edges: ["knows"],
         maxDepth: 2,
       });

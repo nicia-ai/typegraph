@@ -487,7 +487,7 @@ const [latest, versionCount, detail] = await store.batchOnce((read) => [
     limit: 1,
   }),
   read.countNeighbors(document, { edges: ["hasVersion"] }),
-  read.subgraph(document.id, { edges: ["hasSection"], maxDepth: 2 }),
+  read.subgraph(document, { edges: ["hasSection"], maxDepth: 2 }),
 ]);
 ```
 
@@ -504,7 +504,7 @@ When a request needs several independent neighborhoods, prefer one runtime batch
 ```typescript
 const neighborhoods = await store.batchOnce((read) =>
   roots.map((root) =>
-    read.subgraph(root.id, {
+    read.subgraph(root, {
       edges: ["knows", "worksAt"],
       maxDepth: 2,
       project: {
@@ -621,8 +621,8 @@ compatible reads hydrate those shared entities once:
 ```typescript
 const overlapping = await store.batchOnce(
   (read) =>
-    [ada.id, bea.id].map((rootId) =>
-      read.subgraph(rootId, {
+    [ada, bea].map((root) =>
+      read.subgraph(root, {
         edges: ["knows"],
         maxDepth: 2,
         project: { nodes: { Person: ["name", "biography"] } },
@@ -649,8 +649,8 @@ into one statement:
 
 ```typescript
 const disjoint = await store.batchOnce((read) =>
-  [erin.id, hana.id].map((rootId) =>
-    read.subgraph(rootId, {
+  [erin, hana].map((root) =>
+    read.subgraph(root, {
       edges: ["knows"],
       maxDepth: 2,
       project: { nodes: { Person: ["name", "biography"] } },
@@ -666,8 +666,8 @@ transferring biographies:
 
 ```typescript
 const connectivity = await store.batchOnce((read) =>
-  [ada.id, bea.id].map((rootId) =>
-    read.subgraph(rootId, {
+  [ada, bea].map((root) =>
+    read.subgraph(root, {
       edges: ["knows"],
       maxDepth: 2,
       project: { nodes: { Person: [] }, edges: { knows: [] } },

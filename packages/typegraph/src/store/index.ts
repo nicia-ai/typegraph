@@ -126,9 +126,11 @@ export { RecordedStoreView, StoreView } from "./store-view";
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphEdgeLookup,
+  SubgraphNodeKey,
+  SubgraphNodeLookup,
   SubgraphOptions,
   SubgraphResult,
-  SubgraphRoot,
   SubsetEdge,
   SubsetNode,
 } from "./subgraph";

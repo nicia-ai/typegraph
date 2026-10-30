@@ -2,11 +2,10 @@
  * Subgraph walks over nodes of different kinds that share an id.
  *
  * Node rows are keyed by (kind, id), so `Show:m` and `Clip:m` are two distinct
- * nodes. A subgraph walk must start from the node the caller named, step only
- * along edges whose endpoint is the node it stands on (kind and id), and
- * return exactly the nodes it reached. Its result is keyed by id, so a read
- * whose root and returned nodes would share an id across kinds refuses with
- * `SubgraphAmbiguousNodeIdError` instead of letting one node replace another.
+ * nodes. A subgraph walk must start from the node the caller's reference
+ * names, step only along edges whose endpoint is the node it stands on (kind
+ * and id), and return exactly the nodes it reached: both same-id nodes when it
+ * reaches both, each addressable by its own (kind, id).
  *
  * Every case runs through each subgraph read path: the direct read (which
  * takes each backend's own membership strategy), the transaction read, the
@@ -19,14 +18,13 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type GraphNodeReference,
   KindNotFoundError,
   type NodeKinds,
-  SubgraphAmbiguousNodeIdError,
   type SubgraphOptions,
   type SubgraphResult,
-  type SubgraphRoot,
+  ValidationError,
 } from "../../../src";
-import { collectAllEdges } from "../../test-utils";
 import type { InspectableStore, IntegrationTestContext } from "./test-context";
 
 const Show = defineNode("Show", { schema: z.object({}) });
@@ -44,9 +42,22 @@ const sharedIdGraph = defineGraph({
   },
 });
 
+/** The same graph under the identity profile that folds same-id nodes. */
+const foldedIdGraph = defineGraph({
+  id: "subgraph_folded_id_kinds",
+  nodes: {
+    Show: { type: Show },
+    Clip: { type: Clip },
+  },
+  edges: {
+    linked: { type: linked, from: [Show, Clip], to: [Show, Clip] },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 type SharedIdGraph = typeof sharedIdGraph;
 type SharedIdStore = InspectableStore<SharedIdGraph>;
-type Root = SubgraphRoot<SharedIdGraph>;
+type Root = GraphNodeReference<SharedIdGraph>;
 type Options = SubgraphOptions<
   SharedIdGraph,
   "linked",
@@ -98,14 +109,16 @@ const READ_FORMS: readonly ReadForm[] = [
 
 const LINKED = { edges: ["linked"] } as const satisfies Options;
 
-function nodeKeys(result: Result): readonly string[] {
-  return [...result.nodes.values()]
-    .map((node) => `${node.kind}:${node.id}`)
-    .toSorted();
+function ref(kind: "Clip" | "Show", id: string): Root {
+  return { kind, id } as Root;
 }
 
-function edgeKeys(result: Result): readonly string[] {
-  return collectAllEdges(result.adjacency)
+function nodeKeys(result: Result): readonly string[] {
+  return result.nodes.map((node) => `${node.kind}:${node.id}`);
+}
+
+function edgeKeys(edges: Result["edges"]): readonly string[] {
+  return edges
     .map(
       (edge) => `${edge.fromKind}:${edge.fromId}->${edge.toKind}:${edge.toId}`,
     )
@@ -116,18 +129,6 @@ function rootKey(result: Result): string | undefined {
   return result.root === undefined ?
       undefined
     : `${result.root.kind}:${result.root.id}`;
-}
-
-function ambiguousNodeId(
-  situation: "result" | "root",
-  id: string,
-  kinds: readonly string[],
-): unknown {
-  return expect.objectContaining({
-    name: "SubgraphAmbiguousNodeIdError",
-    code: "SUBGRAPH_AMBIGUOUS_NODE_ID",
-    details: { situation, id, kinds },
-  });
 }
 
 /** `Show:a → Clip:m → Show:m → Clip:z`: the walk passes through both `m`s. */
@@ -185,239 +186,257 @@ export function registerSubgraphSharedIdIntegrationTests(
       it("does not follow the edges of an unreached node that shares an id", async () => {
         await seedUnreachableSharedId(store);
 
-        for (const root of ["b", { kind: "Show", id: "b" }] as Root[]) {
-          const result = await form.read(store, root, LINKED);
-          expect(rootKey(result)).toBe("Show:b");
-          expect(nodeKeys(result)).toEqual(["Clip:x", "Show:b"]);
-          expect(edgeKeys(result)).toEqual(["Show:b->Clip:x"]);
-        }
+        const result = await form.read(store, ref("Show", "b"), LINKED);
+        expect(rootKey(result)).toBe("Show:b");
+        expect(nodeKeys(result)).toEqual(["Clip:x", "Show:b"]);
+        expect(edgeKeys(result.edges)).toEqual(["Show:b->Clip:x"]);
+        expect(result.node(ref("Show", "x"))).toBeUndefined();
+      });
+
+      it("returns both same-id nodes it reaches, each under its own kind", async () => {
+        await seedChainThroughSharedId(store);
+
+        const result = await form.read(store, ref("Show", "a"), LINKED);
+        expect(rootKey(result)).toBe("Show:a");
+        expect(nodeKeys(result)).toEqual([
+          "Clip:m",
+          "Clip:z",
+          "Show:a",
+          "Show:m",
+        ]);
+        expect(result.node(ref("Clip", "m"))?.kind).toBe("Clip");
+        expect(result.node(ref("Show", "m"))?.kind).toBe("Show");
+        expect(edgeKeys(result.outgoing(ref("Clip", "m")))).toEqual([
+          "Clip:m->Show:m",
+        ]);
+        expect(edgeKeys(result.outgoing(ref("Show", "m")))).toEqual([
+          "Show:m->Clip:z",
+        ]);
+        expect(edgeKeys(result.incoming(ref("Show", "m"), "linked"))).toEqual([
+          "Clip:m->Show:m",
+        ]);
       });
 
       it("walks through a same-id node of another kind to the nodes beyond it", async () => {
         await seedChainThroughSharedId(store);
 
-        const result = await form.read(store, "a" as Root, {
+        const result = await form.read(store, ref("Show", "a"), {
           ...LINKED,
           includeKinds: ["Clip"],
         });
         expect(result.root).toBeUndefined();
         expect(nodeKeys(result)).toEqual(["Clip:m", "Clip:z"]);
-        expect(edgeKeys(result)).toEqual([]);
+        expect(result.edges).toEqual([]);
       });
 
-      it("refuses a result that would hold two kinds under one id", async () => {
-        await seedChainThroughSharedId(store);
-
-        await expect(form.read(store, "a" as Root, LINKED)).rejects.toThrow(
-          SubgraphAmbiguousNodeIdError,
-        );
-        await expect(
-          form.read(store, { kind: "Show", id: "a" } as Root, LINKED),
-        ).rejects.toEqual(ambiguousNodeId("result", "m", ["Clip", "Show"]));
-      });
-
-      it("refuses a bare root id that two visible kinds hold", async () => {
+      it("starts from the kind the root reference names", async () => {
         await seedSharedRootId(store);
 
-        await expect(form.read(store, "a" as Root, LINKED)).rejects.toEqual(
-          ambiguousNodeId("root", "a", ["Clip", "Show"]),
-        );
-      });
-
-      it("starts from the kind a reference root names", async () => {
-        await seedSharedRootId(store);
-
-        const fromShow = await form.read(
-          store,
-          { kind: "Show", id: "a" } as Root,
-          LINKED,
-        );
+        const fromShow = await form.read(store, ref("Show", "a"), LINKED);
         expect(rootKey(fromShow)).toBe("Show:a");
         expect(nodeKeys(fromShow)).toEqual(["Clip:k", "Show:a"]);
 
-        const fromClip = await form.read(
-          store,
-          { kind: "Clip", id: "a" } as Root,
-          LINKED,
-        );
+        const fromClip = await form.read(store, ref("Clip", "a"), LINKED);
         expect(rootKey(fromClip)).toBe("Clip:a");
         expect(nodeKeys(fromClip)).toEqual(["Clip:a"]);
       });
 
-      it("counts the root against the result when excludeRoot drops it", async () => {
+      it("excludes only the root node when excludeRoot is set", async () => {
         const showA = await store.nodes.Show.create({}, { id: "a" });
         const clipA = await store.nodes.Clip.create({}, { id: "a" });
         const clipB = await store.nodes.Clip.create({}, { id: "b" });
         await store.edges.linked.create(showA, clipA, {});
         await store.edges.linked.create(showA, clipB, {});
-        const root = { kind: "Show", id: "a" } as Root;
 
-        for (const excludeRoot of [false, true]) {
-          await expect(
-            form.read(store, root, { ...LINKED, excludeRoot }),
-          ).rejects.toEqual(ambiguousNodeId("result", "a", ["Clip", "Show"]));
-        }
-        await expect(
-          form.read(store, root, { ...LINKED, includeKinds: ["Clip"] }),
-        ).rejects.toEqual(ambiguousNodeId("result", "a", ["Clip", "Show"]));
+        const withRoot = await form.read(store, ref("Show", "a"), LINKED);
+        expect(rootKey(withRoot)).toBe("Show:a");
+        expect(nodeKeys(withRoot)).toEqual(["Clip:a", "Clip:b", "Show:a"]);
+
+        const withoutRoot = await form.read(store, ref("Show", "a"), {
+          ...LINKED,
+          excludeRoot: true,
+        });
+        expect(withoutRoot.root).toBeUndefined();
+        expect(nodeKeys(withoutRoot)).toEqual(["Clip:a", "Clip:b"]);
+        expect(withoutRoot.edges).toEqual([]);
       });
 
       it("keys both directions of a step on the node it stands on", async () => {
         await seedUnreachableSharedId(store);
         await seedEdgeIntoSharedId(store);
-        const options = { ...LINKED, direction: "both" } as const;
 
-        const result = await form.read(
-          store,
-          { kind: "Clip", id: "x" } as Root,
-          options,
-        );
+        const result = await form.read(store, ref("Clip", "x"), {
+          ...LINKED,
+          direction: "both",
+        });
         expect(rootKey(result)).toBe("Clip:x");
         expect(nodeKeys(result)).toEqual(["Clip:x", "Show:b"]);
-        expect(edgeKeys(result)).toEqual(["Show:b->Clip:x"]);
-
-        await expect(form.read(store, "x" as Root, options)).rejects.toEqual(
-          ambiguousNodeId("root", "x", ["Clip", "Show"]),
-        );
+        expect(edgeKeys(result.edges)).toEqual(["Show:b->Clip:x"]);
       });
 
       it("keys a windowed incoming step on the node it stands on", async () => {
         await seedUnreachableSharedId(store);
         await seedEdgeIntoSharedId(store);
 
-        const result = await form.read(
-          store,
-          { kind: "Clip", id: "x" } as Root,
-          { ...LINKED, edgeWindows: { linked: { direction: "in", limit: 5 } } },
-        );
+        const result = await form.read(store, ref("Clip", "x"), {
+          ...LINKED,
+          edgeWindows: { linked: { direction: "in", limit: 5 } },
+        });
         expect(rootKey(result)).toBe("Clip:x");
         expect(nodeKeys(result)).toEqual(["Clip:x", "Show:b"]);
-        expect(edgeKeys(result)).toEqual(["Show:b->Clip:x"]);
+        expect(edgeKeys(result.edges)).toEqual(["Show:b->Clip:x"]);
       });
 
-      it("returns an empty result for a reference root that is not visible", async () => {
+      it("returns an empty result for a root reference that is not visible", async () => {
         await seedSharedRootId(store);
 
-        const result = await form.read(
-          store,
-          { kind: "Clip", id: "k-missing" } as Root,
-          LINKED,
-        );
+        const result = await form.read(store, ref("Clip", "k-missing"), LINKED);
         expect(result.root).toBeUndefined();
-        expect(result.nodes.size).toBe(0);
-        expect(result.adjacency.size).toBe(0);
+        expect(result.nodes).toEqual([]);
+        expect(result.edges).toEqual([]);
       });
 
-      it("refuses a reference root of an unregistered kind", async () => {
+      it("refuses a root reference of an unregistered kind", async () => {
         await expect(
           form.read(store, { kind: "Episode", id: "a" } as never, LINKED),
         ).rejects.toThrow(KindNotFoundError);
       });
 
-      it("reads a graph whose ids do not repeat across kinds as before", async () => {
+      it("refuses a bare id root", async () => {
+        await expect(form.read(store, "a" as never, LINKED)).rejects.toThrow(
+          ValidationError,
+        );
+      });
+
+      it("reads a graph whose ids do not repeat across kinds", async () => {
         const show = await store.nodes.Show.create({});
         const clip = await store.nodes.Clip.create({});
         const sequel = await store.nodes.Show.create({});
         await store.edges.linked.create(show, clip, {});
         await store.edges.linked.create(clip, sequel, {});
 
-        const result = await form.read(store, show.id, LINKED);
+        const result = await form.read(store, show, LINKED);
         expect(result.root?.id).toBe(show.id);
-        expect([...result.nodes.keys()].toSorted()).toEqual(
+        expect(result.nodes.map((node) => node.id).toSorted()).toEqual(
           [show.id, clip.id, sequel.id].toSorted(),
         );
-        expect(result.adjacency.get(show.id)?.get("linked")?.[0]?.toId).toBe(
-          clip.id,
-        );
-        expect(
-          result.reverseAdjacency.get(sequel.id)?.get("linked")?.[0]?.fromId,
-        ).toBe(clip.id);
+        expect(result.outgoing(show, "linked")[0]?.toId).toBe(clip.id);
+        expect(result.incoming(sequel)[0]?.fromId).toBe(clip.id);
 
-        const withoutRoot = await form.read(store, show.id, {
+        const withoutRoot = await form.read(store, show, {
           ...LINKED,
           excludeRoot: true,
         });
         expect(withoutRoot.root).toBeUndefined();
-        expect([...withoutRoot.nodes.keys()].toSorted()).toEqual(
+        expect(withoutRoot.nodes.map((node) => node.id).toSorted()).toEqual(
           [clip.id, sequel.id].toSorted(),
         );
       });
+    });
+
+    it("looks up an edge's endpoints directly", async () => {
+      await seedChainThroughSharedId(store);
+
+      const result = await store.subgraph(ref("Show", "a"), LINKED);
+      const targets = result.edges.map((edge) =>
+        result.node({ kind: edge.toKind, id: edge.toId }),
+      );
+      const sources = result.edges.map((edge) =>
+        result.node({ kind: edge.fromKind, id: edge.fromId }),
+      );
+      expect(targets.map((node) => `${node?.kind}:${node?.id}`)).toEqual(
+        result.edges.map((edge) => `${edge.toKind}:${edge.toId}`),
+      );
+      expect(sources.every((node) => node !== undefined)).toBe(true);
     });
 
     it("keeps every shared-traversal request on the root it named", async () => {
       await seedUnreachableSharedId(store);
       await seedSharedRootId(store);
 
-      const [fromShowA, fromClipA, fromShowB, fromBareB, fromClipX] =
+      const [fromShowA, fromClipA, fromShowB, fromClipX] =
         await store.batchOnce(
           (read) =>
             [
-              read.subgraph({ kind: "Show", id: "a" } as Root, LINKED),
-              read.subgraph({ kind: "Clip", id: "a" } as Root, LINKED),
-              read.subgraph({ kind: "Show", id: "b" } as Root, LINKED),
-              read.subgraph("b" as Root, LINKED),
-              read.subgraph({ kind: "Clip", id: "x" } as Root, LINKED),
+              read.subgraph(ref("Show", "a"), LINKED),
+              read.subgraph(ref("Clip", "a"), LINKED),
+              read.subgraph(ref("Show", "b"), LINKED),
+              read.subgraph(ref("Clip", "x"), LINKED),
             ] as const,
           { shareSubgraphs: true },
         );
       expect(rootKey(fromShowA)).toBe("Show:a");
       expect(nodeKeys(fromShowA)).toEqual(["Clip:k", "Show:a"]);
-      expect(edgeKeys(fromShowA)).toEqual(["Show:a->Clip:k"]);
+      expect(edgeKeys(fromShowA.edges)).toEqual(["Show:a->Clip:k"]);
       expect(rootKey(fromClipA)).toBe("Clip:a");
       expect(nodeKeys(fromClipA)).toEqual(["Clip:a"]);
       expect(nodeKeys(fromShowB)).toEqual(["Clip:x", "Show:b"]);
-      expect(nodeKeys(fromBareB)).toEqual(["Clip:x", "Show:b"]);
       expect(rootKey(fromClipX)).toBe("Clip:x");
       expect(nodeKeys(fromClipX)).toEqual(["Clip:x"]);
-      expect(edgeKeys(fromClipX)).toEqual([]);
+      expect(fromClipX.edges).toEqual([]);
     });
 
-    it("resolves a bare root id at the read's valid-time coordinate", async () => {
+    it("returns both folded peers on a graph that folds same-id nodes", async () => {
+      const folded = await context.createStore(foldedIdGraph);
+      const showP = await folded.nodes.Show.create({}, { id: "p" });
+      const clipP = await folded.nodes.Clip.create({}, { id: "p" });
+      const showQ = await folded.nodes.Show.create({}, { id: "q" });
+      await folded.edges.linked.create(showP, showQ, {});
+      await folded.edges.linked.create(clipP, showQ, {});
+
+      const result = await folded.subgraph(showP, {
+        edges: ["linked"],
+        direction: "both",
+      });
+      expect(result.root?.kind).toBe("Show");
+      expect(result.nodes.map((node) => `${node.kind}:${node.id}`)).toEqual([
+        "Clip:p",
+        "Show:p",
+        "Show:q",
+      ]);
+      expect(result.incoming(showQ).map((edge) => edge.fromKind)).toEqual(
+        expect.arrayContaining(["Clip", "Show"]),
+      );
+    });
+
+    it("reads the nodes visible at the read's valid-time coordinate", async () => {
+      const past = "2020-01-01T00:00:00.000Z";
+      const later = "2024-01-01T00:00:00.000Z";
       const showA = await store.nodes.Show.create(
         {},
-        { id: "a", validFrom: "2020-01-01T00:00:00.000Z" },
+        { id: "a", validFrom: past },
       );
-      const clipK = await store.nodes.Clip.create(
+      const clipA = await store.nodes.Clip.create(
         {},
-        { id: "k", validFrom: "2020-01-01T00:00:00.000Z" },
+        { id: "a", validFrom: later },
       );
-      await store.edges.linked.create(
-        showA,
-        clipK,
-        {},
-        { validFrom: "2020-01-01T00:00:00.000Z" },
-      );
-      await store.nodes.Clip.create(
-        {},
-        { id: "a", validFrom: "2024-01-01T00:00:00.000Z" },
-      );
+      await store.edges.linked.create(showA, clipA, {}, { validFrom: later });
       const before = "2022-01-01T00:00:00.000Z";
 
-      const pinned = await store.asOf(before).subgraph("a" as Root, LINKED);
-      expect(rootKey(pinned)).toBe("Show:a");
-      expect(nodeKeys(pinned)).toEqual(["Clip:k", "Show:a"]);
+      const pinned = await store.asOf(before).subgraph(showA, LINKED);
+      expect(nodeKeys(pinned)).toEqual(["Show:a"]);
 
-      const optioned = await store.subgraph("a" as Root, {
+      const optioned = await store.subgraph(showA, {
         ...LINKED,
         temporalMode: "asOf",
         asOf: before,
       });
-      expect(rootKey(optioned)).toBe("Show:a");
+      expect(nodeKeys(optioned)).toEqual(["Show:a"]);
 
-      await expect(store.subgraph("a" as Root, LINKED)).rejects.toEqual(
-        ambiguousNodeId("root", "a", ["Clip", "Show"]),
-      );
+      const current = await store.subgraph(showA, LINKED);
+      expect(nodeKeys(current)).toEqual(["Clip:a", "Show:a"]);
     });
 
-    it("resolves a bare root id at the read's recorded coordinate", async () => {
+    it("reads the nodes visible at the read's recorded coordinate", async () => {
       const historyStore = await context.createHistoryStore(sharedIdGraph);
       const first = await historyStore.transactionWithReceipt(async (tx) => {
-        const showA = await tx.nodes.Show.create({}, { id: "a" });
-        const clipK = await tx.nodes.Clip.create({}, { id: "k" });
-        await tx.edges.linked.create(showA, clipK, {});
+        await tx.nodes.Show.create({}, { id: "a" });
       });
       const second = await historyStore.transactionWithReceipt(async (tx) => {
-        await tx.nodes.Clip.create({}, { id: "a" });
+        const showA = await tx.nodes.Show.getById("a" as never);
+        if (showA === undefined) throw new Error("Show:a must exist");
+        const clipA = await tx.nodes.Clip.create({}, { id: "a" });
+        await tx.edges.linked.create(showA, clipA, {});
       });
       const firstRecorded = first.receipt.recorded;
       const secondRecorded = second.receipt.recorded;
@@ -427,13 +446,13 @@ export function registerSubgraphSharedIdIntegrationTests(
 
       const early = await historyStore
         .asOfRecorded(firstRecorded)
-        .subgraph("a" as Root, LINKED);
-      expect(rootKey(early)).toBe("Show:a");
-      expect(nodeKeys(early)).toEqual(["Clip:k", "Show:a"]);
+        .subgraph(ref("Show", "a"), LINKED);
+      expect(nodeKeys(early)).toEqual(["Show:a"]);
 
-      await expect(
-        historyStore.asOfRecorded(secondRecorded).subgraph("a" as Root, LINKED),
-      ).rejects.toEqual(ambiguousNodeId("root", "a", ["Clip", "Show"]));
+      const late = await historyStore
+        .asOfRecorded(secondRecorded)
+        .subgraph(ref("Show", "a"), LINKED);
+      expect(nodeKeys(late)).toEqual(["Clip:a", "Show:a"]);
     });
   });
 }

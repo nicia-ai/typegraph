@@ -21,12 +21,8 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type TraversalDirection } from "./algorithms/types";
 import { edgeOrderColumnName, type EdgeReadWindow } from "./neighbors";
 
-/**
- * A node the walk starts from. A seed with a kind names exactly one node; a
- * seed without one starts from every node of any kind that holds the id and is
- * visible at the read's coordinate.
- */
-export type ReachableSeed = Readonly<{ kind?: string; id: string }>;
+/** A node the walk starts from, named by its (kind, id) identity. */
+export type ReachableSeed = Readonly<{ kind: string; id: string }>;
 
 type BuildReachableCteOptions = Readonly<{
   graphId: string;
@@ -66,9 +62,7 @@ type BuildReachableCteOptions = Readonly<{
   );
 
 function compileSeedFilter(seed: ReachableSeed): SqlFragment {
-  return seed.kind === undefined ?
-      sql`n.id = ${seed.id}`
-    : sql`(n.kind = ${seed.kind} AND n.id = ${seed.id})`;
+  return sql`(n.kind = ${seed.kind} AND n.id = ${seed.id})`;
 }
 
 /**

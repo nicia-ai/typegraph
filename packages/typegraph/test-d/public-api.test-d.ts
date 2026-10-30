@@ -418,7 +418,7 @@ const oneStatementBatch = store.batchOnce((read) => {
       orderBy: { by: "node", field: "missing" },
     }),
   );
-  const subgraph = read.subgraph("person-1" as NodeId<typeof Person>, {
+  const subgraph = read.subgraph(neighborSource, {
     edges: ["knows", "worksAt"],
     edgeWindows: {
       knows: { direction: "both", limit: 1 },
@@ -442,8 +442,8 @@ expectType<Promise<number>>(
 );
 expectType<Promise<number>>(
   transactionContext
-    .subgraph(neighborSource.id, { edges: ["knows"] })
-    .then((subgraph) => subgraph.nodes.size),
+    .subgraph(neighborSource, { edges: ["knows"] })
+    .then((subgraph) => subgraph.nodes.length),
 );
 const transactionBatch = transactionContext.batchOnce((read) => [
   transactionContext

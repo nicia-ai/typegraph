@@ -36,7 +36,7 @@ const benchmarkGraph = defineGraph({
 type ProjectionMode = "full" | "identity";
 type Mode = "direct" | "batchOnceUnfused" | "batchOnceShared";
 type BenchmarkStore = ReturnType<typeof createStore<typeof benchmarkGraph>>;
-type BenchmarkNodeId = Parameters<BenchmarkStore["subgraph"]>[0];
+type BenchmarkRoot = Parameters<BenchmarkStore["subgraph"]>[0];
 type Options = Readonly<{
   backend: PerfBackend;
   postgresDriver: PostgresDriver;
@@ -138,7 +138,7 @@ function instrumentBackend(
 async function seed(
   store: BenchmarkStore,
   options: Options,
-): Promise<readonly BenchmarkNodeId[]> {
+): Promise<readonly BenchmarkRoot[]> {
   const payload = "x".repeat(options.payloadBytes);
   const roots = await Promise.all(
     Array.from({ length: options.roots }, (_, index) =>
@@ -171,13 +171,13 @@ async function seed(
       }
     }
   }
-  return roots.map((root) => root.id);
+  return roots;
 }
 
 async function executeMode(
   mode: Mode,
   store: BenchmarkStore,
-  rootIds: readonly BenchmarkNodeId[],
+  roots: readonly BenchmarkRoot[],
   options: Options,
 ): Promise<void> {
   if (options.projection === "identity") {
@@ -191,12 +191,12 @@ async function executeMode(
     } as const;
     if (mode === "direct") {
       await Promise.all(
-        rootIds.map((rootId) => store.subgraph(rootId, queryOptions)),
+        roots.map((root) => store.subgraph(root, queryOptions)),
       );
       return;
     }
     await store.batchOnce(
-      (read) => rootIds.map((rootId) => read.subgraph(rootId, queryOptions)),
+      (read) => roots.map((root) => read.subgraph(root, queryOptions)),
       { shareSubgraphs: mode === "batchOnceShared" },
     );
     return;
@@ -210,13 +210,11 @@ async function executeMode(
     },
   } as const;
   if (mode === "direct") {
-    await Promise.all(
-      rootIds.map((rootId) => store.subgraph(rootId, queryOptions)),
-    );
+    await Promise.all(roots.map((root) => store.subgraph(root, queryOptions)));
     return;
   }
   await store.batchOnce(
-    (read) => rootIds.map((rootId) => read.subgraph(rootId, queryOptions)),
+    (read) => roots.map((root) => read.subgraph(root, queryOptions)),
     { shareSubgraphs: mode === "batchOnceShared" },
   );
 }
@@ -262,7 +260,7 @@ async function main(): Promise<void> {
     queryDefaults: { traversalExpansion: "none" },
   });
   try {
-    const rootIds = await seed(store, options);
+    const roots = await seed(store, options);
     const results: Record<Mode, Sample[]> = {
       direct: [],
       batchOnceUnfused: [],
@@ -285,7 +283,7 @@ async function main(): Promise<void> {
         });
         const heapBefore = process.memoryUsage().heapUsed;
         const started = performance.now();
-        await executeMode(mode, store, rootIds, options);
+        await executeMode(mode, store, roots, options);
         const sample = {
           ...counters,
           totalMs: performance.now() - started,

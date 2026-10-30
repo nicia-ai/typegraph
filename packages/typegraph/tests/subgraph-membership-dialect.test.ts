@@ -52,7 +52,7 @@ describe("subgraph fetches inline the SQLite CTE membership form", () => {
       await store.edges.knows.create(alice, bob);
 
       captured.length = 0;
-      const result = await store.subgraph(alice.id, {
+      const result = await store.subgraph(alice, {
         edges: ["knows"],
         maxDepth: 2,
       });

@@ -435,14 +435,15 @@ import type { SubsetEdge } from "@nicia-ai/typegraph";
 type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
 ```
 
-### `SubgraphRoot<G>`
+### `SubgraphNodeKey`
 
-The node `store.subgraph()` starts from: a bare node id, or a `{ kind, id }` reference whose
-kind and branded id stay correlated. A bare id held by more than one visible kind is refused
-with `SubgraphAmbiguousNodeIdError`; pass a reference to choose the node.
+The `{ kind, id }` key every subgraph lookup takes. A node, a `GraphNodeReference<G>`, or an
+edge's endpoint (`{ kind: edge.toKind, id: edge.toId }`) fits, so following an edge needs no
+cast. The subgraph root itself is a `GraphNodeReference<G>`, whose kind and branded id stay
+correlated.
 
 ```typescript
-type SubgraphRoot<G> = NodeId<AllNodeTypes<G>> | GraphNodeReference<G>;
+type SubgraphNodeKey<K extends string = string> = Readonly<{ kind: K; id: string }>;
 ```
 
 ### `SubgraphOptions<G, EK, NK>`
@@ -464,15 +465,18 @@ type SubgraphOptions<G, EK, NK> = Readonly<{
 
 ### `SubgraphResult<G, NK, EK>`
 
-The return type of `store.subgraph()`. Contains the root node, a node index, and
-forward/reverse adjacency maps for immediate traversal.
+The return type of `store.subgraph()`. Contains the root node, the returned nodes and edges, and
+`(kind, id)` lookups for immediate traversal. Two nodes of different kinds that share an id are
+both returned, each under its own kind.
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
-  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
-  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  nodes: readonly SubgraphNodeResult<G, NK>[]; // ordered by kind, then id
+  edges: readonly SubgraphEdgeResult<G, EK>[]; // ordered by id
+  node: SubgraphNodeLookup<G, NK>; // (key: SubgraphNodeKey) => node | undefined
+  outgoing: SubgraphEdgeLookup<G, EK>; // (key, edgeKind?) => edges whose source is key
+  incoming: SubgraphEdgeLookup<G, EK>; // (key, edgeKind?) => edges whose target is key
 }>;
 ```
 

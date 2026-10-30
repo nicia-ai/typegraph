@@ -110,11 +110,11 @@ describe("postgres-js custom-plan opt-out", () => {
       await store.edges.references.create(root, child, {});
 
       calls.length = 0;
-      const result = await store.subgraph(root.id, {
+      const result = await store.subgraph(root, {
         edges: ["references"],
         maxDepth: 2,
       });
-      expect(result.nodes.size).toBe(2);
+      expect(result.nodes.length).toBe(2);
 
       const fetches = calls.filter((call) => call.text.includes("unnest("));
       expect(fetches.length).toBeGreaterThanOrEqual(2);

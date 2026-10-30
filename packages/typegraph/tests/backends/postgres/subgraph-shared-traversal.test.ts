@@ -126,11 +126,11 @@ describe("subgraph shared traversal (Postgres)", () => {
     await store.edges.references.create(root, child, {});
 
     statements.length = 0;
-    const result = await store.subgraph(root.id, {
+    const result = await store.subgraph(root, {
       edges: ["references"],
       maxDepth: 3,
     });
-    expect(result.nodes.size).toBe(2);
+    expect(result.nodes.length).toBe(2);
 
     const recursive = statements.filter((statement) =>
       statement.includes("WITH RECURSIVE"),
@@ -186,7 +186,7 @@ describe("subgraph shared traversal (Postgres)", () => {
       await store.edges.references.create(root, child, {});
 
       submitted.length = 0;
-      await store.subgraph(root.id, { edges: ["references"], maxDepth: 2 });
+      await store.subgraph(root, { edges: ["references"], maxDepth: 2 });
 
       const fetches = submitted.filter((call) => call.text.includes("unnest("));
       expect(fetches.length).toBeGreaterThanOrEqual(2);
@@ -231,19 +231,18 @@ describe("subgraph shared traversal (Postgres)", () => {
       await store.edges.references.create(root, node, {});
     }
 
-    const result = await store.subgraph(root.id, {
+    const result = await store.subgraph(root, {
       edges: ["references"],
       maxDepth: 2,
     });
 
-    expect(result.nodes.size).toBe(hostileIds.length + 1);
+    expect(result.nodes.length).toBe(hostileIds.length + 1);
     for (const id of hostileIds) {
       expect(
-        (result.nodes.get(id) as { title?: string } | undefined)?.title,
+        (result.node({ kind: "Doc", id }) as { title?: string } | undefined)
+          ?.title,
       ).toBe(id);
     }
-    expect(result.adjacency.get(root.id)?.get("references")).toHaveLength(
-      hostileIds.length,
-    );
+    expect(result.outgoing(root, "references")).toHaveLength(hostileIds.length);
   });
 });
