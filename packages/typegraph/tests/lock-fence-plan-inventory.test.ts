@@ -4,7 +4,7 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **20** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **22** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
@@ -14,7 +14,7 @@
  *     trusted-import table lock (J18), and SQLite's own schema-commit/
  *     writer fence resolution (J19, the `row`-mechanism counterpart to
  *     J14/J15), plus adopted merge writer-slot acquisition (J20) and
- *     composed merge snapshot enforcement (J21), and adopted schema fence evidence (J22) — enumerated in both
+ *     composed merge snapshot enforcement (J21), adopted schema fence evidence (J22), and the two node-row lock omissions under a writer-serializing plan (J23 SQLite's closed node-delete program, J24 hard delete's lock read) — enumerated in both
  *     directions, keyed on `(file, trimmed
  *     line)` so line drift cannot rot the pin.
  *
@@ -248,6 +248,20 @@ const CALL_SITES: readonly InventoryEntry[] = [
     reason:
       "Composed merge application requires observed read-committed isolation unless the resolved plan proves engine serialization; missing coordination evidence is refused.",
   },
+  {
+    file: "backend/drizzle/sqlite.ts",
+    line: "writersSerialize: serializesWriters(resolveWriteFencePlan(fenceTarget)),",
+    site: "J23",
+    reason:
+      "The SQLite operation layer resolves the plan to learn whether its writers serialize; under engine-serialized (every bundled SQLite driver) the closed node-delete program omits its leading row-lock slots, which would lock nothing. PostgreSQL reads the same fact off J16's plan.",
+  },
+  {
+    file: "store/operations/node-operations.ts",
+    line: "if (!serializesWriters(resolveWriteFencePlan(target))) {",
+    site: "J24",
+    reason:
+      "A hard delete takes the node's delete lock before its cascade reads connected edges only where writers contend; a writer-serializing plan (engine- or caller-serialized) has no concurrent edge write to wait for, so it pays no lock statement.",
+  },
 ];
 
 /** The 5 files every lock site (J1-J8) lives in — zero dialect literals here. */
@@ -409,13 +423,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 20 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 22 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 20 declared call sites, both directions", () => {
-    expect(found).toHaveLength(20);
-    expect(CALL_SITES).toHaveLength(20);
+  it("has exactly the 22 declared call sites, both directions", () => {
+    expect(found).toHaveLength(22);
+    expect(CALL_SITES).toHaveLength(22);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

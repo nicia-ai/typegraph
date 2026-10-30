@@ -25,6 +25,7 @@ import type {
   NodePropertyExpectation,
   ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
+  SqlDialect,
   UpdateNodeParams,
   UpdateNodeSetParams,
 } from "../../types";
@@ -32,6 +33,7 @@ import { toDrizzleSql } from "../execution/types";
 import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
   castBoundValueForColumn,
+  codePointOrderKey,
   expectedValidFromPredicate,
   nodeColumnList,
   quotedColumn,
@@ -633,6 +635,7 @@ export function buildGetNodes(
  */
 export function buildLockNodes(
   tables: Tables,
+  dialect: SqlDialect,
   graphId: string,
   kind: string,
   ids: readonly string[],
@@ -640,9 +643,18 @@ export function buildLockNodes(
 ): SQL {
   return sql`
     ${buildGetNodes(tables, graphId, kind, ids)}
-    ORDER BY ${tables.nodes.id}
+    ORDER BY ${nodeIdLockOrder(dialect)}
     ${rowLock()}
   `;
+}
+
+/**
+ * The order node-row lock statements acquire their rows in: code point, the
+ * order `compareCodePoints` sorts their chunks in, rather than the column's
+ * collation, so chunk order and in-statement order agree on every database.
+ */
+function nodeIdLockOrder(dialect: SqlDialect): SQL {
+  return codePointOrderKey(portableSql.identifier("id"), dialect);
 }
 
 /**
@@ -1174,6 +1186,7 @@ export function buildDeleteNode(
  */
 export function buildLockNodesForAtomicDeleteWithSchemaFence(
   tables: Tables,
+  dialect: SqlDialect,
   input: AtomicNodeDeleteBatchInput,
   schemaLockClause: SQL,
   rowLock: RowLockClause,
@@ -1198,7 +1211,7 @@ export function buildLockNodesForAtomicDeleteWithSchemaFence(
         sql`, `,
       )})
       AND EXISTS (SELECT 1 FROM "schema_fence")
-    ORDER BY ${nodes.id}
+    ORDER BY ${nodeIdLockOrder(dialect)}
     ${rowLock()}
   `;
 }

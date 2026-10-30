@@ -75,6 +75,10 @@ import {
   missingRequiredExtras,
 } from "../../backend/capabilities/resolve";
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
+import {
+  resolveWriteFencePlan,
+  serializesWriters,
+} from "../../backend/capabilities/write-fence";
 import { deriveBackend } from "../../backend/derive-backend";
 import { resolvedNodeUpdateBatchFitsBindBudget } from "../../backend/resolved-node-update-batch";
 import {
@@ -4352,8 +4356,11 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       // check re-reads edges itself, `hardDeleteNode` deletes by primary
       // key, and embeddings clean up by id — so a node concurrently
       // removed between the gate and the write lock makes each statement
-      // a 0-row no-op.
-      await lockNodeRow(target, ctx.graphId, kind, id, "delete");
+      // a 0-row no-op. A backend whose declared write fence admits one
+      // writer has nothing to lock, so it pays no statement for it.
+      if (!serializesWriters(resolveWriteFencePlan(target))) {
+        await lockNodeRow(target, ctx.graphId, kind, id, "delete");
+      }
 
       // The cascade (edges, node, embeddings) is not individually atomic, so
       // it runs in one write transaction. Embeddings live in strategy-owned

@@ -30,6 +30,7 @@ import {
   edgeClaimRelationMissing,
 } from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
+import { compareCodePoints } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import {
   isDuplicatePrimaryKeyError,
@@ -720,6 +721,12 @@ type CreateCommonOperationBackendOptions = Readonly<{
   rowMappers: OperationBackendRowMappers;
   /** Present only on bundled dialect backends that own the fused SQL contract. */
   schemaFenceLockClause?: SQL | undefined;
+  /**
+   * The backend's resolved write fence admits one writer at a time
+   * (`serializesWriters`). Statements that would only take row locks — the
+   * closed node-delete program's leading lock slots — are omitted.
+   */
+  writersSerialize: boolean;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   schemaGraphWriteLockNamespace?: string | undefined;
   /**
@@ -3304,8 +3311,12 @@ export function createCommonOperationBackend(
           // The delete lock leads the program: each delete slot's
           // connected-edge check is a later statement, so its snapshot sees
           // every edge an endpoint-locked writer committed while this waited.
-          const orderedIds = [...new Set(input.ids)].toSorted();
-          const lockSlots = chunkArray(orderedIds, chunkSize).map((ids) => ({
+          const orderedIds = [...new Set(input.ids)].toSorted((left, right) =>
+            compareCodePoints(left, right),
+          );
+          const lockSlots = (
+            options.writersSerialize ? [] : chunkArray(orderedIds, chunkSize)
+          ).map((ids) => ({
             statement: execution.compile(
               operationStrategy.buildLockNodesForAtomicDeleteWithSchemaFence(
                 { ...input, ids },
@@ -4707,9 +4718,12 @@ export function createCommonOperationBackend(
       lock: NodeRowLock,
     ): Promise<readonly NodeRow[]> {
       if (ids.length === 0) return [];
-      // Sorted before chunking so every chunk, and the statement inside it,
-      // locks in one id order across concurrent lockers of overlapping sets.
-      const orderedIds = [...new Set(ids)].toSorted();
+      // Code-point order before chunking, the order each statement's
+      // `ORDER BY` also uses, so every chunk and every row inside it locks in
+      // one order across concurrent lockers of overlapping sets.
+      const orderedIds = [...new Set(ids)].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      );
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(
         orderedIds,

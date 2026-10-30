@@ -541,11 +541,11 @@ seeing the edge. The edge stays live on the deleted node. PostgreSQL raises no
 serialization failure because the edge write locked the node row without
 updating it.
 
-**Workarounds:**
+**The safe choices:**
 
 - Delete nodes at READ COMMITTED (the default), or
-- Run both the delete and every transaction that may create edges to the node
-  at `isolationLevel: "serializable"`; PostgreSQL then aborts the delete with a
+- Run both the delete and the edge writers at SERIALIZABLE
+  (`isolationLevel: "serializable"`). PostgreSQL then aborts the delete with a
   serialization failure, surfaced as `TransactionConflictError` and retryable
   with `store.transaction(fn, { isolationLevel: "serializable", retry: { attempts } })`.
 

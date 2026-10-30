@@ -20,7 +20,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -28,7 +28,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -36,7 +36,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -44,7 +44,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -52,7 +52,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -60,7 +60,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -68,7 +68,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -76,7 +76,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -84,7 +84,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -92,7 +92,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -100,7 +100,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -108,7 +108,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -116,7 +116,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -124,7 +124,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -132,7 +132,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   },
   {
@@ -140,7 +140,7 @@
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
-    "reason": "Deliberate breaking change, listed under Breaking in the minor changeset: the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member left no sound fallback (unlocked reads let a concurrent edge write and endpoint delete each miss the other). A custom backend on a writer-serializing engine implements it as its getNodes read.",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
     "issue": "#795"
   }
 ]

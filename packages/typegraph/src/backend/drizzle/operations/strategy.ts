@@ -802,7 +802,12 @@ const TABLE_EXISTS_QUERIES = {
  * statement runs, so its token is deliberately empty.
  */
 const RESOLVED_NODE_UPDATE_LOCK_CLAUSES = {
-  postgres: sql`FOR UPDATE`,
+  // `NO KEY UPDATE`, not `UPDATE`: the batch rewrites only props and the
+  // version, and the stronger lock would conflict with the `FOR KEY SHARE` an
+  // edge write holds on its endpoints, so a batch update and an edge write
+  // locking each other's rows in opposite orders deadlocked. It still
+  // conflicts with every other writer of the row, delete included.
+  postgres: sql`FOR NO KEY UPDATE`,
   sqlite: sql.empty(),
 } satisfies Record<SqlDialect, SQL>;
 
@@ -1104,6 +1109,7 @@ function createCommonOperationStrategy(
     buildLockNodes: (graphId, kind, ids, lock) =>
       buildLockNodes(
         tables,
+        dialect,
         graphId,
         kind,
         ids,
@@ -1112,6 +1118,7 @@ function createCommonOperationStrategy(
     buildLockNodesForAtomicDeleteWithSchemaFence: (input, schemaLockClause) =>
       buildLockNodesForAtomicDeleteWithSchemaFence(
         tables,
+        dialect,
         input,
         schemaLockClause,
         NODE_ROW_LOCK_CLAUSES[dialect].delete,

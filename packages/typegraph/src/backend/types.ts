@@ -2377,17 +2377,17 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly NodeRow[]>;
   /**
    * Reads the rows {@link GraphBackend.getNodes} reads — live and tombstoned
-   * alike — and locks them until the surrounding transaction ends, in `id`
-   * order, as {@link NodeRowLock} describes. Every store edge write reads its
+   * alike — and locks them until the surrounding transaction ends, acquiring
+   * them in code-point order of `id`, as {@link NodeRowLock} describes. Every store edge write reads its
    * endpoints' liveness through this member, and every store node delete
    * reads its row(s) through it before it reads their connected edges.
    *
    * Required, because the store has no sound fallback: an unlocked read
    * would let a concurrent edge write and endpoint delete each miss the
-   * other. A backend whose engine admits one writer at a time may implement
-   * it as the plain `getNodes` read — the bundled SQLite backends do, with an
-   * empty lock clause — but that is its declaration to make, not the store's
-   * inference.
+   * other. A backend whose engine admits one writer at a time — its declared
+   * write fence is `engine-serialized` or `caller-serialized` — may implement
+   * it as the plain ordered `getNodes` read, as the bundled SQLite backends
+   * do with an empty lock clause.
    */
   lockNodes: (
     this: void,

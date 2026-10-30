@@ -136,6 +136,7 @@ import {
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
+  serializesWriters,
   type WriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
@@ -3469,6 +3470,7 @@ function createPostgresOperationBackend(
         toUniqueRow,
       },
       schemaFenceLockClause: schemaFenceInsertLockClause,
+      writersSerialize: serializesWriters(schemaFenceFusionPlan),
       contributionMaterializer,
       fusion: {
         atomicProgramsAtTransactionScope: true,

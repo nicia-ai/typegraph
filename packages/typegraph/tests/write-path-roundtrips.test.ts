@@ -12,6 +12,10 @@
  *    compute the constraint key; the create leg must reuse that validated
  *    object instead of re-running the full Zod parse. Counted through a
  *    schema-level refinement that increments per parse.
+ *
+ * 3. ENDPOINT LOCKS — a resurrection reads both endpoints under the
+ *    edge-endpoint lock, in one statement when they share a kind, and still
+ *    refuses the source first.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -21,6 +25,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
   RestrictedDeleteError,
 } from "../src";
 import {
@@ -308,7 +313,7 @@ describe("delete round trips", () => {
     }
   });
 
-  it("node deletes read a gate, then lock the row before reading edges", async () => {
+  it("node deletes read a gate; the delete lock costs a statement only where writers contend", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -319,14 +324,15 @@ describe("delete round trips", () => {
       await store.nodes.Spoke.create({ name: "a" }, { id: "a" });
       await store.nodes.Spoke.create({ name: "b" }, { id: "b" });
 
-      // The gate is the one plain read. The in-transaction delete lock is
-      // what makes the cascade's edge read see an edge a concurrent writer
-      // created against this node (#795), so a hard delete pays it too.
+      // The gate is the one read. On a backend whose writers contend, a
+      // delete lock precedes the cascade's edge read (#795); SQLite's writer
+      // slot already excludes every other writer, which its declared write
+      // fence states, so a hard delete there pays no lock statement.
       counts["getNode"] = 0;
       counts["lockNodes"] = 0;
       await store.nodes.Spoke.hardDelete("a" as never);
       expect(counts["getNode"]).toBe(1);
-      expect(counts["lockNodes"]).toBe(1);
+      expect(counts["lockNodes"]).toBe(0);
       expect(await store.nodes.Spoke.getById("a" as never)).toBeUndefined();
 
       // Soft delete's pipeline consumes the pre-image (uniqueness keys); the
@@ -492,6 +498,57 @@ describe("getOrCreate validates props once", () => {
       expect(parses()).toBe(3);
     } finally {
       await backend.close();
+    }
+  });
+});
+
+describe("endpoint lock round trips", () => {
+  const Person = defineNode("Person", {
+    schema: z.object({ name: z.string() }),
+  });
+  const knows = defineEdge("knows", { schema: z.object({}) });
+  const graph = defineGraph({
+    id: "endpoint_lock_rt",
+    nodes: { Person: { type: Person, onDelete: "cascade" } },
+    edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  });
+
+  it("a same-kind resurrection locks both endpoints in one statement and refuses the source first", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "a" }, { id: "a" });
+      const bob = await store.nodes.Person.create({ name: "b" }, { id: "b" });
+      const edge = await store.edges.knows.create(alice, bob, {});
+      await store.edges.knows.delete(edge.id);
+
+      counts["lockNodes"] = 0;
+      const revived = await store.edges.knows.getOrCreateByEndpoints(
+        alice,
+        bob,
+        {},
+      );
+      expect(revived.action).toBe("resurrected");
+      expect(counts["lockNodes"]).toBe(1);
+
+      await store.edges.knows.delete(edge.id);
+      await store.nodes.Person.delete(alice.id);
+      await store.nodes.Person.delete(bob.id);
+      const refusal: unknown = await store.edges.knows
+        .getOrCreateByEndpoints(alice, bob, {})
+        .then(
+          () => {
+            throw new Error("Expected the resurrection to be refused.");
+          },
+          (error_: unknown) => error_,
+        );
+      expect(refusal).toBeInstanceOf(EndpointNotFoundError);
+      expect((refusal as EndpointNotFoundError).details).toMatchObject({
+        endpoint: "from",
+      });
+    } finally {
+      await rawBackend.close();
     }
   });
 });

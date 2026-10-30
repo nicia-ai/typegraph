@@ -60,6 +60,7 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { type GraphData, importGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
@@ -135,6 +136,8 @@ const ISOLATION_LEVELS: readonly IsolationLevel[] = [
   "repeatable_read",
   "serializable",
 ];
+
+const CLEARED_GRAPH_ID = "concurrent-edge-endpoint-delete-cleared";
 
 const ALICE = "alice";
 const BOB = "bob";
@@ -544,6 +547,43 @@ async function settledOrBlocked(
   );
 }
 
+/** Holds a row lock on one Person row from a separate connection. */
+async function holdRowLock(
+  probe: Pool,
+  id: string,
+  strength: "FOR UPDATE" | "FOR KEY SHARE",
+): Promise<Readonly<{ release: () => Promise<void> }>> {
+  const client = await probe.connect();
+  await client.query("BEGIN");
+  await client.query(
+    `SELECT 1 FROM typegraph_nodes WHERE kind = 'Person' AND id = $1 ${strength}`,
+    [id],
+  );
+  return {
+    release: async () => {
+      await client.query("ROLLBACK");
+      client.release();
+    },
+  };
+}
+
+async function isRowLocked(probe: Pool, id: string): Promise<boolean> {
+  const client = await probe.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT 1 FROM typegraph_nodes WHERE kind = 'Person' AND id = $1 FOR UPDATE NOWAIT`,
+      [id],
+    );
+    return false;
+  } catch {
+    return true;
+  } finally {
+    await client.query("ROLLBACK");
+    client.release();
+  }
+}
+
 /** Live edges whose source or target node is tombstoned or gone. */
 async function liveEdgesOnDeletedEndpoints(probe: Pool): Promise<number> {
   const result = await probe.query<{ dangling: number }>(
@@ -939,6 +979,301 @@ describe.runIf(process.env["POSTGRES_URL"])(
             liveEdges: 1,
             targetLive: true,
           });
+        },
+      );
+    });
+
+    describe.each(["managed", "unmanaged"] as const)(
+      "%s store: other writers of the same rows",
+      (mode) => {
+        beforeEach(() => {
+          activeMode = mode;
+        });
+
+        it(
+          "batch node updates and cross edge writes do not deadlock",
+          { timeout: CASE_TIMEOUT_MS },
+          async () => {
+            // A batch update locks its rows `FOR NO KEY UPDATE`, which an edge
+            // write's `FOR KEY SHARE` on the same rows does not wait on. With
+            // `FOR UPDATE` the two transactions below each waited on the
+            // other's row and PostgreSQL aborted one as a deadlock.
+            const live = requireLive();
+            const firstUpdated = deferred();
+            const firstGo = deferred();
+            const first = settle(
+              live.deleteStore.transaction(async (tx) => {
+                await tx.nodes.Person.bulkUpsertById([
+                  { id: asNodeId<typeof Person>(ALICE), props: { name: "A2" } },
+                ]);
+                firstUpdated.resolve();
+                await firstGo.promise;
+                await tx.edges.knows.create(alice, bob, {});
+              }),
+            );
+            await firstUpdated.promise;
+            const second = settle(
+              live.edgeStore.transaction(async (tx) => {
+                await tx.nodes.Person.bulkUpsertById([
+                  { id: asNodeId<typeof Person>(BOB), props: { name: "B2" } },
+                ]);
+                await tx.edges.knows.create(bob, alice, {});
+              }),
+            );
+            const secondState = await settledOrBlocked(live.probe, second);
+            firstGo.resolve();
+            const [firstOutcome, secondOutcome] = await Promise.all([
+              first,
+              second,
+            ]);
+            expect({
+              second: secondState,
+              first: describeOutcome(firstOutcome),
+              secondOutcome: describeOutcome(secondOutcome),
+              liveEdges: await liveEdgeCount(live.probe),
+            }).toEqual({
+              second: "settled",
+              first: "ok",
+              secondOutcome: "ok",
+              liveEdges: 2,
+            });
+          },
+        );
+
+        it.each([
+          {
+            name: "an ordinary row",
+            edges: [
+              {
+                kind: "knows",
+                id: "imported",
+                from: { kind: "Person", id: ALICE },
+                to: { kind: "Person", id: BOB },
+                properties: {},
+              },
+            ],
+          },
+          {
+            // The second row reuses the first's id, so the import defers it
+            // out of the set-oriented slice into its per-row path, which
+            // must take the same endpoint lock.
+            name: "a deferred duplicate-id row",
+            edges: [
+              {
+                kind: "knows",
+                id: "duplicated",
+                from: { kind: "Person", id: "missing" },
+                to: { kind: "Person", id: ALICE },
+                properties: {},
+              },
+              {
+                kind: "knows",
+                id: "duplicated",
+                from: { kind: "Person", id: ALICE },
+                to: { kind: "Person", id: BOB },
+                properties: {},
+              },
+            ],
+          },
+        ])(
+          "delete first: an imported edge to the deleted node ($name) is refused",
+          { timeout: CASE_TIMEOUT_MS },
+          async ({ edges }) => {
+            const live = requireLive();
+            const deleted = deferred();
+            const release = deferred();
+            const deletion = settle(
+              live.deleteStore.transaction(async (tx) => {
+                await tx.nodes.Person.delete(asNodeId<typeof Person>(BOB));
+                deleted.resolve();
+                await release.promise;
+              }),
+            );
+            await deleted.promise;
+            const data: GraphData = {
+              formatVersion: "2.0",
+              exportedAt: "2026-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: [],
+              edges,
+            };
+            const imported = importGraph(live.edgeStore, data, {
+              onConflict: "error",
+            });
+            const importState = await settledOrBlocked(
+              live.probe,
+              settle(imported),
+            );
+            release.resolve();
+            const [deleteOutcome, result] = await Promise.all([
+              deletion,
+              imported,
+            ]);
+            expect({
+              importState,
+              delete: describeOutcome(deleteOutcome),
+              refusedForDeletedEndpoint: result.errors.some(
+                (error) => error.error === `To node not found: Person:${BOB}`,
+              ),
+              dangling: await liveEdgesOnDeletedEndpoints(live.probe),
+              liveEdges: await liveEdgeCount(live.probe),
+            }).toEqual({
+              importState: "blocked",
+              delete: "ok",
+              refusedForDeletedEndpoint: true,
+              dangling: 0,
+              liveEdges: 0,
+            });
+          },
+        );
+      },
+    );
+
+    describe("store.clear()", () => {
+      it(
+        "insert first: clear removes an edge committed while it waited",
+        { timeout: CASE_TIMEOUT_MS },
+        async () => {
+          // A graph of its own: clearing drops the graph's schema rows, which
+          // the managed stores every other case uses depend on.
+          const clearedGraph = defineGraph({
+            id: CLEARED_GRAPH_ID,
+            nodes: graph.nodes,
+            edges: graph.edges,
+          });
+          const live = requireLive();
+          const clearer = createStore(
+            clearedGraph,
+            createPostgresBackend(drizzle(requireDefined(deletePool))),
+          );
+          const writer = createStore(
+            clearedGraph,
+            createPostgresBackend(drizzle(requireDefined(edgePool))),
+          );
+          await clearer.nodes.Person.create({ name: "Alice" }, { id: ALICE });
+          await clearer.nodes.Person.create({ name: "Bob" }, { id: BOB });
+          const inserted = deferred();
+          const release = deferred();
+          const creation = settle(
+            writer.transaction(async (tx) => {
+              await tx.edges.knows.create(alice, bob, {});
+              inserted.resolve();
+              await release.promise;
+            }),
+          );
+          await inserted.promise;
+          const clearing = settle(clearer.clear());
+          const clearState = await settledOrBlocked(live.probe, clearing);
+          release.resolve();
+          const [edgeOutcome, clearOutcome] = await Promise.all([
+            creation,
+            clearing,
+          ]);
+          const remaining = await live.probe.query<{
+            edges: number;
+            nodes: number;
+          }>(
+            `SELECT (SELECT count(*)::int FROM typegraph_edges WHERE graph_id = $1) AS edges,
+                    (SELECT count(*)::int FROM typegraph_nodes WHERE graph_id = $1) AS nodes`,
+            [CLEARED_GRAPH_ID],
+          );
+          expect({
+            clearState,
+            edge: describeOutcome(edgeOutcome),
+            clear: describeOutcome(clearOutcome),
+            remaining: remaining.rows[0],
+          }).toEqual({
+            clearState: "blocked",
+            edge: "ok",
+            clear: "ok",
+            remaining: { edges: 0, nodes: 0 },
+          });
+        },
+      );
+    });
+
+    describe("lock acquisition order", () => {
+      beforeEach(() => {
+        activeMode = "managed";
+      });
+
+      /**
+       * Ids whose code-point order (`"B"` < `"a"`) is the reverse of the test
+       * database's linguistic collation order, so a lock statement that fell
+       * back to the column collation (or to index order) would lock `"a"`
+       * first and these cases would see `"B"` unlocked.
+       */
+      const LOWER = "a";
+      const UPPER = "B";
+
+      async function seedOrderedPair(): Promise<void> {
+        const live = requireLive();
+        const collation = await live.probe.query<{ linguistic: boolean }>(
+          `SELECT $1::text < $2::text AS linguistic`,
+          [LOWER, UPPER],
+        );
+        // The cases below distinguish code-point from collation order only
+        // where the two disagree.
+        expect(collation.rows[0]?.linguistic).toBe(true);
+        await live.deleteStore.nodes.Person.create(
+          { name: "lower" },
+          { id: LOWER },
+        );
+        await live.deleteStore.nodes.Person.create(
+          { name: "upper" },
+          { id: UPPER },
+        );
+      }
+
+      it(
+        "a bulk delete locks its rows in code-point order",
+        { timeout: CASE_TIMEOUT_MS },
+        async () => {
+          const live = requireLive();
+          await seedOrderedPair();
+          const holder = await holdRowLock(live.probe, LOWER, "FOR KEY SHARE");
+          const deletion = settle(
+            live.deleteStore.nodes.Person.bulkDelete([
+              asNodeId<typeof Person>(LOWER),
+              asNodeId<typeof Person>(UPPER),
+            ]),
+          );
+          const state = await settledOrBlocked(live.probe, deletion);
+          const upperLocked = await isRowLocked(live.probe, UPPER);
+          await holder.release();
+          expect({
+            state,
+            upperLocked,
+            delete: describeOutcome(await deletion),
+          }).toEqual({ state: "blocked", upperLocked: true, delete: "ok" });
+        },
+      );
+
+      it.each([
+        { name: "create", cardinalityOne: false },
+        { name: "create (cardinality one)", cardinalityOne: true },
+      ])(
+        "an edge write ($name) locks its endpoints in code-point order",
+        { timeout: CASE_TIMEOUT_MS },
+        async ({ cardinalityOne }) => {
+          const live = requireLive();
+          await seedOrderedPair();
+          const holder = await holdRowLock(live.probe, LOWER, "FOR UPDATE");
+          const from = { kind: "Person", id: LOWER } as const;
+          const to = { kind: "Person", id: UPPER } as const;
+          const creation = settle(
+            cardinalityOne ?
+              live.edgeStore.edges.mentors.create(from, to, {})
+            : live.edgeStore.edges.knows.create(from, to, {}),
+          );
+          const state = await settledOrBlocked(live.probe, creation);
+          const upperLocked = await isRowLocked(live.probe, UPPER);
+          await holder.release();
+          expect({
+            state,
+            upperLocked,
+            edge: describeOutcome(await creation),
+          }).toEqual({ state: "blocked", upperLocked: true, edge: "ok" });
         },
       );
     });

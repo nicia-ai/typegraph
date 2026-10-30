@@ -13,7 +13,7 @@ import type {
   PurgeEdgeClaimsParams,
   SchemaWriteFenceParams,
 } from "../../types";
-import { buildLiveEndpointPredicate, LIVE_ENDPOINT_ALIASES } from "./edges";
+import { buildLiveEndpointPredicate, liveEndpointLockOrder } from "./edges";
 import {
   castBoundValueForColumn,
   edgeColumnList,
@@ -612,7 +612,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
       FROM ${nodeTable} AS "from_node"
       CROSS JOIN ${nodeTable} AS "to_node"
       WHERE ${buildLiveEndpointPredicate(nodes, params)}
-      ${endpointLock(LIVE_ENDPOINT_ALIASES)}
+      ${endpointLock(liveEndpointLockOrder(params))}
     ),
     claimable_axis AS MATERIALIZED (
       SELECT present

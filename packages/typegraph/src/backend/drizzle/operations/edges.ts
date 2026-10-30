@@ -1,6 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../../errors";
+import { compareCodePoints } from "../../../utils/compare";
 import {
   resolveStampedValidityLowerBound,
   resolveStatedValidityLowerBound,
@@ -121,7 +122,23 @@ function atomicEdgeUpdatePostimage(
  * The aliases an endpoint-guarded statement reads its source and target node
  * rows under — the rows its endpoint lock names.
  */
-export const LIVE_ENDPOINT_ALIASES = ["from_node", "to_node"] as const;
+const LIVE_ENDPOINT_ALIASES = ["from_node", "to_node"] as const;
+
+/**
+ * The endpoint aliases in the order a single-edge statement locks them.
+ * PostgreSQL acquires a `FOR KEY SHARE OF a, b` clause's row locks in the
+ * order the clause names them, so naming them in (kind, id) code-point order
+ * — the order every node-delete lock statement takes its rows in — keeps the
+ * write from holding one endpoint while it waits on a delete that holds the
+ * other and waits on it.
+ */
+export function liveEndpointLockOrder(
+  params: Pick<InsertEdgeParams, "fromKind" | "fromId" | "toKind" | "toId">,
+): readonly string[] {
+  const byKind = compareCodePoints(params.fromKind, params.toKind);
+  const order = byKind === 0 ? compareCodePoints(params.fromId, params.toId) : byKind;
+  return order <= 0 ? LIVE_ENDPOINT_ALIASES : ["to_node", "from_node"];
+}
 
 /**
  * The alias a durable convergence reads its identity incumbent under. That
@@ -252,7 +269,7 @@ export function buildInsertEdgeIfEndpointsLive(
     FROM ${nodeTable} AS "from_node"
     CROSS JOIN ${nodeTable} AS "to_node"
     WHERE ${buildLiveEndpointPredicate(nodes, params)}
-    ${endpointLock(LIVE_ENDPOINT_ALIASES)}
+    ${endpointLock(liveEndpointLockOrder(params))}
     RETURNING *
   `;
 }
@@ -323,7 +340,7 @@ export function buildConvergeEdgeCreate(
         FROM ${nodeTable} AS "from_node"
         CROSS JOIN ${nodeTable} AS "to_node"
         WHERE ${buildLiveEndpointPredicate(nodes, params)}
-        ${endpointLock(LIVE_ENDPOINT_ALIASES)}
+        ${endpointLock(liveEndpointLockOrder(params))}
       ) OR EXISTS (
         SELECT 1
         FROM ${edges} AS "identity_owner"
@@ -366,7 +383,7 @@ export function buildConvergeEdgeCreate(
       CROSS JOIN ${nodeTable} AS "to_node"
       WHERE NOT EXISTS (SELECT 1 FROM existing)
         AND ${buildLiveEndpointPredicate(nodes, params)}
-      ${endpointLock(LIVE_ENDPOINT_ALIASES)}
+      ${endpointLock(liveEndpointLockOrder(params))}
       RETURNING *, 1::integer AS write_discriminator
     )
     SELECT * FROM existing
@@ -640,7 +657,7 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
       ${schemaLockClause}
     ) AS "schema_fence"
     WHERE ${buildLiveEndpointPredicate(nodes, params)}
-    ${endpointLock(LIVE_ENDPOINT_ALIASES)}
+    ${endpointLock(liveEndpointLockOrder(params))}
     RETURNING *
   `;
 }

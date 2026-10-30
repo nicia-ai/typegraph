@@ -1712,6 +1712,29 @@ pair, not every edge incident to the first endpoint. One call may contain only
 incident inputs or only exact-pair inputs; mixing the two modes is refused. A
 backend that omits the member retains the exact per-pair fallback.
 
+### Node-row locks (`lockNodes`)
+
+Every `GraphBackend` implements the required
+`lockNodes(graphId, kind, ids, lock)` member. It is the read every store edge
+write's endpoint check and every store node delete's preflight goes through
+(see [Edge endpoints and concurrent node deletes](#edge-endpoints-and-concurrent-node-deletes)).
+The contract:
+
+- Return the rows `getNodes(graphId, kind, ids)` returns, live and tombstoned
+  alike.
+- Acquire them in code-point order of `id` (PostgreSQL: `ORDER BY id COLLATE "C"`).
+- Hold them locked until the surrounding transaction ends: `"edgeEndpoint"`
+  takes a lock that admits other endpoint locks and ordinary row updates but
+  waits on a delete's lock (PostgreSQL `FOR KEY SHARE`); `"delete"` takes a lock
+  that waits on every endpoint lock (PostgreSQL `FOR UPDATE`).
+- On an engine whose writers serialize — the backend declares
+  `writeFence: { mechanism: "engine-serialized" }`, or `"caller-serialized"` —
+  the plain ordered read is a complete implementation, because no other writer
+  can hold either lock.
+
+The bundled backends implement it on every driver. There is no fallback: the
+store calls it unconditionally.
+
 ### Validity-end clearing capability
 
 Custom backends must advertise `capabilities.clearValidTo: true` only when both
@@ -2354,13 +2377,21 @@ single writer slot before its first read. On PostgreSQL they can, so the two
 checks are paired with row locks — the same pairing a foreign key's referential
 check makes with a delete of the referenced row:
 
-- An edge write locks both endpoint rows `FOR KEY SHARE` in the statement that
-  checks their liveness, and holds the lock to the end of its transaction.
-  Endpoint locks do not conflict with each other or with ordinary node updates,
-  so concurrent edge writes and property updates on a heavily connected node are
-  not serialized.
+- An edge write locks both endpoint rows `FOR KEY SHARE` when it checks their
+  liveness, and holds the locks to the end of its transaction. A
+  single-statement write (a fused create, convergence, batch or claimed
+  create) takes them in that statement; the portable path reads the endpoints
+  with `lockNodes` before its insert, in the same transaction. Endpoint locks
+  do not conflict with each other or with node property updates, which lock
+  rows `FOR NO KEY UPDATE`, so concurrent edge writes and updates on a heavily
+  connected node are not serialized.
 - A node delete — single, bulk, hard, and the closed restrict-delete program —
-  locks its row(s) `FOR UPDATE`, in id order, before it reads connected edges.
+  locks its row(s) `FOR UPDATE` before it reads connected edges.
+- `store.clear()` deletes the graph's nodes before its edges, so it waits for
+  an uncommitted edge write and then removes the edge it committed.
+- Both sides take their locks in (kind, id) code-point order: a single-edge
+  write names its two endpoints in that order, and a delete locks a kind's
+  rows in `id` code-point order.
 
 The outcome depends on which write runs first and on the delete's isolation
 level (edge writes at the default READ COMMITTED):
@@ -2373,21 +2404,26 @@ level (edge writes at the default READ COMMITTED):
 The open cell is a PostgreSQL property, not a missing lock: an edge write only
 locks the endpoint row and never updates it, and PostgreSQL raises a
 serialization failure at REPEATABLE READ only for a row that was updated after
-the snapshot. Delete endpoints at READ COMMITTED, or run both the delete and the
-writers that may create edges to its node at SERIALIZABLE. See
+the snapshot. The safe choices are: delete nodes at READ COMMITTED (the
+default), or run both the delete and the edge writers at SERIALIZABLE. See
 [Limitations](/limitations#concurrent-endpoint-deletes-above-read-committed-postgresql).
 
-A bulk delete that covers both endpoints of an edge being created concurrently
-can deadlock with that edge write; PostgreSQL aborts one of the two, surfaced as
-`TransactionConflictError` and retryable with `store.transaction(fn, { retry })`.
+Because both sides lock in one order, a single-edge write and a bulk delete
+of one kind that covers both its endpoints wait on each other instead of
+deadlocking. A deadlock is still possible when a transaction deletes both
+endpoints of an edge being created concurrently through several statements
+in another order (one endpoint, then the other), or when the edge write locks
+many endpoints at once: a transaction that creates several edges, or one
+closed batch edge program, whose rows lock endpoints row by row. PostgreSQL
+then aborts one of the two, surfaced as `TransactionConflictError` and
+retryable with `store.transaction(fn, { retry })`.
 
-Every backend implements the required `lockNodes(graphId, kind, ids, lock)`
-member: it reads the same rows as `getNodes`, in `id` order, and holds them
-locked for `lock` — `"edgeEndpoint"` or `"delete"` — until the transaction
-ends. The bundled backends implement it on every driver. A custom backend on
-an engine that admits one writer at a time may implement it as its plain
-`getNodes` read; any other custom backend must take the two locks above, or
-the store cannot keep the invariant on it.
+Two writes skip the check by design: `importGraph` with
+`validateReferences: false` inserts edges without reading their endpoints,
+and provenance retraction closes a node's currency without touching its edges.
+
+The pairing rests on [`lockNodes`](#node-row-locks-locknodes), which every
+backend implements.
 
 ### SQLite ↔ PostgreSQL parity
 

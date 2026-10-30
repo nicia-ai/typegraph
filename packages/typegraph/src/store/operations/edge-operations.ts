@@ -105,6 +105,7 @@ import {
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
+  type NodeRow,
   rowPropsToObject,
   runOptionallyInTransaction,
   type TransactionBackend,
@@ -132,6 +133,7 @@ import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
+import { compareCodePoints } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -220,7 +222,7 @@ import {
   withUnmatchedEdgeUpdateRefusal,
 } from "./edge-write-fences";
 import { type EdgeUpdateWork } from "./edge-write-pipeline";
-import { lockNodeRow, lockNodeRowsById } from "./node-row-locks";
+import { lockNodeRows, lockNodeRowsById } from "./node-row-locks";
 import {
   atomicResolvedUpdateAttemptBudget,
   type OverlaidSessionMint,
@@ -499,9 +501,12 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
  * are unavailable. The fused INSERT uses this only after its predicate
  * produced no row, so it never spends the reads on a successful create.
  *
- * Both reads take the edge-endpoint lock and hold it to the end of the write
- * transaction: a concurrent delete of either endpoint then either waits for
- * this write and sees its edge, or makes this read wait and see its tombstone.
+ * Both endpoints are read under the edge-endpoint lock, held to the end of the
+ * write transaction, so a concurrent delete of either endpoint either waits
+ * for this write and sees its edge, or makes this read wait and see its
+ * tombstone. They are locked in (kind, id) code-point order — one statement
+ * when they share a kind — the order every delete lock statement takes its
+ * rows in; the verdicts are still checked source first.
  */
 async function assertLiveEdgeEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -512,23 +517,42 @@ async function assertLiveEdgeEndpoints<G extends GraphDef>(
   toId: string,
   backend: WriteTarget,
 ): Promise<void> {
-  const fromNode = await lockNodeRow(
-    backend,
-    ctx.graphId,
+  const kinds =
+    fromKind === toKind ?
+      [fromKind]
+    : [fromKind, toKind].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      );
+  const rowsByKey = new Map<string, NodeRow>();
+  for (const kind of kinds) {
+    const ids = [
+      ...(kind === fromKind ? [fromId] : []),
+      ...(kind === toKind ? [toId] : []),
+    ];
+    for (const row of await lockNodeRows(
+      backend,
+      ctx.graphId,
+      kind,
+      ids,
+      "edgeEndpoint",
+    )) {
+      rowsByKey.set(edgeEndpointRowKey(kind, row.id), row);
+    }
+  }
+  assertEndpointRowLive(
+    edgeKindName,
+    "from",
     fromKind,
     fromId,
-    "edgeEndpoint",
+    rowsByKey.get(edgeEndpointRowKey(fromKind, fromId)),
   );
-  assertEndpointRowLive(edgeKindName, "from", fromKind, fromId, fromNode);
-
-  const toNode = await lockNodeRow(
-    backend,
-    ctx.graphId,
+  assertEndpointRowLive(
+    edgeKindName,
+    "to",
     toKind,
     toId,
-    "edgeEndpoint",
+    rowsByKey.get(edgeEndpointRowKey(toKind, toId)),
   );
-  assertEndpointRowLive(edgeKindName, "to", toKind, toId, toNode);
 }
 
 /** The single owner of an edge endpoint row's live/refusal verdict. */
@@ -1186,7 +1210,9 @@ async function primeEdgeBatchValidationCache<G extends GraphDef>(
 
   // Kinds in sorted order, ids sorted by the lock owner: one acquisition order
   // across batches whose endpoint sets overlap.
-  for (const kind of [...idsByKind.keys()].toSorted()) {
+  for (const kind of [...idsByKind.keys()].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  )) {
     const orderedIds = [...requireDefined(idsByKind.get(kind))];
     const rowsById = await lockNodeRowsById(
       backend,

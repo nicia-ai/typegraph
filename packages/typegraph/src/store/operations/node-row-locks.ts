@@ -6,7 +6,8 @@
  * endpoints' liveness here with the `"edgeEndpoint"` lock, and every store
  * node delete reads its row(s) here with the `"delete"` lock before it reads
  * their connected edges. Fused write statements that check endpoint liveness
- * in SQL take the same endpoint lock inside the statement instead.
+ * in SQL take the same endpoint lock inside the statement instead. An import
+ * run with `validateReferences: false` reads no endpoints at all.
  */
 import {
   type GraphBackend,
