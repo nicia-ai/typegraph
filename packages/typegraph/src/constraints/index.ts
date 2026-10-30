@@ -119,6 +119,25 @@ export function checkWherePredicate(
   return evaluatePredicate(predicate, props);
 }
 
+/**
+ * The key a uniqueness constraint reserves for these props, or `undefined`
+ * when its `where` predicate excludes them.
+ *
+ * THE one reading of "which key does this row hold under this constraint":
+ * the claim writer derives the key it reserves from it, and the constraint
+ * lookups derive both the key they probe and whether a released claim's node
+ * still holds that key from it, so a lookup can never recognize a key the
+ * writer would not have claimed.
+ */
+export function uniqueConstraintKey(
+  constraint: UniqueConstraint,
+  props: Record<string, unknown>,
+): string | undefined {
+  return checkWherePredicate(constraint, props) ?
+      computeUniqueKey(props, constraint.fields, constraint.collation)
+    : undefined;
+}
+
 type UniquePredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
