@@ -69,6 +69,38 @@ export function readNodeDeleteOptions(
   return parsed.data.expect;
 }
 
+/**
+ * Refuses an options argument passed to a node delete that takes none
+ * (`hardDelete`, `bulkDelete`). Their types accept no options, so this only
+ * reaches an untyped caller, who would otherwise get an unguarded delete for
+ * an `expect` the method silently dropped.
+ */
+export function refuseNodeDeleteArguments(
+  extraArguments: readonly unknown[],
+  target: Readonly<{ kind: string; id?: string }>,
+  method: "hardDelete" | "bulkDelete",
+): void {
+  if (extraArguments.every((argument) => argument === undefined)) return;
+  throw new ValidationError(
+    `${target.kind}.${method}() takes no options.`,
+    {
+      entityType: "node",
+      kind: target.kind,
+      ...(target.id === undefined ? {} : { id: target.id }),
+      operation: method === "hardDelete" ? "hardDelete" : "delete",
+      issues: [
+        {
+          path: "options",
+          message: `${method}() accepts no options; only delete(id, { expect }) is guarded by a plan.`,
+        },
+      ],
+    },
+    {
+      suggestion: `Call ${method}() without options, or use delete(id, { expect: plan }) for a guarded soft delete.`,
+    },
+  );
+}
+
 function duplicateEntryIssues(plan: NodeDeletePlan): ValidationIssue[] {
   const seenParts = new Set<string>();
   const seenEdgeIds = new Set<string>();

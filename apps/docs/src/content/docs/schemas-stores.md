@@ -1140,9 +1140,11 @@ store.nodes.Person.delete(
 ```
 
 `expect` takes a plan from `planDelete(id)` and refuses the delete with
-`NodeDeletePlanMismatchError`, before any write, when the delete's own plan no
-longer matches it or the node is no longer live. See
-[Previewing a delete](/ontology#previewing-a-delete).
+`NodeDeletePlanMismatchError`, before any write, when the plan the delete
+computes for itself no longer matches it or the node is no longer live. Only a
+composition whole's delete plans under a per-graph lock; see
+[Previewing a delete](/ontology#previewing-a-delete) for what each isolation
+level does with a write that commits concurrently.
 
 #### `hardDelete(id)`
 

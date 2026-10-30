@@ -1510,22 +1510,34 @@ export type NodeCollection<
    * `options.expect` guards the delete with a plan from
    * {@link NodeCollection.planDelete}, for a preview the caller confirms
    * before deleting, possibly in a later request. The delete computes its own
-   * plan with the same planner, inside its transaction and under its own
-   * per-graph write lock, and compares the two: the same parts (each with
-   * its `whole` and `viaEdgeKind`, so a reparented part counts as changed)
-   * and the same `removedEdgeIds`, in any order. A difference refuses with
-   * `NodeDeletePlanMismatchError` (`situation: "changed"`, naming the parts
-   * and edge ids added to and dropped from the plan) before any node, edge,
-   * sidecar, history or revision write and before `onOperationEnd`; a node
-   * that is absent or already deleted refuses the same way
-   * (`situation: "notLive"`) instead of being a no-op. A guarded delete always
-   * takes the portable delete path, never a fused single-statement command.
+   * plan with the same planner inside its transaction (for a composition
+   * whole, under the per-graph write lock the delete takes) and compares the
+   * two: the same parts (each with its `whole` and `viaEdgeKind`, so a
+   * reparented part counts as changed) and the same `removedEdgeIds`, in any
+   * order. A difference refuses with `NodeDeletePlanMismatchError`
+   * (`situation: "changed"`, naming the parts and edge ids added to and
+   * dropped from the plan) before any node, edge, sidecar, history or revision
+   * write and before `onOperationEnd`; a node that is absent or already
+   * deleted refuses the same way (`situation: "notLive"`) instead of being a
+   * no-op. A guarded delete always takes the portable delete path, never a
+   * fused single-statement command.
    *
-   * The guard covers the moment the delete plans. A write that takes no
-   * per-graph lock (an ordinary edge, a detach, a part's own delete) and
-   * commits between that plan and the delete's statements is not compared;
-   * SQLite admits no such write, and PostgreSQL `REPEATABLE READ` or
-   * `SERIALIZABLE` turns it into a serialization failure.
+   * The comparison covers the parts and edges the delete planned. For a
+   * composition whole no concurrent attach or reparent can change that plan
+   * before the delete runs it. Any other kind takes no per-graph lock, so
+   * every concurrent write can change the answer up to the comparison, and
+   * the comparison sees it at `READ COMMITTED`. A write that takes no
+   * per-graph lock (for a whole: a detach, a part's own delete, or an edge of
+   * a kind with no cardinality or acyclicity constraint; for any other kind:
+   * every write) can also commit after the comparison and before the delete's
+   * statements. The delete then treats it exactly as an unguarded delete
+   * does: at `READ COMMITTED` an edge created on a node it deletes is removed
+   * with that node under `cascade` / `disconnect`, or refuses the delete with
+   * `RestrictedDeleteError` under `restrict` (inside a caller's transaction,
+   * after the cascade's earlier writes); at PostgreSQL `REPEATABLE READ` or
+   * `SERIALIZABLE` the delete's snapshot does not see such an edge, and it
+   * stays live on the deleted node, as it does for every delete. SQLite
+   * admits no concurrent writer.
    *
    * An `options` object of the wrong shape, or one without a plan in
    * `expect`, is refused with `ValidationError`.
@@ -1544,7 +1556,8 @@ export type NodeCollection<
    * Takes no `expect` guard: {@link NodeCollection.planDelete} plans the soft
    * delete, and a hard delete also purges a tombstoned node and the
    * soft-deleted edge rows at each deleted node, which that plan does not
-   * name.
+   * name. An options argument (from an untyped caller) is refused with
+   * `ValidationError` rather than ignored.
    *
    * @throws Error if edges are still connected to this node (delete edges first)
    */
@@ -1569,14 +1582,17 @@ export type NodeCollection<
    * guard is what makes that flow safe.
    *
    * On a transaction's collections (`tx.nodes.<Kind>.planDelete`), the plan
-   * is read under the same per-graph write lock the delete takes and holds it
-   * until the transaction ends, so no concurrent attach or reparent can add a
-   * part before a `delete(id)` later in the same transaction. Writes that take
-   * no per-graph lock still can change the answer: a concurrent detach or
-   * part delete drops that part from the later delete's cascade, and a
-   * concurrent ordinary edge changes `removedEdgeIds` or a restrict verdict.
-   * Passing the plan as `expect` turns such a change into a refusal. On the
-   * store's collections the plan is an unlocked, best-effort read.
+   * of a composition whole is read under the per-graph write lock its delete
+   * takes, held until the transaction ends, so no concurrent attach or
+   * reparent can add a part before a `delete(id)` later in the same
+   * transaction. Writes that take no per-graph lock still can change the
+   * answer: a concurrent detach or part delete drops that part from the later
+   * delete's cascade, and a concurrent ordinary edge changes `removedEdgeIds`
+   * or a restrict verdict. Any other kind's delete takes no per-graph lock, so
+   * every concurrent write can. Passing the plan as `expect` turns a change
+   * the delete can see (every committed change at `READ COMMITTED`) into a
+   * refusal. On the store's collections the plan is an unlocked, best-effort
+   * read.
    *
    * Neither form writes a graph, sidecar, history or revision row. The
    * transactional form takes the lock the delete takes, which for a
@@ -1808,7 +1824,8 @@ export type NodeCollection<
    * Delete multiple nodes by ID.
    *
    * Atomic when the backend supports transactions. Silently ignores IDs
-   * that don't exist.
+   * that don't exist. Takes no `expect` guard; an options argument (from an
+   * untyped caller) is refused with `ValidationError` rather than ignored.
    */
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
 

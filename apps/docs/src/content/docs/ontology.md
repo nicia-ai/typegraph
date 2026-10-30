@@ -838,9 +838,9 @@ if (plan === undefined) return; // nothing to delete
 await store.nodes.Podcast.delete(podcast.id, { expect: plan });
 ```
 
-The delete computes its own plan with the same planner, inside its
-transaction and under the per-graph write lock it takes, and compares the two
-in any order: the same parts, each with the same `whole` and `viaEdgeKind`
+The delete computes its own plan with the same planner inside its
+transaction (for a composition whole, under the per-graph write lock its
+delete takes) and compares the two in any order: the same parts, each with the same `whole` and `viaEdgeKind`
 (so a reparented part counts as changed), and the same `removedEdgeIds`. If
 anything differs — a part attached, detached or moved since the preview, an
 edge added or removed — it refuses with
@@ -856,13 +856,32 @@ The plan is plain data and survives a JSON round trip. Once you pass options,
 options of the wrong shape. A guarded delete always takes the portable delete
 path. `hardDelete` takes no `expect`, because it also purges a tombstoned node
 and the soft-deleted edge rows at each deleted node, which the plan does not
-name. `bulkDelete` takes no `expect` either.
+name. `bulkDelete` takes no `expect` either. Both refuse any options argument
+with `ValidationError` rather than run unguarded.
 
-The guard covers the moment the delete plans. A write that takes no per-graph
-lock (an ordinary edge, a detach, a part's own delete) and commits between
-that plan and the delete's statements is not compared. SQLite admits no such
-write, and on PostgreSQL a `REPEATABLE READ` or `SERIALIZABLE` delete fails
-with a serialization failure instead.
+The comparison covers the parts and edges the delete planned. For a
+composition whole, no concurrent attach or reparent can change that plan
+before the delete runs it. A delete of any other kind takes no per-graph lock,
+so every concurrent write can change the answer up to the comparison.
+
+A write that takes no per-graph lock can also commit after the comparison and
+before the delete's statements: for a whole, a detach, a part's own delete, or
+an edge of a kind with no cardinality or acyclicity constraint; for any other
+kind, every write. The delete treats such a write exactly as an unguarded
+delete does:
+
+- At `READ COMMITTED`, an edge created on a node the delete removes is removed
+  with it under `cascade` / `disconnect`, or refuses the delete with
+  `RestrictedDeleteError` under `restrict`. Inside your own transaction that
+  refusal comes after the cascade's earlier writes, so let it abort the
+  transaction.
+- At PostgreSQL `REPEATABLE READ` or `SERIALIZABLE`, the delete's snapshot does
+  not see such an edge, and it stays live on the deleted node. This holds for
+  every delete, guarded or not: the edge write takes no lock the delete holds,
+  and PostgreSQL arbitrates `SERIALIZABLE` transactions only against each
+  other.
+
+SQLite admits no concurrent writer, so neither case arises there.
 
 When the decision and the delete happen in one transaction, call the
 transaction's collections:
@@ -878,13 +897,15 @@ await store.transaction(async (tx) => {
 });
 ```
 
-`tx.nodes.<Kind>.planDelete` reads the plan under the per-graph write lock
-the delete takes and keeps it until the transaction ends, so no concurrent
-attach or reparent can add a part between the preview and the delete. Writes
-that take no per-graph lock can still change the outcome: a part detached or
-deleted concurrently drops out of the delete's cascade, and an ordinary edge
-created concurrently changes `removedEdgeIds` or a restrict verdict. Passing
-the plan as `expect` turns such a change into a refusal. On the store's
+For a composition whole, `tx.nodes.<Kind>.planDelete` reads the plan under the
+per-graph write lock the delete takes and keeps it until the transaction ends,
+so no concurrent attach or reparent can add a part between the preview and the
+delete. Writes that take no per-graph lock can still change the outcome: a
+part detached or deleted concurrently drops out of the delete's cascade, and
+an ordinary edge created concurrently changes `removedEdgeIds` or a restrict
+verdict. Any other kind's delete takes no per-graph lock, so every concurrent
+write can. Passing the plan as `expect` turns a change the delete can see
+(every committed change at `READ COMMITTED`) into a refusal. On the store's
 collections, `store.nodes.<Kind>.planDelete` is an unlocked read and only a
 best-effort answer.
 

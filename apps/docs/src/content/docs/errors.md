@@ -1013,9 +1013,10 @@ by hand.
 Thrown by `nodes.<Kind>.delete(id, { expect: plan })` when the plan the delete
 computes for itself no longer matches the `plan` from `planDelete(id)`, or
 when the node is absent or already deleted. It is raised before any write.
-The code is `NODE_DELETE_PLAN_MISMATCH` and the category is `"system"`:
-another writer changed what the caller decided on, and the remedy is a fresh
-preview rather than different input. See
+The code is `NODE_DELETE_PLAN_MISMATCH` and the category is `"constraint"`,
+like `RestrictedDeleteError`: the graph's current state refuses the delete the
+caller confirmed, and the remedy is a fresh preview the user confirms again.
+See
 [Previewing a delete](/ontology#previewing-a-delete).
 
 | `details.situation` | Meaning |

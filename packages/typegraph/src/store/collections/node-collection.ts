@@ -40,7 +40,10 @@ import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
-import { readNodeDeleteOptions } from "../operations/node-delete-expectation";
+import {
+  readNodeDeleteOptions,
+  refuseNodeDeleteArguments,
+} from "../operations/node-delete-expectation";
 import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
@@ -765,7 +768,11 @@ export function createNodeCollection<
       await executeNodeDelete(kind, id, backend, expect);
     },
 
-    async hardDelete(id: NodeId<N>): Promise<void> {
+    async hardDelete(
+      id: NodeId<N>,
+      ...extraArguments: readonly unknown[]
+    ): Promise<void> {
+      refuseNodeDeleteArguments(extraArguments, { kind, id }, "hardDelete");
       await executeNodeHardDelete(kind, id, backend);
     },
 
@@ -1359,7 +1366,11 @@ export function createNodeCollection<
       await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
 
-    async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {
+    async bulkDelete(
+      ids: readonly NodeId<N>[],
+      ...extraArguments: readonly unknown[]
+    ): Promise<void> {
+      refuseNodeDeleteArguments(extraArguments, { kind }, "bulkDelete");
       if (ids.length === 0) return;
       await executeNodeDeleteBatch(kind, ids, backend);
     },

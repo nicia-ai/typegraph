@@ -594,6 +594,45 @@ export function registerCompositionDeletePlanIntegrationTests(
       expect(await store.nodes.DpEpisode.getById(kept.id)).toBeDefined();
     });
 
+    it("refuses an edge removed after the preview when the parts are unchanged", async () => {
+      const store = await context.createStore(
+        buildGraph(nextGraphId(), { podcast: "cascade" }),
+      );
+      const tag = await store.nodes.DpTag.create({ name: "t" });
+      const podcast = await store.nodes.DpPodcast.create({ title: "show" });
+      await store.nodes.DpEpisode.create(
+        { title: "e" },
+        { partOf: { whole: podcast } },
+      );
+      const tagEdge = await store.edges.dpTagged.create(podcast, tag, {});
+      const plan = requireDefined(
+        await store.nodes.DpPodcast.planDelete(podcast.id),
+      );
+      await store.edges.dpTagged.delete(tagEdge.id);
+
+      // MUTATION CHECK: drop `diff.droppedEdgeIds.length === 0` from the
+      // `unchanged` decision in `diffNodeDeletePlans`
+      // (src/store/operations/node-delete-expectation.ts) and the delete runs
+      // — verified and reverted.
+      await expect(
+        store.nodes.DpPodcast.delete(podcast.id, { expect: plan }),
+      ).rejects.toThrow(
+        matchingObject({
+          name: "NodeDeletePlanMismatchError",
+          details: {
+            kind: "DpPodcast",
+            id: podcast.id,
+            situation: "changed",
+            addedParts: [],
+            droppedParts: [],
+            addedEdgeIds: [],
+            droppedEdgeIds: [tagEdge.id],
+          },
+        }),
+      );
+      expect(await store.nodes.DpPodcast.getById(podcast.id)).toBeDefined();
+    });
+
     it("compares a part's whole, not only its id", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const podcast = await store.nodes.DpPodcast.create({ title: "show" });

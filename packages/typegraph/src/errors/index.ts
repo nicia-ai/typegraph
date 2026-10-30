@@ -1226,9 +1226,10 @@ function describeNodeDeletePlanMismatch(
  * Thrown by `nodes.<Kind>.delete(id, { expect })` when the plan the delete
  * computes for itself is not the `expect` plan a caller took from
  * `planDelete(id)` — parts or edges changed since the preview, or the node is
- * no longer live. Reached before any write. Category `"system"`, like
- * {@link VersionConflictError}: another writer changed the state the caller
- * decided on, and the remedy is a fresh preview, not different input.
+ * no longer live. Reached before any write. Category `"constraint"`, like
+ * {@link RestrictedDeleteError}: the graph's current state refuses the delete
+ * the caller confirmed, and the remedy is a fresh preview the user confirms
+ * again.
  */
 export class NodeDeletePlanMismatchError extends TypeGraphError {
   declare readonly details: NodeDeletePlanMismatchErrorDetails;
@@ -1242,7 +1243,7 @@ export class NodeDeletePlanMismatchError extends TypeGraphError {
       "NODE_DELETE_PLAN_MISMATCH",
       {
         details,
-        category: "system",
+        category: "constraint",
         suggestion: `Preview again with planDelete(id), confirm the new plan, and retry delete(id, { expect: newPlan }).`,
         cause: options?.cause,
       },

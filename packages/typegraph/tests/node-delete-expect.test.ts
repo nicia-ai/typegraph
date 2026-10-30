@@ -147,6 +147,47 @@ describe("delete(id, { expect }) options", () => {
     expect(await store.nodes.DeClip.getById(clip.id)).toBeDefined();
   });
 
+  it("refuses an options argument to hardDelete and bulkDelete instead of deleting unguarded", async () => {
+    const { store, show, clip, plan } = await showWithClip();
+
+    // MUTATION CHECK: return early from `refuseNodeDeleteArguments`
+    // (src/store/operations/node-delete-expectation.ts) and both calls
+    // delete the show without comparing anything — verified and reverted.
+    // The way an untyped JavaScript caller reaches these methods.
+    const collection = store.nodes.DeShow;
+    const refusals = [
+      await rejectionOf(
+        () =>
+          Reflect.apply(collection.hardDelete, collection, [
+            show.id,
+            { expect: plan },
+          ]) as Promise<void>,
+      ),
+      await rejectionOf(
+        () =>
+          Reflect.apply(collection.bulkDelete, collection, [
+            [show.id],
+            { expect: plan },
+          ]) as Promise<void>,
+      ),
+    ];
+
+    expect(
+      refusals.map((refusal) => ({
+        isValidationError: refusal instanceof ValidationError,
+        operation: (refusal as ValidationError).details.operation,
+        paths: (refusal as ValidationError).details.issues.map(
+          (issue) => issue.path,
+        ),
+      })),
+    ).toEqual([
+      { isValidationError: true, operation: "hardDelete", paths: ["options"] },
+      { isValidationError: true, operation: "delete", paths: ["options"] },
+    ]);
+    expect(await store.nodes.DeShow.getById(show.id)).toBeDefined();
+    expect(await store.nodes.DeClip.getById(clip.id)).toBeDefined();
+  });
+
   it("reports a refused guarded delete through onError, never onOperationEnd", async () => {
     const { store, log, show, plan } = await showWithClip();
     await store.nodes.DeClip.create({}, { partOf: { whole: show } });
@@ -160,7 +201,7 @@ describe("delete(id, { expect }) options", () => {
     expect(log.ended).toEqual([]);
     expect(log.failed.map((entry) => entry.error)).toEqual([refusal]);
     const error = refusal as NodeDeletePlanMismatchError;
-    expect(error.category).toBe("system");
+    expect(error.category).toBe("constraint");
     expect(error.message).toContain("1 part(s) added");
     expect(error.suggestion).toContain("planDelete(id)");
   });

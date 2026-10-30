@@ -28,6 +28,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  NodeDeletePlanMismatchError,
   type NodeId,
   partOf,
   TransactionConflictError,
@@ -305,6 +306,74 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(
           await deleter.nodes.Clip.getById("clip1" as never),
         ).toBeUndefined();
+      },
+    );
+
+    it(
+      "refuses a guarded delete when a part is attached by a fence holder the delete waited on",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        const live = requirePostgres();
+        const deleter = createStore(graph, createPostgresBackend(live.first));
+        const attacher = createStore(graph, createPostgresBackend(live.second));
+        const show = await deleter.nodes.Show.create({}, { id: "show" });
+        await deleter.nodes.Clip.create(
+          { slug: "c0" },
+          { id: "clip0", partOf: { whole: show } },
+        );
+        const plan = requireDefined(
+          await deleter.nodes.Show.planDelete(show.id),
+        );
+
+        const attached = createGate();
+        const release = createGate();
+        const attach = attacher.transaction(async (tx) => {
+          await tx.nodes.Clip.create(
+            { slug: "c1" },
+            { id: "clip1", partOf: { whole: show } },
+          );
+          attached.open();
+          await release.opened;
+        });
+        await attached.opened;
+
+        const deletionOutcome = deleter.nodes.Show.delete(show.id, {
+          expect: plan,
+        }).then(
+          () => "committed" as const,
+          (error: unknown) => error,
+        );
+        await untilSessionWaitsOnFence(live.observer);
+        release.open();
+        await attach;
+
+        // MUTATION CHECK: compare against an unlocked
+        // `planLiveNodeDelete(..., uncapturedGraphWriteLock())` read right
+        // after the gate in `executeNodeDelete`
+        // (src/store/operations/node-operations.ts), instead of the plan read
+        // in the frame, and the delete commits, cascading through clip1, the
+        // part attached after the preview — verified and reverted.
+        const outcome = await deletionOutcome;
+        expect(outcome).toBeInstanceOf(NodeDeletePlanMismatchError);
+        expect((outcome as NodeDeletePlanMismatchError).details).toMatchObject({
+          situation: "changed",
+          addedParts: [
+            {
+              kind: "Clip",
+              id: "clip1",
+              whole: { kind: "Show", id: "show" },
+              viaEdgeKind: "clipOf",
+            },
+          ],
+          droppedParts: [],
+        });
+        expect(await deleter.nodes.Show.getById(show.id)).toBeDefined();
+        expect(
+          await deleter.nodes.Clip.getById("clip0" as never),
+        ).toBeDefined();
+        expect(
+          await deleter.nodes.Clip.getById("clip1" as never),
+        ).toBeDefined();
       },
     );
 
