@@ -698,6 +698,7 @@ export type {
   SubgraphEdgeLookup,
   SubgraphEdgeResult,
   SubgraphIndex,
+  SubgraphKindSelection,
   SubgraphNodeKey,
   SubgraphNodeLookup,
   SubgraphNodeResult,

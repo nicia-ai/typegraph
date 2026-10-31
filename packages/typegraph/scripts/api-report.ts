@@ -670,11 +670,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // intentionally not re-exported from the backend barrel; the engine's exact
 // transitive forgotten-export set is recorded here.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
-  // indexSubgraph's lookups narrow by kind through SelectByKind, an
-  // implementation helper type rendered in their signatures (+1).
   ".": {
-    count: 500,
-    sha256: "1c8579bec083286536d9d89220a5a0593601d873b9d187580879cf30185c54f8",
+    count: 499,
+    sha256: "1b3e0e5c5503e6ef84cca4f2713edae05d3040fc69228cd2c61bf510972f0b2d",
   },
   "./adapters/drizzle/engine": {
     count: 337,

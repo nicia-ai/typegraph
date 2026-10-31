@@ -8038,13 +8038,6 @@ type SelectableNodeMeta = Readonly<{
 }>;
 
 // @public
-type SelectByKind<T extends Readonly<{
-    kind: string;
-}>, K extends string> = T extends unknown ? string extends T["kind"] ? T : T extends Readonly<{
-    kind: K;
-}> ? T : never : never;
-
-// @public
 export type SelectContext<Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = Record<string, never>, RecursiveAliases extends RecursiveAliasMap = {}> = Readonly<{
     [A in keyof Aliases]: Aliases[A]["optional"] extends true ? SelectableNode<Aliases[A]["type"]> | undefined : SelectableNode<Aliases[A]["type"]>;
 }> & Readonly<{
@@ -9030,7 +9023,7 @@ export type SubgraphEdgeKey = Readonly<{
 // @public
 export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
     // (undocumented)
-    <const K extends E["kind"]>(node: SubgraphNodeKey, edgeKind: K): readonly SelectByKind<E, K>[];
+    <const K extends E["kind"]>(node: SubgraphNodeKey, edgeKind: K): readonly SubgraphKindSelection<E, K>[];
     // (undocumented)
     (node: SubgraphNodeKey, edgeKind?: E["kind"]): readonly E[];
 }
@@ -9059,13 +9052,20 @@ export type SubgraphIndex<N extends SubgraphNodeKey, E extends SubgraphEdgeKey> 
 }>;
 
 // @public
+export type SubgraphKindSelection<T extends Readonly<{
+    kind: string;
+}>, K extends string> = T extends unknown ? string extends T["kind"] ? T : T extends Readonly<{
+    kind: K;
+}> ? T : never : never;
+
+// @public
 export type SubgraphNodeKey<K extends string = string> = Readonly<{
     kind: K;
     id: string;
 }>;
 
 // @public
-export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <const K extends string>(node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>) => (string extends K ? N : SelectByKind<N, K>) | undefined;
+export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <const K extends string>(node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>) => (string extends K ? N : SubgraphKindSelection<N, K>) | undefined;
 
 // @public (undocumented)
 type SubgraphNodeProjectionField<N extends NodeType = NodeType> = NodeProjectionPropertyKey<N> | "meta";
