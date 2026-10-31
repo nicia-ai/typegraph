@@ -22,6 +22,7 @@ import {
   assertGraphAnnotations,
   cloneAndFreezeGraphAnnotations,
 } from "./json-value";
+import { assertNodeKindNameSafe } from "./node";
 import {
   type AnyEdgeRegistration,
   type AnyEdgeType,
@@ -674,7 +675,7 @@ const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
 
 /**
  * Refuses any kind name or constraint name that could spell a reserved claim
- * axis.
+ * axis, and any kind name that could spell another node's recursive path token.
  *
  * A node kind and a unique constraint name are both written verbatim into the
  * claim rows a write of that kind reserves, and the axes that are NOT kinds —
@@ -688,7 +689,7 @@ function assertClaimNamesAreSafe(
   nodes: Record<string, NodeRegistration>,
 ): void {
   for (const registration of Object.values(nodes)) {
-    assertClaimAxisSafe(registration.type.kind, "Node kind");
+    assertNodeKindNameSafe(registration.type.kind);
     for (const constraint of registration.unique ?? []) {
       assertClaimAxisSafe(constraint.name, "Unique constraint");
     }

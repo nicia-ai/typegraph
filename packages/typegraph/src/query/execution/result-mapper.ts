@@ -11,7 +11,7 @@ import { type NodeType } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { normalizePath } from "../../utils";
 import { createDataKeyedBag } from "../../utils/object";
-import { stripIdentityPathTokens } from "../../utils/path";
+import { stripKindQualifiedPathTokens } from "../../utils/path";
 import { requireDefined } from "../../utils/presence";
 import { type Traversal } from "../ast";
 import type {
@@ -24,28 +24,33 @@ import type {
   SelectableNode,
   SelectContext,
 } from "../builder/types";
+import { recursivePathTokenShape } from "../compiler/recursive-path-token";
 import { type SqlDialect } from "../dialect/types";
 
 /**
  * A variable-length traversal's path column, plus whether its tokens carry the
- * identity-expansion `kind || SEP || id` wrapper the compiler emits for cycle
- * detection.
+ * `kind || SEP || id` wrapper the compiler emits for cycle detection.
  */
 type PathColumn = Readonly<{
   alias: string;
-  identityExpanded: boolean;
+  kindQualified: boolean;
   format: "ids" | "qualified";
   optional: boolean;
 }>;
 
 function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
+  const scope = {
+    start: { alias: state.startAlias, kinds: state.startKinds },
+    traversals: state.traversals,
+  };
   const columns: PathColumn[] = [];
   for (const traversal of state.traversals) {
     const pathAlias = traversal.variableLength?.pathAlias;
     if (pathAlias !== undefined) {
       columns.push({
         alias: pathAlias,
-        identityExpanded: traversal.includeIdentityMembers === true,
+        kindQualified:
+          recursivePathTokenShape(scope, traversal) === "kind_qualified",
         format:
           traversal.variableLength?.pathFormat === "qualified" ?
             "qualified"
@@ -62,10 +67,10 @@ function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
  * traversal contract promises.
  *
  * SQLite returns pipe-delimited strings and PostgreSQL native arrays, so the
- * shape is normalized here. Identity-expanded traversals additionally carry
- * composite `kind || SEP || id` tokens (the compiler needs them so folded peers
- * stay distinct for cycle detection); those are stripped here so identity and
- * non-identity traversals produce identical path output on both dialects.
+ * shape is normalized here. A walk that can visit more than one kind carries
+ * composite `kind || SEP || id` tokens (the compiler needs them so same-id
+ * nodes of different kinds stay distinct for cycle detection); those are
+ * stripped here so every walk produces bare-id path output on both dialects.
  *
  * This is the single seam where paths become caller-visible arrays — every
  * execution path (execute, prepared, paginated, selective) funnels through it,
@@ -83,7 +88,7 @@ export function transformPathColumns(
   let changed = false;
   for (const row of rows) {
     let transformed: Record<string, unknown> | undefined;
-    for (const { alias, format, identityExpanded, optional } of pathColumns) {
+    for (const { alias, format, kindQualified, optional } of pathColumns) {
       const value = row[alias];
       if (value === undefined) continue;
       if (optional && value === null) {
@@ -99,7 +104,7 @@ export function transformPathColumns(
       }
       const normalized = normalizePath(value);
       const path =
-        identityExpanded ? stripIdentityPathTokens(normalized) : normalized;
+        kindQualified ? stripKindQualifiedPathTokens(normalized) : normalized;
       // normalizePath returns native arrays by reference, so an already-shaped
       // path that needs no stripping leaves the row untouched.
       if (path === value) continue;

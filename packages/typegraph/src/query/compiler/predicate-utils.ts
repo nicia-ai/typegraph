@@ -4,6 +4,7 @@ import {
   type FulltextMatchPredicate,
   type NodePredicate,
   type QueryAst,
+  type Traversal,
   type VectorSimilarityPredicate,
 } from "../ast";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -88,8 +89,17 @@ export function compileKindFilter(
   return sql`${column} IN (${sqlValueList(kinds)})`;
 }
 
+/**
+ * The part of a query that resolves a node alias to its kinds. A `QueryAst`
+ * satisfies it; result materialization builds one from builder state.
+ */
+export type AliasKindScope = Readonly<{
+  start: Readonly<{ alias: string; kinds: readonly string[] }>;
+  traversals: readonly Traversal[];
+}>;
+
 export function getNodeKindsForAlias(
-  ast: QueryAst,
+  ast: AliasKindScope,
   alias: string,
 ): readonly string[] {
   if (alias === ast.start.alias) {
