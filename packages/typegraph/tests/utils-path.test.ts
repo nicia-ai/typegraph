@@ -122,6 +122,18 @@ describe("normalizePath", () => {
     ]);
   });
 
+  it("trims only PostgreSQL's ASCII whitespace around unquoted elements", () => {
+    const nbsp = " ";
+    expect(normalizePath(`{x${nbsp}}`)).toEqual([`x${nbsp}`]);
+    expect(normalizePath(`{${nbsp}}`)).toEqual([nbsp]);
+    expect(normalizePath(`{${nbsp}a,b${nbsp}}`)).toEqual([
+      `${nbsp}a`,
+      `b${nbsp}`,
+    ]);
+    expect(normalizePath("{ a ,\tb\n}")).toEqual(["a", "b"]);
+    expect(normalizePath("{ \t\n\r\v\f}")).toEqual([]);
+  });
+
   it("returns empty array for non-path values", () => {
     expect(normalizePath("not a path")).toEqual([]);
     expect(normalizePath(123)).toEqual([]);

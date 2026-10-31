@@ -9,6 +9,7 @@ import {
   PG_ARRAY_ELEMENT_QUOTE,
   PG_ARRAY_END,
   PG_ARRAY_START,
+  PG_ARRAY_WHITESPACE,
   PG_PATH_ELEMENT_SEPARATOR,
   SQLITE_PATH_DELIMITER,
   SQLITE_PATH_TOKEN_ESCAPES,
@@ -150,13 +151,15 @@ function isPostgresTextArray(value: unknown): value is string {
  * PostgreSQL double-quotes an element that is empty or holds a separator,
  * brace, quote, backslash or whitespace, and backslash-escapes quotes and
  * backslashes inside the quotes, so `{plain,"a,b","say \"hi\""}` holds three
- * elements. Unquoted elements are taken verbatim minus surrounding whitespace.
+ * elements. Unquoted elements are taken verbatim minus surrounding whitespace,
+ * where whitespace is PostgreSQL's ASCII set ({@link PG_ARRAY_WHITESPACE}), not
+ * JavaScript's: PostgreSQL leaves an id ending in U+00A0 unquoted.
  * A path element is a node id or path token and is never SQL NULL, so an
  * unquoted `NULL` cannot occur here.
  */
 function parsePostgresTextArray(value: string): readonly string[] {
   const inner = value.slice(PG_ARRAY_START.length, -PG_ARRAY_END.length);
-  if (inner.trim() === "") return [];
+  if (trimPostgresArrayWhitespace(inner) === "") return [];
 
   const elements: string[] = [];
   let index = 0;
@@ -184,7 +187,10 @@ function readPostgresArrayElement(
   if (inner[index] !== PG_ARRAY_ELEMENT_QUOTE) {
     const separatorIndex = inner.indexOf(PG_PATH_ELEMENT_SEPARATOR, index);
     const end = separatorIndex === -1 ? inner.length : separatorIndex;
-    return { value: inner.slice(index, end).trim(), end };
+    return {
+      value: trimPostgresArrayWhitespace(inner.slice(index, end)),
+      end,
+    };
   }
 
   const characters: string[] = [];
@@ -203,5 +209,13 @@ function readPostgresArrayElement(
 }
 
 function isPostgresArrayWhitespace(character: string | undefined): boolean {
-  return character !== undefined && /\s/.test(character);
+  return character !== undefined && PG_ARRAY_WHITESPACE.has(character);
+}
+
+function trimPostgresArrayWhitespace(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && isPostgresArrayWhitespace(text[start])) start += 1;
+  while (end > start && isPostgresArrayWhitespace(text[end - 1])) end -= 1;
+  return text.slice(start, end);
 }

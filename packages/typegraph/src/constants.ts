@@ -66,6 +66,20 @@ export const PG_ARRAY_ELEMENT_QUOTE = '"';
 /** Escape character inside a quoted PostgreSQL text array element. */
 export const PG_ARRAY_ELEMENT_ESCAPE = "\\";
 
+/**
+ * The characters PostgreSQL's array parser and output treat as whitespace
+ * (`array_isspace`): ASCII only. Any other character, U+00A0 included, is part
+ * of an unquoted element.
+ */
+export const PG_ARRAY_WHITESPACE: ReadonlySet<string> = new Set([
+  " ",
+  "\t",
+  "\n",
+  "\r",
+  "\v",
+  "\f",
+]);
+
 /** PostgreSQL text array start delimiter. */
 export const PG_ARRAY_START = "{";
 
