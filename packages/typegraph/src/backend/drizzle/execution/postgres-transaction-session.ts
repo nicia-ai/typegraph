@@ -36,8 +36,10 @@ type ScopeExecution = Readonly<{
  * always the innermost one still open. Two scopes that overlap without nesting
  * (both opened by concurrent work in one transaction, the outer one exiting
  * first) have no single innermost scope to route to, so the out-of-order exit
- * throws a `CompilerInvariantError`, and every later statement on the session
- * refuses with the same error instead of running on a scope that has ended.
+ * throws a `CompilerInvariantError` and poisons the session: the driver rolls
+ * back the outer scope's savepoint together with the inner one, so every later
+ * statement, scope entry and scope exit on the session refuses with that same
+ * error instead of running outside any savepoint.
  */
 type PostgresTransactionSession = Readonly<{
   operation: SqlExecutionAdapter;
@@ -136,21 +138,18 @@ export function createPostgresTransactionSession(
   }
 
   const openScopes: ScopeExecution[] = [];
-  const endedScopes = new WeakSet<ScopeExecution>();
+  let overlapFailure: CompilerInvariantError | undefined;
 
   function current(): ScopeExecution {
-    const innermost = openScopes.at(-1);
-    if (innermost === undefined) return outer;
-    if (endedScopes.has(innermost)) throw overlappingScopes();
-    return innermost;
+    if (overlapFailure !== undefined) throw overlapFailure;
+    return openScopes.at(-1) ?? outer;
   }
 
   function leave(scope: ScopeExecution, cause?: unknown): void {
-    endedScopes.add(scope);
-    if (openScopes.at(-1) !== scope) {
-      throw overlappingScopes(cause);
-    }
-    openScopes.pop();
+    const wasInnermost = openScopes.at(-1) === scope;
+    openScopes.splice(openScopes.indexOf(scope), 1);
+    if (!wasInnermost) overlapFailure ??= overlappingScopes(cause);
+    if (overlapFailure !== undefined) throw overlapFailure;
   }
 
   // Drizzle's nested transaction on postgres-js is the driver's own

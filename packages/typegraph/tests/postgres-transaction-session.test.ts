@@ -97,19 +97,24 @@ describe("PostgreSQL transaction session driver scopes", () => {
       details: { code: "OVERLAPPING_SAVEPOINT_SCOPES" },
     });
 
-    // The scope opened second is still open, so it keeps its own statements.
-    await run("while second is open");
+    // The driver rolled back both savepoints, so the scope opened second no
+    // longer protects anything: every route refuses, including a new scope.
+    await expect(run("while second is open")).rejects.toMatchObject({
+      details: { code: "OVERLAPPING_SAVEPOINT_SCOPES" },
+    });
+    await expect(
+      enterDriverScope(() => run("in new scope")),
+    ).rejects.toMatchObject({
+      details: { code: "OVERLAPPING_SAVEPOINT_SCOPES" },
+    });
     secondGate.resolve();
-    await second;
+    await expect(second).rejects.toMatchObject({
+      details: { code: "OVERLAPPING_SAVEPOINT_SCOPES" },
+    });
 
-    // Its exit uncovers the ended first scope: nothing may run there or leak
-    // to the outer handle.
     await expect(run("after both")).rejects.toMatchObject({
       details: { code: "OVERLAPPING_SAVEPOINT_SCOPES" },
     });
-    expect(log).toEqual([
-      "outer.1.1: in second",
-      "outer.1.1: while second is open",
-    ]);
+    expect(log).toEqual(["outer.1.1: in second"]);
   });
 });
