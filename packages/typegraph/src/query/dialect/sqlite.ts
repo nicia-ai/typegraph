@@ -4,6 +4,10 @@
  * Implements dialect-specific SQL generation for SQLite databases.
  * Uses SQLite's JSON1 extension for JSON operations.
  */
+import {
+  SQLITE_PATH_DELIMITER,
+  SQLITE_PATH_TOKEN_ESCAPES,
+} from "../../constants";
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
@@ -23,6 +27,22 @@ import { type DialectAdapter } from "./types";
  */
 function escapeSqliteLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+const PATH_DELIMITER = sql.raw(escapeSqliteLiteral(SQLITE_PATH_DELIMITER));
+
+/**
+ * Escapes a recursive path token so it cannot contain the path delimiter: a
+ * node id like `x|y` would otherwise read as two tokens, so the delimited
+ * cycle check would match `y` and `path` output would split the id.
+ * `parseSqlitePath` reverses it.
+ */
+function encodePathToken(token: SqlFragment): SqlFragment {
+  let encoded = token;
+  for (const escape of SQLITE_PATH_TOKEN_ESCAPES) {
+    encoded = sql`replace(${encoded}, ${sql.raw(escapeSqliteLiteral(escape.raw))}, ${sql.raw(escapeSqliteLiteral(escape.encoded))})`;
+  }
+  return encoded;
 }
 
 /**
@@ -422,19 +442,16 @@ export const sqliteDialect: DialectAdapter = {
   },
 
   initializePath(nodeId) {
-    // SQLite uses string-based paths with delimiters: '|id|'
-    return sql`'|' || ${nodeId} || '|'`;
+    return sql`${PATH_DELIMITER} || ${encodePathToken(nodeId)} || ${PATH_DELIMITER}`;
   },
 
   extendPath(currentPath, nodeId) {
-    // Append: path || id || '|'
-    return sql`${currentPath} || ${nodeId} || '|'`;
+    return sql`${currentPath} || ${encodePathToken(nodeId)} || ${PATH_DELIMITER}`;
   },
 
   cycleCheck(nodeId, path) {
-    // Check that id is NOT in path using INSTR
-    // Returns TRUE if no cycle (id not found in path)
-    return sql`INSTR(${path}, '|' || ${nodeId} || '|') = 0`;
+    // TRUE when the delimited token is absent from the path, i.e. no cycle.
+    return sql`INSTR(${path}, ${PATH_DELIMITER} || ${encodePathToken(nodeId)} || ${PATH_DELIMITER}) = 0`;
   },
 
   // ============================================================

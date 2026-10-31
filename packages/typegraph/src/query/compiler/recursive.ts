@@ -8,7 +8,7 @@ import {
   CompilerInvariantError,
   UnsupportedPredicateError,
 } from "../../errors";
-import { IDENTITY_PATH_TOKEN_SEPARATOR } from "../../utils/path";
+import { KIND_QUALIFIED_PATH_TOKEN_SEPARATOR } from "../../utils/path";
 import { type FieldRef, type QueryAst, type SelectiveField } from "../ast";
 import {
   type DialectAdapter,
@@ -42,6 +42,11 @@ import {
   type PredicateCompilerContext,
 } from "./predicates";
 import { assertRecordedQueryAstDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
+import {
+  type RecursivePathTokenShape,
+  recursivePathTokenShape,
+  recursiveWalkNodeKinds,
+} from "./recursive-path-token";
 import {
   markPredicateFieldsAsRequired,
   visitExpressionFields,
@@ -85,18 +90,21 @@ export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
 /**
- * The per-step cycle/path token for a node table alias. For identity-expanded
- * traversals it is the composite `kind || SEP || id` so folded peers (same id,
- * different kind) are distinct tokens; otherwise it is the bare id, preserving
- * the exact pre-identity token and public path output.
+ * The per-step cycle/path token for a node table alias, in the shape
+ * {@link recursivePathTokenShape} chose: the bare id, or the composite
+ * `kind || SEP || id` that keeps same-id nodes of different kinds distinct.
  *
  * The separator is bound as a parameter (not `sql.raw`) so it needs no
  * dialect-specific `char()`/`chr()` builtin — both dialects concatenate bound
  * text with `||`. Composite tokens never reach the caller: result
- * materialization strips them back to bare ids with `stripIdentityPathTokens`.
+ * materialization strips them back to bare ids with
+ * `stripKindQualifiedPathTokens`.
  */
-function compilePathToken(tableAlias: string, composite: boolean): SqlFragment {
-  if (!composite) {
+function compilePathToken(
+  tableAlias: string,
+  shape: RecursivePathTokenShape,
+): SqlFragment {
+  if (shape === "id") {
     return sql.raw(`${tableAlias}.id`);
   }
   return compileKindQualifiedPathToken(tableAlias);
@@ -110,7 +118,7 @@ export function compileKindQualifiedPathToken(tableAlias: string): SqlFragment {
   // Parenthesized so dialect path builders that splice this fragment into a
   // larger `||` chain keep it one text operand — PostgreSQL's `text[] || x`
   // would otherwise re-associate and coerce the separator as an array literal.
-  return sql`(${sql.raw(`${tableAlias}.kind`)} || ${IDENTITY_PATH_TOKEN_SEPARATOR} || ${sql.raw(`${tableAlias}.id`)})`;
+  return sql`(${sql.raw(`${tableAlias}.kind`)} || ${KIND_QUALIFIED_PATH_TOKEN_SEPARATOR} || ${sql.raw(`${tableAlias}.id`)})`;
 }
 
 type RecursiveQueryPassState = Readonly<{
@@ -435,7 +443,8 @@ function compileRecursiveCte(
   const forceWorktableOuterJoinOrder =
     dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
   const nodeKinds = traversal.nodeKinds;
-  const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
+  const previousNodeKinds = recursiveWalkNodeKinds(ast, traversal);
+  const pathTokenShape = recursivePathTokenShape(ast, traversal);
   const direction = traversal.direction;
   const vl = traversal.variableLength;
   const shouldEnforceCycleCheck = vl.cyclePolicy !== "allow";
@@ -443,10 +452,7 @@ function compileRecursiveCte(
     shouldEnforceCycleCheck ||
     (vl.pathAlias !== undefined && vl.pathFormat !== "qualified");
   const recursiveJoinRequiredColumns = new Set<string>(["id"]);
-  if (
-    previousNodeKinds.length > 1 ||
-    traversal.includeIdentityMembers === true
-  ) {
+  if (pathTokenShape === "kind_qualified") {
     recursiveJoinRequiredColumns.add("kind");
   }
   const requiredStartColumns =
@@ -531,21 +537,8 @@ function compileRecursiveCte(
   const effectiveMaxDepth = vl.maxDepth > 0 ? vl.maxDepth : MAX_RECURSIVE_DEPTH;
   const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
 
-  // Under identity folding two folded peers share an id but differ in kind, so
-  // a bare-id path token treats a traversal that legitimately passes through
-  // both peers as a revisit — a spurious cycle. Scope the fix to identity
-  // traversals: their cycle-detection and path tokens become the composite
-  // (kind, id), leaving every other traversal's token (and public path output)
-  // byte-identical. See the `IdentityTraversalOption` JSDoc in
-  // src/query/builder/query-builder.ts for the option's public semantics.
-  const baseToken = compilePathToken(
-    "n0",
-    traversal.includeIdentityMembers === true,
-  );
-  const stepToken = compilePathToken(
-    "n",
-    traversal.includeIdentityMembers === true,
-  );
+  const baseToken = compilePathToken("n0", pathTokenShape);
+  const stepToken = compilePathToken("n", pathTokenShape);
   const cycleCheck =
     shouldEnforceCycleCheck ?
       dialect.cycleCheck(stepToken, sql.raw("r.path"))
@@ -848,13 +841,11 @@ function collectRequiredColumnsByAlias(
   }
 
   const requiredColumnsByAlias = new Map<string, Set<string>>();
-  const previousNodeKinds = [
-    ...new Set([...ast.start.kinds, ...traversal.nodeKinds]),
-  ];
 
-  // Recursive expansion always needs node alias id for joins/cycle checks.
+  // Recursive expansion always needs node alias id for joins/cycle checks, and
+  // the kind wherever the walk's joins and path tokens key on it.
   addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "id");
-  if (previousNodeKinds.length > 1) {
+  if (recursivePathTokenShape(ast, traversal) === "kind_qualified") {
     addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "kind");
   }
 

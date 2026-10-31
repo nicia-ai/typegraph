@@ -25,4 +25,3 @@ The walk is now keyed on (kind, id) everywhere: the seed, each recursive step in
   | iterating `adjacency` for every edge | `edges` (ordered by id) |
 
   Every lookup takes a `{ kind, id }` key, so following an edge is `node({ kind: edge.toKind, id: edge.toId })`; a literal kind narrows the returned node and must be a kind the result can hold. `indexSubgraph`, `SubgraphIndex`, `SubgraphNodeKey`, `SubgraphEdgeKey`, `SubgraphNodeLookup`, `SubgraphEdgeLookup`, and `SubgraphKindSelection` are exported.
-- `defineNode()` and `defineGraph()` now reject a node kind name containing U+001F (unit separator) with a `ConfigurationError`, as they already reject U+001E. Recursive walks key their cycle-detection tokens as `kind + U+001F + id`, so such a kind could make two distinct nodes spell one token and drop the second as a revisit. Rename any such kind before upgrading.

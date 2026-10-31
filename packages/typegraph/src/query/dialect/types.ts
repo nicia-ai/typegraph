@@ -632,8 +632,13 @@ export interface DialectAdapter {
   /**
    * Creates the initial path value for cycle detection.
    *
+   * A token may hold any character, so a dialect whose path is a delimited
+   * string escapes each token (see `SQLITE_PATH_TOKEN_ESCAPES`) and
+   * `normalizePath` decodes it; the same escaped token must reach
+   * `extendPath` and `cycleCheck`.
+   *
    * @example
-   * SQLite: '|' || id || '|'
+   * SQLite: '|' || esc(id) || '|'
    * PostgreSQL: ARRAY[id]
    */
   readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
@@ -655,7 +660,7 @@ export interface DialectAdapter {
    * Extends a path with a new node ID.
    *
    * @example
-   * SQLite: path || id || '|'
+   * SQLite: path || esc(id) || '|'
    * PostgreSQL: path || id
    */
   readonly extendPath: (
@@ -669,7 +674,7 @@ export interface DialectAdapter {
    * Returns a condition that is TRUE if there is no cycle.
    *
    * @example
-   * SQLite: INSTR(path, '|' || id || '|') = 0
+   * SQLite: INSTR(path, '|' || esc(id) || '|') = 0
    * PostgreSQL: id != ALL(path)
    */
   readonly cycleCheck: (

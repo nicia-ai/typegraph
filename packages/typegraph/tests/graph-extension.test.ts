@@ -1218,6 +1218,20 @@ describe("validation failures", () => {
     );
   });
 
+  it("rejects a node kind name containing the path-token separator", () => {
+    // Recursive walks key path tokens as `kind || U+001F || id`; the document
+    // grammar refuses the separator before compilation reaches defineNode.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            "Show\u001FClip": { properties: { x: { type: "string" } } },
+          },
+        }),
+      "INVALID_KIND_NAME",
+    );
+  });
+
   it("rejects duplicate kind names within the document", () => {
     // Object literal duplicate keys are silently overwritten by JS, so
     // we exercise the non-key-uniqueness duplicate-name path via the
