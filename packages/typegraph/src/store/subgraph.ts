@@ -461,7 +461,20 @@ export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <
   const K extends string,
 >(
   node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>,
-) => (string extends K ? N : Extract<N, Readonly<{ kind: K }>>) | undefined;
+) => (string extends K ? N : SelectByKind<N, K>) | undefined;
+
+/**
+ * The members of `T` a lookup by `kind` K can return: a member whose `kind`
+ * is a literal only when it matches K, and a member whose `kind` is the wide
+ * `string` (a decoded or dynamically typed node or edge) always, since its
+ * kind is unknown until runtime.
+ */
+type SelectByKind<T extends Readonly<{ kind: string }>, K extends string> =
+  T extends unknown ?
+    string extends T["kind"] ? T
+    : T extends Readonly<{ kind: K }> ? T
+    : never
+  : never;
 
 /**
  * Lists the returned edges leaving (`outgoing`) or entering (`incoming`) a
@@ -471,7 +484,7 @@ export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
   <const K extends E["kind"]>(
     node: SubgraphNodeKey,
     edgeKind: K,
-  ): readonly Extract<E, Readonly<{ kind: K }>>[];
+  ): readonly SelectByKind<E, K>[];
   (node: SubgraphNodeKey, edgeKind?: E["kind"]): readonly E[];
 }
 

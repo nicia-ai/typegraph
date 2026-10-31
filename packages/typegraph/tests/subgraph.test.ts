@@ -870,6 +870,118 @@ describe("store.subgraph()", () => {
 
   // ── Type-level tests ────────────────────────────────────────
 
+  describe("indexSubgraph lookup typing", () => {
+    type WideNode = Readonly<{ kind: string; id: string; name: string }>;
+    type WideEdge = Readonly<{
+      id: string;
+      kind: string;
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      weight: number;
+    }>;
+    type ShowNode = Readonly<{ kind: "Show"; id: string; title: string }>;
+    type ClipNode = Readonly<{ kind: "Clip"; id: string; seconds: number }>;
+    type LinkedEdge = Readonly<{
+      id: string;
+      kind: "linked";
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      since: string;
+    }>;
+    type CitesEdge = Readonly<{
+      id: string;
+      kind: "cites";
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      page: number;
+    }>;
+    const showKey = { kind: "Show", id: "a" } as const;
+
+    it("keeps members whose kind is widened to string on literal-kind lookups", () => {
+      const nodes: readonly WideNode[] = [
+        { kind: "Show", id: "a", name: "Pilot" },
+      ];
+      const edges: readonly WideEdge[] = [
+        {
+          id: "e1",
+          kind: "linked",
+          fromKind: "Show",
+          fromId: "a",
+          toKind: "Show",
+          toId: "a",
+          weight: 2,
+        },
+      ];
+      const { node, outgoing, incoming } = indexSubgraph({ nodes, edges });
+
+      const show = node(showKey);
+      expectTypeOf(show).toEqualTypeOf<WideNode | undefined>();
+      expect(show?.name).toBe("Pilot");
+
+      const linkedOut = outgoing(showKey, "linked");
+      expectTypeOf(linkedOut).toEqualTypeOf<readonly WideEdge[]>();
+      expect(linkedOut[0]?.weight).toBe(2);
+      expect(incoming(showKey, "linked")[0]?.weight).toBe(2);
+    });
+
+    it("narrows members with literal kinds and rejects a kind typo", () => {
+      const nodes: readonly (ClipNode | ShowNode)[] = [
+        { kind: "Show", id: "a", title: "Pilot" },
+        { kind: "Clip", id: "a", seconds: 30 },
+      ];
+      const edges: readonly (CitesEdge | LinkedEdge)[] = [
+        {
+          id: "e1",
+          kind: "cites",
+          fromKind: "Show",
+          fromId: "a",
+          toKind: "Clip",
+          toId: "a",
+          page: 4,
+        },
+      ];
+      const { node, outgoing } = indexSubgraph({ nodes, edges });
+
+      const show = node(showKey);
+      expectTypeOf(show).toEqualTypeOf<ShowNode | undefined>();
+      expect(show?.title).toBe("Pilot");
+      expect(node({ kind: "Clip", id: "a" })?.seconds).toBe(30);
+      expectTypeOf(outgoing(showKey, "cites")).toEqualTypeOf<
+        readonly CitesEdge[]
+      >();
+      expect(outgoing(showKey, "cites")[0]?.page).toBe(4);
+      // @ts-expect-error - "Shwo" is not a kind these nodes can hold
+      node({ kind: "Shwo", id: "a" });
+      // @ts-expect-error - "cite" is not an edge kind of these edges
+      outgoing(showKey, "cite");
+    });
+
+    it("keeps widened members alongside matching literal members in a mixed union", () => {
+      const nodes: readonly (ShowNode | WideNode)[] = [
+        { kind: "Show", id: "a", title: "Pilot" },
+        { kind: "Clip", id: "a", name: "Trailer" },
+      ];
+      const edges: readonly (LinkedEdge | WideEdge)[] = [];
+      const { node, outgoing } = indexSubgraph({ nodes, edges });
+
+      expectTypeOf(node(showKey)).toEqualTypeOf<
+        ShowNode | WideNode | undefined
+      >();
+      const clip = node({ kind: "Clip", id: "a" });
+      expectTypeOf(clip).toEqualTypeOf<WideNode | undefined>();
+      expect(clip?.name).toBe("Trailer");
+      expectTypeOf(outgoing(showKey, "cites")).toEqualTypeOf<
+        readonly WideEdge[]
+      >();
+    });
+  });
+
   describe("compile-time type safety", () => {
     it("rejects invalid edge kinds at compile time", async () => {
       await store.subgraph(
