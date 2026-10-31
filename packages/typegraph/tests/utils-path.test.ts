@@ -18,9 +18,18 @@ describe("parseSqlitePath", () => {
     expect(parseSqlitePath("|single|")).toEqual(["single"]);
   });
 
-  it("returns empty array for empty path", () => {
-    expect(parseSqlitePath("||")).toEqual([]);
+  it("reads an empty id from the one-token path and nothing from an empty string", () => {
+    expect(parseSqlitePath("||")).toEqual([""]);
+    expect(parseSqlitePath("|a||")).toEqual(["a", ""]);
     expect(parseSqlitePath("")).toEqual([]);
+  });
+
+  it("decodes escaped delimiters and escape characters back to the id", () => {
+    expect(parseSqlitePath("|x%7Cy|50%25|lit%257C|")).toEqual([
+      "x|y",
+      "50%",
+      "lit%7C",
+    ]);
   });
 
   it("handles UUIDs in paths", () => {
@@ -93,6 +102,24 @@ describe("normalizePath", () => {
 
   it("parses SQLite path strings", () => {
     expect(normalizePath("|a|b|c|")).toEqual(["a", "b", "c"]);
+  });
+
+  it("parses PostgreSQL text array literals, quoted elements included", () => {
+    expect(normalizePath("{}")).toEqual([]);
+    expect(normalizePath("{a,b}")).toEqual(["a", "b"]);
+    expect(
+      normalizePath(
+        String.raw`{plain,"a,b","{x}","say \"hi\"","back\\slash","two words",""}`,
+      ),
+    ).toEqual([
+      "plain",
+      "a,b",
+      "{x}",
+      'say "hi"',
+      String.raw`back\slash`,
+      "two words",
+      "",
+    ]);
   });
 
   it("returns empty array for non-path values", () => {

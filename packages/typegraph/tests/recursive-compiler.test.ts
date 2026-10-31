@@ -187,6 +187,14 @@ describe("hasVariableLengthTraversal", () => {
 // compileVariableLengthQuery - Basic
 // ============================================================
 
+/**
+ * The SQLite path seams escape every token so an id holding the `|` delimiter
+ * stays one token; the token inside the escape is what the shape decides.
+ */
+function sqliteEscaped(token: string): string {
+  return `replace(replace(${token}, '%', '%25'), '|', '%7C')`;
+}
+
 describe("compileVariableLengthQuery", () => {
   describe("basic compilation", () => {
     it("generates WITH RECURSIVE clause", () => {
@@ -881,9 +889,13 @@ describe("compileVariableLengthQuery", () => {
 
     it("keeps the bare-id token for a single-kind walk on SQLite", () => {
       const { sql: text, params } = renderForDialect(singleKindAst, "sqlite");
-      expect(text).toContain("'|' || n0.id || '|' AS path");
-      expect(text).toContain("INSTR(r.path, '|' || n.id || '|') = 0");
-      expect(text).toContain("r.path || n.id || '|' AS path");
+      expect(text).toContain(`'|' || ${sqliteEscaped("n0.id")} || '|' AS path`);
+      expect(text).toContain(
+        `INSTR(r.path, '|' || ${sqliteEscaped("n.id")} || '|') = 0`,
+      );
+      expect(text).toContain(
+        `r.path || ${sqliteEscaped("n.id")} || '|' AS path`,
+      );
       expect(text).not.toContain(".kind ||");
       expect(params).not.toContain(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
     });
@@ -900,10 +912,10 @@ describe("compileVariableLengthQuery", () => {
     it("kind-qualifies the token when the walk can visit more than one kind", () => {
       const sqlite = renderForDialect(multiKindAst, "sqlite");
       expect(sqlite.sql).toContain(
-        "'|' || (n0.kind || ? || n0.id) || '|' AS path",
+        `'|' || ${sqliteEscaped("(n0.kind || ? || n0.id)")} || '|' AS path`,
       );
       expect(sqlite.sql).toContain(
-        "INSTR(r.path, '|' || (n.kind || ? || n.id) || '|') = 0",
+        `INSTR(r.path, '|' || ${sqliteEscaped("(n.kind || ? || n.id)")} || '|') = 0`,
       );
       expect(sqlite.params).toContain(KIND_QUALIFIED_PATH_TOKEN_SEPARATOR);
 
@@ -932,7 +944,7 @@ describe("compileVariableLengthQuery", () => {
         "sqlite",
       );
       expect(text).toContain(
-        "INSTR(r.path, '|' || (n.kind || ? || n.id) || '|') = 0",
+        `INSTR(r.path, '|' || ${sqliteEscaped("(n.kind || ? || n.id)")} || '|') = 0`,
       );
     });
   });

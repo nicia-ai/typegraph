@@ -1427,3 +1427,30 @@ describe("names that could spell a reserved claim axis", () => {
     ).not.toThrow();
   });
 });
+
+describe("node kind names that could spell another node's path token", () => {
+  // Recursive walks key their path tokens as `kind || U+001F || id`, so a kind
+  // containing U+001F would let ("A" SEP "B", "c") and ("A", "B" SEP "c")
+  // spell one token and the walk would drop the second as a revisit.
+  const SEPARATOR = "\u001F";
+
+  it("refuses a node kind name at defineNode", () => {
+    expect(() =>
+      defineNode(`Show${SEPARATOR}Clip`, { schema: z.object({}) }),
+    ).toThrow(/contains U\+001F/);
+  });
+
+  it("refuses a registration that bypassed defineNode at defineGraph", () => {
+    const Plain = defineNode("PathPlain", { schema: z.object({}) });
+    const forged = Object.freeze({ ...Plain, kind: `Path${SEPARATOR}Forged` });
+
+    expect(() =>
+      defineGraph({
+        id: "path_token_kind_name",
+        nodes: { Forged: { type: forged } },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(ConfigurationError);
+  });
+});
