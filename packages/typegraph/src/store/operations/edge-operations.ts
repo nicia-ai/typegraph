@@ -1982,10 +1982,15 @@ async function performEdgeUpdate<G extends GraphDef>(
   const cardinality = edgeCardinality(ctx, input.identity.kind);
   const reentersLivePopulation =
     options?.clearDeleted === true && existing.deleted_at !== undefined;
-  if (reentersLivePopulation) {
+  if (options?.clearDeleted === true) {
     // A resurrection makes a live edge exactly as a create does, so it owes
     // the create's endpoint verdict — under the same lock — before it revives
     // a row whose endpoint may have been deleted while it was tombstoned.
+    // Gated on the intent, not on the re-read: the resurrecting UPDATE has no
+    // `deleted_at` predicate, so a row a concurrent writer revived before the
+    // re-read can be tombstoned again by an endpoint delete before this
+    // write, and this write would revive it onto the deleted endpoint. The
+    // endpoint lock taken here makes that delete wait for this write.
     await assertLiveEdgeEndpoints(
       ctx,
       input.identity.kind,

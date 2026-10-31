@@ -59,8 +59,14 @@ import {
   TransactionConflictError,
   type TransactionContext,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  type EdgeRow,
+  type GraphBackend,
+  type TransactionBackend,
+} from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
@@ -585,6 +591,76 @@ async function isRowLocked(probe: Pool, id: string): Promise<boolean> {
   }
 }
 
+/**
+ * Pauses a backend's writer at the two points the stale-preimage resurrection
+ * race needs: after the first edge read that returns the tombstoned edge (the
+ * read its resurrect decision is made from), and just before the resurrecting
+ * UPDATE. Wraps the root and every transaction target, through `deriveBackend`.
+ */
+function pauseResurrection(
+  backend: GraphBackend,
+  edgeId: string,
+  gates: Readonly<{
+    decided: Deferred;
+    afterDecision: Deferred;
+    beforeWrite: Deferred;
+    write: Deferred;
+  }>,
+): GraphBackend {
+  const state = { decided: false, writing: false };
+  async function afterRead<T extends EdgeRow | undefined>(
+    rows: readonly T[],
+  ): Promise<void> {
+    if (state.decided) return;
+    const tombstone = rows.find(
+      (row) => row?.id === edgeId && row.deleted_at !== undefined,
+    );
+    if (tombstone === undefined) return;
+    state.decided = true;
+    gates.decided.resolve();
+    await gates.afterDecision.promise;
+  }
+  function overlay<T extends GraphBackend | TransactionBackend>(target: T) {
+    const getEdges = target.getEdges;
+    return {
+      async getEdge(graphId: string, id: string) {
+        const row = await target.getEdge(graphId, id);
+        await afterRead([row]);
+        return row;
+      },
+      ...(getEdges === undefined ?
+        {}
+      : {
+          async getEdges(graphId: string, ids: readonly string[]) {
+            const rows = await getEdges(graphId, ids);
+            await afterRead(rows);
+            return rows;
+          },
+        }),
+      async updateEdge(params: Parameters<T["updateEdge"]>[0]) {
+        if (
+          params.id === edgeId &&
+          params.clearDeleted === true &&
+          !state.writing
+        ) {
+          state.writing = true;
+          gates.beforeWrite.resolve();
+          await gates.write.promise;
+        }
+        return target.updateEdge(params);
+      },
+    };
+  }
+  return deriveBackend(backend, {
+    ...overlay(backend),
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) => run(deriveBackend(target, overlay(target))),
+        options,
+      ),
+  });
+}
+
 /** Live edges whose source or target node is tombstoned or gone. */
 async function liveEdgesOnDeletedEndpoints(probe: Pool): Promise<number> {
   const result = await probe.query<{ dangling: number }>(
@@ -990,6 +1066,82 @@ describe.runIf(process.env["POSTGRES_URL"])(
         beforeEach(() => {
           activeMode = mode;
         });
+
+        it(
+          "a resurrection decided on a stale tombstone still locks the endpoints it revives onto",
+          { timeout: CASE_TIMEOUT_MS },
+          async () => {
+            // T1 decides to resurrect from a tombstone; T2 revives the edge and
+            // commits; T1 re-reads it live; T3 deletes an endpoint, which
+            // tombstones the edge again; T1's resurrecting UPDATE — it has no
+            // `deleted_at` predicate — revives it. T1 must hold the endpoint
+            // lock regardless of what its re-read showed, so T3 waits for T1
+            // and then cascades the edge T1 committed.
+            const live = requireLive();
+            await seedTombstonedEdge(live.edgeStore, "Person");
+            const gates = {
+              decided: deferred(),
+              afterDecision: deferred(),
+              beforeWrite: deferred(),
+              write: deferred(),
+            };
+            const pausedBackend = pauseResurrection(
+              createPostgresBackend(drizzle(requireDefined(edgePool))),
+              REVIVED_ID,
+              gates,
+            );
+            const [resurrector] =
+              mode === "managed" ?
+                await createStoreWithSchema(graph, pausedBackend)
+              : [createStore(graph, pausedBackend)];
+            const resurrection = settle(
+              resurrector.edges.knows.bulkUpsertById([
+                {
+                  id: asEdgeId<typeof knows>(REVIVED_ID),
+                  from: alice,
+                  to: bob,
+                  props: {},
+                },
+              ]),
+            );
+            await Promise.race([gates.decided.promise, resurrection]);
+            const revival = await settle(
+              live.deleteStore.edges.knows.getOrCreateByEndpoints(
+                alice,
+                bob,
+                {},
+              ),
+            );
+            gates.afterDecision.resolve();
+            await Promise.race([gates.beforeWrite.promise, resurrection]);
+            const deletion = settle(
+              live.deleteStore.nodes.Person.delete(
+                asNodeId<typeof Person>(BOB),
+              ),
+            );
+            const deleteState = await settledOrBlocked(live.probe, deletion);
+            gates.write.resolve();
+            const [resurrectionOutcome, deleteOutcome] = await Promise.all([
+              resurrection,
+              deletion,
+            ]);
+            expect({
+              revival: describeOutcome(revival),
+              deleteState,
+              resurrection: describeOutcome(resurrectionOutcome),
+              delete: describeOutcome(deleteOutcome),
+              dangling: await liveEdgesOnDeletedEndpoints(live.probe),
+              liveEdges: await liveEdgeCount(live.probe),
+            }).toEqual({
+              revival: "ok",
+              deleteState: "blocked",
+              resurrection: "ok",
+              delete: "ok",
+              dangling: 0,
+              liveEdges: 0,
+            });
+          },
+        );
 
         it(
           "batch node updates and cross edge writes do not deadlock",
