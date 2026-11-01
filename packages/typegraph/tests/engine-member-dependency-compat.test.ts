@@ -31,6 +31,35 @@ describe("engine member dependency compatibility", () => {
     expect(ensureTable).not.toHaveBeenCalled();
   });
 
+  it("accepts base-schema deps without transition-log DDL and refuses version-6 adoption naming it", async () => {
+    const ensureTable = vi.fn((_ddl: string): Promise<void> =>
+      Promise.resolve(),
+    );
+    const deps: CreateBaseSchemaMembersDeps = {
+      baseSchemaVersionsTableDdl: "CREATE TABLE versions",
+      ensureTable,
+      executeDdl: (_ddl: string): Promise<void> => Promise.resolve(),
+      generateDdl: () => [],
+      readVersion: () => Promise.resolve(5),
+      writeVersion: (version) => Promise.resolve(version),
+      ensureGraphTemplatesTable: () => Promise.resolve(),
+      fencesTableDdl: "CREATE TABLE fences",
+      ensureEdgeMatchIdentityStorage: () => Promise.resolve(),
+      sinceIndexDdl: [],
+      identityTransitionsTableDdl: ["CREATE TABLE transitions"],
+    };
+    const members = createBaseSchemaMembers(deps);
+
+    await expect(members.adoptBaseSchema()).rejects.toMatchObject({
+      code: "CONFIGURATION_ERROR",
+      details: {
+        missingDependencies: ["identityTransitionRetentionTableDdl"],
+        adoptionVersion: 6,
+      },
+    });
+    expect(ensureTable).not.toHaveBeenCalledWith("CREATE TABLE transitions");
+  });
+
   it("accepts legacy identity deps and refuses journal setup before partial DDL", async () => {
     const ensureTable = vi.fn((_ddl: string): Promise<void> =>
       Promise.resolve(),

@@ -77,7 +77,7 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
@@ -190,6 +190,7 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
@@ -1388,6 +1389,10 @@ export function buildSqliteEngineProfile(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1628,7 +1633,10 @@ export function buildSqliteEngineProfile(
       } catch (error) {
         if (
           attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
+          !isSqliteDuplicateColumnError(
+            error,
+            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+          )
         ) {
           throw error;
         }
@@ -1771,6 +1779,13 @@ export function buildSqliteEngineProfile(
         ),
       }),
     ],
+    identityTransitionsTableDdl: [
+      generateSqliteCreateTableSQL(tables.identityTransitions),
+      ...generateSqliteCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
     revisionChangesTableDdl: generateSqliteCreateTableSQL(
       tables.revisionChanges,
     ),

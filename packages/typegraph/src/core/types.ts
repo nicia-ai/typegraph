@@ -292,6 +292,14 @@ export type Cardinality =
   | "oneActive"; // At most one edge with valid_to IS NULL from any source
 
 /**
+ * The target-side cardinalities. Derived from {@link Cardinality} rather than
+ * spelled again, so the vocabulary has one owner; `"unique"` is excluded
+ * because it is a property of the endpoint PAIR, which the source-side option
+ * already declares — a second pair declaration would be the same axis twice.
+ */
+export type TargetCardinality = Exclude<Cardinality, "unique">;
+
+/**
  * Endpoint existence modes for edge validation.
  */
 export type EndpointExistence =
@@ -396,8 +404,29 @@ export type EdgeRegistration<
   from: readonly FromTypes[];
   to: ToDef;
   cardinality?: Cardinality;
+  /**
+   * The maximum number of edges of this kind that may point AT one target
+   * node.
+   *
+   * Independent of {@link cardinality}, which bounds the edges leaving one
+   * source. Target `"one"` with source `"many"` is many-to-one ownership: a
+   * source may point at many targets, a target may be pointed at once.
+   */
+  targetCardinality?: TargetCardinality;
   endpointExistence?: EndpointExistence;
   matchIdentity?: EdgeMatchIdentity<E>;
+  /**
+   * When true, the live relation formed by this edge kind is a DAG: no write
+   * may create a path from an edge's `to` endpoint back to its `from`
+   * endpoint, and a self-loop is a cycle of length one. Enforced under the
+   * per-graph write fence; refused on a backend that cannot hold one.
+   *
+   * Orthogonal to `cardinality`, `matchIdentity`, `endpointExistence` and
+   * `onDelete` — `cardinality: "many", acyclic: true` (a dependency graph)
+   * is the common case and still takes the fence even though its
+   * cardinality does not.
+   */
+  acyclic?: boolean;
 }>;
 
 /**

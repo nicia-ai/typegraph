@@ -52,6 +52,7 @@ import {
   applyNodeResurrect,
   createNodeWriteContext,
 } from "../src/store/operations/node-write-pipeline";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string() }),
@@ -177,6 +178,79 @@ function spoofProbedUniqueTombstone(backend: GraphBackend): void {
       });
     }, options),
   );
+}
+
+/**
+ * Makes the first `reads` in-transaction reads of each named row (node or
+ * edge) report `EARLY_BOUND` as its `valid_from`, through both the point
+ * and the batch reads: the collection's prefetch and the update batch's own
+ * read lie, the reads after them see the truth — one concurrent recreate
+ * per row. Returns the ids of the updates written, in order.
+ */
+function spoofRowBounds(
+  backend: GraphBackend,
+  rowIds: readonly string[],
+  reads: number,
+): readonly string[] {
+  const written: string[] = [];
+  const runTransaction = backend.transaction;
+  const remaining = new Map(rowIds.map((id) => [id, reads]));
+  const spoof = <T extends { id: string; valid_from: string | undefined }>(
+    row: T,
+  ): T => {
+    const left = remaining.get(row.id) ?? 0;
+    if (left <= 0) return row;
+    remaining.set(row.id, left - 1);
+    return { ...row, valid_from: EARLY_BOUND };
+  };
+  vi.spyOn(backend, "transaction").mockImplementation((run, options) =>
+    runTransaction(async (target) => {
+      const readNode = target.getNode;
+      const readNodes = target.getNodes;
+      const writeNode = target.updateNode;
+      const readEdge = target.getEdge;
+      const readEdges = target.getEdges;
+      const writeEdge = target.updateEdge;
+      return run({
+        ...target,
+        updateNode: async (params) => {
+          const row = await writeNode(params);
+          written.push(params.id);
+          return row;
+        },
+        getNode: async (graphId, kind, id) => {
+          const row = await readNode(graphId, kind, id);
+          return row === undefined ? row : spoof(row);
+        },
+        ...(readNodes === undefined ?
+          {}
+        : {
+            getNodes: async (graphId, kind, ids) => {
+              const rows = await readNodes(graphId, kind, ids);
+              return rows.map((row) => spoof(row));
+            },
+          }),
+        updateEdge: async (params) => {
+          const row = await writeEdge(params);
+          written.push(params.id);
+          return row;
+        },
+        getEdge: async (graphId, id) => {
+          const row = await readEdge(graphId, id);
+          return row === undefined ? row : spoof(row);
+        },
+        ...(readEdges === undefined ?
+          {}
+        : {
+            getEdges: async (graphId, ids) => {
+              const rows = await readEdges(graphId, ids);
+              return rows.map((row) => spoof(row));
+            },
+          }),
+      });
+    }, options),
+  );
+  return written;
 }
 
 describe("store update verdict fence", () => {
@@ -366,6 +440,195 @@ describe("store update verdict fence", () => {
     const row = await nodeRow(backend);
     expect(row.valid_from).toBe(storedBound);
     expect(row.valid_to).toBe(FUTURE_BOUND);
+  });
+
+  // ==========================================================
+  // The fence in a batch of updates
+  // ==========================================================
+
+  it("converges a bulk edge update on the row that is really there without writing an earlier row twice", async () => {
+    const { backend, store, edgeId } = await seed();
+    const second = await store.edges.knows.create(
+      { kind: "Person", id: OTHER_ID },
+      { kind: "Person", id: NODE_ID },
+      { note: "original" },
+    );
+    const written = spoofRowBounds(backend, [second.id], 2);
+
+    const results = await store.edges.knows.bulkUpsertById([
+      {
+        id: edgeId,
+        from: { kind: "Person", id: NODE_ID },
+        to: { kind: "Person", id: OTHER_ID },
+        props: { note: "first" },
+      },
+      {
+        id: second.id,
+        from: { kind: "Person", id: OTHER_ID },
+        to: { kind: "Person", id: NODE_ID },
+        props: { note: "second" },
+        validTo: FUTURE_BOUND,
+      },
+    ]);
+
+    expect(results.map((edge) => edge.note)).toEqual(["first", "second"]);
+    const secondAfter = await edgeRow(backend, second.id);
+    expect(secondAfter.valid_to).toBe(FUTURE_BOUND);
+    expect(written).toEqual([edgeId, second.id]);
+  });
+
+  it("prepares every bulk edge update still to be written again before writing the moved one", async () => {
+    // The second row's bound moved, so its write matches nothing and the
+    // batch converges; the third row's verdict was also read off a bound
+    // that is gone, and against the real one its window inverts. The retry
+    // prepares both before writing either, so the refusal leaves the second
+    // row as it was — only the first row, written before anything moved,
+    // stays written inside the caller's transaction.
+    //
+    // MUTATION CHECK: write each entry of `executeEdgeUpsertUpdateBatch`
+    // with the per-row `performEdgeUpdateConverging` in place of
+    // `writeEdgeUpdateSet` (src/store/operations/edge-operations.ts), which
+    // re-prepares only the moved row — the second row is then written before
+    // the third is refused.
+    const { backend, store, edgeId } = await seed();
+    const second = await store.edges.knows.create(
+      { kind: "Person", id: OTHER_ID },
+      { kind: "Person", id: NODE_ID },
+      { note: "original" },
+    );
+    const third = await store.edges.knows.create(
+      { kind: "Person", id: NODE_ID },
+      { kind: "Person", id: NODE_ID },
+      { note: "original" },
+    );
+    spoofRowBounds(backend, [second.id, third.id], 2);
+
+    let caught: unknown;
+    await store.transaction(async (tx) => {
+      try {
+        await tx.edges.knows.bulkUpsertById([
+          {
+            id: edgeId,
+            from: { kind: "Person", id: NODE_ID },
+            to: { kind: "Person", id: OTHER_ID },
+            props: { note: "first" },
+          },
+          {
+            id: second.id,
+            from: { kind: "Person", id: OTHER_ID },
+            to: { kind: "Person", id: NODE_ID },
+            props: { note: "second" },
+            validTo: FUTURE_BOUND,
+          },
+          {
+            id: third.id,
+            from: { kind: "Person", id: NODE_ID },
+            to: { kind: "Person", id: NODE_ID },
+            props: { note: "third" },
+            validTo: MIDDLE_BOUND,
+          },
+        ]);
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(caught).toBeInstanceOf(ValidationError);
+    const secondAfter = await edgeRow(backend, second.id);
+    expect(rowPropsToObject(secondAfter.props)["note"]).toBe("original");
+    expect(secondAfter.valid_to).toBeUndefined();
+    const thirdAfter = await edgeRow(backend, third.id);
+    expect(thirdAfter.valid_to).toBeUndefined();
+  });
+
+  it("prepares every bulk node update still to be written again before writing the moved one", async () => {
+    // The node counterpart of the edge case above, through the node batch's
+    // own converging writer.
+    //
+    // MUTATION CHECK: write each entry of `executeNodeUpsertUpdateBatch` with
+    // the per-row `performNodeUpdateWithResurrectionRecovery` in place of
+    // `writeNodeUpdateSet` (src/store/operations/node-operations.ts), which
+    // re-prepares only the moved row — the second node is then written
+    // before the third is refused.
+    const { backend, store } = await seed();
+    const third = await store.nodes.Person.create({
+      name: "Carol",
+      email: "carol@example.com",
+    });
+    spoofRowBounds(backend, [OTHER_ID, third.id], 2);
+
+    let caught: unknown;
+    await store.transaction(async (tx) => {
+      try {
+        await tx.nodes.Person.bulkUpsertById([
+          {
+            id: NODE_ID,
+            props: { name: "Alice First", email: "alice@example.com" },
+          },
+          {
+            id: OTHER_ID,
+            props: { name: "Bob Second", email: "bob@example.com" },
+            validTo: FUTURE_BOUND,
+          },
+          {
+            id: third.id,
+            props: { name: "Carol Third", email: "carol@example.com" },
+            validTo: MIDDLE_BOUND,
+          },
+        ]);
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(caught).toBeInstanceOf(ValidationError);
+    const second = await backend.getNode(graph.id, "Person", OTHER_ID);
+    expect(rowPropsToObject(requireDefined(second).props)["name"]).toBe("Bob");
+    expect(second?.valid_to).toBeUndefined();
+  });
+
+  it("converges a bulk node update on the row that is really there without writing an earlier row twice", async () => {
+    const { backend, store } = await seed();
+    const written = spoofRowBounds(backend, [OTHER_ID], 2);
+
+    const results = await store.nodes.Person.bulkUpsertById([
+      {
+        id: NODE_ID,
+        props: { name: "Alice First", email: "alice@example.com" },
+      },
+      {
+        id: OTHER_ID,
+        props: { name: "Bob Second", email: "bob@example.com" },
+        validTo: FUTURE_BOUND,
+      },
+    ]);
+
+    expect(results.map((node) => node.name)).toEqual([
+      "Alice First",
+      "Bob Second",
+    ]);
+    const secondAfter = await backend.getNode(graph.id, "Person", OTHER_ID);
+    expect(secondAfter?.valid_to).toBe(FUTURE_BOUND);
+    expect(written).toEqual([NODE_ID, OTHER_ID]);
+  });
+
+  it("reports contention when a bulk edge update's row is replaced on every attempt", async () => {
+    const { backend, store, edgeId } = await seed();
+    spoofRowBounds(backend, [edgeId], Number.POSITIVE_INFINITY);
+
+    await expect(
+      store.edges.knows.bulkUpsertById([
+        {
+          id: edgeId,
+          from: { kind: "Person", id: NODE_ID },
+          to: { kind: "Person", id: OTHER_ID },
+          props: { note: "first" },
+          validTo: FUTURE_BOUND,
+        },
+      ]),
+    ).rejects.toThrow(/could not be applied to a stable row/);
+    const after = await edgeRow(backend, edgeId);
+    expect(after.valid_to).toBeUndefined();
   });
 
   // ==========================================================

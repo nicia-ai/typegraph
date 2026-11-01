@@ -10,6 +10,24 @@ const ENGINE_INSTANT_VERSION = "e1";
 const RECORDED_REVISION_WIDTH = 16;
 /** Open interval ceiling for numeric recorded-revision columns. */
 export const RECORDED_MAX_REVISION = Number.MAX_SAFE_INTEGER;
+/** The first revision a graph records; nothing is recorded before it. */
+export const RECORDED_FIRST_REVISION = 1;
+
+/**
+ * Whether `revision` is one a TypeGraph recorded instant can carry: a safe
+ * integer from {@link RECORDED_FIRST_REVISION} up to, not including,
+ * {@link RECORDED_MAX_REVISION}. The one range check behind minting an
+ * instant, parsing one, and accepting a revision from an interchange
+ * document — a value any of them admitted and another refused would be stored
+ * and then unreadable.
+ */
+export function isRecordedRevision(revision: number): boolean {
+  return (
+    Number.isSafeInteger(revision) &&
+    revision >= RECORDED_FIRST_REVISION &&
+    revision < RECORDED_MAX_REVISION
+  );
+}
 const RECORDED_INSTANT_PATTERN =
   /^r1:(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
 /**
@@ -45,6 +63,19 @@ declare const RECORDED_INSTANT_BRAND: unique symbol;
  */
 export type RecordedInstant = string & {
   readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
+};
+
+/**
+ * A recorded instant ANOTHER graph minted, carried into this one by an
+ * archival restore of its identity transitions: the source graph's revision
+ * and wall time, kept verbatim. It has a {@link RecordedInstant}'s string form
+ * but names a position on the source's recorded axis, so it carries a
+ * different brand value and `store.asOfRecorded` does not accept it — a read
+ * anchored on it would answer about this graph at a revision this graph never
+ * allocated for that event.
+ */
+export type RestoredRecordedInstant = string & {
+  readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
 };
 
 /**
@@ -108,11 +139,7 @@ export function parseRecordedInstant(
       throw invalidRecordedInstant(value, path);
     }
     const revision = Number(revisionText);
-    if (
-      !Number.isSafeInteger(revision) ||
-      revision < 1 ||
-      revision >= RECORDED_MAX_REVISION
-    ) {
+    if (!isRecordedRevision(revision)) {
       throw invalidRecordedInstant(value, path);
     }
     validateCanonicalIsoDate(recordedAt, path);
@@ -154,18 +181,14 @@ export function createRecordedInstant(
   revision: number,
   recordedAt: string,
 ): RecordedInstant {
-  if (
-    !Number.isSafeInteger(revision) ||
-    revision < 1 ||
-    revision >= RECORDED_MAX_REVISION
-  ) {
+  if (!isRecordedRevision(revision)) {
     throw new ValidationError(
       "createRecordedInstant revision must be a valid recorded revision.",
       {
         issues: [
           {
             path: "createRecordedInstant.revision",
-            message: `Expected a safe integer from 1 through ${String(RECORDED_MAX_REVISION - 1)}, got ${String(revision)}`,
+            message: `Expected a safe integer from ${String(RECORDED_FIRST_REVISION)} through ${String(RECORDED_MAX_REVISION - 1)}, got ${String(revision)}`,
           },
         ],
       },
@@ -397,6 +420,27 @@ export function withRecordedCoordinate(
     ...coordinate,
     recorded: { asOf: recordedAsOf },
   };
+}
+
+/**
+ * THE diagonal recorded coordinate: the recorded-time relation at the
+ * anchor's logical revision, read from the valid instant the anchor itself
+ * was recorded at. One constructor for `store.asOfRecorded(T)` and for
+ * identity replay, so a replayed step and a recorded view pinned to that
+ * step's own anchor are the same read by construction.
+ *
+ * @param suggestion - Caller-specific remediation hint for an invalid anchor.
+ */
+export function recordedDiagonalCoordinate(
+  recordedAsOf: RecordedInstant,
+  suggestion?: string,
+): ReadCoordinate {
+  const validCoordinate = resolveReadCoordinate(
+    "asOf",
+    recordedInstantWallTime(recordedAsOf),
+    suggestion,
+  );
+  return withRecordedCoordinate(validCoordinate, recordedAsOf);
 }
 
 /**

@@ -145,12 +145,21 @@ function placeholderNode(value: Placeholder): SqlPlaceholderChunk {
 }
 
 /**
- * Appends a fragment's chunks one at a time. A spread (`push(...chunks)`)
- * passes every chunk as a call argument, and a statement composed from many
- * reads holds more chunks than the engine's argument limit.
+ * Appends a fragment's chunks one at a time. Never `push(...chunks)`: a
+ * fragment holding a large `VALUES` list has more chunks than an engine
+ * accepts as call arguments, and the spread overflows the stack.
  */
-function appendChunks(target: SqlChunk[], fragment: SqlFragment): void {
-  for (const chunk of getChunks(fragment)) target.push(chunk);
+function appendChunks(chunks: SqlChunk[], fragment: SqlFragment): void {
+  for (const chunk of getChunks(fragment)) chunks.push(chunk);
+}
+
+/** How many bound parameters a fragment renders, placeholders included. */
+export function countSqlParameters(fragment: SqlFragment): number {
+  let count = 0;
+  for (const chunk of getChunks(fragment)) {
+    if (chunk.kind === "parameter" || chunk.kind === "placeholder") count += 1;
+  }
+  return count;
 }
 
 function templateSql(

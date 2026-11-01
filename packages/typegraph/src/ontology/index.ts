@@ -1,9 +1,8 @@
 // Core meta-edges and relation factories
 export {
   broader,
+  type CompositionOptions,
   core,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  differentFrom,
   disjointWith,
   equivalentTo,
   hasPart,
@@ -12,8 +11,6 @@ export {
   narrower,
   partOf,
   relatedTo,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  sameAs,
   subClassOf,
 } from "./core-meta-edges";
 
@@ -43,12 +40,24 @@ export {
 } from "./closures";
 
 // Types
+export type {
+  CompositionExistence,
+  CompositionPartSide,
+} from "../registry/composition-relation";
 export {
+  compositionViaKind,
+  type CompositionViaRef,
+} from "../registry/composition-relation";
+export {
+  type EquivalentToCheck,
   getTypeName,
-  type InferenceType,
   isMetaEdge,
   META_EDGE_BRAND,
   type MetaEdge,
   type MetaEdgeProperties,
   type OntologyRelation,
+  type PolymorphicNodeType,
+  type StructuralSubtypeMismatch,
+  type SubClassOfCheck,
+  type TypedOntologyRelation,
 } from "./types";

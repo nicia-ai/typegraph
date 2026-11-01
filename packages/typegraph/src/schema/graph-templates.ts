@@ -3,13 +3,24 @@ import { type GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { ConfigurationError } from "../errors";
 import { type ReconciledSchema } from "../store/store";
+import { activeSchemaHash } from "./manager";
 import { computeSchemaHash, serializeSchema } from "./serializer";
 
 /** A locally held handle for a durable server-side graph template. */
 export type GraphTemplate<G extends GraphDef> = Readonly<{
   id: string;
   reconciled: ReconciledSchema<G>;
+  /** Content hash of the template's schema document, in this release's serialization. */
   schemaHash: string;
+  /**
+   * The hash the template registry keys this template under, which
+   * instantiation binds. It equals `schemaHash` unless an earlier release
+   * registered the template: the registry keeps the hash that release
+   * computed, and the stored document is judged equal to `schemaHash`
+   * through `activeSchemaHash` rather than rewritten. Absent means
+   * `schemaHash`.
+   */
+  registryHash?: string;
 }>;
 
 export type InstantiateGraphTemplateResult<G extends GraphDef> = Readonly<{
@@ -61,16 +72,42 @@ export async function registerGraphTemplate<G extends GraphDef>(
       { code: "GRAPH_TEMPLATE_RECONCILED_HASH_MISMATCH" },
     );
   }
-  await register({
+  const stored = await register({
     templateId: params.templateId,
     schemaHash,
     schemaDoc: schemaDocument,
   });
+  if (!(await storedSchemaMatches(stored, schemaHash))) {
+    throw new ConfigurationError(
+      `Graph template "${params.templateId}" already exists with different schema content.`,
+      {
+        code: "GRAPH_TEMPLATE_CONTENT_CONFLICT",
+        templateId: params.templateId,
+      },
+    );
+  }
   return Object.freeze({
     id: params.templateId,
     reconciled,
     schemaHash,
+    registryHash: stored.schema_hash,
   });
+}
+
+/**
+ * Whether a stored template or schema row holds the schema `schemaHash`
+ * names. The column is checked first because it is equal whenever this
+ * release wrote the row; a row an earlier release wrote is judged by its
+ * document, through the one owner every stored-version comparison reads.
+ */
+async function storedSchemaMatches(
+  row: Readonly<{ schema_hash: string; schema_doc: string }>,
+  schemaHash: string,
+): Promise<boolean> {
+  return (
+    row.schema_hash === schemaHash ||
+    (await activeSchemaHash(row)) === schemaHash
+  );
 }
 
 /**
@@ -104,12 +141,28 @@ export async function instantiateGraphTemplate<G extends GraphDef>(
     id: params.graphId,
   });
   const targetHash = await computeSchemaHash(serializeSchema(targetGraph, 1));
-  const result = await instantiate({
-    templateId: params.template.id,
-    templateSchemaHash: params.template.schemaHash,
-    graphId: params.graphId,
-    schemaHash: targetHash,
-  });
+  const instantiateUnder = (schemaHash: string) =>
+    instantiate({
+      templateId: params.template.id,
+      templateSchemaHash:
+        params.template.registryHash ?? params.template.schemaHash,
+      graphId: params.graphId,
+      schemaHash,
+    });
+  const firstResult = await instantiateUnder(targetHash);
+  // An idempotent retry against a target an earlier release instantiated is
+  // refused by the hash key alone: that target's v1 row carries the hash the
+  // earlier release computed. Judge its document, and retry under its own
+  // stored key when it holds this target's schema.
+  const earlierReleaseTargetHash =
+    firstResult.status === "refused" ?
+      await earlierReleaseTargetSchemaHash(backend, params.graphId, targetHash)
+    : undefined;
+  const boundTargetHash = earlierReleaseTargetHash ?? targetHash;
+  const result =
+    earlierReleaseTargetHash === undefined ? firstResult : (
+      await instantiateUnder(earlierReleaseTargetHash)
+    );
   if (result.status === "refused") {
     throw new ConfigurationError(
       `Graph template instantiation was refused for graph "${params.graphId}". The template may be absent, or the graph already has a different schema.`,
@@ -123,7 +176,7 @@ export async function instantiateGraphTemplate<G extends GraphDef>(
   if (
     result.row.graph_id !== params.graphId ||
     result.row.version !== 1 ||
-    result.row.schema_hash !== targetHash
+    result.row.schema_hash !== boundTargetHash
   ) {
     throw new ConfigurationError(
       "Graph template backend returned a schema row that does not match the requested target.",
@@ -135,10 +188,30 @@ export async function instantiateGraphTemplate<G extends GraphDef>(
     reconciled: Object.freeze({
       graph: targetGraph,
       version: result.row.version,
-      hash: result.row.schema_hash,
+      hash: targetHash,
     }),
     schema: result.row,
   });
+}
+
+/**
+ * The stored hash column of the target's active v1 row when an earlier
+ * release wrote it for exactly this target schema, otherwise `undefined`.
+ */
+async function earlierReleaseTargetSchemaHash(
+  backend: GraphBackend,
+  graphId: string,
+  targetHash: string,
+): Promise<string | undefined> {
+  const active = await backend.getActiveSchema(graphId);
+  if (
+    active?.version !== 1 ||
+    active.schema_hash === targetHash ||
+    !(await storedSchemaMatches(active, targetHash))
+  ) {
+    return undefined;
+  }
+  return active.schema_hash;
 }
 
 function graphTemplateHandleMismatchError(

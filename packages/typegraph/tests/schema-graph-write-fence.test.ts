@@ -17,6 +17,7 @@ import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import type { GraphWriteFenceAcquisition } from "../src/backend/types";
 import { tsvectorStrategy } from "../src/query/dialect/fulltext-strategy";
 import { requireDefined } from "../src/utils/presence";
 
@@ -59,12 +60,40 @@ describe("schema + graph write fence", () => {
       });
 
       expect(backend.lockSchemaVersionAndGraphWrite).toBeUndefined();
-      await backend.transaction(async (tx) => {
-        await requireDefined(tx.lockSchemaVersionAndGraphWrite)({
-          expectedVersion: 1,
-          graphId: "fused-lock",
-        });
+      const acquire = (
+        fenceRow: "advance" | "leave",
+      ): Promise<GraphWriteFenceAcquisition> =>
+        backend.transaction((tx) =>
+          requireDefined(tx.lockSchemaVersionAndGraphWrite)({
+            expectedVersion: 1,
+            graphId: "fused-lock",
+            fenceRow,
+          }),
+        );
+      const fenceRowGenerations = async (): Promise<readonly number[]> => {
+        const fenceRows = await client.query<{ generation: string }>(
+          `SELECT generation FROM "typegraph_fences" WHERE key = $1`,
+          ["typegraph:recorded-graph-write:fused-lock"],
+        );
+        return fenceRows.rows.map((row) => Number(row.generation));
+      };
+      // A holder that decides nothing under the fence takes the lock alone:
+      // the statement reports the session's isolation and writes no row.
+      await expect(acquire("leave")).resolves.toEqual({
+        isolation: "read_committed",
+        fenceRow: "none",
       });
+      expect(await fenceRowGenerations()).toEqual([]);
+      // A holder that goes on to a lock-only decision advances the graph's
+      // fence row behind the lock, and reports that it did — the evidence a
+      // snapshot-isolation session's freshness rests on.
+      await expect(acquire("advance")).resolves.toEqual({
+        isolation: "read_committed",
+        fenceRow: "advanced",
+      });
+      await acquire("advance");
+      await acquire("leave");
+      expect(await fenceRowGenerations()).toEqual([2]);
 
       const strategy = createPostgresOperationStrategy(
         postgresTables,
@@ -72,11 +101,20 @@ describe("schema + graph write fence", () => {
       );
       const compiled = new PgDialect().sqlToQuery(
         requireDefined(strategy.buildLockSchemaVersionAndGraphWrite)(
-          { expectedVersion: 1, graphId: "fused-lock" },
+          { expectedVersion: 1, graphId: "fused-lock", fenceRow: "advance" },
           "typegraph:recorded-graph-write",
           postgresFenceSql,
         ),
       );
+      const lockOnly = new PgDialect().sqlToQuery(
+        requireDefined(strategy.buildLockSchemaVersionAndGraphWrite)(
+          { expectedVersion: 1, graphId: "fused-lock", fenceRow: "leave" },
+          "typegraph:recorded-graph-write",
+          postgresFenceSql,
+        ),
+      );
+      expect(lockOnly.sql.toLowerCase()).toContain("pg_advisory_xact_lock");
+      expect(lockOnly.sql).not.toContain("typegraph_fences");
       const statement = compiled.sql.toLowerCase();
       expect(statement).toContain('"schema_fence" as materialized');
       expect(statement).toContain("for share");
@@ -87,6 +125,16 @@ describe("schema + graph write fence", () => {
         statement.indexOf('"graph_write_lock" as materialized'),
       );
       expect(statement).toContain('from "schema_fence"');
+      // The fence row is written only after — and only if — the advisory
+      // lock was taken: its row source is the lock CTE.
+      expect(statement).toContain('insert into "typegraph_fences"');
+      expect(statement).toContain('from "graph_write_lock"');
+      expect(
+        statement.indexOf('"graph_write_lock" as materialized'),
+      ).toBeLessThan(statement.indexOf('insert into "typegraph_fences"'));
+      expect(compiled.params).toContain(
+        "typegraph:recorded-graph-write:fused-lock",
+      );
     } finally {
       await client.close();
     }
@@ -106,6 +154,7 @@ describe("schema + graph write fence", () => {
           requireDefined(tx.lockSchemaVersionAndGraphWrite)({
             expectedVersion: 2,
             graphId: "stale-lock",
+            fenceRow: "advance",
           }),
         ),
       ).rejects.toMatchObject({
@@ -129,6 +178,7 @@ describe("schema + graph write fence", () => {
           requireDefined(tx.lockSchemaVersionAndGraphWrite)({
             expectedVersion: 0,
             graphId: "rolled-back-lock",
+            fenceRow: "advance",
           }),
         ),
       ).rejects.toMatchObject({

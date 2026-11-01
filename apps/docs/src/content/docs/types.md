@@ -261,10 +261,16 @@ const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[
 }))
 ```
 
-### `TypedEdgeCollection<R>`
+### `TypedEdgeCollection<R, G>`
 
 A type-safe edge collection derived from the edge registration. This is what
-`store.edges.*` returns. With array-valued `to`, each source type can connect to
+`store.edges.*` returns, with `G` the store's graph. In `G`, each declared
+endpoint reads back as `SubsumedNodeType<G, N>` (its `kind` and `NodeId` widen
+when `G`'s ontology gives the kind subclasses or equivalent kinds) and endpoint
+arguments take an `EdgeEndpointRef<G, N>`, which also admits the kinds in
+`AssignableNodeKinds<G, N["kind"]>` and polymorphic query rows; see
+[typed edge collections under subsumption](/ontology#subsumption-type-inheritance).
+Named without `G`, the declared kinds are taken exactly. With array-valued `to`, each source type can connect to
 each target type. With a [source-dependent target map](/core-concepts#source-dependent-targets),
 typed writes preserve the allowed pairs instead of accepting independent endpoint unions.
 
@@ -523,20 +529,24 @@ type Cardinality = "many" | "one" | "unique" | "oneActive";
 | `"unique"` | At most one edge per source-target pair |
 | `"oneActive"` | At most one active edge (`validTo` is `undefined`) per source node |
 
-### `InferenceType`
+### `TargetCardinality`
 
-Controls how ontology relationships affect queries.
+Controls how many edges of a type can point AT one target node, independent
+of `Cardinality`, which bounds the edges leaving one source.
 
 ```typescript
-type InferenceType =
-  | "subsumption"   // Query for X includes subclass instances
-  | "hierarchy"     // Enables broader/narrower traversal
-  | "substitution"  // Can substitute equivalent types
-  | "constraint"    // Validation rules
-  | "composition"   // Part-whole navigation
-  | "association"   // Discovery/recommendation
-  | "none";         // No automatic inference
+type TargetCardinality = "many" | "one" | "oneActive";
 ```
+
+| Value | Description |
+|-------|-------------|
+| `"many"` | No limit on edges (default) |
+| `"one"` | At most one edge per target node |
+| `"oneActive"` | At most one active edge (`validTo` is `undefined`) per target node |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, already declared from the source side by
+`Cardinality`'s `"unique"` value.
 
 ## Query Types
 
@@ -548,6 +558,7 @@ Configuration for variable-length (recursive) traversals.
 type VariableLengthSpec = Readonly<{
   minDepth: number;                   // Minimum hops (default: 1)
   maxDepth: number;                   // Maximum hops (-1 = unlimited)
+  exhaustive?: boolean;               // No hop ceiling; needs cyclePolicy "prevent" and maxDepth -1
   cyclePolicy: "prevent" | "allow";   // Cycle handling mode
   pathAlias?: string;                 // Column alias for projected path
   depthAlias?: string;                // Column alias for projected depth

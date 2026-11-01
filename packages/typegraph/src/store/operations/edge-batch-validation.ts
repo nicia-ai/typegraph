@@ -4,7 +4,7 @@
  * A batch decides every row before it writes any of them, so a probe that read
  * only the database would let two rows of one batch each see "no conflict" and
  * both land — the in-batch collision. This wrapper is the state that closes
- * that: it overlays the reads a cardinality probe makes (`countEdgesFrom`,
+ * that: it overlays the reads a cardinality probe makes (`countEdgesAtEndpoint`,
  * `edgeExistsBetween`) with the rows the batch has already accepted, so row
  * k+1's probe sees rows 1..k and refuses per ROW rather than at the flush.
  *
@@ -22,17 +22,39 @@
  * per batch, by the caller — a claim against this wrapper would still reach the
  * real target (`deriveBackend` forwards every non-overlaid member) but
  * would be a second, unsorted, per-row claim in addition to the batch's.
+ *
+ * The pending counters fold over {@link edgeCardinalityAxisReferences} — the same
+ * fold the write-time probe and the real claim use — rather than re-spelling
+ * each cardinality's rules inline, so a target-only declaration accumulates
+ * in-batch pending state exactly as a source-only one always has. Both the
+ * write side (`registerPendingEdgeForCardinality`) and the read side
+ * (`countEdgesAtEndpointCached`) key a `from`/`to`-shaped axis by the exact
+ * tuple `countEdgesAtEndpoint` itself reads — `(graphId, edgeKind, endpoint,
+ * endpointKind, endpointId, activeOnly)` — so the two sides cannot drift
+ * without one comparison in one function catching it.
+ *
+ * The module's second overlay, {@link createRetiringEdgeValidationBackend},
+ * is the same device pointed the other way: a frame that RETIRES a row and
+ * inserts its replacement prepares the replacement against a count the
+ * retiring row has already left.
  */
 import { deriveBackend } from "../../backend/derive-backend";
 import {
+  type CountEdgesAtEndpointParams,
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
   type NodeRow,
   type NodeRowLock,
 } from "../../backend/types";
-import { type Cardinality } from "../../core/types";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import {
+  axisCountsRow,
+  edgeCardinalityAxisReferences,
+  type EdgeCardinalityDeclarations,
+  edgeCardinalitySpec,
+  membershipCountsRow,
+} from "../claims/edge-claims";
 import { lockNodeRow, lockNodeRows } from "./node-row-locks";
 import { type WriteTarget } from "./write-session";
 
@@ -42,15 +64,6 @@ function buildEdgeEndpointCacheKey(
   id: string,
 ): string {
   return encodeTupleKey([graphId, kind, id]);
-}
-
-function buildEdgeFromCacheKey(
-  graphId: string,
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-): string {
-  return encodeTupleKey([graphId, edgeKind, fromKind, fromId]);
 }
 
 function buildEdgeBetweenCacheKey(
@@ -64,15 +77,16 @@ function buildEdgeBetweenCacheKey(
   return encodeTupleKey([graphId, edgeKind, fromKind, fromId, toKind, toId]);
 }
 
-function buildCountEdgesFromCacheKey(
-  params: Parameters<GraphBackend["countEdgesFrom"]>[0],
+function buildCountEdgesAtEndpointCacheKey(
+  params: CountEdgesAtEndpointParams,
 ): string {
   const activeOnly = params.activeOnly === true ? "1" : "0";
   return encodeTupleKey([
     params.graphId,
     params.edgeKind,
-    params.fromKind,
-    params.fromId,
+    params.endpoint,
+    params.endpointKind,
+    params.endpointId,
     activeOnly,
   ]);
 }
@@ -88,7 +102,7 @@ export function createEdgeBatchValidationBackend(
   backend: WriteTarget;
   registerPendingEdgeForCardinality: (
     insertParams: InsertEdgeParams,
-    cardinality: Cardinality,
+    declarations: EdgeCardinalityDeclarations,
   ) => void;
   seedEndpointRow: (
     graphId: string,
@@ -103,7 +117,7 @@ export function createEdgeBatchValidationBackend(
    * issue singleton probes for those negative cases.
    */
   seedCardinalityRows: (
-    countRequests: readonly Parameters<GraphBackend["countEdgesFrom"]>[0][],
+    countRequests: readonly CountEdgesAtEndpointParams[],
     uniqueRequests: readonly Parameters<GraphBackend["edgeExistsBetween"]>[0][],
     rows: readonly EdgeRow[],
   ) => void;
@@ -112,11 +126,10 @@ export function createEdgeBatchValidationBackend(
     string,
     Awaited<ReturnType<GraphBackend["getNode"]>>
   >();
-  const countEdgesFromCache = new Map<string, number>();
+  const countEdgesAtEndpointCache = new Map<string, number>();
   const edgeExistsCache = new Map<string, boolean>();
-  const pendingOneCounts = new Map<string, number>();
-  const pendingOneActiveCounts = new Map<string, number>();
-  const pendingUniquePairs = new Set<string>();
+  const pendingByTarget = new Map<string, number>();
+  const pendingUniqueTargets = new Set<string>();
 
   // Every cached endpoint row was read under the edge-endpoint lock — by the
   // batch's priming pass or by a miss below — so serving a later endpoint
@@ -167,25 +180,16 @@ export function createEdgeBatchValidationBackend(
     endpointCache.set(cacheKey, row);
   }
 
-  async function countEdgesFromCached(
-    params: Parameters<GraphBackend["countEdgesFrom"]>[0],
+  async function countEdgesAtEndpointCached(
+    params: CountEdgesAtEndpointParams,
   ): Promise<number> {
-    const cacheKey = buildCountEdgesFromCacheKey(params);
-    let baseCount = countEdgesFromCache.get(cacheKey);
+    const cacheKey = buildCountEdgesAtEndpointCacheKey(params);
+    let baseCount = countEdgesAtEndpointCache.get(cacheKey);
     if (baseCount === undefined) {
-      baseCount = await backend.countEdgesFrom(params);
-      countEdgesFromCache.set(cacheKey, baseCount);
+      baseCount = await backend.countEdgesAtEndpoint(params);
+      countEdgesAtEndpointCache.set(cacheKey, baseCount);
     }
-    const pendingKey = buildEdgeFromCacheKey(
-      params.graphId,
-      params.edgeKind,
-      params.fromKind,
-      params.fromId,
-    );
-    const pendingCount =
-      params.activeOnly === true ?
-        (pendingOneActiveCounts.get(pendingKey) ?? 0)
-      : (pendingOneCounts.get(pendingKey) ?? 0);
+    const pendingCount = pendingByTarget.get(cacheKey) ?? 0;
     return baseCount + pendingCount;
   }
 
@@ -200,7 +204,7 @@ export function createEdgeBatchValidationBackend(
       params.toKind,
       params.toId,
     );
-    if (pendingUniquePairs.has(cacheKey)) {
+    if (pendingUniqueTargets.has(cacheKey)) {
       return true;
     }
     if (edgeExistsCache.has(cacheKey)) {
@@ -211,41 +215,58 @@ export function createEdgeBatchValidationBackend(
     return exists;
   }
 
+  /**
+   * Folds the row's declaration through {@link edgeCardinalityAxisReferences},
+   * exactly as the write-time probe and the real claim do, and records ONE
+   * pending entry per applicable axis — a `fromAndTo`-shaped axis (source
+   * `unique`) into `pendingUniqueTargets`, a `from`/`to`-shaped one into
+   * `pendingByTarget` under the same key `countEdgesAtEndpointCached` reads.
+   * An axis that does not count this row (`axisCountsRow`: active-only, and
+   * the row states a `validTo`) records nothing, matching the real claim it
+   * would never take.
+   */
   function registerPendingEdgeForCardinality(
     insertParams: InsertEdgeParams,
-    cardinality: Cardinality,
+    declarations: EdgeCardinalityDeclarations,
   ): void {
-    const fromCacheKey = buildEdgeFromCacheKey(
-      insertParams.graphId,
-      insertParams.kind,
-      insertParams.fromKind,
-      insertParams.fromId,
-    );
-    if (cardinality === "one") {
-      incrementPendingCount(pendingOneCounts, fromCacheKey);
-      return;
-    }
-    if (cardinality === "oneActive") {
-      if (insertParams.validTo === undefined) {
-        incrementPendingCount(pendingOneActiveCounts, fromCacheKey);
+    for (const ref of edgeCardinalityAxisReferences(declarations)) {
+      if (!axisCountsRow(ref, insertParams)) continue;
+      const spec = edgeCardinalitySpec(ref);
+      if (spec.keyShape === "fromAndTo") {
+        pendingUniqueTargets.add(
+          buildEdgeBetweenCacheKey(
+            insertParams.graphId,
+            insertParams.kind,
+            insertParams.fromKind,
+            insertParams.fromId,
+            insertParams.toKind,
+            insertParams.toId,
+          ),
+        );
+        continue;
       }
-      return;
-    }
-    if (cardinality === "unique") {
-      const uniqueCacheKey = buildEdgeBetweenCacheKey(
-        insertParams.graphId,
-        insertParams.kind,
-        insertParams.fromKind,
-        insertParams.fromId,
-        insertParams.toKind,
-        insertParams.toId,
-      );
-      pendingUniquePairs.add(uniqueCacheKey);
+      const endpoint = spec.keyShape;
+      const { endpointKind, endpointId } =
+        endpoint === "from" ?
+          {
+            endpointKind: insertParams.fromKind,
+            endpointId: insertParams.fromId,
+          }
+        : { endpointKind: insertParams.toKind, endpointId: insertParams.toId };
+      const key = buildCountEdgesAtEndpointCacheKey({
+        graphId: insertParams.graphId,
+        edgeKind: insertParams.kind,
+        endpoint,
+        endpointKind,
+        endpointId,
+        activeOnly: spec.holderLiveness === "liveAndActive",
+      });
+      incrementPendingCount(pendingByTarget, key);
     }
   }
 
   function seedCardinalityRows(
-    countRequests: readonly Parameters<GraphBackend["countEdgesFrom"]>[0][],
+    countRequests: readonly CountEdgesAtEndpointParams[],
     uniqueRequests: readonly Parameters<GraphBackend["edgeExistsBetween"]>[0][],
     rows: readonly EdgeRow[],
   ): void {
@@ -253,17 +274,23 @@ export function createEdgeBatchValidationBackend(
     const pairs = new Set<string>();
     for (const row of rows) {
       if (row.deleted_at !== undefined) continue;
-      const sourceKey = encodeTupleKey([
-        row.graph_id,
-        row.kind,
-        row.from_kind,
-        row.from_id,
-      ]);
-      const previous = counts.get(sourceKey) ?? { all: 0, active: 0 };
-      counts.set(sourceKey, {
-        all: previous.all + 1,
-        active: previous.active + (row.valid_to === undefined ? 1 : 0),
-      });
+      const active = row.valid_to === undefined ? 1 : 0;
+      for (const endpoint of ["from", "to"] as const) {
+        const endpointKind = endpoint === "from" ? row.from_kind : row.to_kind;
+        const endpointId = endpoint === "from" ? row.from_id : row.to_id;
+        const endpointKey = encodeTupleKey([
+          row.graph_id,
+          row.kind,
+          endpoint,
+          endpointKind,
+          endpointId,
+        ]);
+        const previous = counts.get(endpointKey) ?? { all: 0, active: 0 };
+        counts.set(endpointKey, {
+          all: previous.all + 1,
+          active: previous.active + active,
+        });
+      }
       pairs.add(
         buildEdgeBetweenCacheKey(
           row.graph_id,
@@ -276,18 +303,22 @@ export function createEdgeBatchValidationBackend(
       );
     }
     for (const params of countRequests) {
-      const sourceKey = encodeTupleKey([
+      const endpointKey = encodeTupleKey([
         params.graphId,
         params.edgeKind,
-        params.fromKind,
-        params.fromId,
+        params.endpoint,
+        params.endpointKind,
+        params.endpointId,
       ]);
-      const sourceCounts = counts.get(sourceKey);
+      const endpointCounts = counts.get(endpointKey);
       const count =
         params.activeOnly === true ?
-          (sourceCounts?.active ?? 0)
-        : (sourceCounts?.all ?? 0);
-      countEdgesFromCache.set(buildCountEdgesFromCacheKey(params), count);
+          (endpointCounts?.active ?? 0)
+        : (endpointCounts?.all ?? 0);
+      countEdgesAtEndpointCache.set(
+        buildCountEdgesAtEndpointCacheKey(params),
+        count,
+      );
     }
     for (const params of uniqueRequests) {
       const exists = pairs.has(
@@ -316,7 +347,7 @@ export function createEdgeBatchValidationBackend(
 
   const validationBackend = deriveBackend(backend, {
     lockNodes: lockNodesCached,
-    countEdgesFrom: countEdgesFromCached,
+    countEdgesAtEndpoint: countEdgesAtEndpointCached,
     edgeExistsBetween: edgeExistsBetweenCached,
   } satisfies Partial<WriteTarget>);
 
@@ -326,4 +357,198 @@ export function createEdgeBatchValidationBackend(
     seedEndpointRow,
     seedCardinalityRows,
   };
+}
+
+/**
+ * Whether `countEdgesAtEndpoint(params)` counts `row`: the row-level rendering
+ * of the exact predicate that read applies — same graph, edge kind, and
+ * endpoint column pair, not deleted, and open-ended when the read is
+ * `activeOnly`. Kept beside the cache key above, which mirrors the same
+ * tuple, so the two renderings of one read live in one place.
+ */
+function countEdgesAtEndpointIncludes(
+  params: CountEdgesAtEndpointParams,
+  row: Pick<
+    EdgeRow,
+    | "graph_id"
+    | "kind"
+    | "from_kind"
+    | "from_id"
+    | "to_kind"
+    | "to_id"
+    | "deleted_at"
+    | "valid_to"
+  >,
+): boolean {
+  const [endpointKind, endpointId] =
+    params.endpoint === "from" ?
+      [row.from_kind, row.from_id]
+    : [row.to_kind, row.to_id];
+  return (
+    row.graph_id === params.graphId &&
+    row.kind === params.edgeKind &&
+    endpointKind === params.endpointKind &&
+    endpointId === params.endpointId &&
+    row.deleted_at === undefined &&
+    membershipCountsRow(params.activeOnly === true ? "openRows" : "allRows", {
+      validTo: row.valid_to,
+    })
+  );
+}
+
+/**
+ * A row a frame retires before its inserts land, and how: soft-deleted
+ * (`"delete"`, a `population: "one"` incumbent), or its window ended at
+ * `validTo` (`"endWindow"`, a `population: "oneActive"` incumbent).
+ */
+export type RetiringEdge =
+  | Readonly<{ row: EdgeRow; retire: "delete" }>
+  | Readonly<{ row: EdgeRow; retire: "endWindow"; validTo: string }>;
+
+/**
+ * Whether `countEdgesAtEndpoint(params)` stops counting `retiring.row` once
+ * its retire lands: it counts the row now, and does not count the row's
+ * retired state. A deleted row leaves every count; an ended row leaves only
+ * a count that admits open rows alone (`activeOnly`) and stays in every
+ * other — it is still a live row of the edge kind.
+ */
+function retireLeavesCount(
+  params: CountEdgesAtEndpointParams,
+  retiring: RetiringEdge,
+): boolean {
+  if (!countEdgesAtEndpointIncludes(params, retiring.row)) return false;
+  if (retiring.retire === "delete") return true;
+  return !countEdgesAtEndpointIncludes(params, {
+    ...retiring.row,
+    valid_to: retiring.validTo,
+  });
+}
+
+/**
+ * The frame's write target as a replacement edge's preparation must read it:
+ * with `retiring` — the rows this same frame retires AFTER the preparation
+ * and BEFORE the inserts — already in their retired state in every endpoint
+ * count it holds.
+ *
+ * `reparent`'s replace arm (`prepareCompositionAttachmentMoves`,
+ * `node-operations.ts`) is the caller, with the incumbent of every move in
+ * its batch: preparing the replacement before the
+ * incumbent is retired is what keeps a refusal the preparation raises
+ * (cardinality, acyclicity, invalid edge props) from leaving the part
+ * detached when the caller catches it inside an enclosing transaction, and
+ * preparing it against the raw count would refuse every move whose incumbent
+ * realizes the same edge kind — the incumbent still counts against the
+ * part's own cardinality until it is retired. Subtracting exactly the rows
+ * whose retire takes them out of a count ({@link retireLeavesCount}) yields
+ * the count the inserts and their claims will see: a `population: "one"`
+ * incumbent is soft-deleted and leaves every count; a `population:
+ * "oneActive"` incumbent has its window ended, so it leaves an active-only
+ * count but still occupies a count of every live row — a whole-side `one`
+ * bound on the same realizing edge, say — exactly as the claim taken at the
+ * insert will find it.
+ *
+ * `edgeExistsBetween` is deliberately not overlaid: an incumbent that shared
+ * the replacement's `(kind, from, to)` would be the same attachment, which
+ * the decision reports as `"satisfied"` and never replaces.
+ */
+export function createRetiringEdgeValidationBackend(
+  target: WriteTarget,
+  retiring: readonly RetiringEdge[],
+): WriteTarget {
+  if (retiring.length === 0) return target;
+  return deriveBackend(target, {
+    countEdgesAtEndpoint: async (
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> => {
+      const count = await target.countEdgesAtEndpoint(params);
+      const leaving = retiring.filter((edge) =>
+        retireLeavesCount(params, edge),
+      );
+      return count - leaving.length;
+    },
+  } satisfies Partial<WriteTarget>);
+}
+
+/**
+ * The frame's write target as a SET of edge row writes is judged against
+ * before any of them lands: a frame that prepares every write first and issues
+ * them afterwards registers each row's transition as soon as that row is
+ * prepared, so the next row's cardinality and composition probes count the
+ * population the earlier writes will leave, not the stored one.
+ *
+ * A registered transition takes the row's STORED state out of every endpoint
+ * count it was in and puts its state after the write into every count that
+ * state is in — through {@link countEdgesAtEndpointIncludes}, the row-level
+ * rendering of the read itself, so the overlay cannot count a row the read
+ * would not. A row the frame is about to INSERT registers with no stored
+ * state, and a row written twice keeps its stored state and only its latest
+ * one. `edgeExistsBetween` counts live rows, which an update can only add to
+ * (no update soft-deletes), so it answers the stored read or any live row a
+ * transition leaves on the pair.
+ *
+ * This generalizes {@link createRetiringEdgeValidationBackend} (a transition
+ * whose later state counts nowhere) and the pending inserts of
+ * {@link createEdgeBatchValidationBackend} (a transition with no stored state)
+ * to the writes that do both: a resurrection or window reopen enters a count,
+ * a window end leaves one.
+ */
+export function createEdgeTransitionValidationBackend(
+  target: WriteTarget,
+): Readonly<{
+  backend: WriteTarget;
+  registerEdgeTransition: (stored: EdgeRow | undefined, after: EdgeRow) => void;
+}> {
+  const transitions = new Map<
+    string,
+    Readonly<{ stored: EdgeRow | undefined; after: EdgeRow }>
+  >();
+
+  function registerEdgeTransition(
+    stored: EdgeRow | undefined,
+    after: EdgeRow,
+  ): void {
+    const earlier = transitions.get(after.id);
+    transitions.set(after.id, {
+      stored: earlier === undefined ? stored : earlier.stored,
+      after,
+    });
+  }
+
+  const backend = deriveBackend(target, {
+    countEdgesAtEndpoint: async (
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> => {
+      const storedCount = await target.countEdgesAtEndpoint(params);
+      const pendingDelta = [...transitions.values()].reduce(
+        (delta, { stored, after }) =>
+          delta -
+          ((
+            stored !== undefined && countEdgesAtEndpointIncludes(params, stored)
+          ) ?
+            1
+          : 0) +
+          (countEdgesAtEndpointIncludes(params, after) ? 1 : 0),
+        0,
+      );
+      return storedCount + pendingDelta;
+    },
+    edgeExistsBetween: async (params): Promise<boolean> => {
+      for (const { after } of transitions.values()) {
+        if (
+          after.graph_id === params.graphId &&
+          after.kind === params.edgeKind &&
+          after.from_kind === params.fromKind &&
+          after.from_id === params.fromId &&
+          after.to_kind === params.toKind &&
+          after.to_id === params.toId &&
+          after.deleted_at === undefined
+        ) {
+          return true;
+        }
+      }
+      return target.edgeExistsBetween(params);
+    },
+  } satisfies Partial<WriteTarget>);
+
+  return { backend, registerEdgeTransition };
 }

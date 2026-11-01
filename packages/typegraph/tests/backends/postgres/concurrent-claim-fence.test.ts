@@ -898,7 +898,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       "refuses an import edge whose cardinality-one axis a store create took inside its claim window",
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
-        // C3. Both legs probe `countEdgesFrom` and both read zero, because
+        // C3. Both legs probe `countEdgesAtEndpoint` and both read zero, because
         // neither row is committed yet; the edges primary key is
         // `(graph_id, id)` and the two ids differ, so nothing at the database
         // level collides. The claim row is the entire fence.

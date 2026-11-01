@@ -1,6 +1,8 @@
 export type {
+  CompatibleMergeReview,
   MergePlanApplied,
   MergePlanApplyOptions,
+  MergePlanDecisionOptions,
   MergePlanReadContext,
 } from "./apply-callbacks";
 // Public barrel for @nicia-ai/typegraph/graph-merge.
@@ -30,6 +32,7 @@ export {
 } from "./candidate-review";
 export type {
   CandidateWriteSet,
+  CandidateWriteSetPlan,
   CandidateWriteSetTarget,
   PlanCandidateWriteSetArgs,
   PlanCandidateWriteSetForEvolutionArgs,
@@ -83,10 +86,18 @@ export {
   operateDurableBranch,
   scanDurableOperations,
 } from "./durable-operation";
-export type { MergeConstraintConflictErrorDetails } from "./errors";
+export type {
+  AcyclicityMergeConflictDetails,
+  AcyclicityMergeConflictEdge,
+  IdentityMergeConflictCode,
+  MergeConstraintConflictErrorDetails,
+  MergeErrorOptions,
+} from "./errors";
 export {
+  AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   BranchError,
+  CandidatePlanningScopeError,
   CandidateSourceError,
   CandidateWriteSetError,
   DurableEvidenceUndeliveredError,
@@ -100,6 +111,7 @@ export {
   InvalidMergePlanError,
   MatchEvidenceError,
   MERGE_ERROR_CODES,
+  MergeCompositionOrphanError,
   MergeConflictError,
   MergeConstraintConflictError,
   MergeError,
@@ -144,11 +156,12 @@ export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
   MergePlanAnchors,
   MergePlanArtifact,
-  MergePlanArtifactV1,
-  MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
+  MergePlanCompositionOrphan,
   MergePlanDiagnostics,
   MergePlanDigest,
   MergePlanEdgeDelete,
@@ -199,8 +212,7 @@ export type {
 } from "./review-schema";
 export {
   MERGE_REVIEW_FORMAT_VERSION,
-  MERGE_REVIEW_FORMAT_VERSION_V1,
-  MERGE_REVIEW_FORMAT_VERSION_V2,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
 } from "./review-schema";
 export type {
   BaseNodeLookup,
@@ -208,7 +220,17 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
-export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
+export type {
+  CandidatePlanningScope,
+  CandidatePlanningScopeReason,
+  WholeTargetPlanningScope,
+} from "./sparse-candidate-branch";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityDecisionProvenance,
+  IdentityRelation,
+  IdentityTransferAssertion,
+} from "./typegraph-internal";
 export type {
   BaseAmbiguity,
   BaseVersion,
@@ -224,6 +246,7 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityUnresolvedConflict,
   IngestionBranch,
   IngestionNodeCollections,
   MergeBranch,

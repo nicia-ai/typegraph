@@ -14,6 +14,7 @@ import {
   type Traversal,
   type VariableLengthSpec,
 } from "../src/query/ast";
+import { compileQuery } from "../src/query/compiler";
 import { type PredicateCompilerContext } from "../src/query/compiler/predicates";
 import {
   compileVariableLengthQuery,
@@ -22,7 +23,10 @@ import {
   MAX_RECURSIVE_DEPTH,
 } from "../src/query/compiler/recursive";
 import { compileMultiStageRecursiveQuery } from "../src/query/compiler/recursive-chain";
-import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
+import {
+  createRecordedReadBinding,
+  DEFAULT_SQL_SCHEMA,
+} from "../src/query/compiler/schema";
 import { postgresDialect, sqliteDialect } from "../src/query/dialect";
 import { renderSql, sql } from "../src/query/sql-fragment";
 import { KIND_QUALIFIED_PATH_TOKEN_SEPARATOR } from "../src/utils/path";
@@ -63,7 +67,7 @@ function createAst(overrides: Partial<QueryAst> = {}): QueryAst {
     start: {
       alias: "source",
       kinds: ["StartNode"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [
       createTraversal({
@@ -100,6 +104,11 @@ function createContext(
     recursiveTraversal: assumeRecursiveTraversalSupported(
       "recursive compiler unit test",
     ),
+    // A recorded-pinned AST reaches the temporal filter through the recorded
+    // read seam, which refuses a compile with no bound relation — the same
+    // binding a `{ history: true }` store installs. Harmless for the
+    // current-time cases: nothing reads it unless `recordedAsOf` is set.
+    recordedReadBinding: createRecordedReadBinding(DEFAULT_SQL_SCHEMA),
   };
 }
 
@@ -371,11 +380,157 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
+      // Both directions read from a preceding, non-recursive CTE that
+      // normalizes each orientation to tg_source_*/tg_target_* columns —
+      // never two branches each self-joining `recursive_cte` (PostgreSQL
+      // refuses more than one such self-reference; see
+      // `compileRecursiveDirectedEdgesCte`'s doc comment).
+      expect(sql).toContain("_directed_edges AS (");
       expect(sql).toContain('"typegraph_edges" e');
-      expect(sql).toContain("e.from_id = r.target_id");
-      expect(sql).toContain("e.to_id = r.target_id");
+      expect(sql).toContain("e.from_id AS tg_source_id");
+      expect(sql).toContain("e.to_id AS tg_target_id");
+      expect(sql).toContain("e.to_id AS tg_source_id");
+      expect(sql).toContain("e.from_id AS tg_target_id");
+      // The self-loop duplicate guard still applies inside the CTE.
       expect(sql).toContain("e.from_id = e.to_id");
       expect(sql).toContain("e.from_kind = e.to_kind");
+      // The recursive term itself joins the normalized relation exactly once.
+      expect(sql).toContain("e.tg_source_id = r.target_id");
+      expect(sql).toContain("e.tg_source_kind = r.target_kind");
+      // `edgeKinds` and `inverseEdgeKinds` both name "RELATES_TO" here (an
+      // ordinary symmetric `direction: "both"` traversal on one edge kind):
+      // the merged kind filter must dedupe the union, not bind the same
+      // kind twice in one IN list.
+      expect(sql).not.toContain("'RELATES_TO', 'RELATES_TO'");
+      // No edge predicate and no identity frontier widening on this
+      // traversal, so the directed-edges CTE projects only the columns the
+      // recursive term structurally needs — not `e.*` (guarding the
+      // materialization regression a wildcard caused).
+      expect(sql).not.toContain("SELECT e.*");
+      expect(sql).toContain(
+        "SELECT e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at,",
+      );
+    });
+
+    it("adds recorded_from/recorded_to to the narrowed directed-edges projection under a recorded-pinned read", () => {
+      // MUTATION CHECK: dropping the
+      // `temporalFilterPass.recordedColumns` spread (restoring the bare
+      // `e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at` list)
+      // makes this assertion fail while the recursive term's
+      // `e.recorded_from`/`e.recorded_to` reference (below) still compiles
+      // — it would only fail at execution time against a real edges table,
+      // which this unit test does not hit — verified and reverted.
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+        recordedAsOf: "r1:0000000000000009:2024-07-01T00:00:00.000Z",
+      });
+
+      const sql = getSqlString(ast);
+
+      // No edge predicate and no identity frontier widening, so the
+      // narrowed (non-`e.*`) branch still applies...
+      expect(sql).not.toContain("SELECT e.*");
+      // ...but it must carry the two columns the recorded-pinned temporal
+      // filter references on this alias, or the emitted
+      // `e.recorded_from <= ... AND ... < e.recorded_to` predicate fails
+      // with "no such column" against the CTE (SQLite) / an undefined-column
+      // error (PostgreSQL) once a real edges table backs it.
+      expect(sql).toContain(
+        "SELECT e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at, e.recorded_from, e.recorded_to,",
+      );
+      expect(sql).toContain("e.recorded_from");
+      expect(sql).toContain("e.recorded_to");
+    });
+
+    it("pushes graph_id into both arms of the directed-edges CTE", () => {
+      // MUTATION CHECK: dropping the `e.graph_id =
+      // ${graphId} AND` prefix from both arms' WHERE clauses makes this
+      // assertion fail — the two arms would filter on `e.kind` alone —
+      // verified and reverted. Functional behavior is unchanged either way
+      // (the recursive term already requires `graph_id = ${graphId}`), so
+      // this guards a normalization-cost regression, not a correctness one.
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+      const directedEdgesCte = requireDefined(
+        sql.split("_directed_edges AS (")[1],
+      );
+
+      expect(
+        directedEdgesCte.match(/WHERE e\.graph_id = 'test-graph' AND/g),
+      ).toHaveLength(2);
+    });
+
+    it("pushes the edge temporal filter into both arms of the directed-edges CTE", () => {
+      // MUTATION CHECK: dropping `AND ${edgeTemporalFilter}` from the two arms
+      // makes this assertion fail (each arm would filter on `graph_id` and
+      // `kind` only) — verified and reverted. The predicate is row-local over
+      // `e`'s own temporal columns and the recursive term applies it again, so
+      // this guards the normalization cost: without it the CTE materializes
+      // every soft-deleted and superseded edge version of these kinds.
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const directedEdgesCte = requireDefined(
+        requireDefined(
+          getSqlString(ast).split("_directed_edges AS (")[1],
+        ).split("recursive_cte AS (")[0],
+      );
+
+      expect(directedEdgesCte.match(/e\.deleted_at IS NULL/g)).toHaveLength(2);
+    });
+
+    it("keeps the full e.* projection when an edge predicate targets a mixed-orientation traversal", () => {
+      const ast = createAst({
+        predicates: [
+          {
+            targetAlias: "e",
+            targetType: "edge",
+            expression: {
+              __type: "comparison",
+              op: "gte",
+              left: createFieldRef("e", ["props", "weight"], "number"),
+              right: { __type: "literal", value: 10, valueType: "number" },
+            },
+          },
+        ],
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      // The predicate reads `e.props`, which the narrowed column list
+      // does not carry — the safe fallback keeps `e.*` whenever an
+      // edge predicate is present, so the property is still readable.
+      expect(sql).toContain("SELECT e.*,");
+      expect(sql).toContain("weight");
     });
 
     it("forces worktable-first join order on sqlite recursive steps", () => {
@@ -447,6 +602,91 @@ describe("compileVariableLengthQuery", () => {
 
       expect(sql).toContain("r.depth < 500");
     });
+
+    it("applies no hop ceiling to an exhaustive traversal, which ends on cycle prevention alone", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({ exhaustive: true }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).not.toContain("r.depth <");
+      expect(sql).toContain("r.path");
+    });
+    // MUTATION CHECK: emit `maxDepthCondition` for an exhaustive spec too
+    // (drop the `vl.exhaustive === true ? undefined` arm) and `r.depth <`
+    // returns.
+
+    it("refuses an exhaustive traversal that also allows cycles", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              exhaustive: true,
+              cyclePolicy: "allow",
+            }),
+          }),
+        ],
+      });
+
+      expect(() => getSqlString(ast)).toThrow(
+        'exhaustive recursive traversal requires cyclePolicy "prevent"',
+      );
+    });
+    // MUTATION CHECK: delete the `!shouldEnforceCycleCheck` refusal inside the
+    // `vl.exhaustive === true` guard and this compiles an unbounded,
+    // uncycle-checked recursion.
+
+    it.each([
+      { maxDepth: 5, label: "within the explicit ceiling" },
+      { maxDepth: MAX_EXPLICIT_RECURSIVE_DEPTH + 1, label: "beyond it" },
+    ])(
+      "refuses an exhaustive traversal that also states maxDepth $maxDepth ($label)",
+      ({ maxDepth }) => {
+        const ast = createAst({
+          traversals: [
+            createTraversal({
+              variableLength: createVariableLengthSpec({
+                exhaustive: true,
+                maxDepth,
+              }),
+            }),
+          ],
+        });
+
+        expect(() => getSqlString(ast)).toThrow(
+          `cannot also state maxDepth(${maxDepth})`,
+        );
+      },
+    );
+    // MUTATION CHECK: delete the `vl.maxDepth > 0` refusal inside the
+    // `vl.exhaustive === true` guard and maxDepth 5 compiles unbounded (the
+    // stated bound silently ignored).
+
+    it("refuses an exhaustive single-hop traversal instead of lowering it to a plain join", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              exhaustive: true,
+              maxDepth: 1,
+            }),
+          }),
+        ],
+      });
+
+      expect(() => compileQuery(ast, "test-graph", "sqlite")).toThrow(
+        "cannot also state maxDepth(1)",
+      );
+    });
+    // MUTATION CHECK: drop the `variableLength.exhaustive === true` arm in
+    // `tryLowerSingleHopRecursiveTraversal` and the hand-built spec is lowered
+    // to a non-recursive join, so `exhaustive` is silently dropped and nothing
+    // throws.
 
     it("throws when explicit maxDepth exceeds MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
       const ast = createAst({
@@ -870,7 +1110,7 @@ describe("compileVariableLengthQuery", () => {
     // unchanged; one that can hold several must key the token on (kind, id) so
     // same-id nodes of different kinds are not mistaken for revisits.
     const singleKindAst = createAst({
-      start: { alias: "source", kinds: ["Node"], includeSubClasses: false },
+      start: { alias: "source", kinds: ["Node"], expansion: "exact" },
       traversals: [
         createTraversal({
           nodeKinds: ["Node"],
@@ -932,7 +1172,7 @@ describe("compileVariableLengthQuery", () => {
     it("kind-qualifies the token of a single-kind walk that expands identity members", () => {
       const { sql: text } = renderForDialect(
         createAst({
-          start: { alias: "source", kinds: ["Node"], includeSubClasses: false },
+          start: { alias: "source", kinds: ["Node"], expansion: "exact" },
           traversals: [
             createTraversal({
               nodeKinds: ["Node"],

@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type AdapterStore,
   ConfigurationError,
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
   embedding,
+  type GraphDef,
+  MigrationError,
+  type MigrationErrorDetails,
   resolveGraphVectorSlots,
   SchemaContentConflictError,
   TransactionClosedError,
@@ -15,9 +19,13 @@ import {
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type {
   AdapterBackend,
+  GraphBackend,
   IdentityTableNames,
 } from "../../../src/backend/types";
-import { defineGraphExtension } from "../../../src/graph-extension";
+import {
+  defineGraphExtension,
+  type GraphExtension,
+} from "../../../src/graph-extension";
 import { mergeGraphExtension } from "../../../src/graph-extension/merge";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../../src/query/sql-intent";
@@ -122,6 +130,48 @@ const unrelatedFeatureGraph = defineGraph({
   edges: {},
   identity: { sameIdAcrossKinds: "fold" },
 });
+const DisjointLeft = defineNode("AdoptedDisjointLeft", {
+  schema: z.object({}),
+});
+const DisjointRight = defineNode("AdoptedDisjointRight", {
+  schema: z.object({}),
+});
+const disjointTighteningGraph = defineGraph({
+  id: "shared_adopted_disjoint_tightening",
+  nodes: {
+    AdoptedDisjointLeft: { type: DisjointLeft },
+    AdoptedDisjointRight: { type: DisjointRight },
+  },
+  edges: {},
+});
+const disjointTighteningExtension = defineGraphExtension({
+  ontology: [
+    {
+      metaEdge: "disjointWith",
+      from: "AdoptedDisjointLeft",
+      to: "AdoptedDisjointRight",
+    },
+  ],
+});
+const AcyclicTask = defineNode("AdoptedAcyclicTask", {
+  schema: z.object({}),
+});
+const acyclicTighteningGraph = defineGraph({
+  id: "shared_adopted_acyclic_tightening",
+  nodes: { AdoptedAcyclicTask: { type: AcyclicTask } },
+  edges: {},
+});
+function acyclicTighteningExtension(acyclic: boolean) {
+  return defineGraphExtension({
+    edges: {
+      adoptedDependsOn: {
+        from: ["AdoptedAcyclicTask"],
+        to: ["AdoptedAcyclicTask"],
+        ...(acyclic ? { acyclic: true } : {}),
+      },
+    },
+  });
+}
 const standaloneKindExtension = defineGraphExtension({
   nodes: {
     AdoptedStandaloneTag: {
@@ -129,6 +179,77 @@ const standaloneKindExtension = defineGraphExtension({
     },
   },
 });
+
+function ontologyTighteningViolations(
+  error: unknown,
+): MigrationErrorDetails & { reason: "ontology-tightening-violated" } {
+  expect(error).toBeInstanceOf(MigrationError);
+  const details = (error as MigrationError).details;
+  if (details.reason !== "ontology-tightening-violated") {
+    throw new Error(
+      `expected ontology-tightening-violated, got ${details.reason}`,
+    );
+  }
+  return details;
+}
+
+/**
+ * Plans `tightening` against `store`, then asserts the adopted apply refuses
+ * with exactly the refusal `store.evolve(tightening)` raises, before the
+ * callback runs and without publishing a schema version.
+ */
+async function assertAdoptedTighteningRefusedLikeEvolve<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  backend: AdapterBackend<TNativeTransaction>,
+  store: AdapterStore<G, TNativeTransaction>,
+  tightening: GraphExtension,
+): Promise<void> {
+  const graphId = store.graphId;
+  const baseline = await backend.getActiveSchema(graphId);
+  const evolveDetails = ontologyTighteningViolations(
+    await store.evolve(tightening).catch((error: unknown) => error),
+  );
+  const plan = await store.planEvolution(tightening);
+  if (plan.status !== "change") throw new Error("Expected tightening plan.");
+  expect(
+    plan.requirements.filter(
+      (requirement) => requirement.kind === "ontology-tightening",
+    ),
+  ).toEqual([
+    {
+      kind: "ontology-tightening",
+      changes: evolveDetails.changes,
+      edgeCardinalityAxes: [],
+    },
+  ]);
+  if (backend.adoptSchemaWriteTransaction === undefined) {
+    await assertUnsupportedAdoption(() =>
+      backend.transactionWithNative(async (_target, nativeTx) =>
+        store.withEvolvedTransaction(nativeTx, plan, async () => {
+          await Promise.resolve();
+        }),
+      ),
+    );
+    return;
+  }
+  let callbackRan = false;
+  const adoptedError = await backend
+    .transactionWithNative(async (_target, nativeTx) =>
+      store.withEvolvedTransaction(nativeTx, plan, async () => {
+        callbackRan = true;
+        await Promise.resolve();
+      }),
+    )
+    .catch((error: unknown) => error);
+  const adoptedDetails = ontologyTighteningViolations(adoptedError);
+  expect(adoptedDetails.violations).toEqual(evolveDetails.violations);
+  expect(adoptedDetails.changes).toEqual(evolveDetails.changes);
+  expect(callbackRan).toBe(false);
+  const active = await backend.getActiveSchema(graphId);
+  expect(active?.version).toBe(baseline?.version);
+}
 
 async function assertUnsupportedAdoption(
   run: () => Promise<unknown>,
@@ -147,7 +268,58 @@ function identityTablesForBackend(
     ),
     identityClosure: requireDefined(names.identityClosure),
     identitySeparation: requireDefined(names.identitySeparation),
+    identityTransitions: requireDefined(names.identityTransitions),
+    identityTransitionRetention: requireDefined(
+      names.identityTransitionRetention,
+    ),
   };
+}
+
+/**
+ * Replaces the stored document of `version` with one stating a different
+ * schema, as a concurrent writer committing other content at the same
+ * version would, and returns the original document to restore. A
+ * conflicting version is a different DOCUMENT: the stored `schema_hash`
+ * column is the writer's record, and comparisons hash the document itself.
+ */
+async function storeConflictingSchemaDocument(
+  backend: GraphBackend,
+  graphId: string,
+  version: number,
+): Promise<string> {
+  const execute = requireDefined(backend.executeStatement);
+  const row = requireDefined(await backend.getSchemaVersion(graphId, version));
+  const document = JSON.parse(row.schema_doc) as {
+    nodes: Record<string, { description?: string }>;
+  };
+  for (const node of Object.values(document.nodes)) {
+    node.description = "written by a conflicting writer";
+  }
+  const tableName =
+    backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
+  await execute(
+    asCompiledStatementSql(sql`
+      UPDATE ${sql.raw(tableName)} SET schema_doc = ${JSON.stringify(document)}
+      WHERE graph_id = ${graphId} AND version = ${version}
+    `),
+  );
+  return row.schema_doc;
+}
+
+async function restoreSchemaDocument(
+  backend: GraphBackend,
+  graphId: string,
+  version: number,
+  schemaDocument: string,
+): Promise<void> {
+  const tableName =
+    backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
+  await requireDefined(backend.executeStatement)(
+    asCompiledStatementSql(sql`
+      UPDATE ${sql.raw(tableName)} SET schema_doc = ${schemaDocument}
+      WHERE graph_id = ${graphId} AND version = ${version}
+    `),
+  );
 }
 
 export function registerAdoptedEvolutionIntegrationTests(
@@ -594,13 +766,10 @@ export function registerAdoptedEvolutionIntegrationTests(
         );
         return;
       }
-      const tableName =
-        backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
-      await backend.executeStatement(
-        asCompiledStatementSql(sql`
-          UPDATE ${sql.raw(tableName)} SET schema_hash = ${"0".repeat(64)}
-          WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-        `),
+      const originalDocument = await storeConflictingSchemaDocument(
+        backend,
+        graph.id,
+        plan.baseline.version,
       );
       try {
         await expect(
@@ -612,11 +781,11 @@ export function registerAdoptedEvolutionIntegrationTests(
         ).rejects.toThrow(SchemaContentConflictError);
         expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
       } finally {
-        await backend.executeStatement(
-          asCompiledStatementSql(sql`
-            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baseline.hash}
-            WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-          `),
+        await restoreSchemaDocument(
+          backend,
+          graph.id,
+          plan.baseline.version,
+          originalDocument,
         );
       }
     });
@@ -628,13 +797,10 @@ export function registerAdoptedEvolutionIntegrationTests(
       await store.evolve(extension);
       const plan = await store.planEvolution(extension);
       if (plan.status !== "noop") throw new Error("Expected no-op plan.");
-      const tableName =
-        backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
-      await backend.executeStatement(
-        asCompiledStatementSql(sql`
-          UPDATE ${sql.raw(tableName)} SET schema_hash = ${"0".repeat(64)}
-          WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-        `),
+      const originalDocument = await storeConflictingSchemaDocument(
+        backend,
+        graph.id,
+        plan.baseline.version,
       );
       try {
         await expect(
@@ -646,11 +812,11 @@ export function registerAdoptedEvolutionIntegrationTests(
         ).rejects.toThrow(SchemaContentConflictError);
         expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
       } finally {
-        await backend.executeStatement(
-          asCompiledStatementSql(sql`
-            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baseline.hash}
-            WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
-          `),
+        await restoreSchemaDocument(
+          backend,
+          graph.id,
+          plan.baseline.version,
+          originalDocument,
         );
       }
     });
@@ -795,6 +961,43 @@ export function registerAdoptedEvolutionIntegrationTests(
       ).rejects.toThrow();
       const active = await backend.getActiveSchema(graph.id);
       expect(active?.version).toBe(plan.baseline.version);
+    });
+
+    it("refuses a disjointWith tightening existing rows violate, exactly as evolve() does", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        disjointTighteningGraph,
+        backend,
+      );
+      await store.nodes.AdoptedDisjointLeft.create({}, { id: "shared" });
+      await store.nodes.AdoptedDisjointRight.create({}, { id: "shared" });
+
+      await assertAdoptedTighteningRefusedLikeEvolve(
+        backend,
+        store,
+        disjointTighteningExtension,
+      );
+    });
+
+    it("refuses an acyclic: true tightening over an existing cycle, exactly as evolve() does", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        acyclicTighteningGraph,
+        backend,
+      );
+      const evolved = await store.evolve(acyclicTighteningExtension(false));
+      const tasks = evolved.getNodeCollectionOrThrow("AdoptedAcyclicTask");
+      const first = await tasks.create({});
+      const second = await tasks.create({});
+      const dependsOn = evolved.getEdgeCollectionOrThrow("adoptedDependsOn");
+      await dependsOn.create(first, second, {});
+      await dependsOn.create(second, first, {});
+
+      await assertAdoptedTighteningRefusedLikeEvolve(
+        backend,
+        evolved,
+        acyclicTighteningExtension(true),
+      );
     });
 
     it("accepts required-empty tightening when the kind has no rows", async () => {

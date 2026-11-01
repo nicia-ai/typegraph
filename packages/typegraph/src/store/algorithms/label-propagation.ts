@@ -6,6 +6,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  assertNodeKindScope,
   type InternalTraversalOptions,
   pickTemporalOptions,
   resolveMaxIterations,
@@ -63,7 +64,8 @@ export async function executeLabelPropagation<G extends GraphDef>(
   ctx: AlgorithmContext,
   options: InternalLabelPropagationOptions<G>,
 ): Promise<readonly LabelPropagationMembership[]> {
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
+  assertNodeKindScope(ctx, options.nodeKinds);
   assertGraphAnalyticsSupported(ctx, "labelPropagation", {
     requiresWindowFunctions: true,
   });

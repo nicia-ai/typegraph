@@ -17,7 +17,10 @@ const knows = defineEdge("knows", {
   schema: z.object({ label: z.string(), note: z.string().optional() }),
 });
 
-function durableIdentityGraph(id: string) {
+function durableIdentityGraph(
+  id: string,
+  options: Readonly<{ cardinality?: "one" }> = {},
+) {
   return defineGraph({
     id,
     nodes: { Person: { type: Person } },
@@ -26,6 +29,7 @@ function durableIdentityGraph(id: string) {
         type: knows,
         from: [Person],
         to: [Person],
+        ...options,
         matchIdentity: { name: "knows-label", fields: ["label"] },
       },
     },
@@ -61,6 +65,34 @@ export function registerDurableEdgeMatchIdentityIntegrationTests(
         ),
       ).rejects.toBeInstanceOf(EdgeMatchIdentityConflictError);
       await expect(store.edges.knows.find()).resolves.toHaveLength(1);
+    });
+
+    it("refuses a constrained direct create before writing, so a caught refusal leaves no second edge", async () => {
+      const store = await context.createStore(
+        durableIdentityGraph("durable_identity_cardinality_refusal", {
+          cardinality: "one",
+        }),
+      );
+      const source = await store.nodes.Person.create({ name: "Source" });
+      const first = await store.nodes.Person.create({ name: "First" });
+      const second = await store.nodes.Person.create({ name: "Second" });
+      const incumbent = await store.edges.knows.create(source, first, {
+        label: "first",
+      });
+
+      const refusals: unknown[] = [];
+      await store.transaction(async (tx) => {
+        await tx.edges.knows
+          .create(source, second, { label: "second" })
+          .catch((error: unknown) => refusals.push(error));
+      });
+
+      expect(refusals).toEqual([
+        expect.objectContaining({ name: "CardinalityError" }),
+      ]);
+      const stored = await store.edges.knows.find();
+      expect(stored.map((edge) => edge.id)).toEqual([incumbent.id]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
     it("returns the durable incumbent without creating a duplicate", async () => {

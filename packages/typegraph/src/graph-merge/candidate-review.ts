@@ -14,7 +14,7 @@ import {
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact, MergePlanTargetFence } from "./plan-schema";
-import { validateMergePlanArtifact } from "./plan-wire";
+import { readFormatVersion, validateMergePlanArtifact } from "./plan-wire";
 import { err, isErr, ok, type Result } from "./result";
 import {
   candidateReviewReferenceRows,
@@ -30,23 +30,25 @@ import {
   reviewOptionEvidence,
 } from "./review-evidence";
 import {
-  MERGE_REVIEW_FORMAT_VERSION_V1,
-  MERGE_REVIEW_FORMAT_VERSION_V2,
+  isSupportedMergeReviewFormatVersion,
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   type MergeReviewArtifact,
   mergeReviewArtifactSchema,
   type MergeReviewDifference,
   type MergeReviewPolicy,
   mergeReviewPolicySchema,
   type MergeReviewRevalidation,
+  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
 } from "./review-schema";
-import { canUseSparseCandidatePlanning } from "./sparse-candidate-branch";
-import type { GraphDef } from "./typegraph-internal";
+import { candidatePlanningScope } from "./sparse-candidate-branch";
+import type { GraphDef, Store } from "./typegraph-internal";
 
 export type PlanCandidateWriteSetReviewArgs<G extends GraphDef> =
   PlanCandidateWriteSetArgs<G> &
     Readonly<{
       policy: MergeReviewPolicy;
-      /** V2 is explicit opt-in and uses candidate-scoped identity evidence. */
+      /** Explicit opt-in to the format that uses candidate-scoped identity evidence. */
       reviewScope?: "candidate";
     }>;
 
@@ -74,19 +76,19 @@ export async function planCandidateWriteSetReview<G extends GraphDef>(
     const options = reviewOptionEvidence(args.options);
     const startingFence = await captureMergePlanTargetFence(args.target);
     const candidateScope = args.reviewScope === "candidate";
-    if (candidateScope && !canUseSparseCandidatePlanning(args.target)) {
-      throw new MergeReviewError(
+    if (candidateScope)
+      assertCandidateScopeEligible(
+        args.target,
         "Candidate-scoped review requires a revision-tracked target without unsupported cross-row constraints.",
-        { details: { reason: "candidate-scope-ineligible" } },
       );
-    }
     const baselineBeforePlan =
       candidateScope ? undefined : await captureReviewBaseline(args.target);
     const planned = await planCandidateWriteSet({ ...args, writeSet });
     if (isErr(planned)) return planned;
+    const { plan } = planned.data;
     const referencedRows = candidateReviewReferenceRows(
       writeSet,
-      planned.data,
+      plan,
       args.target.graph,
     );
     const baseline =
@@ -101,36 +103,27 @@ export async function planCandidateWriteSetReview<G extends GraphDef>(
             ...(writeSet.identity?.assertions.map(
               (assertion) => assertion.id,
             ) ?? []),
-            ...planned.data.writes.identityAssertions.map(
-              (assertion) => assertion.id,
-            ),
-            ...planned.data.writes.identityRetractions.map(
-              (assertion) => assertion.id,
-            ),
+            ...plan.writes.identityAssertions.map((assertion) => assertion.id),
+            ...plan.writes.identityRetractions.map((assertion) => assertion.id),
           ],
         )
       : baselineBeforePlan;
     if (baseline === undefined)
-      throw new MergeReviewError("Missing V1 review baseline.");
-    assertReviewPlanFence(startingFence, planned.data);
+      throw new MergeReviewError("Missing whole-target review baseline.");
+    assertReviewPlanFence(startingFence, plan);
     await assertPlanningFenceUnchanged(args.target, startingFence);
     assertOptionsUnchanged(options, reviewOptionEvidence(args.options));
     const input = {
       formatVersion:
         candidateScope ?
-          MERGE_REVIEW_FORMAT_VERSION_V2
-        : MERGE_REVIEW_FORMAT_VERSION_V1,
+          MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED
+        : MERGE_REVIEW_FORMAT_VERSION,
       kind: "candidate-write-set" as const,
       writeSet,
       policy,
       options,
-      plan: planned.data,
-      baseline: withReviewAbsences(
-        baseline,
-        writeSet,
-        planned.data,
-        args.target.graph,
-      ),
+      plan,
+      baseline: withReviewAbsences(baseline, writeSet, plan, args.target.graph),
     };
     const review: MergeReviewArtifact = {
       ...input,
@@ -155,25 +148,22 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
     const review = await validateReview(args.review);
     const policy = mergeReviewPolicySchema.parse(args.policy);
     const options = reviewOptionEvidence(args.options);
-    const reviewedEvidenceMode =
-      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V1 ? "v1" : "v2";
+    const candidateScoped =
+      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED;
     if (
-      reviewedEvidenceMode === "v2" &&
+      candidateScoped &&
       args.target.graph.identity !== undefined &&
       review.baseline.identityReferences === undefined
     ) {
       throw new MergeReviewError(
-        "Identity-enabled V2 review evidence is missing its retained identity scope.",
+        "Identity-enabled candidate-scoped review evidence is missing its retained identity scope.",
         { details: { reason: "missing-identity-scope" } },
       );
     }
     const startingFence = await captureMergePlanTargetFence(args.target);
-    if (
-      review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
-      startingFence.revision.revision === null
-    ) {
+    if (candidateScoped && startingFence.revision.revision === null) {
       throw new MergeReviewError(
-        "Candidate-scoped V2 review evidence requires revision tracking for exact revalidation.",
+        "Candidate-scoped review evidence requires revision tracking for exact revalidation.",
         { details: { reason: "revision-tracking-required" } },
       );
     }
@@ -212,24 +202,20 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
         differences: policyDifferences,
       });
 
-    if (
-      review.baseline.scope === "referenced" &&
-      !canUseSparseCandidatePlanning(args.target)
-    ) {
-      throw new MergeReviewError(
+    if (review.baseline.scope === "referenced")
+      assertCandidateScopeEligible(
+        args.target,
         "Scoped review evidence requires a revision-tracked graph without unsupported cross-row constraints.",
-        { details: { reason: "candidate-scope-ineligible" } },
       );
-    }
     const baseline =
-      reviewedEvidenceMode === "v1" ?
-        await captureReviewBaseline(args.target)
-      : await captureReferencedReviewBaseline(
+      candidateScoped ?
+        await captureReferencedReviewBaseline(
           args.target,
           review.baseline.rows,
           review.baseline.identityReferences,
           review.baseline.identityAssertionIds ?? [],
-        );
+        )
+      : await captureReviewBaseline(args.target);
     const completeBaseline = withReviewAbsences(
       baseline,
       review.writeSet,
@@ -253,26 +239,27 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
       writeSet: review.writeSet,
     });
     if (isErr(planned)) return planned;
-    assertReviewPlanFence(startingFence, planned.data);
+    const { plan } = planned.data;
+    assertReviewPlanFence(startingFence, plan);
     await assertPlanningFenceUnchanged(args.target, startingFence);
     assertOptionsUnchanged(options, reviewOptionEvidence(args.options));
     const differences = compareFields(
       "plan",
       reviewPlanContent(review.plan),
-      reviewPlanContent(planned.data),
+      reviewPlanContent(plan),
     );
     return ok(
       differences.length === 0 ?
         {
           status: "compatible",
           reviewDigest: review.digest,
-          plan: planned.data,
+          plan,
         }
       : {
           status: "changed",
           reviewDigest: review.digest,
           differences,
-          plan: planned.data,
+          plan,
         },
     );
   } catch (error) {
@@ -281,10 +268,26 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
 }
 
 async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
+  const formatVersion = readFormatVersion(input);
+  if (!isSupportedMergeReviewFormatVersion(formatVersion)) {
+    throw new MergeReviewError(
+      "The stored merge review uses a format this library version cannot validate.",
+      {
+        details: {
+          reason: "unsupported-version",
+          received: formatVersion,
+          supported: SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
+        },
+        suggestion:
+          "Plan and review the candidate write set again with this library version.",
+      },
+    );
+  }
   const review = mergeReviewArtifactSchema.parse(input);
   if (
-    (review.formatVersion === 1 && review.baseline.scope !== undefined) ||
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
+      review.baseline.scope !== undefined) ||
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED &&
       review.baseline.scope !== "referenced")
   ) {
     throw new MergeReviewError(
@@ -345,11 +348,11 @@ async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
     );
   }
   if (
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V2 &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED &&
       (review.baseline.scope !== "referenced" ||
         (review.baseline.identityReferences === undefined) !==
           (review.baseline.identityAssertionIds === undefined))) ||
-    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION_V1 &&
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
       (review.baseline.scope !== undefined ||
         review.baseline.identityReferences !== undefined ||
         review.baseline.identityAssertionIds !== undefined))
@@ -359,6 +362,17 @@ async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
     });
   }
   return { ...review, plan: plan.artifact };
+}
+
+function assertCandidateScopeEligible<G extends GraphDef>(
+  target: Store<G>,
+  message: string,
+): void {
+  const planningScope = candidatePlanningScope(target);
+  if (planningScope.scope === "whole-target")
+    throw new MergeReviewError(message, {
+      details: { reason: "candidate-scope-ineligible", planningScope },
+    });
 }
 
 function assertReviewPlanFence(

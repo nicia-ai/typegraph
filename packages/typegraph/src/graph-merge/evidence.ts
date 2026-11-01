@@ -81,7 +81,7 @@ export type CandidateDiagnostic =
         | "retained"
         | Readonly<{
             kind: "excluded";
-            reason: "diameter" | "baseAmbiguity";
+            reason: "diameter" | "baseAmbiguity" | "separation";
           }>;
     }>
   | Readonly<{
@@ -89,7 +89,7 @@ export type CandidateDiagnostic =
       scoreDecision: "accepted";
       clusterDisposition: Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity";
+        reason: "diameter" | "baseAmbiguity" | "separation";
       }>;
     }>;
 

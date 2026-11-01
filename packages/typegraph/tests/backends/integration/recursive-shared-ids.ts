@@ -128,7 +128,7 @@ export function registerRecursiveSharedIdIntegrationTests(
         .whereNode("show", (show) => show.id.eq(SHARED_ID))
         .traverse("linked", "link", { expand: "none" })
         .recursive({ maxHops: 6, depth: true })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           kind: row.media.kind,
           id: row.media.id,
@@ -149,7 +149,7 @@ export function registerRecursiveSharedIdIntegrationTests(
         .whereNode("clip", (clip) => clip.id.eq(LEAF_ID))
         .traverse("linked", "link", { direction: "in", expand: "none" })
         .recursive({ maxHops: 6, depth: true })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           kind: row.media.kind,
           id: row.media.id,
@@ -184,7 +184,7 @@ export function registerRecursiveSharedIdIntegrationTests(
         .whereNode("show", (show) => show.id.eq(SHARED_ID))
         .traverse("linked", "link", { expand: "none" })
         .recursive({ maxHops: 6, depth: true, path: true })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           kind: row.media.kind,
           depth: row.media_depth,
@@ -211,7 +211,7 @@ export function registerRecursiveSharedIdIntegrationTests(
           depth: true,
           path: { format: "qualified", alias: "route" },
         })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           kind: row.media.kind,
           depth: row.media_depth,
@@ -254,7 +254,7 @@ export function registerRecursiveSharedIdIntegrationTests(
         .to("Clip", "clip")
         .traverse("linked", "secondLink", { expand: "none" })
         .recursive({ maxHops: 6, depth: "stageDepth", path: "stagePath" })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           from: row.clip.id,
           kind: row.media.kind,
@@ -306,7 +306,7 @@ export function registerRecursiveSharedIdIntegrationTests(
         .whereNode("start", (clip) => clip.id.eq(LEAF_ID))
         .traverse("linked", "link", { expand: "none" })
         .recursive({ maxHops: 2, path: true })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => row.media_path)
         .execute();
       expect(multiKind.toSorted()).toEqual([

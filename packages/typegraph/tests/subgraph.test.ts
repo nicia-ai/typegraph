@@ -25,11 +25,13 @@ import {
   indexSubgraph,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   type Node,
+  partOf,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { KindNotFoundError, ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
+import { type SubgraphResult } from "../src/store/subgraph";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
 
@@ -154,6 +156,119 @@ async function seedTestGraph(store: Store<TestGraph>): Promise<TestIds> {
     tool1Id: tool1.id,
   };
 }
+
+// ============================================================
+// Composition widens the subgraph result's edge-kind type
+// ============================================================
+//
+// Type-only fixtures: `compositionStore` is never a real store and none of
+// the `subgraph*` helpers below is ever CALLED — each exists so a test can
+// read its return type. The runtime behavior of `composition: true` lives
+// in the cross-backend composition-navigation suite.
+
+const CompositionWhole = defineNode("CompositionWhole", {
+  schema: z.object({ title: z.string() }),
+});
+const CompositionPart = defineNode("CompositionPart", {
+  schema: z.object({ title: z.string() }),
+});
+const partOfWhole = defineEdge("part_of_whole", { schema: z.object({}) });
+const mentions = defineEdge("mentions", { schema: z.object({}) });
+
+const compositionGraph = defineGraph({
+  id: "subgraph_composition_typing",
+  nodes: {
+    CompositionWhole: { type: CompositionWhole },
+    CompositionPart: { type: CompositionPart },
+  },
+  edges: {
+    part_of_whole: {
+      type: partOfWhole,
+      from: [CompositionPart],
+      to: [CompositionWhole],
+      cardinality: "one",
+    },
+    mentions: {
+      type: mentions,
+      from: [CompositionWhole],
+      to: [CompositionWhole],
+    },
+  },
+  ontology: [partOf(CompositionPart, CompositionWhole, { via: partOfWhole })],
+});
+
+declare const compositionStore: Store<typeof compositionGraph>;
+declare const compositionRoot: Readonly<{
+  kind: "CompositionWhole";
+  id: NodeId<typeof CompositionWhole>;
+}>;
+
+type ResultEdgeKindOf<R extends { edges: readonly { kind: string }[] }> =
+  R["edges"][number]["kind"];
+
+function subgraphWithoutComposition() {
+  return compositionStore.subgraph(compositionRoot, { edges: ["mentions"] });
+}
+
+function subgraphWithCompositionFalse() {
+  return compositionStore.subgraph(compositionRoot, {
+    edges: ["mentions"],
+    composition: false,
+  });
+}
+
+function subgraphWithCompositionTrue() {
+  return compositionStore.subgraph(compositionRoot, {
+    edges: ["mentions"],
+    composition: true,
+  });
+}
+
+function subgraphWithUnknownComposition(composition: boolean) {
+  return compositionStore.subgraph(compositionRoot, {
+    edges: ["mentions"],
+    composition,
+  });
+}
+
+// A `composition: true` call receives composition edge rows, so it must be
+// able to project them: the option that widened the result's edge-kind type
+// widens the matching projection input through the same owner
+// (`SubgraphProjectFor`).
+function subgraphProjectingCompositionEdges() {
+  return compositionStore.subgraph(compositionRoot, {
+    edges: ["mentions"],
+    composition: true,
+    project: { edges: { part_of_whole: ["meta"] } },
+  });
+}
+
+function subgraphProjectingAnUntraversedEdge() {
+  return compositionStore.subgraph(compositionRoot, {
+    edges: ["mentions"],
+    // @ts-expect-error - without `composition: true` the traversal never
+    // produces `part_of_whole` rows, so projecting that kind stays refused.
+    project: { edges: { part_of_whole: ["meta"] } },
+  });
+}
+
+/** A projection over the edge kinds the result carries is a valid `P`. */
+type ProjectedCompositionSubgraph = SubgraphResult<
+  typeof compositionGraph,
+  "CompositionWhole",
+  "mentions" | "part_of_whole",
+  { edges: { part_of_whole: readonly ["meta"] } }
+>;
+
+type NonProjectionSubgraphResult = SubgraphResult<
+  typeof compositionGraph,
+  "CompositionWhole",
+  "mentions",
+  // @ts-expect-error - the fourth argument is a projection for this graph, not
+  // an arbitrary object; without the constraint the selection silently
+  // resolves to `undefined` and every row comes back fully hydrated.
+  { nonsense: true }
+>;
 
 // ============================================================
 // Tests
@@ -870,6 +985,69 @@ describe("store.subgraph()", () => {
 
   // ── Type-level tests ────────────────────────────────────────
 
+  describe("composition widens the result's edge-kind type", () => {
+    it("keeps the declared edges list when composition is absent or false", () => {
+      expectTypeOf<
+        ResultEdgeKindOf<Awaited<ReturnType<typeof subgraphWithoutComposition>>>
+      >().toEqualTypeOf<"mentions">();
+      expectTypeOf<
+        ResultEdgeKindOf<
+          Awaited<ReturnType<typeof subgraphWithCompositionFalse>>
+        >
+      >().toEqualTypeOf<"mentions">();
+      void subgraphWithoutComposition;
+      void subgraphWithCompositionFalse;
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+
+    it("widens to the graph's whole edge-kind union under composition: true", () => {
+      // `part_of_whole` is never named in `edges`, but the composition
+      // closure can put its rows in `edges`, so the kind type must admit
+      // it.
+      expectTypeOf<
+        ResultEdgeKindOf<
+          Awaited<ReturnType<typeof subgraphWithCompositionTrue>>
+        >
+      >().toEqualTypeOf<"mentions" | "part_of_whole">();
+      void subgraphWithCompositionTrue;
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+
+    it("widens the matching projection input, not only the result", () => {
+      // Compiling IS the assertion: `project.edges.part_of_whole` is outside
+      // the declared `edges` list, and is admissible only because
+      // `composition: true` widened the projection's key set too.
+      expectTypeOf<
+        ResultEdgeKindOf<
+          Awaited<ReturnType<typeof subgraphProjectingCompositionEdges>>
+        >
+      >().toEqualTypeOf<"mentions" | "part_of_whole">();
+      void subgraphProjectingCompositionEdges;
+      void subgraphProjectingAnUntraversedEdge;
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+
+    it("keeps SubgraphResult's projection argument constrained", () => {
+      expectTypeOf<
+        ProjectedCompositionSubgraph["root"]
+      >().not.toEqualTypeOf<never>();
+      expectTypeOf<
+        NonProjectionSubgraphResult["root"]
+      >().not.toEqualTypeOf<never>();
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+
+    it("widens for a composition flag that is only known to be a boolean", () => {
+      expectTypeOf<
+        ResultEdgeKindOf<
+          Awaited<ReturnType<typeof subgraphWithUnknownComposition>>
+        >
+      >().toEqualTypeOf<"mentions" | "part_of_whole">();
+      void subgraphWithUnknownComposition;
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+  });
+
   describe("indexSubgraph lookup typing", () => {
     type WideNode = Readonly<{ kind: string; id: string; name: string }>;
     type WideEdge = Readonly<{
@@ -983,23 +1161,27 @@ describe("store.subgraph()", () => {
   });
 
   describe("compile-time type safety", () => {
-    it("rejects invalid edge kinds at compile time", async () => {
-      await store.subgraph(
-        { kind: "Run", id: ids.runId },
-        // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
-        { edges: ["nonexistent_edge"] },
-      );
+    it("rejects invalid edge kinds at compile time and at runtime", async () => {
+      await expect(
+        store.subgraph(
+          { kind: "Run", id: ids.runId },
+          // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
+          { edges: ["nonexistent_edge"] },
+        ),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
     });
 
-    it("rejects invalid includeKinds at compile time", async () => {
-      await store.subgraph(
-        { kind: "Run", id: ids.runId },
-        {
-          edges: ["has_task"],
-          // @ts-expect-error - "NonExistent" is not a valid node kind
-          includeKinds: ["NonExistent"],
-        },
-      );
+    it("rejects invalid includeKinds at compile time and at runtime", async () => {
+      await expect(
+        store.subgraph(
+          { kind: "Run", id: ids.runId },
+          {
+            edges: ["has_task"],
+            // @ts-expect-error - "NonExistent" is not a valid node kind
+            includeKinds: ["NonExistent"],
+          },
+        ),
+      ).rejects.toBeInstanceOf(KindNotFoundError);
     });
 
     it("accepts a { kind, id } reference root on every subgraph surface", async () => {
