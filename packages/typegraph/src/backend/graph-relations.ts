@@ -162,16 +162,24 @@ const REBUILD_AFTER_CLONE = {
   kind: "rebuildAfterClone",
 } as const satisfies RebuildAfterClonePolicy;
 
+/**
+ * `nodes` clears before `edges`. Deleting a node row conflicts with the
+ * endpoint lock an uncommitted edge write holds, so the node delete waits for
+ * that write, and the later edge delete — a fresh statement — sees and removes
+ * the edge it committed. In the other order the edge delete ran first, missed
+ * the uncommitted edge, and the edge survived the clear with both endpoints
+ * gone.
+ */
 const BEHAVIOR = {
   nodes: {
-    clear: { kind: "delete", order: 14, missingTable: "required" },
+    clear: { kind: "delete", order: 13, missingTable: "required" },
     role: "content",
     presenceAnchor: true,
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   edges: {
-    clear: { kind: "delete", order: 13, missingTable: "required" },
+    clear: { kind: "delete", order: 14, missingTable: "required" },
     role: "content",
     presenceAnchor: true,
     provisionedBy: "base",

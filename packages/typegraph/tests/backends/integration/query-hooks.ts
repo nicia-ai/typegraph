@@ -5,6 +5,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  indexSubgraph,
   partOf,
   type QueryHookContext,
 } from "../../../src";
@@ -49,11 +50,12 @@ function directSubgraphStatementCount(context: IntegrationTestContext): number {
 }
 
 /**
- * A composition subgraph resolves the root's kind, reads the `edges`
- * closure ids, reads the composition closure ids, then hydrates nodes and
- * edges: five statements on every engine.
+ * A composition subgraph reads the `edges` closure members, reads the
+ * composition closure members, then hydrates nodes and edges: four statements
+ * on every engine. The root reference names its kind, so no statement looks
+ * it up.
  */
-const COMPOSITION_SUBGRAPH_STATEMENT_COUNT = 5;
+const COMPOSITION_SUBGRAPH_STATEMENT_COUNT = 4;
 
 /**
  * A subgraph's node and edge fetches run concurrently on some backends, so
@@ -95,21 +97,21 @@ export function registerQueryHookIntegrationTests(
 
       starts.length = 0;
       ends.length = 0;
-      const current = await store.subgraph(root.id, {
+      const current = await store.subgraph(root, {
         edges: ["knows"],
         maxDepth: 1,
       });
-      expect(current.nodes.has(peer.id)).toBe(true);
+      expect(indexSubgraph(current).node(peer)).toBeDefined();
       expect(starts).toHaveLength(expected);
       expect(inOperationIdOrder(ends)).toEqual(inOperationIdOrder(starts));
 
       starts.length = 0;
       ends.length = 0;
-      const recorded = await store.asOfRecorded(pin).subgraph(root.id, {
+      const recorded = await store.asOfRecorded(pin).subgraph(root, {
         edges: ["knows"],
         maxDepth: 1,
       });
-      expect(recorded.nodes.has(peer.id)).toBe(true);
+      expect(indexSubgraph(recorded).node(peer)).toBeDefined();
       expect(starts).toHaveLength(expected);
       expect(inOperationIdOrder(ends)).toEqual(inOperationIdOrder(starts));
 
@@ -140,12 +142,14 @@ export function registerQueryHookIntegrationTests(
       await store.edges.hookPartOf.create(part, whole, {});
 
       starts.length = 0;
-      const unit = await store.subgraph(whole.id, {
+      const unit = await store.subgraph(whole, {
         edges: [],
         composition: true,
       });
 
-      expect(new Set(unit.nodes.keys())).toEqual(new Set([whole.id, part.id]));
+      expect(unit.nodes.map((node) => node.id).toSorted()).toEqual(
+        [whole.id, part.id].toSorted(),
+      );
       expect(starts).toHaveLength(COMPOSITION_SUBGRAPH_STATEMENT_COUNT);
     });
 

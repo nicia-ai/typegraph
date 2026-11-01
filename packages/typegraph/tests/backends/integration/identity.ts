@@ -2524,10 +2524,13 @@ export function registerIdentityIntegrationTests(
           ["shared", "mid"],
           ["shared", "mid", "shared"],
         ]);
-        // The control stops one hop short: with a bare-id cycle token the peer
-        // reads as a revisit of the start. That divergence is exactly what the
-        // composite token exists for, and it must not reach the path output.
-        expect(sortPaths(control)).toEqual([["shared", "mid"]]);
+        // A plain walk over the same kinds reaches the peer too: Person:shared
+        // and Company:shared are distinct nodes, so neither walk reads the peer
+        // as a revisit of the start, and neither leaks a composite token.
+        expect(sortPaths(control)).toEqual([
+          ["shared", "mid"],
+          ["shared", "mid", "shared"],
+        ]);
       });
 
       it("expands recursively at a historical coordinate", async () => {

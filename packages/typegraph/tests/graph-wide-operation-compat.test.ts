@@ -27,6 +27,7 @@ function operationBackend(strategy: CommonOperationStrategy) {
   return createCommonOperationBackend({
     batchConfig: BATCH_CONFIG,
     commandSession: "root",
+    writersSerialize: false,
     execution: {
       compile: () => {
         throw new Error("No SQL expected");

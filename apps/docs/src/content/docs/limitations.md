@@ -299,7 +299,7 @@ are not what happens:
   releases the unique keys of the props the row holds once it is tombstoned,
   so the key such an update moved the node to is released with it.
 - **`subgraph({ composition: true })` is an export, not a delete preview.**
-  [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier)
+  [`store.subgraph(root, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier)
   returns the owned unit as a read sees it, in the read's temporal mode
   (current, unless the read is pinned). The cascade admits each composition
   row by its pair's population instead. A composition row's window never
@@ -790,6 +790,43 @@ TypeGraph is designed for single-database deployments. It does not support:
 - Replication coordination
 
 For distributed graph workloads, consider a dedicated graph database.
+
+## Concurrent Endpoint Deletes Above READ COMMITTED (PostgreSQL)
+
+An edge write and a concurrent delete of one of its endpoints are paired with
+row locks on PostgreSQL, so at the default READ COMMITTED isolation a live edge
+can never be left naming a deleted node: whichever write runs second waits for
+the first and then either refuses (`EndpointNotFoundError`,
+`RestrictedDeleteError`) or removes the edge by the node's `onDelete` behavior.
+See
+[Edge endpoints and concurrent node deletes](/backend-setup#edge-endpoints-and-concurrent-node-deletes)
+for the full matrix.
+
+One ordering is not closed. A node delete that runs inside
+`store.transaction(fn, { isolationLevel: "repeatable_read" })` or
+`"serializable"`, whose transaction snapshot was taken before a concurrent edge
+write to that node committed, waits for that edge write and then commits without
+seeing the edge. The edge stays live on the deleted node. PostgreSQL raises no
+serialization failure because the edge write locked the node row without
+updating it.
+
+**The safe choices:**
+
+- Delete nodes at READ COMMITTED (the default), or
+- Run both the delete and the edge writers at SERIALIZABLE
+  (`isolationLevel: "serializable"`). PostgreSQL then aborts the delete with a
+  serialization failure, surfaced as `TransactionConflictError` and retryable
+  with `store.transaction(fn, { isolationLevel: "serializable", retry: { attempts } })`.
+
+The locks cover a read and the write that depends on it only inside one
+transaction or one certified atomic program. On a backend without interactive
+transactions (`drizzle-orm/neon-http`), a raw `createStore()` runs a delete
+that cannot use the atomic program — a `cascade` / `disconnect` delete, for
+instance — as independent statements, so its lock is released before its edge
+read; a schema-managed store refuses that delete instead (see
+[The guard every fused write shares](#the-guard-every-fused-write-shares)).
+SQLite needs no locks: writers take the single writer slot before their first
+read.
 
 ## Temporal Query Limitations
 

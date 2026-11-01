@@ -53,6 +53,7 @@ import type {
   InsertSchemaParams,
   InsertUniqueParams,
   ManagedNodeCreatePlan,
+  NodeRowLock,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   ResolvedNodeUpdateBatchParams,
@@ -168,6 +169,8 @@ import {
   buildInsertNodesBatchReturning,
   buildInsertNodesBatchWithSchemaFence,
   buildInsertNodeWithSchemaFence,
+  buildLockNodes,
+  buildLockNodesForAtomicDeleteWithSchemaFence,
   buildReadAtomicNodeMutationPostimages,
   buildResolvedNodeUpdateBatch,
   buildUpdateNode,
@@ -184,6 +187,7 @@ import {
   edgePrimaryKeyConstraint,
   liveNodeIdsSubquery,
   nodePrimaryKeyConstraint,
+  type RowLockClause,
   type Tables,
 } from "./shared";
 import {
@@ -364,6 +368,13 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
+  /** The `getNodes` read, row-locked for `lock` (see `NodeRowLock`). */
+  buildLockNodes: (
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    lock: NodeRowLock,
+  ) => SQL;
   buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
   buildAtomicNodeResolvedUpdateBatch: (
     entries: readonly AtomicNodeResolvedUpdateEntry[],
@@ -399,6 +410,11 @@ export type CommonOperationStrategy = Readonly<{
   buildAtomicNodeDeleteBatchWithSchemaFence: (
     input: AtomicNodeDeleteBatchInput,
     timestamp: string,
+    schemaLockClause: SQL,
+  ) => SQL;
+  /** The closed node-delete program's leading delete-lock statement. */
+  buildLockNodesForAtomicDeleteWithSchemaFence: (
+    input: AtomicNodeDeleteBatchInput,
     schemaLockClause: SQL,
   ) => SQL;
   buildSchemaFenceProbe: (
@@ -746,13 +762,9 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildDeleteNode,
   buildHardDeleteNode,
   buildInsertEdge,
-  buildInsertEdgeIfEndpointsLive,
-  buildInsertEdgeIfEndpointsLiveWithSchemaFence,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
-  buildInsertEdgesBatchWithSchemaFence,
-  buildInsertEdgesBatchReturningWithSchemaFence,
   buildGetEdge,
   buildGetEdges,
   buildUpdateEdge,
@@ -823,9 +835,41 @@ const TABLE_EXISTS_QUERIES = {
  * statement runs, so its token is deliberately empty.
  */
 const RESOLVED_NODE_UPDATE_LOCK_CLAUSES = {
-  postgres: sql`FOR UPDATE`,
+  // `NO KEY UPDATE`, not `UPDATE`: the batch rewrites only props and the
+  // version, and the stronger lock would conflict with the `FOR KEY SHARE` an
+  // edge write holds on its endpoints, so a batch update and an edge write
+  // locking each other's rows in opposite orders deadlocked. It still
+  // conflicts with every other writer of the row, delete included.
+  postgres: sql`FOR NO KEY UPDATE`,
   sqlite: sql.empty(),
 } satisfies Record<SqlDialect, SQL>;
+
+function postgresRowLock(strength: "FOR KEY SHARE" | "FOR UPDATE") {
+  return (of?: readonly string[]): SQL =>
+    of === undefined || of.length === 0 ?
+      sql.raw(strength)
+    : sql.raw(
+        `${strength} OF ${of.map((alias) => `"${alias.replaceAll('"', '""')}"`).join(", ")}`,
+      );
+}
+
+const EMPTY_ROW_LOCK: RowLockClause = () => sql.empty();
+
+/**
+ * The node-row lock pairing that keeps a live edge from naming a deleted
+ * endpoint (see `NodeRowLock`). PostgreSQL takes the locks a foreign key's
+ * referential check pairs with a referenced-row delete: an edge write holds
+ * `FOR KEY SHARE` on both endpoints, which no ordinary node update conflicts
+ * with, and a delete takes `FOR UPDATE` before it reads connected edges.
+ * SQLite admits one writer before any statement runs, so both are empty.
+ */
+export const NODE_ROW_LOCK_CLAUSES = {
+  postgres: {
+    edgeEndpoint: postgresRowLock("FOR KEY SHARE"),
+    delete: postgresRowLock("FOR UPDATE"),
+  },
+  sqlite: { edgeEndpoint: EMPTY_ROW_LOCK, delete: EMPTY_ROW_LOCK },
+} satisfies Record<SqlDialect, Record<NodeRowLock, RowLockClause>>;
 
 function createCommonOperationStrategy(
   tables: Tables,
@@ -1038,6 +1082,7 @@ function createCommonOperationStrategy(
     table: getTableName(tables.nodes),
     column: tables.nodes.props.name,
   } as const;
+  const endpointLock = NODE_ROW_LOCK_CLAUSES[dialect].edgeEndpoint;
 
   return {
     ...tableOperations,
@@ -1047,9 +1092,70 @@ function createCommonOperationStrategy(
       ...(fulltextStrategy === undefined ? [] : (["fulltext"] as const)),
     ],
     buildConvergeEdgeCreate: (params) =>
-      buildConvergeEdgeCreate(tables, params),
+      buildConvergeEdgeCreate(tables, params, endpointLock),
     buildAtomicConvergeEdges: (params) =>
-      buildAtomicConvergeEdges(tables, params),
+      buildAtomicConvergeEdges(tables, params, endpointLock),
+    buildInsertEdgeIfEndpointsLive: (params, timestamp) =>
+      buildInsertEdgeIfEndpointsLive(tables, params, timestamp, endpointLock),
+    buildInsertEdgeIfEndpointsLiveWithSchemaFence: (
+      params,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildInsertEdgeIfEndpointsLiveWithSchemaFence(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      ),
+    buildInsertEdgesBatchWithSchemaFence: (
+      params,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildInsertEdgesBatchWithSchemaFence(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      ),
+    buildInsertEdgesBatchReturningWithSchemaFence: (
+      params,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildInsertEdgesBatchReturningWithSchemaFence(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      ),
+    buildLockNodes: (graphId, kind, ids, lock) =>
+      buildLockNodes(
+        tables,
+        dialect,
+        graphId,
+        kind,
+        ids,
+        NODE_ROW_LOCK_CLAUSES[dialect][lock],
+      ),
+    buildLockNodesForAtomicDeleteWithSchemaFence: (input, schemaLockClause) =>
+      buildLockNodesForAtomicDeleteWithSchemaFence(
+        tables,
+        dialect,
+        input,
+        schemaLockClause,
+        NODE_ROW_LOCK_CLAUSES[dialect].delete,
+      ),
     buildAtomicConvergeEdgesTombstoneRefusal: (params) =>
       buildAtomicConvergeEdgesTombstoneRefusal(tables, params),
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
@@ -1505,6 +1611,7 @@ export function createPostgresOperationStrategy(
         params,
         claim,
         timestamp,
+        NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
       ),
     buildLockSchemaVersionAndGraphWrite: (
       params,

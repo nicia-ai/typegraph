@@ -251,20 +251,23 @@ export function registerStoreViewIntegrationTests(
 
         const past = await store
           .asOf(AS_OF)
-          .subgraph(aliceId as never, { edges: ["knows"] });
-        expect([...past.nodes.keys()].length).toBe(3);
-        expect(
-          [...past.nodes.values()].every((node) => node.kind === "Person"),
-        ).toBe(true);
-        const pastNames = [...past.nodes.values()]
+          .subgraph({ kind: "Person", id: aliceId } as never, {
+            edges: ["knows"],
+          });
+        expect(past.nodes.length).toBe(3);
+        expect(past.nodes.every((node) => node.kind === "Person")).toBe(true);
+        const pastNames = past.nodes
           .map((node) => (node as { name: string }).name)
           .toSorted();
         expect(pastNames).toEqual(["Alice", "Carol", "Erin"]);
 
-        const current = await store.subgraph(aliceId as never, {
-          edges: ["knows"],
-        });
-        const currentNames = [...current.nodes.values()]
+        const current = await store.subgraph(
+          { kind: "Person", id: aliceId } as never,
+          {
+            edges: ["knows"],
+          },
+        );
+        const currentNames = current.nodes
           .map((node) => (node as { name: string }).name)
           .toSorted();
         expect(currentNames).toEqual(["Alice", "Dave"]);

@@ -75,6 +75,10 @@ import {
   missingRequiredExtras,
 } from "../../backend/capabilities/resolve";
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
+import {
+  resolveWriteFencePlan,
+  serializesWriters,
+} from "../../backend/capabilities/write-fence";
 import { deriveBackend } from "../../backend/derive-backend";
 import { resolvedNodeUpdateBatchFitsBindBudget } from "../../backend/resolved-node-update-batch";
 import {
@@ -295,6 +299,7 @@ import {
   validateAndPrepareEdgeCreate,
 } from "./edge-operations";
 import { assertNodeDeletePlanExpected } from "./node-delete-expectation";
+import { lockNodeRow, lockNodeRows, lockNodeRowsById } from "./node-row-locks";
 import {
   judgeNodeDeleteBehavior,
   nodeClaimTransition,
@@ -705,6 +710,10 @@ function noPlannedDeleteEffects(): PlannedDeleteEffects {
  * cascade with a consumed edge to remove writes first, so its root is judged
  * here whatever the caller says ({@link cascadeWritesBeforeRoot}).
  *
+ * `lockMembers` is every delete that goes on to write: it takes each member's
+ * delete lock before the first member is judged ({@link lockCascadeMembers}).
+ * `planDelete`'s preview writes nothing and takes none.
+ *
  * An empty plan when `policy?.cascadeComposition` is `false` (merge apply's
  * request: its plan already carries the part deletions) or when the kind
  * declares no composition parts.
@@ -716,7 +725,7 @@ async function planCascadingNodeDelete<G extends GraphDef>(
   lock: GraphWriteLock,
   policy: NodeDeletePolicy | undefined,
   effects: PlannedDeleteEffects,
-  judgeRoot: boolean,
+  options: Readonly<{ judgeRoot: boolean; lockMembers: boolean }>,
 ): Promise<CompositionCascadePlan> {
   const plan: CompositionCascadePlan = withoutPlannedDeleteEffects(
     policy?.cascadeComposition === false ?
@@ -729,6 +738,7 @@ async function planCascadingNodeDelete<G extends GraphDef>(
       ),
     effects,
   );
+  if (options.lockMembers) await lockCascadeMembers(ctx, target, plan);
 
   const judge = async (
     node: Readonly<{ kind: string; id: string }>,
@@ -752,11 +762,43 @@ async function planCascadingNodeDelete<G extends GraphDef>(
 
   const memberPolicy = cascadeMemberDeletePolicy(plan);
   for (const member of plan.members) await judge(member, memberPolicy);
-  if (judgeRoot || cascadeWritesBeforeRoot(plan)) {
+  if (options.judgeRoot || cascadeWritesBeforeRoot(plan)) {
     await judge(root, withCascadeConsumedEdges(policy, plan.consumedEdgeIds));
   }
   for (const edgeId of plan.consumedEdgeIds) effects.removedEdgeIds.add(edgeId);
   return plan;
+}
+
+/**
+ * Takes the delete lock on every cascade member before any member's connected
+ * edges are read — the lock a direct delete of that member takes
+ * (`node-row-locks.ts`). An edge write that holds a member as a locked
+ * endpoint then commits first, and the member's delete sees and removes its
+ * edge instead of leaving it pointing at a deleted part. One statement per
+ * member kind, kinds in code-unit order; the per-graph write lock the cascade
+ * holds already orders it against every other cascade. Where writers
+ * serialize there is no concurrent edge write to wait for, so no statement is
+ * issued.
+ */
+async function lockCascadeMembers<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  plan: CompositionCascadePlan,
+): Promise<void> {
+  if (plan.members.length === 0) return;
+  if (serializesWriters(resolveWriteFencePlan(target))) return;
+  const memberIdsByKind = new Map<string, string[]>();
+  for (const member of plan.members) {
+    const ids = memberIdsByKind.get(member.kind) ?? [];
+    ids.push(member.id);
+    memberIdsByKind.set(member.kind, ids);
+  }
+  const lockOrder = [...memberIdsByKind].toSorted(([left], [right]) =>
+    compareStrings(left, right),
+  );
+  for (const [kind, ids] of lockOrder) {
+    await lockNodeRows(target, ctx.graphId, kind, ids, "delete");
+  }
 }
 
 /**
@@ -6992,8 +7034,16 @@ export async function executeNodeDelete<G extends GraphDef>(
       // This preflight is NOT removable round-trip fat: the soft-delete
       // pipeline consumes the pre-image (uniqueness entries are keyed by
       // props-derived constraint keys), and this in-transaction read is
-      // the concurrency-correct source for it.
-      const preflight = await target.getNode(ctx.graphId, kind, id);
+      // the concurrency-correct source for it. It takes the delete lock
+      // before the pipeline reads connected edges, so an edge write that
+      // holds this node as a locked endpoint commits first and is seen.
+      const preflight = await lockNodeRow(
+        target,
+        ctx.graphId,
+        kind,
+        id,
+        "delete",
+      );
       if (preflight === undefined || !isLiveNodeRow(preflight)) {
         if (expect !== undefined) {
           assertNodeDeletePlanExpected({ kind, id }, expect, undefined);
@@ -7014,7 +7064,7 @@ export async function executeNodeDelete<G extends GraphDef>(
         lock,
         policy,
         effects,
-        expect !== undefined,
+        { judgeRoot: expect !== undefined, lockMembers: true },
       );
       if (expect !== undefined) {
         assertNodeDeletePlanExpected(
@@ -7123,7 +7173,7 @@ async function planLiveNodeDelete<G extends GraphDef>(
     lock,
     undefined,
     effects,
-    true,
+    { judgeRoot: true, lockMembers: false },
   );
   return nodeDeletePlanOf(cascadePlan, effects);
 }
@@ -7294,6 +7344,17 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
       // `planCascadingNodeDelete`. An item an earlier item's cascade already
       // deletes is skipped here exactly as its own in-order read would have
       // found it gone.
+      //
+      // One delete-lock statement for the whole batch, in id order, before
+      // any item's connected-edge read: concurrent batches with overlapping
+      // ids then lock in one order instead of deadlocking item by item.
+      const preflights = await lockNodeRowsById(
+        target,
+        ctx.graphId,
+        kind,
+        ids,
+        "delete",
+      );
       const effects = noPlannedDeleteEffects();
       const plannedDeletes: Readonly<{
         id: string;
@@ -7305,7 +7366,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
       }>[] = [];
       for (const id of ids) {
         if (effects.deletedNodeKeys.has(refKey({ kind, id }))) continue;
-        const preflight = await target.getNode(ctx.graphId, kind, id);
+        const preflight = preflights.get(id);
         if (preflight === undefined || !isLiveNodeRow(preflight)) continue;
         plannedDeletes.push({
           id,
@@ -7317,7 +7378,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
             lock,
             undefined,
             effects,
-            ids.length > 1,
+            { judgeRoot: ids.length > 1, lockMembers: true },
           ),
         });
       }
@@ -7450,13 +7511,18 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       _overlaidSession,
       lock,
     ): Promise<NodeDeleteOutcome> => {
-      // No in-transaction preflight (unlike soft delete, whose pipeline
+      // The delete lock, before the delete-behavior check reads connected
+      // edges. Its row is not needed (unlike soft delete, whose pipeline
       // consumes the pre-image for uniqueness-key cleanup): every hard
       // cascade member is id-keyed and idempotent — the delete-behavior
       // check re-reads edges itself, `hardDeleteNode` deletes by primary
       // key, and embeddings clean up by id — so a node concurrently
       // removed between the gate and the write lock makes each statement
-      // a 0-row no-op.
+      // a 0-row no-op. A backend whose declared write fence admits one
+      // writer has nothing to lock, so it pays no statement for it.
+      if (!serializesWriters(resolveWriteFencePlan(target))) {
+        await lockNodeRow(target, ctx.graphId, kind, id, "delete");
+      }
 
       // Composition parts, leaf-first, BEFORE the whole itself.
       const cascadePlan = await planCascadingNodeDelete(
@@ -7466,7 +7532,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         lock,
         policy,
         noPlannedDeleteEffects(),
-        false,
+        { judgeRoot: false, lockMembers: true },
       );
       await applyCompositionCascade(ctx, cascadePlan, target, "hard", session);
 

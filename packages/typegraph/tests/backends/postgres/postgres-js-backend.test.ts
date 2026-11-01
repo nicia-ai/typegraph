@@ -215,7 +215,6 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
         // PostgreSQL server: two `createSerializedBackend()` handles are
         // genuinely independent physical connections.
         serverLaneConcurrency: true,
-        recoversFailedStatementInTransaction: false,
       },
     );
   });

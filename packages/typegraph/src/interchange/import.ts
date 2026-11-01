@@ -59,6 +59,10 @@ import {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
+import {
+  resolveWriteFencePlan,
+  serializesWriters,
+} from "../backend/capabilities/write-fence";
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import {
   acquireSerializedStreamLease,
@@ -159,6 +163,7 @@ import {
   type NodeCreateDraft,
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
+import { lockNodeRows } from "../store/operations/node-row-locks";
 import {
   type OverlaidSessionMint,
   runWritePlan,
@@ -182,6 +187,7 @@ import {
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { compareCodePoints } from "../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -413,7 +419,29 @@ type ImportWriteFrame = Readonly<{
   applyNodeWindowEnd: (
     input: Readonly<{ kind: string; id: string; validTo?: string }>,
   ) => Promise<void>;
+  /**
+   * Endpoint liveness verdicts this attempt already read, by node key. An
+   * attempt is one write plan: inside its transaction the endpoint locks the
+   * reads took are still held, so a later slice can reuse the verdict.
+   */
+  endpointLiveness: Map<string, boolean>;
+  /**
+   * Whether other writers can contend for endpoint rows — false when the
+   * target's declared write fence serializes writers, where a skipped live
+   * node needs no locked re-read.
+   */
+  endpointLocksContend: boolean;
 }>;
+
+/**
+ * How a node the import accounted for became a valid edge endpoint:
+ * `"written"` — created or updated by this attempt, inside its own write
+ * transaction; `"skippedLive"` — an existing live row the import left alone.
+ */
+type ImportedNodeOrigin = "written" | "skippedLive";
+
+/** The nodes this attempt accounted for, by node key. */
+type ImportedNodes = Map<string, ImportedNodeOrigin>;
 
 /**
  * The counters, error list, and imported-id set one import write-plan attempt
@@ -423,10 +451,11 @@ type ImportWriteFrame = Readonly<{
  * {@link runImportWritePlanAttempt}'s return type, and that function is
  * test-only.
  */
+
 export type ImportAttemptState = Readonly<{
   result: ImportResult;
   errors: ImportError[];
-  importedNodeIds: Set<string>;
+  importedNodeIds: ImportedNodes;
 }>;
 
 /** Fresh, empty attempt state. Called once at the top of every attempt. */
@@ -434,7 +463,7 @@ function createImportAttemptState(): ImportAttemptState {
   return {
     result: emptyImportResult(),
     errors: [],
-    importedNodeIds: new Set<string>(),
+    importedNodeIds: new Map<string, ImportedNodeOrigin>(),
   };
 }
 
@@ -535,6 +564,8 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     dialect: inputs.dialect,
     applyNodeWindowEnd: (input) =>
       inputs.runtime.applyImportedNodeWindowEnd(target, input),
+    endpointLiveness: new Map<string, boolean>(),
+    endpointLocksContend: !serializesWriters(resolveWriteFencePlan(target)),
   };
   // Before the first row: whether this destination has identity history of
   // its own is a fact about it BEFORE this import, and the node and assertion
@@ -1969,7 +2000,7 @@ async function processNodes(
   options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const batchSize = options.batchSize;
@@ -1996,17 +2027,17 @@ function recordNodeOutcome(
   outcome: ProcessResult,
   result: ImportResult,
   errors: ImportError[],
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
 ): void {
   switch (outcome.status) {
     case "created": {
       result.nodes.created++;
-      importedNodeIds.add(makeNodeKey(node.kind, node.id));
+      importedNodeIds.set(makeNodeKey(node.kind, node.id), "written");
       break;
     }
     case "updated": {
       result.nodes.updated++;
-      importedNodeIds.add(makeNodeKey(node.kind, node.id));
+      importedNodeIds.set(makeNodeKey(node.kind, node.id), "written");
       break;
     }
     case "skipped": {
@@ -2014,7 +2045,7 @@ function recordNodeOutcome(
       // A live skipped row is still a valid edge endpoint; a tombstone
       // is not.
       if (outcome.liveTarget) {
-        importedNodeIds.add(makeNodeKey(node.kind, node.id));
+        importedNodeIds.set(makeNodeKey(node.kind, node.id), "skippedLive");
       }
       break;
     }
@@ -2058,7 +2089,7 @@ async function processNodeSlice(
   options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
@@ -3243,6 +3274,71 @@ async function processNode(
 // Edge Processing
 // ============================================================
 
+/**
+ * The import's one endpoint-liveness verdict, shared by the set-oriented slice
+ * and the deferred per-row path: the keys of `endpoints` that are live.
+ *
+ * A node this attempt wrote is live without a read — a created row is
+ * invisible to every other transaction, and an updated one is held by the
+ * import's own row lock, which a delete's lock waits on. So is a live node the
+ * import skipped, where the target's write fence serializes writers. Every
+ * other endpoint is read under the edge-endpoint lock (see
+ * `node-row-locks.ts`), one statement per kind in code-point kind order, and
+ * stays locked to the end of the attempt's transaction: a concurrent delete of
+ * it either waits for this import and sees its edges, or makes the read wait
+ * and see its tombstone. A verdict read once is reused by later slices of the
+ * same attempt.
+ */
+async function readLiveImportEndpoints(
+  frame: ImportWriteFrame,
+  graphId: string,
+  endpoints: readonly Readonly<{ kind: string; id: string }>[],
+  importedNodeIds: ImportedNodes,
+): Promise<Set<string>> {
+  const liveKeys = new Set<string>();
+  const idsByKind = new Map<string, Set<string>>();
+  for (const endpoint of endpoints) {
+    const key = makeNodeKey(endpoint.kind, endpoint.id);
+    const origin = importedNodeIds.get(key);
+    if (
+      origin === "written" ||
+      (origin === "skippedLive" && !frame.endpointLocksContend)
+    ) {
+      liveKeys.add(key);
+      continue;
+    }
+    const known = frame.endpointLiveness.get(key);
+    if (known !== undefined) {
+      if (known) liveKeys.add(key);
+      continue;
+    }
+    const ids = idsByKind.get(endpoint.kind) ?? new Set<string>();
+    ids.add(endpoint.id);
+    idsByKind.set(endpoint.kind, ids);
+  }
+  for (const kind of [...idsByKind.keys()].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  )) {
+    const ids = [...requireDefined(idsByKind.get(kind))];
+    const rows = await lockNodeRows(
+      frame.target,
+      graphId,
+      kind,
+      ids,
+      "edgeEndpoint",
+    );
+    const live = new Set(
+      rows.filter((row) => isLiveNodeRow(row)).map((row) => row.id),
+    );
+    for (const id of ids) {
+      const key = makeNodeKey(kind, id);
+      frame.endpointLiveness.set(key, live.has(id));
+      if (live.has(id)) liveKeys.add(key);
+    }
+  }
+  return liveKeys;
+}
+
 async function processEdges(
   frame: ImportWriteFrame,
   graphId: string,
@@ -3253,7 +3349,7 @@ async function processEdges(
   options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   const batchSize = options.batchSize;
@@ -3338,7 +3434,7 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
   ledger: RequiredPartLedger,
   result: ImportResult,
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
   errors: ImportError[],
 ): Promise<void> {
   // Accepted parts by the whole that holds them, so a whole purged later
@@ -3408,7 +3504,7 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
   part: PendingRequiredPart,
   ledger: RequiredPartLedger,
   result: ImportResult,
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
   errors: ImportError[],
 ): Promise<boolean> {
   const registration = frame.graph.nodes[part.kind];
@@ -3737,7 +3833,7 @@ async function processEdgeSlice(
   options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
   pendingMatchIdentityOwners: Set<string>,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
@@ -3840,50 +3936,17 @@ async function processEdgeSlice(
     candidates.push({ edge, props: propsResult.data });
   }
 
-  // Batch the endpoint-liveness reads: one getNodes per endpoint kind for
-  // every key the import itself didn't create. Falls back to per-row
-  // getNode inside the routing loop when the backend lacks getNodes.
-  const liveEndpointKeys = new Set<string>();
-  const checkedEndpointKeys = new Set<string>();
-  const boundGetNodesForEndpoints = bindExtraIfReachable(
-    frame.target,
-    frame.batchPointRead.extras.getNodes,
-    BATCH_POINT_READ.id,
-  );
-  if (options.validateReferences && boundGetNodesForEndpoints !== undefined) {
-    const idsByKind = new Map<string, Set<string>>();
-    for (const { edge } of candidates) {
-      for (const endpoint of [edge.from, edge.to]) {
-        const key = makeNodeKey(endpoint.kind, endpoint.id);
-        if (importedNodeIds.has(key) || checkedEndpointKeys.has(key)) continue;
-        checkedEndpointKeys.add(key);
-        const ids = idsByKind.get(endpoint.kind) ?? new Set<string>();
-        ids.add(endpoint.id);
-        idsByKind.set(endpoint.kind, ids);
-      }
-    }
-    for (const [kind, ids] of idsByKind) {
-      const rows = await boundGetNodesForEndpoints.getNodes(graphId, kind, [
-        ...ids,
-      ]);
-      for (const row of rows) {
-        if (isLiveNodeRow(row)) {
-          liveEndpointKeys.add(makeNodeKey(kind, row.id));
-        }
-      }
-    }
-  }
-
-  const endpointIsLive = async (endpoint: {
-    kind: string;
-    id: string;
-  }): Promise<boolean> => {
-    const key = makeNodeKey(endpoint.kind, endpoint.id);
-    if (importedNodeIds.has(key)) return true;
-    if (checkedEndpointKeys.has(key)) return liveEndpointKeys.has(key);
-    const row = await frame.target.getNode(graphId, endpoint.kind, endpoint.id);
-    return row !== undefined && isLiveNodeRow(row);
-  };
+  const liveEndpointKeys =
+    options.validateReferences ?
+      await readLiveImportEndpoints(
+        frame,
+        graphId,
+        candidates.flatMap(({ edge }) => [edge.from, edge.to]),
+        importedNodeIds,
+      )
+    : new Set<string>();
+  const endpointIsLive = (endpoint: { kind: string; id: string }): boolean =>
+    liveEndpointKeys.has(makeNodeKey(endpoint.kind, endpoint.id));
 
   // Batch the existence reads. Falls back to per-row getEdge when the
   // backend lacks getEdges.
@@ -3914,14 +3977,14 @@ async function processEdgeSlice(
     const { edge, props } = candidate;
 
     if (options.validateReferences) {
-      if (!(await endpointIsLive(edge.from))) {
+      if (!endpointIsLive(edge.from)) {
         record(edge, {
           status: "error",
           error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
         });
         continue;
       }
-      if (!(await endpointIsLive(edge.to))) {
+      if (!endpointIsLive(edge.to)) {
         record(edge, {
           status: "error",
           error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
@@ -4326,7 +4389,7 @@ async function processEdge(
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ResolvedImportOptions,
-  importedNodeIds: Set<string>,
+  importedNodeIds: ImportedNodes,
 ): Promise<ProcessResult> {
   // Validate edge kind exists
   const schemaEntry = edgeSchemas.get(edge.kind);
@@ -4363,39 +4426,23 @@ async function processEdge(
 
   // Validate references exist (in DB or in import batch)
   if (options.validateReferences) {
-    const fromKey = makeNodeKey(edge.from.kind, edge.from.id);
-    const toKey = makeNodeKey(edge.to.kind, edge.to.id);
-
-    // Check import batch first, then DB. The DB row must be LIVE: getNode
-    // returns tombstones, and inserting an edge whose endpoint is
-    // soft-deleted would bypass the endpoint-liveness invariant the
-    // collection API enforces.
-    if (!importedNodeIds.has(fromKey)) {
-      const fromExists = await frame.target.getNode(
-        graphId,
-        edge.from.kind,
-        edge.from.id,
-      );
-      if (fromExists === undefined || !isLiveNodeRow(fromExists)) {
-        return {
-          status: "error",
-          error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
-        };
-      }
+    const liveEndpointKeys = await readLiveImportEndpoints(
+      frame,
+      graphId,
+      [edge.from, edge.to],
+      importedNodeIds,
+    );
+    if (!liveEndpointKeys.has(makeNodeKey(edge.from.kind, edge.from.id))) {
+      return {
+        status: "error",
+        error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
+      };
     }
-
-    if (!importedNodeIds.has(toKey)) {
-      const toExists = await frame.target.getNode(
-        graphId,
-        edge.to.kind,
-        edge.to.id,
-      );
-      if (toExists === undefined || !isLiveNodeRow(toExists)) {
-        return {
-          status: "error",
-          error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
-        };
-      }
+    if (!liveEndpointKeys.has(makeNodeKey(edge.to.kind, edge.to.id))) {
+      return {
+        status: "error",
+        error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
+      };
     }
   }
 

@@ -32,6 +32,7 @@ import {
   edgeClaimRelationMissing,
 } from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
+import { compareCodePoints } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import {
   isDuplicatePrimaryKeyError,
@@ -149,6 +150,7 @@ import type {
   MisassignedEdgeEndpointRow,
   NodeCreateCommandResult,
   NodeRow,
+  NodeRowLock,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
@@ -643,6 +645,7 @@ export type CommonOperationBackend = Pick<
   | "getEdges"
   | "getNode"
   | "getNodes"
+  | "lockNodes"
   | "getSchemaVersion"
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
@@ -780,6 +783,12 @@ type CreateCommonOperationBackendOptions = Readonly<{
   rowMappers: OperationBackendRowMappers;
   /** Present only on bundled dialect backends that own the fused SQL contract. */
   schemaFenceLockClause?: SQL | undefined;
+  /**
+   * The backend's resolved write fence admits one writer at a time
+   * (`serializesWriters`). Statements that would only take row locks — the
+   * closed node-delete program's leading lock slots — are omitted.
+   */
+  writersSerialize: boolean;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   schemaGraphWriteLockNamespace?: string | undefined;
   /**
@@ -998,6 +1007,7 @@ async function withAtomicNodeDeleteRestrictionClassification<T>(
 }
 
 type AtomicDeleteSlotResult =
+  | Readonly<{ kind: "lock" }>
   | Readonly<{ kind: "affected"; count: number }>
   | Readonly<{ kind: "claim-release" }>
   | Readonly<{ kind: "fence"; matched: boolean }>;
@@ -1012,7 +1022,7 @@ function assembleAtomicDeleteBatchResult(
       affectedCount += result.count;
       continue;
     }
-    if (result.kind === "claim-release") continue;
+    if (result.kind === "lock" || result.kind === "claim-release") continue;
     if (fenceResult !== undefined) {
       throw new CompilerInvariantError(
         "Atomic delete program returned more than one schema-fence result.",
@@ -3506,6 +3516,24 @@ export function createCommonOperationBackend(
             );
           }
           const timestamp = nowIso();
+          // The delete lock leads the program: each delete slot's
+          // connected-edge check is a later statement, so its snapshot sees
+          // every edge an endpoint-locked writer committed while this waited.
+          const orderedIds = [...new Set(input.ids)].toSorted((left, right) =>
+            compareCodePoints(left, right),
+          );
+          const lockSlots = (
+            options.writersSerialize ? [] : chunkArray(orderedIds, chunkSize)
+          ).map((ids) => ({
+            statement: execution.compile(
+              operationStrategy.buildLockNodesForAtomicDeleteWithSchemaFence(
+                { ...input, ids },
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: () => ({ kind: "lock" }) as const,
+          }));
           const deleteSlots = chunkArray(input.ids, chunkSize).map((ids) => ({
             statement: execution.compile(
               operationStrategy.buildAtomicNodeDeleteBatchWithSchemaFence(
@@ -3538,6 +3566,7 @@ export function createCommonOperationBackend(
           );
           const program = {
             slots: [
+              ...lockSlots,
               ...deleteSlots,
               ...claimReleaseSlots,
               {
@@ -4891,6 +4920,36 @@ export function createCommonOperationBackend(
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(ids, batchConfig.getNodesChunkSize)) {
         const query = operationStrategy.buildGetNodes(graphId, kind, chunk);
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
+      }
+      return allRows;
+    },
+
+    async lockNodes(
+      graphId: string,
+      kind: string,
+      ids: readonly string[],
+      lock: NodeRowLock,
+    ): Promise<readonly NodeRow[]> {
+      if (ids.length === 0) return [];
+      // Code-point order before chunking, the order each statement's
+      // `ORDER BY` also uses, so every chunk and every row inside it locks in
+      // one order across concurrent lockers of overlapping sets.
+      const orderedIds = [...new Set(ids)].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      );
+      const allRows: NodeRow[] = [];
+      for (const chunk of chunkArray(
+        orderedIds,
+        batchConfig.getNodesChunkSize,
+      )) {
+        const query = operationStrategy.buildLockNodes(
+          graphId,
+          kind,
+          chunk,
+          lock,
+        );
         const rows = await execution.execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
       }

@@ -58,7 +58,7 @@ function readsStating(
 ): Readonly<Record<string, () => Promise<unknown>>> {
   const options = { edges: ["knows"], ...stated } as never;
   return {
-    subgraph: () => view.subgraph(alice.id, options),
+    subgraph: () => view.subgraph(alice, options),
     shortestPath: () => view.shortestPath(alice, bob, options),
     weightedShortestPath: () =>
       view.weightedShortestPath(alice, bob, {
@@ -203,7 +203,7 @@ describe("a StoreView read refuses a caller-stated coordinate", () => {
     const view = seeded.store.asOf(OTHER_INSTANT);
 
     const refusal = await view
-      .subgraph(seeded.alice.id, {
+      .subgraph(seeded.alice, {
         edges: ["knows"],
         temporalMode: "current",
         asOf: undefined,
@@ -227,10 +227,10 @@ describe("a StoreView read refuses a caller-stated coordinate", () => {
     const before = seeded.store.asOf(OTHER_INSTANT);
 
     const names = async (view: View) => {
-      const result = await view.subgraph(seeded.alice.id, {
+      const result = await view.subgraph(seeded.alice, {
         edges: ["knows"],
       });
-      return [...result.nodes.values()].map((node) => node.name).toSorted();
+      return result.nodes.map((node) => node.name).toSorted();
     };
 
     expect(await names(now)).toEqual(["alice", "bob"]);

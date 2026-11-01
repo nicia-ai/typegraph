@@ -38,6 +38,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "hardDeleteNode",
   "getNode",
   "getNodes",
+  "lockNodes",
   "insertEdge",
   "insertEdgeNoReturn",
   "insertEdgesBatch",

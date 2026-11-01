@@ -28,6 +28,7 @@ import {
   buildTakeOverEdgeClaimGuarded,
 } from "../src/backend/drizzle/operations/edge-claims";
 import type { Tables } from "../src/backend/drizzle/operations/shared";
+import { NODE_ROW_LOCK_CLAUSES } from "../src/backend/drizzle/operations/strategy";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import type {
@@ -433,6 +434,7 @@ describe("buildInsertEdgeIfEndpointsLiveWithCardinalityClaim on PostgreSQL", () 
       },
       composition,
       TIMESTAMP,
+      NODE_ROW_LOCK_CLAUSES.postgres.edgeEndpoint,
     );
     expect(compositionHolderShape(render(new PgDialect(), statement))).toEqual({
       armPairs: 2,

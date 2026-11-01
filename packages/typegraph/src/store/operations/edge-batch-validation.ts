@@ -15,6 +15,9 @@
  * accounting, not two implementations — a second copy is exactly how import's
  * edge path came to have none at all.
  *
+ * It also caches the batch's endpoint rows, so each row's endpoint check reads
+ * its endpoints once, under the edge-endpoint lock (see `node-row-locks.ts`).
+ *
  * It is a read overlay only. The CLAIM is issued against the real backend, once
  * per batch, by the caller — a claim against this wrapper would still reach the
  * real target (`deriveBackend` forwards every non-overlaid member) but
@@ -41,6 +44,8 @@ import {
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
+  type NodeRow,
+  type NodeRowLock,
 } from "../../backend/types";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
@@ -50,6 +55,7 @@ import {
   edgeCardinalitySpec,
   membershipCountsRow,
 } from "../claims/edge-claims";
+import { lockNodeRow, lockNodeRows } from "./node-row-locks";
 import { type WriteTarget } from "./write-session";
 
 function buildEdgeEndpointCacheKey(
@@ -125,7 +131,10 @@ export function createEdgeBatchValidationBackend(
   const pendingByTarget = new Map<string, number>();
   const pendingUniqueTargets = new Set<string>();
 
-  async function getNodeCached(
+  // Every cached endpoint row was read under the edge-endpoint lock — by the
+  // batch's priming pass or by a miss below — so serving a later endpoint
+  // check from the cache still answers it under a lock this transaction holds.
+  async function endpointRowCached(
     graphId: string,
     kind: string,
     id: string,
@@ -134,9 +143,24 @@ export function createEdgeBatchValidationBackend(
     if (endpointCache.has(cacheKey)) {
       return endpointCache.get(cacheKey);
     }
-    const node = await backend.getNode(graphId, kind, id);
+    const node = await lockNodeRow(backend, graphId, kind, id, "edgeEndpoint");
     endpointCache.set(cacheKey, node);
     return node;
+  }
+
+  async function lockNodesCached(
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    lock: NodeRowLock,
+  ): Promise<readonly NodeRow[]> {
+    if (lock !== "edgeEndpoint") {
+      return lockNodeRows(backend, graphId, kind, ids, lock);
+    }
+    const rows = await Promise.all(
+      ids.map((id) => endpointRowCached(graphId, kind, id)),
+    );
+    return rows.filter((row): row is NodeRow => row !== undefined);
   }
 
   // Lets batch preparation prime the endpoint cache from one getNodes
@@ -322,7 +346,7 @@ export function createEdgeBatchValidationBackend(
   }
 
   const validationBackend = deriveBackend(backend, {
-    getNode: getNodeCached,
+    lockNodes: lockNodesCached,
     countEdgesAtEndpoint: countEdgesAtEndpointCached,
     edgeExistsBetween: edgeExistsBetweenCached,
   } satisfies Partial<WriteTarget>);

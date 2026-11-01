@@ -405,10 +405,10 @@ describe("store.subgraph() is unaffected by the query default", () => {
     const media = await store.nodes.Media.create({ title: "root" });
     await store.nodes.Podcast.create({ title: "other", rssUrl: "https://x" });
 
-    const result = await store.subgraph(media.id, { edges: [] });
+    const result = await store.subgraph(media, { edges: [] });
 
     expect(result.root).toBeDefined();
-    expect(result.nodes.size).toBe(1);
+    expect(result.nodes).toHaveLength(1);
     expect(requireDefined(result.root).kind).toBe("Media");
   });
 });

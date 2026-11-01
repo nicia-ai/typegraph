@@ -393,7 +393,7 @@ Recorded-time views retain their narrower reconstructing-read API.
 
 ## Subgraph Types
 
-These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphrootid-options) for
+These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphroot-options) for
 typed neighborhood extraction.
 
 ### `AnyNode<G>`
@@ -441,10 +441,36 @@ import type { SubsetEdge } from "@nicia-ai/typegraph";
 type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
 ```
 
+### `SubgraphNodeKey`
+
+The `{ kind, id }` key every subgraph lookup takes. A node, a `GraphNodeReference<G>`, or an
+edge's endpoint (`{ kind: edge.toKind, id: edge.toId }`) fits, so following an edge needs no
+cast. The subgraph root itself is a `GraphNodeReference<G>`, whose kind and branded id stay
+correlated.
+
+```typescript
+type SubgraphNodeKey<K extends string = string> = Readonly<{ kind: K; id: string }>;
+```
+
+### `indexSubgraph(result)` and `SubgraphIndex<N, E>`
+
+Builds `(kind, id)` lookups over a subgraph result, which itself stays plain data. `N` and `E` are
+the result's node and edge element types, so lookups narrow by kind without naming the graph.
+
+```typescript
+type SubgraphIndex<N, E> = Readonly<{
+  node: SubgraphNodeLookup<N>; // (key) => node | undefined; a literal kind narrows
+  outgoing: SubgraphEdgeLookup<E>; // (key, edgeKind?) => edges whose source is key
+  incoming: SubgraphEdgeLookup<E>; // (key, edgeKind?) => edges whose target is key
+}>;
+
+const { node, outgoing, incoming } = indexSubgraph(await store.subgraph(run, options));
+```
+
 ### `SubgraphOptions<G, EK, NK>`
 
 Options for `store.subgraph()`. See the
-[store reference](/schemas-stores#storesubgraphrootid-options) for the full
+[store reference](/schemas-stores#storesubgraphroot-options) for the full
 parameter table.
 
 ```typescript
@@ -460,15 +486,15 @@ type SubgraphOptions<G, EK, NK> = Readonly<{
 
 ### `SubgraphResult<G, NK, EK>`
 
-The return type of `store.subgraph()`. Contains the root node, a node index, and
-forward/reverse adjacency maps for immediate traversal.
+The return type of `store.subgraph()`: plain data holding the root node and the returned nodes
+and edges. Two nodes of different kinds that share an id are both returned, each under its own
+kind. Use `indexSubgraph(result)` for `(kind, id)` lookups.
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
-  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
-  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  nodes: readonly SubgraphNodeResult<G, NK>[]; // ordered by kind, then id
+  edges: readonly SubgraphEdgeResult<G, EK>[]; // ordered by id
 }>;
 ```
 

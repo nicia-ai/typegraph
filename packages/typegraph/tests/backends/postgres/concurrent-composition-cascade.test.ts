@@ -11,10 +11,10 @@
  *   session fails there with a serialization failure, before the closure is
  *   read.
  * - **A stale pre-image.** An ordinary property update takes no per-graph
- *   lock, so it can commit between a delete's read of the row and its
- *   tombstone, for a cascade member and a directly deleted node alike. The
- *   delete releases the uniqueness entries of the props the row holds once
- *   it is tombstoned.
+ *   lock. The delete takes the node's delete row lock before it reads the
+ *   node's connected edges — a directly deleted node and every cascade member
+ *   alike — so the update waits for the delete and then finds the node gone,
+ *   and the delete releases the uniqueness entries of the row it locked.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -30,6 +30,7 @@ import {
   defineNode,
   NodeDeletePlanMismatchError,
   type NodeId,
+  NodeNotFoundError,
   partOf,
   TransactionConflictError,
 } from "../../../src";
@@ -159,6 +160,39 @@ async function untilSessionWaitsOnFence(observer: Pool): Promise<void> {
          )`,
     );
     if (Number(rows[0]?.waiting) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, FENCE_WAIT_POLL_MS));
+  }
+}
+
+/**
+ * Whether `operation` settled on its own or parked waiting on a row lock of
+ * THIS database: a tuple or transaction lock some session waits for.
+ */
+async function settledOrWaitingOnRowLock(
+  observer: Pool,
+  operation: Promise<unknown>,
+): Promise<"settled" | "waiting"> {
+  const state = { settled: false };
+  void operation.then(
+    () => {
+      state.settled = true;
+    },
+    () => {
+      state.settled = true;
+    },
+  );
+  for (;;) {
+    if (state.settled) return "settled";
+    const { rows } = await observer.query<{ waiting: string }>(
+      `SELECT count(*) AS waiting
+       FROM pg_locks
+       WHERE locktype IN ('tuple', 'transactionid')
+         AND NOT granted
+         AND pid IN (
+           SELECT pid FROM pg_stat_activity WHERE datname = current_database()
+         )`,
+    );
+    if (Number(rows[0]?.waiting) > 0) return "waiting";
     await new Promise((resolve) => setTimeout(resolve, FENCE_WAIT_POLL_MS));
   }
 }
@@ -378,7 +412,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
-      "releases the unique key a member holds when its delete runs, not the one the plan read",
+      "makes a concurrent update of a cascade member wait for the delete, then find the member gone",
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
@@ -391,20 +425,27 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { id: "clip", partOf: { whole: show } },
         );
 
+        // Parked after the cascade planned and locked its members, before
+        // any row is written.
         const deletion = deleter.nodes.Show.delete(show.id);
         await planned.opened;
-        await updater.nodes.Clip.update(clip.id, { slug: "new" });
+        const update = updater.nodes.Clip.update(clip.id, { slug: "new" });
+
+        // MUTATION CHECK: drop the `lockCascadeMembers` call from
+        // `planCascadingNodeDelete` (src/store/operations/node-operations.ts)
+        // — the update then commits while the delete is parked, instead of
+        // waiting on the member's delete lock.
+        expect(await settledOrWaitingOnRowLock(live.observer, update)).toBe(
+          "waiting",
+        );
         resume.open();
         await deletion;
+        await expect(update).rejects.toBeInstanceOf(NodeNotFoundError);
 
-        // MUTATION CHECK: passing the plan's own row to
-        // `deleteNodeRowInFrame` as the member's pre-image leaves "new"
-        // claimed by the tombstoned clip, and this create is refused with
-        // UniquenessError — verified and reverted.
         expect(await updater.nodes.Clip.getById(clip.id)).toBeUndefined();
         await expect(
           updater.nodes.Clip.create(
-            { slug: "new" },
+            { slug: "old" },
             { id: "clip2", partOf: { whole: other } },
           ),
         ).resolves.toMatchObject({ id: "clip2" });
@@ -412,7 +453,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
-      "releases the unique key a directly deleted node holds once it is tombstoned",
+      "makes a concurrent update of a directly deleted node wait for the delete, then find it gone",
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
@@ -424,21 +465,23 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { id: "clip", partOf: { whole: show } },
         );
 
-        // Parked after the delete read its pre-image, before the tombstone.
+        // Parked after the delete locked and read its row, before the
+        // tombstone.
         const deletion = deleter.nodes.Clip.delete(clip.id);
         await planned.opened;
-        await updater.nodes.Clip.update(clip.id, { slug: "new" });
+        const update = updater.nodes.Clip.update(clip.id, { slug: "new" });
+
+        expect(await settledOrWaitingOnRowLock(live.observer, update)).toBe(
+          "waiting",
+        );
         resume.open();
         await deletion;
+        await expect(update).rejects.toBeInstanceOf(NodeNotFoundError);
 
-        // MUTATION CHECK: releasing from the pre-image's props in
-        // `applyNodeSoftDelete` leaves "new" claimed by the tombstoned clip,
-        // and this create is refused with UniquenessError — verified and
-        // reverted.
         expect(await updater.nodes.Clip.getById(clip.id)).toBeUndefined();
         await expect(
           updater.nodes.Clip.create(
-            { slug: "new" },
+            { slug: "old" },
             { id: "clip2", partOf: { whole: show } },
           ),
         ).resolves.toMatchObject({ id: "clip2" });

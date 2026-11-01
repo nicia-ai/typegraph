@@ -3014,7 +3014,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
       const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
       const C extends SubgraphCompositionSelection | undefined = undefined,
     >(
-      rootId: NodeId<AllNodeTypes<G>>,
+      root: GraphNodeReference<G>,
       options: SubgraphOptions<G, EK, NK, P, C>,
     ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   }>;

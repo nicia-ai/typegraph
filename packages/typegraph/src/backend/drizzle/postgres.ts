@@ -136,6 +136,7 @@ import {
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
+  serializesWriters,
   type WriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
@@ -155,6 +156,10 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import {
+  registerDriverSavepointScope,
+  runSessionSavepoint,
+} from "../session-savepoint";
 import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
@@ -255,6 +260,7 @@ import {
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
+import { createPostgresTransactionSession } from "./execution/postgres-transaction-session";
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
@@ -2584,12 +2590,17 @@ function buildPostgresEngineProfileInternal(
                 // SAVEPOINT refuses outside an explicit transaction. Release it
                 // immediately: this proves the literal pinned session is active,
                 // without opening another transaction or changing application data.
+                // The scope issues nothing, so no driver scope is needed to
+                // attribute a failure inside it.
                 try {
-                  await externalTx.execute(
-                    sql`SAVEPOINT typegraph_schema_adoption_probe`,
-                  );
-                  await externalTx.execute(
-                    sql`RELEASE SAVEPOINT typegraph_schema_adoption_probe`,
+                  await runSessionSavepoint(
+                    {
+                      executeControl: (statement) =>
+                        externalTx.execute(sql.raw(statement)),
+                    },
+                    "typegraph_schema_adoption_probe",
+                    () =>
+                      Promise.resolve({ action: "release", value: undefined }),
                   );
                 } catch (error) {
                   throw new ConfigurationError(
@@ -3617,6 +3628,7 @@ function createPostgresOperationBackend(
         toUniqueRow,
       },
       schemaFenceLockClause: schemaFenceInsertLockClause,
+      writersSerialize: serializesWriters(schemaFenceFusionPlan),
       contributionMaterializer,
       fusion: {
         atomicProgramsAtTransactionScope: true,
@@ -4148,28 +4160,29 @@ function createTransactionBackend(
   // The wrap is unconditional because the overlap is created inside TypeGraph
   // (the node write pipeline syncs embeddings and fulltext concurrently), not
   // only by user code.
-  const operationExecutionAdapter = createPostgresExecutionAdapter(
+  const session = createPostgresTransactionSession(
     options.db,
     options.adapterOptions,
   );
-  const compiledExecutionAdapter = createPostgresExecutionAdapter(options.db, {
-    ...options.adapterOptions,
-    useTransactionClient: true,
-  });
-  const executeCompiled = compiledExecutionAdapter.executeCompiled;
+  const executeCompiled = session.compiled.executeCompiled;
+  const { enterDriverScope } = session;
   // Preserve the established Drizzle-routed execution surface for ordinary
   // transaction work. Only a closed atomic program needs the pinned client's
   // compiled-text seam; changing every statement to that seam would also
   // bypass driver logging and other Drizzle session behavior merely because
   // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
-    operationExecutionAdapter,
+    session.operation,
     getPinnedPostgresTransactionClient(options.db) ?? options.db,
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =
     executeCompiled === undefined ? undefined : (
-      createSessionAtomicBatchAdapter({ executeCompiled, runExclusive })
+      createSessionAtomicBatchAdapter({
+        executeCompiled,
+        runExclusive,
+        enterDriverScope,
+      })
     );
   const sessionAtomicSqlProgramExecutor =
     sessionAtomicBatchAdapter === undefined ? undefined : (
@@ -4237,6 +4250,9 @@ function createTransactionBackend(
     options.isFirstParty ?
       markFirstPartyFactory(txOperationBackend)
     : txOperationBackend;
+  if (enterDriverScope !== undefined) {
+    registerDriverSavepointScope(backend, enterDriverScope);
+  }
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);

@@ -6,9 +6,9 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { indexSubgraph } from "../../../src";
 import { KindNotFoundError, ValidationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
-import { collectAllEdges } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -26,13 +26,19 @@ import { type IntegrationTestContext } from "./test-context";
  * - Bidirectional traversal
  * - includeKinds filtering
  */
-async function seedSubgraphData(
-  store: ReturnType<IntegrationTestContext["getStore"]>,
-): Promise<{
-  aliceId: string;
-  bobId: string;
-  charlieId: string;
-  acmeId: string;
+type SubgraphTestStore = ReturnType<IntegrationTestContext["getStore"]>;
+type PersonNode = Awaited<
+  ReturnType<SubgraphTestStore["nodes"]["Person"]["create"]>
+>;
+type CompanyNode = Awaited<
+  ReturnType<SubgraphTestStore["nodes"]["Company"]["create"]>
+>;
+
+async function seedSubgraphData(store: SubgraphTestStore): Promise<{
+  alice: PersonNode;
+  bob: PersonNode;
+  charlie: PersonNode;
+  acme: CompanyNode;
 }> {
   const alice = await store.nodes.Person.create({
     name: "Alice",
@@ -68,34 +74,29 @@ async function seedSubgraphData(
   await store.edges.worksAt.create(alice, acme, { role: "Engineer" });
   await store.edges.worksAt.create(bob, acme, { role: "Manager" });
 
-  return {
-    aliceId: alice.id,
-    bobId: bob.id,
-    charlieId: charlie.id,
-    acmeId: acme.id,
-  };
+  return { alice, bob, charlie, acme };
 }
 
 export function registerSubgraphIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Subgraph Extraction", () => {
-    let ids: Awaited<ReturnType<typeof seedSubgraphData>>;
+    let seeded: Awaited<ReturnType<typeof seedSubgraphData>>;
 
     beforeEach(async () => {
       const store = context.getStore();
-      ids = await seedSubgraphData(store);
+      seeded = await seedSubgraphData(store);
     });
 
     it("extracts immediate neighbors", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 1,
       });
 
-      const names = [...result.nodes.values()]
-        .map((n) => (n as { name: string }).name)
+      const names = result.nodes
+        .map((node) => (node as { name: string }).name)
         .toSorted();
       expect(names).toContain("Alice");
       expect(names).toContain("Bob");
@@ -104,27 +105,28 @@ export function registerSubgraphIntegrationTests(
 
     it("follows multi-hop paths", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 2,
       });
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.aliceId)).toBe(true);
-      expect(result.nodes.has(ids.bobId)).toBe(true);
-      expect(result.nodes.has(ids.charlieId)).toBe(true);
+      expect(index.node(seeded.alice)).toBeDefined();
+      expect(index.node(seeded.bob)).toBeDefined();
+      expect(index.node(seeded.charlie)).toBeDefined();
     });
 
     it("applies per-edge-kind ordering and limits during traversal", async () => {
       const store = context.getStore();
       const dave = await store.nodes.Person.create({ name: "Dave" });
       await store.edges.knows.create(
-        { kind: "Person", id: ids.aliceId },
+        { kind: "Person", id: seeded.alice.id },
         dave,
         {},
         { id: "zzzz-alice-dave" },
       );
 
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 2,
         edgeWindows: {
@@ -134,56 +136,61 @@ export function registerSubgraphIntegrationTests(
           },
         },
       });
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(dave.id)).toBe(true);
-      expect(result.nodes.has(ids.bobId)).toBe(false);
-      expect(result.adjacency.get(ids.aliceId)?.get("knows")).toHaveLength(1);
+      expect(index.node(dave)).toBeDefined();
+      expect(index.node(seeded.bob)).toBeUndefined();
+      expect(index.outgoing(seeded.alice, "knows")).toHaveLength(1);
     });
 
     it("partitions edge windows independently at later hops", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 2,
         edgeWindows: {
           knows: { limit: 1, orderBy: { field: "id", direction: "asc" } },
         },
       });
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.bobId)).toBe(true);
-      expect(result.nodes.has(ids.charlieId)).toBe(true);
-      expect(result.adjacency.get(ids.bobId)?.get("knows")).toHaveLength(1);
+      expect(index.node(seeded.bob)).toBeDefined();
+      expect(index.node(seeded.charlie)).toBeDefined();
+      expect(index.outgoing(seeded.bob, "knows")).toHaveLength(1);
     });
 
     it("keeps unwindowed kinds and supports per-kind traversal directions", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows", "worksAt"],
         maxDepth: 1,
         edgeWindows: { knows: { limit: 1 } },
       });
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.bobId)).toBe(true);
-      expect(result.nodes.has(ids.acmeId)).toBe(true);
-      const incoming = await store.subgraph(ids.bobId as never, {
+      expect(index.node(seeded.bob)).toBeDefined();
+      expect(index.node(seeded.acme)).toBeDefined();
+      const incoming = await store.subgraph(seeded.bob, {
         edges: ["knows", "worksAt"],
         edgeWindows: {
           knows: { direction: "in", limit: 1 },
           worksAt: { direction: "out", limit: 1 },
         },
       });
-      expect(incoming.nodes.has(ids.aliceId)).toBe(true);
-      expect(incoming.nodes.has(ids.acmeId)).toBe(true);
+      const incomingIndex = indexSubgraph(incoming);
+      expect(incomingIndex.node(seeded.alice)).toBeDefined();
+      expect(incomingIndex.node(seeded.acme)).toBeDefined();
 
-      const both = await store.subgraph(ids.bobId as never, {
+      const both = await store.subgraph(seeded.bob, {
         edges: ["knows"],
         direction: "both",
         edgeWindows: { knows: { limit: 1 } },
       });
-      expect(both.nodes.has(ids.aliceId)).toBe(true);
-      expect(both.nodes.has(ids.charlieId)).toBe(true);
+      const bothIndex = indexSubgraph(both);
+      expect(bothIndex.node(seeded.alice)).toBeDefined();
+      expect(bothIndex.node(seeded.charlie)).toBeDefined();
       await expect(
-        store.subgraph(ids.aliceId as never, {
+        store.subgraph(seeded.alice, {
           edges: ["knows"],
           edgeWindows: { worksAt: { limit: 1 } } as never,
         }),
@@ -192,12 +199,12 @@ export function registerSubgraphIntegrationTests(
 
     it("follows multiple edge kinds", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows", "worksAt"],
         maxDepth: 2,
       });
 
-      const kinds = new Set([...result.nodes.values()].map((n) => n.kind));
+      const kinds = new Set(result.nodes.map((n) => n.kind));
       expect(kinds.has("Person")).toBe(true);
       expect(kinds.has("Company")).toBe(true);
     });
@@ -205,70 +212,75 @@ export function registerSubgraphIntegrationTests(
     it("deduplicates diamond-reachable nodes", async () => {
       const store = context.getStore();
       // acme is reachable via alice→worksAt AND alice→knows→bob→worksAt
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows", "worksAt"],
         maxDepth: 3,
       });
 
-      const companyNodes = [...result.nodes.values()].filter(
-        (n) => n.kind === "Company",
+      const companyNodes = result.nodes.filter(
+        (node) => node.kind === "Company",
       );
       expect(companyNodes).toHaveLength(1);
     });
 
     it("filters with includeKinds", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows", "worksAt"],
         maxDepth: 2,
         includeKinds: ["Company"],
       });
 
-      for (const node of result.nodes.values()) {
+      for (const node of result.nodes) {
         expect(node.kind).toBe("Company");
       }
-      expect(result.nodes.size).toBe(1);
+      expect(result.nodes.length).toBe(1);
     });
 
     it("excludes root", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 1,
         excludeRoot: true,
       });
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.aliceId)).toBe(false);
-      expect(result.nodes.size).toBe(1);
+      expect(index.node(seeded.alice)).toBeUndefined();
+      expect(result.nodes.length).toBe(1);
     });
 
     it("handles bidirectional traversal", async () => {
       const store = context.getStore();
       // Starting from bob, traverse knows in both directions
-      const result = await store.subgraph(ids.bobId as never, {
+      const result = await store.subgraph(seeded.bob, {
         edges: ["knows"],
         maxDepth: 1,
         direction: "both",
       });
+      const index = indexSubgraph(result);
 
       // Outbound: bob → charlie
-      expect(result.nodes.has(ids.charlieId)).toBe(true);
+      expect(index.node(seeded.charlie)).toBeDefined();
       // Inbound: alice → bob (reversed)
-      expect(result.nodes.has(ids.aliceId)).toBe(true);
+      expect(index.node(seeded.alice)).toBeDefined();
     });
 
     it("returns edges only when both endpoints are in result", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows", "worksAt"],
         maxDepth: 2,
         includeKinds: ["Person"],
       });
+      const index = indexSubgraph(result);
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       for (const edge of allEdges) {
-        expect(result.nodes.has(edge.fromId as string)).toBe(true);
-        expect(result.nodes.has(edge.toId as string)).toBe(true);
+        expect(
+          index.node({ kind: edge.fromKind, id: edge.fromId }),
+        ).toBeDefined();
+        expect(index.node({ kind: edge.toKind, id: edge.toId })).toBeDefined();
       }
 
       // worksAt edges connect Person→Company, but Company is excluded
@@ -284,79 +296,83 @@ export function registerSubgraphIntegrationTests(
       // Delete edges connected to bob first (restrict policy)
       const knowsFromBob = await store.edges.knows.findFrom({
         kind: "Person",
-        id: ids.bobId,
+        id: seeded.bob.id,
       });
       for (const edge of knowsFromBob) await store.edges.knows.delete(edge.id);
       const knowsToBob = await store.edges.knows.findTo({
         kind: "Person",
-        id: ids.bobId,
+        id: seeded.bob.id,
       });
       for (const edge of knowsToBob) await store.edges.knows.delete(edge.id);
       const worksAtFromBob = await store.edges.worksAt.findFrom({
         kind: "Person",
-        id: ids.bobId,
+        id: seeded.bob.id,
       });
       for (const edge of worksAtFromBob)
         await store.edges.worksAt.delete(edge.id);
 
-      await store.nodes.Person.delete(ids.bobId as never);
+      await store.nodes.Person.delete(seeded.bob.id);
 
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 2,
       });
+      const index = indexSubgraph(result);
 
-      expect(result.nodes.has(ids.bobId)).toBe(false);
+      expect(index.node(seeded.bob)).toBeUndefined();
       // charlie is unreachable since bob (the intermediate node) is deleted
-      expect(result.nodes.has(ids.charlieId)).toBe(false);
+      expect(index.node(seeded.charlie)).toBeUndefined();
     });
 
     it("returns empty for non-existent root", async () => {
       const store = context.getStore();
-      const result = await store.subgraph("nonexistent" as never, {
-        edges: ["knows"],
-        maxDepth: 1,
-      });
+      const result = await store.subgraph(
+        { kind: "Person", id: "nonexistent" } as never,
+        {
+          edges: ["knows"],
+          maxDepth: 1,
+        },
+      );
 
       expect(result.root).toBeUndefined();
-      expect(result.nodes.size).toBe(0);
+      expect(result.nodes.length).toBe(0);
     });
 
     it("handles cycles without infinite loops", async () => {
       const store = context.getStore();
       // Create cycle: charlie knows alice
-      const charlieRef = { kind: "Person" as const, id: ids.charlieId };
-      const aliceRef = { kind: "Person" as const, id: ids.aliceId };
+      const charlieRef = { kind: "Person" as const, id: seeded.charlie.id };
+      const aliceRef = { kind: "Person" as const, id: seeded.alice.id };
       await store.edges.knows.create(charlieRef, aliceRef, { since: "2022" });
 
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 10,
       });
 
       // All three people reachable, each visited once
-      expect(result.nodes.size).toBe(3);
+      expect(result.nodes.length).toBe(3);
     });
 
     it("returns only root when empty edges option", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: [],
       });
 
       expect(result.root).toBeDefined();
-      expect(requireDefined(result.root).id).toBe(ids.aliceId);
-      expect(result.nodes.size).toBe(1);
-      expect(result.adjacency.size).toBe(0);
+      expect(requireDefined(result.root).id).toBe(seeded.alice.id);
+      expect(result.nodes.length).toBe(1);
+      expect(result.edges).toHaveLength(0);
     });
 
     it("validates traversal options identically for direct and batched reads", async () => {
       const store = context.getStore();
-      const rootOnly = await store.subgraph(ids.aliceId as never, {
+      const rootOnly = await store.subgraph(seeded.alice, {
         edges: ["knows"],
         maxDepth: 0,
       });
-      expect(rootOnly.nodes.size).toBe(1);
+      expect(rootOnly.nodes.length).toBe(1);
 
       const invalidOptions = [
         { edges: ["knows"], maxDepth: -1 },
@@ -368,11 +384,11 @@ export function registerSubgraphIntegrationTests(
       ] as const;
       for (const options of invalidOptions) {
         await expect(
-          store.subgraph(ids.aliceId as never, options as never),
+          store.subgraph(seeded.alice, options as never),
         ).rejects.toBeInstanceOf(ValidationError);
         await expect(
           store.batchOnce((read) => [
-            read.subgraph(ids.aliceId as never, options as never),
+            read.subgraph(seeded.alice, options as never),
           ]),
         ).rejects.toBeInstanceOf(ValidationError);
       }
@@ -380,7 +396,7 @@ export function registerSubgraphIntegrationTests(
 
     it("projects node and edge fields across backends", async () => {
       const store = context.getStore();
-      const result = await store.subgraph(ids.aliceId as never, {
+      const result = await store.subgraph(seeded.alice, {
         edges: ["knows", "worksAt"],
         maxDepth: 1,
         project: {
@@ -395,7 +411,7 @@ export function registerSubgraphIntegrationTests(
         },
       });
 
-      const nodes = [...result.nodes.values()];
+      const nodes = result.nodes;
       const people = nodes.filter((node) => node.kind === "Person");
       const companies = nodes.filter((node) => node.kind === "Company");
 
@@ -413,7 +429,7 @@ export function registerSubgraphIntegrationTests(
       expect(companies[0]).toHaveProperty("meta.updatedAt");
       expect(companies[0]).not.toHaveProperty("industry");
 
-      const allEdges = collectAllEdges(result.adjacency);
+      const allEdges = result.edges;
       const worksAtEdges = allEdges.filter(
         (edge): edge is Extract<typeof edge, { kind: "worksAt" }> =>
           edge.kind === "worksAt",
@@ -429,13 +445,13 @@ export function registerSubgraphIntegrationTests(
         "Manager",
       ]);
       for (const edge of worksAtEdges) {
-        expect(edge).toHaveProperty("toId", ids.acmeId);
+        expect(edge).toHaveProperty("toId", seeded.acme.id);
         expect(edge).not.toHaveProperty("meta");
       }
 
       expect(knowsEdges).toHaveLength(1);
-      expect(knowsEdges[0]).toHaveProperty("fromId", ids.aliceId);
-      expect(knowsEdges[0]).toHaveProperty("toId", ids.bobId);
+      expect(knowsEdges[0]).toHaveProperty("fromId", seeded.alice.id);
+      expect(knowsEdges[0]).toHaveProperty("toId", seeded.bob.id);
       expect(knowsEdges[0]).not.toHaveProperty("meta");
     });
 
@@ -463,20 +479,26 @@ export function registerSubgraphIntegrationTests(
         },
       } as const;
 
-      const direct = await store.subgraph(ids.bobId as never, options);
+      const direct = await store.subgraph(seeded.bob, options);
       const [oneStatement, count] = await store.batchOnce((read) => [
-        read.subgraph(ids.bobId as never, options),
+        read.subgraph(seeded.bob, options),
         read.countNeighbors(
-          { kind: "Person", id: ids.bobId as never },
+          { kind: "Person", id: seeded.bob.id },
           { edges: ["knows"] },
         ),
       ]);
 
-      expect(oneStatement).toEqual(direct);
+      expect({
+        root: oneStatement.root,
+        nodes: oneStatement.nodes,
+        edges: oneStatement.edges,
+      }).toEqual({
+        root: direct.root,
+        nodes: direct.nodes,
+        edges: direct.edges,
+      });
       expect(count).toBeGreaterThan(0);
-      const edgeIds = collectAllEdges(oneStatement.adjacency).map(
-        (edge) => edge.id,
-      );
+      const edgeIds = oneStatement.edges.map((edge) => edge.id);
       expect(edgeIds).toHaveLength(4);
       expect(new Set(edgeIds).size).toBe(edgeIds.length);
     });
@@ -484,14 +506,14 @@ export function registerSubgraphIntegrationTests(
     it("keeps overlapping, duplicate, and missing runtime subgraphs independent", async () => {
       const store = context.getStore();
       const roots = [
-        ids.aliceId,
-        ids.bobId,
-        ids.aliceId,
-        "missing-subgraph-root",
+        seeded.alice,
+        seeded.bob,
+        seeded.alice,
+        { kind: "Person", id: "missing-subgraph-root" },
       ];
       const results = await store.batchOnce((read) =>
-        roots.map((rootId) =>
-          read.subgraph(rootId as never, {
+        roots.map((rootRef) =>
+          read.subgraph(rootRef as never, {
             edges: ["knows", "worksAt"],
             maxDepth: 2,
             edgeWindows: {
@@ -511,16 +533,20 @@ export function registerSubgraphIntegrationTests(
       expect(results).toHaveLength(4);
       expect(results[0]).toEqual(results[2]);
       expect(results[0]).not.toBe(results[2]);
-      expect(results[0]?.nodes.has(ids.acmeId)).toBe(true);
-      expect(results[1]?.nodes.has(ids.acmeId)).toBe(true);
+      expect(
+        indexSubgraph(requireDefined(results[0])).node(seeded.acme),
+      ).toBeDefined();
+      expect(
+        indexSubgraph(requireDefined(results[1])).node(seeded.acme),
+      ).toBeDefined();
       expect(results[3]?.root).toBeUndefined();
-      expect(results[3]?.nodes.size).toBe(0);
-      expect(results[3]?.adjacency.size).toBe(0);
+      expect(results[3]?.nodes.length).toBe(0);
+      expect(results[3]?.edges).toHaveLength(0);
     });
 
     it("refuses an unregistered edge or node kind on every subgraph surface", async () => {
       const store = context.getStore();
-      const root = ids.aliceId as never;
+      const root = seeded.alice;
       const unknownEdge = { edges: ["knowz"] } as never;
       const unknownNode = {
         edges: ["knows"],

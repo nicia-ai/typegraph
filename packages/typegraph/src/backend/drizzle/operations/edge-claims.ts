@@ -15,11 +15,13 @@ import type {
   PurgeEdgeClaimsParams,
   SchemaWriteFenceParams,
 } from "../../types";
+import { buildLiveEndpointPredicate, liveEndpointLockOrder } from "./edges";
 import {
   castBoundValueForColumn,
   edgeColumnList,
   quotedColumn,
   quotedTableName,
+  type RowLockClause,
   sqlNull,
   type Tables,
 } from "./shared";
@@ -826,6 +828,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
   params: InsertEdgeParams,
   claim: ClaimEdgeCardinalityParams,
   timestamp: string,
+  endpointLock: RowLockClause,
 ): SQL {
   const { edgeClaims, edges, nodes } = tables;
   const claimsName = getTableName(edgeClaims);
@@ -833,24 +836,14 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
   const propsJson = JSON.stringify(params.props);
   const columns = edgeColumnList(edges);
   const target = edgeCardinalityClaimTarget(claim);
-  const from = (column: Readonly<{ name: string }>): SQL =>
-    qualifiedAlias("from_node", column);
-  const to = (column: Readonly<{ name: string }>): SQL =>
-    qualifiedAlias("to_node", column);
 
   return sql`
     WITH live_endpoints AS MATERIALIZED (
       SELECT 1 AS present
       FROM ${nodeTable} AS "from_node"
       CROSS JOIN ${nodeTable} AS "to_node"
-      WHERE ${from(nodes.graphId)} = ${params.graphId}
-        AND ${from(nodes.kind)} = ${params.fromKind}
-        AND ${from(nodes.id)} = ${params.fromId}
-        AND ${from(nodes.deletedAt)} IS NULL
-        AND ${to(nodes.graphId)} = ${params.graphId}
-        AND ${to(nodes.kind)} = ${params.toKind}
-        AND ${to(nodes.id)} = ${params.toId}
-        AND ${to(nodes.deletedAt)} IS NULL
+      WHERE ${buildLiveEndpointPredicate(nodes, params)}
+      ${endpointLock(liveEndpointLockOrder(params))}
     ),
     claimable_axis AS MATERIALIZED (
       SELECT present

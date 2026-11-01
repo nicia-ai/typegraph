@@ -124,16 +124,19 @@ describe("subgraph({ composition: true }) completeness", () => {
     // `buildExhaustiveDirectedReachableCte`. The unit then comes back
     // truncated at the ceiling — 1001 nodes instead of 1002 — which is the
     // silent partial export this test exists to forbid.
-    const unit = await store.subgraph(root, { edges: [], composition: true });
-
-    expect(unit.nodes.size).toBe(CHAIN_LENGTH);
-    // Every level's realizing edge came back with it.
-    const attachments = [...unit.reverseAdjacency.values()].flatMap(
-      (byKind) => byKind.get("sdParentFolder") ?? [],
+    const unit = await store.subgraph(
+      { kind: "SdFolder", id: root },
+      { edges: [], composition: true },
     );
-    expect(attachments).toHaveLength(CHAIN_LENGTH - 1);
+
+    expect(unit.nodes).toHaveLength(CHAIN_LENGTH);
+    // Every level's realizing edge came back with it.
+    expect(unit.edges).toHaveLength(CHAIN_LENGTH - 1);
+    expect(new Set(unit.edges.map((edge) => edge.kind))).toEqual(
+      new Set(["sdParentFolder"]),
+    );
     // The deepest leaf — the first row a hop ceiling drops — is present.
-    const depths = [...unit.nodes.values()].map((node) => node.depth);
+    const depths = unit.nodes.map((node) => node.depth);
     expect(Math.max(...depths)).toBe(CHAIN_LENGTH - 1);
   });
 
@@ -158,17 +161,18 @@ describe("subgraph({ composition: true }) completeness", () => {
     );
 
     // MUTATION CHECK: drop the `isStatementCutShortError` arm from
-    // `fetchCompositionClosureIds` (src/store/subgraph.ts) — the caller then
+    // `fetchCompositionClosureNodes` (src/store/subgraph.ts) — the caller then
     // gets the raw driver error, indistinguishable from a transport failure,
     // and the "delivered or refused, never partial" promise has no refusal
     // behind it.
     const refusal = await store
-      .subgraph(parent.id, { edges: [], composition: true })
+      .subgraph(parent, { edges: [], composition: true })
       .catch((error: unknown) => error);
 
     expect(refusal).toBeInstanceOf(ConfigurationError);
     const details = (refusal as ConfigurationError).details;
     expect(details["code"]).toBe("COMPOSITION_UNIT_INDETERMINATE");
+    expect(details["rootKind"]).toBe("SdFolder");
     expect(details["rootId"]).toBe(parent.id);
     expect((refusal as ConfigurationError).cause).toMatchObject({
       code: "SQLITE_INTERRUPT",

@@ -227,11 +227,14 @@ void store.algorithms.personalizedPageRank({
 });
 void store.algorithms.labelPropagation({ edges: ["knows"], ...temporal });
 
-// Subgraph also accepts the temporal options (requires a branded NodeId).
-void store.subgraph(aliceNodeId, {
-  edges: ["knows"],
-  temporalMode: "includeEnded",
-});
+// Subgraph also accepts the temporal options (takes a kind and branded id reference).
+void store.subgraph(
+  { kind: "Person", id: aliceNodeId },
+  {
+    edges: ["knows"],
+    temporalMode: "includeEnded",
+  },
+);
 
 // --- Negative cases (must fail compile) ---
 
@@ -271,5 +274,11 @@ void store.algorithms.reachable(aliceId, {
   temporalMode: "bogus_mode",
 });
 
-// @ts-expect-error - subgraph edge kind must be registered on the graph
-void store.subgraph(aliceNodeId, { edges: ["not_a_kind"] });
+void store.subgraph(
+  { kind: "Person", id: aliceNodeId },
+  // @ts-expect-error - subgraph edge kind must be registered on the graph
+  { edges: ["not_a_kind"] },
+);
+
+// @ts-expect-error - a bare node id is not a subgraph root
+void store.subgraph(aliceNodeId, { edges: ["knows"] });

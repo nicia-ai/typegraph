@@ -127,13 +127,19 @@ export type {
   AnyEdge,
   AnyNode,
   SubgraphCompositionSelection,
+  SubgraphEdgeKey,
+  SubgraphEdgeLookup,
+  SubgraphIndex,
+  SubgraphKindSelection,
+  SubgraphNodeKey,
+  SubgraphNodeLookup,
   SubgraphOptions,
   SubgraphResult,
   SubgraphResultEdgeKinds,
   SubsetEdge,
   SubsetNode,
 } from "./subgraph";
-export { defineSubgraphProject } from "./subgraph";
+export { defineSubgraphProject, indexSubgraph } from "./subgraph";
 
 // Store
 export type { ClaimOwner, ClaimTarget } from "./claims/axis";

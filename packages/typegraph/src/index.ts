@@ -772,7 +772,13 @@ export type {
   AnyEdge,
   AnyNode,
   SubgraphCompositionSelection,
+  SubgraphEdgeKey,
+  SubgraphEdgeLookup,
   SubgraphEdgeResult,
+  SubgraphIndex,
+  SubgraphKindSelection,
+  SubgraphNodeKey,
+  SubgraphNodeLookup,
   SubgraphNodeResult,
   SubgraphOptions,
   SubgraphResult,
@@ -780,7 +786,7 @@ export type {
   SubsetEdge,
   SubsetNode,
 } from "./store/subgraph";
-export { defineSubgraphProject } from "./store/subgraph";
+export { defineSubgraphProject, indexSubgraph } from "./store/subgraph";
 export type {
   AdapterTransactionContext,
   BaseStoreOptions,

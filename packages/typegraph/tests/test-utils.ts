@@ -594,21 +594,6 @@ export { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 export { storeBackend as getStoreBackend } from "../src/store/runtime-port";
 
 /**
- * Flattens all edges from a subgraph adjacency map into a single array.
- */
-export function collectAllEdges<E>(
-  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly E[]>>,
-): E[] {
-  const edges: E[] = [];
-  for (const kindMap of adjacency.values()) {
-    for (const edgeList of kindMap.values()) {
-      edges.push(...edgeList);
-    }
-  }
-  return edges;
-}
-
-/**
  * Shared time anchors for temporal-behavior tests.
  *
  * Use these to build fixtures that exercise `temporalMode` / `asOf` across

@@ -1473,8 +1473,10 @@ describe("Store with PostgreSQL Backend", () => {
       const orderByPosition = requireDefined(resolvedBatchStatement).indexOf(
         "ORDER BY",
       );
+      // `NO KEY UPDATE`: the batch's lock must not conflict with an edge
+      // write's `FOR KEY SHARE` on the same rows (#795).
       const rowLockPosition = requireDefined(resolvedBatchStatement).indexOf(
-        "FOR UPDATE",
+        "FOR NO KEY UPDATE",
       );
       expect(orderByPosition).toBeGreaterThanOrEqual(0);
       expect(rowLockPosition).toBeGreaterThan(orderByPosition);

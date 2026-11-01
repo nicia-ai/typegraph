@@ -241,7 +241,7 @@ aliases as `string`-kinded anyway, so state `expansion` on the call or use
 | [`parts()` / `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes) | Every kind the composition relation reaches | `maxHops`, `via` | No | Untyped |
 | Node collection reads (`find`, `count`, `updateWhere`, `compareAndSet`) | The exact kind | No option; query instead | No | The literal |
 | [`store.search`](/fulltext-search) (`fulltext`, `vector`, `hybrid`) | The exact kind | `expansion: "exact" \| "subclasses"` | No | The literal; `"subclasses"` widens, as a stated `from(kind, alias, { expansion: "subclasses" })` does |
-| [`subgraph({ includeKinds })`](/schemas-stores#storesubgraphrootid-options) | Exactly the listed kinds | List every kind to include | No | Not applicable |
+| [`subgraph({ includeKinds })`](/schemas-stores#storesubgraphroot-options) | Exactly the listed kinds | List every kind to include | No | Not applicable |
 
 An omitted `expansion` means the store default everywhere in the query
 builder, and nowhere else. A kind whose subclasses only a persisted extension

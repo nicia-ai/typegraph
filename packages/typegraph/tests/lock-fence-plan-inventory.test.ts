@@ -4,7 +4,7 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **21** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **25** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
@@ -15,8 +15,11 @@
  *     writer fence resolution (J19, the `row`-mechanism counterpart to
  *     J14/J15), plus adopted merge writer-slot acquisition (J20) and
  *     composed merge snapshot enforcement (J21), adopted schema fence
- *     evidence (J22), and the store-owned write unit's replay decision (J23)
- *     — enumerated in both
+ *     evidence (J22), the store-owned write unit's replay decision (J23),
+ *     and the node-row lock omissions under a writer-serializing plan (J24
+ *     SQLite's closed node-delete program, J25 hard delete's lock read, J26
+ *     import's skipped-node endpoint read, J27 a composition cascade's
+ *     member locks) — enumerated in both
  *     directions, keyed on `(file, trimmed
  *     line)` so line drift cannot rot the pin.
  *
@@ -108,7 +111,7 @@ type InventoryEntry = Readonly<{
   reason: string;
 }>;
 
-/** The 21 `resolveWriteFencePlan` call sites (Contract J, I8). */
+/** The 25 `resolveWriteFencePlan` call sites (Contract J, I8). */
 const CALL_SITES: readonly InventoryEntry[] = [
   {
     file: "backend/drizzle/postgres.ts",
@@ -256,6 +259,34 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J21",
     reason:
       "Composed merge application requires observed read-committed isolation unless the resolved plan proves engine serialization; missing coordination evidence is refused.",
+  },
+  {
+    file: "backend/drizzle/sqlite.ts",
+    line: "writersSerialize: serializesWriters(resolveWriteFencePlan(fenceTarget)),",
+    site: "J24",
+    reason:
+      "The SQLite operation layer resolves the plan to learn whether its writers serialize; under engine-serialized (every bundled SQLite driver) the closed node-delete program omits its leading row-lock slots, which would lock nothing. PostgreSQL reads the same fact off J16's plan.",
+  },
+  {
+    file: "store/operations/node-operations.ts",
+    line: "if (!serializesWriters(resolveWriteFencePlan(target))) {",
+    site: "J25",
+    reason:
+      "A hard delete takes the node's delete lock before its cascade reads connected edges only where writers contend; a writer-serializing plan (engine- or caller-serialized) has no concurrent edge write to wait for, so it pays no lock statement.",
+  },
+  {
+    file: "interchange/import.ts",
+    line: "endpointLocksContend: !serializesWriters(resolveWriteFencePlan(target)),",
+    site: "J26",
+    reason:
+      "An import attempt resolves the plan once to learn whether other writers can contend for endpoint rows; under a writer-serializing plan a live node the import skipped needs no locked re-read, as before endpoint locks existed.",
+  },
+  {
+    file: "store/operations/node-operations.ts",
+    line: "if (serializesWriters(resolveWriteFencePlan(target))) return;",
+    site: "J27",
+    reason:
+      "A composition cascade takes each member's delete lock before it reads the members' connected edges only where writers contend, the same rule as J25's hard delete; a writer-serializing plan has no concurrent edge write to wait for.",
   },
 ];
 
@@ -418,13 +449,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 21 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 25 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 21 declared call sites, both directions", () => {
-    expect(found).toHaveLength(21);
-    expect(CALL_SITES).toHaveLength(21);
+  it("has exactly the 25 declared call sites, both directions", () => {
+    expect(found).toHaveLength(25);
+    expect(CALL_SITES).toHaveLength(25);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

@@ -46,7 +46,11 @@ function vectorRelationTargets<G extends GraphDef>(
  * graph-local `contributionMaterializations` markers, which a clear keeps unless
  * `preserveContributionMaterializations: false` is passed, and `recordedClock`
  * on a store with live (non-history) revision tracking, which reseeds its clock
- * inside the clear transaction. Every other relation reads `0`.
+ * inside the clear transaction. On PostgreSQL, `edgeClaims` can also keep one
+ * row when a cardinality-constrained edge write committed while the clear
+ * waited for it: claims clear before the nodes the edge waits on, and the
+ * leftover row names an edge that no longer exists, so the next write on that
+ * axis takes it over. Every other relation reads `0`.
  *
  * Read-only, and reports whether its counts share one snapshot in
  * `consistency`. It asks for one read-only `repeatable read` transaction and

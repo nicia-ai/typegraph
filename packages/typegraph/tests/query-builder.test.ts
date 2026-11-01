@@ -2475,10 +2475,15 @@ describe("QueryBuilder Variable-Length Paths", () => {
     const sqlObject = q.compile();
     const { sql } = toSqlWithParams(sqlObject);
 
-    // SQLite uses INSTR for cycle detection
-    expect(sql).toContain("INSTR");
-    // SQLite uses string-based path
-    expect(sql).toContain("|| n0.id ||");
+    // SQLite tracks a delimited string path and escapes each token so an id
+    // holding the delimiter stays one token. A Person -> Organization walk
+    // visits two kinds, so its tokens are kind-qualified.
+    expect(sql).toContain(
+      "'|' || replace(replace((n0.kind || ? || n0.id), '%', '%25'), '|', '%7C') || '|' AS path",
+    );
+    expect(sql).toContain(
+      "INSTR(r.path, '|' || replace(replace((n.kind || ? || n.id), '%', '%25'), '|', '%7C') || '|') = 0",
+    );
   });
 
   it("skips cycle checks when cyclePolicy('allow') is selected", () => {

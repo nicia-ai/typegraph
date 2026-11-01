@@ -592,7 +592,7 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
     });
 
-    it("case 9b: a whole delete removes a composition edge resurrected onto a deleted part", async () => {
+    it("case 9b: a composition edge is not resurrected onto a deleted part", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const episode = await store.nodes.EeEpisode.create({});
       const segment = await store.nodes.EeSegment.create(
@@ -601,24 +601,19 @@ export function registerCompositionExistenceIntegrationTests(
       );
       await store.nodes.EeSegment.delete(segment.id);
       expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
-      // Edge resurrection reads no endpoint, so the part's own deleted edge
-      // comes back live with the part still tombstoned.
-      const { action } = await store.edges.eeSegmentOf.getOrCreateByEndpoints(
-        segment,
-        episode,
-        {},
-      );
-      expect(action).toBe("resurrected");
-      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
 
-      // MUTATION CHECK: the same early return as case 9a leaves this edge
-      // live between two tombstones — verified and reverted.
-      await store.nodes.EeEpisode.delete(episode.id);
-
+      // A resurrection owes the create's endpoint verdict, so the part's own
+      // deleted edge stays deleted while the part is tombstoned.
+      await expect(
+        store.edges.eeSegmentOf.getOrCreateByEndpoints(segment, episode, {}),
+      ).rejects.toBeInstanceOf(EndpointNotFoundError);
       expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
+
+      await store.nodes.EeEpisode.delete(episode.id);
+      expect(await store.nodes.EeEpisode.getById(episode.id)).toBeUndefined();
     });
     // MUTATION CHECK: restoring the early return on an empty `plan.members`
-    // in `applyCompositionCascade` leaves the edge live between two
+    // in `applyCompositionCascade` leaves case 9a's edge live between two
     // tombstoned nodes — verified and reverted.
 
     it("case 9b: a whole delete a part's `restrict` refuses, caught in a transaction, deletes nothing", async () => {

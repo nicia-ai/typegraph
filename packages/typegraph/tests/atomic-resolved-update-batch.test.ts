@@ -20,6 +20,7 @@ import {
   buildAtomicNodeResolvedUpdateBatch,
   buildReadAtomicNodeMutationPostimages,
 } from "../src/backend/drizzle/operations/nodes";
+import { NODE_ROW_LOCK_CLAUSES } from "../src/backend/drizzle/operations/strategy";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
@@ -793,6 +794,7 @@ describe("atomic resolved update batches", () => {
         timestamp,
         schemaFence,
         drizzleSql.empty(),
+        NODE_ROW_LOCK_CLAUSES.sqlite.edgeEndpoint,
       ),
       buildAtomicEdgeResolvedUpdateBatch(
         sqliteTables,

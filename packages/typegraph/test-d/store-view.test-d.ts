@@ -288,10 +288,10 @@ expectError(
   }),
 );
 expectError(
-  view.subgraph(personId, { edges: ["knows"], temporalMode: "asOf" }),
+  view.subgraph(personRef, { edges: ["knows"], temporalMode: "asOf" }),
 );
 expectError(
-  store.subgraph(personId, {
+  store.subgraph(personRef, {
     edges: ["knows"],
     recordedAsOf: CANONICAL,
   }),
@@ -333,7 +333,7 @@ expectError(
   ),
 );
 expectError(
-  store.subgraph(personId, {
+  store.subgraph(personRef, {
     edges: ["knows"],
     ...LEAKED_RECORDED_OPTIONS,
   }),

@@ -372,12 +372,12 @@ export async function main(): Promise<void> {
       },
     );
 
-    const unit = await store.subgraph(exportPodcast.id, {
+    const unit = await store.subgraph(exportPodcast, {
       edges: [],
       composition: true,
     });
     console.log(
-      `  exported ${unit.nodes.size} nodes rooted at ${requireDefined(unit.root).kind}/${requireDefined(unit.root).id}`,
+      `  exported ${unit.nodes.length} nodes rooted at ${requireDefined(unit.root).kind}/${requireDefined(unit.root).id}`,
     );
     assertEqual(
       requireDefined(unit.root).kind,
@@ -385,7 +385,7 @@ export async function main(): Promise<void> {
       "the export's root is the podcast",
     );
     assertEqual(
-      new Set(unit.nodes.keys()),
+      new Set(unit.nodes.map((node) => node.id)),
       new Set([
         exportPodcast.id,
         exportEpisode.id,

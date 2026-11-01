@@ -28,6 +28,7 @@ import {
   defineGraph,
   defineNode,
   hasPart,
+  indexSubgraph,
   partOf,
   type QualifiedRecursivePath,
   subClassOf,
@@ -323,17 +324,10 @@ const SUBSUMPTION_CLOSURE_GRAPHS = [
 
 type CompositionStore = InspectableStore<typeof compositionNavigationGraph>;
 
-function adjacencyEdgeIds(
-  adjacency: ReadonlyMap<
-    string,
-    ReadonlyMap<string, readonly Readonly<{ id: string }>[]>
-  >,
+function edgeIds(
+  edges: readonly Readonly<{ id: string }>[],
 ): ReadonlySet<string> {
-  return new Set(
-    [...adjacency.values()].flatMap((byKind) =>
-      [...byKind.values()].flatMap((edges) => edges.map((edge) => edge.id)),
-    ),
-  );
+  return new Set(edges.map((edge) => edge.id));
 }
 
 async function seedCompositionFixtures(store: CompositionStore) {
@@ -1028,11 +1022,11 @@ export function registerCompositionNavigationIntegrationTests(
         .execute();
       expect(wholesVia.toSorted()).toEqual(ancestorIds.toSorted());
 
-      const owned = await store.subgraph(root.id, {
+      const owned = await store.subgraph(root, {
         edges: [],
         composition: true,
       });
-      expect([...owned.nodes.keys()].toSorted()).toEqual(
+      expect(owned.nodes.map((node) => node.id).toSorted()).toEqual(
         chain.map((section) => section.id).toSorted(),
       );
     });
@@ -1298,12 +1292,12 @@ export function registerCompositionNavigationIntegrationTests(
           const { store, report, rich, paragraph } =
             await seedSubsumptionClosure();
 
-          const result = await store.subgraph(report.id, {
+          const result = await store.subgraph(report, {
             edges: [],
             composition: true,
           });
 
-          expect(new Set(result.nodes.keys())).toEqual(
+          expect(new Set(result.nodes.map((node) => node.id))).toEqual(
             new Set([report.id, rich.id, paragraph.id]),
           );
         });
@@ -1330,13 +1324,13 @@ export function registerCompositionNavigationIntegrationTests(
       const { podcast, episode1, episode2, segment1 } =
         await seedCompositionFixtures(store);
 
-      const result = await store.subgraph(podcast.id, {
+      const result = await store.subgraph(podcast, {
         edges: [],
         composition: true,
       });
 
       expect(result.root?.kind).toBe("CnPodcast");
-      expect(new Set(result.nodes.keys())).toEqual(
+      expect(new Set(result.nodes.map((node) => node.id))).toEqual(
         new Set([podcast.id, episode1.id, episode2.id, segment1.id]),
       );
     });
@@ -1355,12 +1349,12 @@ export function registerCompositionNavigationIntegrationTests(
       // per-edge-kind direction `compositionTraversalDirection` derives)
       // makes this include `sectionRoot` and `sectionSibling` alongside the
       // expected two nodes — verified and reverted.
-      const result = await store.subgraph(sectionChild.id, {
+      const result = await store.subgraph(sectionChild, {
         edges: [],
         composition: true,
       });
 
-      expect(new Set(result.nodes.keys())).toEqual(
+      expect(new Set(result.nodes.map((node) => node.id))).toEqual(
         new Set([sectionChild.id, sectionGrandchild.id]),
       );
     });
@@ -1389,13 +1383,13 @@ export function registerCompositionNavigationIntegrationTests(
       // `buildSubgraphCompositionReachableCte` (src/store/subgraph.ts). The
       // composition closure then stops at `maxDepth` hops and this returns
       // 3 nodes instead of 14 — verified and reverted.
-      const result = await store.subgraph(requireDefined(chain[0]).id, {
+      const result = await store.subgraph(requireDefined(chain[0]), {
         edges: [],
         composition: true,
         maxDepth: 2,
       });
 
-      expect(new Set(result.nodes.keys())).toEqual(
+      expect(new Set(result.nodes.map((node) => node.id))).toEqual(
         new Set(chain.map((section) => section.id)),
       );
     });
@@ -1404,14 +1398,16 @@ export function registerCompositionNavigationIntegrationTests(
       const store = await context.createStore(compositionNavigationGraph);
       const { podcast, episode1 } = await seedCompositionFixtures(store);
 
-      const result = await store.subgraph(podcast.id, {
+      const result = await store.subgraph(podcast, {
         edges: [],
         composition: true,
         project: { edges: { cnEpisodeOf: ["position"] } },
       });
 
-      const pilotEdges =
-        result.adjacency.get(episode1.id)?.get("cnEpisodeOf") ?? [];
+      const pilotEdges = indexSubgraph(result).outgoing(
+        episode1,
+        "cnEpisodeOf",
+      );
       expect(pilotEdges).toHaveLength(1);
       const pilotEdge = requireDefined(pilotEdges[0]);
       expect(pilotEdge).toMatchObject({
@@ -1457,22 +1453,68 @@ export function registerCompositionNavigationIntegrationTests(
       // (src/store/recursive-cte.ts) — the walk then follows the video's
       // note edge from the track's id and pulls that note into the album's
       // unit.
-      const result = await store.subgraph(album.id, {
+      const result = await store.subgraph(album, {
         edges: [],
         composition: true,
       });
-      expect(result.nodes.has(trackNote.id)).toBe(true);
-      expect(result.nodes.has(videoNote.id)).toBe(false);
+      expect(indexSubgraph(result).node(trackNote)).toBeDefined();
+      expect(indexSubgraph(result).node(videoNote)).toBeUndefined();
 
-      // MUTATION CHECK: pick the LAST kind in code-point order in
-      // `fetchCompositionRootKind` (src/store/subgraph.ts) — a root id held by
-      // `CnTrack` and `CnVideo` then walks the video's unit instead.
-      const sharedRoot = await store.subgraph(track.id, {
+      // MUTATION CHECK: drop the `n.kind` term from `compileSeedFilter`
+      // (src/store/recursive-cte.ts) — the walk then seeds from every node
+      // holding the root's id, and each root's unit takes in the other's note.
+      const trackUnit = await store.subgraph(track, {
         edges: [],
         composition: true,
       });
-      expect(sharedRoot.nodes.has(trackNote.id)).toBe(true);
-      expect(sharedRoot.nodes.has(videoNote.id)).toBe(false);
+      expect(indexSubgraph(trackUnit).node(trackNote)).toBeDefined();
+      expect(indexSubgraph(trackUnit).node(videoNote)).toBeUndefined();
+      const videoUnit = await store.subgraph(video, {
+        edges: [],
+        composition: true,
+      });
+      expect(indexSubgraph(videoUnit).node(videoNote)).toBeDefined();
+      expect(indexSubgraph(videoUnit).node(trackNote)).toBeUndefined();
+    });
+
+    it("parts() and wholes() return every member when members of different kinds share an id", async () => {
+      const store = await context.createStore(sharedIdCompositionGraph);
+      const album = await store.nodes.CnAlbum.create({});
+      const track = await store.nodes.CnTrack.create({}, { id: "shared" });
+      await store.edges.cnAlbumHasTrack.create(album, track, {});
+      // The note reuses the track's id, one level below it in the same unit.
+      const note = await store.nodes.CnNote.create(
+        {},
+        { id: track.id, partOf: { whole: track } },
+      );
+
+      // MUTATION CHECK: key the recursive cycle token on the bare id
+      // (`recursivePathTokenShape` returning "id" for a multi-kind walk,
+      // src/query/compiler/recursive-path-token.ts) — the walk then reads the
+      // note as a revisit of the track it descends from and drops it, and
+      // the upward walk from the note drops the track and never reaches the
+      // album.
+      const parts = await store
+        .query()
+        .from("CnAlbum", "album")
+        .whereNode("album", (node) => node.id.eq(album.id))
+        .parts("part")
+        .select((ctx) => ({ kind: ctx.part.kind, id: ctx.part.id }))
+        .execute();
+      expect(new Set(parts.map((part) => `${part.kind}/${part.id}`))).toEqual(
+        new Set([`CnTrack/${track.id}`, `CnNote/${note.id}`]),
+      );
+
+      const wholes = await store
+        .query()
+        .from("CnNote", "note")
+        .whereNode("note", (node) => node.id.eq(note.id))
+        .wholes("whole")
+        .select((ctx) => ({ kind: ctx.whole.kind, id: ctx.whole.id }))
+        .execute();
+      expect(
+        new Set(wholes.map((whole) => `${whole.kind}/${whole.id}`)),
+      ).toEqual(new Set([`CnTrack/${track.id}`, `CnAlbum/${album.id}`]));
     });
 
     it("subgraph({ composition: true }) reads every statement at one current instant", async () => {
@@ -1509,10 +1551,10 @@ export function registerCompositionNavigationIntegrationTests(
         // backend, which is what lets the hook move the clock mid-read.
         const result = await store.transaction((tx) => {
           advanceClockOnNextStatement = true;
-          return tx.subgraph(podcast.id, { edges: [], composition: true });
+          return tx.subgraph(podcast, { edges: [], composition: true });
         });
 
-        expect(new Set(result.nodes.keys())).toEqual(
+        expect(new Set(result.nodes.map((node) => node.id))).toEqual(
           new Set([podcast.id, episode.id]),
         );
       } finally {
@@ -1540,12 +1582,12 @@ export function registerCompositionNavigationIntegrationTests(
       });
       await history.edges.cnBookHasChapter.create(book, lateChapter, {});
 
-      const pinned = await history.asOfRecorded(pin).subgraph(book.id, {
+      const pinned = await history.asOfRecorded(pin).subgraph(book, {
         edges: [],
         composition: true,
       });
 
-      expect(new Set(pinned.nodes.keys())).toEqual(
+      expect(new Set(pinned.nodes.map((node) => node.id))).toEqual(
         new Set([book.id, chapter.id, paragraph.id]),
       );
     });
@@ -1555,36 +1597,34 @@ export function registerCompositionNavigationIntegrationTests(
       const { podcast, book } = await seedCompositionFixtures(store);
 
       const [storePodcast, storeBookViaChapters] = await Promise.all([
-        store.subgraph(podcast.id, { edges: [], composition: true }),
-        store.subgraph(book.id, {
+        store.subgraph(podcast, { edges: [], composition: true }),
+        store.subgraph(book, {
           edges: [],
           composition: { via: "cnBookHasChapter" },
         }),
       ]);
       const [txPodcast, txBookViaChapters] = await store.transaction(
         async (tx) => [
-          await tx.subgraph(podcast.id, { edges: [], composition: true }),
-          await tx.subgraph(book.id, {
+          await tx.subgraph(podcast, { edges: [], composition: true }),
+          await tx.subgraph(book, {
             edges: [],
             composition: { via: "cnBookHasChapter" },
           }),
         ],
       );
 
-      expect(txPodcast.nodes.size).toBe(4);
-      expect(new Set(txPodcast.nodes.keys())).toEqual(
-        new Set(storePodcast.nodes.keys()),
+      expect(txPodcast.nodes).toHaveLength(4);
+      expect(new Set(txPodcast.nodes.map((node) => node.id))).toEqual(
+        new Set(storePodcast.nodes.map((node) => node.id)),
       );
-      expect(adjacencyEdgeIds(txPodcast.adjacency)).toEqual(
-        adjacencyEdgeIds(storePodcast.adjacency),
-      );
-      expect(txBookViaChapters.nodes.size).toBe(2);
-      expect(new Set(txBookViaChapters.nodes.keys())).toEqual(
-        new Set(storeBookViaChapters.nodes.keys()),
+      expect(edgeIds(txPodcast.edges)).toEqual(edgeIds(storePodcast.edges));
+      expect(txBookViaChapters.nodes).toHaveLength(2);
+      expect(new Set(txBookViaChapters.nodes.map((node) => node.id))).toEqual(
+        new Set(storeBookViaChapters.nodes.map((node) => node.id)),
       );
       await expect(
         store.transaction((tx) =>
-          tx.subgraph(book.id, {
+          tx.subgraph(book, {
             edges: [],
             composition: { via: "cnEpisodeOf" },
           }),
@@ -1617,7 +1657,7 @@ export function registerCompositionNavigationIntegrationTests(
         await expect(
           store.batchOnce((read) => [
             read.neighbors(podcast, { edges: ["cnEpisodeOf"] }),
-            read.subgraph(podcast.id, options),
+            read.subgraph(podcast, options),
           ]),
         ).rejects.toThrow(
           expect.objectContaining({
@@ -1638,7 +1678,7 @@ export function registerCompositionNavigationIntegrationTests(
 
       for (const composition of invalidSelections) {
         const options = { edges: [], composition } as never;
-        await expect(store.subgraph(podcast.id, options)).rejects.toThrow(
+        await expect(store.subgraph(podcast, options)).rejects.toThrow(
           expect.objectContaining({ code: "VALIDATION_ERROR" }),
         );
       }
@@ -1649,7 +1689,7 @@ export function registerCompositionNavigationIntegrationTests(
       const node = await store.nodes.CnPodcast.create({ title: "Solo" });
 
       await expect(
-        store.subgraph(node.id, { edges: [], composition: true }),
+        store.subgraph(node, { edges: [], composition: true }),
       ).rejects.toThrow(
         expect.objectContaining({
           code: "CONFIGURATION_ERROR",

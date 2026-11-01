@@ -112,12 +112,15 @@ import {
   registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
+  registerRecursiveDelimiterIdIntegrationTests,
   registerRecursiveIntegrationTests,
+  registerRecursiveSharedIdIntegrationTests,
   registerRecursiveStopExpansionIntegrationTests,
   registerRefusedCreateClaimIntegrationTests,
   registerRelationalCompositionIntegrationTests,
   registerReleasedClaimLookupIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
+  registerSavepointRecoveryIntegrationTests,
   registerSchemaCheckedReadIntegrationTests,
   registerSelectiveRetryIntegrationTests,
   registerSetNodeMutationIntegrationTests,
@@ -125,6 +128,7 @@ import {
   registerStoreAnalysisIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
+  registerSubgraphSharedIdIntegrationTests,
   registerTemporalIntegrationTests,
   registerTemporalOracleIntegrationTests,
   registerTransactionReceiptIntegrationTests,
@@ -203,11 +207,6 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
    * `true`.
    */
   serverLaneConcurrency?: boolean;
-  /**
-   * See {@link IntegrationTestContext.recoversFailedStatementInTransaction}.
-   * Defaults to `true`.
-   */
-  recoversFailedStatementInTransaction?: boolean;
 }>;
 
 /**
@@ -295,8 +294,6 @@ export function createIntegrationTestSuite<
         return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
       serverLaneConcurrency: options.serverLaneConcurrency ?? false,
-      recoversFailedStatementInTransaction:
-        options.recoversFailedStatementInTransaction ?? true,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {
@@ -379,6 +376,7 @@ export function createIntegrationTestSuite<
     registerRefusedCreateClaimIntegrationTests(context);
     registerConstraintFenceErrorIntegrationTests(context);
     registerConstraintFenceTransactionHealthTests(context);
+    registerSavepointRecoveryIntegrationTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);
     registerOntologyTighteningIntegrationTests(context);
     registerUniquenessClaimGateIntegrationTests(context);
@@ -391,12 +389,15 @@ export function createIntegrationTestSuite<
     registerSchemaCheckedReadIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
+    registerRecursiveSharedIdIntegrationTests(context);
+    registerRecursiveDelimiterIdIntegrationTests(context);
     registerRecursiveStopExpansionIntegrationTests(context);
     registerPaginationIntegrationTests(context);
     registerTraversalIntegrationTests(context);
     registerEdgePropertyIntegrationTests(context);
     registerAdvancedEdgePropertyIntegrationTests(context);
     registerSubgraphIntegrationTests(context);
+    registerSubgraphSharedIdIntegrationTests(context);
     registerStoreViewIntegrationTests(context);
     registerStoreAnalysisIntegrationTests(context);
     registerClearIntegrationTests(context);
