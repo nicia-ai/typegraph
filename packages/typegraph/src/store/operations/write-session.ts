@@ -170,6 +170,7 @@ export type WriteTarget = Readonly<
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
       | "commands"
+      | "lockNodes"
     > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<

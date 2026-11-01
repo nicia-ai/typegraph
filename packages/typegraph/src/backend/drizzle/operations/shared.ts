@@ -11,6 +11,14 @@ import type { SqliteTables } from "../schema/sqlite";
 export type Tables = SqliteTables | PostgresTables;
 
 /**
+ * A row-lock clause for the trailing locking position of a `SELECT`. `of`
+ * names the `FROM` aliases it locks; without it the clause locks every row
+ * the `SELECT` reads. A dialect whose engine already serializes writers
+ * renders an empty clause.
+ */
+export type RowLockClause = (of?: readonly string[]) => SQL;
+
+/**
  * The names a relation's PRIMARY KEY constraint can carry, given the relation
  * name and its key columns.
  *

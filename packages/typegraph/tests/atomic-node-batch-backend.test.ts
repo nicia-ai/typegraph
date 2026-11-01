@@ -104,17 +104,23 @@ describe("bundled root atomic node batch", () => {
     ).resolves.toEqual({ affectedCount: 3, schemaFenceMatched: true });
 
     expect(transaction).toHaveBeenCalledOnce();
-    expect(query).toHaveBeenCalledTimes(7);
+    expect(query).toHaveBeenCalledTimes(10);
+    // The delete lock leads the program, before any delete's edge check.
     for (const [sqlText, params] of query.mock.calls.slice(0, 3)) {
-      expect(sqlText).toContain("UPDATE");
+      expect(sqlText).toContain("FOR UPDATE");
+      expect(sqlText).not.toContain('UPDATE "');
       expect(params.length).toBeLessThanOrEqual(7);
     }
     for (const [sqlText, params] of query.mock.calls.slice(3, 6)) {
       expect(sqlText).toContain("UPDATE");
+      expect(params.length).toBeLessThanOrEqual(7);
+    }
+    for (const [sqlText, params] of query.mock.calls.slice(6, 9)) {
+      expect(sqlText).toContain("UPDATE");
       expect(sqlText).toContain("typegraph_node_uniques");
       expect(params.length).toBeLessThanOrEqual(7);
     }
-    expect(query.mock.calls[6]?.[0]).toContain("SELECT");
+    expect(query.mock.calls[9]?.[0]).toContain("SELECT");
   });
 
   it.each([
@@ -361,6 +367,86 @@ describe("bundled root atomic node batch", () => {
     for (const call of query.mock.calls) {
       expect(call[1].length).toBeLessThanOrEqual(100);
     }
+  });
+
+  it("runs a D1 node-delete program without lock statements, because its writer slot already serializes writers", async () => {
+    const boundStatements: Readonly<{
+      sql: string;
+      params: readonly unknown[];
+    }>[] = [];
+    const prepare = vi.fn((sqlText: string) => ({
+      bind(...params: readonly unknown[]) {
+        const statement = { sql: sqlText, params };
+        boundStatements.push(statement);
+        return statement;
+      },
+    }));
+    const batch = vi.fn(
+      (
+        statements: readonly Readonly<{
+          sql: string;
+          params: readonly unknown[];
+        }>[],
+      ) =>
+        Promise.resolve(
+          statements.map((statement) => {
+            const sqlText = statement.sql.toLowerCase();
+            if (sqlText.includes("typegraph_node_uniques"))
+              return { results: [] };
+            if (sqlText.includes("update")) {
+              return {
+                results: statement.params
+                  .filter(
+                    (parameter): parameter is string =>
+                      typeof parameter === "string" &&
+                      parameter.startsWith("delete-person-"),
+                  )
+                  .map((id) => ({ id })),
+              };
+            }
+            return { results: [{ version: 1 }] };
+          }),
+        ),
+    );
+    const dialect = new SQLiteSyncDialect();
+    const db = {
+      $client: { batch, prepare },
+      session: { constructor: { name: "SQLiteD1Session" } },
+      dialect: {
+        sqlToQuery(query: SQL) {
+          return dialect.sqlToQuery(query);
+        },
+      },
+      all: vi.fn(() => Promise.resolve([])),
+      get: vi.fn(() => Promise.resolve(undefined)),
+      run: vi.fn(() => Promise.resolve()),
+    } as unknown as AnySqliteDatabase;
+    const backend = createSqliteBackend(db);
+    const executeAtomicNodeDelete =
+      resolveBundledRootAtomicMutationPrograms(backend)?.deleteNodes;
+    if (executeAtomicNodeDelete === undefined) {
+      throw new Error("Expected D1 atomic node delete capability");
+    }
+
+    await expect(
+      executeAtomicNodeDelete({
+        graphId: "graph-1",
+        kind: "Person",
+        ids: ["delete-person-1", "delete-person-2"],
+        schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+      }),
+    ).resolves.toEqual({ affectedCount: 2, schemaFenceMatched: true });
+
+    expect(batch).toHaveBeenCalledOnce();
+    // Delete, claim release and schema-fence probe only: the PostgreSQL
+    // program's leading lock slots would lock nothing here.
+    expect(
+      boundStatements.map((statement) => {
+        const sqlText = statement.sql.toLowerCase();
+        if (sqlText.includes("typegraph_node_uniques")) return "release";
+        return sqlText.includes("update") ? "delete" : "fence";
+      }),
+    ).toEqual(["delete", "release", "fence"]);
   });
 
   it("uses one D1 batch while keeping every fenced chunk within its bind limit", async () => {

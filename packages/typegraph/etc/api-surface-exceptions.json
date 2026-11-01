@@ -1,1 +1,146 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildLockNodes",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy is built only by the two bundled engine builders; an engine profile's `strategy` is non-derivable (absent from DERIVABLE_ENGINE_PROFILE_KEYS) and its opaque bundled `assembly` closes over it, so no external consumer can author or replace this type.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildLockNodesForAtomicDeleteWithSchemaFence",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy is built only by the two bundled engine builders; an engine profile's `strategy` is non-derivable (absent from DERIVABLE_ENGINE_PROFILE_KEYS) and its opaque bundled `assembly` closes over it, so no external consumer can author or replace this type.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphBackend",
+    "member": "lockNodes",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change, recorded in the ### Breaking entry of .changeset/edge-endpoint-delete-race.md (#795): the store reads every edge endpoint check and node delete preflight through lockNodes, and an optional member had no sound fallback. Custom backends must implement it; a writer-serializing engine implements it as its ordered getNodes read.",
+    "issue": "#795"
+  }
+]
