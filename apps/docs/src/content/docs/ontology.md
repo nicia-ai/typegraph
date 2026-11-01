@@ -111,12 +111,11 @@ is still compared. A subclass that adds an `embedding()` to its parent opens
 normally, two independently declared `z.date()` fields are accepted, and a
 pair that is also incompatible elsewhere (a tighter `z.string().min(5)` on
 the parent, say) is refused. The compile-time check still applies to the
-unconverted fields. This per-field comparison needs Zod 4.5 or later; with an
-older Zod, a pair with such a field on either side is skipped. A field Zod
-converts only in part, such as a `.catch()` with a dynamic fallback, keeps
-the type it states and is comparable only to the same schema. A deserialized
-document has no Zod schemas, and it stores such a kind without a property
-projection, so a pair with that kind on **either** side is skipped there.
+unconverted fields. A field Zod converts only in part, such as a `.catch()`
+with a dynamic fallback, keeps the type it states and is comparable only to
+the same schema. A deserialized document has no Zod schemas, and it stores
+such a kind without a property projection, so a pair with that kind on
+**either** side is skipped there.
 Every commit, `createStore`, `getSchemaChanges` and `requiresMigration` also
 check the graph in your code, so this coarser check never decides alone.
 

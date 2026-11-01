@@ -480,7 +480,7 @@ export type ImportResult = z.infer<typeof ImportResultSchema>;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 // Annotated as the wider `ZodCustom` because zod 4.6 narrowed `z.instanceof`'s
-// return type to `ZodInstanceOf`, which zod 4.0–4.5 (inside our `^4.0.0` peer
+// return type to `ZodInstanceOf`, which zod 4.5 (inside our `^4.5.0` peer
 // range) does not declare; emitting it would break consumers' declarations.
 const AbortSignalSchema: z.ZodCustom<AbortSignal, AbortSignal> =
   z.instanceof(AbortSignal);

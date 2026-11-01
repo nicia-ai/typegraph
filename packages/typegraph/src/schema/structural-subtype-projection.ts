@@ -40,8 +40,7 @@
  * is still compared. A node Zod converts only in part (a dynamic `.catch()`
  * keeps its `type`) is marked as carrying a Zod-only constraint instead. The
  * persisted placeholder is kept when this projection cannot do better: a
- * conversion that fails for another reason, or a Zod release older than 4.5
- * that ignores the `unrepresentable` handler.
+ * conversion that fails for another reason.
  */
 import { z } from "zod";
 

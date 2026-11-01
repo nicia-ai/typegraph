@@ -179,7 +179,7 @@ async function runConsumerTypeSmokeTest(
   const tarballPath = path.join(temporaryDir, "typegraph.tgz");
   const fixtureDir = path.join(packageDir, "type-smoke");
 
-  const zodVersion = packageJson.devDependencies?.["zod"] ?? "^4.0.0";
+  const zodVersion = packageJson.devDependencies?.["zod"] ?? "^4.5.0";
   const drizzleVersion =
     packageJson.devDependencies?.["drizzle-orm"] ?? ">=0.35.0";
 
