@@ -19,7 +19,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, subClassOf } from "../../../src";
+import {
+  asNodeId,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  subClassOf,
+} from "../../../src";
 import type { InspectableStore, IntegrationTestContext } from "./test-context";
 
 const CHAIN_IDS = ["a|b", "b", "%7C", "|", "%", "%25", "\u001F"] as const;
@@ -193,14 +199,14 @@ export function registerRecursiveDelimiterIdIntegrationTests(
     it("reaches every chain node through store.subgraph", async () => {
       await seedChain(store);
 
-      const result = await store.subgraph(ROOT_ID as never, {
-        edges: ["linked"],
-        maxDepth: 20,
-      });
+      const result = await store.subgraph(
+        { kind: "Clip", id: asNodeId<typeof Clip>(ROOT_ID) },
+        { edges: ["linked"], maxDepth: 20 },
+      );
 
-      expect(
-        [...result.nodes.values()].map((node) => node.id).toSorted(),
-      ).toEqual([...CHAIN_IDS].toSorted());
+      expect(result.nodes.map((node) => node.id).toSorted()).toEqual(
+        [...CHAIN_IDS].toSorted(),
+      );
     });
   });
 }

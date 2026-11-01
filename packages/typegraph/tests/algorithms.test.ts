@@ -30,11 +30,7 @@ import type {
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createStatementCountingBackend } from "./statement-counting-backend";
-import {
-  collectAllEdges,
-  createTestBackend,
-  TEMPORAL_ANCHORS,
-} from "./test-utils";
+import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -3072,8 +3068,8 @@ describe("store.algorithms temporal behavior", () => {
       expect(outDegree).toBe(1);
 
       // fetchSubgraphEdges: subgraph hydrates edges via compileTemporalFilter.
-      const sub = await freshStore.subgraph(alice.id, { edges: ["knows"] });
-      expect(collectAllEdges(sub.adjacency)).toHaveLength(1);
+      const sub = await freshStore.subgraph(alice, { edges: ["knows"] });
+      expect(sub.edges).toHaveLength(1);
     });
 
     it("excludes rows whose valid_to was earlier today", async () => {

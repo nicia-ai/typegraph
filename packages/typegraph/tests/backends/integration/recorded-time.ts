@@ -1243,10 +1243,10 @@ export function registerRecordedTimeIntegrationTests(
         {
           surface: "subgraph",
           read: async () => {
-            const subgraph = await recorded.subgraph(alice.id, {
+            const subgraph = await recorded.subgraph(alice, {
               edges: ["knows"],
             });
-            return [...subgraph.nodes.values()]
+            return subgraph.nodes
               .map((node) => (node as { name: string }).name)
               .toSorted();
           },
@@ -1344,10 +1344,10 @@ export function registerRecordedTimeIntegrationTests(
         earlyRanks.reduce((total, row) => total + row.score, 0),
       ).toBeCloseTo(1, 10);
 
-      const earlySubgraph = await early.subgraph(a.id, {
+      const earlySubgraph = await early.subgraph(a, {
         edges: ["knows"],
       });
-      const earlyNames = [...earlySubgraph.nodes.values()]
+      const earlyNames = earlySubgraph.nodes
         .map((node) => (node as { name: string }).name)
         .toSorted();
       expect(earlyNames).toEqual(["A", "B", "C"]);
@@ -1891,7 +1891,7 @@ export function registerRecordedTimeIntegrationTests(
           );
         });
         await expectMissingRecordedRelations(() =>
-          recorded.subgraph(alice.id, { edges: ["knows"], maxDepth: 1 }),
+          recorded.subgraph(alice, { edges: ["knows"], maxDepth: 1 }),
         );
         await expectMissingRecordedRelations(() =>
           recorded.degree(alice, { edges: ["knows"] }),

@@ -170,7 +170,7 @@ describe("Store.evolve — subgraph parity", () => {
     // The edge name is a graph-extension kind, so it requires the `as never`
     // cast — same pattern as `store.search.fulltext("Paper" as never)`
     // shown in the runnable example.
-    const result = await evolved.subgraph(alice.id, {
+    const result = await evolved.subgraph(alice, {
       edges: ["appliesTo" as never],
       maxDepth: 1,
       direction: "both",
@@ -179,7 +179,7 @@ describe("Store.evolve — subgraph parity", () => {
     // The two Tag nodes were reached via the appliesTo edges.
     // `node.kind` is typed against compile-time kinds; graph-extension kind
     // comparison goes through an `unknown` cast.
-    const tagIds = [...result.nodes.values()]
+    const tagIds = result.nodes
       .filter((node) => (node.kind as unknown as string) === "Tag")
       .map((node) => node.id)
       .toSorted();

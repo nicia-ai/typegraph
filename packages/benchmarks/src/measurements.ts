@@ -23,8 +23,7 @@ type SubgraphNode = Readonly<{ kind: string; id: string }>;
 type SubgraphEdge = Readonly<{ id: string; fromId: string; toId: string }>;
 
 type FullSubgraphResult = Readonly<{
-  nodes: ReadonlyMap<
-    string,
+  nodes: readonly (
     | Readonly<{
         kind: "User";
         id: string;
@@ -38,17 +37,16 @@ type FullSubgraphResult = Readonly<{
         title: string;
         body: string;
       }>
-  >;
-  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly SubgraphEdge[]>>;
+  )[];
+  edges: readonly SubgraphEdge[];
 }>;
 
 type ProjectedSubgraphResult = Readonly<{
-  nodes: ReadonlyMap<
-    string,
+  nodes: readonly (
     | Readonly<{ kind: "User"; id: string; name: string }>
     | Readonly<{ kind: "Post"; id: string; title: string }>
-  >;
-  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly SubgraphEdge[]>>;
+  )[];
+  edges: readonly SubgraphEdge[];
 }>;
 
 type BenchmarkSubgraphOptions = Readonly<{
@@ -102,43 +100,34 @@ async function benchmarkQuery(
   return medianResult;
 }
 
-function sumEdgeChecksum(
-  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly SubgraphEdge[]>>,
-): number {
+function sumEdgeChecksum(edges: readonly SubgraphEdge[]): number {
   let checksum = 0;
-  for (const kindMap of adjacency.values()) {
-    for (const edges of kindMap.values()) {
-      for (const edge of edges) {
-        checksum += edge.id.length + edge.fromId.length + edge.toId.length;
-      }
-    }
+  for (const edge of edges) {
+    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
   }
   return checksum;
 }
 
 function consumeSubgraphCounts(
   result: Readonly<{
-    nodes: ReadonlyMap<string, SubgraphNode>;
-    adjacency: ReadonlyMap<
-      string,
-      ReadonlyMap<string, readonly SubgraphEdge[]>
-    >;
+    nodes: readonly SubgraphNode[];
+    edges: readonly SubgraphEdge[];
   }>,
 ): number {
   let checksum = 0;
 
-  for (const node of result.nodes.values()) {
+  for (const node of result.nodes) {
     checksum += node.id.length + node.kind.length;
   }
 
-  checksum += sumEdgeChecksum(result.adjacency);
+  checksum += sumEdgeChecksum(result.edges);
   return checksum;
 }
 
 function projectSubgraphInApplication(result: FullSubgraphResult): number {
   let checksum = 0;
 
-  for (const node of result.nodes.values()) {
+  for (const node of result.nodes) {
     if (node.kind === "User") {
       checksum += node.id.length + node.name.length;
       continue;
@@ -149,14 +138,14 @@ function projectSubgraphInApplication(result: FullSubgraphResult): number {
     }
   }
 
-  checksum += sumEdgeChecksum(result.adjacency);
+  checksum += sumEdgeChecksum(result.edges);
   return checksum;
 }
 
 function consumeProjectedSubgraph(result: ProjectedSubgraphResult): number {
   let checksum = 0;
 
-  for (const node of result.nodes.values()) {
+  for (const node of result.nodes) {
     if (node.kind === "User") {
       checksum += node.id.length + node.name.length;
       continue;
@@ -165,7 +154,7 @@ function consumeProjectedSubgraph(result: ProjectedSubgraphResult): number {
     checksum += node.id.length + node.title.length;
   }
 
-  checksum += sumEdgeChecksum(result.adjacency);
+  checksum += sumEdgeChecksum(result.edges);
   return checksum;
 }
 
@@ -180,14 +169,13 @@ async function logSubgraphShape(
   label: string,
   options: BenchmarkSubgraphOptions,
 ): Promise<void> {
-  const result = await store.subgraph("user_0" as never, options);
-  let edgeCount = 0;
-  for (const kindMap of result.adjacency.values()) {
-    for (const edges of kindMap.values()) {
-      edgeCount += edges.length;
-    }
-  }
-  console.log(`${label}: ${result.nodes.size} nodes, ${edgeCount} edges`);
+  const result = await store.subgraph(
+    { kind: "User", id: "user_0" } as never,
+    options,
+  );
+  console.log(
+    `${label}: ${result.nodes.length} nodes, ${result.edges.length} edges`,
+  );
 }
 
 type MeasurementContext = Readonly<{
@@ -272,7 +260,7 @@ export async function measureQueries(
     "subgraph full hydration (wide payload, depth 2)",
     async () => {
       const result = await store.subgraph(
-        "user_0" as never,
+        { kind: "User", id: "user_0" } as never,
         SUBGRAPH_BASELINE_OPTIONS,
       );
 
@@ -287,7 +275,7 @@ export async function measureQueries(
     "subgraph full hydration + app projection (wide payload, depth 2)",
     async () => {
       const result = await store.subgraph(
-        "user_0" as never,
+        { kind: "User", id: "user_0" } as never,
         SUBGRAPH_BASELINE_OPTIONS,
       );
 
@@ -301,19 +289,22 @@ export async function measureQueries(
   const subgraphSqlProjectionMs = await bench(
     "subgraph SQL projection (wide payload, depth 2)",
     async () => {
-      const result = await store.subgraph("user_0" as never, {
-        ...SUBGRAPH_BASELINE_OPTIONS,
-        project: {
-          nodes: {
-            User: ["name"],
-            Post: ["title"],
-          },
-          edges: {
-            follows: [],
-            authored: [],
+      const result = await store.subgraph(
+        { kind: "User", id: "user_0" } as never,
+        {
+          ...SUBGRAPH_BASELINE_OPTIONS,
+          project: {
+            nodes: {
+              User: ["name"],
+              Post: ["title"],
+            },
+            edges: {
+              follows: [],
+              authored: [],
+            },
           },
         },
-      });
+      );
 
       assertNonEmptyChecksum(
         "subgraph SQL projection",
@@ -332,7 +323,7 @@ export async function measureQueries(
     "subgraph full hydration (wide payload, depth 3 stress)",
     async () => {
       const result = await store.subgraph(
-        "user_0" as never,
+        { kind: "User", id: "user_0" } as never,
         SUBGRAPH_STRESS_OPTIONS,
       );
 
@@ -347,7 +338,7 @@ export async function measureQueries(
     "subgraph full hydration + app projection (wide payload, depth 3 stress)",
     async () => {
       const result = await store.subgraph(
-        "user_0" as never,
+        { kind: "User", id: "user_0" } as never,
         SUBGRAPH_STRESS_OPTIONS,
       );
 
@@ -361,19 +352,22 @@ export async function measureQueries(
   const subgraphStressSqlProjectionMs = await bench(
     "subgraph SQL projection (wide payload, depth 3 stress)",
     async () => {
-      const result = await store.subgraph("user_0" as never, {
-        ...SUBGRAPH_STRESS_OPTIONS,
-        project: {
-          nodes: {
-            User: ["name"],
-            Post: ["title"],
-          },
-          edges: {
-            follows: [],
-            authored: [],
+      const result = await store.subgraph(
+        { kind: "User", id: "user_0" } as never,
+        {
+          ...SUBGRAPH_STRESS_OPTIONS,
+          project: {
+            nodes: {
+              User: ["name"],
+              Post: ["title"],
+            },
+            edges: {
+              follows: [],
+              authored: [],
+            },
           },
         },
-      });
+      );
 
       assertNonEmptyChecksum(
         "subgraph stress SQL projection",

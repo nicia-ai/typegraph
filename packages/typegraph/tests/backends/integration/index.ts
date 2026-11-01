@@ -80,6 +80,7 @@ export { registerSetOperationIntegrationTests } from "./set-operations";
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
+export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids";
 export { registerTemporalIntegrationTests } from "./temporal";
 export { registerTemporalOracleIntegrationTests } from "./temporal-oracle";
 export type { IntegrationTestContext } from "./test-context";

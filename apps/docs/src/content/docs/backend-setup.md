@@ -1367,7 +1367,7 @@ capabilities (`DialectCapabilities`) declares `subgraphMembershipStrategy`, so a
 profile inherits whichever of the two dialects its own `dialect` field names. It
 is the plan-shape choice behind `store.subgraph()`'s reachable-node filter:
 `"materialized-ids"` fetches the traversal closure once and filters both the
-node and edge queries against that fixed id list (the shape PostgreSQL uses,
+node and edge queries against that fixed list of (kind, id) pairs (the shape PostgreSQL uses,
 trading one extra round trip for a parameter-driven plan), while `"inline-cte"`
 embeds the recursive closure in each fetch instead (the shape SQLite uses, where
 an in-process traversal is cheap and a growing parameter list would pressure the

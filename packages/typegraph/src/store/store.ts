@@ -90,7 +90,6 @@ import {
   type TransactionOptions,
 } from "../backend/types";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type GraphIdentityConfig,
@@ -864,7 +863,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
   clear: (
@@ -952,7 +951,7 @@ export type BatchReadBuilder<G extends GraphDef> = Readonly<{
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
 }>;
@@ -980,7 +979,7 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
 }>;
@@ -1563,8 +1562,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.recordedEdgeGetByIds(kind, ids, coordinate),
       recordedEdgeScan: (kind, coordinate, options) =>
         this.recordedEdgeScan(kind, coordinate, options),
-      subgraphAtCoordinate: (rootId, subgraphOptions) =>
-        this.subgraphAtCoordinate(rootId, subgraphOptions),
+      subgraphAtCoordinate: (root, subgraphOptions) =>
+        this.subgraphAtCoordinate(root, subgraphOptions),
       algorithmsAtCoordinate: (coordinate) =>
         this.algorithmsAtCoordinate(coordinate),
       identityAtCoordinate: (coordinate) =>
@@ -3389,8 +3388,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         );
       },
-      subgraph: (rootId, options) =>
-        this.#createSubgraphRead(rootId, options, backend, attempt),
+      subgraph: (root, options) =>
+        this.#createSubgraphRead(root, options, backend, attempt),
     };
   }
 
@@ -3630,27 +3629,36 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Extracts a typed subgraph by traversing from a root node.
    *
-   * Performs a BFS traversal from `rootId` following the specified edge kinds,
-   * returning an indexed result with adjacency maps for immediate traversal.
+   * Performs a BFS traversal from `root` following the specified edge kinds,
+   * returning the reached nodes and edges as plain data; `indexSubgraph`
+   * builds (kind, id) lookups over them.
+   *
+   * `root` is a `{ kind, id }` reference. Node rows are keyed by (kind, id),
+   * so two nodes of different kinds may share an id; every lookup takes both,
+   * and a walk that reaches both returns both.
    *
    * @example
    * ```typescript
-   * const sg = await store.subgraph(run.id, {
+   * const sg = await store.subgraph(run, {
    *   edges: ["has_task", "runs_agent", "uses_skill"],
    *   maxDepth: 4,
    * });
+   * const { node, outgoing, incoming } = indexSubgraph(sg);
    *
    * // Root node (the traversal starting point)
    * console.log(sg.root?.kind);
    *
-   * // Lookup by ID
-   * const task = sg.nodes.get(taskId);
+   * // Lookup by kind and id
+   * const task = node({ kind: "Task", id: taskId });
    *
-   * // Forward adjacency: edges of a kind from a node
-   * const taskEdges = sg.adjacency.get(run.id)?.get("has_task") ?? [];
+   * // Outgoing edges of a kind from a node, and the nodes they reach
+   * const taskEdges = outgoing(run, "has_task");
+   * const tasks = taskEdges.map((edge) =>
+   *   node({ kind: edge.toKind, id: edge.toId }),
+   * );
    *
-   * // Reverse adjacency: edges of a kind pointing to a node
-   * const parentEdges = sg.reverseAdjacency.get(taskId)?.get("has_task") ?? [];
+   * // Incoming edges of a kind pointing to a node
+   * const parentEdges = incoming({ kind: "Task", id: taskId }, "has_task");
    * ```
    */
   async subgraph<
@@ -3658,7 +3666,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ): Promise<SubgraphResult<G, NK, EK, P>> {
     // The public surface is valid-time only (`recordedAsOf` is typed `never`).
@@ -3668,7 +3676,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#assertPublicSubgraphOptions(options);
     // After the guard, the public read is just the coordinate path with no
     // recorded pin — delegate so the executeSubgraph wiring lives in one place.
-    return this.subgraphAtCoordinate(rootId, options);
+    return this.subgraphAtCoordinate(root, options);
   }
 
   #createSubgraphRead<
@@ -3676,7 +3684,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
     backend: GraphBackend | TransactionBackend = this.#baseBackend,
     attempt = 1,
@@ -3685,7 +3693,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return createSubgraphRead({
       graph: this.#graph,
       graphId: this.graphId,
-      rootId,
+      root,
       backend: this.#createHookedQueryBackend(backend, attempt),
       dialect: getDialect(backend.dialect),
       schema: this.#schema,
@@ -3700,7 +3708,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       message:
         "recordedAsOf is only available through store.asOfRecorded(...).subgraph(...).",
       suggestion:
-        "Use store.asOfRecorded(recordedAt).subgraph(rootId, options) instead of passing recordedAsOf directly.",
+        "Use store.asOfRecorded(recordedAt).subgraph(root, options) instead of passing recordedAsOf directly.",
     });
   }
 
@@ -3717,7 +3725,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
+    root: GraphNodeReference<G>,
     options: InternalSubgraphOptions<G, EK, NK, P>,
   ): Promise<SubgraphResult<G, NK, EK, P>> {
     const coordinate = resolveReadCoordinate(
@@ -3731,7 +3739,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return executeSubgraph({
       graph: this.#graph,
       graphId: this.graphId,
-      rootId,
+      root,
       backend: this.#recordedReads.backendForCoordinate(
         readCoordinate,
         "recorded-subgraph",
@@ -4636,8 +4644,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         );
       },
-      subgraph: (rootId, options) =>
-        this.#createSubgraphRead(rootId, options, txBackend, attempt).execute(),
+      subgraph: (root, options) =>
+        this.#createSubgraphRead(root, options, txBackend, attempt).execute(),
     };
   }
 

@@ -6,6 +6,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  indexSubgraph,
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
@@ -52,19 +53,22 @@ async function main(): Promise<void> {
     // Keep the default batching path for disjoint neighborhoods: there is no
     // repeated hydration for a shared query to remove.
     const disjoint = await store.batchOnce((read) =>
-      [ada.id, dana.id].map((root) =>
+      [ada, dana].map((root) =>
         read.subgraph(root, { edges: ["knows"], maxDepth: 2 }),
       ),
     );
-    assert.equal(disjoint[0]?.nodes.has(cara.id), true);
-    assert.equal(disjoint[0].nodes.has(dana.id), false);
-    assert.equal(disjoint[1]?.nodes.has(eli.id), true);
-    assert.equal(disjoint[1].nodes.has(ada.id), false);
+    const [fromAda, fromDana] = disjoint.map((subgraph) =>
+      indexSubgraph(subgraph),
+    );
+    assert.ok(fromAda?.node(cara));
+    assert.equal(fromAda?.node(dana), undefined);
+    assert.ok(fromDana?.node(eli));
+    assert.equal(fromDana?.node(ada), undefined);
 
     // The same overlapping Ada/Bea roots are also cheap on the default path
     // when callers need identities only. Empty projections omit properties.
     const identityOnly = await store.batchOnce((read) =>
-      [ada.id, bea.id].map((root) =>
+      [ada, bea].map((root) =>
         read.subgraph(root, {
           edges: ["knows"],
           maxDepth: 2,
@@ -72,16 +76,19 @@ async function main(): Promise<void> {
         }),
       ),
     );
-    assert.equal(identityOnly[0]?.nodes.has(cara.id), true);
-    assert.equal(identityOnly[1]?.nodes.has(cara.id), true);
-    const identityAda = identityOnly[0].nodes.get(ada.id);
+    const [identityFromAda, identityFromBea] = identityOnly.map((subgraph) =>
+      indexSubgraph(subgraph),
+    );
+    assert.ok(identityFromAda?.node(cara));
+    assert.ok(identityFromBea?.node(cara));
+    const identityAda = identityFromAda?.node(ada);
     assert.ok(identityAda);
     assert.equal("biography" in identityAda, false);
 
     // One statement retrieves both bounded neighborhoods. Shared hydration is
     // useful here because they overlap and include substantial property data.
     // Measure your workload before opting in; disjoint roots can transfer more.
-    const roots = [ada.id, bea.id];
+    const roots = [ada, bea];
     const subgraphs = await store.batchOnce(
       (read) =>
         roots.map((root) =>
@@ -90,8 +97,9 @@ async function main(): Promise<void> {
       { shareSubgraphs: true },
     );
     assert.equal(subgraphs.length, 2);
-    assert.equal(subgraphs[0]?.nodes.has(cara.id), true);
-    assert.equal(subgraphs[1]?.nodes.has(cara.id), true);
+    for (const subgraph of subgraphs) {
+      assert.ok(indexSubgraph(subgraph).node(cara));
+    }
 
     const paths = await store
       .query()

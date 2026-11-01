@@ -8,7 +8,13 @@ import fc from "fast-check";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../../src";
+import {
+  asNodeId,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  indexSubgraph,
+} from "../../src";
 import type { GraphBackend } from "../../src/backend/types";
 import { createStore, type Store } from "../../src/store";
 import { requireDefined } from "../../src/utils/presence";
@@ -37,6 +43,10 @@ type PropertyGraph = typeof propertyGraph;
 // ============================================================
 // Helpers
 // ============================================================
+
+function itemRef(id: string) {
+  return { kind: "Item" as const, id: asNodeId<typeof Item>(id) };
+}
 
 /**
  * Builds a chain of N items: item0 → item1 → ... → itemN-1
@@ -104,7 +114,7 @@ describe("subgraph property tests", () => {
 
             const nodeIds = await buildChain(store, chainLength);
             const result = await store.subgraph(
-              requireDefined(nodeIds[0]) as never,
+              itemRef(requireDefined(nodeIds[0])),
               {
                 edges: ["link"],
                 maxDepth,
@@ -112,7 +122,7 @@ describe("subgraph property tests", () => {
             );
 
             const expected = Math.min(maxDepth + 1, chainLength);
-            expect(result.nodes.size).toBe(expected);
+            expect(result.nodes.length).toBe(expected);
           },
         ),
         { numRuns: 30 },
@@ -130,20 +140,21 @@ describe("subgraph property tests", () => {
 
             const nodeIds = await buildChain(store, chainLength);
             const result = await store.subgraph(
-              requireDefined(nodeIds[0]) as never,
+              itemRef(requireDefined(nodeIds[0])),
               {
                 edges: ["link"],
                 maxDepth,
               },
             );
 
-            for (const kindMap of result.adjacency.values()) {
-              for (const edges of kindMap.values()) {
-                for (const edge of edges) {
-                  expect(result.nodes.has(edge.fromId as string)).toBe(true);
-                  expect(result.nodes.has(edge.toId as string)).toBe(true);
-                }
-              }
+            const index = indexSubgraph(result);
+            for (const edge of result.edges) {
+              expect(
+                index.node({ kind: edge.fromKind, id: edge.fromId }),
+              ).toBeDefined();
+              expect(
+                index.node({ kind: edge.toKind, id: edge.toId }),
+              ).toBeDefined();
             }
           },
         ),
@@ -162,7 +173,7 @@ describe("subgraph property tests", () => {
 
             const nodeIds = await buildChain(store, chainLength);
             const result = await store.subgraph(
-              requireDefined(nodeIds[0]) as never,
+              itemRef(requireDefined(nodeIds[0])),
               {
                 edges: ["link"],
                 maxDepth,
@@ -171,14 +182,8 @@ describe("subgraph property tests", () => {
 
             // In a chain, edges = nodes - 1 (when all nodes are connected)
             // With maxDepth >= 1, root is always included so size > 0
-            expect(result.nodes.size).toBeGreaterThan(0);
-            let edgeCount = 0;
-            for (const kindMap of result.adjacency.values()) {
-              for (const edges of kindMap.values()) {
-                edgeCount += edges.length;
-              }
-            }
-            expect(edgeCount).toBe(result.nodes.size - 1);
+            expect(result.nodes.length).toBeGreaterThan(0);
+            expect(result.edges).toHaveLength(result.nodes.length - 1);
           },
         ),
         { numRuns: 30 },
@@ -197,12 +202,12 @@ describe("subgraph property tests", () => {
 
             const allIds = await buildStar(store, spokeCount);
             const centerId = requireDefined(allIds[0]);
-            const result = await store.subgraph(centerId as never, {
+            const result = await store.subgraph(itemRef(centerId), {
               edges: ["link"],
               maxDepth: 1,
             });
 
-            expect(result.nodes.size).toBe(spokeCount + 1);
+            expect(result.nodes.length).toBe(spokeCount + 1);
           },
         ),
         { numRuns: 20 },
@@ -220,14 +225,14 @@ describe("subgraph property tests", () => {
 
             const allIds = await buildStar(store, spokeCount);
             const centerId = requireDefined(allIds[0]);
-            const result = await store.subgraph(centerId as never, {
+            const result = await store.subgraph(itemRef(centerId), {
               edges: ["link"],
               maxDepth,
             });
 
-            // Map keys are inherently unique — just verify size matches
-            // the expected count (no silent overwrites from duplicate IDs)
-            expect(result.nodes.size).toBeLessThanOrEqual(spokeCount + 1);
+            const nodeIds = result.nodes.map((node) => node.id);
+            expect(new Set(nodeIds).size).toBe(nodeIds.length);
+            expect(result.nodes.length).toBeLessThanOrEqual(spokeCount + 1);
           },
         ),
         { numRuns: 20 },
@@ -248,20 +253,22 @@ describe("subgraph property tests", () => {
             const allIds = await buildStar(store, spokeCount);
             const centerId = requireDefined(allIds[0]);
 
-            const withRoot = await store.subgraph(centerId as never, {
+            const withRoot = await store.subgraph(itemRef(centerId), {
               edges: ["link"],
               maxDepth,
             });
-            const withoutRoot = await store.subgraph(centerId as never, {
+            const withoutRoot = await store.subgraph(itemRef(centerId), {
               edges: ["link"],
               maxDepth,
               excludeRoot: true,
             });
 
             // Without root should have exactly one fewer node
-            expect(withoutRoot.nodes.size).toBe(withRoot.nodes.size - 1);
+            expect(withoutRoot.nodes.length).toBe(withRoot.nodes.length - 1);
             // And that missing node is the root
-            expect(withoutRoot.nodes.has(centerId)).toBe(false);
+            expect(
+              indexSubgraph(withoutRoot).node(itemRef(centerId)),
+            ).toBeUndefined();
           },
         ),
         { numRuns: 20 },
@@ -286,7 +293,7 @@ describe("subgraph property tests", () => {
             );
 
             const result = await store.subgraph(
-              requireDefined(nodeIds[0]) as never,
+              itemRef(requireDefined(nodeIds[0])),
               {
                 edges: ["link"],
                 maxDepth: chainLength * 2,
@@ -294,7 +301,7 @@ describe("subgraph property tests", () => {
             );
 
             // All nodes in the cycle should be reachable, each exactly once
-            expect(result.nodes.size).toBe(chainLength);
+            expect(result.nodes.length).toBe(chainLength);
           },
         ),
         { numRuns: 20 },

@@ -1,13 +1,13 @@
 /**
  * Subgraph shared traversal on Postgres: the recursive BFS closure is
- * computed ONCE and its ids passed to the node and edge fetches as a
- * single text[] parameter, instead of embedding the recursive CTE in
+ * computed ONCE and its kinds and ids passed to the node and edge fetches
+ * as a pair of text[] parameters, instead of embedding the recursive CTE in
  * both statements (which re-ran the traversal twice per call).
  *
  * Pinned here:
  * 1. Statement shape — exactly one executed statement contains the
  *    recursive traversal; the node/edge fetches semi-join an unnest of
- *    the id-array parameter instead of re-declaring the CTE.
+ *    the kind and id array parameters instead of re-declaring the CTE.
  * 2. Array-literal escaping — user-supplied ids containing quotes,
  *    backslashes, commas, and braces survive the text[] round trip.
  * 3. Plan mode — the id-filtered fetches run as UNNAMED statements.
@@ -31,6 +31,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  indexSubgraph,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
@@ -126,11 +127,11 @@ describe("subgraph shared traversal (Postgres)", () => {
     await store.edges.references.create(root, child, {});
 
     statements.length = 0;
-    const result = await store.subgraph(root.id, {
+    const result = await store.subgraph(root, {
       edges: ["references"],
       maxDepth: 3,
     });
-    expect(result.nodes.size).toBe(2);
+    expect(result.nodes.length).toBe(2);
 
     const recursive = statements.filter((statement) =>
       statement.includes("WITH RECURSIVE"),
@@ -186,7 +187,7 @@ describe("subgraph shared traversal (Postgres)", () => {
       await store.edges.references.create(root, child, {});
 
       submitted.length = 0;
-      await store.subgraph(root.id, { edges: ["references"], maxDepth: 2 });
+      await store.subgraph(root, { edges: ["references"], maxDepth: 2 });
 
       const fetches = submitted.filter((call) => call.text.includes("unnest("));
       expect(fetches.length).toBeGreaterThanOrEqual(2);
@@ -231,19 +232,19 @@ describe("subgraph shared traversal (Postgres)", () => {
       await store.edges.references.create(root, node, {});
     }
 
-    const result = await store.subgraph(root.id, {
+    const result = await store.subgraph(root, {
       edges: ["references"],
       maxDepth: 2,
     });
 
-    expect(result.nodes.size).toBe(hostileIds.length + 1);
+    const { node, outgoing } = indexSubgraph(result);
+
+    expect(result.nodes.length).toBe(hostileIds.length + 1);
     for (const id of hostileIds) {
       expect(
-        (result.nodes.get(id) as { title?: string } | undefined)?.title,
+        (node({ kind: "Doc", id }) as { title?: string } | undefined)?.title,
       ).toBe(id);
     }
-    expect(result.adjacency.get(root.id)?.get("references")).toHaveLength(
-      hostileIds.length,
-    );
+    expect(outgoing(root, "references")).toHaveLength(hostileIds.length);
   });
 });

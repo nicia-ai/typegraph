@@ -88,7 +88,7 @@ const past = store.asOf("2024-01-01T00:00:00.000Z");
 const alice = await past.nodes.Person.getById(aliceId);
 const jobs = await past.edges.worksAt.findFrom(alice);
 const peers = await past.reachable(aliceId, { edges: ["knows"] });
-const team = await past.subgraph(aliceId, { edges: ["reportsTo"] });
+const team = await past.subgraph({ kind: "Person", id: aliceId }, { edges: ["reportsTo"] });
 
 const names = await past
   .query()
@@ -673,7 +673,7 @@ const pastEmployees = await store
 `store.subgraph()` and `store.algorithms.*` accept the same `temporalMode`
 and `asOf` options, defaulting to `graph.defaults.temporalMode`. See
 [Temporal Behavior](/graph-algorithms#temporal-behavior) for the algorithm
-surface and [`store.subgraph()` options](/schemas-stores#storesubgraphrootid-options)
+surface and [`store.subgraph()` options](/schemas-stores#storesubgraphroot-options)
 for subgraph.
 
 ## Real-World Examples

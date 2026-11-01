@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { indexSubgraph } from "../../../src";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -240,13 +241,13 @@ export function registerReadEfficiencyIntegrationTests(
       });
       statements.length = 0;
       await store.batchOnce((read) => [
-        read.subgraph(root.id, {
+        read.subgraph(root, {
           edges: [],
           maxDepth: 0,
           includeKinds: ["Document"],
           project: { nodes: { Document: ["metadata"] } },
         }),
-        read.subgraph(root.id, {
+        read.subgraph(root, {
           edges: [],
           maxDepth: 0,
           includeKinds: ["Document"],
@@ -258,13 +259,13 @@ export function registerReadEfficiencyIntegrationTests(
       statements.length = 0;
       const [first, duplicate] = await store.batchOnce(
         (read) => [
-          read.subgraph(root.id, {
+          read.subgraph(root, {
             edges: [],
             maxDepth: 0,
             includeKinds: ["Document"],
             project: { nodes: { Document: ["metadata"] } },
           }),
-          read.subgraph(root.id, {
+          read.subgraph(root, {
             edges: [],
             maxDepth: 0,
             includeKinds: ["Document"],
@@ -275,7 +276,11 @@ export function registerReadEfficiencyIntegrationTests(
       );
       expect(statements).toHaveLength(1);
       expect(statements[0]).toContain("typegraph_shared_hydrated");
-      expect(duplicate).toEqual(first);
+      expect({
+        root: duplicate.root,
+        nodes: duplicate.nodes,
+        edges: duplicate.edges,
+      }).toEqual({ root: first.root, nodes: first.nodes, edges: first.edges });
       const duplicateMetadata = duplicate.root?.metadata;
       expect(duplicateMetadata).toBeDefined();
       if (duplicateMetadata === undefined)
@@ -286,8 +291,8 @@ export function registerReadEfficiencyIntegrationTests(
       await store.transaction(async (transaction) => {
         const [copy] = await transaction.batchOnce(
           (read) => [
-            read.subgraph(root.id, { edges: [], maxDepth: 0 }),
-            read.subgraph(root.id, { edges: [], maxDepth: 0 }),
+            read.subgraph(root, { edges: [], maxDepth: 0 }),
+            read.subgraph(root, { edges: [], maxDepth: 0 }),
           ],
           { shareSubgraphs: true },
         );
@@ -424,13 +429,13 @@ export function registerReadEfficiencyIntegrationTests(
       const [neighbors, count, subgraph] = await store.batchOnce((read) => [
         read.neighbors(root, { edges: ["knows"] }),
         read.countNeighbors(root, { edges: ["knows"] }),
-        read.subgraph(root.id, { edges: ["knows"], maxDepth: 1 }),
+        read.subgraph(root, { edges: ["knows"], maxDepth: 1 }),
       ]);
 
       expect(neighbors).toHaveLength(1);
       expect(neighbors).toEqual(directNeighbors);
       expect(count).toBe(1);
-      expect(subgraph.nodes.has(target.id)).toBe(true);
+      expect(indexSubgraph(subgraph).node(target)).toBeDefined();
       expect(statements).toHaveLength(1);
     });
 
@@ -455,13 +460,13 @@ export function registerReadEfficiencyIntegrationTests(
         await expect(
           tx.countNeighbors(root, { edges: ["knows"] }),
         ).resolves.toBe(1);
-        const directSubgraph = await tx.subgraph(root.id, {
+        const directSubgraph = await tx.subgraph(root, {
           edges: ["knows"],
           maxDepth: 1,
         });
 
         expect(neighbors[0]?.node.id).toBe(target.id);
-        expect(directSubgraph.nodes.has(target.id)).toBe(true);
+        expect(indexSubgraph(directSubgraph).node(target)).toBeDefined();
         expect(statements).toHaveLength(3);
 
         statements.length = 0;
@@ -475,13 +480,13 @@ export function registerReadEfficiencyIntegrationTests(
               .select((ctx) => ctx.person.name),
             read.neighbors(root, { edges: ["knows"] }),
             read.countNeighbors(root, { edges: ["knows"] }),
-            read.subgraph(root.id, { edges: ["knows"], maxDepth: 1 }),
+            read.subgraph(root, { edges: ["knows"], maxDepth: 1 }),
           ]);
 
         expect(people).toEqual(["root", "target"]);
         expect(batchedNeighbors).toEqual(neighbors);
         expect(count).toBe(1);
-        expect(batchedSubgraph.nodes.has(target.id)).toBe(true);
+        expect(indexSubgraph(batchedSubgraph).node(target)).toBeDefined();
         expect(statements).toHaveLength(1);
         expect(attempts).toEqual([1]);
       });

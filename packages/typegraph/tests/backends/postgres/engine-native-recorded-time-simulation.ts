@@ -249,19 +249,6 @@ export async function buildEngineNativeSimulation(
   return { capturingStore, engineNativeStore, countRecordedNodes };
 }
 
-/** Total edge count across a `SubgraphResult`'s forward adjacency. */
-function totalSubgraphEdgeCount(
-  result: Readonly<{
-    adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly unknown[]>>;
-  }>,
-): number {
-  let count = 0;
-  for (const edgesByKind of result.adjacency.values()) {
-    for (const edges of edgesByKind.values()) count += edges.length;
-  }
-  return count;
-}
-
 /**
  * The shared scenario both lanes run: a capturing store writes history, the
  * engine-native store built alongside it (see {@link buildEngineNativeSimulation})
@@ -380,16 +367,14 @@ export async function runEngineNativeSimulationScenario(
 
   // Subgraph parity.
   const [capturedSubgraph, nativeSubgraph] = await Promise.all([
-    capturingView.subgraph(alice.id, { edges: ["knows"] }),
-    engineNativeView.subgraph(alice.id, { edges: ["knows"] }),
+    capturingView.subgraph(alice, { edges: ["knows"] }),
+    engineNativeView.subgraph(alice, { edges: ["knows"] }),
   ]);
-  expect([...nativeSubgraph.nodes.keys()].toSorted()).toEqual(
-    [...capturedSubgraph.nodes.keys()].toSorted(),
+  expect(nativeSubgraph.nodes.map((node) => node.id).toSorted()).toEqual(
+    capturedSubgraph.nodes.map((node) => node.id).toSorted(),
   );
-  expect(totalSubgraphEdgeCount(nativeSubgraph)).toBe(
-    totalSubgraphEdgeCount(capturedSubgraph),
-  );
-  expect(totalSubgraphEdgeCount(nativeSubgraph)).toBe(1);
+  expect(nativeSubgraph.edges.length).toBe(capturedSubgraph.edges.length);
+  expect(nativeSubgraph.edges.length).toBe(1);
 
   // Algorithm parity.
   const [capturedDegree, nativeDegree] = await Promise.all([
