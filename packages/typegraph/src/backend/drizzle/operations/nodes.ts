@@ -25,6 +25,7 @@ import type {
   NodePropertyExpectation,
   ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
+  SqlDialect,
   UpdateNodeParams,
   UpdateNodeSetParams,
 } from "../../types";
@@ -32,9 +33,11 @@ import { toDrizzleSql } from "../execution/types";
 import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
   castBoundValueForColumn,
+  codePointOrderKey,
   expectedValidFromPredicate,
   nodeColumnList,
   quotedColumn,
+  type RowLockClause,
   sqlNull,
   type Tables,
 } from "./shared";
@@ -627,6 +630,34 @@ export function buildGetNodes(
 }
 
 /**
+ * Builds the `getNodes` read, ordered by id and row-locked by `rowLock`, so
+ * concurrent lockers of overlapping id sets acquire their locks in one order.
+ */
+export function buildLockNodes(
+  tables: Tables,
+  dialect: SqlDialect,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+  rowLock: RowLockClause,
+): SQL {
+  return sql`
+    ${buildGetNodes(tables, graphId, kind, ids)}
+    ORDER BY ${nodeIdLockOrder(dialect)}
+    ${rowLock()}
+  `;
+}
+
+/**
+ * The order node-row lock statements acquire their rows in: code point, the
+ * order `compareCodePoints` sorts their chunks in, rather than the column's
+ * collation, so chunk order and in-statement order agree on every database.
+ */
+function nodeIdLockOrder(dialect: SqlDialect): SQL {
+  return codePointOrderKey(portableSql.identifier("id"), dialect);
+}
+
+/**
  * Builds an UPDATE query for a node.
  * Uses raw column names in SET clause (required by SQL syntax).
  */
@@ -1141,6 +1172,47 @@ export function buildDeleteNode(
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.id} = ${params.id}
       AND ${nodes.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * The leading statement of the closed node-delete program: locks the target
+ * rows with the delete lock before the delete statement's connected-edge
+ * check runs, so that check — a later statement with its own snapshot — sees
+ * every edge an endpoint-locked writer committed while this one waited. The
+ * schema fence is the statement's first acquisition, preserving the store's
+ * lock order (schema fence, then row work). It returns the locked ids;
+ * missing and tombstoned ids lock nothing the delete would write.
+ */
+export function buildLockNodesForAtomicDeleteWithSchemaFence(
+  tables: Tables,
+  dialect: SqlDialect,
+  input: AtomicNodeDeleteBatchInput,
+  schemaLockClause: SQL,
+  rowLock: RowLockClause,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${input.schemaFence.graphId}
+        AND ${schemaVersions.version} = ${input.schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    )
+    SELECT ${nodes.id}
+    FROM ${nodes}
+    WHERE ${nodes.graphId} = ${input.graphId}
+      AND ${nodes.kind} = ${input.kind}
+      AND ${nodes.id} IN (${sql.join(
+        input.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND EXISTS (SELECT 1 FROM "schema_fence")
+    ORDER BY ${nodeIdLockOrder(dialect)}
+    ${rowLock()}
   `;
 }
 

@@ -100,6 +100,7 @@ import {
   registerRelationalCompositionIntegrationTests,
   registerReleasedClaimLookupIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
+  registerSavepointRecoveryIntegrationTests,
   registerSchemaCheckedReadIntegrationTests,
   registerSelectiveRetryIntegrationTests,
   registerSetNodeMutationIntegrationTests,
@@ -347,6 +348,7 @@ export function createIntegrationTestSuite<
     registerRefusedCreateClaimIntegrationTests(context);
     registerConstraintFenceErrorIntegrationTests(context);
     registerConstraintFenceTransactionHealthTests(context);
+    registerSavepointRecoveryIntegrationTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);

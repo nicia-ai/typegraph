@@ -904,6 +904,26 @@ export type DeleteNodeParams = Readonly<{
 }>;
 
 /**
+ * Why {@link GraphBackend.lockNodes} locks the rows it reads. The two purposes
+ * are the halves of one pairing — the pairing a foreign key's referential
+ * check makes with a referenced-row delete — so a live edge can never be left
+ * naming a deleted endpoint by writers that interleave:
+ *
+ * - `"edgeEndpoint"`: an edge write's endpoint liveness read. Endpoint locks do
+ *   not exclude each other or ordinary node updates, but one waits on a
+ *   concurrent delete's lock and then re-reads the committed row. PostgreSQL
+ *   spells it `FOR KEY SHARE`.
+ * - `"delete"`: a node delete's lock, taken before the delete reads the
+ *   node's connected edges. It waits on every endpoint lock an uncommitted
+ *   edge write holds, so the edge read that follows sees that edge once it
+ *   commits. PostgreSQL spells it `FOR UPDATE`.
+ *
+ * An engine that admits one writer at a time (SQLite) already serializes the
+ * two writes, so its lock clause is empty.
+ */
+export type NodeRowLock = "edgeEndpoint" | "delete";
+
+/**
  * Parameters for inserting an edge.
  */
 export type InsertEdgeParams = Readonly<{
@@ -1184,7 +1204,19 @@ export type NodeCreateCommand = Readonly<{
   plan: ManagedNodeCreatePlan;
 }>;
 
-/** An edge create command accepted by the authoritative command port. */
+/**
+ * An edge create command accepted by the authoritative command port.
+ *
+ * A port that reports `created` for it, or for an
+ * {@link EdgeConvergeCreateCommand}, has applied the `endpointPredicate`
+ * dimension: the statement that inserts checked both endpoints live and took
+ * the lock {@link GraphBackend.lockNodes} takes for `"edgeEndpoint"`
+ * (PostgreSQL `FOR KEY SHARE`, or equivalent) on both rows, in (kind, id)
+ * code-point order, held to the end of the transaction. Without that lock a
+ * concurrent endpoint delete can leave the edge live on a deleted node; a port
+ * that cannot take it returns `unsupported` with `endpointPredicate`, and the
+ * store's portable path takes it instead.
+ */
 export type EdgeCreateCommand = Readonly<{
   kind: "edge.create";
   plan: ManagedEdgeCreatePlan;
@@ -2354,6 +2386,30 @@ export type GraphBackend = Readonly<{
     graphId: string,
     kind: string,
     ids: readonly string[],
+  ) => Promise<readonly NodeRow[]>;
+  /**
+   * Reads the rows {@link GraphBackend.getNodes} reads — live and tombstoned
+   * alike — and locks them until the surrounding transaction ends, acquiring
+   * them in code-point order of `id`, as {@link NodeRowLock} describes. The
+   * store's portable edge writes read their endpoints' liveness through this
+   * member, and its portable node deletes read their row(s) through it before
+   * they read connected edges. Single-statement commands and closed atomic
+   * programs take the same locks inside their own SQL instead (see
+   * {@link EdgeCreateCommand}).
+   *
+   * Required, because the store has no sound fallback: an unlocked read
+   * would let a concurrent edge write and endpoint delete each miss the
+   * other. A backend whose engine admits one writer at a time — its declared
+   * write fence is `engine-serialized` or `caller-serialized` — may implement
+   * it as the plain ordered `getNodes` read, as the bundled SQLite backends
+   * do with an empty lock clause.
+   */
+  lockNodes: (
+    this: void,
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    lock: NodeRowLock,
   ) => Promise<readonly NodeRow[]>;
 
   // === Edge Operations ===
@@ -3732,6 +3788,9 @@ export type NodeEntityWriteBackend = Pick<
   | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"
+  // A read, but a locking one, so it belongs to the write surface rather than
+  // to the portable read projections built from the read types.
+  | "lockNodes"
 >;
 
 export type EdgeEntityReadBackend = Pick<

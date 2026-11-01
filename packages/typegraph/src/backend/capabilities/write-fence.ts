@@ -1122,6 +1122,17 @@ export function resolveWriteFencePlan(
 }
 
 /**
+ * Whether a resolved plan admits one writer at a time — the engine's writer
+ * slot (`engine-serialized`) or the deployment's own promise
+ * (`caller-serialized`). Under it a statement whose only effect would be to
+ * take row locks locks nothing another writer could contend for, so it is
+ * omitted; the plan is the backend's declaration, never an inference.
+ */
+export function serializesWriters(plan: WriteFencePlan): boolean {
+  return plan.kind === "engine-serialized" || plan.kind === "caller-serialized";
+}
+
+/**
  * Formats a {@link WriteFenceDeclaration} exactly as a caller would write it
  * under `capabilities.writeFence`.
  */

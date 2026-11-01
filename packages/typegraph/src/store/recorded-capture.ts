@@ -18,6 +18,11 @@ import {
   projectGraphBackend,
 } from "../backend/derive-backend";
 import {
+  resolveDriverSavepointScope,
+  runSessionSavepoint,
+  type SavepointDecision,
+} from "../backend/session-savepoint";
+import {
   type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
@@ -495,10 +500,6 @@ type TransactionControlTarget = Readonly<
   Pick<TransactionBackend, "executeStatement">
 >;
 
-type RecordedSavepointDecision<T> =
-  | Readonly<{ action: "release"; value: T }>
-  | Readonly<{ action: "rollback"; value: T; cause: unknown }>;
-
 const recordedTransactionBindings = new WeakMap<
   object,
   RecordedTransactionBinding
@@ -550,7 +551,7 @@ export async function runRecordedTransactionSavepoint<T>(
     { supported: true }
   >,
   savepoint: string,
-  fn: () => Promise<RecordedSavepointDecision<T>>,
+  fn: () => Promise<SavepointDecision<T>>,
 ): Promise<T> {
   const binding = recordedTransactionBindings.get(target);
   binding?.assertOpen();
@@ -581,36 +582,17 @@ export async function runRecordedTransactionSavepoint<T>(
       binding.capture.graphLocks.set(graphId, lock);
     }
   };
-  const executeControl = (sql: string): Promise<unknown> =>
-    executeStatement(asCompiledStatementSql(portableSql.raw(sql)));
-  const rollback = async (cause: unknown): Promise<void> => {
-    try {
-      await executeControl(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-      restoreCapture();
-      await executeControl(`RELEASE SAVEPOINT ${savepoint}`);
-    } catch (recoveryError) {
-      throw new AggregateError(
-        [cause],
-        "Failed to recover a TypeGraph recorded transaction savepoint.",
-        { cause: recoveryError },
-      );
-    }
-  };
 
-  await executeControl(`SAVEPOINT ${savepoint}`);
-  let result: RecordedSavepointDecision<T>;
-  try {
-    result = await fn();
-  } catch (error) {
-    await rollback(error);
-    throw error;
-  }
-  if (result.action === "rollback") {
-    await rollback(result.cause);
-  } else {
-    await executeControl(`RELEASE SAVEPOINT ${savepoint}`);
-  }
-  return result.value;
+  return runSessionSavepoint(
+    {
+      executeControl: (statement) =>
+        executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
+      enterDriverScope: resolveDriverSavepointScope(rawTarget),
+    },
+    savepoint,
+    fn,
+    restoreCapture,
+  );
 }
 
 /** Internal fence/control statements bypass row capture but retain its lifetime guard. */
