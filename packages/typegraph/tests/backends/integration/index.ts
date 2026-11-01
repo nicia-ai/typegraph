@@ -72,6 +72,7 @@ export { registerRefusedCreateClaimIntegrationTests } from "./refused-create-cla
 export { registerRelationalCompositionIntegrationTests } from "./relational-composition";
 export { registerReleasedClaimLookupIntegrationTests } from "./released-claim-lookup";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
+export { registerSavepointRecoveryIntegrationTests } from "./savepoint-recovery";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
