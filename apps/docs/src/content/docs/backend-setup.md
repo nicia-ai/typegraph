@@ -2606,7 +2606,9 @@ Because both sides lock in one order, a single-edge write and a bulk delete
 of one kind that covers both its endpoints wait on each other instead of
 deadlocking. A deadlock is still possible when a transaction deletes both
 endpoints of an edge being created concurrently through several statements
-in another order (one endpoint, then the other), when `store.clear()` deletes
+in another order (one endpoint, then the other), when a composition whole's
+delete locks the whole and then its parts while an edge write locks the same
+nodes in `(kind, id)` order, when `store.clear()` deletes
 a graph's nodes while an edge write holds one endpoint and waits on the other,
 or when the edge write locks many endpoints at once: a transaction that creates
 several edges, or one closed batch edge program, whose rows lock endpoints row
@@ -2614,6 +2616,8 @@ by row. PostgreSQL then aborts one of the two. Inside `store.transaction()`
 the abort surfaces as `TransactionConflictError`, retryable with
 `store.transaction(fn, { retry })`; a direct store call surfaces the driver's
 deadlock error (SQLSTATE `40P01`) unchanged, as it does any other conflict.
+See [Limitations](/limitations#deadlocks-between-deletes-and-edge-writes-postgresql)
+for the full list and how to retry.
 
 Two writes skip the check by design: `importGraph` with
 `validateReferences: false` inserts edges without reading their endpoints,

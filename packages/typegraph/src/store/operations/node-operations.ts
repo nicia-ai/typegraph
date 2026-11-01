@@ -142,7 +142,7 @@ import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
-import { compareStrings } from "../../utils/compare";
+import { compareCodePoints, compareStrings } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -775,8 +775,10 @@ async function planCascadingNodeDelete<G extends GraphDef>(
  * (`node-row-locks.ts`). An edge write that holds a member as a locked
  * endpoint then commits first, and the member's delete sees and removes its
  * edge instead of leaving it pointing at a deleted part. One statement per
- * member kind, kinds in code-unit order; the per-graph write lock the cascade
- * holds already orders it against every other cascade. Where writers
+ * member kind, kinds in code-point order like every other multi-kind lock
+ * read, and each kind's rows in id order inside `lockNodes`; the per-graph
+ * write lock the cascade holds already orders it against every other
+ * cascade. Where writers
  * serialize there is no concurrent edge write to wait for, so no statement is
  * issued.
  */
@@ -794,7 +796,7 @@ async function lockCascadeMembers<G extends GraphDef>(
     memberIdsByKind.set(member.kind, ids);
   }
   const lockOrder = [...memberIdsByKind].toSorted(([left], [right]) =>
-    compareStrings(left, right),
+    compareCodePoints(left, right),
   );
   for (const [kind, ids] of lockOrder) {
     await lockNodeRows(target, ctx.graphId, kind, ids, "delete");

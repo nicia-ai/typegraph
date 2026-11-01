@@ -293,11 +293,17 @@ are not what happens:
   lock with no fences relation cannot detect the stale snapshot and refuses
   the delete at those levels with `ConfigurationError`
   (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`).
-- **A property update racing a delete is not fenced, but cannot strand a
-  unique key.** An ordinary node update takes no per-graph lock, so it can
-  commit while a delete, direct or cascaded, is in flight. The delete
-  releases the unique keys of the props the row holds once it is tombstoned,
-  so the key such an update moved the node to is released with it.
+- **A property update racing a delete cannot strand a unique key.** An
+  ordinary node update takes no per-graph lock. On PostgreSQL the delete, direct
+  or cascaded, locks each node it deletes before it reads the node's connected
+  edges, so the update waits for the delete and then finds the node gone. The
+  delete releases the unique keys of the props the row holds once it is
+  tombstoned, so a key an update moved the node to is released with it.
+- **A whole's delete can deadlock with an edge write on PostgreSQL.** The
+  cascade locks the whole, then its parts one kind at a time, so an edge write
+  that already holds one of those nodes and waits on another can deadlock with
+  it. See
+  [Deadlocks between deletes and edge writes](#deadlocks-between-deletes-and-edge-writes-postgresql).
 - **`subgraph({ composition: true })` is an export, not a delete preview.**
   [`store.subgraph(root, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier)
   returns the owned unit as a read sees it, in the read's temporal mode
@@ -311,13 +317,6 @@ are not what happens:
   leaves behind, and an `includeEnded` read does. So the export can name
   fewer or more parts than a delete removes. To know what a delete will do,
   use [`planDelete`](/ontology#previewing-a-delete).
-- **A subgraph result is keyed by node id.** The export's closure walk
-  follows each edge from the `(kind, id)` it reached, exactly as the cascade
-  does, but `subgraph()` returns one node per id: where a node of the unit
-  shares its id with a node of another kind, the result holds only one of
-  the two, and a root id held by two kinds walks the unit of the kind that
-  sorts first by code point. Give composition parts ids that are unique
-  across kinds when you rely on the export.
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`
@@ -826,6 +825,48 @@ instance — as independent statements, so its lock is released before its edge
 read; a schema-managed store refuses that delete instead (see
 [The guard every fused write shares](#the-guard-every-fused-write-shares)).
 SQLite needs no locks: writers take the single writer slot before their first
+read.
+
+## Deadlocks Between Deletes and Edge Writes (PostgreSQL)
+
+The row locks that pair node deletes with edge writes (see
+[Edge endpoints and concurrent node deletes](/backend-setup#edge-endpoints-and-concurrent-node-deletes))
+make the two wait for each other, and two writers that wait for each other can
+deadlock. Both sides take their locks in `(kind, id)` code-point order, so a
+single-edge write and a `bulkDelete` of one kind that covers both of its
+endpoints queue behind each other rather than deadlock. These shapes can still
+deadlock:
+
+- **A delete that is several statements.** A transaction deletes both
+  endpoints of an edge being created concurrently, one endpoint at a time, in
+  the other order.
+- **A composition whole's delete.** The cascade locks the whole first, then its
+  parts one kind at a time, while an edge write between the whole and one of
+  its parts, or between two of its parts, locks the same nodes in `(kind, id)`
+  order.
+- **An edge write that locks many endpoints.** A transaction that creates
+  several edges, or one closed batch edge program, locks endpoints row by row
+  in its own order.
+- **`store.clear()`.** It deletes the graph's nodes while an edge write holds
+  one endpoint and waits on the other.
+
+PostgreSQL detects the cycle and aborts one of the two transactions; the other
+commits, and no edge is left on a deleted node either way. The aborted one is
+safe to re-run:
+
+- Inside `store.transaction()` the abort surfaces as `TransactionConflictError`
+  (`TRANSACTION_CONFLICT`, with the driver's `40P01` error as `cause`). Pass
+  `store.transaction(fn, { retry: { attempts } })` to have TypeGraph re-run the
+  callback, or re-run it yourself.
+- A direct store call such as `store.nodes.Folder.bulkDelete(ids)` surfaces the
+  driver's deadlock error (SQLSTATE `40P01`) unchanged, as it does any other
+  conflict. Wrap the call in `store.transaction(..., { retry })` to get the
+  typed error and the retry.
+
+To make a deadlock less likely, keep transactions that delete nodes and
+transactions that write many edges short, and delete a set of nodes with one
+`bulkDelete` per kind rather than one statement per node. SQLite cannot
+deadlock this way: its writers take the single writer slot before their first
 read.
 
 ## Temporal Query Limitations
