@@ -77,18 +77,31 @@ function buildEdgeBetweenCacheKey(
   return encodeTupleKey([graphId, edgeKind, fromKind, fromId, toKind, toId]);
 }
 
+type EndpointCountScope = Pick<
+  CountEdgesAtEndpointParams,
+  "graphId" | "edgeKind" | "endpoint" | "endpointKind" | "endpointId"
+>;
+
+function endpointCountTuple(scope: EndpointCountScope): readonly string[] {
+  return [
+    scope.graphId,
+    scope.edgeKind,
+    scope.endpoint,
+    scope.endpointKind,
+    scope.endpointId,
+  ];
+}
+
+/** The key of one endpoint's count, before the active-only choice. */
+function buildEndpointKey(scope: EndpointCountScope): string {
+  return encodeTupleKey(endpointCountTuple(scope));
+}
+
 function buildCountEdgesAtEndpointCacheKey(
   params: CountEdgesAtEndpointParams,
 ): string {
   const activeOnly = params.activeOnly === true ? "1" : "0";
-  return encodeTupleKey([
-    params.graphId,
-    params.edgeKind,
-    params.endpoint,
-    params.endpointKind,
-    params.endpointId,
-    activeOnly,
-  ]);
+  return encodeTupleKey([...endpointCountTuple(params), activeOnly]);
 }
 
 function incrementPendingCount(counts: Map<string, number>, key: string): void {
@@ -274,17 +287,16 @@ export function createEdgeBatchValidationBackend(
     const pairs = new Set<string>();
     for (const row of rows) {
       if (row.deleted_at !== undefined) continue;
-      const active = row.valid_to === undefined ? 1 : 0;
+      const active =
+        membershipCountsRow("openRows", { validTo: row.valid_to }) ? 1 : 0;
       for (const endpoint of ["from", "to"] as const) {
-        const endpointKind = endpoint === "from" ? row.from_kind : row.to_kind;
-        const endpointId = endpoint === "from" ? row.from_id : row.to_id;
-        const endpointKey = encodeTupleKey([
-          row.graph_id,
-          row.kind,
+        const endpointKey = buildEndpointKey({
+          graphId: row.graph_id,
+          edgeKind: row.kind,
           endpoint,
-          endpointKind,
-          endpointId,
-        ]);
+          endpointKind: endpoint === "from" ? row.from_kind : row.to_kind,
+          endpointId: endpoint === "from" ? row.from_id : row.to_id,
+        });
         const previous = counts.get(endpointKey) ?? { all: 0, active: 0 };
         counts.set(endpointKey, {
           all: previous.all + 1,
@@ -303,14 +315,7 @@ export function createEdgeBatchValidationBackend(
       );
     }
     for (const params of countRequests) {
-      const endpointKey = encodeTupleKey([
-        params.graphId,
-        params.edgeKind,
-        params.endpoint,
-        params.endpointKind,
-        params.endpointId,
-      ]);
-      const endpointCounts = counts.get(endpointKey);
+      const endpointCounts = counts.get(buildEndpointKey(params));
       const count =
         params.activeOnly === true ?
           (endpointCounts?.active ?? 0)

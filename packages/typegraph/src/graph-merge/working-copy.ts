@@ -70,15 +70,14 @@ import {
   createSqlSchema,
   createStore,
   createStoreWithSchema,
-  declaresRequiredCompositionParts,
   exportGraph,
   exportGraphStream,
   importGraph,
   importGraphStream,
   isBackendDerivedFrom,
   sharesSerializedTransactionResource,
-  snapshotExportContention,
   storeBackend,
+  streamedImportRefusal,
   summarizeImportErrors,
   wrapWithManagedClose,
 } from "./typegraph-internal";
@@ -279,18 +278,12 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           : {}),
         } as const;
         // Materialize the export instead of streaming it whenever the
-        // streamed import would refuse: when the fresh backend writes through
-        // the connection the base's snapshot export would hold (the import
-        // guard's own predicate), or when the graph declares required-
-        // existence parts, which only a single-transaction import can write
-        // together with their attaching edges.
+        // streamed import would refuse, as decided by that import's own
+        // predicate.
         const result =
           (
-            snapshotExportContention(
-              storeBackend(baseStore),
-              storeBackend(freshStore),
-            ) === undefined &&
-            !declaresRequiredCompositionParts(freshStore.registry)
+            streamedImportRefusal(freshStore, storeBackend(baseStore)) ===
+            undefined
           ) ?
             await importGraphStream(
               freshStore,

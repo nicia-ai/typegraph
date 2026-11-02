@@ -9,6 +9,7 @@ import {
 import type { TransactionContext } from "../store/types";
 import { requireDefined } from "../utils/presence";
 import { InvalidMergeOptionsError } from "./errors";
+import { assertOnlyDeclaredKeys } from "./options";
 import type { MergePlanArtifactV2 } from "./plan-schema";
 import type { MergeReviewRevalidation } from "./review-schema";
 import type { MergedCounts } from "./types";
@@ -105,14 +106,21 @@ export const MERGE_PLAN_DECISION_OPTION_KEYS: ReadonlySet<string> = new Set(
 );
 
 /** Every key {@link MergePlanApplyOptions} declares. */
-export const MERGE_PLAN_APPLY_OPTION_KEYS: ReadonlySet<string> = new Set(
-  Object.keys({
-    review: true,
-    sourceId: true,
+export const MERGE_PLAN_APPLY_OPTION_KEYS: ReadonlySet<string> = new Set([
+  ...MERGE_PLAN_DECISION_OPTION_KEYS,
+  ...Object.keys({
     beforeApply: true,
     afterApply: true,
-  } satisfies Readonly<Record<keyof MergePlanApplyOptions<GraphDef>, true>>),
-);
+  } satisfies Readonly<
+    Record<
+      Exclude<
+        keyof MergePlanApplyOptions<GraphDef>,
+        keyof MergePlanDecisionOptions
+      >,
+      true
+    >
+  >),
+]);
 
 /**
  * Refuses an apply option the entry point does not declare. The apply reads
@@ -123,12 +131,7 @@ export function assertOnlyDeclaredApplyOptions(
   options: object,
   declared: ReadonlySet<string>,
 ): void {
-  const unknownOption = Object.keys(options).find((key) => !declared.has(key));
-  if (unknownOption === undefined) return;
-  throw new InvalidMergeOptionsError(
-    `Unknown merge plan apply option "${unknownOption}".`,
-    { details: { option: unknownOption } },
-  );
+  assertOnlyDeclaredKeys(options, declared, "", "merge plan apply option");
 }
 
 /**

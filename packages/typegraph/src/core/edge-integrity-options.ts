@@ -36,6 +36,32 @@ export const TARGET_CARDINALITY_VALUES: readonly TargetCardinality[] =
     (cardinality): cardinality is TargetCardinality => cardinality !== "unique",
   );
 
+/**
+ * The target-side cardinality a registration or stored edge declares. An
+ * absent `targetCardinality` means `"many"`: the serializer omits the
+ * default (see {@link serializedTargetCardinalityField}), so documents stored
+ * before the option existed keep their hash.
+ */
+export function effectiveTargetCardinality(
+  declared: TargetCardinality | undefined,
+): TargetCardinality {
+  return declared ?? "many";
+}
+
+/**
+ * The `targetCardinality` field a serialized edge carries: omitted when
+ * undeclared or declared as the default, so a graph that never uses the
+ * option serializes and hashes byte-identically to a document produced
+ * before it existed.
+ */
+export function serializedTargetCardinalityField(
+  declared: TargetCardinality | undefined,
+): Readonly<{ targetCardinality?: TargetCardinality }> {
+  return declared === undefined || declared === "many" ?
+      {}
+    : { targetCardinality: declared };
+}
+
 export const ENDPOINT_EXISTENCE_VALUES = [
   "notDeleted",
   "currentlyValid",

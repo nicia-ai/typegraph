@@ -2911,7 +2911,7 @@ export const TRANSACTION_RUNTIME: unique symbol = typeGraphGlobalSymbol(
   "transaction-runtime-v1",
 );
 
-type TransactionRuntime = Readonly<{
+export type TransactionRuntime = Readonly<{
   backend: TransactionBackend;
   /**
    * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through

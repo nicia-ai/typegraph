@@ -10,6 +10,7 @@ import {
   getEdgeEndpointPairs,
   projectTargetKinds,
 } from "../core/edge-endpoints";
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
@@ -109,7 +110,9 @@ export function buildGraphEdgeKindFacts(
       to: projectTargetKinds(registration.to),
       pairs: getEdgeEndpointPairs(registration.from, registration.to),
       cardinality: registration.cardinality ?? "many",
-      targetCardinality: registration.targetCardinality ?? "many",
+      targetCardinality: effectiveTargetCardinality(
+        registration.targetCardinality,
+      ),
     });
   }
   return result;

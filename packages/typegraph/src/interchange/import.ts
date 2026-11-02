@@ -106,6 +106,7 @@ import {
   UniquenessError,
   ValidationError,
 } from "../errors";
+import { zodIssuesToValidationIssues } from "../errors/validation";
 import {
   assertIdentityTransitionsMonotone,
   IDENTITY_IMPORT_FAILED_ASSERTION,
@@ -118,10 +119,10 @@ import {
   identityTransitionLogUnavailableError,
 } from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
-import { getDialect } from "../query/dialect";
-import { type DialectAdapter } from "../query/dialect/types";
+import { orientCompositionEndpoints } from "../registry/composition-relation";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
+  acyclicityProbeContext,
   assertEdgeRelationsAcyclic,
   edgeKindIsInAcyclicRelation,
 } from "../store/acyclicity";
@@ -187,6 +188,7 @@ import {
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import {
   assertOrderedValidityWindow,
@@ -197,7 +199,7 @@ import {
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { encodeTupleKey } from "../utils/tuple-key";
+import { encodeTupleKey, nodeRefKey } from "../utils/tuple-key";
 import {
   type IngestionImportTarget,
   resolveIngestionImportTarget,
@@ -373,6 +375,8 @@ interface CommittedWriteCounts {
  * declares no required part, which never purges.
  */
 type RequiredPartLedger = Readonly<{
+  /** Whether the graph declares any required-existence part, fixed per attempt. */
+  declaresRequiredParts: boolean;
   /**
    * Parts no row of the payload and no row of the target can attach, by
    * `makeNodeKey`, decided before the first write
@@ -410,7 +414,6 @@ type ImportWriteFrame = Readonly<{
   /** The code-level graph, for `acyclicRelationForEdgeKind`. */
   graph: GraphDef;
   schema: SqlSchema;
-  dialect: DialectAdapter;
   /**
    * The identity half of a node update that states `validTo`, bound to this
    * frame's target — the store's own window-end owner, reached through the
@@ -480,7 +483,6 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   graphId: string;
   graph: G;
   schema: SqlSchema;
-  dialect: DialectAdapter;
   registry: KindRegistry;
   data: GraphData;
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>;
@@ -536,13 +538,20 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   // seen (`processNodes` then `processEdges`), so whether a part ended up
   // attached can only be decided once the whole edge set is written — except
   // for a part nothing can attach, which is settled here, before any row.
+  const declaresRequiredParts = declaresRequiredCompositionParts(
+    inputs.registry,
+  );
   const requiredPartLedger: RequiredPartLedger = {
-    unattachableParts: await readUnattachableRequiredParts(
-      target,
-      inputs.graphId,
-      inputs.registry,
-      inputs.data,
-    ),
+    declaresRequiredParts,
+    unattachableParts:
+      declaresRequiredParts ?
+        await readUnattachableRequiredParts(
+          target,
+          inputs.graphId,
+          inputs.registry,
+          inputs.data,
+        )
+      : new Set(),
     pendingParts: new Map(),
     partUpdates: new Map(),
     edgeWrites: new Map(),
@@ -561,7 +570,6 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     lock,
     graph: inputs.graph,
     schema: inputs.schema,
-    dialect: inputs.dialect,
     applyNodeWindowEnd: (input) =>
       inputs.runtime.applyImportedNodeWindowEnd(target, input),
     endpointLiveness: new Map<string, boolean>(),
@@ -722,7 +730,6 @@ async function importGraphData<G extends GraphDef>(
     graphId,
     graph,
     schema: store.revisionSchema,
-    dialect: getDialect(backend.dialect),
     registry,
     data,
     nodeSchemas,
@@ -856,23 +863,17 @@ export async function importGraphStream<G extends GraphDef>(
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
   const options = ImportOptionsSchema.parse(rawOptions);
-  assertStreamedImportSupportsComposition(store);
-  const sourceBackend = exportStreamBackend(chunks);
   const targetBackend = storeBackend(store);
-  // Whether this export would hold the connection the import writes through is
-  // decided by the single owner of that predicate — including the
-  // `execution.interactiveTransactions: false` abstention, where nothing is held open and refusing
-  // would refuse work that succeeds.
-  const contention =
-    sourceBackend === undefined ? undefined : (
-      snapshotExportContention(sourceBackend, targetBackend)
-    );
-  if (contention !== undefined) {
+  const refusal = streamedImportRefusal(store, exportStreamBackend(chunks));
+  if (refusal?.reason === "requiredComposition") {
+    throw streamedRequiredCompositionRefusal(store.graphId);
+  }
+  if (refusal?.reason === "exportContention") {
     throw serializedStreamRefusal({
       graphId: store.graphId,
       requested: "import-stream",
       heldBy: "export-snapshot",
-      detector: contention,
+      detector: refusal.detector,
     });
   }
   const result = emptyImportResult();
@@ -1259,21 +1260,48 @@ function throwIfStreamChunkFailed(
 }
 
 /**
- * Refuses a streamed import into a graph that declares required-existence
- * composition parts, before any chunk is read. Every chunk commits on its own,
- * and a part's attaching edge arrives in a later chunk than the part itself,
- * so the required-existence check can only be exact inside ONE transaction —
- * which `importGraph` provides.
+ * Why {@link importGraphStream} would refuse to stream into `store` from an
+ * export read through `sourceBackend`, or `undefined` when it can stream. The
+ * one owner of that decision: the streamed import raises it before reading a
+ * chunk, and a caller choosing between the streamed and the materialized
+ * import (`graph-merge`'s clone) asks it first.
+ *
+ * - `"requiredComposition"`: the graph declares required-existence parts.
+ *   Every chunk commits on its own and a part's attaching edge arrives in a
+ *   later chunk than the part, so the required-existence check is exact only
+ *   inside ONE transaction, which `importGraph` provides.
+ * - `"exportContention"`: the export would hold the connection the import
+ *   writes through, as decided by `snapshotExportContention` (which abstains
+ *   under `execution.interactiveTransactions: false`, where nothing is held
+ *   open and refusing would refuse work that succeeds).
  */
-function assertStreamedImportSupportsComposition<G extends GraphDef>(
+export function streamedImportRefusal<G extends GraphDef>(
   store: Store<G>,
-): void {
-  if (!declaresRequiredCompositionParts(store.registry)) return;
-  throw new ConfigurationError(
+  sourceBackend: GraphBackend | undefined,
+):
+  | Readonly<{ reason: "requiredComposition" }>
+  | Readonly<{ reason: "exportContention"; detector: SnapshotExportContention }>
+  | undefined {
+  if (declaresRequiredCompositionParts(store.registry)) {
+    return { reason: "requiredComposition" };
+  }
+  const detector =
+    sourceBackend === undefined ? undefined : (
+      snapshotExportContention(sourceBackend, storeBackend(store))
+    );
+  return detector === undefined ? undefined : (
+      { reason: "exportContention", detector }
+    );
+}
+
+function streamedRequiredCompositionRefusal(
+  graphId: string,
+): ConfigurationError {
+  return new ConfigurationError(
     "Streamed import cannot validate required-existence composition parts: each chunk commits separately, so a part would commit before the edge that attaches it.",
     {
       code: "IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED",
-      graphId: store.graphId,
+      graphId,
     },
     {
       suggestion:
@@ -1439,11 +1467,7 @@ function validateIdentitySection(identity: GraphData["identity"]): void {
   throw new ValidationError(
     `Invalid identity interchange section: ${parsed.error.message}`,
     {
-      issues: parsed.error.issues.map((issue) => ({
-        path: issue.path.join("."),
-        message: issue.message,
-        code: issue.code,
-      })),
+      issues: zodIssuesToValidationIssues(parsed.error),
     },
     { cause: parsed.error },
   );
@@ -1710,11 +1734,7 @@ function validateStreamHeader(header: GraphDataHeader): void {
   throw new ValidationError(
     `Invalid graph interchange stream header: ${parsed.error.message}`,
     {
-      issues: parsed.error.issues.map((issue) => ({
-        path: issue.path.join("."),
-        message: issue.message,
-        code: issue.code,
-      })),
+      issues: zodIssuesToValidationIssues(parsed.error),
     },
     { cause: parsed.error },
   );
@@ -1913,12 +1933,11 @@ async function readUnattachableRequiredParts(
   registry: KindRegistry,
   data: GraphData,
 ): Promise<ReadonlySet<string>> {
-  if (!declaresRequiredCompositionParts(registry)) return new Set();
   const namedByPayloadEdge = new Set<string>();
   for (const edge of data.edges) {
     const partSide = registry.compositionPartSide(edge.kind);
     if (partSide === undefined) continue;
-    const part = partSide === "from" ? edge.from : edge.to;
+    const { part } = orientCompositionEndpoints(partSide, edge.from, edge.to);
     namedByPayloadEdge.add(makeNodeKey(part.kind, part.id));
   }
   const candidates = new Map<string, PendingRequiredPart>();
@@ -1930,12 +1949,7 @@ async function readUnattachableRequiredParts(
   }
   const unattachable = new Set<string>();
   const parts = [...candidates.values()];
-  for (
-    let index = 0;
-    index < parts.length;
-    index += COMPOSITION_ATTACHMENT_PAGE_SIZE
-  ) {
-    const page = parts.slice(index, index + COMPOSITION_ATTACHMENT_PAGE_SIZE);
+  for (const page of chunk(parts, COMPOSITION_ATTACHMENT_PAGE_SIZE)) {
     const attachments = await readCompositionAttachmentsForPage(
       registry,
       target,
@@ -1943,7 +1957,7 @@ async function readUnattachableRequiredParts(
       page,
     );
     for (const part of page) {
-      if (attachments.has(encodeTupleKey([part.kind, part.id]))) continue;
+      if (attachments.has(nodeRefKey(part))) continue;
       unattachable.add(makeNodeKey(part.kind, part.id));
     }
   }
@@ -3445,16 +3459,12 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
   ];
   while (candidates.length > 0) {
     const purgedKeys: string[] = [];
-    for (
-      let index = 0;
-      index < candidates.length;
-      index += COMPOSITION_ATTACHMENT_PAGE_SIZE
-    ) {
+    for (const page of chunk(candidates, COMPOSITION_ATTACHMENT_PAGE_SIZE)) {
       const standings = await readCompositionPartStandings(
         registry,
         frame.target,
         graphId,
-        candidates.slice(index, index + COMPOSITION_ATTACHMENT_PAGE_SIZE),
+        page,
         frame.batchPointRead,
       );
       for (const { part, whole } of standings) {
@@ -3616,16 +3626,18 @@ type PreparedEdgeImportCreate = Readonly<{
   candidate: EdgeImportCandidate;
   params: InsertEdgeParams;
   declarations: EdgeCardinalityDeclarations;
+  work: EdgeInsertWork;
 }>;
 
 /**
- * THE insert params one accepted edge candidate carries, built once and read by
- * three consumers: the in-slice cardinality registration, the claim, and the
- * flush. The candidate loop needs them before the flush does — that is what
+ * THE insert params and insert work one accepted edge candidate carries, built
+ * once and read by every consumer: the in-slice cardinality registration, the
+ * probe, the claim, and the flush. The candidate loop needs them before the flush does — that is what
  * lets an in-slice collision refuse the ROW — so they cannot be materialized
  * only at the flush the way the pre-fence path did.
  */
 function prepareEdgeImportCreate(
+  registry: KindRegistry,
   graphId: string,
   candidate: EdgeImportCandidate,
   registration: EdgeRegistration,
@@ -3659,6 +3671,7 @@ function prepareEdgeImportCreate(
     candidate,
     params,
     declarations: registration,
+    work: importEdgeInsertWork(registry, params, registration),
   };
 }
 
@@ -3838,7 +3851,7 @@ async function processEdgeSlice(
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
   // Only a graph that can purge a part ever reads how its edges were counted.
-  const tracksEdgeWrites = declaresRequiredCompositionParts(registry);
+  const tracksEdgeWrites = requiredPartLedger.declaresRequiredParts;
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
     if (
@@ -4067,6 +4080,7 @@ async function processEdgeSlice(
 
     const preparation = await catchEdgeCreateRefusal(() =>
       prepareEdgeImportCreate(
+        registry,
         graphId,
         candidate,
         requireDefined(edgeSchemas.get(edge.kind)).registration,
@@ -4185,7 +4199,7 @@ async function processEdgeSlice(
 
   const accepted: PreparedEdgeImportCreate[] = [];
   for (const prepared of preparedCreates) {
-    const { candidate, params, declarations } = prepared;
+    const { candidate, params, declarations, work } = prepared;
     const { edge } = candidate;
 
     // Acyclic-kind rows never join the batched flush below: the
@@ -4211,7 +4225,7 @@ async function processEdgeSlice(
     const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
       checkEdgeCardinalityConstraints(
         { graphId, registry, backend: cardinalityValidationBackend },
-        importEdgeInsertWork(registry, params, declarations).claims,
+        work.claims,
       ),
     );
     if (!cardinalityResult.ok) {
@@ -4256,21 +4270,12 @@ async function processEdgeSlice(
     // there aborts the import, which is the honest outcome when the graph
     // changed under a bulk load and is why the per-row probe above exists for
     // everything that is not concurrent.
-    const acceptedWork = accepted.map((prepared) =>
-      importEdgeInsertWork(registry, prepared.params, prepared.declarations),
-    );
+    const acceptedWork = accepted.map((prepared) => prepared.work);
     const retryAcceptedIndividually = async (): Promise<void> => {
       for (const prepared of accepted) {
         const { result: rowResult } = await catchEdgeCreateRefusalWithSavepoint(
           frame,
-          () =>
-            frame.session.createEdge(
-              importEdgeInsertWork(
-                registry,
-                prepared.params,
-                prepared.declarations,
-              ),
-            ),
+          () => frame.session.createEdge(prepared.work),
         );
         if (rowResult.ok) {
           record(prepared.candidate.edge, { status: "created" });
@@ -4524,6 +4529,7 @@ async function processEdge(
 
   const preparation = await catchEdgeCreateRefusal(() =>
     prepareEdgeImportCreate(
+      registry,
       graphId,
       { edge, props: propsResult.data },
       schemaEntry.registration,
@@ -4537,11 +4543,11 @@ async function processEdge(
   // claims before it writes — the same order the collection create uses. No
   // pending state is needed: this path writes each edge as it goes, so the next
   // row's probe reads the previous one from the same transaction.
-  const { declarations, params } = preparation.value;
+  const { params, work } = preparation.value;
   const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
     checkEdgeCardinalityConstraints(
       { graphId, registry, backend: frame.target },
-      importEdgeInsertWork(registry, params, declarations).claims,
+      work.claims,
     ),
   );
   if (!cardinalityResult.ok) {
@@ -4556,21 +4562,18 @@ async function processEdge(
   const { result: createResult } = await catchEdgeCreateRefusalWithSavepoint(
     frame,
     async () => {
-      const row = await frame.session.createEdge(
-        importEdgeInsertWork(registry, params, declarations),
-      );
+      const row = await frame.session.createEdge(work);
       if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
         await assertEdgeRelationsAcyclic(
-          {
+          acyclicityProbeContext({
             graphId,
             graph: frame.graph,
             registry,
             schema: frame.schema,
-            dialect: frame.dialect,
             target: frame.target,
             lock: frame.lock,
             operation: "importGraph",
-          },
+          }),
           [
             {
               edgeId: params.id,

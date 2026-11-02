@@ -388,6 +388,20 @@ async function evidencedRevisionCount(
 }
 
 /**
+ * THE two-armed "changed strictly after `sinceRevision`" predicate over one
+ * recorded relation's rows: a version opened after it, or a version closed
+ * after it. See the module doc for why the two arms cover every write shape.
+ */
+function changedAfterRevision(sinceRevision: number): SqlFragment {
+  return sql`
+    (
+              recorded_from > ${sinceRevision}
+              OR (recorded_to > ${sinceRevision} AND recorded_to <> ${RECORDED_MAX_REVISION})
+            )
+  `;
+}
+
+/**
  * Every `(kind, id)` in one recorded relation with a change strictly after
  * `sinceRevision` — the shared query behind both the node and edge halves
  * of a `"keys"` delta. See the module doc for why the two-armed predicate
@@ -405,10 +419,7 @@ async function changedEntityKeys(
       SELECT DISTINCT kind, id
       FROM ${table}
       WHERE graph_id = ${graphId}
-        AND (
-          recorded_from > ${sinceRevision}
-          OR (recorded_to > ${sinceRevision} AND recorded_to <> ${RECORDED_MAX_REVISION})
-        )
+        AND ${changedAfterRevision(sinceRevision)}
       ORDER BY kind, id
     `),
   );
@@ -440,10 +451,7 @@ async function recordedIdentityChangedSince<G extends GraphDef>(
       SELECT 1 AS changed
       FROM ${store.revisionSchema.recordedIdentityAssertionsTable}
       WHERE graph_id = ${store.graphId}
-        AND (
-          recorded_from > ${parsed.revision}
-          OR (recorded_to > ${parsed.revision} AND recorded_to <> ${RECORDED_MAX_REVISION})
-        )
+        AND ${changedAfterRevision(parsed.revision)}
       LIMIT 1
     `),
   );

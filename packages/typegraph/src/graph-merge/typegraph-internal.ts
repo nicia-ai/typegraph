@@ -19,10 +19,7 @@ export {
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
 export { REVISION_JOURNAL_ENTITY } from "../backend/revision-journal";
-export {
-  sharesSerializedTransactionResource,
-  snapshotExportContention,
-} from "../backend/transaction-resource";
+export { sharesSerializedTransactionResource } from "../backend/transaction-resource";
 export type {
   EngineRevision,
   EntityKey,
@@ -62,7 +59,6 @@ export {
 export type { IdentityTransferAssertion } from "../identity/service";
 export { currentClassKey } from "../identity/service-mutation";
 export {
-  refKey as identityReferenceKeyOf,
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,
 } from "../identity/service-read";
@@ -77,6 +73,7 @@ export { exportGraph, exportGraphStream } from "../interchange/export";
 export {
   importGraph,
   importGraphStream,
+  streamedImportRefusal,
   summarizeImportErrors,
 } from "../interchange/import";
 export { getEdgeRowsByIds } from "../store/edge-fetch";
@@ -90,6 +87,7 @@ export {
 export { getDialect } from "../query/dialect";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+export { orientCompositionEndpoints } from "../registry/composition-relation";
 export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
 export { activeSchemaHash } from "../schema/manager";
@@ -109,7 +107,6 @@ export { type UniqueIntrospection } from "../store/introspect";
 export { planCompositionCascade } from "../store/operations/composition-cascade";
 export {
   compositionEdgeAttachesPart,
-  declaresRequiredCompositionParts,
   findLiveCompositionAttachment,
   findLiveCompositionWhole,
   withDeferredCompositionExistence,

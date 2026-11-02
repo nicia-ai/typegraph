@@ -30,8 +30,7 @@
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import {
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
+  isSubsumptionMetaEdge,
   META_EDGE_SUB_CLASS_OF,
 } from "../../ontology/constants";
 import { type OntologyRelation } from "../../ontology/types";
@@ -195,7 +194,7 @@ export function resolveDefaultAliasExpansion(
  *   three, so only an out-of-domain value can fail here — or when the removed
  *   `includeSubClasses` option is stated.
  */
-export function resolveAliasExpansion(
+function resolveAliasExpansion(
   options: AliasExpansionOptions | undefined,
   storeDefaultExpansion: DefaultAliasExpansionAxis,
 ): AliasExpansionAxis {
@@ -204,6 +203,25 @@ export function resolveAliasExpansion(
   if (expansion === undefined) return storeDefaultExpansion;
   assertPermittedExpansionAxis(expansion, ALIAS_EXPANSION_AXES, "alias");
   return expansion;
+}
+
+/**
+ * Resolves an alias's expansion axis and the kind list it expands `sourceKinds`
+ * to: {@link resolveAliasExpansion} then {@link expandKindListForAxis}, the
+ * pair every `from()` / `fromDynamic()` / `to()` / `toDynamic()` runs.
+ */
+export function resolveAliasKinds(
+  options: AliasExpansionOptions | undefined,
+  storeDefaultExpansion: DefaultAliasExpansionAxis,
+  sourceKinds: readonly string[],
+  registry: ExpansionRegistry,
+  typing: AliasStaticTyping,
+): Readonly<{ expansion: AliasExpansionAxis; kinds: readonly string[] }> {
+  const expansion = resolveAliasExpansion(options, storeDefaultExpansion);
+  return {
+    expansion,
+    kinds: expandKindListForAxis(expansion, sourceKinds, registry, typing),
+  };
 }
 
 /**
@@ -249,14 +267,6 @@ export function aliasOverloadTyping(
     : INDEPENDENT_ALIAS_TYPING;
 }
 
-const SUBSUMPTION_TARGET_META_EDGES: ReadonlySet<string> = new Set([
-  META_EDGE_SUB_CLASS_OF,
-]);
-const SUBSUMPTION_EITHER_SIDE_META_EDGES: ReadonlySet<string> = new Set([
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
-]);
-
 function endpointKind(endpoint: OntologyRelation["from"]): string | undefined {
   return typeof endpoint === "string" ? undefined : endpoint.kind;
 }
@@ -275,11 +285,11 @@ function subsumptionAffectedKinds(
   const affected = new Set<string>();
   for (const relation of ontology) {
     const name = relation.metaEdge.name;
+    if (!isSubsumptionMetaEdge(name)) continue;
     const named =
-      SUBSUMPTION_TARGET_META_EDGES.has(name) ? [relation.to]
-      : SUBSUMPTION_EITHER_SIDE_META_EDGES.has(name) ?
-        [relation.from, relation.to]
-      : [];
+      name === META_EDGE_SUB_CLASS_OF ?
+        [relation.to]
+      : [relation.from, relation.to];
     for (const endpoint of named) {
       const kind = endpointKind(endpoint);
       if (kind !== undefined) affected.add(kind);
@@ -434,7 +444,7 @@ export function expandKindsForAxis(
  * every listed kind's expansion, refused only for an extra kind no member of
  * the list's static type admits.
  */
-export function expandKindListForAxis(
+function expandKindListForAxis(
   axis: AliasExpansionAxis,
   sourceKinds: readonly string[],
   registry: ExpansionRegistry,

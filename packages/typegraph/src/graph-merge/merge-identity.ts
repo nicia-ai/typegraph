@@ -52,6 +52,7 @@ import {
 import {
   assertNoOpposingIdentityRelationsRaw,
   dedupeIdentityAssertionsRaw,
+  endpointTuple,
   identityDedupeKey,
   planIdentityThreeWay,
 } from "./identity-three-way";
@@ -95,18 +96,6 @@ export type IdentityPlanSlice = Readonly<{
   retypeMap: ReadonlyMap<MergeKey, string>;
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
 }>;
-
-/**
- * The `(a.kind, a.id, b.kind, b.id)` endpoint tuple every identity key encoder
- * below is built from. One definition keeps their FIELD ORDER identical — the
- * keys are compared against each other's encodings, so a drifted order in one
- * encoder would silently stop matching rows the others key the same way.
- */
-function endpointTuple(
-  assertion: Readonly<{ a: IdentityEndpoint; b: IdentityEndpoint }>,
-): readonly string[] {
-  return [assertion.a.kind, assertion.a.id, assertion.b.kind, assertion.b.id];
-}
 
 export { DUPLICATE_IDENTITY_ASSERTION_DROP_REASON } from "./identity-three-way";
 
@@ -213,17 +202,9 @@ export function planIdentityChanges(
   // per semantic pair, so a freshly minted branch id can never displace the
   // target's committed row — choosing it would report an id as applied that
   // is never written while listing the target's own row as dropped.
-  const committedIds = new Set<string>(
-    staging.newIdentityAssertions
-      .map((staged) => staged.assertion)
-      .filter((assertion) => {
-        const stored = storedIdentityRowsById.get(assertion.id);
-        return (
-          stored !== undefined &&
-          assertionTruthKey(stored) === assertionTruthKey(assertion)
-        );
-      })
-      .map((assertion) => assertion.id),
+  const committedIds = committedIdentityIds(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+    storedIdentityRowsById,
   );
   const classified = planIdentityThreeWay(staging, committedIds);
 
@@ -459,17 +440,7 @@ export function remapIdentityAssertionEndpoints(
   // still exactly matches its stored truth here. Without the recompute, the
   // branch's unwritable challenger could win this second dedupe and recreate
   // the applied-but-never-written report divergence.
-  const committedIds = new Set<string>(
-    remapped
-      .filter((assertion) => {
-        const stored = storedRowsById.get(assertion.id);
-        return (
-          stored !== undefined &&
-          assertionTruthKey(stored) === assertionTruthKey(assertion)
-        );
-      })
-      .map((assertion) => assertion.id),
-  );
+  const committedIds = committedIdentityIds(remapped, storedRowsById);
   const deduped = dedupeIdentityAssertionsRaw(remapped, committedIds);
   // Node reconciliation can collapse previously distinct endpoint pairs onto
   // the same canonical pair, so the pre-reconciliation check above is not
@@ -880,6 +851,28 @@ export function encodeClassFingerprint(
         ),
       ),
   ]);
+}
+
+/**
+ * The ids among `assertions` the target ALREADY holds with the exact same
+ * complete truth — the set the three-way survivor rule must prefer, since the
+ * applier is idempotent per pair and never writes a fresh challenger over it.
+ */
+function committedIdentityIds(
+  assertions: readonly IdentityTransferAssertion[],
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
+): ReadonlySet<string> {
+  return new Set(
+    assertions
+      .filter((assertion) => {
+        const stored = storedRowsById.get(assertion.id);
+        return (
+          stored !== undefined &&
+          assertionTruthKey(stored) === assertionTruthKey(assertion)
+        );
+      })
+      .map((assertion) => assertion.id),
+  );
 }
 
 /** The complete truth an assertion id identifies, as a comparable string. */

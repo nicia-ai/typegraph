@@ -190,7 +190,11 @@ export class KindRegistry {
   // Transitive closure for inheritance
   readonly subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
   readonly subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
-  readonly #subClassComponents: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Computed on first read: the composition builder's validation-only
+   * registry is discarded without ever asking for a component.
+   */
+  #subClassComponents: ReadonlyMap<string, readonly string[]> | undefined;
 
   // === Hierarchy (broader/narrower) ===
   // Transitive closure for concept hierarchy (separate from subClassOf!)
@@ -229,6 +233,11 @@ export class KindRegistry {
     string,
     CompositionPair | undefined
   >();
+  readonly #compositionPopulationByEdgeKind: ReadonlyMap<
+    string,
+    CompositionPair["population"]
+  >;
+  readonly #compositionEdgeKindList: readonly string[];
 
   /**
    * Each registered edge kind's declared endpoints and cardinalities, as the
@@ -255,13 +264,12 @@ export class KindRegistry {
     this.edgeKinds = edgeKinds;
     this.identity = identity;
     this.#composition = composition;
+    this.#compositionPopulationByEdgeKind = new Map(
+      composition.pairs.map((pair) => [pair.viaEdgeKind, pair.population]),
+    );
+    this.#compositionEdgeKindList = Object.freeze([...composition.edgeKinds]);
     this.subClassAncestors = closures.subClassAncestors;
     this.subClassDescendants = closures.subClassDescendants;
-    this.#subClassComponents = computeSubClassComponents(
-      nodeKinds,
-      closures.subClassAncestors,
-      closures.subClassDescendants,
-    );
     this.broaderClosure = closures.broaderClosure;
     this.narrowerClosure = closures.narrowerClosure;
     this.equivalenceSets = closures.equivalenceSets;
@@ -312,6 +320,11 @@ export class KindRegistry {
    * in code-point order. Every member of one component returns the same array.
    */
   getSubClassComponent(kind: string): readonly string[] {
+    this.#subClassComponents ??= computeSubClassComponents(
+      this.nodeKinds,
+      this.subClassAncestors,
+      this.subClassDescendants,
+    );
     return this.#subClassComponents.get(kind) ?? [kind];
   }
 
@@ -485,8 +498,7 @@ export class KindRegistry {
    * (`ONTOLOGY_COMPOSITION_VIA_MIXED` refuses a graph where they would not).
    */
   compositionEdgePopulation(edgeKind: string): "one" | "oneActive" | undefined {
-    return this.#composition.pairs.find((pair) => pair.viaEdgeKind === edgeKind)
-      ?.population;
+    return this.#compositionPopulationByEdgeKind.get(edgeKind);
   }
 
   /**
@@ -639,7 +651,7 @@ export class KindRegistry {
 
   /** Every realizing edge kind, code-point ordered. */
   compositionEdgeKinds(): readonly string[] {
-    return [...this.#composition.edgeKinds];
+    return this.#compositionEdgeKindList;
   }
 
   /**
@@ -799,9 +811,6 @@ export class KindRegistry {
   }
 
   /**
-   * Gets an edge kind by name.
-   */
-  /**
    * The endpoints and cardinalities an edge kind's REGISTRATION declares,
    * wherever they were stated (on the edge type, or on the graph's
    * `{ type, from, to }` entry). `getEdgeType(name).from`/`.to` carry only
@@ -811,6 +820,9 @@ export class KindRegistry {
     return this.#edgeFacts.get(edgeKind);
   }
 
+  /**
+   * Gets an edge kind by name.
+   */
   getEdgeType(name: string): AnyEdgeType | undefined {
     return this.edgeKinds.get(name);
   }
@@ -1257,7 +1269,7 @@ export function computeEquivalenceClasses(
     const members = [member, ...others].toSorted((left, right) =>
       compareCodePoints(left, right),
     );
-    const key = JSON.stringify(members);
+    const key = encodeTupleKey(members);
     if (seen.has(key)) continue;
     seen.add(key);
     classes.push(Object.freeze(members));

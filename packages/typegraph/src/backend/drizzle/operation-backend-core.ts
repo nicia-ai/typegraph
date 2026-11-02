@@ -25,8 +25,6 @@ import {
   isSameClaimOwner,
 } from "../../store/claims/axis";
 import {
-  type EdgeCardinalityAxisName,
-  edgeCardinalityAxisName,
   type EdgeCardinalityAxisRef,
   edgeCardinalityClaimTarget,
   edgeClaimRelationMissing,
@@ -178,7 +176,10 @@ import {
   ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT,
   ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
 } from "./operations/contribution-evidence";
-import { ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT } from "./operations/edge-claims";
+import {
+  ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
+  claimPredicateShapeKey,
+} from "./operations/edge-claims";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -1135,14 +1136,7 @@ type EdgeAuditRow = Readonly<{
 }>;
 
 /** The audit row's snake_case columns as the reported row names them. */
-function edgeAuditRowFields(row: EdgeAuditRow): Readonly<{
-  edgeKind: string;
-  edgeId: string;
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-}> {
+function edgeAuditRowFields(row: EdgeAuditRow): MisassignedEdgeEndpointRow {
   return {
     edgeKind: row.edge_kind,
     edgeId: row.edge_id,
@@ -3523,8 +3517,9 @@ export function createCommonOperationBackend(
             compareCodePoints(left, right),
           );
           const lockSlots = (
-            options.writersSerialize ? [] : chunkArray(orderedIds, chunkSize)
-          ).map((ids) => ({
+            options.writersSerialize ?
+              []
+            : chunkArray(orderedIds, chunkSize)).map((ids) => ({
             statement: execution.compile(
               operationStrategy.buildLockNodesForAtomicDeleteWithSchemaFence(
                 { ...input, ids },
@@ -5680,13 +5675,7 @@ export function createCommonOperationBackend(
         }>
       >();
       for (const declaration of params.edgeCardinalities) {
-        const axisName: EdgeCardinalityAxisName =
-          edgeCardinalityAxisName(declaration);
-        const scope: CompositionClaimScope | undefined =
-          declaration.scope === undefined ?
-            undefined
-          : { kind: "composition", holders: declaration.scope.holders };
-        const axisKey = `${axisName}|${scope === undefined ? "" : "composition"}`;
+        const axisKey = claimPredicateShapeKey(declaration);
         const entry = edgeAxes.get(axisKey) ?? {
           // Narrowed to the axis ref alone: `declaration` also carries
           // `edgeKind`, and keeping that field on `ref` would let a later
@@ -5694,7 +5683,7 @@ export function createCommonOperationBackend(
           // spread ORDER to discard it instead of the type excluding it.
           ref: axisRefFromDeclaration(declaration),
           edgeKinds: [],
-          scope,
+          scope: declaration.scope,
         };
         entry.edgeKinds.push(declaration.edgeKind);
         edgeAxes.set(axisKey, entry);

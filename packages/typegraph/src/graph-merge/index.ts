@@ -129,6 +129,7 @@ export {
 export type {
   CandidateDiagnostic,
   CandidateDiagnostics,
+  ClusterExclusionReason,
   EntityRef,
   MatchEvidence,
   MatchSource,

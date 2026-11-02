@@ -660,41 +660,30 @@ export async function importIdentityTransitionsIntoTarget(
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
     const { floorRevision: destinationFloor, hasOwnHistory } = baseline;
     const restoredAt = nowIso();
-    if (transitions.length === 0) {
-      if (
-        !isIdentityTransitionRestore(false, carriedWatermark) ||
-        hasOwnHistory
-      ) {
-        return { created: 0, watermark: undefined };
-      }
-      await writeIdentityTransitionRetentionWatermark(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        destinationFloor,
-        restoredAt,
+    if (transitions.length > 0) {
+      const values = transitions.map((row) =>
+        encodeIdentityTransitionRow(
+          {
+            graphId: ctx.graphId,
+            cause: row.cause,
+            classRef: row.class,
+            priorClassRef: row.priorClass,
+            assertionIds: row.assertionIds,
+            decision: row.decision,
+            validAt: row.validAt,
+          },
+          row.recordedRevision,
+          row.recordedAt,
+          row.transitionId,
+          restoredAt,
+        ),
       );
-      return { created: 0, watermark: destinationFloor };
+      await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
     }
-    const values = transitions.map((row) =>
-      encodeIdentityTransitionRow(
-        {
-          graphId: ctx.graphId,
-          cause: row.cause,
-          classRef: row.class,
-          priorClassRef: row.priorClass,
-          assertionIds: row.assertionIds,
-          decision: row.decision,
-          validAt: row.validAt,
-        },
-        row.recordedRevision,
-        row.recordedAt,
-        row.transitionId,
-        restoredAt,
-      ),
-    );
-    await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
-    if (hasOwnHistory) {
+    if (
+      hasOwnHistory ||
+      !isIdentityTransitionRestore(transitions.length > 0, carriedWatermark)
+    ) {
       return { created: transitions.length, watermark: undefined };
     }
     await writeIdentityTransitionRetentionWatermark(

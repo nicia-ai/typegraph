@@ -23,6 +23,7 @@ import {
 } from "../core/temporal";
 import { IdentityReplayError, ValidationError } from "../errors";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
+import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import {
   readEverRecordedReferences,
@@ -374,7 +375,7 @@ function recordedTransition<G extends GraphDef>(
 function publicTransition<G extends GraphDef>(
   row: IdentityTransitionRow,
 ): IdentityTransition<G> {
-  if (row.restored_at === undefined) return recordedTransition<G>(row);
+  if (!isRestoredTransitionRow(row)) return recordedTransition<G>(row);
   return {
     ...transitionFields<G>(row),
     recorded: createRecordedInstant(
@@ -889,13 +890,7 @@ function laterRevision(
 function groupByBoundary(
   rows: readonly IdentityTransitionRow[],
 ): readonly (readonly IdentityTransitionRow[])[] {
-  const groups = new Map<number, IdentityTransitionRow[]>();
-  for (const row of rows) {
-    const group = groups.get(row.recorded_revision) ?? [];
-    group.push(row);
-    groups.set(row.recorded_revision, group);
-  }
-  return [...groups.entries()]
+  return [...groupBy(rows, (row) => row.recorded_revision).entries()]
     .toSorted(([left], [right]) => left - right)
     .map(([, group]) => group);
 }

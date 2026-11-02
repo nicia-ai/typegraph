@@ -13,11 +13,10 @@
  */
 import { identityAssertionSemanticKey } from "../identity/assertion-key";
 import { identityValidityWindowsOverlap } from "../identity/validity-window";
+import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { IdentityMergeConflictError } from "./errors";
-import { type EntityRef, entityRef } from "./evidence";
-import { mergeKeyOf } from "./node-key";
 import type {
   StagedIdentityAssertion,
   StagedRetraction,
@@ -141,20 +140,26 @@ function droppedIdentityAssertion(
   return { kind: "identity", id: assertion.id, reason };
 }
 
-/** Structural (kind, id) tuple key for one identity assertion ENDPOINT PAIR. */
-function pairEndpointKey(
-  assertion: Readonly<{ a: EntityRef; b: EntityRef }>,
-): string {
-  return encodeTupleKey([
-    assertion.a.kind,
-    assertion.a.id,
-    assertion.b.kind,
-    assertion.b.id,
-  ]);
+/**
+ * The `(a.kind, a.id, b.kind, b.id)` endpoint tuple every identity key encoder
+ * is built from. One definition keeps their FIELD ORDER identical — the keys
+ * are compared against each other's encodings, so a drifted order in one
+ * encoder would silently stop matching rows the others key the same way.
+ */
+export function endpointTuple(
+  assertion: Readonly<{
+    a: Readonly<{ kind: string; id: string }>;
+    b: Readonly<{ kind: string; id: string }>;
+  }>,
+): readonly string[] {
+  return [assertion.a.kind, assertion.a.id, assertion.b.kind, assertion.b.id];
 }
 
-function entityRefOf(ref: Readonly<{ kind: string; id: string }>): EntityRef {
-  return entityRef(mergeKeyOf(ref));
+/** Structural (kind, id) tuple key for one identity assertion ENDPOINT PAIR. */
+function pairEndpointKey(
+  assertion: Parameters<typeof endpointTuple>[0],
+): string {
+  return encodeTupleKey(endpointTuple(assertion));
 }
 
 /**
@@ -164,7 +169,6 @@ function entityRefOf(ref: Readonly<{ kind: string; id: string }>): EntityRef {
  */
 type OpposingRelationGroup<T> = Readonly<{
   endpoint: string;
-  items: readonly T[];
   same: readonly T[];
   different: readonly T[];
   overlap: Readonly<{ same: T; different: T }>;
@@ -202,17 +206,9 @@ function opposingRelationGroups<T>(
   items: readonly T[],
   assertionOf: (item: T) => IdentityTransferAssertion,
 ): readonly OpposingRelationGroup<T>[] {
-  const byEndpoint = new Map<string, T[]>();
-  for (const item of items) {
-    const assertion = assertionOf(item);
-    const key = pairEndpointKey({
-      a: entityRefOf(assertion.a),
-      b: entityRefOf(assertion.b),
-    });
-    const group = byEndpoint.get(key) ?? [];
-    group.push(item);
-    byEndpoint.set(key, group);
-  }
+  const byEndpoint = groupBy(items, (item) =>
+    pairEndpointKey(assertionOf(item)),
+  );
   const groups: OpposingRelationGroup<T>[] = [];
   for (const [endpoint, group] of byEndpoint) {
     const same = group.filter((item) => assertionOf(item).relation === "same");
@@ -221,7 +217,7 @@ function opposingRelationGroups<T>(
     );
     const overlap = firstOverlappingOpposingPair(same, different, assertionOf);
     if (overlap === undefined) continue;
-    groups.push({ endpoint, items: group, same, different, overlap });
+    groups.push({ endpoint, same, different, overlap });
   }
   return groups;
 }
@@ -452,26 +448,23 @@ function assertNoStagedOpposingRelations(staging: StagingSet): void {
  * branch disagreeing, is convergent, not a race.
  */
 function assertNoRetractReassertRace(staging: StagingSet): void {
-  const retractedBySemantic = new Map<string, StagedRetraction[]>();
-  for (const staged of staging.retractedIdentityAssertions) {
-    const key = identitySemanticKey(staged.assertion);
-    const group = retractedBySemantic.get(key) ?? [];
-    group.push(staged);
-    retractedBySemantic.set(key, group);
-  }
+  const retractedBySemantic = groupBy(
+    staging.retractedIdentityAssertions,
+    (staged) => identitySemanticKey(staged.assertion),
+  );
+  const reassertedBySemantic = groupBy(
+    staging.newIdentityAssertions,
+    (staged) => identitySemanticKey(staged.assertion),
+  );
   for (const staged of staging.newIdentityAssertions) {
     const retractions = (
       retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? []
     ).filter((candidate) => candidate.assertion.id !== staged.assertion.id);
     if (retractions.length === 0) continue;
     const reasserters = new Set(
-      staging.newIdentityAssertions
-        .filter(
-          (other) =>
-            identitySemanticKey(other.assertion) ===
-            identitySemanticKey(staged.assertion),
-        )
-        .map((other) => other.branchId),
+      (
+        reassertedBySemantic.get(identitySemanticKey(staged.assertion)) ?? []
+      ).map((other) => other.branchId),
     );
     const selfRetracted = retractions.some(
       (retraction) => retraction.branchId === staged.branchId,
@@ -514,22 +507,18 @@ export function planIdentityThreeWay(
   const retractions: IdentityTransferAssertion[] = [];
   const dropped: DroppedItem[] = [];
 
-  const baseByDedupe = new Map<string, IdentityTransferAssertion[]>();
-  const baseIdToDedupeKey = new Map<string, string>();
-  for (const assertion of staging.baseIdentityAssertions) {
-    const key = identityDedupeKey(assertion);
-    const group = baseByDedupe.get(key) ?? [];
-    group.push(assertion);
-    baseByDedupe.set(key, group);
-    baseIdToDedupeKey.set(assertion.id, key);
-  }
-  const assertedByDedupe = new Map<string, StagedIdentityAssertion[]>();
-  for (const staged of staging.newIdentityAssertions) {
-    const key = identityDedupeKey(staged.assertion);
-    const group = assertedByDedupe.get(key) ?? [];
-    group.push(staged);
-    assertedByDedupe.set(key, group);
-  }
+  const baseByDedupe = groupBy(staging.baseIdentityAssertions, (assertion) =>
+    identityDedupeKey(assertion),
+  );
+  const baseIdToDedupeKey = new Map<string, string>(
+    staging.baseIdentityAssertions.map((assertion) => [
+      assertion.id,
+      identityDedupeKey(assertion),
+    ]),
+  );
+  const assertedByDedupe = groupBy(staging.newIdentityAssertions, (staged) =>
+    identityDedupeKey(staged.assertion),
+  );
   const retractedByDedupe = new Map<string, StagedRetraction[]>();
   for (const staged of staging.retractedIdentityAssertions) {
     const key = baseIdToDedupeKey.get(staged.assertion.id);

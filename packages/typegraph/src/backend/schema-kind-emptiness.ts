@@ -39,3 +39,20 @@ export async function schemaKindHasRows(
 ): Promise<boolean> {
   return (await countSchemaKindRows(backend, graphId, probe, 1)) > 0;
 }
+
+/**
+ * The probes whose row population holds at least one row, in input order.
+ * Sequential, not concurrent: a schema-commit preflight probes through its
+ * one transaction connection.
+ */
+export async function populatedSchemaKinds(
+  backend: SchemaKindCountMembers,
+  graphId: string,
+  probes: readonly SchemaKindEmptinessProbe[],
+): Promise<readonly SchemaKindEmptinessProbe[]> {
+  const populated: SchemaKindEmptinessProbe[] = [];
+  for (const probe of probes) {
+    if (await schemaKindHasRows(backend, graphId, probe)) populated.push(probe);
+  }
+  return populated;
+}

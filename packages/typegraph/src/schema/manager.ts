@@ -10,7 +10,7 @@
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import {
   countSchemaKindRows,
-  schemaKindHasRows,
+  populatedSchemaKinds,
 } from "../backend/schema-kind-emptiness";
 import {
   type CommitSchemaVersionIfKindsEmptyResult,
@@ -76,6 +76,7 @@ import {
   type SchemaTighteningPreflight,
 } from "./tightening-preflight";
 import {
+  type SchemaCommitTransition,
   type SchemaHash,
   type SerializedEdgeDef,
   type SerializedSchema,
@@ -193,11 +194,13 @@ export async function activeSchemaHash(
 }
 
 /**
- * Whether the stored version hashes equal to `currentHash`. The column is
- * checked first because it is equal whenever this release wrote the row.
+ * Whether a stored schema or template row holds the schema `currentHash`
+ * names. The column is checked first because it is equal whenever this
+ * release wrote the row; a row an earlier release wrote is judged by its
+ * document, through {@link activeSchemaHash}.
  */
-async function storedSchemaHashMatches(
-  row: SchemaVersionRow,
+export async function storedSchemaHashMatches(
+  row: Pick<SchemaVersionRow, "schema_hash" | "schema_doc">,
   currentHash: SchemaHash,
 ): Promise<boolean> {
   return (
@@ -976,8 +979,9 @@ export type SchemaCommitPreflightSteps = Readonly<{
  * any) this commit carries.
  *
  * Identity's error wins whenever identity contributed a step, because its
- * preflight is the one that cannot be split from the commit; a
- * tightening-only commit names the axis it is actually about (see
+ * preflight is the one that cannot be split from the commit, and is the
+ * answer for a commit carrying no tightening preflight; a tightening-only
+ * commit names the axis it is actually about (see
  * {@link SchemaTighteningPreflight.capabilityError}). One owner, because
  * every commit path that relies on the backend's atomic preflight primitive
  * (`ensureSchema`'s auto-migrate branch, `migrateSchema`, `Store.evolve`)
@@ -988,8 +992,10 @@ export type SchemaCommitPreflightSteps = Readonly<{
 export function schemaCommitCapabilityError(
   hasIdentityPreflight: boolean,
   tightening: SchemaTighteningPreflight | undefined,
-): AtomicPreflightCapabilityError | undefined {
-  if (hasIdentityPreflight || tightening === undefined) return undefined;
+): AtomicPreflightCapabilityError {
+  if (hasIdentityPreflight || tightening === undefined) {
+    return IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR;
+  }
   return tightening.capabilityError;
 }
 
@@ -1527,40 +1533,30 @@ function matchIdentityRekeyedEdgeKinds(
 }
 
 /** Refuses identity activation/re-keying while rows still lack target keys. */
-/** The versions a schema transition moves the active pointer between. */
-type SchemaVersionTransition = Readonly<{
-  fromVersion: number;
-  toVersion: number;
-}>;
-
 function prepareEdgeMatchIdentityCommitPreflight(
   target: Readonly<{ id: string }>,
   edgeKinds: readonly string[],
-  transition: SchemaVersionTransition,
+  transition: Pick<SchemaCommitTransition, "fromVersion" | "toVersion">,
 ): ((backend: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
   if (edgeKinds.length === 0) return undefined;
   return async (backend): Promise<void> => {
-    const populated: string[] = [];
-    for (const kind of edgeKinds) {
-      const hasRows = await schemaKindHasRows(backend, target.id, {
-        entity: "edge",
-        kind,
-        rows: "all",
-      });
-      if (hasRows) populated.push(kind);
-    }
+    const populated = await populatedSchemaKinds(
+      backend,
+      target.id,
+      edgeKinds.map((kind) => ({ entity: "edge", kind, rows: "all" }) as const),
+    );
     if (populated.length === 0) return;
     throw edgeMatchIdentityRekeyPopulatedError(
       target.id,
       transition,
-      populated,
+      populated.map((probe) => probe.kind),
     );
   };
 }
 
 function edgeMatchIdentityRekeyPopulatedError(
   graphId: string,
-  transition: SchemaVersionTransition,
+  transition: Pick<SchemaCommitTransition, "fromVersion" | "toVersion">,
   edgeKinds: readonly string[],
 ): MigrationError {
   return new MigrationError(
@@ -1895,12 +1891,9 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
 /**
  * @internal Commits a data preflight and schema CAS in one transaction.
  *
- * `capabilityError` names the reason a preflight is owed when the backend
- * cannot commit one atomically. Defaults to the identity capability error —
- * every caller that composes an ontology preflight alongside (or instead of)
- * an identity one passes `ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR`
- * when identity contributed no step of its own, so the refusal names the
- * state that actually required atomicity.
+ * `capabilityError` is the refusal raised when the backend cannot commit a
+ * preflight atomically; every caller passes
+ * {@link schemaCommitCapabilityError}'s decision.
  */
 export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   backend: GraphBackend,
@@ -1908,7 +1901,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   currentVersion: number,
   preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   previous: SerializedSchema | undefined,
-  capabilityError: AtomicPreflightCapabilityError = IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+  capabilityError: AtomicPreflightCapabilityError,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
@@ -2081,8 +2074,7 @@ function prepareRollbackPreflight(
       identity === undefined ?
         atomicPreflightUnsupportedError(
           graphId,
-          schemaCommitCapabilityError(false, tightening) ??
-            IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+          schemaCommitCapabilityError(false, tightening),
         )
       : identityRollbackRequiresMigrationError(
           graphId,

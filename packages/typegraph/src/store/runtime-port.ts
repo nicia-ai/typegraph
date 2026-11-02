@@ -56,6 +56,7 @@ import {
   type RecordedScanOptions,
   type RecordedScanPage,
   TRANSACTION_RUNTIME,
+  type TransactionRuntime,
 } from "./types";
 
 export const STORE_RUNTIME: unique symbol =
@@ -641,11 +642,7 @@ export function storeQueryBackend<G extends GraphDef>(
 }
 
 type TransactionRuntimePort = Readonly<{
-  [TRANSACTION_RUNTIME]?: Readonly<{
-    backend: TransactionBackend;
-    deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy;
-    reviveNode: TransactionReviveNode;
-  }>;
+  [TRANSACTION_RUNTIME]?: TransactionRuntime;
 }>;
 
 /**
@@ -658,11 +655,6 @@ type TransactionRuntimePort = Readonly<{
 export type TransactionDeleteNodeWithPolicy = (
   work: Readonly<{ kind: string; id: string }>,
   policy?: NodeDeletePolicy,
-) => Promise<void>;
-
-/** A node revival bound to the transaction it is invoked from — see {@link transactionReviveNode}. */
-type TransactionReviveNode = (
-  work: Readonly<{ kind: string; id: string }>,
 ) => Promise<void>;
 
 const transactionStoreOwners = new WeakMap<object, object>();
@@ -731,17 +723,23 @@ export async function runInTransactionContext<
   }
 }
 
-/** Returns the full backend for privileged transaction-bound internals. */
-export function transactionBackend(
+function requireTransactionRuntime(
   transaction: TransactionRuntimePort,
-): TransactionBackend {
+): TransactionRuntime {
   const runtime = transaction[TRANSACTION_RUNTIME];
   if (runtime === undefined) {
     throw new TypeError(
       "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
     );
   }
-  return runtime.backend;
+  return runtime;
+}
+
+/** Returns the full backend for privileged transaction-bound internals. */
+export function transactionBackend(
+  transaction: TransactionRuntimePort,
+): TransactionBackend {
+  return requireTransactionRuntime(transaction).backend;
 }
 
 /**
@@ -764,13 +762,10 @@ export function transactionDeleteNodeWithPolicy(
   work: Readonly<{ kind: string; id: string }>,
   policy?: NodeDeletePolicy,
 ): Promise<void> {
-  const runtime = transaction[TRANSACTION_RUNTIME];
-  if (runtime === undefined) {
-    throw new TypeError(
-      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
-    );
-  }
-  return runtime.deleteNodeWithPolicy(work, policy);
+  return requireTransactionRuntime(transaction).deleteNodeWithPolicy(
+    work,
+    policy,
+  );
 }
 
 /**
@@ -786,11 +781,5 @@ export function transactionReviveNode(
   transaction: TransactionRuntimePort,
   work: Readonly<{ kind: string; id: string }>,
 ): Promise<void> {
-  const runtime = transaction[TRANSACTION_RUNTIME];
-  if (runtime === undefined) {
-    throw new TypeError(
-      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
-    );
-  }
-  return runtime.reviveNode(work);
+  return requireTransactionRuntime(transaction).reviveNode(work);
 }

@@ -10,7 +10,9 @@
 import { z } from "zod";
 
 import { isRecordedRevision } from "../core/temporal";
+import type { IdentityTransitionCause } from "../identity";
 import { isCanonicalIsoDate } from "../utils/date";
+import { type Assert, type Equal } from "../utils/type-assert";
 
 // ============================================================
 // Format Version
@@ -59,6 +61,11 @@ const ValidityTimestampSchema = z.iso
 // Node Interchange
 // ============================================================
 
+const InterchangeNodeRefSchema = z.object({
+  kind: z.string().min(1),
+  id: z.string().min(1),
+});
+
 /**
  * Interchange format for a node.
  *
@@ -105,14 +112,8 @@ export type InterchangeNode = z.infer<typeof InterchangeNodeSchema>;
 export const InterchangeEdgeSchema = z.object({
   kind: z.string().min(1),
   id: z.string().min(1),
-  from: z.object({
-    kind: z.string().min(1),
-    id: z.string().min(1),
-  }),
-  to: z.object({
-    kind: z.string().min(1),
-    id: z.string().min(1),
-  }),
+  from: InterchangeNodeRefSchema,
+  to: InterchangeNodeRefSchema,
   properties: z.record(z.string(), z.unknown()).default({}),
   /** See {@link InterchangeNodeSchema}'s `validFrom` for the null/undefined contract. */
   validFrom: ValidityTimestampSchema.nullable().optional(),
@@ -139,8 +140,8 @@ export type IdentityInterchangeMode = z.infer<
 export const InterchangeIdentityAssertionSchema = z.object({
   id: z.string().min(1),
   relation: z.enum(["same", "different"]),
-  a: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
-  b: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
+  a: InterchangeNodeRefSchema,
+  b: InterchangeNodeRefSchema,
   validFrom: ValidityTimestampSchema,
   validTo: ValidityTimestampSchema.optional(),
   /**
@@ -150,9 +151,7 @@ export const InterchangeIdentityAssertionSchema = z.object({
    * explicit retractions; when present it names one of `a` / `b` and requires
    * `validTo`. Import rejects both violations with an attributed error.
    */
-  endedBy: z
-    .object({ kind: z.string().min(1), id: z.string().min(1) })
-    .optional(),
+  endedBy: InterchangeNodeRefSchema.optional(),
 });
 export type InterchangeIdentityAssertion = z.infer<
   typeof InterchangeIdentityAssertionSchema
@@ -160,11 +159,11 @@ export type InterchangeIdentityAssertion = z.infer<
 
 /**
  * The nine causes `IdentityTransitionCause` (`identity/transition-log.ts`)
- * declares — spelled again here, rather than imported, because that module
- * owns internal transition-writing semantics and this schema owns only the
- * wire shape, matching this file's existing precedent of inlining
+ * declares — spelled again here, rather than imported as a value, because that
+ * module owns internal transition-writing semantics and this schema owns only
+ * the wire shape, matching this file's existing precedent of inlining
  * `InterchangeIdentityAssertionSchema.relation` rather than importing
- * `IdentityRelation`.
+ * `IdentityRelation`. A type-level check keeps the two spellings from drifting.
  */
 const InterchangeIdentityTransitionCauseSchema = z.enum([
   "assert",
@@ -177,6 +176,14 @@ const InterchangeIdentityTransitionCauseSchema = z.enum([
   "schema-transition",
   "reconcile",
 ]);
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _interchangeCauseMatchesTransitionLog = Assert<
+  Equal<
+    z.infer<typeof InterchangeIdentityTransitionCauseSchema>,
+    IdentityTransitionCause
+  >
+>;
 
 /**
  * Strict: a decision names only the evidence this format defines, so an
@@ -213,10 +220,8 @@ export const InterchangeIdentityTransitionSchema = z.object({
     }),
   recordedAt: z.iso.datetime(),
   validAt: ValidityTimestampSchema,
-  class: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
-  priorClass: z
-    .object({ kind: z.string().min(1), id: z.string().min(1) })
-    .optional(),
+  class: InterchangeNodeRefSchema,
+  priorClass: InterchangeNodeRefSchema.optional(),
   assertionIds: z.array(z.string().min(1)),
   decision: InterchangeIdentityTransitionDecisionSchema.optional(),
 });

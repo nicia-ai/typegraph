@@ -4,6 +4,7 @@ import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
 import type { TransactionContext } from "../store/types";
+import { groupBy } from "../utils/array";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { assertMergeTransactionPristine } from "./adopted-transaction";
@@ -128,7 +129,11 @@ import {
   translateMergeCommitError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
-import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
+import type {
+  CandidateDiagnostic,
+  CandidateDiagnostics,
+  ClusterExclusionReason,
+} from "./evidence";
 import { compareMatchEvidence, entityRef } from "./evidence";
 import { evolutionPlanningTarget } from "./evolution-target";
 import { createRecordedBaseReader } from "./historical-base";
@@ -273,6 +278,7 @@ import {
   type GraphWriteLock,
   isLiveNodeRow,
   lockRecordedGraphWrite,
+  orientCompositionEndpoints,
   planCompositionCascade,
   readProposedEdgeAcyclicityViolations,
   readRecordedClock,
@@ -513,13 +519,7 @@ function identityFusionGroups(
     (component) => component.members,
   );
   if (!ontologyRetype) return groups;
-  const byBareId = new Map<string, MergeKey[]>();
-  for (const key of participants) {
-    const bare = idOf(key);
-    const members = byBareId.get(bare);
-    if (members === undefined) byBareId.set(bare, [key]);
-    else members.push(key);
-  }
+  const byBareId = groupBy(participants, (key) => idOf(key));
   return [
     ...groups,
     ...[...byBareId.values()].filter((members) => members.length > 1),
@@ -1402,10 +1402,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   for (const cluster of clusters) {
     assertClusterNotSeparated(cluster.members, separationFacts);
   }
-  const excludedByEndpoints = new Map<
-    string,
-    "diameter" | "baseAmbiguity" | "separation"
-  >();
+  const excludedByEndpoints = new Map<string, ClusterExclusionReason>();
   for (const excluded of [
     ...guard.excludedEdges,
     ...diameterGuard.excludedEdges,
@@ -1464,11 +1461,8 @@ function buildInternalMergePlan<G extends GraphDef>(
   // carries them in full, so a component spanning two same-id/different-kind committed
   // entities stays distinguishable in the report.
   const baseAmbiguities: BaseAmbiguity[] = guard.events.map((event) => ({
-    baseIds: event.baseIds.map((key) => ({ kind: kindOf(key), id: idOf(key) })),
-    memberIds: event.memberIds.map((key) => ({
-      kind: kindOf(key),
-      id: idOf(key),
-    })),
+    baseIds: event.baseIds.map((key) => entityRef(key)),
+    memberIds: event.memberIds.map((key) => entityRef(key)),
   }));
 
   // (5) canonicalize each cluster: min-id survivor + commutative prop union.
@@ -2298,6 +2292,30 @@ function validityEndMutationOf(
 ): ValidityEndMutation {
   if (write.clearValidTo === true) return { clearValidTo: true };
   return write.validTo === undefined ? {} : { validTo: write.validTo };
+}
+
+/** Whether a write states its own end of validity — an instant or an explicit reopening — rather than keeping the stored row's. */
+function statesValidityEnd(
+  write: Readonly<{
+    validTo?: string | undefined;
+    clearValidTo?: boolean | undefined;
+  }>,
+): boolean {
+  return write.validTo !== undefined || write.clearValidTo === true;
+}
+
+/** Whether a live edge of `edgeKind` ending at `validTo` still attaches its `partKind` part. */
+function liveCompositionEdgeAttaches(
+  registry: KindRegistry,
+  partKind: string,
+  edgeKind: string,
+  validTo: string | undefined,
+): boolean {
+  return compositionEdgeAttachesPart(registry, partKind, {
+    kind: edgeKind,
+    deleted_at: undefined,
+    valid_to: validTo,
+  });
 }
 
 type MechanicalNodeWrite = Readonly<{
@@ -3443,11 +3461,12 @@ function plannedCompositionState(
     const part = partSide === "from" ? upsert.from : upsert.to;
     if (
       upsert.validTo !== undefined &&
-      !compositionEdgeAttachesPart(registry, part.kind, {
-        kind: upsert.kind,
-        deleted_at: undefined,
-        valid_to: upsert.validTo,
-      })
+      !liveCompositionEdgeAttaches(
+        registry,
+        part.kind,
+        upsert.kind,
+        upsert.validTo,
+      )
     ) {
       detachedEdgeIds.add(upsert.id);
       continue;
@@ -3483,18 +3502,12 @@ async function plannedEdgeUpsertAttachesPart(
   const upserts =
     planned.edgeUpsertsByPart.get(mergeKey(part.kind, part.id)) ?? [];
   for (const upsert of upserts) {
-    const statesWindowEnd =
-      upsert.validTo !== undefined || upsert.clearValidTo === true;
     const validTo =
-      statesWindowEnd ?
+      statesValidityEnd(upsert) ?
         upsert.validTo
       : (await backend.getEdge(ctx.graphId, upsert.id))?.valid_to;
     if (
-      compositionEdgeAttachesPart(ctx.registry, part.kind, {
-        kind: upsert.kind,
-        deleted_at: undefined,
-        valid_to: validTo,
-      })
+      liveCompositionEdgeAttaches(ctx.registry, part.kind, upsert.kind, validTo)
     ) {
       return true;
     }
@@ -3688,11 +3701,7 @@ function stagedRowAttachesForBranch(
   staged: StagedEdge,
 ): boolean {
   const attaches = (validTo: string | undefined): boolean =>
-    compositionEdgeAttachesPart(registry, partKind, {
-      kind: staged.kind,
-      deleted_at: undefined,
-      valid_to: validTo,
-    });
+    liveCompositionEdgeAttaches(registry, partKind, staged.kind, validTo);
   if (staged.origin === BRANCH_CREATED_EDGE_ORIGIN) {
     return attaches(staged.validTo);
   }
@@ -3905,7 +3914,7 @@ export async function requiredExistenceOrphanCandidates(
   ): void => {
     const partSide = ctx.registry.compositionPartSide(edgeKind);
     if (partSide === undefined) return;
-    const part = partSide === "from" ? from : to;
+    const { part } = orientCompositionEndpoints(partSide, from, to);
     add(part.kind, part.id);
   };
 
@@ -4079,13 +4088,11 @@ async function liveOrphanCandidates(
       liveKeys.add(mergeKey(candidate.kind, candidate.id));
     }
   } else {
-    const idsByKind = new Map<string, string[]>();
-    for (const candidate of unresolved) {
-      const ids = idsByKind.get(candidate.kind) ?? [];
-      ids.push(candidate.id);
-      idsByKind.set(candidate.kind, ids);
-    }
-    for (const [kind, ids] of idsByKind) {
+    for (const [kind, kindCandidates] of groupBy(
+      unresolved,
+      (candidate) => candidate.kind,
+    )) {
+      const ids = kindCandidates.map((candidate) => candidate.id);
       for (const row of await getNodes(ctx.graphId, kind, ids)) {
         if (row.deleted_at === undefined) liveKeys.add(mergeKey(kind, row.id));
       }
@@ -4157,13 +4164,13 @@ async function resolvedMergeArtifact<G extends GraphDef>(
       canonicalMappings: [...plan.canonicalOf]
         .sort(([left], [right]) => compareMergeKeys(left, right))
         .map(([member, canonical]) => ({
-          member: wireEntityRef(kindOf(member), idOf(member)),
-          canonical: wireEntityRef(kindOf(canonical), idOf(canonical)),
+          member: entityRef(member),
+          canonical: entityRef(canonical),
         })),
       retypes: [...plan.retypeMap]
         .sort(([left], [right]) => compareMergeKeys(left, right))
         .map(([entity, toKind]) => ({
-          entity: wireEntityRef(kindOf(entity), idOf(entity)),
+          entity: entityRef(entity),
           toKind,
         })),
       deletedNodes: plannedNodeReleases(plan),
@@ -4234,7 +4241,7 @@ async function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
     edgeKindIsInAcyclicRelation(target.graph, target.registry, edge.kind),
   );
   const keepsStoredEnd = (edge: MergedEdge): boolean =>
-    edge.validTo === undefined && edge.clearValidTo !== true;
+    !statesValidityEnd(edge);
   const backend = storeBackend(target);
   const storedRows = await getEdgeRowsByIds(
     backend,

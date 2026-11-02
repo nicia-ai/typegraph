@@ -13,16 +13,17 @@ import {
   type EdgeRow,
   type GraphBackend,
   type GraphReadBackend,
-  isLiveNodeRow,
+  isLiveNodeRowPresent,
 } from "../../backend/types";
 import { CompilerInvariantError, CompositionCycleError } from "../../errors";
 import {
   type CompositionPair,
   type CompositionPartSide,
+  orientCompositionEndpoints,
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStringTuples } from "../../utils/compare";
-import { encodeTupleKey } from "../../utils/tuple-key";
+import { nodeRefKey } from "../../utils/tuple-key";
 import { compositionRowMembership } from "../claims/composition-claims";
 import { membershipCountsRow } from "../claims/edge-claims";
 import {
@@ -136,17 +137,6 @@ export function compositionEdgeCounts(
 
 type CascadeNode = Readonly<{ kind: string; id: string }>;
 
-/**
- * The visited set's key for one member. {@link encodeTupleKey} rather than a
- * delimiter join: node ids are arbitrary caller data, and a delimiter a value
- * may itself contain would collapse two distinct members onto one key — read
- * here as an already-visited node, i.e. a spurious {@link CompositionCycleError}
- * or a silently skipped member.
- */
-function memberKey(node: CascadeNode): string {
-  return encodeTupleKey([node.kind, node.id]);
-}
-
 /** Which endpoint of `edgeKind` carries the WHOLE — the mirror of `compositionPartSide`. */
 export function wholeSide(partSide: CompositionPartSide): "from" | "to" {
   return partSide === "from" ? "to" : "from";
@@ -170,11 +160,11 @@ export function compositionRowEndpoints(
   partSide: CompositionPartSide,
   row: Pick<EdgeRow, "from_kind" | "from_id" | "to_kind" | "to_id">,
 ): CompositionRowEndpoints {
-  const from = { kind: row.from_kind, id: row.from_id };
-  const to = { kind: row.to_kind, id: row.to_id };
-  return partSide === "from" ?
-      { part: from, whole: to }
-    : { part: to, whole: from };
+  return orientCompositionEndpoints(
+    partSide,
+    { kind: row.from_kind, id: row.from_id },
+    { kind: row.to_kind, id: row.to_id },
+  );
 }
 
 /**
@@ -254,46 +244,15 @@ async function readWholeSideEdges(
   backend: GraphReadBackend,
   trustEmptyResult: boolean,
 ): Promise<WholeSideEdgesResult> {
-  const wholeIsFromEdgeKinds: string[] = [];
-  const wholeIsToEdgeKinds: string[] = [];
-  for (const edgeKind of edgeKinds) {
-    const bucket =
-      wholeSide(requirePartSide(ctx.registry, edgeKind)) === "from" ?
-        wholeIsFromEdgeKinds
-      : wholeIsToEdgeKinds;
-    bucket.push(edgeKind);
-  }
-
-  const setRead = backend.findEdgesByHeterogeneousEndpointSet;
-  if (setRead !== undefined) {
-    const endpoints = frontier.map((node) => ({
-      kind: node.kind,
-      id: node.id,
-    }));
-    const [fromSideRows, toSideRows] = await Promise.all([
-      wholeIsFromEdgeKinds.length === 0 ?
-        Promise.resolve<readonly EdgeRow[]>([])
-      : setRead({
-          graphId: ctx.graphId,
-          side: "from",
-          endpoints,
-          edgeKinds: wholeIsFromEdgeKinds,
-          excludeDeleted: true,
-        }),
-      wholeIsToEdgeKinds.length === 0 ?
-        Promise.resolve<readonly EdgeRow[]>([])
-      : setRead({
-          graphId: ctx.graphId,
-          side: "to",
-          endpoints,
-          edgeKinds: wholeIsToEdgeKinds,
-          excludeDeleted: true,
-        }),
-    ]);
-    const combined = [...fromSideRows, ...toSideRows];
-    if (combined.length > 0 || trustEmptyResult) {
-      return { rows: combined, setReadAnswered: true };
-    }
+  const combined = await readCompositionEdgesAtRole(
+    ctx,
+    backend,
+    "whole",
+    frontier,
+    edgeKinds,
+  );
+  if (combined !== undefined && (combined.length > 0 || trustEmptyResult)) {
+    return { rows: combined, setReadAnswered: true };
   }
 
   const edgeKindSet = new Set(edgeKinds);
@@ -327,7 +286,65 @@ async function readWholeSideEdges(
   // The set-read port (if any) is now confirmed for this cascade: this
   // round paid the fallback and it agreed with the port's empty verdict
   // (or there was no port to confirm), so future rounds may trust it.
-  return { rows: filtered, setReadAnswered: setRead !== undefined };
+  return {
+    rows: filtered,
+    setReadAnswered: backend.findEdgesByHeterogeneousEndpointSet !== undefined,
+  };
+}
+
+/**
+ * Every undeleted row of `edgeKinds` whose `role` endpoint is one of
+ * `endpoints`, read with `findEdgesByHeterogeneousEndpointSet` — one statement
+ * per orientation (an orientation no edge kind takes issues none), since one
+ * call's `side` applies uniformly to every edge kind it names — and combined
+ * from-side first. `undefined` when the backend omits that optional port,
+ * which leaves the caller on its own fallback.
+ *
+ * The port applies no temporal filter beyond `excludeDeleted`, exactly like
+ * the `findEdgesConnectedTo` read it stands in for, so the population
+ * decision stays the caller's.
+ */
+export async function readCompositionEdgesAtRole(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  backend: GraphReadBackend,
+  role: "part" | "whole",
+  endpoints: readonly CascadeNode[],
+  edgeKinds: readonly string[],
+): Promise<readonly EdgeRow[] | undefined> {
+  const setRead = backend.findEdgesByHeterogeneousEndpointSet;
+  if (setRead === undefined) return undefined;
+  const fromSideEdgeKinds: string[] = [];
+  const toSideEdgeKinds: string[] = [];
+  for (const edgeKind of edgeKinds) {
+    const partSide = requirePartSide(ctx.registry, edgeKind);
+    const side = role === "part" ? partSide : wholeSide(partSide);
+    (side === "from" ? fromSideEdgeKinds : toSideEdgeKinds).push(edgeKind);
+  }
+  const endpointReferences = endpoints.map((node) => ({
+    kind: node.kind,
+    id: node.id,
+  }));
+  const [fromSideRows, toSideRows] = await Promise.all([
+    fromSideEdgeKinds.length === 0 ?
+      Promise.resolve<readonly EdgeRow[]>([])
+    : setRead({
+        graphId: ctx.graphId,
+        side: "from",
+        endpoints: endpointReferences,
+        edgeKinds: fromSideEdgeKinds,
+        excludeDeleted: true,
+      }),
+    toSideEdgeKinds.length === 0 ?
+      Promise.resolve<readonly EdgeRow[]>([])
+    : setRead({
+        graphId: ctx.graphId,
+        side: "to",
+        endpoints: endpointReferences,
+        edgeKinds: toSideEdgeKinds,
+        excludeDeleted: true,
+      }),
+  ]);
+  return [...fromSideRows, ...toSideRows];
 }
 
 function requirePartSide(
@@ -376,10 +393,9 @@ async function liveDiscoveredMembers(
       backend.getNode(ctx.graphId, member.kind, member.id),
     ),
   );
-  return discoveryOrder.filter((_member, index) => {
-    const row = nodeRows[index];
-    return row !== undefined && isLiveNodeRow(row);
-  });
+  return discoveryOrder.filter((_member, index) =>
+    isLiveNodeRowPresent(nodeRows[index]),
+  );
 }
 
 /**
@@ -476,7 +492,7 @@ export async function planCompositionCascade(
   });
 
   const root: CascadeNode = { kind: wholeKind, id: wholeId };
-  const visited = new Set<string>([memberKey(root)]);
+  const visited = new Set<string>([nodeRefKey(root)]);
   const discoveryRounds: DiscoveredCascadeMember[][] = [];
   const consumedEdgeIds = new Set<string>();
 
@@ -510,7 +526,7 @@ export async function planCompositionCascade(
       );
       if (!compositionEdgeCounts(pair, row)) continue;
 
-      const key = memberKey(part);
+      const key = nodeRefKey(part);
       if (visited.has(key)) {
         throw new CompositionCycleError({
           wholeKind,

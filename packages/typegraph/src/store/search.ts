@@ -656,7 +656,7 @@ export async function executeVectorSearch<N = Node>(
     ctx,
     nodeKind,
     options.fieldPath,
-    options,
+    resolveSearchKinds(ctx, nodeKind, options),
     "vectorSearch",
   );
   for (const { slot } of searchKinds) {
@@ -783,8 +783,8 @@ function assertVectorKindsCoverRows(
 type VectorSearchKind = Readonly<{ kind: string; slot: ResolvedSearchSlot }>;
 
 /**
- * Resolves the kinds a vector search spans, keeping only kinds that
- * declare the embedding field (a kind that omits it holds no vector there,
+ * Narrows a search's resolved kinds to the ones a vector search spans: only
+ * kinds that declare the embedding field (a kind that omits it holds no vector there,
  * and has no table to reference). Enforces one shared declared metric across
  * the expansion: scores from different metrics cannot be merged into one
  * ranking, and a per-call metric override cannot bridge the gap either (each
@@ -795,10 +795,9 @@ function resolveVectorSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
   fieldPath: string,
-  options: SearchScopeOptions,
+  kinds: readonly string[],
   label: string,
 ): readonly VectorSearchKind[] {
-  const kinds = resolveSearchKinds(ctx, nodeKind, options);
   assertVectorKindsCoverRows(ctx, nodeKind, kinds, fieldPath, label);
   const resolved: VectorSearchKind[] = [];
   for (const kind of kinds) {
@@ -920,7 +919,7 @@ export async function executeHybridSearch<N = Node>(
     ctx,
     nodeKind,
     options.vector.fieldPath,
-    options,
+    fulltextKinds,
     "hybridSearch.vector",
   );
   for (const { slot } of vectorKinds) {

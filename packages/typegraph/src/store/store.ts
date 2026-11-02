@@ -394,7 +394,6 @@ import {
   prepareNodeReplacement,
 } from "./operations";
 import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
-import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   batchRefusalDetails,
   batchRefusalSuffix,
@@ -443,6 +442,7 @@ import {
 import {
   assertRegisteredEdgeKinds,
   assertRegisteredNodeKinds,
+  requireNodeRegistration,
 } from "./registered-kinds";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
@@ -534,6 +534,7 @@ import {
   TRANSACTION_RUNTIME,
   type TransactionContext,
   type TransactionOutcome,
+  type TransactionRuntime,
   type UnboundLiveStoreOptions,
   type WorkingCopyOptions,
 } from "./types";
@@ -1890,23 +1891,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     upserts: readonly ResolvedNodeUpsert[];
     releases: readonly ResolvedNodeRelease[];
   }> {
-    const upserts = writes.upserts.map((upsert) => {
-      if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
-        throw new KindNotFoundError(upsert.kind, "node", {
-          graphId: this.graphId,
-        });
-      }
-      const registration = this.#graph.nodes[upsert.kind];
-      if (registration === undefined) {
-        throw new KindNotFoundError(upsert.kind, "node", {
-          graphId: this.graphId,
-        });
-      }
-      return {
-        ...upsert,
-        constraints: registration.unique ?? [],
-      };
-    });
+    const upserts = writes.upserts.map((upsert) => ({
+      ...upsert,
+      constraints:
+        requireNodeRegistration(this.#graph, upsert.kind).unique ?? [],
+    }));
     // Which kinds a release is worth CLEARING for: the clear exists so the
     // set's upserts can take keys the set is giving back, and only a
     // uniqueness declaration produces a key another node could take.
@@ -1916,11 +1905,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         .map(([kind]) => kind),
     );
     const releases = writes.releases.filter((release) => {
-      if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
-        throw new KindNotFoundError(release.kind, "node", {
-          graphId: this.graphId,
-        });
-      }
+      assertRegisteredNodeKinds(this.#graph, [release.kind]);
       return constrainedKinds.has(release.kind);
     });
     return { upserts, releases };
@@ -4066,9 +4051,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const C extends SubgraphCompositionSelection | undefined,
   >(
     root: GraphNodeReference<G>,
-    options: SubgraphOptions<G, EK, NK, P, C>,
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
     backend: GraphBackend | TransactionBackend,
-    attempt: number,
+    attempt?: number,
   ) {
     return {
       graph: this.#graph,
@@ -4118,22 +4103,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       options.recordedAsOf === undefined ?
         coordinate
       : withRecordedCoordinate(coordinate, options.recordedAsOf);
-    return executeSubgraph({
-      graph: this.#graph,
-      graphId: this.graphId,
-      root,
-      backend: this.#createHookedQueryBackend(
+    return executeSubgraph(
+      this.#sessionSubgraphParams(
+        root,
+        options,
         this.#recordedReads.backendForCoordinate(
           readCoordinate,
           "recorded-subgraph",
         ),
       ),
-      dialect: getDialect(this.#backend.dialect),
-      schema: this.#schema,
-      recordedReadBinding: this.#recordedReadBinding,
-      registry: this.#registry,
-      options,
-    });
+    );
   }
 
   /**
@@ -4981,18 +4960,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const scopeRecorder = createTransactionReceiptRecorder();
       const chain = [...recorders, scopeRecorder];
       const surface = buildSurface(chain);
-      let nodes = surface.nodes;
-      let edges = surface.edges;
-      let identity = surface.identity;
-      for (const recorder of chain) {
-        ({ nodes, edges } = wrapTransactionCollections(nodes, edges, recorder));
-        identity =
-          identity === undefined ? undefined : (
-            wrapTransactionIdentity(identity, recorder)
-          );
-      }
-      const scopedNodes = nodes;
-      const scopedEdges = edges;
+      const {
+        nodes: scopedNodes,
+        edges: scopedEdges,
+        identity,
+      } = wrapSurfaceForRecorders(surface, chain);
       // The internal delete port travels with the surface too. It runs
       // `executeNodeDelete` against a node operation context directly and
       // never touches `surface.nodes` — the collection wrappers just above
@@ -5003,41 +4975,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // port would run the delete against the OUTER surface's node operation
       // context, attributing its `cascadedParts` to the outer chain's
       // recorders and leaving THIS scope's own (freshly created) receipt
-      // without them. Rebuilt here from the scope's own surface, so
+      // without them. Taken from the scope's own surface, so
       // `cascadedParts` reaches this scope's receipt too — the same
       // attribution-follows-the-context reasoning as the collections above,
       // for a write those collections cannot see at all. The receipt this
       // yields is therefore a receipt shape callers must expect: a delete
       // reported here carries `cascadedParts` while its own `writes` stay at
       // zero, since no collection ever counted it.
-      const outerRuntime = context[TRANSACTION_RUNTIME];
       const scopedContext = overlayPropertyDescriptors(context, {
         nodes: scopedNodes,
         edges: scopedEdges,
         ...(identity === undefined ? {} : { identity }),
         ...this.#edgeCollectionAccess(scopedEdges),
         ...this.#nodeCollectionAccess(scopedNodes),
-        [TRANSACTION_RUNTIME]: {
-          ...outerRuntime,
-          deleteNodeWithPolicy: (
-            work: Readonly<{ kind: string; id: string }>,
-            policy?: NodeDeletePolicy,
-          ) =>
-            executeNodeDelete(
-              surface.nodeOperationContext,
-              work.kind,
-              work.id,
-              outerRuntime.backend,
-              { policy },
-            ),
-          reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
-            executeNodeRevive(
-              surface.nodeOperationContext,
-              work.kind,
-              work.id,
-              outerRuntime.backend,
-            ),
-        },
+        [TRANSACTION_RUNTIME]: surface.runtime,
       });
       // Non-enumerable, matching the outer context's own definition, so the
       // symbol port never leaks into a caller's spread of `tx`.
@@ -5135,17 +5086,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_TEMPORAL_OPTIONS" },
         );
       }
-      if (!hasOwnKey(this.#graph.nodes, entry.kind)) {
-        throw new KindNotFoundError(entry.kind, "node", {
-          graphId: this.graphId,
-        });
-      }
-      const registration = this.#graph.nodes[entry.kind];
-      if (registration === undefined) {
-        throw new KindNotFoundError(entry.kind, "node", {
-          graphId: this.graphId,
-        });
-      }
+      const registration = requireNodeRegistration(this.#graph, entry.kind);
       if (
         (registration.unique?.length ?? 0) > 0 ||
         this.#registry.getDisjointKinds(entry.kind).length > 0 ||
@@ -5329,7 +5270,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         maybeRefreshStatisticsAfterBulk: undefined,
       };
       return {
-        nodeOperationContext,
+        runtime: {
+          backend: txBackend,
+          deleteNodeWithPolicy: (work, policy) =>
+            executeNodeDelete(
+              nodeOperationContext,
+              work.kind,
+              work.id,
+              txBackend,
+              { policy },
+            ),
+          reviveNode: (work) =>
+            executeNodeRevive(
+              nodeOperationContext,
+              work.kind,
+              work.id,
+              txBackend,
+            ),
+        },
         nodes: createNodeCollectionsProxy(
           this.#graph,
           this.graphId,
@@ -5353,27 +5311,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       };
     };
 
-    const outerSurface = buildSurface(
-      receiptRecorder === undefined ? [] : [receiptRecorder],
-    );
-    const txNodeOperationContext = outerSurface.nodeOperationContext;
-
-    let nodes = outerSurface.nodes;
-    let edges = outerSurface.edges;
-
-    if (receiptRecorder !== undefined) {
-      ({ nodes, edges } = wrapTransactionCollections(
-        nodes,
-        edges,
-        receiptRecorder,
-      ));
-    }
-
-    const identity = outerSurface.identity;
-    const receiptIdentity =
-      identity === undefined || receiptRecorder === undefined ?
-        identity
-      : wrapTransactionIdentity(identity, receiptRecorder);
+    const outerRecorders =
+      receiptRecorder === undefined ? [] : [receiptRecorder];
+    const outerSurface = buildSurface(outerRecorders);
+    const {
+      nodes,
+      edges,
+      identity: receiptIdentity,
+    } = wrapSurfaceForRecorders(outerSurface, outerRecorders);
 
     // Honest capability discriminant for `tx.sql`. Capture/revision tracking
     // take precedence because they replace `tx.sql` with a fail-loud guard even
@@ -5391,27 +5336,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...this.#createTransactionReadSurface(txBackend, attempt),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
-      [TRANSACTION_RUNTIME]: {
-        backend: txBackend,
-        deleteNodeWithPolicy: (
-          work: Readonly<{ kind: string; id: string }>,
-          policy?: NodeDeletePolicy,
-        ) =>
-          executeNodeDelete(
-            txNodeOperationContext,
-            work.kind,
-            work.id,
-            txBackend,
-            { policy },
-          ),
-        reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
-          executeNodeRevive(
-            txNodeOperationContext,
-            work.kind,
-            work.id,
-            txBackend,
-          ),
-      },
+      [TRANSACTION_RUNTIME]: outerSurface.runtime,
       ...this.#nodeCollectionAccess(nodes),
       ...this.#edgeCollectionAccess(edges),
       ...(this.#captureEnabled || this.#engineNativeHistory ?
@@ -8285,11 +8210,37 @@ export type MeasurableAdapterHistoryTransactionContext<
  * `TRANSACTION_RUNTIME`'s delete port must run against the same one.
  */
 type TransactionWriteSurface<G extends GraphDef> = Readonly<{
-  nodeOperationContext: NodeOperationContext<G>;
+  /** The internal delete/revive port, bound to this surface's own node operation context. */
+  runtime: TransactionRuntime;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
   identity?: IdentityFacade<G>;
 }>;
+
+/**
+ * Wraps a write surface's collections and identity facade once per recorder,
+ * innermost first, so every recorder in the chain counts each write.
+ */
+function wrapSurfaceForRecorders<G extends GraphDef>(
+  surface: TransactionWriteSurface<G>,
+  recorders: readonly TransactionReceiptRecorder[],
+): Readonly<{
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+  identity: IdentityFacade<G> | undefined;
+}> {
+  let nodes = surface.nodes;
+  let edges = surface.edges;
+  let identity = surface.identity;
+  for (const recorder of recorders) {
+    ({ nodes, edges } = wrapTransactionCollections(nodes, edges, recorder));
+    identity =
+      identity === undefined ? undefined : (
+        wrapTransactionIdentity(identity, recorder)
+      );
+  }
+  return { nodes, edges, identity };
+}
 
 export type AdapterRecordedReadStore<
   G extends GraphDef,

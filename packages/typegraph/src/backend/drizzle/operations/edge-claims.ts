@@ -1,11 +1,13 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
+  axisRowMembership,
   edgeCardinalityAxisName,
   type EdgeCardinalityAxisRef,
   edgeCardinalityClaimTarget,
   type EdgeCardinalitySpec,
   edgeCardinalitySpec,
+  type RowMembership,
 } from "../../../store/claims/edge-claims";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
@@ -19,29 +21,13 @@ import { buildLiveEndpointPredicate, liveEndpointLockOrder } from "./edges";
 import {
   castBoundValueForColumn,
   edgeColumnList,
+  qualifiedColumn,
   quotedColumn,
   quotedTableName,
   type RowLockClause,
   sqlNull,
   type Tables,
 } from "./shared";
-
-/**
- * Qualifies a column with its relation, the one rendering both dialects read
- * identically. The claim statements name TWO relations (the claim rows and the
- * edges their holders are), so a bare column name would be ambiguous in the
- * takeover statement's correlated subquery.
- */
-function qualified(tableName: string, column: Readonly<{ name: string }>): SQL {
-  return sql.raw(`"${tableName}"."${column.name}"`);
-}
-
-function qualifiedAlias(
-  alias: string,
-  column: Readonly<{ name: string }>,
-): SQL {
-  return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
-}
 
 /**
  * WHERE a claim statement reads the per-edge values its predicates compare
@@ -128,7 +114,7 @@ export const ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT =
   PROPOSED_COLUMN_ORDER.length;
 
 function proposedValue(column: ProposedColumn): SQL {
-  return qualifiedAlias(PROPOSED_RELATION, { name: PROPOSED_COLUMNS[column] });
+  return qualifiedColumn(PROPOSED_RELATION, { name: PROPOSED_COLUMNS[column] });
 }
 
 const PROPOSED_CLAIM_VALUES: ClaimValueSource = {
@@ -226,7 +212,7 @@ type ClaimHolderAxis = EdgeCardinalityAxisRef &
  * {@link claimHolderTerms} renders its arms in: two entries share a statement
  * only when that statement's text is the one both of them need.
  */
-function claimPredicateShapeKey(entry: ClaimEdgeCardinalityParams): string {
+export function claimPredicateShapeKey(entry: ClaimHolderAxis): string {
   return JSON.stringify([
     edgeCardinalityAxisName(entry),
     entry.scope?.kind,
@@ -302,11 +288,11 @@ export function endpointTerms(
 ): SQL {
   const fromTerms =
     keyShape === "from" || keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.fromKind)} = ${values.fromKind} AND ${qualified(edgesName, edges.fromId)} = ${values.fromId}`
+      sql` AND ${qualifiedColumn(edgesName, edges.fromKind)} = ${values.fromKind} AND ${qualifiedColumn(edgesName, edges.fromId)} = ${values.fromId}`
     : sql``;
   const toTerms =
     keyShape === "to" || keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.toKind)} = ${values.toKind} AND ${qualified(edgesName, edges.toId)} = ${values.toId}`
+      sql` AND ${qualifiedColumn(edgesName, edges.toKind)} = ${values.toKind} AND ${qualifiedColumn(edgesName, edges.toId)} = ${values.toId}`
     : sql``;
   return sql`${fromTerms}${toTerms}`;
 }
@@ -387,14 +373,14 @@ export function claimHolderTerms(
     // absent — the ordinary claim shape, whose predicate reads the edge kind
     // and the endpoints its key covers.
     const bound = values as ClaimValueSource;
-    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
+    return sql`${qualifiedColumn(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
   }
   const part =
     "part" in values ?
       values.part
     : {
-        kind: spec.keyShape === "from" ? values.fromKind : values.toKind,
-        id: spec.keyShape === "from" ? values.fromId : values.toId,
+        kind: partEndpoint(spec.keyShape, values.fromKind, values.toKind),
+        id: partEndpoint(spec.keyShape, values.fromId, values.toId),
       };
   // One arm per ORIENTED side, always `from` before `to`, so two axes whose
   // holders agree render the identical statement text regardless of the order
@@ -411,12 +397,12 @@ export function claimHolderTerms(
     if (sideKinds.length === 0) continue;
     arms.push(sql`
       (
-            ${qualified(edgesName, edges.kind)} IN (${sql.join(
+            ${qualifiedColumn(edgesName, edges.kind)} IN (${sql.join(
               sideKinds.map((kind) => sql`${kind}`),
               sql`, `,
             )})
-            AND ${qualified(edgesName, side.kindColumn)} = ${part.kind}
-            AND ${qualified(edgesName, side.idColumn)} = ${part.id}
+            AND ${qualifiedColumn(edgesName, side.kindColumn)} = ${part.kind}
+            AND ${qualifiedColumn(edgesName, side.idColumn)} = ${part.id}
           )
     `);
   }
@@ -425,6 +411,37 @@ export function claimHolderTerms(
   // `arms` is never empty in practice; the fallback keeps this total rather
   // than emitting invalid SQL for a hand-built axis with no holders.
   return arms.length === 0 ? sql`FALSE` : sql`(${sql.join(arms, sql` OR `)})`;
+}
+
+/**
+ * Which of an axis's two endpoint values is the PART its key covers: `from`
+ * for a `"from"`-keyed axis, `to` otherwise. The one decision the write-path
+ * fence and the correlated audit both read, so they cannot pick opposite
+ * sides.
+ */
+export function partEndpoint<From, To>(
+  keyShape: EdgeCardinalitySpec["keyShape"],
+  from: From,
+  to: To,
+): From | To {
+  return keyShape === "from" ? from : to;
+}
+
+/**
+ * What a member of a cardinality population must still BE: the SQL rendering
+ * of `membershipCountsRow` under the axis's {@link axisRowMembership}
+ * rule — an `"openRows"` population additionally requires an open validity
+ * window. Rendered for the outer row and for the correlated peer from the
+ * same ternary, so the two sides of one statement cannot disagree.
+ */
+export function holderLivenessTerm(
+  membership: RowMembership,
+  relation: string,
+  edges: Tables["edges"],
+): SQL {
+  return membership === "openRows" ?
+      sql` AND ${qualifiedColumn(relation, edges.validTo)} IS NULL`
+    : sql.empty();
 }
 
 /**
@@ -439,15 +456,16 @@ function competingLiveEdgePredicate(
 ): SQL {
   const { edges } = tables;
   const edgesName = getTableName(edges);
-  const activeTerm =
-    edgeCardinalitySpec(axis).holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
-    : sql``;
+  const activeTerm = holderLivenessTerm(
+    axisRowMembership(axis),
+    edgesName,
+    edges,
+  );
 
   return sql`
-    ${qualified(edgesName, edges.graphId)} = ${values.graphId}
-      AND ${qualified(edgesName, edges.id)} <> ${values.edgeId}
-      AND ${qualified(edgesName, edges.deletedAt)} IS NULL
+    ${qualifiedColumn(edgesName, edges.graphId)} = ${values.graphId}
+      AND ${qualifiedColumn(edgesName, edges.id)} <> ${values.edgeId}
+      AND ${qualifiedColumn(edgesName, edges.deletedAt)} IS NULL
       AND ${claimHolderTerms(edgesName, edges, axis, values)}${activeTerm}
   `;
 }
@@ -460,17 +478,17 @@ function proposedEndpointsLivePredicate(
   return sql`
     EXISTS (
       SELECT 1 FROM ${nodes} AS "from_node"
-      WHERE ${qualifiedAlias("from_node", nodes.graphId)} = ${values.graphId}
-        AND ${qualifiedAlias("from_node", nodes.kind)} = ${values.fromKind}
-        AND ${qualifiedAlias("from_node", nodes.id)} = ${values.fromId}
-        AND ${qualifiedAlias("from_node", nodes.deletedAt)} IS NULL
+      WHERE ${qualifiedColumn("from_node", nodes.graphId)} = ${values.graphId}
+        AND ${qualifiedColumn("from_node", nodes.kind)} = ${values.fromKind}
+        AND ${qualifiedColumn("from_node", nodes.id)} = ${values.fromId}
+        AND ${qualifiedColumn("from_node", nodes.deletedAt)} IS NULL
     )
     AND EXISTS (
       SELECT 1 FROM ${nodes} AS "to_node"
-      WHERE ${qualifiedAlias("to_node", nodes.graphId)} = ${values.graphId}
-        AND ${qualifiedAlias("to_node", nodes.kind)} = ${values.toKind}
-        AND ${qualifiedAlias("to_node", nodes.id)} = ${values.toId}
-        AND ${qualifiedAlias("to_node", nodes.deletedAt)} IS NULL
+      WHERE ${qualifiedColumn("to_node", nodes.graphId)} = ${values.graphId}
+        AND ${qualifiedColumn("to_node", nodes.kind)} = ${values.toKind}
+        AND ${qualifiedColumn("to_node", nodes.id)} = ${values.toId}
+        AND ${qualifiedColumn("to_node", nodes.deletedAt)} IS NULL
     )
   `;
 }
@@ -508,14 +526,15 @@ function recordedClaimHolderIsLivePredicate(
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const edgesName = getTableName(edges);
-  const activeTerm =
-    edgeCardinalitySpec(axis).holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
-    : sql``;
+  const activeTerm = holderLivenessTerm(
+    axisRowMembership(axis),
+    edgesName,
+    edges,
+  );
   return sql`
-    ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
-      AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
-      AND ${qualified(edgesName, edges.deletedAt)} IS NULL
+    ${qualifiedColumn(edgesName, edges.graphId)} = ${qualifiedColumn(claimsName, edgeClaims.graphId)}
+      AND ${qualifiedColumn(edgesName, edges.id)} = ${qualifiedColumn(claimsName, edgeClaims.edgeId)}
+      AND ${qualifiedColumn(edgesName, edges.deletedAt)} IS NULL
       AND ${claimHolderTerms(edgesName, edges, axis, values)}${activeTerm}
   `;
 }
@@ -549,15 +568,15 @@ export function buildDeleteStaleAtomicEdgeClaims(
       ${proposedRelationCte(tables, group)},
       "stale" AS (
         SELECT
-          ${qualified(claimsName, edgeClaims.graphId)} AS "stale_graph_id",
-          ${qualified(claimsName, edgeClaims.axis)} AS "stale_axis",
-          ${qualified(claimsName, edgeClaims.key)} AS "stale_key"
+          ${qualifiedColumn(claimsName, edgeClaims.graphId)} AS "stale_graph_id",
+          ${qualifiedColumn(claimsName, edgeClaims.axis)} AS "stale_axis",
+          ${qualifiedColumn(claimsName, edgeClaims.key)} AS "stale_key"
         FROM ${edgeClaims}
         JOIN ${PROPOSED_RELATION_REF}
-          ON ${qualified(claimsName, edgeClaims.graphId)} = ${values.graphId}
-          AND ${qualified(claimsName, edgeClaims.axis)} = ${proposedValue("axis")}
-          AND ${qualified(claimsName, edgeClaims.key)} = ${proposedValue("key")}
-        WHERE ${qualified(claimsName, edgeClaims.edgeId)} <> ${values.edgeId}
+          ON ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${values.graphId}
+          AND ${qualifiedColumn(claimsName, edgeClaims.axis)} = ${proposedValue("axis")}
+          AND ${qualifiedColumn(claimsName, edgeClaims.key)} = ${proposedValue("key")}
+        WHERE ${qualifiedColumn(claimsName, edgeClaims.edgeId)} <> ${values.edgeId}
           AND EXISTS (SELECT 1 FROM "schema_fence")
           AND ${proposedEndpointsLivePredicate(tables, values)}
           AND NOT EXISTS (
@@ -660,10 +679,10 @@ export function buildAssertAtomicEdgeClaimsOwned(
       WHERE ${proposedEndpointsLivePredicate(tables, values)}
         AND NOT EXISTS (
           SELECT 1 FROM ${edgeClaims}
-          WHERE ${qualified(claimsName, edgeClaims.graphId)} = ${values.graphId}
-            AND ${qualified(claimsName, edgeClaims.axis)} = ${proposedValue("axis")}
-            AND ${qualified(claimsName, edgeClaims.key)} = ${proposedValue("key")}
-            AND ${qualified(claimsName, edgeClaims.edgeId)} = ${values.edgeId}
+          WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${values.graphId}
+            AND ${qualifiedColumn(claimsName, edgeClaims.axis)} = ${proposedValue("axis")}
+            AND ${qualifiedColumn(claimsName, edgeClaims.key)} = ${proposedValue("key")}
+            AND ${qualifiedColumn(claimsName, edgeClaims.edgeId)} = ${values.edgeId}
         )
       LIMIT 1
     `,
@@ -711,7 +730,7 @@ export function buildLockEdgeClaims(
     INSERT INTO ${edgeClaims} (${columns})
     VALUES ${valueRows}
     ON CONFLICT (${conflictColumns})
-    DO UPDATE SET ${quotedColumn(edgeClaims.updatedAt)} = ${qualified(claimsName, edgeClaims.updatedAt)}
+    DO UPDATE SET ${quotedColumn(edgeClaims.updatedAt)} = ${qualifiedColumn(claimsName, edgeClaims.updatedAt)}
     RETURNING
       ${quotedColumn(edgeClaims.axis)} as axis,
       ${quotedColumn(edgeClaims.key)} as key,
@@ -751,10 +770,10 @@ export function buildReadEdgeClaimIncumbents(
       SELECT
         ${proposedValue("axis")} AS axis,
         ${proposedValue("key")} AS key,
-        ${qualified(edgesName, edges.id)} AS incumbent_edge_id
+        ${qualifiedColumn(edgesName, edges.id)} AS incumbent_edge_id
       FROM ${PROPOSED_RELATION_REF}
       JOIN ${edges} ON ${competingLiveEdgePredicate(tables, values, axis)}
-      ORDER BY ${qualified(edgesName, edges.id)}
+      ORDER BY ${qualifiedColumn(edgesName, edges.id)}
     `;
   });
 }
@@ -802,13 +821,13 @@ export function buildLockEdgeClaimGuarded(
       ${sql.identifier(edgeClaims.axis.name)},
       ${sql.identifier(edgeClaims.key.name)}
     ) DO UPDATE SET
-      ${quotedColumn(edgeClaims.updatedAt)} = ${qualified(claimsName, edgeClaims.updatedAt)}
+      ${quotedColumn(edgeClaims.updatedAt)} = ${qualifiedColumn(claimsName, edgeClaims.updatedAt)}
     RETURNING
       ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id,
       (
-        SELECT ${qualified(edgesName, edges.id)} FROM ${edges}
+        SELECT ${qualifiedColumn(edgesName, edges.id)} FROM ${edges}
         WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), params)}
-        ORDER BY ${qualified(edgesName, edges.id)}
+        ORDER BY ${qualifiedColumn(edgesName, edges.id)}
         LIMIT 1
       ) AS incumbent_edge_id
   `;
@@ -870,7 +889,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
         ${sql.identifier(edgeClaims.axis.name)},
         ${sql.identifier(edgeClaims.key.name)}
       ) DO UPDATE SET
-        ${quotedColumn(edgeClaims.updatedAt)} = ${qualified(claimsName, edgeClaims.updatedAt)}
+        ${quotedColumn(edgeClaims.updatedAt)} = ${qualifiedColumn(claimsName, edgeClaims.updatedAt)}
       RETURNING
         ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id
     ),
@@ -929,10 +948,10 @@ export function buildTakeOverEdgeClaim(
     UPDATE ${edgeClaims}
     SET ${quotedColumn(edgeClaims.edgeId)} = ${params.edgeId},
         ${quotedColumn(edgeClaims.updatedAt)} = ${timestamp}
-    WHERE ${qualified(claimsName, edgeClaims.graphId)} = ${params.graphId}
-      AND ${qualified(claimsName, edgeClaims.axis)} = ${target.axis}
-      AND ${qualified(claimsName, edgeClaims.key)} = ${target.key}
-      AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
+    WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${params.graphId}
+      AND ${qualifiedColumn(claimsName, edgeClaims.axis)} = ${target.axis}
+      AND ${qualifiedColumn(claimsName, edgeClaims.key)} = ${target.key}
+      AND ${qualifiedColumn(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
       AND NOT EXISTS (
         SELECT 1 FROM ${edges}
         WHERE ${recordedClaimHolderIsLivePredicate(tables, boundClaimValues(params), params)}
@@ -959,10 +978,10 @@ export function buildTakeOverEdgeClaimGuarded(
     UPDATE ${edgeClaims}
     SET ${quotedColumn(edgeClaims.edgeId)} = ${params.edgeId},
         ${quotedColumn(edgeClaims.updatedAt)} = ${timestamp}
-    WHERE ${qualified(claimsName, edgeClaims.graphId)} = ${params.graphId}
-      AND ${qualified(claimsName, edgeClaims.axis)} = ${target.axis}
-      AND ${qualified(claimsName, edgeClaims.key)} = ${target.key}
-      AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
+    WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${params.graphId}
+      AND ${qualifiedColumn(claimsName, edgeClaims.axis)} = ${target.axis}
+      AND ${qualifiedColumn(claimsName, edgeClaims.key)} = ${target.key}
+      AND ${qualifiedColumn(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
       AND NOT EXISTS (
         SELECT 1 FROM ${edges}
         WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), params)}

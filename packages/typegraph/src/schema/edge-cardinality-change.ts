@@ -11,6 +11,7 @@
  * `computeSchemaDiff`'s ontology bucket) to grow a case they cannot act on.
  */
 import type { EdgeCardinalityDeclaration } from "../backend/types";
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
 import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import type { OntologySnapshot } from "./ontology-change";
 
@@ -40,17 +41,13 @@ export function newlyConstrainedEdgeAxes(
     const beforeDef = before.edges[edgeKind];
     const declarations = {
       cardinality: afterDef.cardinality,
-      // `SerializedEdgeDef.targetCardinality` is optional and absent means
-      // "many" (see `serializeEdgeDef`) — defaulted explicitly here rather
-      // than left `undefined`, since `exactOptionalPropertyTypes` treats an
-      // explicit `undefined` differently from an omitted key.
-      targetCardinality: afterDef.targetCardinality ?? "many",
+      targetCardinality: effectiveTargetCardinality(afterDef.targetCardinality),
     };
     for (const ref of edgeCardinalityAxisReferences(declarations)) {
       const storedCardinality =
         ref.direction === "source" ?
           (beforeDef?.cardinality ?? "many")
-        : (beforeDef?.targetCardinality ?? "many");
+        : effectiveTargetCardinality(beforeDef?.targetCardinality);
       if (storedCardinality !== ref.cardinality) {
         result.push({ ...ref, edgeKind });
       }

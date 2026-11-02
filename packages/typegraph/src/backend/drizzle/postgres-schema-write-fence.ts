@@ -23,7 +23,14 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import { sql as portableSql } from "../../query/sql-fragment";
 import { requireDefined } from "../../utils/presence";
-import { fenceRowAdvanceAfter, type FenceSql } from "../capabilities/write-fence";
+import {
+  fenceRowAdvanceAfter,
+  type FenceSql,
+} from "../capabilities/write-fence";
+import {
+  FENCE_ISOLATION_COLUMN,
+  FENCE_ROW_GENERATION_COLUMN,
+} from "../command-contract";
 import type { SchemaGraphWriteFenceParams } from "../types";
 import { toDrizzleSql } from "./execution/types";
 import type { PostgresTables } from "./schema/postgres";
@@ -91,39 +98,47 @@ export function buildLockSchemaVersionAndGraphWrite(
     )
   `;
   const isolationFact = toDrizzleSql(isolationFactExpression(), "postgres");
-  switch (params.fenceRow) {
-    case "leave": {
-      return sql`
-        ${schemaFenceAndGraphLock}
-            SELECT
-              TRUE AS "fence_acquired",
-              ${isolationFact} AS "transaction_isolation"
-            FROM "graph_write_lock"
-      `;
+  const { fenceRowCte, generationColumn, finalRelation } = (() => {
+    switch (params.fenceRow) {
+      case "leave": {
+        return {
+          fenceRowCte: sql``,
+          generationColumn: sql``,
+          finalRelation: sql`"graph_write_lock"`,
+        };
+      }
+      case "advance": {
+        return {
+          fenceRowCte: sql`
+            ,
+                        "fence_row" AS (
+                          ${toDrizzleSql(
+                            fenceRowAdvanceAfter(
+                              portableSql.identifier(getTableName(fences)),
+                              advisoryLockNamespace,
+                              params.graphId,
+                              portableSql.raw('"graph_write_lock"'),
+                            ),
+                            "postgres",
+                          )}
+                        )
+          `,
+          generationColumn: sql`
+            "fence_row".${sql.identifier(FENCE_ROW_GENERATION_COLUMN)} AS ${sql.identifier(FENCE_ROW_GENERATION_COLUMN)},
+          `,
+          finalRelation: sql`"fence_row"`,
+        };
+      }
+      default: {
+        return params.fenceRow satisfies never;
+      }
     }
-    case "advance": {
-      return sql`
-        ${schemaFenceAndGraphLock},
-            "fence_row" AS (
-              ${toDrizzleSql(
-        fenceRowAdvanceAfter(
-          portableSql.identifier(getTableName(fences)),
-          advisoryLockNamespace,
-          params.graphId,
-          portableSql.raw('"graph_write_lock"'),
-        ),
-        "postgres",
-      )}
-            )
-            SELECT
-              TRUE AS "fence_acquired",
-              "fence_row"."generation" AS "generation",
-              ${isolationFact} AS "transaction_isolation"
-            FROM "fence_row"
-      `;
-    }
-    default: {
-      return params.fenceRow satisfies never;
-    }
-  }
+  })();
+  return sql`
+    ${schemaFenceAndGraphLock}${fenceRowCte}
+        SELECT
+          TRUE AS "fence_acquired",${generationColumn}
+          ${isolationFact} AS ${sql.identifier(FENCE_ISOLATION_COLUMN)}
+        FROM ${finalRelation}
+  `;
 }

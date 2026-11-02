@@ -21,22 +21,21 @@ import {
   axisRowMembership,
   type EdgeCardinalityAxisRef,
   edgeCardinalitySpec,
-  type RowMembership,
 } from "../../../store/claims/edge-claims";
 import type { CompositionClaimScope } from "../../types";
-import { claimHolderTerms, endpointTerms } from "./edge-claims";
-import { quotedColumn, type Tables } from "./shared";
+import {
+  claimHolderTerms,
+  endpointTerms,
+  holderLivenessTerm,
+  partEndpoint,
+} from "./edge-claims";
+import { qualifiedColumn, quotedColumn, type Tables } from "./shared";
 
 /** The alias the correlated subquery reads the same relation under. */
 const PEER = "peer";
 
 /** The alias the misassigned-endpoint audit's `VALUES` derived table reads under. */
 const ALLOWED_PAIR_ALIAS = "tg_allowed_pair";
-
-/** Qualifies a column with a relation name, the rendering both dialects read. */
-function qualified(relation: string, column: Readonly<{ name: string }>): SQL {
-  return sql.raw(`"${relation}"."${column.name}"`);
-}
 
 /** A bound-parameter `IN (…)` list; callers never pass an empty one. */
 function inList(values: readonly string[]): SQL {
@@ -60,7 +59,7 @@ function auditedRowTerm(
   relation: string,
   table: Readonly<{ deletedAt: Readonly<{ name: string }> }>,
 ): SQL {
-  return sql`${qualified(relation, table.deletedAt)} IS NULL`;
+  return sql`${qualifiedColumn(relation, table.deletedAt)} IS NULL`;
 }
 
 /**
@@ -79,23 +78,6 @@ function edgeAuditProjection(edges: Tables["edges"]): SQL {
     ${quotedColumn(edges.toKind)} as to_kind,
     ${quotedColumn(edges.toId)} as to_id
   `;
-}
-
-/**
- * What a member of a cardinality population must still BE: the SQL rendering
- * of `membershipCountsRow` under the axis's {@link axisRowMembership}
- * rule — an `"openRows"` population additionally requires an open validity
- * window. Rendered for the outer row and for the correlated peer from the
- * same ternary, so the two sides of one statement cannot disagree.
- */
-function holderLivenessTerm(
-  membership: RowMembership,
-  relation: string,
-  edges: Tables["edges"],
-): SQL {
-  return membership === "openRows" ?
-      sql` AND ${qualified(relation, edges.validTo)} IS NULL`
-    : sql.empty();
 }
 
 /**
@@ -128,16 +110,16 @@ export function buildContendedUniqueRowAudit(
       ${quotedColumn(uniques.concreteKind)} as concrete_kind,
       ${quotedColumn(uniques.nodeId)} as node_id
     FROM ${uniques}
-    WHERE ${qualified(relation, uniques.graphId)} = ${graphId}
-      AND ${qualified(relation, uniques.constraintName)} IN (${inList(constraintNames)})
+    WHERE ${qualifiedColumn(relation, uniques.graphId)} = ${graphId}
+      AND ${qualifiedColumn(relation, uniques.constraintName)} IN (${inList(constraintNames)})
       AND ${auditedRowTerm(relation, uniques)}
       AND EXISTS (
         SELECT 1 FROM ${uniques} AS ${sql.raw(`"${PEER}"`)}
-        WHERE ${qualified(PEER, uniques.graphId)} = ${qualified(relation, uniques.graphId)}
-          AND ${qualified(PEER, uniques.constraintName)} = ${qualified(relation, uniques.constraintName)}
-          AND ${qualified(PEER, uniques.key)} = ${qualified(relation, uniques.key)}
+        WHERE ${qualifiedColumn(PEER, uniques.graphId)} = ${qualifiedColumn(relation, uniques.graphId)}
+          AND ${qualifiedColumn(PEER, uniques.constraintName)} = ${qualifiedColumn(relation, uniques.constraintName)}
+          AND ${qualifiedColumn(PEER, uniques.key)} = ${qualifiedColumn(relation, uniques.key)}
           AND ${auditedRowTerm(PEER, uniques)}
-          AND ${qualified(PEER, uniques.nodeKind)} <> ${qualified(relation, uniques.nodeKind)}
+          AND ${qualifiedColumn(PEER, uniques.nodeKind)} <> ${qualifiedColumn(relation, uniques.nodeKind)}
       )
   `;
 }
@@ -163,31 +145,39 @@ export function buildContendedEdgeRowAudit(
   const { edges } = tables;
   const relation = getTableName(edges);
   const spec = edgeCardinalitySpec(ref);
-  const activeOnly = holderLivenessTerm(axisRowMembership(ref), relation, edges);
-  const peerActiveOnly = holderLivenessTerm(axisRowMembership(ref), PEER, edges);
+  const activeOnly = holderLivenessTerm(
+    axisRowMembership(ref),
+    relation,
+    edges,
+  );
+  const peerActiveOnly = holderLivenessTerm(
+    axisRowMembership(ref),
+    PEER,
+    edges,
+  );
   // The endpoint fold belongs to `endpointTerms` — the same renderer the
   // write-path fence reads it through — given the OUTER row's own qualified
   // columns in place of a write's bound literals, so the audit cannot key the
   // population on a different subset of endpoints than the fence does.
   const peerEndpoints = endpointTerms(PEER, edges, spec.keyShape, {
-    fromKind: qualified(relation, edges.fromKind),
-    fromId: qualified(relation, edges.fromId),
-    toKind: qualified(relation, edges.toKind),
-    toId: qualified(relation, edges.toId),
+    fromKind: qualifiedColumn(relation, edges.fromKind),
+    fromId: qualifiedColumn(relation, edges.fromId),
+    toKind: qualifiedColumn(relation, edges.toKind),
+    toId: qualifiedColumn(relation, edges.toId),
   });
 
   return sql`
     SELECT${edgeAuditProjection(edges)}
     FROM ${edges}
-    WHERE ${qualified(relation, edges.graphId)} = ${graphId}
-      AND ${qualified(relation, edges.kind)} IN (${inList(edgeKinds)})
+    WHERE ${qualifiedColumn(relation, edges.graphId)} = ${graphId}
+      AND ${qualifiedColumn(relation, edges.kind)} IN (${inList(edgeKinds)})
       AND ${auditedRowTerm(relation, edges)}${activeOnly}
       AND EXISTS (
         SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
-        WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
-          AND ${qualified(PEER, edges.kind)} = ${qualified(relation, edges.kind)}${peerEndpoints}
+        WHERE ${qualifiedColumn(PEER, edges.graphId)} = ${qualifiedColumn(relation, edges.graphId)}
+          AND ${qualifiedColumn(PEER, edges.kind)} = ${qualifiedColumn(relation, edges.kind)}${peerEndpoints}
           AND ${auditedRowTerm(PEER, edges)}${peerActiveOnly}
-          AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
+          AND ${qualifiedColumn(PEER, edges.id)} <> ${qualifiedColumn(relation, edges.id)}
       )
   `;
 }
@@ -223,12 +213,26 @@ export function buildContendedCompositionEdgeRowAudit(
   const { edges } = tables;
   const relation = getTableName(edges);
   const spec = edgeCardinalitySpec(ref);
-  const outerPartKindColumn =
-    spec.keyShape === "from" ? edges.fromKind : edges.toKind;
-  const outerPartIdColumn =
-    spec.keyShape === "from" ? edges.fromId : edges.toId;
-  const activeOnly = holderLivenessTerm(axisRowMembership(ref), relation, edges);
-  const peerActiveOnly = holderLivenessTerm(axisRowMembership(ref), PEER, edges);
+  const outerPartKindColumn = partEndpoint(
+    spec.keyShape,
+    edges.fromKind,
+    edges.toKind,
+  );
+  const outerPartIdColumn = partEndpoint(
+    spec.keyShape,
+    edges.fromId,
+    edges.toId,
+  );
+  const activeOnly = holderLivenessTerm(
+    axisRowMembership(ref),
+    relation,
+    edges,
+  );
+  const peerActiveOnly = holderLivenessTerm(
+    axisRowMembership(ref),
+    PEER,
+    edges,
+  );
 
   // The composition overload of `claimHolderTerms`: given a part identity in
   // place of a claim value source, it needs nothing beyond the axis ref and
@@ -240,8 +244,8 @@ export function buildContendedCompositionEdgeRowAudit(
     { ...ref, scope: { kind: "composition", holders } },
     {
       part: {
-        kind: qualified(relation, outerPartKindColumn),
-        id: qualified(relation, outerPartIdColumn),
+        kind: qualifiedColumn(relation, outerPartKindColumn),
+        id: qualifiedColumn(relation, outerPartIdColumn),
       },
     },
   );
@@ -249,15 +253,15 @@ export function buildContendedCompositionEdgeRowAudit(
   return sql`
     SELECT${edgeAuditProjection(edges)}
     FROM ${edges}
-    WHERE ${qualified(relation, edges.graphId)} = ${graphId}
-      AND ${qualified(relation, edges.kind)} IN (${inList(reportedEdgeKinds)})
-      AND ${qualified(relation, edges.deletedAt)} IS NULL${activeOnly}
+    WHERE ${qualifiedColumn(relation, edges.graphId)} = ${graphId}
+      AND ${qualifiedColumn(relation, edges.kind)} IN (${inList(reportedEdgeKinds)})
+      AND ${auditedRowTerm(relation, edges)}${activeOnly}
       AND EXISTS (
         SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
-        WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
+        WHERE ${qualifiedColumn(PEER, edges.graphId)} = ${qualifiedColumn(relation, edges.graphId)}
           AND ${peerHolderTerms}
-          AND ${qualified(PEER, edges.deletedAt)} IS NULL${peerActiveOnly}
-          AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
+          AND ${auditedRowTerm(PEER, edges)}${peerActiveOnly}
+          AND ${qualifiedColumn(PEER, edges.id)} <> ${qualifiedColumn(relation, edges.id)}
       )
   `;
 }
@@ -280,8 +284,8 @@ export function buildDisjointOverlapAudit(
   const liveIdsOfKind = (kind: string): SQL => sql`
     SELECT ${quotedColumn(nodes.id)} as node_id
     FROM ${nodes}
-    WHERE ${qualified(relation, nodes.graphId)} = ${graphId}
-      AND ${qualified(relation, nodes.kind)} = ${kind}
+    WHERE ${qualifiedColumn(relation, nodes.graphId)} = ${graphId}
+      AND ${qualifiedColumn(relation, nodes.kind)} = ${kind}
       AND ${auditedRowTerm(relation, nodes)}
   `;
   return sql`${liveIdsOfKind(kinds[0])} INTERSECT ${liveIdsOfKind(kinds[1])}`;
@@ -336,15 +340,15 @@ export function buildMisassignedEdgeEndpointAudit(
                ),
                sql`, `,
              )}) AS ${sql.raw(`"${ALLOWED_PAIR_ALIAS}"`)}
-             WHERE ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column1`)} = ${qualified(relation, edges.fromKind)}
-               AND ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column2`)} = ${qualified(relation, edges.toKind)}
+             WHERE ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column1`)} = ${qualifiedColumn(relation, edges.fromKind)}
+               AND ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column2`)} = ${qualifiedColumn(relation, edges.toKind)}
            )
     `;
   return sql`
     SELECT${edgeAuditProjection(edges)}
     FROM ${edges}
-    WHERE ${qualified(relation, edges.graphId)} = ${graphId}
-      AND ${qualified(relation, edges.kind)} = ${edgeKind}
+    WHERE ${qualifiedColumn(relation, edges.graphId)} = ${graphId}
+      AND ${qualifiedColumn(relation, edges.kind)} = ${edgeKind}
       AND ${auditedRowTerm(relation, edges)}${admittedPredicate}
   `;
 }

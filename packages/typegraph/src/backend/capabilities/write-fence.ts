@@ -11,6 +11,7 @@ import { type SqlTableNames } from "../../query/compiler/schema";
 import { type SqlDialect } from "../../query/dialect/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { requireDefined } from "../../utils/presence";
+import { FENCE_ISOLATION_COLUMN } from "../command-contract";
 import { type BackendCapabilities } from "../types";
 
 /**
@@ -154,7 +155,7 @@ function advisoryAcquireKeyedWithIsolationStatement(
   return sql`
     SELECT
       ${advisoryLockExpression(namespace, key)},
-      ${isolationFactExpression()} AS transaction_isolation
+      ${isolationFactExpression()} AS ${sql.raw(FENCE_ISOLATION_COLUMN)}
   `;
 }
 
@@ -187,7 +188,7 @@ function fenceRowUpsertStatement(
   const isolationColumn =
     isolationFactExpression === undefined ?
       sql``
-    : sql`, ${isolationFactExpression()} AS transaction_isolation`;
+    : sql`, ${isolationFactExpression()} AS ${sql.raw(FENCE_ISOLATION_COLUMN)}`;
   return sql`
     INSERT INTO ${fencesTable} (key, generation)
     ${proposedRow}
@@ -280,8 +281,8 @@ function isolationFactStatement(
   isolationFactExpression?: FenceSql["isolationFactExpression"],
 ): SqlFragment {
   return isolationFactExpression === undefined ?
-      sql`SELECT NULL AS transaction_isolation WHERE 1 = 0`
-    : sql`SELECT ${isolationFactExpression()} AS transaction_isolation`;
+      sql`SELECT NULL AS ${sql.raw(FENCE_ISOLATION_COLUMN)} WHERE 1 = 0`
+    : sql`SELECT ${isolationFactExpression()} AS ${sql.raw(FENCE_ISOLATION_COLUMN)}`;
 }
 
 /**

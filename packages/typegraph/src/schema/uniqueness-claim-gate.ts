@@ -27,7 +27,7 @@
  * the kind holds rows. A kind with no rows has no claims to strand and is
  * unaffected.
  */
-import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
+import { populatedSchemaKinds } from "../backend/schema-kind-emptiness";
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
@@ -38,6 +38,7 @@ import {
 import { compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { type OntologySnapshot } from "./ontology-change";
+import { type SchemaCommitTransition } from "./types";
 import { type SerializedUniqueConstraint } from "./types";
 import {
   type UniqueConstraintEnforcementChange,
@@ -164,12 +165,6 @@ export function uniquenessClaimGates(
   );
 }
 
-type SchemaVersionTransition = Readonly<{
-  graphId: string;
-  fromVersion: number;
-  toVersion: number;
-}>;
-
 function describeGate(gate: UniquenessClaimGate): string {
   const subject = `"${gate.constraintName}" on "${gate.kind}"`;
   if (gate.cause === "claim-axis-moved") {
@@ -188,18 +183,17 @@ function describeGate(gate: UniquenessClaimGate): string {
  */
 export async function assertUniquenessClaimGatesOpen(
   target: SchemaCommitPreflightBackend,
-  transition: SchemaVersionTransition,
+  transition: SchemaCommitTransition,
   gates: readonly UniquenessClaimGate[],
 ): Promise<void> {
-  const populatedKinds = new Set<string>();
-  for (const kind of new Set(gates.map((gate) => gate.kind))) {
-    const populated = await schemaKindHasRows(target, transition.graphId, {
-      entity: "node",
-      kind,
-      rows: "nonDeleted",
-    });
-    if (populated) populatedKinds.add(kind);
-  }
+  const populatedProbes = await populatedSchemaKinds(
+    target,
+    transition.graphId,
+    [...new Set(gates.map((gate) => gate.kind))].map(
+      (kind) => ({ entity: "node", kind, rows: "nonDeleted" }) as const,
+    ),
+  );
+  const populatedKinds = new Set(populatedProbes.map((probe) => probe.kind));
   const closed = gates.filter((gate) => populatedKinds.has(gate.kind));
   if (closed.length === 0) return;
   throw new MigrationError(

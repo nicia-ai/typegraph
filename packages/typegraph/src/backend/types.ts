@@ -630,6 +630,17 @@ export function isLiveNodeRow(row: NodeRow): row is LiveNodeRow {
   return row.deleted_at === undefined;
 }
 
+/**
+ * Whether a node read found a row and that row is live: present and not
+ * tombstoned. Valid time is deliberately not part of it — a row whose window
+ * has closed is still a row an edge may point at.
+ */
+export function isLiveNodeRowPresent(
+  row: NodeRow | undefined,
+): row is LiveNodeRow {
+  return row !== undefined && isLiveNodeRow(row);
+}
+
 export function isTombstonedNodeRow(row: NodeRow): row is TombstonedNodeRow {
   return row.deleted_at !== undefined;
 }

@@ -8,7 +8,7 @@
  * probe can never disagree about what a declaration allows.
  */
 import type { EdgeEndpointAllowance } from "../backend/types";
-import { compareStrings } from "../utils/compare";
+import { compareStringTuples } from "../utils/compare";
 import { encodeTupleKey } from "../utils/tuple-key";
 import type { EdgeKindFacts } from "./edge-kind-facts";
 import type { KindRegistry } from "./kind-registry";
@@ -21,7 +21,7 @@ import type { KindRegistry } from "./kind-registry";
  * assignable to a declared endpoint exactly when it is that endpoint or one
  * of its `expandSubClasses` descendants.
  *
- * Deduped and sorted by `compareStrings(from) || compareStrings(to)` so two
+ * Deduped and sorted by `compareStringTuples` over `(from, to)` so two
  * runs produce one shape.
  */
 export function expandEdgeEndpointAllowance(
@@ -42,10 +42,7 @@ export function expandEdgeEndpointAllowance(
     }
   }
 
-  allowedPairs.sort(
-    (left, right) =>
-      compareStrings(left[0], right[0]) || compareStrings(left[1], right[1]),
-  );
+  allowedPairs.sort((left, right) => compareStringTuples(left, right));
 
   return { edgeKind, allowedPairs };
 }

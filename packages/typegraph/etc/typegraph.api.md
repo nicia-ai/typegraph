@@ -6079,7 +6079,6 @@ class KindRegistry {
     getAncestors(kind: string): ReadonlySet<string>;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
-    // (undocumented)
     getEdgeType(name: string): AnyEdgeType | undefined;
     getEquivalents(kind: string): readonly string[];
     getImpliedEdges(edgeKind: string): readonly string[];

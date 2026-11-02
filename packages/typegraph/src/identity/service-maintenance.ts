@@ -8,13 +8,14 @@ import {
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { type KindRegistry } from "../registry/kind-registry";
 import {
   batchRefusalDetails,
   batchRefusalSuffix,
   resolveBatchWriteVerdict,
 } from "../store/operations/write-transaction";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
-import { chunk } from "../utils/array";
+import { chunk, groupBy } from "../utils/array";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
@@ -64,7 +65,10 @@ import {
   type PlainNodeRef,
 } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
-import { diffClosureTransitions } from "./transition-log";
+import {
+  type ClosureTransitionRecord,
+  diffClosureTransitions,
+} from "./transition-log";
 
 /**
  * The context slice a closure rebuild reads. Narrower than the full
@@ -624,21 +628,21 @@ export async function snapshotIdentityClosureClasses(
   graphId: string,
 ): Promise<ReadonlyMap<string, readonly PlainNodeRef[]>> {
   const rows = await readClosureRowsForGraph(target, schema, graphId);
-  const groups = new Map<
-    string,
-    Readonly<{ classRef: PlainNodeRef; members: PlainNodeRef[] }>
-  >();
-  for (const row of rows) {
-    const classKey = `${row.class_kind} ${row.class_id}`;
-    const group = groups.get(classKey) ?? {
-      classRef: { kind: row.class_kind, id: row.class_id },
-      members: [],
-    };
-    group.members.push({ kind: row.member_kind, id: row.member_id });
-    groups.set(classKey, group);
-  }
+  const rowsByClass = groupBy(rows, (row) =>
+    refKey({ kind: row.class_kind, id: row.class_id }),
+  );
+  const groups = [...rowsByClass.values()].map((classRows) => ({
+    classRef: {
+      kind: requireDefined(classRows[0]).class_kind,
+      id: requireDefined(classRows[0]).class_id,
+    },
+    members: classRows.map((row) => ({
+      kind: row.member_kind,
+      id: row.member_id,
+    })),
+  }));
   const byMember = new Map<string, readonly PlainNodeRef[]>();
-  for (const { classRef, members } of groups.values()) {
+  for (const { classRef, members } of groups) {
     // The class's canonical is the row's OWN `class_kind`/`class_id` — what
     // the closure table already recorded — never re-derived by sorting the
     // member set. `insertClosureComponents` and `mergeCurrentClasses` both
@@ -658,7 +662,7 @@ export async function snapshotIdentityClosureClasses(
 }
 
 /** The union of two closure snapshots' members, for `diffClosureTransitions`'s `affected` argument. */
-export function combineSnapshotMembers(
+function combineSnapshotMembers(
   ...snapshots: readonly ReadonlyMap<string, readonly PlainNodeRef[]>[]
 ): readonly PlainNodeRef[] {
   const byKey = new Map<string, PlainNodeRef>();
@@ -679,21 +683,54 @@ export function combineSnapshotMembers(
  * member's record explains) and would otherwise silently skip a LIVE
  * singleton's own genuine membership change. This fills every `affected`
  * member missing from `snapshot` with its own trivial `[member]` class when
- * `isRegistered` says its kind still exists, leaving a truly dead member
+ * the registry still has its kind, leaving a truly dead member
  * absent (unchanged behavior).
  */
-export function fillLiveSingletons(
+function fillLiveSingletons(
   snapshot: ReadonlyMap<string, readonly PlainNodeRef[]>,
   affected: readonly PlainNodeRef[],
-  isRegistered: (kind: string) => boolean,
+  registry: KindRegistry,
 ): ReadonlyMap<string, readonly PlainNodeRef[]> {
   const filled = new Map(snapshot);
   for (const member of affected) {
     const key = refKey(member);
     if (filled.has(key)) continue;
-    if (isRegistered(member.kind)) filled.set(key, [member]);
+    if (registry.nodeKinds.has(member.kind)) filled.set(key, [member]);
   }
   return filled;
+}
+
+/**
+ * Diffs the closure around a FULL rebuild: reads the post-rebuild snapshot and
+ * returns the class transitions between it and the `before` snapshot taken
+ * ahead of the rebuild.
+ *
+ * `fillBefore` gives `before` the same singleton fill `after` gets. A member
+ * that was a live singleton (no closure ROW — `fillLiveSingletons`' own doc
+ * explains why that is not "gone") before the rebuild would otherwise read as
+ * "no longer exists" to `diffClosureTransitions`, silently skipping first
+ * enablement folding two previously-untouched singletons.
+ */
+export async function diffFullRebuildTransitions(
+  target: Backend,
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "schema"
+  >,
+  before: ReadonlyMap<string, readonly PlainNodeRef[]>,
+  fillBefore: boolean,
+): Promise<readonly ClosureTransitionRecord[]> {
+  const afterRows = await snapshotIdentityClosureClasses(
+    target,
+    ctx.schema,
+    ctx.graphId,
+  );
+  const affected = combineSnapshotMembers(before, afterRows);
+  return diffClosureTransitions(
+    affected,
+    fillBefore ? fillLiveSingletons(before, affected, ctx.registry) : before,
+    fillLiveSingletons(afterRows, affected, ctx.registry),
+  );
 }
 
 /**
@@ -715,11 +752,11 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
   await runIdentityMutation(
     ctx,
     async (target, touch, _markWritten, noteTransition) => {
-      const before = await snapshotIdentityClosureClasses(
-        target,
-        ctx.schema,
-        ctx.graphId,
-      );
+      const repairClosure = options?.repairClosure !== false;
+      const before =
+        repairClosure ?
+          await snapshotIdentityClosureClasses(target, ctx.schema, ctx.graphId)
+        : undefined;
       const removedAssertions = await deleteAssertionsTouchingKinds(
         target,
         ctx.schema,
@@ -727,7 +764,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
         removedKinds,
         touch,
       );
-      if (options?.repairClosure === false) return;
+      if (before === undefined) return;
       await replaceClosure(
         target,
         ctx.schema,
@@ -735,27 +772,22 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
         identityActiveKinds(ctx.registry),
         ctx.sameIdAcrossKinds,
       );
-      const afterRows = await snapshotIdentityClosureClasses(
+      // `before` does NOT need the singleton fill the schema-commit preflight
+      // gives its own pre-commit snapshot: that fill exists to catch a live
+      // singleton folding into a class for the FIRST time, which can only
+      // happen when the closure is built from a state where identity had not
+      // yet run at all (first enablement). On an already-enabled graph, every
+      // node creation folds in the write frame that creates it, so no live
+      // member can reach this cascade as an untouched singleton that is about
+      // to be folded for the first time — `replaceClosure`'s active-kinds
+      // rebuild can only ever shrink or remove existing classes, never mint a
+      // genuinely new one.
+      const transitions = await diffFullRebuildTransitions(
         target,
-        ctx.schema,
-        ctx.graphId,
+        ctx,
+        before,
+        false,
       );
-      const affected = combineSnapshotMembers(before, afterRows);
-      // `before` does NOT need the same `fillLiveSingletons` treatment
-      // `identitySchemaCommitPreflight` (schema-transition.ts) gives its own
-      // pre-commit snapshot: that fill exists to catch a live singleton
-      // folding into a class for the FIRST time, which can only happen when
-      // the closure is built from a state where identity had not yet run at
-      // all (first enablement). On an already-enabled graph, every node
-      // creation folds in the write frame that creates it, so
-      // no live member can reach this cascade as an untouched singleton that
-      // is about to be folded for the first time — `replaceClosure`'s
-      // active-kinds rebuild can only ever shrink or remove existing
-      // classes, never mint a genuinely new one.
-      const after = fillLiveSingletons(afterRows, affected, (kind) =>
-        ctx.registry.nodeKinds.has(kind),
-      );
-      const transitions = diffClosureTransitions(affected, before, after);
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
         cause: "kind-drop",
         assertions: removedAssertions,

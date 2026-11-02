@@ -1,10 +1,10 @@
 import { compareCodePoints } from "../utils/compare";
-import { encodeTupleKey } from "../utils/tuple-key";
+import { nodeRefKey } from "../utils/tuple-key";
 import { type PlainNodeRef } from "./sql-target";
 
-/** Canonical, injective map key for a node reference. */
+/** Canonical, injective map key for a node reference ({@link nodeRefKey}). */
 export function identityReferenceKey(ref: PlainNodeRef): string {
-  return encodeTupleKey([ref.kind, ref.id]);
+  return nodeRefKey(ref);
 }
 
 /** Orders identity references by kind, then id, using code-point order. */

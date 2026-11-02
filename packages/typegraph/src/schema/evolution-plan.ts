@@ -301,15 +301,15 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     ),
     ...groupedRequirements.addedKinds,
     ...groupedRequirements.vectorSlots,
-    ...(schemaTightening === undefined || !tightensOntologyOrCardinality ?
-      []
-    : [
+    ...(tightensOntologyOrCardinality ?
+      [
         freezeDeep({
           kind: "ontology-tightening" as const,
           changes: schemaTightening.probedChanges,
           edgeCardinalityAxes: schemaTightening.newlyConstrainedAxes,
         }),
-      ]),
+      ]
+    : []),
     ...(groupedRequirements.identityAffectedKinds.length > 0 ?
       [
         Object.freeze({

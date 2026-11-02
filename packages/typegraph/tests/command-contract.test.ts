@@ -5,7 +5,7 @@ import {
   assertGraphCommandConvergenceIsolation,
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
-  graphCommandCoordinationIsolation,
+  graphCommandCoordinationAcquisition,
   graphCommandExecutionContext,
   mintGraphCommandCoordination,
   observesEveryEarlierFenceHolder,
@@ -126,13 +126,16 @@ describe("authoritative graph command contract", () => {
         fenceRow: "none",
       });
       expect(
-        graphCommandCoordinationIsolation(port, "graph", coordination),
+        graphCommandCoordinationAcquisition(port, coordination, "graph")
+          .isolation,
       ).toBe(isolation);
       expect(
-        graphCommandCoordinationIsolation(port, "other", coordination),
+        graphCommandCoordinationAcquisition(port, coordination, "other")
+          .isolation,
       ).toBe("unknown");
       expect(
-        graphCommandCoordinationIsolation(otherPort, "graph", coordination),
+        graphCommandCoordinationAcquisition(otherPort, coordination, "graph")
+          .isolation,
       ).toBe("unknown");
     },
   );

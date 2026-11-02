@@ -13,6 +13,18 @@ export function isPlainObject(
 }
 
 /**
+ * Narrows `unknown` to a non-array object whose string-keyed members can be
+ * read defensively — never an assertion. Unlike {@link isPlainObject} it admits
+ * class instances (an `Error`, say), so it suits a structural read of a value
+ * of unknown origin rather than a check that it is a literal `{}`.
+ */
+export function isObjectRecord(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * Own-key membership for a bag whose KEYS ARE DATA — a props record parsed out
  * of a JSON column, a JSON-Schema `properties` map, a serialized-schema kind
  * table. The single owner of that question; every path asking it calls here.

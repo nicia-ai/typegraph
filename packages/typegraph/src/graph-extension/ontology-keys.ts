@@ -12,6 +12,7 @@
  * encoding here keeps the four sites from drifting apart.
  */
 import { getTypeName, type OntologyRelation } from "../ontology/types";
+import { type CompositionRealization } from "../registry/composition-relation";
 import { encodeTupleKey } from "../utils/tuple-key";
 import {
   type ExtensionOntologyRelation,
@@ -21,24 +22,31 @@ import {
 export function graphExtensionOntologyKey(
   entry: ExtensionOntologyRelation,
 ): string {
-  return encodeTupleKey([
-    entry.metaEdge,
-    entry.from,
-    entry.to,
-    entry.via ?? "",
-    entry.partSide ?? "",
-    entry.existence ?? "",
-  ]);
+  return ontologyRelationKey(entry.metaEdge, entry.from, entry.to, entry);
 }
 
 export function compileTimeOntologyKey(relation: OntologyRelation): string {
-  return encodeTupleKey([
+  return ontologyRelationKey(
     relation.metaEdge.name,
     getTypeName(relation.from),
     getTypeName(relation.to),
-    relation.via ?? "",
-    relation.partSide ?? "",
-    relation.existence ?? "",
+    relation,
+  );
+}
+
+function ontologyRelationKey(
+  metaEdge: string,
+  from: string,
+  to: string,
+  composition: CompositionRealization,
+): string {
+  return encodeTupleKey([
+    metaEdge,
+    from,
+    to,
+    composition.via ?? "",
+    composition.partSide ?? "",
+    composition.existence ?? "",
   ]);
 }
 

@@ -691,7 +691,7 @@ export type CandidateDiagnostic = Readonly<{
     reason?: "noComparableValues";
     clusterDisposition?: "retained" | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity" | "separation";
+        reason: ClusterExclusionReason;
     }>;
 }> | Readonly<{
     evidence: Extract<MatchEvidence, Readonly<{
@@ -700,7 +700,7 @@ export type CandidateDiagnostic = Readonly<{
     scoreDecision: "accepted";
     clusterDisposition: Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity" | "separation";
+        reason: ClusterExclusionReason;
     }>;
 }>;
 
@@ -1074,6 +1074,9 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(makeBackend: MakeBa
     revisionJournal?: false;
     refreshStatistics?: false;
 }>): WorkingCopyStrategy<G>;
+
+// @public
+export type ClusterExclusionReason = "diameter" | "baseAmbiguity" | "separation";
 
 // @public (undocumented)
 type CoalesceExpressionNode = Readonly<{
@@ -4945,7 +4948,6 @@ class KindRegistry {
     getAncestors(kind: string): ReadonlySet<string>;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
-    // (undocumented)
     getEdgeType(name: string): AnyEdgeType | undefined;
     getEquivalents(kind: string): readonly string[];
     getImpliedEdges(edgeKind: string): readonly string[];
@@ -5474,7 +5476,7 @@ export type MergePlanCandidateDiagnostic = Readonly<{
     reason?: "noComparableValues" | undefined;
     clusterDisposition?: "retained" | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity" | "separation";
+        reason: ClusterExclusionReason;
     }> | undefined;
 }>;
 

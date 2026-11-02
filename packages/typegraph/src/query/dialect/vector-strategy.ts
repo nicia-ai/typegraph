@@ -44,7 +44,7 @@ import {
   ConfigurationError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
-import { requireDefined } from "../../utils/presence";
+import { shortHash } from "../../utils/hash";
 import { sql, type SqlFragment } from "../sql-fragment";
 
 /**
@@ -609,30 +609,6 @@ const MAX_VECTOR_IDENTIFIER_LENGTH = 63;
 
 function sanitizeIdentifierPart(value: string): string {
   return value.toLowerCase().replaceAll(/[^a-z0-9_]/g, "_");
-}
-
-/**
- * Deterministic 8-char hash for collision-safe truncation of over-long
- * identifiers. Self-contained so the strategy layer has no backend-runtime
- * dependency.
- */
-export function shortHash(input: string): string {
-  let h1 = 0xde_ad_be_ef;
-  let h2 = 0x41_c6_ce_57;
-  for (let index = 0; index < input.length; index++) {
-    const ch = requireDefined(input.codePointAt(index));
-    h1 = Math.imul(h1 ^ ch, 0x9e_37_79_b1);
-    h2 = Math.imul(h2 ^ ch, 0x5f_35_64_95);
-  }
-  h1 =
-    Math.imul(h1 ^ (h1 >>> 16), 0x85_eb_ca_6b) ^
-    Math.imul(h2 ^ (h2 >>> 13), 0xc2_b2_ae_35);
-  h2 =
-    Math.imul(h2 ^ (h2 >>> 16), 0x85_eb_ca_6b) ^
-    Math.imul(h1 ^ (h1 >>> 13), 0xc2_b2_ae_35);
-  const hi = (h2 >>> 0).toString(16).padStart(8, "0");
-  const lo = (h1 >>> 0).toString(16).padStart(8, "0");
-  return `${hi}${lo}`.slice(0, 8);
 }
 
 /**

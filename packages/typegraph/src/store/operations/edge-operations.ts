@@ -125,7 +125,6 @@ import {
 } from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
-import { getDialect } from "../../query/dialect";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
@@ -143,9 +142,10 @@ import {
 import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
-import { encodeTupleKey } from "../../utils/tuple-key";
+import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import {
   type AcyclicityProbeContext,
+  acyclicityProbeContext as buildAcyclicityProbeContext,
   acyclicRelationCountsRow,
   acyclicRelationMembership,
   assertEdgeRelationsAcyclic,
@@ -185,7 +185,8 @@ import {
   checkEdgeCardinalityConstraints,
   type ConstraintContext,
   type ConstraintFenceReason,
-  edgeWriteNeedsConstraintFence,
+  edgeKindCardinalityDeclarations,
+  edgeKindFenceReason,
 } from "../constraints";
 import { classifyDurableEdgeBatchOutcomes } from "../durable-edge-batch";
 import { getEdgeRowsByIds } from "../edge-fetch";
@@ -269,7 +270,7 @@ import {
   assertsStoredWindowState,
   type EdgeUpdateFences,
 } from "./write-fences";
-import { edgeWritePlan } from "./write-plan";
+import { edgeBatchWritePlan, edgeWritePlan } from "./write-plan";
 import {
   type EdgeInsertWork,
   type EdgeWriteSession,
@@ -658,31 +659,25 @@ async function assertLiveEdgeEndpoints<G extends GraphDef>(
 // ============================================================
 
 /**
- * The cardinality declarations an edge create must honor, resolved from the
- * graph def. Also the input to {@link edgeWriteNeedsConstraintFence} and
- * {@link edgeCardinalityAxisReferences}, so "does this create probe anything" and
- * "what does it probe" are read from one place, source AND target alike.
- *
- * A kind this graph does not define answers the empty declaration. Choosing
- * the fence must not become the thing that REPORTS an unknown kind: the write
- * path raises `KindNotFoundError` from inside the hooked transaction, where a
- * caller's `onError` hook observes it, and this runs before that transaction
- * opens.
+ * The cardinality declarations an edge create must honor —
+ * {@link file://../constraints.ts edgeKindCardinalityDeclarations} read off
+ * this module's context. The same declarations {@link edgeWriteFenceReason}
+ * folds and {@link edgeCardinalityAxisReferences} probes, so "does this create
+ * probe anything" and "what does it probe" are read from one place, source AND
+ * target alike. A kind this graph does not define answers the empty
+ * declaration.
  */
-export function edgeCardinalityDeclarations<G extends GraphDef>(
+function edgeCardinalityDeclarations<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
 ): EdgeCardinalityDeclarations {
-  if (!hasOwnKey(ctx.graph.edges, kind)) return {};
-  return getEdgeRegistration(ctx.graph, kind);
+  return edgeKindCardinalityDeclarations(ctx.graph, kind);
 }
 
 /**
  * Whether this edge kind participates in an acyclic relation. A kind this
- * graph does not define answers `false`, matching {@link edgeCardinality}'s
- * unknown-kind default. Delegates to
- * {@link file://../acyclicity.ts edgeKindIsInAcyclicRelation}, the one owner
- * of this decision, rather than re-reading `registration.acyclic` here.
+ * graph does not define answers `false`, matching
+ * {@link edgeCardinalityDeclarations}'s unknown-kind default.
  */
 function edgeAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -772,39 +767,34 @@ function edgeUpdateReentersAcyclicRelation<G extends GraphDef>(
 }
 
 /**
- * Whether this edge kind realizes a composition pair. THE input every
- * {@link edgeWriteNeedsConstraintFence} call in this module supplies so a
- * composition edge's fence reason reads `"edgeComposition"`, in preference to
- * the ordinary `"edgeCardinality"` it also qualifies for.
- */
-function edgeComposition<G extends GraphDef>(
-  ctx: EdgeOperationContext<G>,
-  kind: string,
-): boolean {
-  return ctx.registry.isCompositionEdge(kind);
-}
-
-/**
- * THE constraint-fence reason an edge write of this kind owes: the declared
- * cardinality axes and the composition dimension — both invariant properties
- * of the kind — folded with the acyclicity answer the CALLER decides.
- *
- * One assembler so a new fence dimension is added in one place rather than at
- * every call site. `acyclic` is a parameter because it genuinely varies: a
- * create always re-admits the row to the acyclicity population, a resurrect
- * does so only when it clears the tombstone, and a bare window reopen never
- * does — so each call site states the dimension it actually decides.
+ * THE constraint-fence reason an edge write of this kind owes —
+ * {@link file://../constraints.ts edgeKindFenceReason} read off this
+ * module's context. `acyclic` is omitted by a create, which always re-admits
+ * its row to the acyclicity population; a resurrect or a window reopen states
+ * the dimension it actually decides.
  */
 function edgeWriteFenceReason<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
   acyclic: boolean,
 ): ConstraintFenceReason | undefined {
-  return edgeWriteNeedsConstraintFence({
-    ...edgeCardinalityDeclarations(ctx, kind),
-    acyclic,
-    composition: edgeComposition(ctx, kind),
-  });
+  return edgeKindFenceReason(ctx.graph, ctx.registry, kind, acyclic);
+}
+
+/** {@link edgeWriteFenceReason} for a create of `kind`, which re-admits it to its acyclic relation. */
+function edgeCreateFenceReason<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+): ConstraintFenceReason | undefined {
+  return edgeWriteFenceReason(ctx, kind, edgeAcyclic(ctx, kind));
+}
+
+/** {@link edgeCreateFenceReason} for each distinct kind, in first-seen order. */
+function edgeCreateFenceReasons<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kinds: readonly string[],
+): readonly (ConstraintFenceReason | undefined)[] {
+  return [...new Set(kinds)].map((kind) => edgeCreateFenceReason(ctx, kind));
 }
 
 /**
@@ -820,16 +810,15 @@ function acyclicityProbeContext<G extends GraphDef>(
   lock: GraphWriteLock,
   operation: string,
 ): AcyclicityProbeContext {
-  return {
+  return buildAcyclicityProbeContext({
     graphId: ctx.graphId,
     graph: ctx.graph,
     registry: ctx.registry,
     schema: ctx.revisionSchema,
-    dialect: getDialect(target.dialect),
     target,
     lock,
     operation,
-  };
+  });
 }
 
 /**
@@ -969,6 +958,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   const autocommitBackend =
     isBundledRootAutocommitEligible(backend) ? backend : undefined;
   const declarations = edgeCardinalityDeclarations(ctx, kind);
+  const fenceReason = edgeCreateFenceReason(ctx, kind);
   const candidate =
     hasOwnKey(ctx.graph.edges, kind) ?
       ({
@@ -978,8 +968,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
         kindRegistered: true,
         convergesDynamically: convergeOn !== undefined && !durableConvergence,
-        constrained:
-          edgeWriteFenceReason(ctx, kind, edgeAcyclic(ctx, kind)) !== undefined,
+        constrained: fenceReason !== undefined,
       } as const)
     : undefined;
   const schemaFenceInFirstWrite =
@@ -991,7 +980,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     isAutocommitSingleStatementWrite({ kind: "edge", candidate });
   const plan = edgeWritePlan(
     convergeOn === undefined || durableConvergence ?
-      edgeWriteFenceReason(ctx, kind, edgeAcyclic(ctx, kind))
+      fenceReason
     : "edgeMatchKeyConvergence",
   );
 
@@ -1633,7 +1622,7 @@ type EdgeEndpointInput = Readonly<{
 const ATOMIC_EDGE_SCALAR_DIAGNOSTIC_WINDOW_SIZE = 32;
 
 function edgeEndpointRowKey(kind: string, id: string): string {
-  return encodeTupleKey([kind, id]);
+  return nodeRefKey({ kind, id });
 }
 
 function collectEdgeEndpointIdsByKind(
@@ -1963,7 +1952,12 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
 
   await runWritePlan(
     ctx,
-    edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
+    edgeBatchWritePlan(
+      edgeCreateFenceReasons(
+        ctx,
+        inputs.map((input) => input.kind),
+      ),
+    ),
     backend,
     async (session, target, _overlaidSession, lock) => {
       const { batchInsertWork } = await prepareEdgeBatchCreates(
@@ -2082,10 +2076,10 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
     ctx,
     // The paired updates are decided under this frame's fence, so it fences
     // for their kinds as a create of each would.
-    edgeWritePlan(
-      batchFencesConstraintProbe(ctx, [
-        ...inputs,
-        ...pairedUpdates.map((entry) => ({ kind: entry.input.identity.kind })),
+    edgeBatchWritePlan(
+      edgeCreateFenceReasons(ctx, [
+        ...inputs.map((input) => input.kind),
+        ...pairedUpdates.map((entry) => entry.input.identity.kind),
       ]),
     ),
     backend,
@@ -2171,26 +2165,6 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
       return rows.map((row) => rowToEdge(row));
     },
   );
-}
-
-/**
- * A batch fences when ANY item in it does: the batch shares one transaction, so
- * one constrained item makes the whole transaction a constrained write. A batch
- * of purely `many`, non-acyclic edges still takes no lock.
- */
-function batchFencesConstraintProbe<G extends GraphDef>(
-  ctx: EdgeOperationContext<G>,
-  inputs: readonly Readonly<{ kind: string }>[],
-): ConstraintFenceReason | undefined {
-  for (const input of inputs) {
-    const reason = edgeWriteFenceReason(
-      ctx,
-      input.kind,
-      edgeAcyclic(ctx, input.kind),
-    );
-    if (reason !== undefined) return reason;
-  }
-  return undefined;
 }
 
 /**

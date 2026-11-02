@@ -182,6 +182,8 @@ type RecordedCaptureSession = Readonly<{
     fn: () => Promise<T>,
   ) => Promise<T>;
   forceGraphRevision: (graphId: string) => void;
+  /** Whether identity transition notes for `graphId` are buffered for the flush. */
+  hasIdentityTransitionNotes: (graphId: string) => boolean;
   checkpoint: () => RecordedCaptureCheckpoint;
   restore: (checkpoint: RecordedCaptureCheckpoint) => void;
   flush: (
@@ -490,6 +492,11 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       forcedGraphRevisions.add(graphId);
     },
 
+    hasIdentityTransitionNotes(graphId: string): boolean {
+      if (sealed) throw recordedCaptureSealedError({});
+      return identityTransitionNotes.some((note) => note.graphId === graphId);
+    },
+
     checkpoint(): RecordedCaptureCheckpoint {
       if (sealed) throw recordedCaptureSealedError({});
       return {
@@ -769,9 +776,7 @@ export function hasPendingIdentityTransitionNotes(
 ): boolean {
   const session = recordedTransactionBindings.get(target)?.capture?.session;
   if (session === undefined) return false;
-  return session
-    .checkpoint()
-    .identityTransitionNotes.some((note) => note.graphId === graphId);
+  return session.hasIdentityTransitionNotes(graphId);
 }
 
 /** Forces one revision allocation when this capture transaction flushes. */

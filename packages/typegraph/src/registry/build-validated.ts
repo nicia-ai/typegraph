@@ -133,7 +133,8 @@ function assertStructuralSubsumption(
   if (violations.length === 0) return;
 
   const first = requireDefined(violations[0]);
-  const relationName = first.viaEquivalence ? "equivalentTo" : "subClassOf";
+  const relationName =
+    first.viaEquivalence ? META_EDGE_EQUIVALENT_TO : META_EDGE_SUB_CLASS_OF;
   const declaredNote = first.declared ? "declared" : "implied transitively";
   throw new ConfigurationError(
     `Ontology is incoherent: ${relationName}(${first.childKind}, ${first.parentKind}) ` +

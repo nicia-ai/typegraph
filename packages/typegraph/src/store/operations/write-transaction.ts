@@ -856,27 +856,14 @@ export function runInWriteTransaction<T>(
     );
   if (refusal !== undefined) return Promise.reject(refusal);
 
-  const attempt = (): Promise<T> =>
-    runInWriteTransactionAttempt(ctx, backend, fn, options, transactionMode);
-
-  // Decided before the attempt, and rejected rather than thrown for the same
-  // reason the refusal above is.
-  let retried: boolean;
-  try {
-    retried =
+  return runMaybeRetried(
+    backend,
+    "runInWriteTransaction",
+    () =>
       requiresOptimisticRetryUnit(backend) ||
-      ownsSnapshotFencedUnit(backend, fenceReason);
-  } catch (error) {
-    return Promise.reject(asRejection(error));
-  }
-  if (!retried) return attempt();
-  return runRetriedUnit(
-    {
-      operation: "runInWriteTransaction",
-      attempts: OPTIMISTIC_RETRY_ATTEMPTS,
-      target: backend,
-    },
-    attempt,
+      ownsSnapshotFencedUnit(backend, fenceReason),
+    () =>
+      runInWriteTransactionAttempt(ctx, backend, fn, options, transactionMode),
   );
 }
 
@@ -974,21 +961,37 @@ export function runOwnedMutationSetTransaction<T>(
   backend: GraphBackend | TransactionBackend,
   fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
 ): Promise<T> {
-  const attempt = (): Promise<T> =>
-    runOptionallyInTransaction(backend, (target) => fn(target));
+  return runMaybeRetried(
+    backend,
+    "runOwnedMutationSetTransaction",
+    () => opensKeyedFenceTransaction(backend),
+    () => runOptionallyInTransaction(backend, (target) => fn(target)),
+  );
+}
+
+/**
+ * Runs a store-owned unit's `attempt` once, or replays it whole through
+ * {@link runRetriedUnit} when `replays` says the unit is one the store
+ * retries. The decision is taken before the first attempt and, like a
+ * refusal, surfaces as a rejection rather than a synchronous throw: a caller
+ * that composes a promise-returning unit without `await` must see every
+ * failure the same way.
+ */
+function runMaybeRetried<T>(
+  backend: GraphBackend | TransactionBackend,
+  operation: string,
+  replays: () => boolean,
+  attempt: () => Promise<T>,
+): Promise<T> {
   let replayed: boolean;
   try {
-    replayed = opensKeyedFenceTransaction(backend);
+    replayed = replays();
   } catch (error) {
     return Promise.reject(asRejection(error));
   }
   if (!replayed) return attempt();
   return runRetriedUnit(
-    {
-      operation: "runOwnedMutationSetTransaction",
-      attempts: OPTIMISTIC_RETRY_ATTEMPTS,
-      target: backend,
-    },
+    { operation, attempts: OPTIMISTIC_RETRY_ATTEMPTS, target: backend },
     attempt,
   );
 }

@@ -141,6 +141,7 @@ import {
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import {
+  FENCE_ISOLATION_COLUMN,
   observesEveryEarlierFenceHolder,
   readGraphWriteFenceAcquisition,
 } from "../command-contract";
@@ -516,14 +517,19 @@ END; $tg$`;
     EXECUTE $definition$ ${functionDdl} $definition$;
   END IF;
 END; $install$`;
-  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
-    const triggerName = revisionChangeTriggerName(entity, table);
-    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
-    const trigger = triggerName.replaceAll("'", "''");
-    const journal = names.revisionChanges.replaceAll("'", "''");
-    const clock = names.recordedClock.replaceAll("'", "''");
-    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
-  });
+  const triggerDdl = postgresRevisionChangeTargets(names).map(
+    ({ entity, table }) => {
+      const triggerName = revisionChangeTriggerName(entity, table);
+      const relation = postgresIdentifierRegclassName(table).replaceAll(
+        "'",
+        "''",
+      );
+      const trigger = triggerName.replaceAll("'", "''");
+      const journal = names.revisionChanges.replaceAll("'", "''");
+      const clock = names.recordedClock.replaceAll("'", "''");
+      return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    },
+  );
   return [installFunctionDdl, ...triggerDdl];
 }
 
@@ -1187,9 +1193,9 @@ function buildPostgresEngineProfileInternal(
   // DDL this backend issues then runs where the allocation lives.
   const allocationSchema = allocationSchemaOfTables(tables);
   const allocationPin =
-    allocationSchema === undefined ?
-      undefined
-    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
+    allocationSchema === undefined ? undefined : (
+      toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres")
+    );
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1319,13 +1325,17 @@ function buildPostgresEngineProfileInternal(
   );
   const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
   const bareClient =
-    typeof rawClient === "object" &&
-    rawClient !== null &&
-    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+    (
+      typeof rawClient === "object" &&
+      rawClient !== null &&
+      isBarePgClient(rawClient as Readonly<Record<string, unknown>>)
+    ) ?
       rawClient
     : undefined;
   const queueOwner =
-    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
+    transactionScoped ?
+      (getPinnedPostgresTransactionClient(db) ?? db)
+    : bareClient;
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
@@ -1364,7 +1374,9 @@ function buildPostgresEngineProfileInternal(
     baseSchemaVersions: getTableName(tables.baseSchemaVersions),
     graphTemplates: getTableName(tables.graphTemplates),
     indexMaterializations: getTableName(tables.indexMaterializations),
-    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
     kindRemovals: getTableName(tables.kindRemovals),
     reconciliationMarkers: getTableName(tables.reconciliationMarkers),
   } satisfies PostgresTableNames;
@@ -1657,8 +1669,9 @@ function buildPostgresEngineProfileInternal(
     revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
     async revisionChangesJournalReady(): Promise<boolean> {
       const expectedTriggers = portableSql.join(
-        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
-          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        postgresRevisionChangeTargets(tableNames).map(
+          ({ entity, table }) =>
+            portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
         ),
         portableSql`, `,
       );
@@ -2190,7 +2203,7 @@ function buildPostgresEngineProfileInternal(
               adapterOptions,
             ).execute<Record<string, unknown>>(
               asCompiledRowsSql(
-                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}, ${isolationFactExpression()} AS transaction_isolation`,
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}, ${isolationFactExpression()} AS ${portableSql.raw(FENCE_ISOLATION_COLUMN)}`,
               ),
             );
             assertSchemaWriteObservesEarlierWriters(
@@ -2325,9 +2338,9 @@ function buildPostgresEngineProfileInternal(
       // fails there with a serialization failure at any isolation.
       const fence = resolveSchemaCommitFence();
       const transactionConfig =
-        fence.kind === "lock" ? SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION : (
-          undefined
-        );
+        fence.kind === "lock" ?
+          SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
+        : undefined;
       const attempt = (): Promise<T> =>
         db.transaction(async (tx) => {
           await acquireSchemaWriteFence(tx, graphId, fence, {
@@ -2651,7 +2664,7 @@ function buildPostgresEngineProfileInternal(
                   asCompiledRowsSql(
                     isolationFactExpression === undefined ?
                       portableSql`SELECT current_setting('lock_timeout') AS value`
-                    : portableSql`SELECT current_setting('lock_timeout') AS value, ${isolationFactExpression()} AS transaction_isolation`,
+                    : portableSql`SELECT current_setting('lock_timeout') AS value, ${isolationFactExpression()} AS ${portableSql.raw(FENCE_ISOLATION_COLUMN)}`,
                   ),
                 );
                 const previousTimeout =

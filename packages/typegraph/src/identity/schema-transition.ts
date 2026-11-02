@@ -35,9 +35,8 @@ import {
 } from "../utils/sql-errors";
 import { separationRebuildRequired } from "./separation";
 import {
-  combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
-  fillLiveSingletons,
+  diffFullRebuildTransitions,
   hasAssertionsTouchingKinds,
   type IdentityRebuildContext,
   lockIdentityEnablementNodes,
@@ -49,7 +48,6 @@ import {
 import { noteClassTransitions } from "./service-mutation";
 import { type IdentityTarget } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
-import { diffClosureTransitions } from "./transition-log";
 
 /** The identity relations a schema transition reads, writes, and locks. */
 function identityTableNames(schema: SqlSchema): IdentityTableNames {
@@ -749,26 +747,12 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
         )
       : [];
     await rebuildIdentityClosureForContext({ ...ctx, backend: target });
-    const afterRows = await snapshotIdentityClosureClasses(
+    const transitions = await diffFullRebuildTransitions(
       target,
-      ctx.schema,
-      ctx.graphId,
+      ctx,
+      before,
+      true,
     );
-    const affected = combineSnapshotMembers(before, afterRows);
-    // `before` needs the SAME singleton fill `after` gets: a member that was
-    // a live singleton (no closure ROW — `fillLiveSingletons`' own doc
-    // explains why that is not "gone") before this commit would otherwise
-    // read as `oldClassOf.get(key) === undefined` to `diffClosureTransitions`,
-    // which is its OWN signal for "no longer exists" — silently skipping the
-    // one shape `schema-transition` exists to cover: first enablement folding
-    // two previously-untouched singletons that never had a materialized row.
-    const beforeFilled = fillLiveSingletons(before, affected, (kind) =>
-      ctx.registry.nodeKinds.has(kind),
-    );
-    const after = fillLiveSingletons(afterRows, affected, (kind) =>
-      ctx.registry.nodeKinds.has(kind),
-    );
-    const transitions = diffClosureTransitions(affected, beforeFilled, after);
     if (transitions.length > 0) {
       await withRecordedIdentityMutationTarget(
         target,

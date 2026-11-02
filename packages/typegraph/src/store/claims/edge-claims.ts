@@ -27,6 +27,7 @@ import {
   CompositionError,
   ConfigurationError,
 } from "../../errors";
+import { requireDefined } from "../../utils/presence";
 import { isMissingTableError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
@@ -493,21 +494,9 @@ export type EdgeCardinalityViolationSubject = Readonly<{
 function edgeCardinalityClaimRefusal(
   params: ClaimEdgeCardinalityParams,
 ): CardinalityError {
-  // An incumbent count of one always violates every constrained cardinality;
-  // the fallback keeps the return type honest without inventing a second
-  // spelling of the message.
-  return (
-    edgeCardinalityViolation(params, params, 1) ??
-    new CardinalityError({
-      edgeKind: params.edgeKind,
-      direction: params.direction,
-      fromKind: params.fromKind,
-      fromId: params.fromId,
-      toKind: params.toKind,
-      toId: params.toId,
-      cardinality: params.cardinality,
-      existingCount: 1,
-    })
+  return requireDefined(
+    edgeCardinalityViolation(params, params, 1),
+    "An incumbent count of one violates every constrained cardinality.",
   );
 }
 

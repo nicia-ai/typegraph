@@ -84,6 +84,16 @@ export function edgeWritePlan(
   return { entity: "edge", constraintProbe, requiresIdentityLock: false };
 }
 
+/**
+ * The plan for a batched edge write. A batch of purely `many`, non-acyclic,
+ * non-composition edges still takes no lock.
+ */
+export function edgeBatchWritePlan(
+  constraintProbes: readonly (ConstraintFenceReason | undefined)[],
+): WritePlan<"edge"> {
+  return edgeWritePlan(foldBatchConstraintProbe(constraintProbes));
+}
+
 /** A single frame that deliberately coordinates node and edge writes. */
 export function mixedWritePlan(
   constraintProbe: ConstraintFenceReason | undefined,
@@ -93,16 +103,16 @@ export function mixedWritePlan(
 }
 
 /**
- * The plan for a batched mixed (node + composition edge) write.
+ * The plan for a mixed (node + composition edge) write whose constraint probe
+ * folds several sources.
  *
- * Widens {@link foldBatchConstraintProbe}'s fold to `entity: "mixed"` for a
- * composition batch create: `executeNodeCreateBatch` and
- * `executeNodeCreateNoReturnBatch` (`node-operations.ts`) each fold TWO
- * probe sources — the node batch's own constraint probes and the composition
- * edges the batch's `partOf`/required-existence items owe — into one
- * verdict. Passing both probe arrays through ONE combined list keeps that a
- * single fold instead of two independent `.find()` calls the two call sites
- * would otherwise each re-spell.
+ * Widens {@link foldBatchConstraintProbe}'s fold to `entity: "mixed"`: a
+ * composition create or restore (`node-operations.ts`) folds the node
+ * writes' own constraint probes with the composition edges its
+ * `partOf`/required-existence items owe — one item or a whole batch — into
+ * one verdict. Passing every probe through ONE combined list keeps that a
+ * single fold instead of an independent `.find()` or `??` chain each call
+ * site would otherwise re-spell.
  */
 export function mixedBatchWritePlan(
   constraintProbes: readonly (ConstraintFenceReason | undefined)[],

@@ -33,7 +33,8 @@ import {
   type GraphRelationNameSource,
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
-import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
+import { quoteIdentifier } from "../query/dialect/vector-strategy";
+import { shortHash } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
 
 /** The TypeGraph relations that carry system indexes. */

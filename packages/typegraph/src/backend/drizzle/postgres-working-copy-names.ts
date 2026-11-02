@@ -1,6 +1,6 @@
 /** Physical relation names of one PostgreSQL working-copy allocation. */
-import { shortHash } from "../../query/dialect/vector-strategy";
-import { sha256Hex } from "../../utils/hash";
+import { CompilerInvariantError } from "../../errors";
+import { sha256Hex, shortHash } from "../../utils/hash";
 import { requireDefined } from "../../utils/presence";
 import {
   defaultPostgresTableNames,
@@ -47,8 +47,9 @@ export function allocationRelationSuffixes<K extends string>(
     const suffix = sharing.get(truncated) === 1 ? truncated : hashedSuffix(key);
     const owner = owners.get(suffix);
     if (owner !== undefined) {
-      throw new Error(
+      throw new CompilerInvariantError(
         `Working-copy relations "${owner}" and "${key}" resolve to the same physical suffix "${suffix}".`,
+        { owner, key, suffix },
       );
     }
     owners.set(suffix, key);

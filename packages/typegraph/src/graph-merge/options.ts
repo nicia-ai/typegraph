@@ -157,6 +157,17 @@ const KEYLESS_KEYS: ReadonlySet<string> = new Set(
   >),
 );
 
+type StrategyArm<Kind extends SimilarityStrategy["kind"]> = Extract<
+  SimilarityStrategy,
+  Readonly<{ kind: Kind }>
+>;
+
+function declaredStrategyKeys<Arm extends SimilarityStrategy>(
+  keys: Readonly<Record<Exclude<keyof Arm, "__graph">, true>>,
+): ReadonlySet<string> {
+  return new Set(Object.keys(keys));
+}
+
 /**
  * Every key each {@link SimilarityStrategy} arm declares, by its `kind`. The
  * phantom `__graph` binding is never set at runtime, so it is not listed.
@@ -164,10 +175,23 @@ const KEYLESS_KEYS: ReadonlySet<string> = new Set(
 const SIMILARITY_STRATEGY_KEYS: Readonly<
   Record<SimilarityStrategy["kind"], ReadonlySet<string>>
 > = {
-  hybrid: new Set(["kind", "fields", "weights"]),
-  vector: new Set(["kind", "field"]),
-  fulltext: new Set(["kind", "fields"]),
-  custom: new Set(["kind", "score"]),
+  hybrid: declaredStrategyKeys<StrategyArm<"hybrid">>({
+    kind: true,
+    fields: true,
+    weights: true,
+  }),
+  vector: declaredStrategyKeys<StrategyArm<"vector">>({
+    kind: true,
+    field: true,
+  }),
+  fulltext: declaredStrategyKeys<StrategyArm<"fulltext">>({
+    kind: true,
+    fields: true,
+  }),
+  custom: declaredStrategyKeys<StrategyArm<"custom">>({
+    kind: true,
+    score: true,
+  }),
 };
 
 /** Every key a hybrid strategy's `weights` declares. */
@@ -189,15 +213,16 @@ const HYBRID_WEIGHT_KEYS: ReadonlySet<string> = new Set(
  * enclosing option, so the refusal names the exact key — `resolve.Person.blok`
  * rather than `blok`.
  */
-function assertOnlyDeclaredKeys(
+export function assertOnlyDeclaredKeys(
   value: object,
   declared: ReadonlySet<string>,
   path: string,
+  optionNoun = "merge option",
 ): void {
   const unknownKey = Object.keys(value).find((key) => !declared.has(key));
   if (unknownKey === undefined) return;
   const option = path === "" ? unknownKey : `${path}.${unknownKey}`;
-  throw new InvalidMergeOptionsError(`Unknown merge option "${option}".`, {
+  throw new InvalidMergeOptionsError(`Unknown ${optionNoun} "${option}".`, {
     details: { option },
   });
 }

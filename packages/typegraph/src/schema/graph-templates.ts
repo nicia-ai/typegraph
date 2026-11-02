@@ -3,7 +3,7 @@ import { type GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { ConfigurationError } from "../errors";
 import { type ReconciledSchema } from "../store/store";
-import { activeSchemaHash } from "./manager";
+import { storedSchemaHashMatches } from "./manager";
 import { computeSchemaHash, serializeSchema } from "./serializer";
 
 /** A locally held handle for a durable server-side graph template. */
@@ -77,7 +77,7 @@ export async function registerGraphTemplate<G extends GraphDef>(
     schemaHash,
     schemaDoc: schemaDocument,
   });
-  if (!(await storedSchemaMatches(stored, schemaHash))) {
+  if (!(await storedSchemaHashMatches(stored, schemaHash))) {
     throw new ConfigurationError(
       `Graph template "${params.templateId}" already exists with different schema content.`,
       {
@@ -92,22 +92,6 @@ export async function registerGraphTemplate<G extends GraphDef>(
     schemaHash,
     registryHash: stored.schema_hash,
   });
-}
-
-/**
- * Whether a stored template or schema row holds the schema `schemaHash`
- * names. The column is checked first because it is equal whenever this
- * release wrote the row; a row an earlier release wrote is judged by its
- * document, through the one owner every stored-version comparison reads.
- */
-async function storedSchemaMatches(
-  row: Readonly<{ schema_hash: string; schema_doc: string }>,
-  schemaHash: string,
-): Promise<boolean> {
-  return (
-    row.schema_hash === schemaHash ||
-    (await activeSchemaHash(row)) === schemaHash
-  );
 }
 
 /**
@@ -207,7 +191,7 @@ async function earlierReleaseTargetSchemaHash(
   if (
     active?.version !== 1 ||
     active.schema_hash === targetHash ||
-    !(await storedSchemaMatches(active, targetHash))
+    !(await storedSchemaHashMatches(active, targetHash))
   ) {
     return undefined;
   }

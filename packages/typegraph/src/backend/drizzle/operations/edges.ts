@@ -29,6 +29,7 @@ import {
   castBoundValueForColumn,
   edgeColumnList,
   expectedValidFromPredicate,
+  qualifiedColumn,
   quotedColumn,
   quotedTableName,
   type RowLockClause,
@@ -63,13 +64,6 @@ export type AtomicConvergeEdgesParams = Readonly<{
   schemaFence: SchemaWriteFenceParams;
   schemaLockClause: SQL;
 }>;
-
-function qualifiedColumn(
-  alias: string,
-  column: Readonly<{ name: string }>,
-): SQL {
-  return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
-}
 
 function atomicEdgeCreatePostimage(
   params: InsertEdgeParams,
@@ -136,7 +130,8 @@ export function liveEndpointLockOrder(
   params: Pick<InsertEdgeParams, "fromKind" | "fromId" | "toKind" | "toId">,
 ): readonly string[] {
   const byKind = compareCodePoints(params.fromKind, params.toKind);
-  const order = byKind === 0 ? compareCodePoints(params.fromId, params.toId) : byKind;
+  const order =
+    byKind === 0 ? compareCodePoints(params.fromId, params.toId) : byKind;
   return order <= 0 ? LIVE_ENDPOINT_ALIASES : ["to_node", "from_node"];
 }
 
@@ -1444,21 +1439,11 @@ export function buildCountEdgesAtEndpoint(
   params: CountEdgesAtEndpointParams,
 ): SQL {
   const { edges } = tables;
-  const kindColumn =
-    params.endpoint === "from" ? edges.fromKind : edges.toKind;
+  const kindColumn = params.endpoint === "from" ? edges.fromKind : edges.toKind;
   const idColumn = params.endpoint === "from" ? edges.fromId : edges.toId;
 
-  if (params.activeOnly) {
-    return sql`
-      SELECT COUNT(*) as count FROM ${edges}
-      WHERE ${edges.graphId} = ${params.graphId}
-        AND ${edges.kind} = ${params.edgeKind}
-        AND ${kindColumn} = ${params.endpointKind}
-        AND ${idColumn} = ${params.endpointId}
-        AND ${edges.deletedAt} IS NULL
-        AND ${edges.validTo} IS NULL
-    `;
-  }
+  const activeTerm =
+    params.activeOnly ? sql`\n      AND ${edges.validTo} IS NULL` : sql``;
 
   return sql`
     SELECT COUNT(*) as count FROM ${edges}
@@ -1466,7 +1451,7 @@ export function buildCountEdgesAtEndpoint(
       AND ${edges.kind} = ${params.edgeKind}
       AND ${kindColumn} = ${params.endpointKind}
       AND ${idColumn} = ${params.endpointId}
-      AND ${edges.deletedAt} IS NULL
+      AND ${edges.deletedAt} IS NULL${activeTerm}
   `;
 }
 

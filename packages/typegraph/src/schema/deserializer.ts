@@ -133,24 +133,20 @@ export function deserializeSchema(
 // ============================================================
 
 /**
- * Builds a KindRegistry from a serialized schema's ontology, edges, and
- * identity slices.
+ * Builds a KindRegistry from a serialized schema's ontology, nodes, edges,
+ * and identity slices.
  *
  * Persisted closures are a legacy inspection artifact. Relations are validated
  * and closures are recomputed so old schemas gain current hardening rules.
  *
- * Deliberately narrower than `SerializedSchema`: `nodes` carries no
- * information this construction needs (node kinds are discovered through the
+ * `nodes` registers no node kinds (node kinds are discovered through the
  * ontology relations and edge endpoints, and no Zod schema can be
- * reconstructed from JSON Schema anyway), so the ontology-tightening
- * classifier (`src/schema/ontology-change.ts`) can build a registry for
- * either side of a diff from an `OntologySnapshot` without also carrying the
- * property-schema slice.
+ * reconstructed from JSON Schema): it only classifies names and supplies the
+ * property schemas the structural-subsumption check compares.
  *
- * Exported (renamed from the former private `buildRegistryFromRelations`) so
- * the deserializer's registry and the ontology-tightening classifier's
- * registry are the SAME construction — one owner, so a persisted ontology
- * cannot be interpreted two different ways by two call sites.
+ * The one construction for a persisted ontology, so the deserializer's
+ * registry and the ontology-tightening classifier's registry
+ * (`src/schema/ontology-change.ts`) cannot interpret one document two ways.
  */
 export function buildRegistryFromSerializedSchema(
   schema: Pick<SerializedSchema, "ontology" | "nodes" | "edges" | "identity">,

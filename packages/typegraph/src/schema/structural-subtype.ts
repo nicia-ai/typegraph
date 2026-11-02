@@ -143,9 +143,10 @@
  * An unmodeled construct always yields `{ verdict: "incomparable" }` and is
  * never silently accepted as a match.
  */
+import { decodeJsonPointerSegment } from "../query/json-pointer";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { sortedReplacer } from "./canonical";
+import { canonicalJson } from "./canonical";
 import {
   closesTupleByOmission,
   isObjectSchema,
@@ -503,15 +504,14 @@ function incomparable(
 // ============================================================
 
 /**
- * `undefined` when `schema` carries no keyword this predicate knows
- * constrains values but cannot model; otherwise the `incomparable` result to
- * return immediately.
+ * `undefined` when `stripped` (a schema after {@link stripSchemaMetadata})
+ * carries no keyword this predicate knows constrains values but cannot model;
+ * otherwise the `incomparable` result to return immediately.
  */
 function unmodeledConstruct(
-  schema: JsonSchema,
+  stripped: Readonly<Record<string, unknown>>,
   path: readonly string[],
 ): StructuralSubtypeResult | undefined {
-  const stripped = stripSchemaMetadata(schema);
   for (const key of Object.keys(stripped)) {
     if (UNMODELED_CONSTRAINING_KEYWORDS.has(key)) {
       return incomparable("unsupported-keyword", path);
@@ -521,14 +521,16 @@ function unmodeledConstruct(
 }
 
 /**
- * `schema` reduced to only the keywords this predicate compares — migration
- * metadata (description/title/default/$schema) and any keyword outside
- * {@link COMPARABLE_KEYWORDS} are dropped. Used only for the equality fast
+ * `stripped` (a schema after {@link stripSchemaMetadata}, which drops the
+ * migration metadata description/title/default/$schema) reduced to only the
+ * keywords this predicate compares — any keyword outside
+ * {@link COMPARABLE_KEYWORDS} is dropped. Used only for the equality fast
  * path below; the per-construct comparison functions read the original schema
  * directly.
  */
-function comparableKeywords(schema: JsonSchema): Record<string, unknown> {
-  const stripped = stripSchemaMetadata(schema);
+function comparableKeywords(
+  stripped: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
   const kept = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(stripped)) {
     if (COMPARABLE_KEYWORDS.has(key)) kept[key] = value;
@@ -586,11 +588,6 @@ function collectReferences(value: unknown, into: Set<string>): void {
   }
 }
 
-/** A JSON Pointer reference token, unescaped (RFC 6901: `~1` then `~0`). */
-function unescapePointerToken(token: string): string {
-  return token.replaceAll("~1", "/").replaceAll("~0", "~");
-}
-
 /**
  * What `reference` names in `root`: the document itself, or one of its
  * `$defs` — the two forms the projection emits. `undefined` for a reference
@@ -606,7 +603,7 @@ function resolveReference(
   const definitions = root[DEFINITIONS_KEYWORD];
   if (definitions === null || typeof definitions !== "object") return undefined;
   const byName = definitions as Record<string, JsonSchema>;
-  const name = unescapePointerToken(
+  const name = decodeJsonPointerSegment(
     reference.slice(LOCAL_DEFINITION_PREFIX.length),
   );
   return hasOwnKey(byName, name) ? byName[name] : undefined;
@@ -704,11 +701,9 @@ function compareSchemas(
   // copies a parent's `$ref`/`allOf` property verbatim is refused as
   // SCHEMA_INCOMPARABLE instead of accepted as an identical, and therefore
   // trivially compatible, property.
-  if (
-    sameSchema(stripSchemaMetadata(child), stripSchemaMetadata(parent), walk)
-  ) {
-    return SUBTYPE;
-  }
+  const strippedChild = stripSchemaMetadata(child);
+  const strippedParent = stripSchemaMetadata(parent);
+  if (sameSchema(strippedChild, strippedParent, walk)) return SUBTYPE;
 
   if (
     hasOwnKey(child, UNPROJECTABLE_NODE_KEYWORD) ||
@@ -717,7 +712,10 @@ function compareSchemas(
     return SUBTYPE;
   }
 
-  if (hasOwnKey(child, "$ref") || hasOwnKey(parent, "$ref")) {
+  if (
+    hasOwnKey(child, REFERENCE_KEYWORD) ||
+    hasOwnKey(parent, REFERENCE_KEYWORD)
+  ) {
     return incomparable("schema-reference", path);
   }
 
@@ -729,12 +727,18 @@ function compareSchemas(
     return incomparable("unsupported-construct", path);
   }
 
-  const childUnmodeled = unmodeledConstruct(child, path);
+  const childUnmodeled = unmodeledConstruct(strippedChild, path);
   if (childUnmodeled !== undefined) return childUnmodeled;
-  const parentUnmodeled = unmodeledConstruct(parent, path);
+  const parentUnmodeled = unmodeledConstruct(strippedParent, path);
   if (parentUnmodeled !== undefined) return parentUnmodeled;
 
-  if (sameSchema(comparableKeywords(child), comparableKeywords(parent), walk)) {
+  if (
+    sameSchema(
+      comparableKeywords(strippedChild),
+      comparableKeywords(strippedParent),
+      walk,
+    )
+  ) {
     return SUBTYPE;
   }
 
@@ -789,9 +793,21 @@ function disjointByTypeToken(left: JsonSchema, right: JsonSchema): boolean {
   if (typeof leftType !== "string" || typeof rightType !== "string") {
     return false;
   }
-  if (leftType === rightType) return false;
-  const numeric = new Set([NUMBER_TYPE_TOKEN, INTEGER_TYPE_TOKEN]);
-  return !(numeric.has(leftType) && numeric.has(rightType));
+  return (
+    !typeTokenNarrows(leftType, rightType) &&
+    !typeTokenNarrows(rightType, leftType)
+  );
+}
+
+/** Whether every value of type `child` is a value of type `parent`: the same token, or `integer` under `number`. */
+function typeTokenNarrows(
+  child: NonNullable<JsonSchema["type"]>,
+  parent: NonNullable<JsonSchema["type"]>,
+): boolean {
+  return (
+    child === parent ||
+    (child === INTEGER_TYPE_TOKEN && parent === NUMBER_TYPE_TOKEN)
+  );
 }
 
 /** The value set a schema pins one REQUIRED property to, if it does. */
@@ -994,13 +1010,10 @@ function compareLeaf(
     return notSubtype("unconstrained-where-parent-constrains", path);
   }
 
-  const isIntegerNarrowingNumber =
-    childType === INTEGER_TYPE_TOKEN && parentType === NUMBER_TYPE_TOKEN;
   if (
     childType !== undefined &&
     parentType !== undefined &&
-    childType !== parentType &&
-    !isIntegerNarrowingNumber
+    !typeTokenNarrows(childType, parentType)
   ) {
     return notSubtype("type-token-mismatch", path);
   }
@@ -1033,8 +1046,12 @@ function compareLeaf(
     case undefined:
     default: {
       if (
-        hasKeywordOutsideValueSet(comparableKeywords(child)) ||
-        hasKeywordOutsideValueSet(comparableKeywords(parent))
+        hasKeywordOutsideValueSet(
+          comparableKeywords(stripSchemaMetadata(child)),
+        ) ||
+        hasKeywordOutsideValueSet(
+          comparableKeywords(stripSchemaMetadata(parent)),
+        )
       ) {
         return incomparable("unsupported-construct", path);
       }
@@ -1043,16 +1060,12 @@ function compareLeaf(
   }
 }
 
-function canonicalValueKey(value: unknown): string {
-  return JSON.stringify(value, sortedReplacer);
-}
-
 function allowedValues(schema: JsonSchema): ReadonlySet<string> | undefined {
   if (hasOwnKey(schema, "const")) {
-    return new Set([canonicalValueKey(schema.const)]);
+    return new Set([canonicalJson(schema.const)]);
   }
   if (schema.enum !== undefined) {
-    return new Set(schema.enum.map((value) => canonicalValueKey(value)));
+    return new Set(schema.enum.map((value) => canonicalJson(value)));
   }
   return undefined;
 }

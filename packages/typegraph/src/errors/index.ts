@@ -1325,6 +1325,19 @@ export type CompositionErrorDetails =
       at: string;
     }>;
 
+function compositionPartLabel(
+  details: Readonly<{ partKind: string; partId?: string | undefined }>,
+): string {
+  return `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+}
+
+function compositionWholeLabel(
+  whole: Readonly<{ kind: string; id: string }>,
+  via: string | undefined,
+): string {
+  return `${whole.kind}/${whole.id}${via === undefined ? "" : ` (via "${via}")`}`;
+}
+
 /**
  * What one {@link CompositionErrorDetails} situation reads as: its code, its
  * message, and the way out — one switch, so a code never drifts from the
@@ -1333,7 +1346,7 @@ export type CompositionErrorDetails =
 function describeCompositionRefusal(
   details: CompositionErrorDetails,
 ): Readonly<{ code: string; message: string; suggestion: string }> {
-  const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+  const partLabel = compositionPartLabel(details);
   const wholeLabel = `${details.wholeKind}/${details.wholeId}`;
   switch (details.situation) {
     case "occupied": {
@@ -1476,7 +1489,7 @@ export type CompositionExistenceErrorDetails = Readonly<{
 function describeCompositionExistenceRefusal(
   details: CompositionExistenceErrorDetails,
 ): Readonly<{ code: string; message: string; suggestion: string }> {
-  const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+  const partLabel = compositionPartLabel(details);
   switch (details.situation) {
     case "create": {
       return {
@@ -1498,19 +1511,11 @@ function describeCompositionExistenceRefusal(
       const held =
         details.currentWhole === undefined ?
           "no whole"
-        : `whole ${details.currentWhole.kind}/${details.currentWhole.id}${
-            details.currentVia === undefined ?
-              ""
-            : ` (via "${details.currentVia}")`
-          }`;
+        : `whole ${compositionWholeLabel(details.currentWhole, details.currentVia)}`;
       const asked =
         details.requestedWhole === undefined ?
           "the requested whole"
-        : `${details.requestedWhole.kind}/${details.requestedWhole.id}${
-            details.requestedVia === undefined ?
-              ""
-            : ` (via "${details.requestedVia}")`
-          }`;
+        : compositionWholeLabel(details.requestedWhole, details.requestedVia);
       return {
         code: "COMPOSITION_WHOLE_CONFLICT",
         message: `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`,

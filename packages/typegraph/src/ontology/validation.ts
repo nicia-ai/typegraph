@@ -11,14 +11,13 @@ import {
 } from "../registry/kind-registry";
 import { computeTransitiveClosure } from "./closures";
 import {
+  isEquivalenceMetaEdge,
   META_EDGE_BROADER,
   META_EDGE_DISJOINT_WITH,
-  META_EDGE_EQUIVALENT_TO,
   META_EDGE_HAS_PART,
   META_EDGE_INVERSE_OF,
   META_EDGE_NARROWER,
   META_EDGE_PART_OF,
-  META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
   type MetaEdgeName,
 } from "./constants";
@@ -417,8 +416,7 @@ function findEquivalenceRelationIndex(
   const memberSet = new Set(members);
   for (const [index, relation] of ontology.entries()) {
     if (
-      (relation.metaEdge === META_EDGE_EQUIVALENT_TO ||
-        relation.metaEdge === META_EDGE_SAME_AS) &&
+      isEquivalenceMetaEdge(relation.metaEdge) &&
       memberSet.has(relation.from) &&
       memberSet.has(relation.to)
     ) {

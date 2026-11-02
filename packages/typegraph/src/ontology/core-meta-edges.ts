@@ -321,6 +321,27 @@ const COMPOSITION_OPTION_KEYS: readonly string[] = [
   "existence",
 ] satisfies readonly (keyof CompositionOptions)[];
 
+/** The enum-valued composition options, in the order they are judged. */
+const COMPOSITION_ENUM_OPTIONS = [
+  {
+    option: "existence",
+    values: COMPOSITION_EXISTENCE_VALUES,
+    isValid: isCompositionExistence,
+    code: "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID",
+  },
+  {
+    option: "partSide",
+    values: COMPOSITION_PART_SIDE_VALUES,
+    isValid: isCompositionPartSide,
+    code: "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID",
+  },
+] as const satisfies readonly Readonly<{
+  option: keyof CompositionOptions;
+  values: readonly string[];
+  isValid: (value: unknown) => boolean;
+  code: string;
+}>[];
+
 /**
  * THE one read of a `partOf` / `hasPart` options object, shared by both
  * factories so neither can accept what the other refuses. A key this library
@@ -345,36 +366,13 @@ function compositionRelationOptions(
       },
     );
   }
-  if (
-    options.existence !== undefined &&
-    !isCompositionExistence(options.existence)
-  ) {
+  for (const { option, values, isValid, code } of COMPOSITION_ENUM_OPTIONS) {
+    const value = options[option];
+    if (value === undefined || isValid(value)) continue;
     throw new ConfigurationError(
-      `${factory}() was given \`existence: ${JSON.stringify(options.existence)}\`.`,
-      {
-        code: "ONTOLOGY_COMPOSITION_EXISTENCE_INVALID",
-        factory,
-        existence: options.existence,
-      },
-      {
-        suggestion: `Pass one of: ${COMPOSITION_EXISTENCE_VALUES.join(", ")}.`,
-      },
-    );
-  }
-  if (
-    options.partSide !== undefined &&
-    !isCompositionPartSide(options.partSide)
-  ) {
-    throw new ConfigurationError(
-      `${factory}() was given \`partSide: ${JSON.stringify(options.partSide)}\`.`,
-      {
-        code: "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID",
-        factory,
-        partSide: options.partSide,
-      },
-      {
-        suggestion: `Pass one of: ${COMPOSITION_PART_SIDE_VALUES.join(", ")}.`,
-      },
+      `${factory}() was given \`${option}: ${JSON.stringify(value)}\`.`,
+      { code, factory, [option]: value },
+      { suggestion: `Pass one of: ${values.join(", ")}.` },
     );
   }
   return compositionRelationFields({

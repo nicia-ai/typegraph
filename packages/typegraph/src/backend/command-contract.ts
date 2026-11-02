@@ -111,9 +111,9 @@ export function normalizeGraphCommandIsolation(
 }
 
 /** The column a fence acquisition reports its session isolation under. */
-const FENCE_ISOLATION_COLUMN = "transaction_isolation";
+export const FENCE_ISOLATION_COLUMN = "transaction_isolation";
 /** The column a fence acquisition reports its advanced fence row under. */
-const FENCE_ROW_GENERATION_COLUMN = "generation";
+export const FENCE_ROW_GENERATION_COLUMN = "generation";
 
 /**
  * THE one reader of a graph-write fence acquisition's result row, shared by
@@ -151,16 +151,6 @@ function boundGraphCommandCoordination(
     ) ?
       binding
     : undefined;
-}
-
-/** Effective isolation of coordination earned by this graph and transaction. */
-export function graphCommandCoordinationIsolation(
-  port: GraphCommandPort,
-  graphId: string,
-  coordination: GraphCommandCoordination,
-): GraphCommandIsolation {
-  return graphCommandCoordinationAcquisition(port, coordination, graphId)
-    .isolation;
 }
 
 /**

@@ -9,7 +9,12 @@ import {
   UnsupportedPredicateError,
 } from "../../errors";
 import { KIND_QUALIFIED_PATH_TOKEN_SEPARATOR } from "../../utils/path";
-import { type FieldRef, type QueryAst, type SelectiveField } from "../ast";
+import {
+  type FieldRef,
+  type QueryAst,
+  type SelectiveField,
+  type TraversalDirection,
+} from "../ast";
 import {
   type DialectAdapter,
   type DialectRecursiveQueryStrategy,
@@ -90,6 +95,49 @@ export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
 type EdgeJoinField = "from_id" | "to_id";
+type EdgeKindField = "from_kind" | "to_kind";
+
+/** The normalizing CTE's uniform endpoint columns a mixed traversal reads. */
+type DirectedEdgeJoinField = EdgeJoinField | "tg_source_id" | "tg_target_id";
+type DirectedEdgeKindField =
+  EdgeKindField | "tg_source_kind" | "tg_target_kind";
+
+type EdgeEndpointColumns = Readonly<{
+  joinField: EdgeJoinField;
+  targetField: EdgeJoinField;
+  joinKindField: EdgeKindField;
+  targetKindField: EdgeKindField;
+}>;
+
+/** The edge endpoint columns a walk entering an edge in `direction` joins and exits on. */
+function traversalEndpointColumns(
+  direction: TraversalDirection,
+): EdgeEndpointColumns {
+  return direction === "out" ?
+      {
+        joinField: "from_id",
+        targetField: "to_id",
+        joinKindField: "from_kind",
+        targetKindField: "to_kind",
+      }
+    : {
+        joinField: "to_id",
+        targetField: "from_id",
+        joinKindField: "to_kind",
+        targetKindField: "from_kind",
+      };
+}
+
+function reversedEndpointColumns(
+  columns: EdgeEndpointColumns,
+): EdgeEndpointColumns {
+  return {
+    joinField: columns.targetField,
+    targetField: columns.joinField,
+    joinKindField: columns.targetKindField,
+    targetKindField: columns.joinKindField,
+  };
+}
 
 /**
  * The column a mixed-orientation traversal's normalizing CTE carries each
@@ -666,8 +714,8 @@ function compileRecursiveCte(
    */
   function compileWorktableJoinClauses(
     branch: Readonly<{
-      joinField: string;
-      joinKindField: string;
+      joinField: DirectedEdgeJoinField;
+      joinKindField: DirectedEdgeKindField;
     }>,
   ): SqlFragment[] {
     const edgeId = sql`e.${sql.raw(branch.joinField)}`;
@@ -687,10 +735,10 @@ function compileRecursiveCte(
 
   function compileRecursiveBranch(
     branch: Readonly<{
-      joinField: string;
-      targetField: string;
-      joinKindField: string;
-      targetKindField: string;
+      joinField: DirectedEdgeJoinField;
+      targetField: DirectedEdgeJoinField;
+      joinKindField: DirectedEdgeKindField;
+      targetKindField: DirectedEdgeKindField;
       edgeKinds: readonly string[];
       duplicateGuard?: SqlFragment | undefined;
       /**
@@ -781,10 +829,7 @@ function compileRecursiveCte(
     `;
   }
 
-  const directJoinField = direction === "out" ? "from_id" : "to_id";
-  const directTargetField = direction === "out" ? "to_id" : "from_id";
-  const directJoinKindField = direction === "out" ? "from_kind" : "to_kind";
-  const directTargetKindField = direction === "out" ? "to_kind" : "from_kind";
+  const directColumns = traversalEndpointColumns(direction);
 
   // PostgreSQL allows one recursive reference per recursive term, so both
   // orientations are normalized into this single CTE before recursion starts.
@@ -792,11 +837,6 @@ function compileRecursiveCte(
   const directedEdgesCteName = `${traversal.edgeAlias}_directed_edges`;
 
   function compileRecursiveDirectedEdgesCte(): SqlFragment {
-    const inverseJoinField = direction === "out" ? "to_id" : "from_id";
-    const inverseTargetField = direction === "out" ? "from_id" : "to_id";
-    const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
-    const inverseTargetKindField =
-      direction === "out" ? "from_kind" : "to_kind";
     // A self-loop of a kind in both lists would yield two identical rows; the
     // guard drops the inverse arm's copy.
     const duplicateGuard = compileInverseTraversalDuplicateGuard(
@@ -850,26 +890,29 @@ function compileRecursiveCte(
     // term applies both again, and `edgeTemporalFilter` is row-local over
     // `e`'s own temporal columns); this only bounds what gets normalized
     // before those filters run.
-    const directArm = sql`
-      SELECT ${directedEdgeBaseColumns},
-        e.${sql.raw(directJoinField)} AS tg_source_id,
-        e.${sql.raw(directJoinKindField)} AS tg_source_kind,
-        e.${sql.raw(directTargetField)} AS tg_target_id,
-        e.${sql.raw(directTargetKindField)} AS tg_target_kind${armDirectionColumn(directJoinField)}
-      FROM ${ctx.schema.edgesTable} e
-      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(directEdgeKinds, "e.kind")} AND ${edgeTemporalFilter}
-    `;
-    const inverseArm = sql`
-      SELECT ${directedEdgeBaseColumns},
-        e.${sql.raw(inverseJoinField)} AS tg_source_id,
-        e.${sql.raw(inverseJoinKindField)} AS tg_source_kind,
-        e.${sql.raw(inverseTargetField)} AS tg_target_id,
-        e.${sql.raw(inverseTargetKindField)} AS tg_target_kind${armDirectionColumn(inverseJoinField)}
-      FROM ${ctx.schema.edgesTable} e
-      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(inverseEdgeKinds, "e.kind")} AND ${edgeTemporalFilter}${
-        duplicateGuard === undefined ? sql`` : sql` AND ${duplicateGuard}`
-      }
-    `;
+    function compileDirectedEdgeArm(
+      columns: EdgeEndpointColumns,
+      edgeKinds: readonly string[],
+      duplicateGuard?: SqlFragment,
+    ): SqlFragment {
+      return sql`
+        SELECT ${directedEdgeBaseColumns},
+          e.${sql.raw(columns.joinField)} AS tg_source_id,
+          e.${sql.raw(columns.joinKindField)} AS tg_source_kind,
+          e.${sql.raw(columns.targetField)} AS tg_target_id,
+          e.${sql.raw(columns.targetKindField)} AS tg_target_kind${armDirectionColumn(columns.joinField)}
+        FROM ${ctx.schema.edgesTable} e
+        WHERE e.graph_id = ${graphId} AND ${compileKindFilter(edgeKinds, "e.kind")} AND ${edgeTemporalFilter}${
+          duplicateGuard === undefined ? sql`` : sql` AND ${duplicateGuard}`
+        }
+      `;
+    }
+    const directArm = compileDirectedEdgeArm(directColumns, directEdgeKinds);
+    const inverseArm = compileDirectedEdgeArm(
+      reversedEndpointColumns(directColumns),
+      inverseEdgeKinds,
+      duplicateGuard,
+    );
 
     return sql`
       ${sql.raw(directedEdgesCteName)} AS (
@@ -896,12 +939,9 @@ function compileRecursiveCte(
         edgeSource: sql.raw(directedEdgesCteName),
       })
     : compileRecursiveBranch({
-        joinField: directJoinField,
-        targetField: directTargetField,
-        joinKindField: directJoinKindField,
-        targetKindField: directTargetKindField,
+        ...directColumns,
         edgeKinds: directEdgeKinds,
-        pathDirection: sql`${qualifiedPathDirection(directJoinField)}`,
+        pathDirection: sql`${qualifiedPathDirection(directColumns.joinField)}`,
       });
   const baseSelectColumns = [
     ...startColumnsFromBase,

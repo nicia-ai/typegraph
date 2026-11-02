@@ -9,8 +9,10 @@
  * instead — built once per input shape (a live `GraphDef` or a persisted
  * schema) and read everywhere else.
  */
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
 import { type Cardinality, type TargetCardinality } from "../core/types";
 import { type SerializedEdgeDef } from "../schema/types";
+import { encodeTupleKey } from "../utils/tuple-key";
 
 /**
  * An edge kind's declared domain (`from`) and range (`to`) kind names, its
@@ -45,31 +47,60 @@ export function buildSerializedEdgeKindFacts(
 ): ReadonlyMap<string, EdgeKindFacts> {
   const result = new Map<string, EdgeKindFacts>();
   for (const [kind, def] of Object.entries(edges)) {
-    const pairs: { from: string; to: string }[] = [];
-    if (def.targetKindsBySource === undefined) {
-      for (const fromKind of def.fromKinds) {
-        for (const toKind of def.toKinds) {
-          pairs.push({ from: fromKind, to: toKind });
-        }
-      }
-    } else {
-      for (const [sourceKind, targetKinds] of Object.entries(
-        def.targetKindsBySource,
-      )) {
-        for (const targetKind of targetKinds) {
-          pairs.push({ from: sourceKind, to: targetKind });
-        }
-      }
-    }
     result.set(kind, {
       from: def.fromKinds,
       to: def.toKinds,
-      pairs,
+      pairs: serializedEdgeEndpointPairs(def),
       cardinality: def.cardinality,
-      // Absent in documents stored before the option existed (the serializer
-      // omits the default so untouched graphs keep their hash).
-      targetCardinality: def.targetCardinality ?? "many",
+      targetCardinality: effectiveTargetCardinality(def.targetCardinality),
     });
   }
   return result;
+}
+
+/**
+ * The `(from, to)` pairs a serialized edge declares: its source-dependent
+ * target map when it has one, else the Cartesian `fromKinds × toKinds`.
+ */
+export function serializedEdgeEndpointPairs(
+  def: SerializedEdgeDef,
+): EdgeKindFacts["pairs"] {
+  const pairs: { from: string; to: string }[] = [];
+  if (def.targetKindsBySource === undefined) {
+    for (const fromKind of def.fromKinds) {
+      for (const toKind of def.toKinds) {
+        pairs.push({ from: fromKind, to: toKind });
+      }
+    }
+  } else {
+    for (const [sourceKind, targetKinds] of Object.entries(
+      def.targetKindsBySource,
+    )) {
+      for (const targetKind of targetKinds) {
+        pairs.push({ from: sourceKind, to: targetKind });
+      }
+    }
+  }
+  return pairs;
+}
+
+/**
+ * The declared endpoint pairs `before` holds that `after` does not, deduped,
+ * in `before`'s order. Endpoint kind lists are sets, so the order pairs are
+ * declared in carries no meaning.
+ */
+export function lostEndpointPairs(
+  before: EdgeKindFacts["pairs"],
+  after: EdgeKindFacts["pairs"],
+): EdgeKindFacts["pairs"] {
+  const afterKeys = new Set(
+    after.map((pair) => encodeTupleKey([pair.from, pair.to])),
+  );
+  const seen = new Set<string>();
+  return before.filter((pair) => {
+    const key = encodeTupleKey([pair.from, pair.to]);
+    if (afterKeys.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

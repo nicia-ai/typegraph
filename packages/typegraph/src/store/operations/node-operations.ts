@@ -86,6 +86,7 @@ import {
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
+  isLiveNodeRowPresent,
   isTombstonedNodeRow,
   type LiveNodeRow,
   type NodeInsertProjection,
@@ -119,7 +120,7 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
-import { type IdentityFoldPlan, refKey } from "../../identity/service";
+import { type IdentityFoldPlan } from "../../identity/service";
 import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
@@ -155,7 +156,7 @@ import {
 import { generateId } from "../../utils/id";
 import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
-import { encodeTupleKey } from "../../utils/tuple-key";
+import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import { acyclicRelationCountsRow } from "../acyclicity";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
 import {
@@ -277,7 +278,7 @@ import {
   findLiveCompositionAttachment,
   incumbentSatisfiesRequestedAttachment,
   readCompositionAttachment,
-  readCompositionWholeRows,
+  readNodeRowsByRef,
   readReparentOptions,
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
@@ -292,7 +293,6 @@ import {
 import {
   assertCompositionEdgeWindowEndable,
   assertPreparedEdgeCreatesAcyclic,
-  edgeCardinalityDeclarations,
   type EdgeCreatePrepared,
   edgeInsertWork,
   endCompositionEdgeWindow,
@@ -623,7 +623,7 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
   const registration = getNodeRegistration(ctx.graph, kind);
   if (mode === "soft") {
     const preflight = existing ?? (await target.getNode(ctx.graphId, kind, id));
-    if (preflight === undefined || !isLiveNodeRow(preflight)) return false;
+    if (!isLiveNodeRowPresent(preflight)) return false;
     await session.retireNode(
       {
         existing: preflight,
@@ -757,7 +757,7 @@ async function planCascadingNodeDelete<G extends GraphDef>(
     for (const edgeId of verdict.removedEdgeIds) {
       effects.removedEdgeIds.add(edgeId);
     }
-    effects.deletedNodeKeys.add(refKey(node));
+    effects.deletedNodeKeys.add(nodeRefKey(node));
   };
 
   const memberPolicy = cascadeMemberDeletePolicy(plan);
@@ -831,7 +831,7 @@ function withoutPlannedDeleteEffects(
 ): CompositionCascadePlan {
   return {
     members: plan.members.filter(
-      (member) => !effects.deletedNodeKeys.has(refKey(member)),
+      (member) => !effects.deletedNodeKeys.has(nodeRefKey(member)),
     ),
     consumedEdgeIds: new Set(
       [...plan.consumedEdgeIds].filter(
@@ -912,6 +912,40 @@ async function applyCompositionCascade<G extends GraphDef>(
     ),
     mode,
   );
+}
+
+/**
+ * The write half of one planned node delete: its composition cascade,
+ * leaf-first, then the root's own row, told to skip every edge the cascade
+ * consumed. Returns the parts the cascade deleted, in deletion order.
+ *
+ * The cascade (connected edges, uniques, embeddings, fulltext, node) is not
+ * individually atomic, so every caller runs it inside one write frame. Under
+ * recorded-time capture that also collapses it into a single recorded commit
+ * instant instead of one instant per sub-write.
+ */
+async function deleteRootWithCascade<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: NodeWriteSession,
+  target: WriteTarget,
+  mode: NodeDeleteMode,
+  root: Readonly<{ kind: string; id: string }>,
+  policy: NodeDeletePolicy | undefined,
+  cascadePlan: CompositionCascadePlan,
+  preflight?: LiveNodeRow,
+): Promise<readonly CompositionCascadedPart[]> {
+  await applyCompositionCascade(ctx, cascadePlan, target, mode, session);
+  await deleteNodeRowInFrame(
+    ctx,
+    session,
+    target,
+    mode,
+    root.kind,
+    root.id,
+    withCascadeConsumedEdges(policy, cascadePlan.consumedEdgeIds),
+    preflight,
+  );
+  return cascadedPartReferences(cascadePlan);
 }
 
 /**
@@ -2149,7 +2183,7 @@ async function prepareNodeUpdateSet<G extends GraphDef>(
   const projected = new Map<string, BackendNodeRow>();
   const transitions: NodeClaimTransition[] = [];
   for (const created of sources.pendingCreates ?? []) {
-    projected.set(refKey(created), nodeRowOfPendingCreate(created));
+    projected.set(nodeRefKey(created), nodeRowOfPendingCreate(created));
     transitions.push({
       kind: created.kind,
       id: created.id,
@@ -2163,7 +2197,7 @@ async function prepareNodeUpdateSet<G extends GraphDef>(
   const prepared: NodeUpdateSetEntry[] = [];
   for (const entry of entries) {
     const ref = { kind: entry.input.kind, id: entry.input.id };
-    const projection = projected.get(refKey(ref));
+    const projection = projected.get(nodeRefKey(ref));
     const stored =
       projection === undefined ?
         (sources.storedRows?.get(ref.id) ??
@@ -2194,7 +2228,7 @@ async function prepareNodeUpdateSet<G extends GraphDef>(
       withdrawWindowEndNote();
     }
     transitions.push(update.claimTransition);
-    projected.set(refKey(ref), update.rowAfter);
+    projected.set(nodeRefKey(ref), update.rowAfter);
     prepared.push({
       prepared: update,
       preparedAgainstStoredRow: projection === undefined,
@@ -2786,7 +2820,7 @@ async function diagnoseAtomicNodeIdentity<G extends GraphDef>(
           prepared.kind,
           prepared.id,
         );
-        if (existing !== undefined && isLiveNodeRow(existing))
+        if (isLiveNodeRowPresent(existing))
           throw createAlreadyExistsError("node", prepared.kind, prepared.id);
       },
     );
@@ -2809,13 +2843,17 @@ async function diagnoseAtomicNodeIdentity<G extends GraphDef>(
         const rows = await boundGetNodes.getNodes(ctx.graphId, kind, idsWindow);
         for (const row of rows) {
           if (isLiveNodeRow(row))
-            occupiedReferences.add(refKey({ kind: row.kind, id: row.id }));
+            occupiedReferences.add(nodeRefKey({ kind: row.kind, id: row.id }));
         }
       }
     },
   );
   return preparedCreates.map((prepared) =>
-    occupiedReferences.has(refKey({ kind: prepared.kind, id: prepared.id })) ?
+    (
+      occupiedReferences.has(
+        nodeRefKey({ kind: prepared.kind, id: prepared.id }),
+      )
+    ) ?
       {
         kind: "refusal",
         error: createAlreadyExistsError("node", prepared.kind, prepared.id),
@@ -2872,7 +2910,7 @@ async function diagnoseAtomicNodeDisjointness<G extends GraphDef>(
         ...group.ids,
       ]);
       for (const row of rows) {
-        rowsByReference.set(refKey({ kind: row.kind, id: row.id }), row);
+        rowsByReference.set(nodeRefKey({ kind: row.kind, id: row.id }), row);
       }
     },
   );
@@ -2880,9 +2918,9 @@ async function diagnoseAtomicNodeDisjointness<G extends GraphDef>(
   return preparedCreates.map((prepared, index) => {
     for (const conflictingKind of requireDefined(disjointKindsByInput[index])) {
       const row = rowsByReference.get(
-        refKey({ kind: conflictingKind, id: prepared.id }),
+        nodeRefKey({ kind: conflictingKind, id: prepared.id }),
       );
-      if (row === undefined || !isLiveNodeRow(row)) continue;
+      if (!isLiveNodeRowPresent(row)) continue;
       const error = checkDisjointness(
         prepared.id,
         prepared.kind,
@@ -3072,7 +3110,7 @@ function restoreAtomicNodeBatchRows(
         { expectedGraphId: graphId, actualGraphId: row.graph_id },
       );
     }
-    const key = refKey({ kind: row.kind, id: row.id });
+    const key = nodeRefKey({ kind: row.kind, id: row.id });
     if (rowsByReference.has(key)) {
       throw new CompilerInvariantError(
         "Atomic node batch returned duplicate node references.",
@@ -3084,7 +3122,7 @@ function restoreAtomicNodeBatchRows(
 
   return preparedCreates.map((prepared) => {
     const row = rowsByReference.get(
-      refKey({ kind: prepared.kind, id: prepared.id }),
+      nodeRefKey({ kind: prepared.kind, id: prepared.id }),
     );
     if (row === undefined) {
       throw new CompilerInvariantError(
@@ -3561,38 +3599,30 @@ function resolveBatchCompositionWorks<G extends GraphDef>(
 }
 
 /**
- * The constraint-fence probe one composition create owes for the
- * edge it is about to attach — `edgeComposition: true` makes
- * `edgeWriteNeedsConstraintFence` answer `"edgeComposition"` unconditionally,
- * so a backend that cannot hold the fence refuses the whole create rather
- * than writing a node it cannot attach. The single spelling of that probe,
- * reused by the single-create path, both batch create paths, and the
- * composition-restoring leg of `executeNodeUpsertUpdate`.
+ * The constraint-fence probe a composition attachment owes for the edge it
+ * writes — `composition: true` makes `edgeWriteNeedsConstraintFence` answer
+ * `"edgeComposition"` unconditionally, whatever else the realizing edge kind
+ * declares, so a backend that cannot hold the fence refuses the whole write
+ * rather than writing a node it cannot attach. The single spelling of that
+ * probe, reused by every create, restore and reparent path that attaches.
  */
-function compositionEdgeConstraintFence<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  work: CompositionCreateWork,
-): ConstraintFenceReason | undefined {
-  return edgeWriteNeedsConstraintFence({
-    ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
-    composition: true,
-  });
-}
+const COMPOSITION_EDGE_FENCE = edgeWriteNeedsConstraintFence({
+  composition: true,
+});
 
 /**
- * The constraint-fence probes a batch's composition edges owe,
- * folded alongside the batch's own node probes by both create paths — one
- * spelling of "filter to the resolved works, then fence each one's realizing
- * edge kind" shared by `executeNodeCreateNoReturnBatch` and
- * `executeNodeCreateBatch`.
+ * The constraint-fence probes a batch's composition edges owe, folded
+ * alongside the batch's own node probes by both create paths
+ * (`executeNodeCreateNoReturnBatch`, `executeNodeCreateBatch`). Every
+ * attachment owes the same probe and a batch is constrained when any member
+ * is, so one entry stands for all of them.
  */
-function compositionBatchConstraintProbes<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
+function compositionBatchConstraintProbes(
   compositionWorks: readonly (CompositionCreateWork | undefined)[],
 ): readonly (ConstraintFenceReason | undefined)[] {
-  return compositionWorks
-    .filter((work): work is CompositionCreateWork => work !== undefined)
-    .map((work) => compositionEdgeConstraintFence(ctx, work));
+  return compositionWorks.some((work) => work !== undefined) ?
+      [COMPOSITION_EDGE_FENCE]
+    : [];
 }
 
 /** One batch item that owes a composition edge: the written row and its work. */
@@ -3634,7 +3664,7 @@ function batchCompositionAttachments(
  *
  * A lost claim at insert time is not a refusal this ordering leaves open:
  * every create that owes a composition edge holds the constraint fence
- * ({@link compositionEdgeConstraintFence}), so no other writer can change
+ * ({@link COMPOSITION_EDGE_FENCE}), so no other writer can change
  * what these reads judged before the insert lands, and the claim rows stay
  * the database backstop for the same verdict.
  */
@@ -3646,7 +3676,7 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
   part: Readonly<{ kind: string; id: string }>,
 ): Promise<EdgeCreatePrepared | undefined> {
   if (work === undefined) return undefined;
-  const wholeIsPart = refKey(work.whole) === refKey(part);
+  const wholeIsPart = nodeRefKey(work.whole) === nodeRefKey(part);
   return prepareCompositionCreateEdge(
     ctx,
     target,
@@ -3681,7 +3711,7 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
  * by both batch create paths so neither re-spells the join, the loop, or the
  * probe below.
  *
- * - The WHOLE rows are read once per kind ({@link readCompositionWholeRows})
+ * - The WHOLE rows are read once per kind ({@link readNodeRowsByRef})
  *   and judged per item by {@link assertCompositionWholeEndpointLive} — the
  *   same owner the fenced attachment decision uses, so a dead or missing
  *   whole refuses with the identical `EndpointNotFoundError` on the identical
@@ -3720,14 +3750,14 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
   if (attachments.length === 0) return [];
 
   const batchRowKeys = new Set(
-    preparedCreates.map((prepared) => refKey(prepared)),
+    preparedCreates.map((prepared) => nodeRefKey(prepared)),
   );
   const wholeIsBatchRow = (work: CompositionCreateWork): boolean =>
-    batchRowKeys.has(refKey(work.whole));
+    batchRowKeys.has(nodeRefKey(work.whole));
   // One round trip per distinct whole kind, through the owner the
-  // `compositionExistence` audit reads as well. `refKey` below is the tuple
+  // `compositionExistence` audit reads as well. `nodeRefKey` below is the tuple
   // key that read returns its rows under.
-  const wholeRows = await readCompositionWholeRows(
+  const wholeRows = await readNodeRowsByRef(
     target,
     ctx.graphId,
     attachments
@@ -3752,7 +3782,7 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
             { source: "wholeInFrame" }
           : {
               source: "primedWhole",
-              wholeRow: wholeRows.get(refKey(work.whole)),
+              wholeRow: wholeRows.get(nodeRefKey(work.whole)),
             },
         validateAcyclicity: false,
       },
@@ -4249,42 +4279,61 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
 }
 
 /**
- * The fenced attachment of ONE part in one call — decide, prepare, write —
- * for a frame whose only statements are the attachment's own
- * ({@link runCompositionAttachmentWritePlan}). A frame that owes other
- * statements calls the halves separately so its refusals come first
- * ({@link executeNodeUpsertUpdate}), as does one that moves several parts
- * ({@link executeNodeReparentBatch}).
+ * The fenced attachment of parts in one call — re-read, decide, prepare,
+ * write — for a frame whose only statements are the attachments' own: one
+ * part's ({@link runCompositionAttachmentWritePlan}) or a reparent's
+ * ({@link executeNodeReparentBatch}). A frame that owes other statements
+ * calls the halves separately so its refusals come first
+ * ({@link executeNodeUpsertUpdate}).
  */
-async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
+async function applyCompositionAttachmentsUnderFence<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
-  partId: string,
-  request: CompositionAttachmentRequest,
-): Promise<AttachmentApplyResult> {
-  const decided = await decideCompositionAttachmentUnderFence(
-    ctx.registry,
-    target,
-    ctx.graphId,
-    partId,
-    request,
-    lock,
-    { partRowRestoredByUpdate: false },
-  );
-  const [result] = await writeCompositionAttachmentMoves(
+  operation: "nodes.attach" | "nodes.reparent",
+  partKind: string,
+  items: readonly Readonly<{
+    id: string;
+    request: CompositionAttachmentRequest;
+    moveAt: CompositionMoveInstant | undefined;
+  }>[],
+): Promise<readonly AttachmentApplyResult[]> {
+  // Every item is decided, then every move prepared, before the first
+  // write: see `prepareCompositionAttachmentMoves`.
+  const decisions: DecidedAttachmentMove[] = [];
+  for (const item of items) {
+    // Re-read under the lock: the caller's gate is lock-free, and a
+    // concurrent delete between the two must not leave this frame
+    // attaching a tombstoned part to a live whole.
+    await assertLiveNodeRow(target, ctx.graphId, partKind, item.id);
+    decisions.push({
+      partId: item.id,
+      moveAt: item.moveAt,
+      endpoints: { source: "read" },
+      decided: await decideCompositionAttachmentUnderFence(
+        ctx.registry,
+        target,
+        ctx.graphId,
+        item.id,
+        item.request,
+        lock,
+        { partRowRestoredByUpdate: false },
+      ),
+    });
+  }
+  return writeCompositionAttachmentMoves(
     ctx,
     session,
     target,
     lock,
-    await prepareCompositionAttachmentMoves(ctx, target, lock, "nodes.attach", [
-      { partId, decided, moveAt: undefined, endpoints: { source: "read" } },
-    ]),
-  );
-  return requireDefined(
-    result,
-    "writeCompositionAttachmentMoves returned no result for its one move",
+    await prepareCompositionAttachmentMoves(
+      ctx,
+      target,
+      lock,
+      operation,
+      decisions,
+    ),
   );
 }
 
@@ -4299,7 +4348,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
  * whether the constraint matched an existing node or created one.
  *
  * Every verdict and every write comes from the fenced re-read
- * ({@link applyCompositionAttachmentUnderFence} inside
+ * ({@link applyCompositionAttachmentsUnderFence} inside
  * {@link runCompositionAttachmentWritePlan}, `onIncumbent: "refuse"`): an
  * already-held attachment is satisfied (idempotent, stated `props`
  * honored), no live whole has the attachment written now — so an optional
@@ -4701,12 +4750,10 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
           nodeFencesConstraintProbe(ctx, existing.kind, "update"),
         ),
         ...owed.map(({ leg }) =>
-          leg.request === undefined ?
-            undefined
-          : compositionEdgeConstraintFence(ctx, leg.request.work),
+          leg.request === undefined ? undefined : COMPOSITION_EDGE_FENCE,
         ),
         ...nodeBatchConstraintProbes(ctx, creates, "create"),
-        ...compositionBatchConstraintProbes(ctx, createWorks),
+        ...compositionBatchConstraintProbes(createWorks),
       ],
       revisions.some(({ leg }) => leg.restoresRow) &&
         nodeRequiresIdentityLock(ctx),
@@ -4821,10 +4868,11 @@ function newRowClaimTransitions<G extends GraphDef>(
  * The attachments of the rows a batch is about to create, as the moves
  * {@link prepareCompositionAttachmentMoves} counts alongside the matched
  * items' — each an `"attach"` of a part the frame has no row for yet, judged
- * against its whole's row (read once per distinct whole) exactly as the create
- * batch will judge it. The part's id is a stand-in: the created row's real id
- * is assigned when the create batch prepares it, and nothing the frame counts
- * depends on it.
+ * against its whole's row exactly as the create batch will judge it. Every
+ * request resolves the call's one `partOf`, so they share one whole, read
+ * once. The part's id is a stand-in: the created row's real id is assigned
+ * when the create batch prepares it, and nothing the frame counts depends on
+ * it.
  */
 async function newRowAttachmentMoves<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -4832,33 +4880,23 @@ async function newRowAttachmentMoves<G extends GraphDef>(
   attachingCreates: readonly CreateNodeInput[],
   partOf: CompositionAttachment | undefined,
 ): Promise<readonly DecidedAttachmentMove[]> {
-  const wholeRows = new Map<string, BackendNodeRow | undefined>();
-  const moves: DecidedAttachmentMove[] = [];
-  for (const { kind } of attachingCreates) {
+  const requests = attachingCreates.map(({ kind }) => {
     const id = generateId();
     const request = requireDefined(
       resolveGetOrCreateAttachmentRequest(ctx, kind, id, partOf),
       "a create that owes a composition attachment resolved to no request",
     );
-    const wholeKey = refKey(request.work.whole);
-    if (!wholeRows.has(wholeKey)) {
-      wholeRows.set(
-        wholeKey,
-        await target.getNode(
-          ctx.graphId,
-          request.work.whole.kind,
-          request.work.whole.id,
-        ),
-      );
-    }
-    moves.push({
-      partId: id,
-      moveAt: undefined,
-      endpoints: { source: "primedWhole", wholeRow: wholeRows.get(wholeKey) },
-      decided: { request, disposition: "attach" },
-    });
-  }
-  return moves;
+    return { id, request };
+  });
+  const whole = requests[0]?.request.work.whole;
+  if (whole === undefined) return [];
+  const wholeRow = await target.getNode(ctx.graphId, whole.kind, whole.id);
+  return requests.map(({ id, request }) => ({
+    partId: id,
+    moveAt: undefined,
+    endpoints: { source: "primedWhole", wholeRow },
+    decided: { request, disposition: "attach" },
+  }));
 }
 
 // ============================================================
@@ -4933,7 +4971,7 @@ async function newRowAttachmentMoves<G extends GraphDef>(
  * `"refuse"` for a lookup. Everything else (the fence, the locked re-read,
  * the single move instant, the retire's population rule, the final-state
  * validation) is one owner:
- * {@link applyCompositionAttachmentUnderFence}.
+ * {@link applyCompositionAttachmentsUnderFence}.
  */
 export async function executeNodeReparent<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -4973,6 +5011,21 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
   return reparentParts(ctx, kind, items, backend, disposition, {
     kind: "batch",
   });
+}
+
+/**
+ * Refuses a reparent of a part with no live row — absent or tombstoned — with
+ * the `NodeNotFoundError` every reparent surface reports, both at the
+ * lock-free gate and at the re-read under the lock.
+ */
+async function assertLiveNodeRow(
+  reader: Readonly<Pick<GraphBackend, "getNode">>,
+  graphId: string,
+  kind: string,
+  id: string,
+): Promise<void> {
+  const row = await reader.getNode(graphId, kind, id);
+  if (!isLiveNodeRowPresent(row)) throw new NodeNotFoundError(kind, id);
 }
 
 /**
@@ -5036,60 +5089,32 @@ async function reparentParts<G extends GraphDef>(
     }
     seenIds.add(item.id);
   }
-  for (const item of resolved) {
-    const gate = await backend.getNode(ctx.graphId, kind, item.id);
-    if (!gate || !isLiveNodeRow(gate))
-      throw new NodeNotFoundError(kind, item.id);
-  }
-  const first = requireDefined(resolved[0]);
-  const plan = mixedWritePlan(
-    compositionEdgeConstraintFence(ctx, first.request.work),
-    false,
+  const gates = await readNodeRowsByRef(
+    backend,
+    ctx.graphId,
+    resolved.map((item) => ({ kind, id: item.id })),
+    ctx.batchPointRead,
   );
+  for (const item of resolved) {
+    if (!isLiveNodeRowPresent(gates.get(nodeRefKey({ kind, id: item.id })))) {
+      throw new NodeNotFoundError(kind, item.id);
+    }
+  }
+  const plan = mixedWritePlan(COMPOSITION_EDGE_FENCE, false);
   const rowWork: WriteRowWork<"mixed", readonly NodeReparentResult[]> = async (
     session,
     target,
     _overlaidSession,
     lock,
   ) => {
-    // Every item is decided, then every move prepared, before the first
-    // write: see `prepareCompositionAttachmentMoves`.
-    const decisions: DecidedAttachmentMove[] = [];
-    for (const item of resolved) {
-      // Re-read under the lock: the gate above is lock-free, and a
-      // concurrent delete between the two must not leave this frame
-      // attaching a tombstoned part to a live whole.
-      const part = await target.getNode(ctx.graphId, kind, item.id);
-      if (!part || !isLiveNodeRow(part)) {
-        throw new NodeNotFoundError(kind, item.id);
-      }
-      decisions.push({
-        partId: item.id,
-        moveAt: item.moveAt,
-        endpoints: { source: "read" },
-        decided: await decideCompositionAttachmentUnderFence(
-          ctx.registry,
-          target,
-          ctx.graphId,
-          item.id,
-          item.request,
-          lock,
-          { partRowRestoredByUpdate: false },
-        ),
-      });
-    }
-    const applied = await writeCompositionAttachmentMoves(
+    const applied = await applyCompositionAttachmentsUnderFence(
       ctx,
       session,
       target,
       lock,
-      await prepareCompositionAttachmentMoves(
-        ctx,
-        target,
-        lock,
-        "nodes.reparent",
-        decisions,
-      ),
+      "nodes.reparent",
+      kind,
+      resolved,
     );
     return applied.map((result) => ({
       moved: result.wrote,
@@ -5139,8 +5164,7 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
   request: CompositionAttachmentRequest,
   backend: GraphBackend | TransactionBackend,
 ): Promise<AttachmentApplyResult> {
-  const gate = await backend.getNode(ctx.graphId, kind, id);
-  if (!gate || !isLiveNodeRow(gate)) throw new NodeNotFoundError(kind, id);
+  await assertLiveNodeRow(backend, ctx.graphId, kind, id);
 
   const opContext = ctx.createOperationContext("update", "node", kind, id);
   return runHookedWritePlan(
@@ -5152,22 +5176,21 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
     // helper). The probe is the composition edge's own — a backend that
     // cannot hold the fence refuses the move rather than retiring an
     // attachment it cannot replace.
-    mixedWritePlan(compositionEdgeConstraintFence(ctx, request.work), false),
+    mixedWritePlan(COMPOSITION_EDGE_FENCE, false),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      // Re-read under the lock: the gate above is lock-free, and a
-      // concurrent delete between the two must not leave this frame
-      // attaching a tombstoned part to a live whole.
-      const part = await target.getNode(ctx.graphId, kind, id);
-      if (!part || !isLiveNodeRow(part)) throw new NodeNotFoundError(kind, id);
-
-      return applyCompositionAttachmentUnderFence(
+      const [applied] = await applyCompositionAttachmentsUnderFence(
         ctx,
         session,
         target,
         lock,
-        id,
-        request,
+        "nodes.attach",
+        kind,
+        [{ id, request, moveAt: undefined }],
+      );
+      return requireDefined(
+        applied,
+        "writeCompositionAttachmentMoves returned no result for its one move",
       );
     },
     { didWrite: (applied) => applied.wrote },
@@ -5225,21 +5248,20 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     autocommitBackend !== undefined &&
     candidate !== undefined &&
     isAutocommitSingleStatementWrite({ kind: "node", candidate });
-  // `mixedWritePlan` unconditionally — `entity` only widens the
+  // A mixed plan unconditionally — `entity` only widens the
   // STATIC session type `rowWork` receives (`createWriteSession` always
   // mints the full node+edge session; see `write-executor.ts`'s
   // `planFrame`), so this has no runtime effect on the ordinary,
   // no-`partOf` create. When this create owes a composition edge, the
-  // constraint probe folds the node's own with the edge's — `edgeComposition
-  // : true` makes `edgeWriteNeedsConstraintFence` answer `"edgeComposition"`
-  // unconditionally, so a backend that cannot hold the fence refuses the
-  // WHOLE create, naming the composition declaration, rather than writing a
-  // node it cannot attach.
-  const plan = mixedWritePlan(
-    nodeFencesConstraintProbe(ctx, kind, "create") ??
-      (compositionWork === undefined ? undefined : (
-        compositionEdgeConstraintFence(ctx, compositionWork)
-      )),
+  // constraint probe folds the node's own with the edge's
+  // ({@link COMPOSITION_EDGE_FENCE}), so a backend that cannot hold
+  // the fence refuses the WHOLE create, naming the composition declaration,
+  // rather than writing a node it cannot attach.
+  const plan = mixedBatchWritePlan(
+    [
+      nodeFencesConstraintProbe(ctx, kind, "create"),
+      compositionWork === undefined ? undefined : COMPOSITION_EDGE_FENCE,
+    ],
     nodeCreateRequiresIdentityLock(ctx, input),
   );
 
@@ -5661,7 +5683,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     mixedBatchWritePlan(
       [
         ...nodeBatchConstraintProbes(ctx, inputs, "create"),
-        ...compositionBatchConstraintProbes(ctx, compositionWorks),
+        ...compositionBatchConstraintProbes(compositionWorks),
       ],
       nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
@@ -5819,7 +5841,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     mixedBatchWritePlan(
       [
         ...nodeBatchConstraintProbes(ctx, inputs, "create"),
-        ...compositionBatchConstraintProbes(ctx, compositionWorks),
+        ...compositionBatchConstraintProbes(compositionWorks),
         // The paired updates are decided under this frame's fence.
         ...nodeBatchConstraintProbes(
           ctx,
@@ -5886,13 +5908,13 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       }
       const byReference = new Map(
         [...inserted, ...resurrected].map((row) => [
-          refKey({ kind: row.kind, id: row.id }),
+          nodeRefKey({ kind: row.kind, id: row.id }),
           row,
         ]),
       );
       const rows = preparedCreates.map((prepared) =>
         requireDefined(
-          byReference.get(refKey({ kind: prepared.kind, id: prepared.id })),
+          byReference.get(nodeRefKey({ kind: prepared.kind, id: prepared.id })),
           `Missing written row for ${prepared.kind} ${prepared.id}`,
         ),
       );
@@ -5927,6 +5949,19 @@ function nodeWriteMovesWindowEnd(
   input: Readonly<{ validTo?: string; clearValidTo?: true }>,
 ): boolean {
   return input.validTo !== undefined || input.clearValidTo === true;
+}
+
+/**
+ * Whether identity participates in an update of an existing node: when it
+ * RESURRECTS (the restored row folds), and when it moves its validity end (an
+ * end reads the identity's other members). A live-row update cannot change a
+ * node's kind, so nothing else folds.
+ */
+function nodeUpdateTouchesIdentity(
+  input: Readonly<{ validTo?: string; clearValidTo?: true }>,
+  clearDeleted: boolean,
+): boolean {
+  return clearDeleted || nodeWriteMovesWindowEnd(input);
 }
 
 /**
@@ -6069,12 +6104,8 @@ export async function executeNodeUpdate<G extends GraphDef>(
     opContext,
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, input.kind, "update"),
-      // Identity participates in an update when it RESURRECTS, and when it
-      // moves its validity end: a live-row update cannot change a node's kind,
-      // so nothing folds, but an end reads the identity that touches it.
-      options?.clearDeleted === true || nodeWriteMovesWindowEnd(input) ?
-        nodeRequiresIdentityLock(ctx)
-      : false,
+      nodeUpdateTouchesIdentity(input, options?.clearDeleted === true) &&
+        nodeRequiresIdentityLock(ctx),
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
@@ -6445,20 +6476,18 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   const compositionAttachment = options?.compositionAttachment;
   return runWritePlan(
     nodeWritePlanContext(ctx),
-    // `mixedWritePlan` unconditionally — see `executeNodeCreateInternal`'s
+    // A mixed plan unconditionally — see `executeNodeCreateInternal`'s
     // identical note: `entity` only widens the STATIC session type, with no
     // runtime effect on a call that carries no `compositionAttachment`.
-    mixedWritePlan(
-      nodeFencesConstraintProbe(ctx, input.kind, "update") ??
-        (compositionAttachment === undefined ? undefined : (
-          compositionEdgeConstraintFence(ctx, compositionAttachment.work)
-        )),
-      // Conditional for the same reason as {@link executeNodeUpdate}: a
-      // resurrecting upsert folds, and moving a validity end reads the
-      // identity's other members, so both take the lock.
-      options?.clearDeleted === true || nodeWriteMovesWindowEnd(input) ?
-        nodeRequiresIdentityLock(ctx)
-      : false,
+    mixedBatchWritePlan(
+      [
+        nodeFencesConstraintProbe(ctx, input.kind, "update"),
+        compositionAttachment === undefined ? undefined : (
+          COMPOSITION_EDGE_FENCE
+        ),
+      ],
+      nodeUpdateTouchesIdentity(input, options?.clearDeleted === true) &&
+        nodeRequiresIdentityLock(ctx),
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
@@ -6685,8 +6714,8 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, first.input.kind, "update"),
-      entries.some(
-        (entry) => entry.clearDeleted || nodeWriteMovesWindowEnd(entry.input),
+      entries.some((entry) =>
+        nodeUpdateTouchesIdentity(entry.input, entry.clearDeleted),
       ) && nodeRequiresIdentityLock(ctx),
     ),
     backend,
@@ -6724,7 +6753,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       if (canBatchResolvedUpdates) {
         const resolvedEntries = entries.map((entry) => {
           const existing = resolvedRows.get(entry.input.id);
-          if (existing === undefined || !isLiveNodeRow(existing)) {
+          if (!isLiveNodeRowPresent(existing)) {
             throw new NodeNotFoundError(entry.input.kind, entry.input.id);
           }
           const props =
@@ -7046,7 +7075,7 @@ export async function executeNodeDelete<G extends GraphDef>(
         id,
         "delete",
       );
-      if (preflight === undefined || !isLiveNodeRow(preflight)) {
+      if (!isLiveNodeRowPresent(preflight)) {
         if (expect !== undefined) {
           assertNodeDeletePlanExpected({ kind, id }, expect, undefined);
         }
@@ -7075,25 +7104,18 @@ export async function executeNodeDelete<G extends GraphDef>(
           nodeDeletePlanOf(cascadePlan, effects),
         );
       }
-      await applyCompositionCascade(ctx, cascadePlan, target, "soft", session);
-
-      // The cascade (connected edges, uniques, embeddings, fulltext, node) is
-      // not individually atomic, so it runs in one write transaction. Under
-      // recorded-time capture this also collapses the cascade into a single
-      // recorded commit instant instead of one instant per sub-write.
-      await deleteNodeRowInFrame(
-        ctx,
-        session,
-        target,
-        "soft",
-        kind,
-        id,
-        withCascadeConsumedEdges(policy, cascadePlan.consumedEdgeIds),
-        preflight,
-      );
       return {
         wrote: true,
-        cascadedParts: cascadedPartReferences(cascadePlan),
+        cascadedParts: await deleteRootWithCascade(
+          ctx,
+          session,
+          target,
+          "soft",
+          { kind, id },
+          policy,
+          cascadePlan,
+          preflight,
+        ),
       };
     },
     {
@@ -7166,7 +7188,7 @@ async function planLiveNodeDelete<G extends GraphDef>(
   lock: GraphWriteLock,
 ): Promise<NodeDeletePlan | undefined> {
   const existing = await target.getNode(ctx.graphId, kind, id);
-  if (existing === undefined || !isLiveNodeRow(existing)) return undefined;
+  if (!isLiveNodeRowPresent(existing)) return undefined;
   const effects = noPlannedDeleteEffects();
   const cascadePlan = await planCascadingNodeDelete(
     ctx,
@@ -7367,9 +7389,9 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
         cascadePlan: CompositionCascadePlan;
       }>[] = [];
       for (const id of ids) {
-        if (effects.deletedNodeKeys.has(refKey({ kind, id }))) continue;
+        if (effects.deletedNodeKeys.has(nodeRefKey({ kind, id }))) continue;
         const preflight = preflights.get(id);
-        if (preflight === undefined || !isLiveNodeRow(preflight)) continue;
+        if (!isLiveNodeRowPresent(preflight)) continue;
         plannedDeletes.push({
           id,
           preflight,
@@ -7388,24 +7410,17 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
       let affectedCount = 0;
       const cascadedParts: CompositionCascadedPart[] = [];
       for (const { id, preflight, cascadePlan } of plannedDeletes) {
-        await applyCompositionCascade(
-          ctx,
-          cascadePlan,
-          target,
-          "soft",
-          session,
-        );
-        cascadedParts.push(...cascadedPartReferences(cascadePlan));
-
-        await deleteNodeRowInFrame(
-          ctx,
-          session,
-          target,
-          "soft",
-          kind,
-          id,
-          withCascadeConsumedEdges(undefined, cascadePlan.consumedEdgeIds),
-          preflight,
+        cascadedParts.push(
+          ...(await deleteRootWithCascade(
+            ctx,
+            session,
+            target,
+            "soft",
+            { kind, id },
+            undefined,
+            cascadePlan,
+            preflight,
+          )),
         );
         affectedCount += 1;
       }
@@ -7536,24 +7551,20 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         noPlannedDeleteEffects(),
         { judgeRoot: false, lockMembers: true },
       );
-      await applyCompositionCascade(ctx, cascadePlan, target, "hard", session);
-
-      // The cascade (edges, node, embeddings) is not individually atomic, so
-      // it runs in one write transaction. Embeddings live in strategy-owned
-      // per-`(kind, field)` tables, so they are cleaned up here rather than
-      // in the backend's graph-agnostic `hardDeleteNode` cascade.
-      await deleteNodeRowInFrame(
-        ctx,
-        session,
-        target,
-        "hard",
-        kind,
-        id,
-        withCascadeConsumedEdges(policy, cascadePlan.consumedEdgeIds),
-      );
+      // Embeddings live in strategy-owned per-`(kind, field)` tables, so
+      // they are cleaned up here rather than in the backend's graph-agnostic
+      // `hardDeleteNode` cascade.
       return {
         wrote: true,
-        cascadedParts: cascadedPartReferences(cascadePlan),
+        cascadedParts: await deleteRootWithCascade(
+          ctx,
+          session,
+          target,
+          "hard",
+          { kind, id },
+          policy,
+          cascadePlan,
+        ),
       };
     },
     // No `didWrite`: a hard delete reports no authoritative mutation verdict

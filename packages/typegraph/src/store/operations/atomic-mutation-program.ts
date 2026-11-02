@@ -30,7 +30,7 @@ import type { KindRegistry } from "../../registry/kind-registry";
 import { hasOwnKey } from "../../utils/object";
 import { edgeKindIsInAcyclicRelation } from "../acyclicity";
 import { edgeCardinalityAxisReferences } from "../claims/edge-claims";
-import { edgeWriteNeedsConstraintFence } from "../constraints";
+import { edgeKindFenceReason } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
@@ -294,15 +294,7 @@ export function resolveAtomicEdgeConvergenceExecutor(
   // No native program applies a constrained cardinality axis or acyclicity;
   // such a create must re-enter the portable path, which probes and refuses.
   if (
-    edgeWriteNeedsConstraintFence({
-      ...registration,
-      acyclic: edgeKindIsInAcyclicRelation(
-        input.graph,
-        input.registry,
-        input.kind,
-      ),
-      composition: input.registry.isCompositionEdge(input.kind),
-    }) !== undefined
+    edgeKindFenceReason(input.graph, input.registry, input.kind) !== undefined
   ) {
     return;
   }
@@ -527,15 +519,8 @@ function isAtomicResolvedEdgeKindEligible(
     // No native program applies a constrained cardinality axis, acyclicity,
     // or composition; such a create must re-enter the portable path, which
     // probes and refuses.
-    edgeWriteNeedsConstraintFence({
-      ...registration,
-      acyclic: edgeKindIsInAcyclicRelation(
-        input.graph,
-        input.registry,
-        input.kind,
-      ),
-      composition: input.registry.isCompositionEdge(input.kind),
-    }) === undefined &&
+    edgeKindFenceReason(input.graph, input.registry, input.kind) ===
+      undefined &&
     registration.matchIdentity === undefined
   );
 }

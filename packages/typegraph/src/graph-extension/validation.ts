@@ -882,11 +882,7 @@ function validateOntologySection(
       metaEdge: metaEdge as MetaEdgeName,
       from,
       to,
-      ...compositionRelationFields({
-        via,
-        partSide: partSide,
-        existence,
-      }),
+      ...compositionRelationFields({ via, partSide, existence }),
     });
   }
   return result;

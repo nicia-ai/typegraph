@@ -38,14 +38,18 @@ import {
   type ClaimEdgeCardinalityParams,
   type CompositionClaimScope,
   type GraphEntityReadBackend,
-  isLiveNodeRow,
+  isLiveNodeRowPresent,
 } from "../backend/types";
 import { checkDisjointness } from "../constraints";
 import { type GraphDef } from "../core/define-graph";
 import { type UniqueConstraint } from "../core/types";
 import { type CardinalityError, type CompositionError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
-import { acyclicEdgeRelations } from "./acyclicity";
+import { hasOwnKey } from "../utils/object";
+import {
+  acyclicEdgeRelations,
+  edgeKindIsInAcyclicRelation,
+} from "./acyclicity";
 import { type ConstraintFenceReason } from "./claims/backing";
 import {
   claimRefusalFor,
@@ -124,6 +128,45 @@ export function edgeWriteNeedsConstraintFence(
     return "edgeCardinality";
   }
   return declarations.acyclic === true ? "edgeAcyclicity" : undefined;
+}
+
+/**
+ * The cardinality declarations an edge write of `kind` must honor, read from
+ * the graph def. A kind this graph does not define answers the empty
+ * declaration: choosing the fence must not become the thing that REPORTS an
+ * unknown kind — the write path raises `KindNotFoundError` from inside the
+ * hooked transaction, where a caller's `onError` hook observes it.
+ */
+export function edgeKindCardinalityDeclarations(
+  graph: GraphDef,
+  kind: string,
+): EdgeCardinalityDeclarations {
+  return (hasOwnKey(graph.edges, kind) ? graph.edges[kind] : undefined) ?? {};
+}
+
+/**
+ * THE constraint-fence reason an edge write of `kind` owes: the kind's
+ * declared cardinality axes and its composition dimension — both invariant
+ * properties of the kind — folded through {@link edgeWriteNeedsConstraintFence}
+ * with an acyclicity answer.
+ *
+ * `acyclic` defaults to whether the kind participates in an acyclic relation
+ * at all, which is what a create (always re-admitting its row to that
+ * population) owes. A write that re-admits the row only conditionally — a
+ * resurrect that clears the tombstone, a window reopen of an `"openRows"`
+ * member — states the dimension it actually decides.
+ */
+export function edgeKindFenceReason(
+  graph: GraphDef,
+  registry: KindRegistry,
+  kind: string,
+  acyclic: boolean = edgeKindIsInAcyclicRelation(graph, registry, kind),
+): ConstraintFenceReason | undefined {
+  return edgeWriteNeedsConstraintFence({
+    ...edgeKindCardinalityDeclarations(graph, kind),
+    acyclic,
+    composition: registry.isCompositionEdge(kind),
+  });
 }
 
 /**
@@ -245,16 +288,12 @@ export function graphOwesClaims(
       if (gating !== undefined) return gating.refusalReason;
     }
   }
-  for (const [kind, registration] of Object.entries(graph.edges)) {
-    // Routed through `edgeWriteNeedsConstraintFence` — the one owner of
-    // "which reason does this edge kind's declaration qualify under, and in
-    // what preference order" — rather than re-spelling the cardinality-only
-    // half of that fold here. An acyclicity-only answer is filtered out
-    // below.
-    const reason = edgeWriteNeedsConstraintFence({
-      ...registration,
-      composition: registry.isCompositionEdge(kind),
-    });
+  for (const kind of Object.keys(graph.edges)) {
+    // Routed through `edgeKindFenceReason` — the one owner of "which reason
+    // does this edge kind's declaration qualify under, and in what preference
+    // order" — rather than re-spelling the cardinality-only half of that fold
+    // here. An acyclicity-only answer is filtered out below.
+    const reason = edgeKindFenceReason(graph, registry, kind);
     if (reason === "edgeComposition" || reason === "edgeCardinality") {
       return reason;
     }
@@ -304,7 +343,7 @@ export async function checkDisjointnessConstraint(
   // For each disjoint kind, check if a node with this ID exists
   for (const disjointKind of disjointKinds) {
     const existing = await ctx.backend.getNode(ctx.graphId, disjointKind, id);
-    if (existing !== undefined && isLiveNodeRow(existing)) {
+    if (isLiveNodeRowPresent(existing)) {
       const error = checkDisjointness(id, kind, [disjointKind], ctx.registry);
       if (error) throw error;
     }

@@ -459,9 +459,8 @@ export function createSchemaIntrospector(
         rootsAbove(kindName, roots).some((root) =>
           Object.entries(getShapeForKind(root) ?? {}).some(
             ([fieldName, rootInfo]) => {
-              if (rootInfo.searchable === undefined) return false;
               const info = getFieldTypeInfo(kindName, fieldName);
-              return info !== undefined && info.searchable === undefined;
+              return info !== undefined && dropsSearchableTag(rootInfo, info);
             },
           ),
         ),
@@ -520,8 +519,15 @@ function keepsIndexingTags(
 ): boolean {
   return (
     (info.valueType === "embedding") === (resolved.valueType === "embedding") &&
-    (resolved.searchable === undefined || info.searchable !== undefined)
+    !dropsSearchableTag(resolved, info)
   );
+}
+
+function dropsSearchableTag(
+  resolved: FieldTypeInfo,
+  info: FieldTypeInfo,
+): boolean {
+  return resolved.searchable !== undefined && info.searchable === undefined;
 }
 
 function schemaAllowsAbsence(schema: z.ZodType): boolean {

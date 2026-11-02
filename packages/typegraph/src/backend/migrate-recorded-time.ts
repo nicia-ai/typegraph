@@ -19,10 +19,11 @@ import {
   type ResolvedSqlTableNames,
   type SqlTableNames,
 } from "../query/compiler/schema";
-import { shortHash } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
+import { shortHash } from "../utils/hash";
+import { decodeRevisionColumn } from "../utils/revision-column";
 import { requireCatalog } from "./capabilities/catalog";
 import { resolveRecordedTimeOwnership } from "./capabilities/recorded-time-ownership";
 import { resolvedTableNames } from "./table-names";
@@ -194,10 +195,7 @@ function canonicalLegacyInstant(value: unknown): string {
 }
 
 function safeRevision(value: unknown): number {
-  const revision =
-    typeof value === "bigint" ? Number(value)
-    : typeof value === "string" && /^\d+$/.test(value) ? Number(value)
-    : value;
+  const revision = decodeRevisionColumn(value);
   if (
     typeof revision !== "number" ||
     !Number.isSafeInteger(revision) ||

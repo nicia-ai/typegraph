@@ -4,15 +4,20 @@
  * Provides diff detection between schema versions to identify
  * what has changed and what migrations might be needed.
  */
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
 import { type IndexEntity } from "../core/types";
 import { MigrationError } from "../errors";
 import { type IndexDeclaration } from "../indexes/types";
 import { isSubsumptionMetaEdge } from "../ontology/constants";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
+import {
+  lostEndpointPairs,
+  serializedEdgeEndpointPairs,
+} from "../registry/edge-kind-facts";
 import { compareStrings } from "../utils/compare";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { canonicalEqual, sortedReplacer } from "./canonical";
+import { canonicalEqual, canonicalJson } from "./canonical";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   classifyOntologyChanges,
@@ -20,6 +25,7 @@ import {
 } from "./ontology-change";
 import {
   type JsonSchema,
+  type SchemaCommitTransition,
   type SerializedEdgeDef,
   type SerializedNodeDef,
   type SerializedSchema,
@@ -513,16 +519,12 @@ const SUBSCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set([
  */
 const DEPENDENT_REQUIRED_KEYWORD = "dependentRequired";
 
-function canonicalKey(value: unknown): string {
-  return JSON.stringify(value, sortedReplacer);
-}
-
 function sortedByCanonicalForm(items: readonly unknown[]): readonly unknown[] {
   // `compareStrings`, not `localeCompare`: the ordering has to be identical in
   // every process that diffs this schema, and locale-aware collation varies
   // with the host's ICU configuration.
   return items.toSorted((left, right) =>
-    compareStrings(canonicalKey(left), canonicalKey(right)),
+    compareStrings(canonicalJson(left), canonicalJson(right)),
   );
 }
 
@@ -717,30 +719,6 @@ export function propertySchemasEqual(before: unknown, after: unknown): boolean {
     comparisonNormalizedSchema(before),
     comparisonNormalizedSchema(after),
   );
-}
-
-/**
- * Endpoint kind lists are sets — the order edge endpoints are declared in
- * carries no meaning.
- */
-function getSerializedEdgePairs(edge: SerializedEdgeDef): ReadonlySet<string> {
-  const pairs = new Set<string>();
-  if (edge.targetKindsBySource === undefined) {
-    for (const fromKind of edge.fromKinds) {
-      for (const toKind of edge.toKinds) {
-        pairs.add(`${fromKind}\0${toKind}`);
-      }
-    }
-  } else {
-    for (const [sourceKind, targetKinds] of Object.entries(
-      edge.targetKindsBySource,
-    )) {
-      for (const targetKind of targetKinds) {
-        pairs.add(`${sourceKind}\0${targetKind}`);
-      }
-    }
-  }
-  return pairs;
 }
 
 function endpointKindsEqual(
@@ -1190,15 +1168,10 @@ function diffEdgeDef(
       after.targetKindsBySource,
     )
   ) {
-    const beforePairs = getSerializedEdgePairs(before);
-    const afterPairs = getSerializedEdgePairs(after);
-    const removedPairs: string[] = [];
-    for (const pair of beforePairs) {
-      if (!afterPairs.has(pair)) {
-        const [from, to] = pair.split("\0");
-        removedPairs.push(`(${from} -> ${to})`);
-      }
-    }
+    const removedPairs = lostEndpointPairs(
+      serializedEdgeEndpointPairs(before),
+      serializedEdgeEndpointPairs(after),
+    ).map(({ from, to }) => `(${from} -> ${to})`);
 
     const isBreaking = removedPairs.length > 0;
     const details =
@@ -1234,8 +1207,12 @@ function diffEdgeDef(
   // before comparing: unlike `cardinality`, an absent key means "many" (see
   // `SerializedEdgeDef`), so an undeclared-vs-undeclared or
   // undeclared-vs-explicit-"many" pair must diff as unchanged.
-  const beforeTargetCardinality = before.targetCardinality ?? "many";
-  const afterTargetCardinality = after.targetCardinality ?? "many";
+  const beforeTargetCardinality = effectiveTargetCardinality(
+    before.targetCardinality,
+  );
+  const afterTargetCardinality = effectiveTargetCardinality(
+    after.targetCardinality,
+  );
   if (beforeTargetCardinality !== afterTargetCardinality) {
     changes.push({
       type: "modified",
@@ -1713,13 +1690,8 @@ function moveCustomRelationsAction(relations: readonly string[]): string {
  *   such relation and the migration action that moves it.
  */
 export function assertNoRemovedCustomRelations(
-  params: Readonly<{
-    verb: string;
-    graphId: string;
-    fromVersion: number;
-    toVersion: number;
-    changes: readonly OntologyChange[];
-  }>,
+  params: SchemaCommitTransition &
+    Readonly<{ verb: string; changes: readonly OntologyChange[] }>,
 ): void {
   const relations = removedCustomRelations(params.changes);
   if (relations.length === 0) return;

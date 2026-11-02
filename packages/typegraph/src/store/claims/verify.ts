@@ -454,11 +454,37 @@ const UNTARGETED_FAMILY_ORDER = [
   "compositionFutureWindow",
 ] as const;
 
+type ClaimTargetedViolation = Extract<
+  ConstraintFenceViolation,
+  { target: ClaimTarget }
+>;
+
+type UntargetedViolation = Exclude<
+  ConstraintFenceViolation,
+  ClaimTargetedViolation
+>;
+
 /** Narrows to the two claim-backed families, both of which carry `target`. */
 function hasClaimTarget(
   violation: ConstraintFenceViolation,
-): violation is Extract<ConstraintFenceViolation, { target: ClaimTarget }> {
+): violation is ClaimTargetedViolation {
   return "target" in violation;
+}
+
+/** The key an untargeted violation is ordered by within its own family. */
+function untargetedOrderKey(violation: UntargetedViolation): string {
+  switch (violation.family) {
+    case "edgeEndpointAssignability":
+    case "compositionFutureWindow": {
+      return violation.edgeKind;
+    }
+    case "compositionExistence": {
+      return violation.partKind;
+    }
+    case "edgeAcyclicity": {
+      return violation.relation;
+    }
+  }
 }
 
 /**
@@ -472,38 +498,19 @@ function compareConstraintFenceViolations(
   left: ConstraintFenceViolation,
   right: ConstraintFenceViolation,
 ): number {
-  const leftHasTarget = hasClaimTarget(left);
-  const rightHasTarget = hasClaimTarget(right);
-  if (leftHasTarget && rightHasTarget) {
-    return compareClaimTargets(left.target, right.target);
+  if (hasClaimTarget(left)) {
+    return hasClaimTarget(right) ?
+        compareClaimTargets(left.target, right.target)
+      : -1;
   }
-  if (leftHasTarget) return -1;
-  if (rightHasTarget) return 1;
+  if (hasClaimTarget(right)) return 1;
 
   const leftUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(left.family);
   const rightUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(right.family);
   if (leftUntargetedRank !== rightUntargetedRank) {
     return leftUntargetedRank - rightUntargetedRank;
   }
-  if (
-    left.family === "edgeEndpointAssignability" &&
-    right.family === left.family
-  ) {
-    return compareStrings(left.edgeKind, right.edgeKind);
-  }
-  if (left.family === "compositionExistence" && right.family === left.family) {
-    return compareStrings(left.partKind, right.partKind);
-  }
-  if (
-    left.family === "compositionFutureWindow" &&
-    right.family === left.family
-  ) {
-    return compareStrings(left.edgeKind, right.edgeKind);
-  }
-  return compareStrings(
-    (left as EdgeAcyclicityViolation).relation,
-    (right as EdgeAcyclicityViolation).relation,
-  );
+  return compareStrings(untargetedOrderKey(left), untargetedOrderKey(right));
 }
 
 /** The declarations the audit reads, one list per family. */

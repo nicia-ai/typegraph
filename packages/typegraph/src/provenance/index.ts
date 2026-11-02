@@ -17,6 +17,7 @@ import {
   COMPOSITION_ATTACHMENT_PAGE_SIZE,
   readCompositionAttachmentsForPage,
   readLiveCompositionWholes,
+  requiredCompositionPairs,
 } from "../store/operations/composition-create";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
@@ -31,11 +32,12 @@ import {
   type DynamicNodeCollection,
   type TransactionContext,
 } from "../store/types";
-import { compareStrings } from "../utils/compare";
+import { chunk } from "../utils/array";
+import { compareStrings, compareStringTuples } from "../utils/compare";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { encodeTupleKey } from "../utils/tuple-key";
+import { nodeRefKey } from "../utils/tuple-key";
 
 export type {
   ContributionDiagnostic,
@@ -701,7 +703,7 @@ async function readCompositionExistenceDependencies(
   const partKeysByWholeKey = new Map<string, string[]>();
   for (const [factKey] of requiredPartRows) requiredPartFactKeys.add(factKey);
 
-  for (const page of chunked(
+  for (const page of chunk(
     requiredPartRows,
     COMPOSITION_ATTACHMENT_PAGE_SIZE,
   )) {
@@ -712,7 +714,7 @@ async function readCompositionExistenceDependencies(
       page.map(([, row]) => row),
     );
     for (const [factKey, row] of page) {
-      const attachment = attachments.get(encodeTupleKey([row.kind, row.id]));
+      const attachment = attachments.get(nodeRefKey(row));
       if (attachment === undefined) continue;
       const wholeKey = refKey({
         kind: attachment.whole.kind,
@@ -742,15 +744,6 @@ async function readCompositionExistenceDependencies(
     partKeysByWholeKey,
     liveWholeKeys,
   };
-}
-
-/** Fixed-size slices of `values`, in order. */
-function chunked<T>(values: readonly T[], size: number): readonly T[][] {
-  const pages: T[][] = [];
-  for (let start = 0; start < values.length; start += size) {
-    pages.push(values.slice(start, start + size));
-  }
-  return pages;
 }
 
 function availableSourceKeys(
@@ -1339,11 +1332,10 @@ function assertRequiredPartsOfFactWholesAreFacts(
 ): void {
   const factKinds = new Set(config.factKinds);
   const offenders: Readonly<{ wholeKind: string; partKind: string }>[] = [];
-  for (const pair of registry.compositionRelation().pairs) {
-    if (registry.compositionExistence(pair.partKind) !== "required") continue;
+  for (const pair of requiredCompositionPairs(registry)) {
     for (const wholeKind of config.factKinds) {
       if (!registry.isAssignableTo(wholeKind, pair.wholeKind)) continue;
-      for (const partKind of registry.expandSubClasses(pair.partKind)) {
+      for (const partKind of pair.partKinds) {
         if (factKinds.has(partKind)) continue;
         offenders.push({ wholeKind, partKind });
       }
@@ -1352,9 +1344,10 @@ function assertRequiredPartsOfFactWholesAreFacts(
   if (offenders.length === 0) return;
 
   const ordered = offenders.toSorted((left, right) =>
-    left.wholeKind === right.wholeKind ?
-      compareStrings(left.partKind, right.partKind)
-    : compareStrings(left.wholeKind, right.wholeKind),
+    compareStringTuples(
+      [left.wholeKind, left.partKind],
+      [right.wholeKind, right.partKind],
+    ),
   );
   const first = requireDefined(ordered[0], "a non-empty offender list");
   throw new ConfigurationError(

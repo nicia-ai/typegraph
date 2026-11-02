@@ -123,7 +123,11 @@ import {
   ontologyRelationIdentityKey,
 } from "../registry/composition-relation";
 import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance";
-import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
+import {
+  buildSerializedEdgeKindFacts,
+  type EdgeKindFacts,
+  lostEndpointPairs,
+} from "../registry/edge-kind-facts";
 import { type KindRegistry } from "../registry/kind-registry";
 import { requiredCompositionPartKinds } from "../store/operations/composition-create";
 import { compareStrings, compareStringTuples } from "../utils/compare";
@@ -327,61 +331,64 @@ function relationDescription(relation: SerializedOntologyRelation): string {
 }
 
 /**
- * Injective lookup key for the before/after relation maps below.
+ * The relations of one side, keyed by {@link ontologyRelationIdentityKey}.
  *
- * A delimiter join (`${metaEdge}:${from}:${to}`) collides for a kind name
- * containing the delimiter, and a `via` change (composition's realizing
- * edge) must diff as remove + add rather than disappearing as a no-op, so
- * both `via` and `partSide` are folded into the key alongside the three
- * original fields, through the same injective tuple encoding the claim keys
- * use for exactly this reason (`src/utils/tuple-key.ts`).
- *
- * `existence` is deliberately NOT part of this key. It identifies the
- * SAME declared pair whichever way it reads, so a pair whose `existence`
- * only flips (an in-place edit, not a re-declaration) is looked up as one
- * relation present on both sides and classified as `modified` by
- * `classifyExistenceChange` below — never folded into this identity key,
- * which would make it disappear into a `removed` + `added` pair instead.
- * `partOf`/`hasPart`'s `removed` arm is unconditionally `breaking`
- * (dropping the pair entirely), so an existence-only edit routed through
- * that arm would always classify as breaking regardless of direction,
- * refusing even a pure loosening and refusing a tightening before
+ * `via` and `partSide` are part of that identity, so a composition relation
+ * re-pointed at a different realizing edge diffs as remove + add rather than
+ * disappearing as a no-op. `existence` is deliberately NOT: a pair whose
+ * `existence` only flips (an in-place edit, not a re-declaration) is looked
+ * up as one relation present on both sides and classified as `modified` by
+ * `classifyExistenceChange` below. `partOf`/`hasPart`'s `removed` arm is
+ * unconditionally `breaking`, so an existence-only edit routed through it
+ * would refuse even a pure loosening, and refuse a tightening before
  * `prepareSchemaTighteningPreflight` ever ran.
  */
-function relationMapKey(relation: SerializedOntologyRelation): string {
-  return ontologyRelationIdentityKey(relation);
-}
-
 function keyedRelations(
   relations: readonly SerializedOntologyRelation[],
 ): ReadonlyMap<string, SerializedOntologyRelation> {
   const result = new Map<string, SerializedOntologyRelation>();
   for (const relation of relations) {
-    result.set(relationMapKey(relation), relation);
+    result.set(ontologyRelationIdentityKey(relation), relation);
   }
   return result;
 }
 
-/**
- * Kind names present on the `before` side (nodes or edges) that are absent
- * on the `after` side — i.e. kinds THIS COMMIT removes.
- */
-function computeRemovedKindNames(
+/** Which kinds a schema transition removes, keeps and adds. */
+export type SnapshotKindDelta = Readonly<{
+  /** Node and edge kind names present `before` and absent `after` — kinds THIS COMMIT removes. */
+  removedKindNames: ReadonlySet<string>;
+  /** Edge kinds present on both sides, `compareStrings` order. */
+  retainedEdgeKinds: readonly string[];
+  /** Edge kinds absent `before` and present `after`, `compareStrings` order. */
+  addedEdgeKinds: readonly string[];
+}>;
+
+/** THE before/after kind delta every per-transition decision reads. */
+export function snapshotKindDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
-): ReadonlySet<string> {
+): SnapshotKindDelta {
   const afterNames = new Set([
     ...Object.keys(after.nodes),
     ...Object.keys(after.edges),
   ]);
-  const removed = new Set<string>();
-  for (const name of [
-    ...Object.keys(before.nodes),
-    ...Object.keys(before.edges),
-  ]) {
-    if (!afterNames.has(name)) removed.add(name);
-  }
-  return removed;
+  const removedKindNames = new Set(
+    [...Object.keys(before.nodes), ...Object.keys(before.edges)].filter(
+      (name) => !afterNames.has(name),
+    ),
+  );
+  const afterEdgeKinds = Object.keys(after.edges).toSorted((left, right) =>
+    compareStrings(left, right),
+  );
+  return {
+    removedKindNames,
+    retainedEdgeKinds: afterEdgeKinds.filter((edgeKind) =>
+      hasOwnKey(before.edges, edgeKind),
+    ),
+    addedEdgeKinds: afterEdgeKinds.filter(
+      (edgeKind) => !hasOwnKey(before.edges, edgeKind),
+    ),
+  };
 }
 
 // ============================================================
@@ -520,23 +527,31 @@ function newlyRequiredPartEdgeKinds(
   afterRegistry: KindRegistry,
 ): readonly string[] {
   const requiredBefore = new Set(requiredCompositionPartKinds(beforeRegistry));
-  const newlyRequired = new Set(
-    requiredCompositionPartKinds(afterRegistry).filter(
-      (kind) => !requiredBefore.has(kind),
-    ),
+  const edgeKinds = new Set(
+    requiredPartKindsByViaEdgeKind(afterRegistry)
+      .filter(({ partKind }) => !requiredBefore.has(partKind))
+      .map(({ viaEdgeKind }) => viaEdgeKind),
   );
-  if (newlyRequired.size === 0) return [];
-  const edgeKinds = new Set<string>();
-  for (const pair of afterRegistry.compositionRelation().pairs) {
-    if (
-      afterRegistry
-        .expandSubClasses(pair.partKind)
-        .some((kind) => newlyRequired.has(kind))
-    ) {
-      edgeKinds.add(pair.viaEdgeKind);
-    }
-  }
   return [...edgeKinds].toSorted(compareStrings);
+}
+
+/**
+ * Every (realizing edge kind, concrete required-existence part kind) a
+ * composition pair places, in pair order and then `expandSubClasses` order:
+ * the one reading of "which required parts does this edge kind hold",
+ * shared by the classifier above and the commit preflight's required-whole
+ * check.
+ */
+export function requiredPartKindsByViaEdgeKind(
+  registry: KindRegistry,
+): readonly Readonly<{ viaEdgeKind: string; partKind: string }>[] {
+  const requiredPartKinds = new Set(requiredCompositionPartKinds(registry));
+  return registry.compositionRelation().pairs.flatMap((pair) =>
+    registry
+      .expandSubClasses(pair.partKind)
+      .filter((partKind) => requiredPartKinds.has(partKind))
+      .map((partKind) => ({ viaEdgeKind: pair.viaEdgeKind, partKind })),
+  );
 }
 
 /** One edge kind's admission loss: the pairs it stopped admitting, and what the probe still allows. */
@@ -560,6 +575,12 @@ function endpointPairKey(pair: readonly [string, string]): string {
   return encodeTupleKey(pair);
 }
 
+/** Both sides' edge kind facts, built once per classification. */
+type SnapshotEdgeKindFacts = Readonly<{
+  before: ReadonlyMap<string, EdgeKindFacts>;
+  after: ReadonlyMap<string, EdgeKindFacts>;
+}>;
+
 /**
  * Whether any edge kind present on both sides DECLARES fewer endpoint pairs
  * than before — read off the two documents alone, no registry. With no
@@ -569,20 +590,12 @@ function endpointPairKey(pair: readonly [string, string]): string {
  * {@link edgeEndpointAdmissionLosses} needs registries at all.
  */
 function edgeEndpointDeclarationsNarrowed(
-  before: OntologySnapshot,
-  after: OntologySnapshot,
+  endpoints: SnapshotEdgeKindFacts,
 ): boolean {
-  const beforeEndpoints = buildSerializedEdgeKindFacts(before.edges);
-  const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
-  for (const [edgeKind, afterKinds] of afterEndpoints) {
-    const beforeKinds = beforeEndpoints.get(edgeKind);
+  for (const [edgeKind, afterKinds] of endpoints.after) {
+    const beforeKinds = endpoints.before.get(edgeKind);
     if (beforeKinds === undefined) continue;
-    if (
-      lostAnyMember(
-        beforeKinds.pairs.map((pair) => endpointPairKey([pair.from, pair.to])),
-        afterKinds.pairs.map((pair) => endpointPairKey([pair.from, pair.to])),
-      )
-    ) {
+    if (lostEndpointPairs(beforeKinds.pairs, afterKinds.pairs).length > 0) {
       return true;
     }
   }
@@ -604,22 +617,19 @@ function edgeEndpointDeclarationsNarrowed(
  * holding the commit to a `Mammal` row.
  */
 function edgeEndpointAdmissionLosses(
-  before: OntologySnapshot,
-  after: OntologySnapshot,
+  endpoints: SnapshotEdgeKindFacts,
+  kindDelta: SnapshotKindDelta,
   beforeRegistry: KindRegistry,
   afterRegistry: KindRegistry,
-  removedKindNames: ReadonlySet<string>,
 ): readonly EdgeEndpointAdmissionLoss[] {
-  const beforeEndpoints = buildSerializedEdgeKindFacts(before.edges);
-  const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
+  const { removedKindNames } = kindDelta;
   const namesRemovedKind = ([from, to]: readonly [string, string]): boolean =>
     removedKindNames.has(from) || removedKindNames.has(to);
 
   const losses: EdgeEndpointAdmissionLoss[] = [];
-  for (const edgeKind of Object.keys(after.edges)) {
-    if (!hasOwnKey(before.edges, edgeKind)) continue;
-    const beforeKinds = beforeEndpoints.get(edgeKind);
-    const afterKinds = afterEndpoints.get(edgeKind);
+  for (const edgeKind of kindDelta.retainedEdgeKinds) {
+    const beforeKinds = endpoints.before.get(edgeKind);
+    const afterKinds = endpoints.after.get(edgeKind);
     if (beforeKinds === undefined || afterKinds === undefined) continue;
 
     const beforeAllowed = expandEdgeEndpointAllowance(
@@ -675,13 +685,11 @@ export type AddedEdgeKindProbes = Readonly<{
 }>;
 
 export function addedEdgeKindProbes(
-  before: OntologySnapshot,
   after: OntologySnapshot,
+  kindDelta: SnapshotKindDelta,
   afterRegistry: KindRegistry,
 ): AddedEdgeKindProbes {
-  const addedEdgeKinds = Object.keys(after.edges)
-    .filter((edgeKind) => !hasOwnKey(before.edges, edgeKind))
-    .toSorted((left, right) => compareStrings(left, right));
+  const { addedEdgeKinds } = kindDelta;
   if (addedEdgeKinds.length === 0) {
     return { endpointAllowances: [], acyclicEdgeKinds: [] };
   }
@@ -713,16 +721,15 @@ export function addedEdgeKindProbes(
 function edgeAcyclicityTransitionDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
+  kindDelta: SnapshotKindDelta,
   wasTransition: (wasAcyclic: boolean, isAcyclic: boolean) => boolean,
 ): readonly string[] {
-  const edgeKinds: string[] = [];
-  for (const edgeKind of Object.keys(after.edges)) {
-    if (!hasOwnKey(before.edges, edgeKind)) continue;
-    const wasAcyclic = before.edges[edgeKind]?.acyclic === true;
-    const isAcyclic = after.edges[edgeKind]?.acyclic === true;
-    if (wasTransition(wasAcyclic, isAcyclic)) edgeKinds.push(edgeKind);
-  }
-  return edgeKinds.toSorted(compareStrings);
+  return kindDelta.retainedEdgeKinds.filter((edgeKind) =>
+    wasTransition(
+      before.edges[edgeKind]?.acyclic === true,
+      after.edges[edgeKind]?.acyclic === true,
+    ),
+  );
 }
 
 /**
@@ -732,10 +739,12 @@ function edgeAcyclicityTransitionDelta(
 function edgeAcyclicityAddedDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
+  kindDelta: SnapshotKindDelta,
 ): readonly string[] {
   return edgeAcyclicityTransitionDelta(
     before,
     after,
+    kindDelta,
     (wasAcyclic, isAcyclic) => !wasAcyclic && isAcyclic,
   );
 }
@@ -748,10 +757,12 @@ function edgeAcyclicityAddedDelta(
 function edgeAcyclicityRemovedDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
+  kindDelta: SnapshotKindDelta,
 ): readonly string[] {
   return edgeAcyclicityTransitionDelta(
     before,
     after,
+    kindDelta,
     (wasAcyclic, isAcyclic) => wasAcyclic && !isAcyclic,
   );
 }
@@ -829,7 +840,7 @@ function classifyKnownRelationSeverity(
       // Composition tightening: this arm only ever sees a BRAND-NEW pair — flipping an
       // already-declared pair's `existence` is classified separately by
       // `classifyExistenceChange` (relation identity, `via`/`partSide`
-      // included, excludes `existence`; see `relationMapKey`'s docblock),
+      // included, excludes `existence`; see `keyedRelations`' docblock),
       // so it never reaches here as a synthetic remove + add. A brand-new
       // pair is under-probed by `compositionSingleWhole` alone when it is
       // ALSO declared `required`: the pair's data must additionally be
@@ -1027,11 +1038,11 @@ function classifyRelation(
 
 /**
  * Classifies an in-place `existence` flip on an already-declared `partOf`/
- * `hasPart` pair (same identity — `relationMapKey` excludes `existence`, so
- * this is the ONLY place that edit is classified; see its docblock). Mirrors
- * the tightening/loosening split for the whole-pair `added` case
- * above, but keyed off the existence delta directly rather than off
- * presence/absence of the pair itself:
+ * `hasPart` pair (same identity — `ontologyRelationIdentityKey` excludes
+ * `existence`, so this is the ONLY place that edit is classified; see
+ * `keyedRelations`' docblock). Mirrors the tightening/loosening split for the
+ * whole-pair `added` case above, but keyed off the existence delta directly
+ * rather than off presence/absence of the pair itself:
  *
  * - optional (or unset) → required: TIGHTENING. A required part with no
  *   live whole can already exist in the data (nothing constrained it
@@ -1044,8 +1055,8 @@ function classifyRelation(
  * `after` (not `before`) is used for the description and probes: the probe
  * plan audits the graph as it will be, and the realizing edge kind
  * (`via`) cannot itself change between these two entries (a `via` change
- * makes `relationMapKey` disagree, so it would classify as remove + add
- * instead of reaching this function).
+ * makes `ontologyRelationIdentityKey` disagree, so it would classify as
+ * remove + add instead of reaching this function).
  */
 function classifyExistenceChange(
   before: SerializedOntologyRelation,
@@ -1113,13 +1124,14 @@ export function classifyOntologyChanges(
   after: OntologySnapshot,
 ): readonly OntologyChange[] {
   const changes: OntologyChange[] = [];
+  const kindDelta = snapshotKindDelta(before, after);
 
   // Edge-registration `acyclic`. Independent of whether any
   // ontology relation changed — an edge kind's acyclicity axiom shares no
   // relation with `disjointWith` / `subClassOf` / `equivalentTo`, so this
   // never needs a `KindRegistry` and runs unconditionally, before the
   // relation-change early return below.
-  for (const edgeKind of edgeAcyclicityAddedDelta(before, after)) {
+  for (const edgeKind of edgeAcyclicityAddedDelta(before, after, kindDelta)) {
     changes.push({
       type: "modified",
       entity: "edgeRegistration",
@@ -1131,7 +1143,7 @@ export function classifyOntologyChanges(
       ],
     });
   }
-  for (const edgeKind of edgeAcyclicityRemovedDelta(before, after)) {
+  for (const edgeKind of edgeAcyclicityRemovedDelta(before, after, kindDelta)) {
     changes.push({
       type: "modified",
       entity: "edgeRegistration",
@@ -1149,10 +1161,10 @@ export function classifyOntologyChanges(
   const addedRelations = [...afterRelations.entries()]
     .filter(([key]) => !beforeRelations.has(key))
     .map(([, relation]) => relation);
-  // Same identity on both sides (`relationMapKey` excludes `existence`) but
-  // the `existence` value itself differs: an in-place edit, classified by
-  // `classifyExistenceChange` rather than falling out of the remove/add
-  // sets above.
+  // Same identity on both sides (`ontologyRelationIdentityKey` excludes
+  // `existence`) but the `existence` value itself differs: an in-place edit,
+  // classified by `classifyExistenceChange` rather than falling out of the
+  // remove/add sets above.
   const modifiedExistenceRelations = [...afterRelations.entries()]
     .filter(([key]) => beforeRelations.has(key))
     .map(
@@ -1166,11 +1178,15 @@ export function classifyOntologyChanges(
       );
     });
 
+  const endpoints: SnapshotEdgeKindFacts = {
+    before: buildSerializedEdgeKindFacts(before.edges),
+    after: buildSerializedEdgeKindFacts(after.edges),
+  };
   if (
     removedRelations.length === 0 &&
     addedRelations.length === 0 &&
     modifiedExistenceRelations.length === 0 &&
-    !edgeEndpointDeclarationsNarrowed(before, after)
+    !edgeEndpointDeclarationsNarrowed(endpoints)
   ) {
     return changes;
   }
@@ -1186,16 +1202,14 @@ export function classifyOntologyChanges(
   const beforeRegistry = buildSchemaBaselineRegistry(before);
   const afterRegistry = buildRegistryFromSerializedSchema(after);
 
-  const removedKindNames = computeRemovedKindNames(before, after);
   const endpointAdmissionLosses = edgeEndpointAdmissionLosses(
-    before,
-    after,
+    endpoints,
+    kindDelta,
     beforeRegistry,
     afterRegistry,
-    removedKindNames,
   );
   const context: RelationClassificationContext = {
-    removedKindNames,
+    removedKindNames: kindDelta.removedKindNames,
     disjointnessPairs: nodeDisjointnessDelta(beforeRegistry, afterRegistry),
     uniquenessGroups: nodeUniquenessComponentGroups(
       before,

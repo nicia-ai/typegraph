@@ -32,6 +32,7 @@ import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { decodeRevisionColumn } from "../../utils/revision-column";
 import { isSerializationFailure } from "../../utils/sql-errors";
 import { executeStatement } from "./guards";
 
@@ -477,10 +478,7 @@ function failInvalidClock(value: unknown, cause?: unknown): never {
 }
 
 function recordedClockRevision(value: unknown): number {
-  const revision =
-    typeof value === "bigint" ? Number(value)
-    : typeof value === "string" && /^\d+$/.test(value) ? Number(value)
-    : value;
+  const revision = decodeRevisionColumn(value);
   if (
     typeof revision !== "number" ||
     !Number.isSafeInteger(revision) ||

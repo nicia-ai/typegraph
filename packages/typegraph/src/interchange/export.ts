@@ -199,9 +199,9 @@ export function exportGraphStream<G extends GraphDef>(
 }
 
 /**
- * Why this graph's export must carry temporal fields, as the refusal an
- * explicit `includeTemporal: false` earns — or `undefined` when the caller's
- * choice stands. A graph that requires them exports them by default.
+ * Why this graph's export must carry temporal fields — or `undefined` when the
+ * caller's choice stands. A graph that requires them exports them by default,
+ * and an explicit `includeTemporal: false` earns {@link temporalFieldsRefusal}.
  *
  * - Identity rows carry their effective-time windows unconditionally. Their
  *   endpoint rows must therefore carry temporal bounds too, or the store's
@@ -214,11 +214,32 @@ export function exportGraphStream<G extends GraphDef>(
  *   a reparented part attached to its former whole again, or a second
  *   active edge refused against the first.
  */
-function requiredTemporalFieldsRefusal(
+function requiredTemporalFields(
   graph: GraphDef,
+): TemporalFieldsRequirement | undefined {
+  if (graph.identity !== undefined) return { reason: "identity" };
+  const activeOnlyEdgeKinds = Object.entries(graph.edges)
+    .filter(
+      ([, registration]) => activeOnlyAxisReferences(registration).length > 0,
+    )
+    .map(([edgeKind]) => edgeKind)
+    .toSorted(compareStrings);
+  if (activeOnlyEdgeKinds.length === 0) return undefined;
+  return { reason: "active-only-cardinality", edgeKinds: activeOnlyEdgeKinds };
+}
+
+type TemporalFieldsRequirement =
+  | Readonly<{ reason: "identity" }>
+  | Readonly<{
+      reason: "active-only-cardinality";
+      edgeKinds: readonly string[];
+    }>;
+
+function temporalFieldsRefusal(
+  requirement: TemporalFieldsRequirement,
   identityMode: string,
-): ConfigurationError | undefined {
-  if (graph.identity !== undefined) {
+): ConfigurationError {
+  if (requirement.reason === "identity") {
     return new ConfigurationError(
       "Identity export requires temporal endpoint fields.",
       {
@@ -232,22 +253,15 @@ function requiredTemporalFieldsRefusal(
       },
     );
   }
-  const activeOnlyEdgeKinds = Object.entries(graph.edges)
-    .filter(
-      ([, registration]) => activeOnlyAxisReferences(registration).length > 0,
-    )
-    .map(([edgeKind]) => edgeKind)
-    .toSorted(compareStrings);
-  if (activeOnlyEdgeKinds.length === 0) return undefined;
   return new ConfigurationError(
     "Export of a graph with an active-only edge cardinality requires temporal fields.",
     {
       code: "ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
-      edgeKinds: activeOnlyEdgeKinds,
+      edgeKinds: requirement.edgeKinds,
       includeTemporal: false,
     },
     {
-      suggestion: `Remove includeTemporal or set it to true: ${activeOnlyEdgeKinds.map((edgeKind) => `"${edgeKind}"`).join(", ")} count a row only while its window is open, so an ended row exported without its validTo would re-import as current.`,
+      suggestion: `Remove includeTemporal or set it to true: ${requirement.edgeKinds.map((edgeKind) => `"${edgeKind}"`).join(", ")} count a row only while its window is open, so an ended row exported without its validTo would re-import as current.`,
     },
   );
 }
@@ -258,15 +272,12 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
   const parsed = ExportStreamOptionsSchema.parse(options ?? {});
-  const temporalFieldsRequirement = requiredTemporalFieldsRefusal(
-    store.graph,
-    parsed.identityMode,
-  );
+  const temporalFieldsRequirement = requiredTemporalFields(store.graph);
   if (
     temporalFieldsRequirement !== undefined &&
     options?.includeTemporal === false
   ) {
-    throw temporalFieldsRequirement;
+    throw temporalFieldsRefusal(temporalFieldsRequirement, parsed.identityMode);
   }
   const resolved =
     temporalFieldsRequirement === undefined ? parsed : (

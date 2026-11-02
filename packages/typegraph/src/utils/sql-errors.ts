@@ -224,6 +224,22 @@ function sqliteErrorCode(link: unknown): unknown {
 }
 
 /**
+ * Whether the link carries a SQLite result code in either spelling a driver
+ * reports it: better-sqlite3's symbolic `code`, or libSQL's numeric
+ * `rawCode`/`extendedCode`.
+ */
+function hasSqliteResultCode(
+  link: object,
+  symbolic: string,
+  extended: number,
+): boolean {
+  if (Reflect.get(link, "code") === symbolic) return true;
+  return SQLITE_EXTENDED_CODE_FIELDS.some(
+    (field) => Reflect.get(link, field) === extended,
+  );
+}
+
+/**
  * SQLite driver messages normalized independently of transport decoration.
  * Native SQLite usually returns the engine text alone, while libSQL prefixes
  * that same text with its symbolic result code. Classifiers compare the
@@ -439,17 +455,14 @@ function isSqlitePrimaryKeyViolation(
   link: object,
   relation: PrimaryKeyRelation,
 ): boolean {
-  if (Reflect.get(link, "code") === SQLITE_PRIMARY_KEY_VIOLATION_CODE) {
+  if (
+    hasSqliteResultCode(
+      link,
+      SQLITE_PRIMARY_KEY_VIOLATION_CODE,
+      SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE,
+    )
+  ) {
     return true;
-  }
-  for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
-    const value: unknown = Reflect.get(link, field);
-    if (
-      typeof value === "number" &&
-      value === SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE
-    ) {
-      return true;
-    }
   }
   if (Reflect.get(link, "code") !== "SQLITE_CONSTRAINT") return false;
   const message = sqliteErrorMessage(link);
@@ -519,11 +532,11 @@ export function isNotNullColumnViolation(
     }
     const code: unknown = Reflect.get(link, "code");
     const isSqliteNotNullViolation =
-      code === SQLITE_NOT_NULL_VIOLATION_CODE ||
       code === "SQLITE_CONSTRAINT" ||
-      SQLITE_EXTENDED_CODE_FIELDS.some(
-        (field) =>
-          Reflect.get(link, field) === SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE,
+      hasSqliteResultCode(
+        link,
+        SQLITE_NOT_NULL_VIOLATION_CODE,
+        SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE,
       );
     if (
       sqliteErrorMessage(link) === expectedSqliteMessage &&
@@ -560,11 +573,11 @@ export function isDuplicateUniqueIndexError(
       return true;
     }
     const isSqliteUniqueViolation =
-      Reflect.get(link, "code") === SQLITE_UNIQUE_VIOLATION_CODE ||
       Reflect.get(link, "code") === "SQLITE_CONSTRAINT" ||
-      SQLITE_EXTENDED_CODE_FIELDS.some(
-        (field) =>
-          Reflect.get(link, field) === SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE,
+      hasSqliteResultCode(
+        link,
+        SQLITE_UNIQUE_VIOLATION_CODE,
+        SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE,
       );
     const message = sqliteErrorMessage(link);
     const expectedColumns = relation.sqliteColumns
@@ -754,12 +767,15 @@ export function isSqliteNotAuthorizedError(error: unknown): boolean {
  */
 export function isSqliteStaleSnapshotError(error: unknown): boolean {
   for (const link of errorChain(error)) {
-    if (sqliteErrorCode(link) === SQLITE_STALE_SNAPSHOT_CODE) return true;
     if (!canReadProperty(link)) continue;
-    for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
-      if (Reflect.get(link, field) === SQLITE_STALE_SNAPSHOT_EXTENDED_CODE) {
-        return true;
-      }
+    if (
+      hasSqliteResultCode(
+        link,
+        SQLITE_STALE_SNAPSHOT_CODE,
+        SQLITE_STALE_SNAPSHOT_EXTENDED_CODE,
+      )
+    ) {
+      return true;
     }
   }
   return false;
@@ -814,23 +830,19 @@ export function isStatementCutShortError(error: unknown): boolean {
   if (isInsufficientResourcesError(error)) return true;
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
-    const code: unknown = Reflect.get(link, "code");
     if (
-      code === POSTGRES_QUERY_CANCELED_CODE ||
-      code === POSTGRES_PROGRAM_LIMIT_EXCEEDED_CODE ||
-      code === SQLITE_INTERRUPT_CODE ||
-      code === SQLITE_TOOBIG_CODE
+      isSqlStateIn(Reflect.get(link, "code"), [
+        POSTGRES_QUERY_CANCELED_CODE,
+        POSTGRES_PROGRAM_LIMIT_EXCEEDED_CODE,
+      ]) ||
+      hasSqliteResultCode(
+        link,
+        SQLITE_INTERRUPT_CODE,
+        SQLITE_INTERRUPT_EXTENDED_CODE,
+      ) ||
+      hasSqliteResultCode(link, SQLITE_TOOBIG_CODE, SQLITE_TOOBIG_EXTENDED_CODE)
     ) {
       return true;
-    }
-    for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
-      const extended: unknown = Reflect.get(link, field);
-      if (
-        extended === SQLITE_INTERRUPT_EXTENDED_CODE ||
-        extended === SQLITE_TOOBIG_EXTENDED_CODE
-      ) {
-        return true;
-      }
     }
   }
   return false;

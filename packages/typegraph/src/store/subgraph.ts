@@ -688,9 +688,14 @@ type SubgraphExecutionParams<
 type SubgraphPlan = Readonly<{
   baseSchema: SqlSchema;
   ctx: SubgraphContext;
+  /** The realizing edge kinds a composition read also walks; empty for any other read. */
+  compositionEdgeKinds: readonly string[];
+  /** `ctx` widened by {@link compositionEdgeKinds}: the context node and edge hydration read through. */
+  readContext: SubgraphContext;
   reachableCte: SqlFragment;
   includedIdsCte: SqlFragment;
   nodeProjectionPlan: ProjectionPlan;
+  /** Covers every edge kind {@link readContext} hydrates, composition kinds included. */
   edgeProjectionPlan: ProjectionPlan;
 }>;
 
@@ -778,14 +783,51 @@ function buildSubgraphPlan<
     options.project?.edges,
   );
   const reachableCte = buildSubgraphReachableCte(ctx, baseSchema, surface);
-
-  return {
+  const compositionEdgeKinds = resolveSubgraphCompositionEdgeKinds(params, ctx);
+  const plan = {
     baseSchema,
     ctx,
+    compositionEdgeKinds,
+    readContext: ctx,
     reachableCte,
     includedIdsCte: buildIncludedIdsCte(ctx),
     nodeProjectionPlan,
     edgeProjectionPlan,
+  };
+  if (compositionEdgeKinds.length === 0) return plan;
+
+  const readEdgeKinds = dedupeStrings([
+    ...ctx.edgeKinds,
+    ...compositionEdgeKinds,
+  ]);
+  const compositionOnlyEdgeKinds = readEdgeKinds.filter(
+    (edgeKind) => !ctx.edgeKinds.includes(edgeKind),
+  );
+  return {
+    ...plan,
+    readContext: { ...ctx, edgeKinds: readEdgeKinds },
+    edgeProjectionPlan: extendProjectionPlan(
+      edgeProjectionPlan,
+      buildEdgeProjectionPlan(
+        params.graph,
+        compositionOnlyEdgeKinds,
+        options.project?.edges,
+      ),
+    ),
+  };
+}
+
+/** `base` followed by `extension`, as one plan built over both kind lists in that order would be. */
+function extendProjectionPlan(
+  base: ProjectionPlan,
+  extension: ProjectionPlan,
+): ProjectionPlan {
+  return {
+    fullKinds: [...base.fullKinds, ...extension.fullKinds],
+    projectedKinds: new Map([
+      ...base.projectedKinds,
+      ...extension.projectedKinds,
+    ]),
   };
 }
 
@@ -888,25 +930,16 @@ export async function executeSubgraph<
 >(
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
 ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
-  const plan = buildSubgraphPlan(params, "subgraph");
-  const { ctx, reachableCte, includedIdsCte, nodeProjectionPlan, baseSchema } =
-    plan;
-  const compositionEdgeKinds = resolveSubgraphCompositionEdgeKinds(params, ctx);
-  const readContext =
-    compositionEdgeKinds.length === 0 ?
-      ctx
-    : {
-        ...ctx,
-        edgeKinds: dedupeStrings([...ctx.edgeKinds, ...compositionEdgeKinds]),
-      };
-  const edgeProjectionPlan =
-    compositionEdgeKinds.length === 0 ?
-      plan.edgeProjectionPlan
-    : buildEdgeProjectionPlan(
-        params.graph,
-        readContext.edgeKinds,
-        params.options.project?.edges,
-      );
+  const {
+    ctx,
+    compositionEdgeKinds,
+    readContext,
+    reachableCte,
+    includedIdsCte,
+    nodeProjectionPlan,
+    edgeProjectionPlan,
+    baseSchema,
+  } = buildSubgraphPlan(params, "subgraph");
 
   // The node and edge fetches both need the traversal closure. Embedding
   // the recursive CTE in each statement runs the BFS twice; on Postgres

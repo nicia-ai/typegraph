@@ -37,9 +37,12 @@
  * current identity class and asks that one predicate, never its own SQL and
  * never a re-derivation of what "class-lifted difference" means.
  */
+import { identityReferenceKey } from "../identity/reference";
+import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
+import { entityRef } from "./evidence";
 import type { MergeKey } from "./node-key";
-import { idOf, kindOf, mergeKeyOf } from "./node-key";
+import { mergeKeyOf } from "./node-key";
 import type {
   GraphDef,
   IdentityTransferAssertion,
@@ -50,7 +53,6 @@ import {
   bulkIsSeparated,
   compareCodePoints,
   currentClassKey,
-  identityReferenceKeyOf,
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,
   separationClassPairKey,
@@ -201,21 +203,24 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
     (assertion) => [mergeKeyOf(assertion.a), mergeKeyOf(assertion.b)],
   );
   const resolved = [...new Set([...participants, ...stagedEndpoints])];
+  const resolvedEntries = resolved.map((key) => ({
+    key,
+    ref: entityRef(key),
+  }));
   const targetClasses = await loadCurrentStructuralClasses(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
-    resolved.map((key) => ({ kind: kindOf(key), id: idOf(key) })),
+    resolvedEntries.map(({ ref }) => ref),
   );
   const targetClassKeyOf = new Map<MergeKey, string>();
   const membersByTargetClassKey = new Map<string, readonly PlainNodeRef[]>();
-  for (const key of resolved) {
-    const ref = { kind: kindOf(key), id: idOf(key) };
+  for (const { key, ref } of resolvedEntries) {
     // `loadCurrentStructuralClasses` keys on the identity module's OWN
     // reference key — reached here rather than re-spelled — and coalesces an
     // unclosed node onto itself, so a node belonging to no class is still
     // answered, as its own singleton class.
-    const members = targetClasses.get(identityReferenceKeyOf(ref)) ?? [ref];
+    const members = targetClasses.get(identityReferenceKey(ref)) ?? [ref];
     const classKey = currentClassKey(members);
     targetClassKeyOf.set(key, classKey);
     membersByTargetClassKey.set(classKey, members);
@@ -234,13 +239,10 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   for (const [key, targetClassKey] of targetClassKeyOf) {
     classKeyOf.set(key, mergedClasses.find(targetClassKey));
   }
-  const targetClassKeysByClassKey = new Map<string, string[]>();
-  for (const targetClassKey of membersByTargetClassKey.keys()) {
-    const classKey = mergedClasses.find(targetClassKey);
-    const grouped = targetClassKeysByClassKey.get(classKey) ?? [];
-    grouped.push(targetClassKey);
-    targetClassKeysByClassKey.set(classKey, grouped);
-  }
+  const targetClassKeysByClassKey = groupBy(
+    membersByTargetClassKey.keys(),
+    (targetClassKey) => mergedClasses.find(targetClassKey),
+  );
 
   const separatedClassPairs = new Set<string>();
   const separatingAssertionIdOf = new Map<string, string>();

@@ -38,9 +38,8 @@ export function isSupportedMergeReviewFormatVersion(
   formatVersion: unknown,
 ): formatVersion is MergeReviewFormatVersion {
   return (
-    formatVersion === MERGE_REVIEW_FORMAT_VERSION ||
-    formatVersion === MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED
-  );
+    SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS as readonly unknown[]
+  ).includes(formatVersion);
 }
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */

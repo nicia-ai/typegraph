@@ -64,6 +64,21 @@ export function isCompositionPartSide(
 }
 
 /**
+ * The part and whole of a composition edge whose part sits at `partSide`:
+ * the one place that orientation is decided, whatever shape the endpoints
+ * take.
+ */
+export function orientCompositionEndpoints<Endpoint>(
+  partSide: CompositionPartSide,
+  from: Endpoint,
+  to: Endpoint,
+): Readonly<{ part: Endpoint; whole: Endpoint }> {
+  return partSide === "from" ?
+      { part: from, whole: to }
+    : { part: to, whole: from };
+}
+
+/**
  * Whether a composition part can exist with no whole.
  * `"required"` — the part cannot exist without a live whole, enforced at
  * create (a bare create is refused; `partOf` must name a legal whole) and at
@@ -706,11 +721,7 @@ export function buildCompositionRelation(
   const applicablePairsByPartKind = new Map<string, readonly CompositionPair[]>(
     [...candidateKinds].map((kind) => [
       kind,
-      pairs.filter(
-        (pair) =>
-          kind === pair.partKind ||
-          registry.isAssignableTo(kind, pair.partKind),
-      ),
+      pairs.filter((pair) => registry.isAssignableTo(kind, pair.partKind)),
     ]),
   );
 
@@ -762,4 +773,32 @@ export function buildCompositionRelation(
     relation: { pairs: sortedPairs, edgeKinds, partSideByEdgeKind },
     issues,
   };
+}
+
+/**
+ * The registry readers that answer a composition walk towards `towards`: the
+ * realizing edge kinds under a source kind, the target kinds they reach, and
+ * the target kinds one realizing edge alone reaches.
+ */
+export function compositionReadersTowards(
+  registry: KindRegistry,
+  towards: "parts" | "wholes",
+): Readonly<{
+  edgeKindsFrom: (kind: string) => readonly string[];
+  targetKindsFrom: (kind: string) => readonly string[];
+  targetKindsFromVia: (kind: string, viaEdgeKind: string) => readonly string[];
+}> {
+  return towards === "parts" ?
+      {
+        edgeKindsFrom: (kind) => registry.compositionEdgeKindsUnder(kind),
+        targetKindsFrom: (kind) => registry.compositionPartKindsUnder(kind),
+        targetKindsFromVia: (kind, viaEdgeKind) =>
+          registry.compositionPartKindsUnderVia(kind, viaEdgeKind),
+      }
+    : {
+        edgeKindsFrom: (kind) => registry.compositionEdgeKindsOver(kind),
+        targetKindsFrom: (kind) => registry.compositionWholeKindsOver(kind),
+        targetKindsFromVia: (kind, viaEdgeKind) =>
+          registry.compositionWholeKindsOverVia(kind, viaEdgeKind),
+      };
 }

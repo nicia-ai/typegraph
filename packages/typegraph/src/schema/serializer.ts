@@ -13,6 +13,7 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import { isEdgeTargetMap, projectTargetKinds } from "../core/edge-endpoints";
+import { serializedTargetCardinalityField } from "../core/edge-integrity-options";
 import { canonicalAnnotations } from "../core/json-value";
 import {
   type EdgeRegistration,
@@ -45,11 +46,12 @@ import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
 import {
   computeClosuresFromNamedOntology,
   KindRegistry,
+  type RegistryClosures,
 } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { createDataKeyedBag } from "../utils/object";
-import { sortedReplacer } from "./canonical";
+import { canonicalJson } from "./canonical";
 import {
   type JsonSchema,
   type SchemaHash,
@@ -527,12 +529,7 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     // and hash byte-identically, to a document produced before this option
     // existed — the deserializer's `.default("many")` (`src/schema/types.ts`)
     // is what reads an absent key back as unconstrained.
-    ...((
-      registration.targetCardinality === undefined ||
-      registration.targetCardinality === "many"
-    ) ?
-      {}
-    : { targetCardinality: registration.targetCardinality }),
+    ...serializedTargetCardinalityField(registration.targetCardinality),
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     ...(registration.matchIdentity === undefined ?
       {}
@@ -583,17 +580,24 @@ function serializeOntology(
     metaEdges[name] = serializeMetaEdge(metaEdge);
   }
 
-  const serializedRelations = withCanonicalPartSides(
-    relations.map((relation) => serializeOntologyRelation(relation)),
-    edges,
+  const namedRelations = relations.map((relation) =>
+    serializeOntologyRelation(relation),
   );
+  if (namedRelations.length === 0) {
+    return {
+      metaEdges: { ...metaEdges },
+      relations: namedRelations,
+      closures: emptySerializedClosures(),
+    };
+  }
 
-  const closures = serializeClosures(serializedRelations);
-
+  // Closures read only each relation's meta-edge and endpoints, so the
+  // relations before `partSide` canonicalization compute the same ones.
+  const closures = computeClosuresFromNamedOntology(namedRelations);
   return {
     metaEdges: { ...metaEdges },
-    relations: serializedRelations,
-    closures,
+    relations: withCanonicalPartSides(namedRelations, edges, closures),
+    closures: serializeComputedClosures(closures),
   };
 }
 
@@ -601,10 +605,18 @@ function serializeOntology(
  * Serializes a meta-edge.
  */
 function serializeMetaEdge(metaEdge: MetaEdge): SerializedMetaEdge {
-  return {
-    name: metaEdge.name,
-    description: metaEdge.properties.description,
-  };
+  return serializedMetaEdge(metaEdge.name, metaEdge.properties.description);
+}
+
+/**
+ * The fields a serialized meta-edge carries — everything else an earlier
+ * release wrote is dropped (see {@link canonicalStoredSchemaDocument}).
+ */
+function serializedMetaEdge(
+  name: string,
+  description: string | undefined,
+): SerializedMetaEdge {
+  return { name, description };
 }
 
 /**
@@ -631,15 +643,12 @@ function serializeOntologyRelation(
 function withCanonicalPartSides(
   relations: readonly SerializedOntologyRelation[],
   edges: Record<string, SerializedEdgeDef>,
+  closures: RegistryClosures,
 ): readonly SerializedOntologyRelation[] {
   if (!relations.some((relation) => relation.partSide !== undefined)) {
     return relations;
   }
-  const registry = new KindRegistry(
-    new Map(),
-    new Map(),
-    computeClosuresFromNamedOntology(relations),
-  );
+  const registry = new KindRegistry(new Map(), new Map(), closures);
   const edgeFacts = buildSerializedEdgeKindFacts(edges);
   return relations.map((relation) => {
     if (relation.partSide === undefined) return relation;
@@ -662,25 +671,31 @@ function withCanonicalPartSides(
 function serializeClosures(
   relations: readonly NamedOntologyRelation[],
 ): SerializedClosures {
-  if (relations.length === 0) {
-    return {
-      subClassAncestors: {},
-      subClassDescendants: {},
-      broaderClosure: {},
-      narrowerClosure: {},
-      equivalenceSets: {},
-      disjointPairs: [],
-      partOfClosure: {},
-      hasPartClosure: {},
-      iriToKind: {},
-      edgeInverses: {},
-      edgeImplicationsClosure: {},
-      edgeImplyingClosure: {},
-    };
-  }
+  return relations.length === 0 ?
+      emptySerializedClosures()
+    : serializeComputedClosures(computeClosuresFromNamedOntology(relations));
+}
 
-  const computed = computeClosuresFromNamedOntology(relations);
+function emptySerializedClosures(): SerializedClosures {
+  return {
+    subClassAncestors: {},
+    subClassDescendants: {},
+    broaderClosure: {},
+    narrowerClosure: {},
+    equivalenceSets: {},
+    disjointPairs: [],
+    partOfClosure: {},
+    hasPartClosure: {},
+    iriToKind: {},
+    edgeInverses: {},
+    edgeImplicationsClosure: {},
+    edgeImplyingClosure: {},
+  };
+}
 
+function serializeComputedClosures(
+  computed: RegistryClosures,
+): SerializedClosures {
   return {
     subClassAncestors: mapToRecord(computed.subClassAncestors),
     subClassDescendants: mapToRecord(computed.subClassDescendants),
@@ -900,17 +915,14 @@ export function canonicalStoredSchemaDocument(
   const edges = createDataKeyedBag<SerializedEdgeDef>();
   for (const [kind, edge] of Object.entries(document.edges)) {
     const { targetCardinality, ...rest } = edge;
-    edges[kind] =
-      targetCardinality === undefined || targetCardinality === "many" ?
-        rest
-      : edge;
+    edges[kind] = {
+      ...rest,
+      ...serializedTargetCardinalityField(targetCardinality),
+    };
   }
   const metaEdges = createDataKeyedBag<SerializedMetaEdge>();
   for (const [name, metaEdge] of Object.entries(document.ontology.metaEdges)) {
-    metaEdges[name] = {
-      name: metaEdge.name,
-      description: metaEdge.description,
-    };
+    metaEdges[name] = serializedMetaEdge(metaEdge.name, metaEdge.description);
   }
   return {
     ...document,
@@ -951,6 +963,5 @@ export async function computeSchemaHash(
   };
 
   // Serialize with sorted keys for deterministic output
-  const json = JSON.stringify(hashable, sortedReplacer);
-  return sha256Hex(json);
+  return sha256Hex(canonicalJson(hashable));
 }

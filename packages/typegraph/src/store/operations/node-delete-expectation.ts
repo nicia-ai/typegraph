@@ -12,7 +12,7 @@ import {
 } from "../../errors";
 import { zodIssuesToValidationIssues } from "../../errors/validation";
 import { compareStrings } from "../../utils/compare";
-import { encodeTupleKey } from "../../utils/tuple-key";
+import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import { type CompositionCascadedPart, type NodeDeletePlan } from "../types";
 
 type DeletedNode = Readonly<{ kind: string; id: string }>;
@@ -106,7 +106,7 @@ function duplicateEntryIssues(plan: NodeDeletePlan): ValidationIssue[] {
   const seenEdgeIds = new Set<string>();
   const issues: ValidationIssue[] = [];
   for (const [index, part] of plan.cascadedParts.entries()) {
-    const key = encodeTupleKey([part.kind, part.id]);
+    const key = nodeRefKey(part);
     if (seenParts.has(key)) {
       issues.push({
         path: `expect.cascadedParts.${index}`,

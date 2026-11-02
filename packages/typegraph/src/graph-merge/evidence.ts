@@ -1,3 +1,4 @@
+import { type Assert, type Equal } from "../utils/type-assert";
 import { canonicalValueKey } from "./canonical-props";
 import type { MergeKey } from "./node-key";
 import {
@@ -71,6 +72,22 @@ export type MatchEvidence =
       threshold: number;
     }>;
 
+/** Why a retained candidate edge's endpoints still ended up in separate clusters. */
+export type ClusterExclusionReason =
+  "diameter" | "baseAmbiguity" | "separation";
+
+/** Every {@link ClusterExclusionReason}, for the plan schema's runtime check. */
+export const CLUSTER_EXCLUSION_REASONS = [
+  "diameter",
+  "baseAmbiguity",
+  "separation",
+] as const;
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _clusterExclusionReasonsAreComplete = Assert<
+  Equal<(typeof CLUSTER_EXCLUSION_REASONS)[number], ClusterExclusionReason>
+>;
+
 /** One opt-in scorer observation, retained independently of cluster membership. */
 export type CandidateDiagnostic =
   | Readonly<{
@@ -81,7 +98,7 @@ export type CandidateDiagnostic =
         | "retained"
         | Readonly<{
             kind: "excluded";
-            reason: "diameter" | "baseAmbiguity" | "separation";
+            reason: ClusterExclusionReason;
           }>;
     }>
   | Readonly<{
@@ -89,7 +106,7 @@ export type CandidateDiagnostic =
       scoreDecision: "accepted";
       clusterDisposition: Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity" | "separation";
+        reason: ClusterExclusionReason;
       }>;
     }>;
 

@@ -37,7 +37,6 @@ export {
   assertVectorSearchLimit,
   buildVectorCapabilities,
   quoteIdentifier,
-  shortHash,
   VECTOR_CONTRIBUTION_PREFIX,
   vectorMinScoreCondition,
   vectorPhysicalName,
@@ -72,6 +71,7 @@ export type {
   SqlIntent,
 } from "../query/sql-intent";
 export { resolveStampedValidityLowerBound } from "../utils/date";
+export { shortHash } from "../utils/hash";
 export {
   BATCH_POINT_READ,
   batchPointReadMembers,

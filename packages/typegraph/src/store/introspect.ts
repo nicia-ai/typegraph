@@ -20,6 +20,7 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import { projectTargetKinds } from "../core/edge-endpoints";
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
 import { canonicalAnnotations } from "../core/json-value";
 import {
   type Cardinality,
@@ -171,7 +172,7 @@ export function introspectSchema<G extends GraphDef>(
       from: reg.from.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
       to: projectTargetKinds(reg.to),
       cardinality: reg.cardinality ?? "many",
-      targetCardinality: reg.targetCardinality ?? "many",
+      targetCardinality: effectiveTargetCardinality(reg.targetCardinality),
       endpointExistence: reg.endpointExistence ?? "notDeleted",
       acyclic: reg.acyclic ?? false,
       properties: serializeSchemaProperties(edgeType.schema),

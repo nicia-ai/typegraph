@@ -36,9 +36,9 @@ import {
 import {
   type AliasExpansionOptions,
   aliasOverloadTyping,
-  expandKindsForAxis,
+  type AliasStaticTyping,
   INDEPENDENT_ALIAS_TYPING,
-  resolveAliasExpansion,
+  resolveAliasKinds,
 } from "./alias-expansion";
 // Type-only import to get the QueryBuilder type without runtime circular dependency
 import {
@@ -683,19 +683,11 @@ export class TraversalBuilder<
       > {
     validateSqlIdentifier(alias);
 
-    const expansion = resolveAliasExpansion(
-      options,
-      this.#config.defaultExpansion,
-    );
-    const kinds = expandKindsForAxis(
-      expansion,
+    const kinds = this.#resolveTargetKinds(
       kind,
-      this.#config.registry,
+      options,
       aliasOverloadTyping(options, "to()"),
     );
-    if (expansion === "narrower") {
-      this.#assertNarrowerEndpointsAdmitted(kind, kinds);
-    }
 
     const newState = this.#stateWithTraversal(alias, kinds);
 
@@ -763,7 +755,7 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: AliasExpansionOptions | { expansion?: undefined },
+    options?: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -784,19 +776,11 @@ export class TraversalBuilder<
     }
     this.#assertValidEndpoint(kindName);
 
-    const expansion = resolveAliasExpansion(
-      options,
-      this.#config.defaultExpansion,
-    );
-    const kinds = expandKindsForAxis(
-      expansion,
+    const kinds = this.#resolveTargetKinds(
       kindName,
-      this.#config.registry,
+      options,
       INDEPENDENT_ALIAS_TYPING,
     );
-    if (expansion === "narrower") {
-      this.#assertNarrowerEndpointsAdmitted(kindName, kinds);
-    }
 
     const baseState = this.#stateWithTraversal(alias, kinds);
     const newState: QueryBuilderState = {
@@ -811,6 +795,24 @@ export class TraversalBuilder<
       RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
       CoordinateState
     >;
+  }
+
+  #resolveTargetKinds(
+    kind: string,
+    options: AliasExpansionOptions | undefined,
+    typing: AliasStaticTyping,
+  ): readonly string[] {
+    const { expansion, kinds } = resolveAliasKinds(
+      options,
+      this.#config.defaultExpansion,
+      [kind],
+      this.#config.registry,
+      typing,
+    );
+    if (expansion === "narrower") {
+      this.#assertNarrowerEndpointsAdmitted(kind, kinds);
+    }
+    return kinds;
   }
 
   /**

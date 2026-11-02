@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import { compareEntityRefs, compareMatchSources } from "./evidence";
+import {
+  CLUSTER_EXCLUSION_REASONS,
+  type ClusterExclusionReason,
+  compareEntityRefs,
+  compareMatchSources,
+} from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
 // Bumped 1 -> 2 for the composition-orphan review field: a required field
@@ -195,7 +200,7 @@ export type MergePlanCandidateDiagnostic = Readonly<{
     | "retained"
     | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity" | "separation";
+        reason: ClusterExclusionReason;
       }>
     | undefined;
 }>;
@@ -371,6 +376,20 @@ const mergePlanAnchorsSchema = z.discriminatedUnion("kind", [
   incrementalAnchorsSchema,
 ]);
 
+function statesAtMostOneValidityEnd(
+  upsert: Readonly<{
+    validTo?: string | undefined;
+    clearValidTo?: true | undefined;
+  }>,
+): boolean {
+  return upsert.validTo === undefined || !upsert.clearValidTo;
+}
+
+const VALIDITY_END_EXCLUSIVITY_ISSUE = {
+  message: 'A write states either "validTo" or "clearValidTo", never both',
+  path: ["clearValidTo"],
+};
+
 const nodeUpsertSchema = z
   .object({
     kind: nonEmptyStringSchema,
@@ -382,10 +401,7 @@ const nodeUpsertSchema = z
     clearValidTo: z.literal(true).optional(),
   })
   .strict()
-  .refine((upsert) => upsert.validTo === undefined || !upsert.clearValidTo, {
-    message: 'A write states either "validTo" or "clearValidTo", never both',
-    path: ["clearValidTo"],
-  });
+  .refine(statesAtMostOneValidityEnd, VALIDITY_END_EXCLUSIVITY_ISSUE);
 
 const edgeUpsertSchema = z
   .object({
@@ -400,10 +416,7 @@ const edgeUpsertSchema = z
     clearValidTo: z.literal(true).optional(),
   })
   .strict()
-  .refine((upsert) => upsert.validTo === undefined || !upsert.clearValidTo, {
-    message: 'A write states either "validTo" or "clearValidTo", never both',
-    path: ["clearValidTo"],
-  });
+  .refine(statesAtMostOneValidityEnd, VALIDITY_END_EXCLUSIVITY_ISSUE);
 
 const mergePlanIdentityAssertionSchema = z
   .object({
@@ -593,7 +606,7 @@ const diagnosticsSchema = z
               z
                 .object({
                   kind: z.literal("excluded"),
-                  reason: z.enum(["diameter", "baseAmbiguity", "separation"]),
+                  reason: z.enum(CLUSTER_EXCLUSION_REASONS),
                 })
                 .strict(),
             ])

@@ -16,7 +16,7 @@
  * `OntologySnapshot` already carries `edges`, so no input change was needed
  * to add the cardinality half.
  */
-import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
+import { populatedSchemaKinds } from "../backend/schema-kind-emptiness";
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { createSqlSchema } from "../query/compiler/schema";
@@ -39,12 +39,8 @@ import {
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
-import {
-  readCompositionUnattachedParts,
-  requiredCompositionPartKinds,
-} from "../store/operations/composition-create";
+import { readCompositionUnattachedParts } from "../store/operations/composition-create";
 import { groupBy } from "../utils/array";
-import { hasOwnKey } from "../utils/object";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   type EdgeCardinalityDeclaration,
@@ -60,7 +56,10 @@ import {
   type OntologyDataProbe,
   type OntologySnapshot,
   ontologyTighteningProbes,
+  requiredPartKindsByViaEdgeKind,
+  snapshotKindDelta,
 } from "./ontology-change";
+import { type SchemaCommitTransition } from "./types";
 import {
   assertUniquenessClaimGatesOpen,
   declaredKindUniqueConstraints,
@@ -84,6 +83,10 @@ export type AtomicPreflightCapabilityError = Readonly<{
   suggestion?: string;
 }>;
 
+const ATOMIC_PREFLIGHT_BACKEND_SUGGESTION =
+  "Run this migration through a backend built by `createSqliteBackend` or " +
+  "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.";
+
 /**
  * Thrown when an ontology tightening needs the atomic preflight-commit
  * primitive and the backend does not implement it.
@@ -93,9 +96,7 @@ const ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapa
     code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically validate an ontology tightening against existing data as part of a schema transition.",
-    suggestion:
-      "Run this migration through a backend built by `createSqliteBackend` or " +
-      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+    suggestion: ATOMIC_PREFLIGHT_BACKEND_SUGGESTION,
   };
 
 /**
@@ -113,9 +114,7 @@ const EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPrefl
     code: "EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically validate a newly-constrained edge cardinality against existing data as part of a schema transition.",
-    suggestion:
-      "Run this migration through a backend built by `createSqliteBackend` or " +
-      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+    suggestion: ATOMIC_PREFLIGHT_BACKEND_SUGGESTION,
   };
 
 /**
@@ -130,27 +129,23 @@ const UNIQUENESS_CLAIM_GATE_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCa
     code: "UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically verify that a kind is empty while changing a uniqueness constraint that covers it as part of a schema transition.",
-    suggestion:
-      "Run this migration through a backend built by `createSqliteBackend` or " +
-      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+    suggestion: ATOMIC_PREFLIGHT_BACKEND_SUGGESTION,
   };
 
-export type SchemaTighteningPreflightParams = Readonly<{
-  graphId: string;
-  fromVersion: number;
-  toVersion: number;
-  before: OntologySnapshot;
-  after: OntologySnapshot;
-  /**
-   * The already-classified diff, when a caller computed one (`ensureSchema`
-   * and `Store.evolve` both diff `before`/`after` before reaching this
-   * preflight). Reusing it avoids reclassifying the identical
-   * `before`/`after` pair a second time in the same commit; `migrateSchema`
-   * and `evolve`'s dropped-kinds branch, which never compute a diff, omit
-   * this and classification runs internally, once.
-   */
-  changes?: readonly OntologyChange[];
-}>;
+export type SchemaTighteningPreflightParams = SchemaCommitTransition &
+  Readonly<{
+    before: OntologySnapshot;
+    after: OntologySnapshot;
+    /**
+     * The already-classified diff, when a caller computed one (`ensureSchema`
+     * and `Store.evolve` both diff `before`/`after` before reaching this
+     * preflight). Reusing it avoids reclassifying the identical
+     * `before`/`after` pair a second time in the same commit; `migrateSchema`
+     * and `evolve`'s dropped-kinds branch, which never compute a diff, omit
+     * this and classification runs internally, once.
+     */
+    changes?: readonly OntologyChange[];
+  }>;
 
 /**
  * The probe of one kind, or `undefined` when this diff carries none —
@@ -176,17 +171,14 @@ function previewViolations(
 }
 
 /**
- * Required-existence check. Resolves the delta's `via` edge kinds to their REQUIRED-existence
- * part kinds against the PROPOSED registry — reusing
- * {@link requiredCompositionPartKinds} (`../store/operations/composition-create`)
- * rather than re-spelling "which part kinds does a required existence pair
- * name" a second time, so this probe can never admit an `existence:
- * "optional"` pair's part kind (which can never violate `compositionExistence`)
- * or miss a subclass of a declared required part kind — reads
- * {@link readCompositionUnattachedParts} for the
- * result, dedupes, one owner of "which part kinds does this probe's
- * edge-kind list name", shared by nothing else because this preflight is
- * its only caller.
+ * Required-existence check. Resolves the delta's `via` edge kinds to their
+ * REQUIRED-existence part kinds against the PROPOSED registry through
+ * {@link requiredPartKindsByViaEdgeKind} (`./ontology-change`), the same
+ * reading the classifier used to name those edge kinds, so this probe can
+ * never admit an `existence: "optional"` pair's part kind (which can never
+ * violate `compositionExistence`) or miss a subclass of a declared required
+ * part kind — then reads {@link readCompositionUnattachedParts} for the
+ * result.
  */
 async function readCompositionUnattachedPartsForEdgeKinds(
   proposedRegistry: KindRegistry,
@@ -194,18 +186,11 @@ async function readCompositionUnattachedPartsForEdgeKinds(
   graphId: string,
   edgeKinds: readonly string[],
 ): Promise<readonly ConstraintFenceViolation[]> {
-  const requiredPartKinds = new Set(
-    requiredCompositionPartKinds(proposedRegistry),
+  const partKinds = new Set(
+    requiredPartKindsByViaEdgeKind(proposedRegistry)
+      .filter(({ viaEdgeKind }) => edgeKinds.includes(viaEdgeKind))
+      .map(({ partKind }) => partKind),
   );
-  const partKinds = new Set<string>();
-  for (const pair of proposedRegistry.compositionRelation().pairs) {
-    if (!edgeKinds.includes(pair.viaEdgeKind)) continue;
-    for (const concreteKind of proposedRegistry.expandSubClasses(
-      pair.partKind,
-    )) {
-      if (requiredPartKinds.has(concreteKind)) partKinds.add(concreteKind);
-    }
-  }
   if (partKinds.size === 0) return [];
   const unattached = await readCompositionUnattachedParts(
     proposedRegistry,
@@ -232,15 +217,15 @@ async function populatedAddedEdgeKindProbes(
   graphId: string,
   probes: AddedEdgeKindProbes,
 ): Promise<AddedEdgeKindProbes> {
-  const populated = new Set<string>();
-  for (const { edgeKind } of probes.endpointAllowances) {
-    const hasRows = await schemaKindHasRows(target, graphId, {
-      entity: "edge",
-      kind: edgeKind,
-      rows: "nonDeleted",
-    });
-    if (hasRows) populated.add(edgeKind);
-  }
+  const populatedProbes = await populatedSchemaKinds(
+    target,
+    graphId,
+    probes.endpointAllowances.map(
+      ({ edgeKind }) =>
+        ({ entity: "edge", kind: edgeKind, rows: "nonDeleted" }) as const,
+    ),
+  );
+  const populated = new Set(populatedProbes.map((probe) => probe.kind));
   return {
     endpointAllowances: probes.endpointAllowances.filter((allowance) =>
       populated.has(allowance.edgeKind),
@@ -521,9 +506,8 @@ export function prepareSchemaTighteningPreflight(
     uniqueConstraints,
     changes.length > 0,
   );
-  const addsEdgeKind = Object.keys(params.after.edges).some(
-    (edgeKind) => !hasOwnKey(params.before.edges, edgeKind),
-  );
+  const kindDelta = snapshotKindDelta(params.before, params.after);
+  const addsEdgeKind = kindDelta.addedEdgeKinds.length > 0;
   if (
     probes.length === 0 &&
     newlyConstrainedAxes.length === 0 &&
@@ -561,8 +545,8 @@ export function prepareSchemaTighteningPreflight(
     return undefined;
   }
   const addedEdgeKinds = addedEdgeKindProbes(
-    params.before,
     params.after,
+    kindDelta,
     proposedRegistry,
   );
 

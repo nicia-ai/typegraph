@@ -70,6 +70,7 @@ import {
   type RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
 import {
+  type InternalReadParams,
   withCoordinate,
   withValidCoordinate,
 } from "./collections/temporal-read-params";
@@ -965,6 +966,19 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     });
   }
 
+  /** This view's read options with its coordinate applied ({@link pinnedOptions}). */
+  #pinned<Options extends object>(
+    method: string,
+    options: Options | undefined,
+  ): Options & InternalReadParams {
+    return pinnedOptions(
+      method,
+      options,
+      this.coordinate,
+      withCoordinate(this.coordinate),
+    );
+  }
+
   /** The temporal mode this view reads in. */
   get mode(): TemporalMode {
     return this.coordinate.valid.mode;
@@ -1043,11 +1057,9 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     root: GraphNodeReference<G>,
     options: StoreViewSubgraphOptions<G, EK, NK, P, C>,
   ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
-    const internalOptions = pinnedOptions(
+    const internalOptions = this.#pinned(
       "subgraph",
       options,
-      this.coordinate,
-      withCoordinate(this.coordinate),
     ) as InternalSubgraphOptions<G, EK, NK, P, C>;
     return storeRuntime(this.store).subgraphAtCoordinate(root, internalOptions);
   }
@@ -1061,12 +1073,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     return this.internalAlgorithms().shortestPath(
       from,
       to,
-      pinnedOptions(
-        "shortestPath",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("shortestPath", options),
     );
   }
 
@@ -1079,12 +1086,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     return this.internalAlgorithms().weightedShortestPath(
       from,
       to,
-      pinnedOptions(
-        "weightedShortestPath",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("weightedShortestPath", options),
     );
   }
 
@@ -1095,12 +1097,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   ): Promise<readonly ReachableNode[]> {
     return this.internalAlgorithms().reachable(
       from,
-      pinnedOptions(
-        "reachable",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("reachable", options),
     );
   }
 
@@ -1113,12 +1110,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     return this.internalAlgorithms().canReach(
       from,
       to,
-      pinnedOptions(
-        "canReach",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("canReach", options),
     );
   }
 
@@ -1129,12 +1121,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   ): Promise<readonly ReachableNode[]> {
     return this.internalAlgorithms().neighbors(
       node,
-      pinnedOptions(
-        "neighbors",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("neighbors", options),
     );
   }
 
@@ -1145,12 +1132,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   ): Promise<number> {
     return this.internalAlgorithms().degree(
       node,
-      pinnedOptions(
-        "degree",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("degree", options),
     );
   }
 
@@ -1159,12 +1141,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options: StoreViewLabelPropagationOptions<G>,
   ): Promise<readonly LabelPropagationMembership[]> {
     return this.internalAlgorithms().labelPropagation(
-      pinnedOptions(
-        "labelPropagation",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("labelPropagation", options),
     );
   }
 
@@ -1173,12 +1150,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ): Promise<readonly WeaklyConnectedComponentMembership[]> {
     return this.internalAlgorithms().weaklyConnectedComponents(
-      pinnedOptions(
-        "weaklyConnectedComponents",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("weaklyConnectedComponents", options),
     );
   }
 
@@ -1187,12 +1159,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options: StoreViewPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
     return this.internalAlgorithms().pageRank(
-      pinnedOptions(
-        "pageRank",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("pageRank", options),
     );
   }
 
@@ -1201,12 +1168,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options: StoreViewPersonalizedPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
     return this.internalAlgorithms().personalizedPageRank(
-      pinnedOptions(
-        "personalizedPageRank",
-        options,
-        this.coordinate,
-        withCoordinate(this.coordinate),
-      ),
+      this.#pinned("personalizedPageRank", options),
     );
   }
 }

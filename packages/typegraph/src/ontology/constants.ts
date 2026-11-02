@@ -79,9 +79,10 @@ export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
  * than re-spelling the membership test.
  */
 export function isSubsumptionMetaEdge(metaEdge: string): boolean {
-  return (
-    metaEdge === META_EDGE_SUB_CLASS_OF ||
-    metaEdge === META_EDGE_EQUIVALENT_TO ||
-    metaEdge === META_EDGE_SAME_AS
-  );
+  return metaEdge === META_EDGE_SUB_CLASS_OF || isEquivalenceMetaEdge(metaEdge);
+}
+
+/** Whether `metaEdge` declares mutual subsumption: `equivalentTo` or `sameAs`. */
+export function isEquivalenceMetaEdge(metaEdge: string): boolean {
+  return metaEdge === META_EDGE_EQUIVALENT_TO || metaEdge === META_EDGE_SAME_AS;
 }

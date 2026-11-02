@@ -161,7 +161,7 @@ function currentWindowPredicate(
 }
 
 /** Qualifies a column with a relation name, the rendering both dialects read. */
-function qualifiedColumn(
+export function qualifiedColumn(
   relation: string,
   column: Readonly<{ name: string }>,
 ): SQL {

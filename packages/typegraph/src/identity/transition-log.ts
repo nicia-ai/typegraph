@@ -31,6 +31,7 @@ import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
+import { decodeRevisionColumn } from "../utils/revision-column";
 import {
   optionalIdentityTimestamp,
   toCanonicalIdentityTimestamp,
@@ -447,9 +448,8 @@ type RawIdentityTransitionRow = Readonly<{
 }>;
 
 function toRevisionNumber(value: unknown): number {
-  if (typeof value === "number") return value;
-  if (typeof value === "bigint") return Number(value);
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  const revision = decodeRevisionColumn(value);
+  if (typeof revision === "number") return revision;
   throw new ConfigurationError(
     "Identity transition row carried a non-numeric recorded_revision.",
     { value },
@@ -519,7 +519,9 @@ function normalizeIdentityTransitionRow(
  * interleaves arbitrarily with this graph's, so no numeric floor can
  * separate "restored" from "native" the way this per-row marker does.
  */
-export function isRestoredTransitionRow(row: IdentityTransitionRow): boolean {
+export function isRestoredTransitionRow(
+  row: IdentityTransitionRow,
+): row is IdentityTransitionRow & Readonly<{ restored_at: string }> {
   return row.restored_at !== undefined;
 }
 

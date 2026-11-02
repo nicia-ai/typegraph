@@ -346,7 +346,8 @@ const runtimeEdgeDocumentZod = z
 const compositionPartSideZod = z.enum(COMPOSITION_PART_SIDE_VALUES);
 const compositionExistenceZod = z.enum(COMPOSITION_EXISTENCE_VALUES);
 
-const runtimeOntologyRelationZod = z
+/** One ontology relation, as both the stored ontology and a graph extension persist it. */
+const ontologyRelationZod = z
   .object({
     metaEdge: z.string(),
     from: z.string(),
@@ -385,7 +386,7 @@ const graphExtensionZod = z
     annotations: annotationsZod.optional(),
     nodes: z.record(z.string(), runtimeNodeDocumentZod).optional(),
     edges: z.record(z.string(), runtimeEdgeDocumentZod).optional(),
-    ontology: z.array(runtimeOntologyRelationZod).optional(),
+    ontology: z.array(ontologyRelationZod).optional(),
     indexes: z.array(runtimeIndexDocumentZod).optional(),
   })
   .loose() as unknown as z.ZodType<GraphExtension>;
@@ -704,18 +705,7 @@ export const serializedSchemaZod = z
           .superRefine(
             checkRecordKeyMatchesField("name", "ontology.metaEdges"),
           ),
-        relations: z.array(
-          z
-            .object({
-              metaEdge: z.string(),
-              from: z.string(),
-              to: z.string(),
-              via: z.string().optional(),
-              partSide: compositionPartSideZod.optional(),
-              existence: compositionExistenceZod.optional(),
-            })
-            .loose(),
-        ),
+        relations: z.array(ontologyRelationZod),
         closures: z
           .object({
             subClassAncestors: z.record(z.string(), z.array(z.string())),
@@ -847,6 +837,13 @@ export type SerializedSchema = Readonly<{
  * to detect if the schema has actually changed.
  */
 export type SchemaHash = string;
+
+/** The graph and the versions a schema commit moves its active pointer between. */
+export type SchemaCommitTransition = Readonly<{
+  graphId: string;
+  fromVersion: number;
+  toVersion: number;
+}>;
 
 /** The version and content hash of one stored schema snapshot. */
 export type SchemaIdentity = Readonly<{

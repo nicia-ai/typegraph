@@ -27,6 +27,7 @@ import {
 import { ConfigurationError, KindNotFoundError } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
 import {
+  compositionReadersTowards,
   compositionViaKind,
   type CompositionViaRef,
   partitionCompositionEdgeKindsByDirection,
@@ -64,10 +65,8 @@ import {
 import {
   type AliasExpansionOptions,
   aliasOverloadTyping,
-  expandKindListForAxis,
-  expandKindsForAxis,
   INDEPENDENT_ALIAS_TYPING,
-  resolveAliasExpansion,
+  resolveAliasKinds,
 } from "./alias-expansion";
 import { buildQueryAst } from "./ast-builder";
 import {
@@ -654,12 +653,9 @@ export class QueryBuilder<
         });
       }
     }
-    const expansion = resolveAliasExpansion(
+    const { expansion, kinds } = resolveAliasKinds(
       options,
       this.#config.defaultExpansion,
-    );
-    const kinds = expandKindListForAxis(
-      expansion,
       requestedKinds,
       this.#config.registry,
       aliasOverloadTyping(options, "from()"),
@@ -750,13 +746,10 @@ export class QueryBuilder<
       });
     }
 
-    const expansion = resolveAliasExpansion(
+    const { expansion, kinds } = resolveAliasKinds(
       options,
       this.#config.defaultExpansion,
-    );
-    const kinds = expandKindsForAxis(
-      expansion,
-      kindName,
+      [kindName],
       this.#config.registry,
       INDEPENDENT_ALIAS_TYPING,
     );
@@ -1094,19 +1087,7 @@ export class QueryBuilder<
     NA,
     O
   > {
-    return this.#navigateComposition(
-      "parts",
-      nodeAlias,
-      options,
-    ) as unknown as CompositionNavigationResult<
-      G,
-      Aliases,
-      EdgeAliases,
-      RecursiveAliases,
-      CoordinateState,
-      NA,
-      O
-    >;
+    return this.#navigateComposition<NA, O>("parts", nodeAlias, options);
   }
 
   /**
@@ -1138,19 +1119,7 @@ export class QueryBuilder<
     NA,
     O
   > {
-    return this.#navigateComposition(
-      "wholes",
-      nodeAlias,
-      options,
-    ) as unknown as CompositionNavigationResult<
-      G,
-      Aliases,
-      EdgeAliases,
-      RecursiveAliases,
-      CoordinateState,
-      NA,
-      O
-    >;
+    return this.#navigateComposition<NA, O>("wholes", nodeAlias, options);
   }
 
   /**
@@ -1159,11 +1128,22 @@ export class QueryBuilder<
    * else — refusal, edge-kind partition, the union construction, recursion —
    * is one code path so the two steps cannot drift.
    */
-  #navigateComposition(
+  #navigateComposition<
+    NA extends string,
+    const O extends CompositionNavigationOptions<Aliases>,
+  >(
     relation: "parts" | "wholes",
-    nodeAlias: string,
-    options: CompositionNavigationOptions<Aliases> | undefined,
-  ): QueryBuilder<G, AliasMap, EdgeAliasMap, RecursiveAliasMap, "open"> {
+    nodeAlias: UniqueAlias<NA, Aliases>,
+    options: O | undefined,
+  ): CompositionNavigationResult<
+    G,
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState,
+    NA,
+    O
+  > {
     validateSqlIdentifier(nodeAlias);
     const registry = this.#config.registry;
     const fromAlias = options?.from ?? this.#state.currentAlias;
@@ -1188,25 +1168,12 @@ export class QueryBuilder<
       );
     }
 
-    const edgeKindsUnder = (kind: string): readonly string[] =>
-      relation === "parts" ?
-        registry.compositionEdgeKindsUnder(kind)
-      : registry.compositionEdgeKindsOver(kind);
-    const targetKindsUnder = (kind: string): readonly string[] =>
-      relation === "parts" ?
-        registry.compositionPartKindsUnder(kind)
-      : registry.compositionWholeKindsOver(kind);
-    const targetKindsVia = (
-      kind: string,
-      viaEdgeKind: string,
-    ): readonly string[] =>
-      relation === "parts" ?
-        registry.compositionPartKindsUnderVia(kind, viaEdgeKind)
-      : registry.compositionWholeKindsOverVia(kind, viaEdgeKind);
+    const { edgeKindsFrom, targetKindsFrom, targetKindsFromVia } =
+      compositionReadersTowards(registry, relation);
 
     const edgeKinds = new Set<string>();
     for (const kind of sourceKinds) {
-      for (const edgeKind of edgeKindsUnder(kind)) edgeKinds.add(edgeKind);
+      for (const edgeKind of edgeKindsFrom(kind)) edgeKinds.add(edgeKind);
     }
     const viaKind =
       options?.via === undefined ? undefined : compositionViaKind(options.via);
@@ -1219,8 +1186,8 @@ export class QueryBuilder<
     const targetKinds = new Set(
       sourceKinds.flatMap((kind) =>
         viaKind === undefined ?
-          targetKindsUnder(kind)
-        : targetKindsVia(kind, viaKind),
+          targetKindsFrom(kind)
+        : targetKindsFromVia(kind, viaKind),
       ),
     );
     if (viaKind !== undefined) {
@@ -1228,7 +1195,7 @@ export class QueryBuilder<
         const declaredVia = [...edgeKinds]
           .filter((edgeKind) =>
             sourceKinds.some(
-              (kind) => targetKindsVia(kind, edgeKind).length > 0,
+              (kind) => targetKindsFromVia(kind, edgeKind).length > 0,
             ),
           )
           .toSorted();
@@ -1372,12 +1339,14 @@ export class QueryBuilder<
     : traversalBuilder.toKindSet(
         targetKindList,
         nodeAlias,
-      )) as unknown as QueryBuilder<
+      )) as unknown as CompositionNavigationResult<
       G,
-      AliasMap,
-      EdgeAliasMap,
-      RecursiveAliasMap,
-      "open"
+      Aliases,
+      EdgeAliases,
+      RecursiveAliases,
+      CoordinateState,
+      NA,
+      O
     >;
   }
 

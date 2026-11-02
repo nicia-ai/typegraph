@@ -138,11 +138,10 @@ export function findStructuralSubsumptionViolations(
     const parentKinds = [...ancestors].toSorted((left, right) =>
       compareCodePoints(left, right),
     );
+    if (parentKinds.length === 0) continue;
+    const childSchema = propertySchemaOf(childKind);
 
     for (const parentKind of parentKinds) {
-      if (childKind === parentKind) continue;
-
-      const childSchema = propertySchemaOf(childKind);
       const parentSchema = propertySchemaOf(parentKind);
       // Unregistered kind (external IRI, or a parent this document only
       // references) — subsumption does not apply; skip, do not throw.

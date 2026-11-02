@@ -36,6 +36,7 @@ import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError, EdgeAcyclicityError } from "../errors";
 import { EdgeAcyclicityIndeterminateError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
 import { countSqlParameters, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
@@ -92,9 +93,10 @@ export type AcyclicEdgeRelation = Readonly<{
 /**
  * A standalone `acyclic: true` registration's own relation: the edge
  * kind IS the relation, named after itself, with one `reversed: false`
- * member. The one constructor for this shape, so a caller that reasons over
- * a proposed edge kind rather than a runtime {@link GraphDef} — the
- * schema-tightening preflight, grouping a tightening's newly-declared edge
+ * member. The one constructor for this shape, reached only through
+ * {@link declaredAcyclicEdgeRelations}, so a caller that reasons over a
+ * proposed edge kind rather than a runtime {@link GraphDef} — the
+ * schema-tightening preflight, judging a tightening's newly-declared edge
  * kinds — builds the identical shape {@link acyclicEdgeRelations} does,
  * rather than hand-spelling the member literal a second time.
  */
@@ -172,10 +174,27 @@ function compositionAcyclicRelation(
   };
 }
 
-const acyclicEdgeRelationsCache = new WeakMap<
-  GraphDef,
-  WeakMap<KindRegistry, readonly AcyclicEdgeRelation[]>
->();
+type PerGraphAndRegistryCache<T> = WeakMap<GraphDef, WeakMap<KindRegistry, T>>;
+
+/** Reads `cache` for `(graph, registry)`, building and storing the value on a miss. */
+function memoizedPerGraphAndRegistry<T extends object>(
+  cache: PerGraphAndRegistryCache<T>,
+  graph: GraphDef,
+  registry: KindRegistry,
+  build: () => T,
+): T {
+  const byRegistry = cache.get(graph) ?? new WeakMap<KindRegistry, T>();
+  const cached = byRegistry.get(registry);
+  if (cached !== undefined) return cached;
+  const value = build();
+  byRegistry.set(registry, value);
+  cache.set(graph, byRegistry);
+  return value;
+}
+
+const acyclicEdgeRelationsCache: PerGraphAndRegistryCache<
+  readonly AcyclicEdgeRelation[]
+> = new WeakMap();
 
 /**
  * Every acyclic relation this graph declares, in code-point order by name:
@@ -197,19 +216,65 @@ export function acyclicEdgeRelations(
   graph: GraphDef,
   registry: KindRegistry,
 ): readonly AcyclicEdgeRelation[] {
-  const byRegistry = acyclicEdgeRelationsCache.get(graph);
-  const cached = byRegistry?.get(registry);
-  if (cached !== undefined) return cached;
-  const relations = declaredAcyclicEdgeRelations(
+  return memoizedPerGraphAndRegistry(
+    acyclicEdgeRelationsCache,
+    graph,
     registry,
-    Object.entries(graph.edges)
-      .filter(([, registration]) => registration.acyclic === true)
-      .map(([edgeKind]) => edgeKind),
+    () =>
+      declaredAcyclicEdgeRelations(
+        registry,
+        Object.entries(graph.edges)
+          .filter(([, registration]) => registration.acyclic === true)
+          .map(([edgeKind]) => edgeKind),
+      ),
   );
-  const registryCache = byRegistry ?? new WeakMap();
-  registryCache.set(registry, relations);
-  acyclicEdgeRelationsCache.set(graph, registryCache);
-  return relations;
+}
+
+/** The relation an edge kind's writes are probed against, and its rule there. */
+type AcyclicEdgeKindPlacement = Readonly<{
+  relation: AcyclicEdgeRelation;
+  membership: RowMembership;
+}>;
+
+const acyclicEdgeKindPlacementsCache: PerGraphAndRegistryCache<
+  ReadonlyMap<string, AcyclicEdgeKindPlacement>
+> = new WeakMap();
+
+/**
+ * Every acyclic edge kind's {@link AcyclicEdgeKindPlacement}, memoized like
+ * {@link acyclicEdgeRelations} so the per-row readers below are one lookup.
+ * The composition-wins rule for a kind in two relations lives here; see
+ * {@link acyclicRelationForEdgeKind}.
+ */
+function acyclicEdgeKindPlacements(
+  graph: GraphDef,
+  registry: KindRegistry,
+): ReadonlyMap<string, AcyclicEdgeKindPlacement> {
+  return memoizedPerGraphAndRegistry(
+    acyclicEdgeKindPlacementsCache,
+    graph,
+    registry,
+    () => {
+      const placements = new Map<string, AcyclicEdgeKindPlacement>();
+      for (const relation of acyclicEdgeRelations(graph, registry)) {
+        for (const member of relation.members) {
+          const placed = placements.get(member.edgeKind);
+          if (
+            placed !== undefined &&
+            (placed.relation.name === COMPOSITION_RELATION_NAME ||
+              relation.name !== COMPOSITION_RELATION_NAME)
+          ) {
+            continue;
+          }
+          placements.set(member.edgeKind, {
+            relation,
+            membership: member.membership,
+          });
+        }
+      }
+      return placements;
+    },
+  );
 }
 
 /**
@@ -261,14 +326,7 @@ export function acyclicRelationForEdgeKind(
   registry: KindRegistry,
   edgeKind: string,
 ): AcyclicEdgeRelation | undefined {
-  const matches = acyclicEdgeRelations(graph, registry).filter((relation) =>
-    relation.members.some((member) => member.edgeKind === edgeKind),
-  );
-  if (matches.length <= 1) return matches[0];
-  return (
-    matches.find((relation) => relation.name === COMPOSITION_RELATION_NAME) ??
-    matches[0]
-  );
+  return acyclicEdgeKindPlacements(graph, registry).get(edgeKind)?.relation;
 }
 
 /**
@@ -286,9 +344,7 @@ export function acyclicRelationMembership(
   registry: KindRegistry,
   edgeKind: string,
 ): RowMembership | undefined {
-  return acyclicRelationForEdgeKind(graph, registry, edgeKind)?.members.find(
-    (member) => member.edgeKind === edgeKind,
-  )?.membership;
+  return acyclicEdgeKindPlacements(graph, registry).get(edgeKind)?.membership;
 }
 
 /**
@@ -315,8 +371,11 @@ export function acyclicRelationCountsRow(
 }
 
 /**
- * Every edge kind that participates in ANY acyclic relation, in code-point
- * order. A projection of {@link acyclicEdgeRelations} for callers that need
+ * Every edge kind that participates in ANY acyclic relation, in
+ * {@link acyclicEdgeRelations}' relation order: the composition relation's
+ * members first, then the standalone kinds in code-point order. A kind both
+ * composition-realizing and declared `acyclic: true` appears once per
+ * relation. A projection of {@link acyclicEdgeRelations} for callers that need
  * the flat kind list (a trusted-import capability refusal, an import-time
  * batching decision over more than one candidate edge) rather than the
  * relation structure itself — reading it through this function rather than
@@ -347,7 +406,7 @@ export function edgeKindIsInAcyclicRelation(
   registry: KindRegistry,
   edgeKind: string,
 ): boolean {
-  return acyclicRelationForEdgeKind(graph, registry, edgeKind) !== undefined;
+  return acyclicEdgeKindPlacements(graph, registry).has(edgeKind);
 }
 
 /**
@@ -412,6 +471,9 @@ function groupProposedByAcyclicRelation(
       selfLoopEdgeIds: string[];
     }
   >();
+  let firstSelfLoop:
+    | Readonly<{ relation: AcyclicEdgeRelation; edge: ProposedRelationEdge }>
+    | undefined;
   for (const edge of proposed) {
     if (!acyclicRelationCountsRow(graph, registry, edge)) continue;
     const relation = requireDefined(
@@ -423,36 +485,17 @@ function groupProposedByAcyclicRelation(
       selfLoopEdgeIds: [],
     };
     byRelationName.set(relation.name, entry);
-    if (proposedEdgeIsSelfLoop(edge)) entry.selfLoopEdgeIds.push(edge.edgeId);
-    else entry.edges.push(edge);
+    if (proposedEdgeIsSelfLoop(edge)) {
+      entry.selfLoopEdgeIds.push(edge.edgeId);
+      firstSelfLoop ??= { relation, edge };
+    } else {
+      entry.edges.push(edge);
+    }
   }
   const groups = [...byRelationName.keys()]
     .toSorted((left, right) => compareStrings(left, right))
     .map((name) => requireDefined(byRelationName.get(name)));
-  const selfLoopIds = new Set(
-    groups.flatMap((group) => [...group.selfLoopEdgeIds]),
-  );
-  const firstSelfLoopEdge = proposed.find(
-    (edge) =>
-      selfLoopIds.has(edge.edgeId) &&
-      acyclicRelationCountsRow(graph, registry, edge),
-  );
-  return {
-    groups,
-    firstSelfLoop:
-      firstSelfLoopEdge === undefined ? undefined : (
-        {
-          relation: requireDefined(
-            acyclicRelationForEdgeKind(
-              graph,
-              registry,
-              firstSelfLoopEdge.edgeKind,
-            ),
-          ),
-          edge: firstSelfLoopEdge,
-        }
-      ),
-  };
+  return { groups, firstSelfLoop };
 }
 
 /**
@@ -490,6 +533,16 @@ export type AcyclicityProbeContext = Readonly<{
   /** Echoed in every refusal's `details.operation`. */
   operation: string;
 }>;
+
+/**
+ * The probe context for an acyclicity assertion run on `target`. The dialect
+ * is read from that target, so no caller threads a second copy of it.
+ */
+export function acyclicityProbeContext(
+  params: Omit<AcyclicityProbeContext, "dialect">,
+): AcyclicityProbeContext {
+  return { ...params, dialect: getDialect(params.target.dialect) };
+}
 
 /**
  * What the audit reader needs — `AcyclicityProbeContext` minus `lock` (no

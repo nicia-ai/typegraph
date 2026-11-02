@@ -35,7 +35,6 @@ import {
   type GraphData,
   ImportOptionsSchema,
 } from "../src/interchange/types";
-import { getDialect } from "../src/query/dialect";
 import { runWritePlan } from "../src/store/operations/write-executor";
 import { mixedWritePlan } from "../src/store/operations/write-plan";
 import { storeBackend, storeRuntime } from "../src/store/runtime-port";
@@ -769,7 +768,6 @@ describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
       graphId,
       graph: store.graph,
       schema: store.revisionSchema,
-      dialect: getDialect(backend.dialect),
       registry,
       data,
       nodeSchemas: buildNodeSchemaMap(store.graph),

@@ -33,25 +33,31 @@ import {
   sortedByClaimTarget,
 } from "./edge-claims";
 
+type CompositionHolders = readonly Readonly<{
+  edgeKind: string;
+  partSide: CompositionPartSide;
+}>[];
+
+const compositionHoldersCache = new WeakMap<KindRegistry, CompositionHolders>();
+
 /**
  * THE oriented holder list every composition claim on this graph carries as
  * its `scope.holders` — one entry per realizing edge kind, tagged with which
- * endpoint of that kind is the part. Computed once per call rather than
- * cached: it folds a `KindRegistry`'s own already-built map
- * (`compositionEdgeKinds`/`compositionPartSide`), so recomputing it is a
- * flat map over data the registry already holds, not a second traversal of
- * the ontology.
+ * endpoint of that kind is the part. Memoized per registry: a registry is
+ * immutable once built, and every composition claim reads the same list.
  */
-function compositionHolders(
-  registry: KindRegistry,
-): readonly Readonly<{ edgeKind: string; partSide: CompositionPartSide }>[] {
-  return registry.compositionEdgeKinds().map((edgeKind) => ({
+function compositionHolders(registry: KindRegistry): CompositionHolders {
+  const cached = compositionHoldersCache.get(registry);
+  if (cached !== undefined) return cached;
+  const holders = registry.compositionEdgeKinds().map((edgeKind) => ({
     edgeKind,
     partSide: requireDefined(
       registry.compositionPartSide(edgeKind),
       `"${edgeKind}" is in compositionEdgeKinds() but has no recorded partSide`,
     ),
   }));
+  compositionHoldersCache.set(registry, holders);
+  return holders;
 }
 
 /**
@@ -107,11 +113,9 @@ function compositionClaim(
 ): ClaimEdgeCardinalityParams | undefined {
   const partSide = registry.compositionPartSide(subject.kind);
   if (partSide === undefined) return undefined;
-  const partConcreteKind =
-    partSide === "from" ? subject.fromKind : subject.toKind;
   const population = requireDefined(
-    registry.compositionPopulation(partConcreteKind),
-    `"${subject.kind}" is a composition edge kind but "${partConcreteKind}" has no recorded composition population`,
+    registry.compositionEdgePopulation(subject.kind),
+    `"${subject.kind}" is a composition edge kind but has no recorded composition population`,
   );
   return {
     ...compositionAxisRef(partSide, population),
@@ -148,11 +152,10 @@ export function edgeInsertClaims(
     subject,
   );
   const composition = compositionClaim(registry, subject);
-  const owesComposition =
-    composition !== undefined && axisCountsRow(composition, subject);
-  return sortedByClaimTarget(
-    owesComposition ? [...ordinary, composition] : ordinary,
-  );
+  if (composition === undefined || !axisCountsRow(composition, subject)) {
+    return ordinary;
+  }
+  return sortedByClaimTarget([...ordinary, composition]);
 }
 
 /**
