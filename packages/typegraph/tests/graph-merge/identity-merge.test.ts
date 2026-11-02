@@ -344,6 +344,42 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(current.map((entry) => entry.id)).toEqual([assertion.id]);
   });
 
+  it("merges a retraction the other branch reasserted and then ended itself", async () => {
+    const { store, first, second, assertion } = await createBase(true);
+    if (assertion === undefined) throw new Error("Missing base assertion");
+    const retractBranch = unwrap(await branch(store, () => makeBackend()));
+    const reassertBranch = unwrap(await branch(store, () => makeBackend()));
+    await retractBranch.store.identity.retractAssertion(assertion.id);
+    await reassertBranch.store.identity.retractAssertion(assertion.id);
+    const reasserted = await reassertBranch.store.identity.assertSame(
+      first,
+      second,
+    );
+    // An ending in the assertion's own millisecond leaves an empty window,
+    // which the merge drops rather than lands as history.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await reassertBranch.store.identity.retractAssertion(
+      reasserted.assertion.id,
+    );
+
+    const result = await merge(store, [retractBranch, reassertBranch], {});
+    if (isErr(result)) {
+      console.info("refusal", result.error.message, result.error.details);
+      throw result.error;
+    }
+    console.info("merged", result.data.merged.identity, result.data.dropped);
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 1 });
+    expect(await store.identity.assertionsOf(first)).toEqual([]);
+    expect(await store.identity.areSame(first, second)).toBe(false);
+    const archival = await storeRuntime(store).identityAssertionsAtTarget(
+      storeRuntime(store).backend,
+      "archival",
+    );
+    expect(
+      archival.find((row) => row.id === reasserted.assertion.id)?.validTo,
+    ).toBeDefined();
+  });
+
   it("merges a retract and reassert every retracting branch agrees on", async () => {
     const { store, first, second, assertion } = await createBase(true);
     if (assertion === undefined) throw new Error("Missing base assertion");
@@ -579,6 +615,62 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(await store.nodes.Person.getById(second.id)).toBeDefined();
     expect(await store.identity.assertionsOf(first)).toEqual([]);
   });
+
+  /**
+   * An assertion that ENDED claims nothing about its endpoint's present, so a
+   * deletion of that endpoint does not contradict it: the merge lands it as
+   * history. Covers the branch that ended it by deleting the endpoint itself,
+   * and a branch that retracted it while another branch deleted the endpoint.
+   */
+  it.each([
+    { relation: "same", ending: "own-delete" },
+    { relation: "different", ending: "own-delete" },
+    { relation: "same", ending: "retract" },
+    { relation: "different", ending: "retract" },
+  ] as const)(
+    "lands an ended $relation assertion over a deleted endpoint as history ($ending)",
+    async ({ relation, ending }) => {
+      const { store, first, second } = await createBase();
+      const assertBranch = unwrap(await branch(store, () => makeBackend()));
+      const deleteBranch = unwrap(await branch(store, () => makeBackend()));
+      const { assertion } =
+        relation === "same" ?
+          await assertBranch.store.identity.assertSame(first, second)
+        : await assertBranch.store.identity.assertDifferent(first, second);
+      // An ending in the assertion's own millisecond leaves an empty window,
+      // which the merge drops rather than lands as history.
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      if (ending === "own-delete") {
+        await assertBranch.store.nodes.Person.delete(second.id);
+      } else {
+        await assertBranch.store.identity.retractAssertion(assertion.id);
+        await deleteBranch.store.nodes.Person.delete(second.id);
+      }
+      expect(await assertBranch.store.identity.assertionsOf(first)).toEqual([]);
+
+      const branches =
+        ending === "own-delete" ? [assertBranch] : [assertBranch, deleteBranch];
+      const result = await merge(store, branches, {});
+      if (isErr(result)) {
+        console.info("refusal", result.error.message, result.error.details);
+        throw result.error;
+      }
+      expect(result.data.merged.identity).toEqual({
+        asserted: 1,
+        retracted: 0,
+      });
+      expect(await store.nodes.Person.getById(second.id)).toBeUndefined();
+      expect(await store.identity.assertionsOf(first)).toEqual([]);
+      const archival = await storeRuntime(store).identityAssertionsAtTarget(
+        storeRuntime(store).backend,
+        "archival",
+      );
+      const landed = archival.find((row) => row.id === assertion.id);
+      console.info("landed history", landed);
+      expect(landed).toMatchObject({ relation });
+      expect(landed?.validTo).toBeDefined();
+    },
+  );
 
   it("rejects a transitive same/different contradiction (#4)", async () => {
     const { store, first, second, third } = await createChainBase();

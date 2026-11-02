@@ -154,6 +154,100 @@ describe("a retract/reassert race", () => {
     expect(planned.retractions).toEqual([ended]);
     expect(planned.dropped).toEqual([]);
   });
+
+  /**
+   * Only an assertion that holds NOW reasserts the pair. Branch B retracted the
+   * pair, asserted it again under a new id, and retracted that too, so B agrees
+   * with A that the pair no longer holds; its ended row is history.
+   */
+  it("is not a race when the other branch's reassertion has already ended", () => {
+    const endedReassertion: IdentityTransferAssertion = {
+      ...reasserted,
+      validTo: "2024-03-01T00:00:00.000Z",
+    };
+    const planned = planIdentityChanges(
+      stagingWithIdentityChanges(
+        [{ branchId: BRANCH_B, assertion: endedReassertion }],
+        [
+          { branchId: BRANCH_A, assertion: inherited },
+          { branchId: BRANCH_B, assertion: inherited },
+        ],
+      ),
+      new Map(),
+    );
+    console.info("ended reassertion plan", planned);
+    expect(planned.assertions).toEqual([endedReassertion]);
+    expect(planned.retractions).toEqual([inherited]);
+    expect(planned.dropped).toEqual([]);
+  });
+
+  it("is not a race when the other branch only records the pair's history", () => {
+    const history: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "a-history",
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2021-01-01T00:00:00.000Z",
+    };
+    const planned = planIdentityChanges(
+      stagingWithIdentityChanges(
+        [{ branchId: BRANCH_B, assertion: history }],
+        [{ branchId: BRANCH_A, assertion: inherited }],
+      ),
+      new Map(),
+    );
+    console.info("history-only plan", planned);
+    expect(planned.assertions).toEqual([history]);
+    expect(planned.retractions).toEqual([inherited]);
+    expect(planned.dropped).toEqual([]);
+  });
+});
+
+/**
+ * The refusal's witness is the `same` and `different` whose windows overlap —
+ * not whichever of each relation sorts first. Here the first `same` is a
+ * bounded window that ended before the `different` began, so naming it would
+ * point the caller at a claim that contradicts nothing.
+ */
+describe("an opposing-relations refusal", () => {
+  it("names the overlapping pair, not the first of each relation", () => {
+    const boundedSame: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "o-1",
+      validFrom: "2000-01-01T00:00:00.000Z",
+      validTo: "2001-01-01T00:00:00.000Z",
+    };
+    const currentDifferent: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      relation: "different",
+      id: "o-2",
+    };
+    const currentSame: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "o-3",
+      validFrom: "2024-03-01T00:00:00.000Z",
+    };
+    const caught = caughtFrom(() =>
+      planIdentityChanges(
+        stagingWithIdentityChanges(
+          [
+            { branchId: BRANCH_A, assertion: boundedSame },
+            { branchId: BRANCH_A, assertion: currentDifferent },
+            { branchId: BRANCH_B, assertion: currentSame },
+          ],
+          [],
+          [],
+        ),
+        new Map(),
+      ),
+    );
+    expect(caught).toBeInstanceOf(IdentityMergeConflictError);
+    const error = caught as IdentityMergeConflictError;
+    console.info("opposing refusal", error.details);
+    expect(error.details["assertions"]).toEqual([
+      currentSame,
+      currentDifferent,
+    ]);
+  });
 });
 
 describe("duplicate assertions of one pair", () => {

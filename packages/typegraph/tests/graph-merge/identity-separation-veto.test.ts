@@ -34,6 +34,7 @@ import { z } from "zod";
 import { branch } from "../../src/graph-merge/branch";
 import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import { merge, mergeIncremental } from "../../src/graph-merge/merge";
+import { COLLAPSED_ENDED_DIFFERENT_DROP_REASON } from "../../src/graph-merge/merge-identity";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 import { backendMatrix } from "./test-utils";
@@ -416,6 +417,93 @@ describe.each(backendMatrix())("identity separation veto [$name]", (entry) => {
         { kind: "Robot", id: "r1" },
       ),
     ).toBe(true);
+  });
+
+  /**
+   * Only a `different` that holds NOW separates. A branch that asserts and then
+   * retracts `different(alpha, beta)` no longer holds them apart, exactly as a
+   * retracted row in the target's ledger would not, so its match is neither
+   * dropped (scored) nor refused (definitional). The ended row's pair is one
+   * node after the fusion, so the row is dropped with a typed reason.
+   */
+  it("lets a scored match through once the branch retracted the different that held it apart", async () => {
+    const forkPoint = await makeSimilarityStore();
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const alpha = { kind: "Person", id: "alpha" } as const;
+    const beta = { kind: "Person", id: "beta" } as const;
+    const props = { name: "Ada", email: "ada@example.test" };
+    await source.store.nodes.Person.create(props, { id: "alpha" });
+    await source.store.nodes.Person.create(props, { id: "beta" });
+    const { assertion: retracted } =
+      await source.store.identity.assertDifferent(alpha, beta);
+    await source.store.identity.retractAssertion(retracted.id);
+    expect(await source.store.identity.areDifferent(alpha, beta)).toBe(false);
+
+    const result = await merge(forkPoint, [source], {
+      branchOrder: [BRANCH_A],
+      resolve: {
+        Person: {
+          ...ONE_BUCKET,
+          threshold: 0.5,
+          similarity: { kind: "custom", score: () => 1 },
+        },
+      },
+    });
+
+    if (isErr(result)) {
+      console.info("merge refused", result.error.code, result.error.message);
+      throw result.error;
+    }
+    console.info("identity conflicts", result.data.identityConflicts);
+    expect(result.data.identityConflicts).toEqual([]);
+    expect(result.data.resolutions).toEqual([
+      expect.objectContaining({ memberIds: ["alpha", "beta"] }),
+    ]);
+    expect(await livePersonIds(forkPoint)).toHaveLength(1);
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: retracted.id,
+      reason: COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
+    });
+  });
+
+  it("does not refuse a definitional match whose different the branch retracted", async () => {
+    const [forkPoint] = await createStoreWithSchema(
+      retypeGraph,
+      await makeBackend(),
+      { history: true },
+    );
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const person = { kind: "Person", id: "x" } as const;
+    const employee = { kind: "Employee", id: "x" } as const;
+    const props = { name: "X", email: "x@example.test" };
+    await source.store.nodes.Person.create(props, { id: "x" });
+    await source.store.nodes.Employee.create(props, { id: "x" });
+    const { assertion: retracted } =
+      await source.store.identity.assertDifferent(person, employee);
+    await source.store.identity.retractAssertion(retracted.id);
+
+    const result = await merge(forkPoint, [source], {
+      branchOrder: [BRANCH_A],
+      reconcileTypes: "ontology",
+    });
+
+    if (isErr(result)) {
+      console.info("merge refused", result.error.code, result.error.details);
+      throw result.error;
+    }
+    expect(result.data.identityConflicts).toEqual([]);
+    expect(await forkPoint.nodes.Employee.getById("x" as never)).toBeDefined();
+    expect(await forkPoint.nodes.Person.getById("x" as never)).toBeUndefined();
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: retracted.id,
+      reason: COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
+    });
   });
 
   /**

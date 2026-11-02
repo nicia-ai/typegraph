@@ -998,7 +998,12 @@ proposed it. There is no option to state: a `different` assertion is an
 integrity fact, so the veto runs for every identity-enabled merge. It honors
 an assertion the target already holds and one a branch being merged adds
 alike: a branch can record `assertDifferent(a, b)` to keep entity resolution
-from fusing two entities it stages.
+from fusing two entities it stages. Only a `different` that still holds
+separates: one a branch retracted, or ended by deleting an endpoint, vetoes
+nothing, exactly as an ended row in the target's ledger does not. If the
+match then fuses its two entities, the ended assertion has no pair left to
+describe and is reported on `dropped` with reason
+`identity:ended-different-collapsed`.
 
 | Proposed match | Outcome |
 | --- | --- |
@@ -1060,6 +1065,8 @@ The rules are fixed; there is no policy to choose.
 | Branches end the same assertion at different instants | One retraction is written, at the **earliest** staged `validTo` — independent of branch order |
 | One branch retracts a pair and re-asserts it itself | Both are written: the base assertion ends at the staged instant and the replacement lands |
 | One branch retracts a pair while a **different** branch re-asserts it without retracting | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`, naming both assertions and both branches |
+| A branch re-asserts a pair and then ends that re-assertion, or records a bounded historical window for it | Not a re-assertion: only an assertion that still holds re-asserts a pair. The ended row lands as history beside the other branch's retraction |
+| A branch's assertion names a node another branch (or the same branch) deleted | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT` while the assertion still holds. One that ended — retracted, or ended by that very deletion — lands as history |
 | Branches assert `same` and `different` for one pair over overlapping validity windows | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`, naming both assertions |
 | A scored candidate match spans two identity classes held apart by a `different` assertion | The match is dropped and reported (see below); the merge continues |
 
@@ -1314,7 +1321,8 @@ type MergeReport = {
   typeReconciliations: TypeReconciliation[]; // ontology kind collapses
   // Node drops (deleted endpoints, incompatible members), edge drops, identity
   // drops (identity:duplicate-assertion, identity:endpoints-collapsed,
-  // identity:retraction-target-mismatch, identity:deletion-overruled), and
+  // identity:ended-different-collapsed, identity:retraction-target-mismatch,
+  // identity:deletion-overruled), and
   // lower-bound deltas the commit cannot apply (window-not-applicable)
   dropped: DroppedItem[];
   // Inherited rows whose end-of-validity the merge resolved. Each entry carries

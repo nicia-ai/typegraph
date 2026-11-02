@@ -41,6 +41,7 @@ import {
   identityReferenceKey,
   normalizeIdentityPair,
 } from "../identity/reference";
+import { isCurrentIdentityAssertion } from "../identity/validity-window";
 import { encodeTupleKey } from "../utils/tuple-key";
 import type { CanonicalEntity } from "./canonicalize";
 import {
@@ -105,6 +106,15 @@ export { DUPLICATE_IDENTITY_ASSERTION_DROP_REASON } from "./identity-three-way";
  */
 export const REDUNDANT_IDENTITY_ASSERTION_DROP_REASON =
   "identity:endpoints-collapsed";
+
+/**
+ * Reason recorded when node reconciliation fused both endpoints of a
+ * `different` assertion that no longer holds — retracted, or ended by deleting
+ * an endpoint. It forbade nothing, and its pair is now one node, so the
+ * history row has no pair left to describe.
+ */
+export const COLLAPSED_ENDED_DIFFERENT_DROP_REASON =
+  "identity:ended-different-collapsed";
 
 /** Reason recorded when endpoint remapping leaves no shared validity window. */
 export const EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON =
@@ -235,7 +245,7 @@ export function planIdentityChanges(
     const stored = storedIdentityRowsById.get(assertionId);
     if (
       stored !== undefined &&
-      stored.validTo === undefined &&
+      isCurrentIdentityAssertion(stored) &&
       assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
     ) {
       retractionDropped.push({
@@ -312,8 +322,9 @@ function resolveIdentityEndpoint(
  * `requireLiveEndpoints` guard would reject with a NodeNotFoundError, rolling back
  * the whole merge). After remapping it re-establishes the identity-pair invariants:
  * a `same` assertion whose endpoints collapse onto one survivor is redundant
- * and dropped (reported), while a collapsed `different` assertion is a typed
- * conflict; surviving endpoints are re-normalized into code-point order (the
+ * and dropped (reported), as is a collapsed `different` that no longer holds,
+ * while a collapsed CURRENT `different` assertion is a typed conflict;
+ * surviving endpoints are re-normalized into code-point order (the
  * import path rejects a non-normalized pair), and assertions that now share a
  * semantic key are re-deduped by the same survivor rule
  * ({@link compareIdentitySurvivors}) that {@link planIdentityChanges} applied
@@ -348,7 +359,16 @@ export function remapIdentityAssertionEndpoints(
       retypeMap,
     );
     if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
-      if (assertion.relation === "different") {
+      if (assertion.relation === "same") {
+        dropped.push(
+          droppedIdentityAssertion(
+            assertion,
+            REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
+          ),
+        );
+        continue;
+      }
+      if (isCurrentIdentityAssertion(assertion)) {
         throw new IdentityMergeConflictError(
           "Node reconciliation collapsed a different-identity assertion onto one survivor.",
           { details: { assertion, survivor: remappedA } },
@@ -357,7 +377,7 @@ export function remapIdentityAssertionEndpoints(
       dropped.push(
         droppedIdentityAssertion(
           assertion,
-          REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
+          COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
         ),
       );
       continue;
@@ -467,6 +487,11 @@ export function remapIdentityAssertionEndpoints(
  * and is (not) the same as another, a second says it is gone, and unlike the
  * delete/modify case there is no policy the caller can set to arbitrate.
  *
+ * Only an assertion that holds NOW conflicts with the deletion. One that ended —
+ * retracted, or ended by the very deletion of its endpoint — claims nothing
+ * about the entity's present, and the commit lands it as history: an ended row
+ * needs only its endpoint ROWS, which a soft delete keeps.
+ *
  * `nodeDeletions` is keyed by the deleted node's own kind, while the assertions
  * arrive post-retype, so a retyped identity is checked in BOTH forms.
  */
@@ -484,6 +509,7 @@ export function assertIdentityEndpointsNotDeleted(
     }
   }
   for (const assertion of assertions) {
+    if (!isCurrentIdentityAssertion(assertion)) continue;
     for (const endpoint of [assertion.a, assertion.b]) {
       if (!deletedIdentities.has(mergeKeyOf(endpoint))) {
         continue;
@@ -990,7 +1016,7 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
     const stored = storedById.get(retraction.id);
     if (
       stored !== undefined &&
-      stored.validTo === undefined &&
+      isCurrentIdentityAssertion(stored) &&
       assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
     ) {
       throw new BaseVersionMismatchError(

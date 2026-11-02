@@ -38,6 +38,7 @@
  * never a re-derivation of what "class-lifted difference" means.
  */
 import { identityReferenceKey } from "../identity/reference";
+import { isCurrentIdentityAssertion } from "../identity/validity-window";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { entityRef } from "./evidence";
@@ -79,7 +80,7 @@ export type IdentitySeparationFacts = Readonly<{
   classKeyOf: ReadonlyMap<MergeKey, string>;
   /**
    * NUL-joined, code-point-ordered class-key pairs held apart, by the target's
-   * relation or by a `different` assertion a merged branch carries.
+   * relation or by a current `different` assertion a merged branch carries.
    */
   separatedClassPairs: ReadonlySet<string>;
   /**
@@ -143,15 +144,17 @@ function fusionPairs(
  * one group is correct but quadratic; passing the components keeps the probe
  * proportional to what the plan can actually merge.
  *
- * `stagedAssertions` are the assertions the merged branches add, and both
- * relations bind the merge that lands them as firmly as the target's own
- * ledger does:
+ * `stagedAssertions` are the assertions the merged branches add. Only the ones
+ * that hold NOW ({@link isCurrentIdentityAssertion}) bind the merge, exactly as
+ * only the target ledger's current rows do — an assertion a branch retracted,
+ * or ended by deleting an endpoint, is history the merge carries, not a fact
+ * that forbids a match. A current assertion binds as firmly as the target's
+ * own ledger:
  *
- *  - a current `same` among them joins its endpoints' target classes, so a
- *    participant a branch asserts into a class answers for every separation
- *    that class carries — a node the target does not hold being its own class;
- *  - a `different` among them separates the resulting classes of its two
- *    endpoints.
+ *  - a `same` joins its endpoints' target classes, so a participant a branch
+ *    asserts into a class answers for every separation that class carries — a
+ *    node the target does not hold being its own class;
+ *  - a `different` separates the resulting classes of its two endpoints.
  *
  * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the separation
  * relation this graph's veto reads has never been provisioned or filled —
@@ -165,12 +168,14 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
 ): Promise<IdentitySeparationFacts> {
   const participants = [...new Set(groups.flat())];
   if (participants.length === 0) return NO_IDENTITY_SEPARATION_FACTS;
-  const stagedDifferent = stagedAssertions.filter(
+  const currentStaged = stagedAssertions.filter((assertion) =>
+    isCurrentIdentityAssertion(assertion),
+  );
+  const stagedDifferent = currentStaged.filter(
     (assertion) => assertion.relation === "different",
   );
-  const stagedSame = stagedAssertions.filter(
-    (assertion) =>
-      assertion.relation === "same" && assertion.validTo === undefined,
+  const stagedSame = currentStaged.filter(
+    (assertion) => assertion.relation === "same",
   );
   const ctx = storeRuntime(target).identityContext();
   // A graph holding no `different` assertion can separate nothing, so the whole
