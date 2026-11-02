@@ -24,6 +24,7 @@ import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { type EdgeKindFacts } from "./edge-kind-facts";
 import { type KindRegistry } from "./kind-registry";
+import { type RowMembership } from "./row-membership";
 
 // ============================================================
 // Types
@@ -842,4 +843,46 @@ export function compositionViaReach(
     )
     .toSorted((left, right) => compareStrings(left, right));
   return { realized: false, declaredVia };
+}
+
+/**
+ * THE membership rule of a composition row under its pair's whole-side
+ * population: `"one"` binds part and whole for the row's whole life, ended
+ * or not (`"allRows"`); `"oneActive"` holds only while the window is open
+ * (`"openRows"`), because an ended row is the history a reparent leaves
+ * behind and attaches nothing.
+ *
+ * Every reader of composition membership decides through this — the
+ * cascade's closure (`compositionEdgeCounts`), the composition acyclicity
+ * relation, `subgraph({ composition })` and `parts()`/`wholes()` — so none
+ * can disagree about which rows bind. The composition CLAIM reaches the same
+ * rule through its cardinality axis (`holderLiveness` of the `"one"` /
+ * `"oneActive"` axis); `tests/composition-row-membership.test.ts` pins the
+ * two together.
+ */
+export function compositionPopulationMembership(
+  population: "one" | "oneActive",
+): RowMembership {
+  return population === "oneActive" ? "openRows" : "allRows";
+}
+
+/**
+ * Each composition edge kind's own {@link compositionPopulationMembership}
+ * rule, read off the registry: the per-kind input every SQL reader of
+ * composition membership renders (`compileEdgeMembershipFilters`,
+ * `src/query/compiler/temporal.ts`).
+ */
+export function compositionEdgeKindMembers(
+  registry: KindRegistry,
+  edgeKinds: Iterable<string>,
+): readonly Readonly<{ edgeKind: string; membership: RowMembership }>[] {
+  return [...edgeKinds].map((edgeKind) => ({
+    edgeKind,
+    membership: compositionPopulationMembership(
+      requireDefined(
+        registry.compositionEdgePopulation(edgeKind),
+        `"${edgeKind}" is not a composition edge kind, but was named as one`,
+      ),
+    ),
+  }));
 }

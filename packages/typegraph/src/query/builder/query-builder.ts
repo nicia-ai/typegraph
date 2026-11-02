@@ -27,13 +27,13 @@ import {
 import { ConfigurationError, KindNotFoundError } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
 import {
+  compositionEdgeKindMembers,
   compositionReadersTowards,
   compositionViaKind,
   compositionViaReach,
   type CompositionViaRef,
   partitionCompositionEdgeKindsByDirection,
 } from "../../registry/composition-relation";
-import { compositionEdgeKindMembers } from "../../store/claims/composition-claims";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,

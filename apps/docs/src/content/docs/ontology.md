@@ -1047,13 +1047,17 @@ Tier 1 is enforced, in full, at write time:
   claim and the delete cascade count, so an ended `population: "one"` edge
   still binds its part and an ended `population: "oneActive"` edge does not.
   The read's temporal mode sets the instant: a current read, and an
-  `includeEnded` or `includeTombstones` read, reads what is owned now —
-  those modes do not widen ownership — while `store.asOf(t)` reads what was
-  owned at `t`, where a `"one"` edge ended before `t` still binds. The mode
-  still decides which nodes are visible, and a plain `.traverse()` over a
-  realizing edge kind keeps the edge's validity window. Preview a delete with
-  [`planDelete`](#previewing-a-delete), which also checks the plan still
-  holds when the delete runs.
+  `includeEnded` or `includeTombstones` read, follows the edges that bind
+  now — those modes do not widen ownership — while `store.asOf(t)` follows
+  the edges that bound at `t`, where a `"one"` edge ended before `t` still
+  binds. That rule is for the EDGES: nodes still follow the read's temporal
+  filter at every hop, so a part whose own validity window has ended (or not
+  yet started) is not shown, and neither is anything reachable only through
+  it, although the whole owns them and its delete removes them. A plain
+  `.traverse()` over a realizing edge kind keeps the edge's validity window.
+  Preview a delete with [`planDelete`](#previewing-a-delete), which lists
+  every part the delete removes and checks the plan still holds when the
+  delete runs.
   There is no depth ceiling on that closure and no partial answer: it is a
   set-semantics recursion bounded by its own visited set, the same way the
   acyclicity probe is exhaustive, so a part chain of any length comes back

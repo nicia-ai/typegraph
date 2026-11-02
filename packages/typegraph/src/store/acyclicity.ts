@@ -40,7 +40,9 @@ import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
 import { countSqlParameters, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { compositionEdgeKindMembers } from "../registry/composition-relation";
 import { type KindRegistry } from "../registry/kind-registry";
+import { type RowMembership } from "../registry/row-membership";
 import { chunk } from "../utils/array";
 import { compareStrings } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
@@ -49,8 +51,7 @@ import {
   COMPOSITION_RELATION_NAME,
   displayAcyclicRelationName,
 } from "./claims/axis";
-import { compositionEdgeKindMembers } from "./claims/composition-claims";
-import { membershipCountsRow, type RowMembership } from "./claims/edge-claims";
+import { membershipCountsRow } from "./claims/edge-claims";
 import {
   fenceLockOnlyDecision,
   type GraphWriteLock,

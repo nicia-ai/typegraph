@@ -1,13 +1,14 @@
 import type { QueryAst, Traversal } from "../../ast";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import { type RecordedReadBinding } from "../schema";
+import type { RECORDED_TEMPORAL_COLUMNS } from "../temporal";
 import {
   compileEdgeMembershipFilters,
   compileTemporalFilter,
   currentReadInstantFor,
   extractTemporalOptions,
   type ReadInstantMode,
-  RECORDED_TEMPORAL_COLUMNS,
+  recordedIntervalColumns,
 } from "../temporal";
 
 export type TemporalFilterPass = Readonly<{
@@ -30,11 +31,8 @@ export type TemporalFilterPass = Readonly<{
    */
   currentInstant: SqlFragment;
   /**
-   * {@link RECORDED_TEMPORAL_COLUMNS} when the read is recorded-pinned to a
-   * source that carries them (`RecordedReadSource.carriesInterval`), otherwise
-   * empty: the extra columns {@link forAlias}'s filter references. An
-   * engine-native `AS OF` source has no recorded interval and its filter reads
-   * none.
+   * The extra columns {@link forAlias}'s filter references
+   * ({@link recordedIntervalColumns}).
    */
   recordedColumns: readonly (typeof RECORDED_TEMPORAL_COLUMNS)[number][];
 }>;
@@ -54,13 +52,10 @@ export function createTemporalFilterPass(
   recordedReadBinding?: RecordedReadBinding,
 ): TemporalFilterPass {
   const currentTimestamp = currentReadInstantFor(readInstant);
-  const recordedColumns: TemporalFilterPass["recordedColumns"] =
-    (
-      ast.recordedAsOf !== undefined &&
-      recordedReadBinding?.carriesInterval === true
-    ) ?
-      RECORDED_TEMPORAL_COLUMNS
-    : [];
+  const recordedColumns = recordedIntervalColumns(
+    ast.recordedAsOf,
+    recordedReadBinding,
+  );
   function forAlias(tableAlias?: string): SqlFragment {
     return compileTemporalFilter({
       ...extractTemporalOptions(ast, tableAlias),

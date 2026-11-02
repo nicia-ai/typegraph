@@ -1681,7 +1681,10 @@ export function registerCompositionNavigationIntegrationTests(
       const { podcast } = await seedCompositionFixtures(store);
       // The batch builder's options type admits no `composition`; only a
       // JavaScript caller can reach this refusal, so the options are
-      // untyped here.
+      // untyped here. MUTATION CHECK: drop the `"batchOnce.subgraph"`
+      // composition refusal from `buildSubgraphPlan` (src/store/subgraph.ts)
+      // and both batches resolve, the one-statement read silently ignoring
+      // `composition` — verified and reverted.
       const compositionSelections: readonly unknown[] = [
         true,
         { via: "cnEpisodeOf" },
@@ -1705,6 +1708,18 @@ export function registerCompositionNavigationIntegrationTests(
           }),
         );
         expect(statements).toEqual([]);
+
+        await expect(
+          store.transaction((tx) =>
+            tx.batchOnce((read) => [read.subgraph(podcast, options)]),
+          ),
+        ).rejects.toThrow(
+          expect.objectContaining({
+            details: matchingObject({
+              code: "SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED",
+            }),
+          }),
+        );
       }
     });
 

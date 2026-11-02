@@ -7,7 +7,7 @@
  */
 import { optionalRecordedInstantParts } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
-import { type RowMembership } from "../../store/claims/edge-claims";
+import { type RowMembership } from "../../registry/row-membership";
 import { nowIso } from "../../utils/date";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { compileKindFilter } from "./predicate-utils";
@@ -141,6 +141,25 @@ export const RECORDED_TEMPORAL_COLUMNS = [
   "recorded_from",
   "recorded_to",
 ] as const;
+
+/**
+ * The recorded columns a read's temporal filter references, so a narrowed
+ * projection of a recorded relation keeps them: {@link RECORDED_TEMPORAL_COLUMNS}
+ * when the read is recorded-pinned to a source that carries them
+ * (`RecordedReadSource.carriesInterval`), otherwise none. An engine-native
+ * `AS OF` source has no recorded interval, and its filter reads none.
+ */
+export function recordedIntervalColumns(
+  recordedAsOf: string | undefined,
+  recordedReadBinding: RecordedReadBinding | undefined,
+): readonly (typeof RECORDED_TEMPORAL_COLUMNS)[number][] {
+  return (
+      recordedAsOf !== undefined &&
+        recordedReadBinding?.carriesInterval === true
+    ) ?
+      RECORDED_TEMPORAL_COLUMNS
+    : [];
+}
 
 /**
  * Compiles a temporal filter to SQL.

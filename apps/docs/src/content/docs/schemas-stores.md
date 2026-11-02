@@ -3051,10 +3051,9 @@ const sg = await store.subgraph(episode, {
 // no need to name segmentOf/episodeOf/... by hand.
 ```
 
-The unit is what the root **owns**, not what its edges' validity windows
-show. The closure follows the composition rows that bind a part to its whole —
-the same membership the delete cascade removes and
-[`planDelete`](/ontology#previewing-a-delete) previews: an ended
+The closure follows what the root **owns**, not what its edges' validity
+windows show: the composition rows that bind a part to its whole — the same
+membership the delete cascade counts. An ended
 `population: "one"` edge still binds its part, because a `one` binding holds
 for the row's whole life, and an ended `population: "oneActive"` edge, the
 history a `reparent` leaves behind, binds nothing. Such an ended `"one"` edge
@@ -3071,6 +3070,14 @@ visible:
   that ended before `t` still binds at `t`.
 - A recorded read (`store.asOfRecorded(...)`) closes over the ownership its
   pinned revision recorded.
+
+The membership rule decides which **edges** the closure follows; **nodes**
+still follow the read's temporal filter at every hop. A part node the read
+cannot see — its own validity window ended, or not yet started — is not
+returned, and neither is anything reachable only through it, even though the
+whole still owns them and a delete would remove them. The export is the
+owned unit as the read sees it, not a delete preview: use
+[`planDelete`](/ontology#previewing-a-delete) to see what a delete removes.
 
 The `edges` list you name keeps the read's validity window. When a kind is in
 both lists, an edge is returned if either admits it.

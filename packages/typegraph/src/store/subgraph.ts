@@ -43,6 +43,7 @@ import {
   compileTemporalFilter,
   currentReadInstant,
   type EdgeKindMembership,
+  recordedIntervalColumns,
 } from "../query/compiler/temporal";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
@@ -57,6 +58,7 @@ import {
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import {
+  compositionEdgeKindMembers,
   compositionViaKind,
   compositionViaReach,
   type CompositionViaRef,
@@ -70,7 +72,6 @@ import { hasOwnKey, isPlainObject } from "../utils/object";
 import { kindQualifiedToken } from "../utils/path";
 import { requireDefined } from "../utils/presence";
 import { isStatementCutShortError } from "../utils/sql-errors";
-import { compositionEdgeKindMembers } from "./claims/composition-claims";
 import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
 import {
   buildExhaustiveDirectedReachableCte,
@@ -398,13 +399,17 @@ export type SubgraphOptions<
    * applies, or the read refuses with `ConfigurationError`
    * (`COMPOSITION_VIA_NOT_DECLARED`).
    *
-   * The closure follows OWNERSHIP, not the read's validity window: the
+   * The closure's EDGES follow ownership, not the read's validity window: the
    * composition rows that bind a part to its whole, the same membership the
-   * delete cascade removes. An ended `population: "one"` row still binds (and
+   * delete cascade counts. An ended `population: "one"` row still binds (and
    * is returned with its `validTo`); an ended `population: "oneActive"` row
    * does not. `temporalMode` sets the instant ownership is evaluated at
    * (`"asOf"` at `asOf`, every other mode now — `includeEnded` and
-   * `includeTombstones` do not widen it) and still decides node visibility.
+   * `includeTombstones` do not widen it). NODES follow `temporalMode` at
+   * every hop, so a part the read cannot see (its own window ended or not yet
+   * started) is not returned, nor is anything reachable only through it,
+   * although a delete of the root removes them: the export is not a delete
+   * preview — `planDelete` is.
    *
    * This is set-level, not per-root-kind-required: a root whose kind declares
    * no composition parts contributes nothing extra and the read still runs
@@ -1617,6 +1622,8 @@ function buildSubgraphEdgeSource(
     "created_at",
     "updated_at",
     "deleted_at",
+    // The row filter applied over this source reads the recorded interval too.
+    ...recordedIntervalColumns(ctx.recordedAsOf, ctx.recordedReadBinding),
   ].map((column) => sql.raw(`windowed_edge.${column}`));
 
   // Bidirectional windows can surface one physical edge through both

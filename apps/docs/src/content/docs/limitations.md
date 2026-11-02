@@ -304,20 +304,23 @@ are not what happens:
   that already holds one of those nodes and waits on another can deadlock with
   it. See
   [Deadlocks between deletes and edge writes](#deadlocks-between-deletes-and-edge-writes-postgresql).
-- **`subgraph({ composition: true })` reads the ownership the cascade
-  deletes, but is not a delete preview.**
+- **`subgraph({ composition: true })` follows the edges the cascade
+  follows, but is not a delete preview.**
   [`store.subgraph(root, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
-  `parts()` and `wholes()` admit each composition row by its pair's
+  `parts()` and `wholes()` admit each composition EDGE by its pair's
   population, exactly as the cascade does, not by the row's validity window:
   an ended `population: "one"` row still binds its part, because a `one`
   binding holds for the row's whole life, and an ended `population:
-  "oneActive"` row, the history a `reparent` leaves behind, does not. A
-  current read therefore names the parts a delete issued now would remove,
-  and `includeEnded` / `includeTombstones` do not widen it. A pinned read
-  (`asOf`, `asOfRecorded`) names what was owned at its instant. The read's
-  temporal mode still decides which NODES are visible, and a read takes no
-  lock, so a write between the read and the delete can change the answer. To
-  know what a delete will do, and to delete only if that still holds, use
+  "oneActive"` row, the history a `reparent` leaves behind, does not.
+  `includeEnded` / `includeTombstones` do not widen that, and a pinned read
+  (`asOf`, `asOfRecorded`) follows the edges that bound at its instant. NODES
+  still follow the read's temporal filter at every hop, while the cascade
+  deletes every live part however its window stands: a part node whose own
+  validity window has ended (or not yet started) is not returned, and
+  neither is anything reachable only through it, although the delete removes
+  them. A read also takes no lock, so a write between the read and the
+  delete can change the answer. To know what a delete will do, and to delete
+  only if that still holds, use
   [`planDelete`](/ontology#previewing-a-delete).
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind

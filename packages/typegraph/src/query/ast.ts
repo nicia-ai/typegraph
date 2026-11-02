@@ -10,6 +10,8 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
+import { type RowMembership } from "../registry/row-membership";
+import { type Assert, type Equal } from "../utils/type-assert";
 import { type AliasExpansionAxis } from "./builder/alias-expansion";
 import { type DatabaseExpression } from "./expressions";
 import { type JsonPointer } from "./json-pointer";
@@ -503,6 +505,16 @@ export type Traversal = Readonly<{
     membership: "allRows" | "openRows";
   }>[];
 }>;
+
+// Spelled inline above so the public `Traversal` type names no unexported
+// symbol; pinned here so it cannot drift from the rule's own type.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _compositionMembershipMatchesRowMembership = Assert<
+  Equal<
+    NonNullable<Traversal["compositionMembership"]>[number]["membership"],
+    RowMembership
+  >
+>;
 
 /**
  * Returns the full set of edge kind names for a traversal, merging

@@ -661,10 +661,9 @@ realizes no pair at the source alias itself, such as `segmentOf` on a Podcast,
 is refused with `ConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`), and
 `details.declaredVia` lists the edges that would work.
 
-**They read ownership, not validity.** A composition step follows the rows
-that bind a part to its whole — the same membership the delete cascade
-removes and [`planDelete`](/ontology#previewing-a-delete) previews — rather
-than the edge's validity window. An ended `population: "one"` edge still binds
+**They follow ownership, not validity.** A composition step follows the
+edges that bind a part to its whole — the same membership the delete cascade
+counts — rather than the edge's validity window. An ended `population: "one"` edge still binds
 its part, because a `one` binding holds for the row's whole life, so it is
 still walked and its row still carries its `validTo`. An ended
 `population: "oneActive"` edge is the history a `reparent` leaves behind and
@@ -678,9 +677,13 @@ is not walked. The query's temporal mode sets the instant:
   still binds at `t`.
 - `store.asOfRecorded(...)` walks the ownership its pinned revision recorded.
 
-The mode still decides which nodes are visible. A plain `.traverse()` over a
-realizing edge kind is not a composition step and keeps the edge's validity
-window.
+That rule is for the edges. Nodes still follow the query's temporal filter at
+every hop, so a part whose own validity window has ended (or not yet started)
+is not returned, and neither is anything reachable only through it, although
+the whole owns them and a delete would remove them. To list what a delete
+removes, use [`planDelete`](/ontology#previewing-a-delete). A plain
+`.traverse()` over a realizing edge kind is not a composition step and keeps
+the edge's validity window.
 
 **The result alias is untyped** (reached via `.field(name)`, like
 [`fromDynamic`](/queries/source#runtime-declared-kinds)): the parts or wholes

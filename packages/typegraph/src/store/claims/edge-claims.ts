@@ -27,6 +27,7 @@ import {
   CompositionError,
   ConfigurationError,
 } from "../../errors";
+import { type RowMembership } from "../../registry/row-membership";
 import { requireDefined } from "../../utils/presence";
 import { isMissingTableError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
@@ -326,21 +327,6 @@ export function sortedByClaimTarget(
 }
 
 /**
- * Which of a population's non-deleted rows are its members: every one
- * (`"allRows"`), or only a row whose validity window is still open
- * (`"openRows"`, no `validTo`).
- *
- * A static property of a row, never of an instant: composition refuses a
- * window that ends or starts later than its write
- * (`assertCompositionWindowCurrent`,
- * `src/store/operations/composition-create.ts`), so an open-ended
- * composition row is current and an ended one is history, for good. That is
- * what lets one predicate, {@link membershipCountsRow}, decide membership for
- * a claim, the audit, the cascade and the acyclicity relation alike.
- */
-export type RowMembership = "allRows" | "openRows";
-
-/**
  * The membership rule of one cardinality axis, read off
  * {@link edgeCardinalitySpec}'s `holderLiveness`: an active-only axis
  * (`oneActive`) counts open rows, every other axis counts a row for its
@@ -361,9 +347,13 @@ export function axisRowMembership(ref: EdgeCardinalityAxisRef): RowMembership {
  * rule of the population it asks about: the claim set
  * ({@link axisCountsRow}), the composition cascade's closure
  * (`compositionEdgeCounts`), the acyclicity relations' proposed and retired
- * rows (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`). The two SQL
- * renderings — the acyclicity walk's window filter and the fence audit's
- * holder term — render the same rule as `valid_to IS NULL`.
+ * rows (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`). It has two
+ * SQL renderings: `compileEdgeMembershipFilters`
+ * (`src/query/compiler/temporal.ts`), for a relation of several edge kinds
+ * each under its own rule at a read coordinate — the acyclicity walk, the
+ * composition closure and `parts()`/`wholes()` — and `holderLivenessTerm`
+ * (`src/backend/drizzle/operations/edge-claims.ts`), for one cardinality
+ * axis's holders in the claim and fence-audit statements.
  */
 export function membershipCountsRow(
   membership: RowMembership,

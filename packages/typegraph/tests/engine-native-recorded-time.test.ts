@@ -1084,7 +1084,8 @@ describe("engine-native recorded time: live point read and scan", () => {
    * `RECORDED_TEMPORAL_COLUMNS` for every recorded-pinned read again,
    * ignoring `carriesInterval`, and the `parts()` read fails with SQLite "no
    * such column: e.recorded_from" — the narrowed CTE projects a column the
-   * engine-native source does not have.
+   * engine-native source does not have — and the windowed `subgraph` read
+   * below fails the same way on its windowed edge source.
    */
   it("walks a mixed-orientation composition through the engine-native source", async () => {
     const Car = defineNode("EnCar", { schema: z.object({}) });
@@ -1161,6 +1162,14 @@ describe("engine-native recorded time: live point read and scan", () => {
       [car.id, engine.id, wheel.id].toSorted(),
     );
     expect(unit.edges).toHaveLength(2);
+
+    // A windowed edge source keeps the recorded columns its row filter reads;
+    // an engine-native source has none to keep.
+    const windowed = await view.subgraph(car, {
+      edges: ["enCarHasWheel"],
+      edgeWindows: { enCarHasWheel: { limit: 5 } },
+    });
+    expect(windowed.edges.map((edge) => edge.kind)).toEqual(["enCarHasWheel"]);
   });
 });
 
