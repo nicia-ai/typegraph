@@ -98,8 +98,15 @@ authored extension, and a deserialized persisted document), throwing a
 | --- | --- |
 | `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE` | a `subClassOf` child's schema does not extend its parent's |
 | `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` | the projected JSON Schema cannot judge the pair (`$ref`, `allOf`, `not`, or an unmodeled keyword) |
-| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | an `equivalentTo` pair fails in one direction |
+| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | a pair the equivalence class relates — through `equivalentTo`, or a `sameAs` a persisted document still carries — fails in one direction |
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | the same, but the pair is incomparable |
+
+The message and `details.relation` name the relation the refused pair comes
+from: the `subClassOf`, `equivalentTo` or `sameAs` that declared it, or, for a
+pair the hierarchy only implies (`details.declared: false`), `subClassOf` or
+the equivalence relation its class declares (`equivalentTo` whenever the class
+declares one). `details` also carries `childKind`, `parentKind`,
+`viaEquivalence`, `declared`, `reason`, `path` and every violation found.
 
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:

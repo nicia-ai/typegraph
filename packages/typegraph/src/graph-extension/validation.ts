@@ -22,6 +22,10 @@ import {
   type KindEntity,
   type NullCheckOp,
 } from "../core/types";
+import {
+  COLLATION_VALUES,
+  UNIQUENESS_SCOPE_VALUES,
+} from "../core/unique-constraint-options";
 import { ConfigurationError } from "../errors";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
@@ -2029,7 +2033,7 @@ function validateUniqueConstraints(
 
     const scopeResult = validateOptionalLiteral(
       constraint["scope"],
-      ["kind", "kindWithSubClasses"] as const,
+      UNIQUENESS_SCOPE_VALUES,
       `${constraintPath}/scope`,
       "Unique constraint `scope`",
       "INVALID_DOCUMENT_SHAPE",
@@ -2040,7 +2044,7 @@ function validateUniqueConstraints(
 
     const collationResult = validateOptionalLiteral(
       constraint["collation"],
-      ["binary", "caseInsensitive"] as const,
+      COLLATION_VALUES,
       `${constraintPath}/collation`,
       "Unique constraint `collation`",
       "INVALID_DOCUMENT_SHAPE",

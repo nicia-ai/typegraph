@@ -29,6 +29,10 @@
  */
 import { populatedSchemaKinds } from "../backend/schema-kind-emptiness";
 import { type SchemaCommitPreflightBackend } from "../backend/types";
+import {
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  uniquenessScopeSpansSubclasses,
+} from "../core/unique-constraint-options";
 import { MigrationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
@@ -97,7 +101,11 @@ export function declaredKindUniqueConstraints(
       return afterDef.uniqueConstraints.map((constraint) => ({
         kind,
         constraint,
-        change: uniqueConstraintEnforcementChange(existing, constraint),
+        change: uniqueConstraintEnforcementChange(
+          existing,
+          constraint,
+          NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+        ),
       }));
     });
 }
@@ -115,7 +123,7 @@ export function mayGateUniquenessClaims(
   return constraints.some(
     ({ change, constraint }) =>
       change !== undefined ||
-      (ontologyChanged && constraint.scope === "kindWithSubClasses"),
+      (ontologyChanged && uniquenessScopeSpansSubclasses(constraint.scope)),
   );
 }
 
@@ -150,7 +158,7 @@ export function uniquenessClaimGates(
           },
         ];
       }
-      if (constraint.scope === "kind") return [];
+      if (!uniquenessScopeSpansSubclasses(constraint.scope)) return [];
       const proposedComponent = afterRegistry.getSubClassComponent(kind);
       const lostKinds = beforeRegistry
         .getSubClassComponent(kind)

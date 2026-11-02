@@ -81,6 +81,8 @@ export type AtomicPreflightCapabilityError = Readonly<{
   code: string;
   message: string;
   suggestion?: string;
+  /** What the refusal's `details` carry beside `code` and `graphId`. */
+  details?: Readonly<Record<string, unknown>>;
 }>;
 
 const ATOMIC_PREFLIGHT_BACKEND_SUGGESTION =

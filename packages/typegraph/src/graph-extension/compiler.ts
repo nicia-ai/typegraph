@@ -22,6 +22,10 @@ import {
   type TargetCardinality,
   type UniqueConstraint,
 } from "../core/types";
+import {
+  EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS,
+  withUniqueConstraintDefaults,
+} from "../core/unique-constraint-options";
 import { metaEdgesByName } from "../ontology/core-meta-edges";
 import { type OntologyRelation } from "../ontology/types";
 import { compositionRelationFields } from "../registry/composition-relation";
@@ -406,11 +410,15 @@ function applyOptional(
 function compileUniqueConstraint(
   document: ExtensionUniqueConstraint,
 ): UniqueConstraint {
+  const { scope, collation } = withUniqueConstraintDefaults(
+    document,
+    EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS,
+  );
   const base = {
     name: document.name,
     fields: document.fields,
-    scope: document.scope ?? "kind",
-    collation: document.collation ?? "binary",
+    scope,
+    collation,
   };
   if (document.where === undefined) {
     return base;

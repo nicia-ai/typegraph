@@ -14,7 +14,11 @@
 import { describe, expect, it } from "vitest";
 
 import { type SchemaCommitPreflightBackend } from "../src/backend/types";
-import { composeSchemaCommitPreflight } from "../src/schema/manager";
+import {
+  composeSchemaCommitPreflight,
+  planSchemaCommitPreflight,
+  type SchemaCommitPreflightSteps,
+} from "../src/schema/manager";
 import { type SchemaTighteningPreflight } from "../src/schema/tightening-preflight";
 
 function recordingStep(
@@ -24,6 +28,16 @@ function recordingStep(
   return () => {
     calls.push(name);
     return Promise.resolve();
+  };
+}
+
+function recordingEdgeMatchIdentity(
+  calls: string[],
+  name: string,
+): NonNullable<SchemaCommitPreflightSteps["edgeMatchIdentity"]> {
+  return {
+    run: recordingStep(calls, name),
+    capabilityError: { code: "EDGE_TEST", message: "test" },
   };
 }
 
@@ -46,7 +60,10 @@ describe("composeSchemaCommitPreflight", () => {
     const preflight = composeSchemaCommitPreflight({
       identity: recordingStep(calls, "identity"),
       tightening: recordingTightening(calls, "ontology"),
-      edgeMatchIdentity: recordingStep(calls, "edge-match-identity"),
+      edgeMatchIdentity: recordingEdgeMatchIdentity(
+        calls,
+        "edge-match-identity",
+      ),
       structural: recordingStep(calls, "structural"),
     });
 
@@ -63,16 +80,7 @@ describe("composeSchemaCommitPreflight", () => {
   // MUTATION CHECK: reordering the role list inside
   // `composeSchemaCommitPreflight` makes this assertion fail.
 
-  it("drops undefined roles and returns undefined when every role is undefined", async () => {
-    expect(
-      composeSchemaCommitPreflight({
-        structural: undefined,
-        edgeMatchIdentity: undefined,
-        tightening: undefined,
-        identity: undefined,
-      }),
-    ).toBeUndefined();
-
+  it("drops undefined roles", async () => {
     const calls: string[] = [];
     const preflight = composeSchemaCommitPreflight({
       structural: undefined,
@@ -80,7 +88,7 @@ describe("composeSchemaCommitPreflight", () => {
       tightening: recordingTightening(calls, "only-step"),
       identity: undefined,
     });
-    await preflight?.({} as SchemaCommitPreflightBackend);
+    await preflight({} as SchemaCommitPreflightBackend);
     expect(calls).toEqual(["only-step"]);
   });
 
@@ -101,5 +109,73 @@ describe("composeSchemaCommitPreflight", () => {
     });
     await preflight({} as SchemaCommitPreflightBackend);
     expect(order).toEqual(["first-start", "first-end", "second-start"]);
+  });
+});
+
+describe("planSchemaCommitPreflight", () => {
+  const NO_STEPS = {
+    structural: undefined,
+    edgeMatchIdentity: undefined,
+    tightening: undefined,
+    identity: undefined,
+  } as const;
+
+  it("owes no atomic preflight for no step, or a structural gate alone", () => {
+    expect(planSchemaCommitPreflight(NO_STEPS)).toBeUndefined();
+    expect(
+      planSchemaCommitPreflight({
+        ...NO_STEPS,
+        structural: recordingStep([], "structural"),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("names the step that needs the atomic primitive", () => {
+    const tightening = recordingTightening([], "ontology");
+    const capabilityCodes = [
+      {
+        ...NO_STEPS,
+        edgeMatchIdentity: recordingEdgeMatchIdentity([], "edge"),
+      },
+      {
+        ...NO_STEPS,
+        structural: recordingStep([], "structural"),
+        edgeMatchIdentity: recordingEdgeMatchIdentity([], "edge"),
+      },
+      {
+        ...NO_STEPS,
+        edgeMatchIdentity: recordingEdgeMatchIdentity([], "edge"),
+        tightening,
+      },
+      {
+        ...NO_STEPS,
+        edgeMatchIdentity: recordingEdgeMatchIdentity([], "edge"),
+        tightening,
+        identity: recordingStep([], "identity"),
+      },
+    ].map((steps) => planSchemaCommitPreflight(steps)?.capabilityError.code);
+
+    expect(capabilityCodes).toEqual([
+      "EDGE_TEST",
+      "EDGE_TEST",
+      "TEST",
+      "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+    ]);
+  });
+
+  it("runs the structural gate inside the plan once another step is owed", async () => {
+    const calls: string[] = [];
+    const plan = planSchemaCommitPreflight({
+      ...NO_STEPS,
+      structural: recordingStep(calls, "structural"),
+      edgeMatchIdentity: recordingEdgeMatchIdentity(
+        calls,
+        "edge-match-identity",
+      ),
+    });
+
+    await plan?.run({} as SchemaCommitPreflightBackend);
+
+    expect(calls).toEqual(["structural", "edge-match-identity"]);
   });
 });

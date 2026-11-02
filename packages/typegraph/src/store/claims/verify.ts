@@ -41,6 +41,7 @@ import type {
 } from "../../backend/types";
 import { subClassComponent } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
+import { uniquenessScopeSpansSubclasses } from "../../core/unique-constraint-options";
 import { ConfigurationError } from "../../errors";
 import { createSqlSchema } from "../../query/compiler/schema";
 import { getDialect } from "../../query/dialect";
@@ -216,9 +217,9 @@ function uniquenessAxisGroups(
     for (const constraint of registration.unique ?? []) {
       const target = uniquenessClaimTarget(kind, constraint.scope, registry);
       const coveredKinds =
-        constraint.scope === "kind" ?
-          [kind]
-        : subClassComponent(kind, registry);
+        uniquenessScopeSpansSubclasses(constraint.scope) ?
+          subClassComponent(kind, registry)
+        : [kind];
       const identity = `${constraint.name}\u0000${target.axis}`;
       const existing =
         coveredByIdentity.get(identity)?.coveredKinds ?? new Set<string>();

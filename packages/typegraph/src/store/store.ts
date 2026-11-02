@@ -269,8 +269,8 @@ import {
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
   parseSerializedSchema,
+  planSchemaCommitPreflight,
   requiresMigration as requiresMigrationImpl,
-  schemaCommitCapabilityError,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
@@ -6250,11 +6250,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           },
         )
       );
+    // Ordering — and the "ontology before identity" reasoning — is spelled
+    // once, at `composeSchemaCommitPreflight` in `../schema/manager`.
+    const preflight = planSchemaCommitPreflight({
+      structural: (target) =>
+        assertEvolvedSchemaRequiredKindsEmpty(
+          target,
+          this.graphId,
+          classification,
+        ),
+      edgeMatchIdentity: undefined,
+      tightening: schemaTighteningPreflight,
+      identity:
+        identityCandidate === undefined ? undefined : (
+          (target: SchemaCommitPreflightBackend) =>
+            identityCandidate.identitySchemaPreflight(
+              target,
+              identityProvisioning?.provisionInCommit ?? [],
+            )
+        ),
+    });
     const committed =
-      (
-        schemaTighteningPreflight === undefined &&
-        identityCandidate === undefined
-      ) ?
+      preflight === undefined ?
         classification.requireEmpty.length > 0 ?
           await commitEvolvedSchemaWhenRequiredKindsAreEmpty(
             this.#backend,
@@ -6273,32 +6290,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           merged,
           activeRow.version,
-          // Ordering — and the "ontology before identity" reasoning — is
-          // spelled once, at `composeSchemaCommitPreflight` in
-          // `../schema/manager`.
-          composeSchemaCommitPreflight({
-            structural: (target) =>
-              assertEvolvedSchemaRequiredKindsEmpty(
-                target,
-                this.graphId,
-                classification,
-              ),
-            edgeMatchIdentity: undefined,
-            tightening: schemaTighteningPreflight,
-            identity:
-              identityCandidate === undefined ? undefined : (
-                (target: SchemaCommitPreflightBackend) =>
-                  identityCandidate.identitySchemaPreflight(
-                    target,
-                    identityProvisioning?.provisionInCommit ?? [],
-                  )
-              ),
-          }),
+          preflight,
           storedSchema,
-          schemaCommitCapabilityError(
-            identityCandidate !== undefined,
-            schemaTighteningPreflight,
-          ),
         );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already
@@ -7127,7 +7120,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // No structural gate: dropping kinds that still hold rows is this verb's
     // purpose (materializeRemovals reclaims them). No edge match identity
     // step: a removal declares no new durable key.
-    const preflight = composeSchemaCommitPreflight({
+    const preflight = planSchemaCommitPreflight({
       structural: undefined,
       edgeMatchIdentity: undefined,
       tightening: schemaTighteningPreflight,
@@ -7147,10 +7140,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           activeRow.version,
           preflight,
           storedSchema,
-          schemaCommitCapabilityError(
-            identityCascade !== undefined,
-            schemaTighteningPreflight,
-          ),
         );
 
     // Queue per-deployment data-cleanup status — one row per removed

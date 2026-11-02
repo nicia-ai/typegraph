@@ -1320,6 +1320,34 @@ check is for untyped callers:
 | --- | --- |
 | `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
 
+#### Structural subsumption codes
+
+Registry build refuses a pair of node kinds a subsumption relation joins when
+the child's schema does not extend the parent's; see
+[Subsumption](/ontology#subsumption-type-inheritance). `details.relation` names the relation the
+pair comes from (`subClassOf`, `equivalentTo`, or a `sameAs` a persisted
+document still carries), and `details.declared` says whether that relation
+declared the pair or the hierarchy implies it:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE` | A `subClassOf` child's schema does not extend its parent's. |
+| `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a `subClassOf` pair. |
+| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | A pair an equivalence class relates (`equivalentTo` or `sameAs`) fails in one direction. |
+| `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a pair an equivalence class relates. |
+
+#### Unique constraint option codes
+
+`defineGraph` refuses a unique constraint whose `scope` or `collation` is stated
+outside its domain. TypeScript rejects these at compile time; the runtime check
+is for untyped callers. An untyped caller that omits either gets
+`scope: "kindWithSubClasses"` and `collation: "binary"` written into the
+registration, the values the store has always enforced for an omitted member:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `UNIQUE_CONSTRAINT_OPTION_INVALID` | `scope` is not `"kind"` or `"kindWithSubClasses"`, or `collation` is not `"binary"` or `"caseInsensitive"`. `details.option` names the option, `details.value` is what was stated, `details.kind` is the node kind and `details.constraintName` the constraint. |
+
 #### Export temporal-field codes
 
 `exportGraph` / `exportGraphStream` refuse to drop valid-time fields a graph's
@@ -1338,7 +1366,7 @@ Durable edge match identity uses stable `ConfigurationError` detail codes:
 | `EDGE_MATCH_IDENTITY_VALUE_NOT_SCALAR` | A declared identity field cannot be represented as a portable JSON scalar, or an untyped runtime value violated that declaration. |
 | `EDGE_MATCH_IDENTITY_KEY_TOO_LARGE` | One complete durable identity tuple exceeds the portable 2,000-byte index budget. Normal import records this against the individual edge; trusted import is atomic and refuses the whole stream. |
 | `EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE` | The adapter declares durable identity support, but the database is missing its columns or unique arbiter. Initialize or migrate the schema before serving writes. |
-| `EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND` | Initial adoption needs an atomic empty-kind fence or materialization preflight that the custom backend does not implement. |
+| `EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND` | Activating or changing an edge kind's match identity needs the edge kind verified empty atomically with the schema commit. Initial adoption needs an atomic empty-kind fence or materialization preflight; a later `migrateSchema` or `rollbackSchema` that re-keys an edge kind needs `commitSchemaVersionWithPreflight` or `setActiveVersionWithPreflight`. The custom backend does not implement the one the commit needs. |
 | `DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED` | A custom backend declares durable identity support but refuses the authoritative convergence command. TypeGraph fails closed because the portable read-then-write fallback has no equivalent database arbiter. |
 | `IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT` | A durable import batch was refused without savepoint rollback protection, either because the backend is non-transactional or because its root/transaction statement-execution contract cannot serve savepoints. TypeGraph will not retry rows individually because that could double-attribute an already-written prefix. |
 

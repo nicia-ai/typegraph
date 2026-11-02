@@ -60,22 +60,29 @@ import {
  */
 export type StructuralSubsumptionMode = "enforce" | "unenforced-baseline";
 
+/** For each directly declared `(first, second)` pair, the meta-edges declaring it. */
 function declaredSubsumptionPairs(
   ontology: readonly NamedOntologyRelation[],
-): ReadonlySet<string> {
-  const pairs = new Set<string>();
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const pairs = new Map<string, Set<string>>();
+  const declare = (first: string, second: string, metaEdge: string): void => {
+    const key = encodeTupleKey([first, second]);
+    const metaEdges = pairs.get(key) ?? new Set<string>();
+    metaEdges.add(metaEdge);
+    pairs.set(key, metaEdges);
+  };
   for (const relation of ontology) {
     switch (relation.metaEdge) {
       case META_EDGE_SUB_CLASS_OF: {
-        pairs.add(encodeTupleKey([relation.from, relation.to]));
+        declare(relation.from, relation.to, relation.metaEdge);
         break;
       }
       case META_EDGE_EQUIVALENT_TO:
       case META_EDGE_SAME_AS: {
         // Equivalence is inherently bidirectional — both directions are a
         // DECLARED relation, never a transitive-only consequence.
-        pairs.add(encodeTupleKey([relation.from, relation.to]));
-        pairs.add(encodeTupleKey([relation.to, relation.from]));
+        declare(relation.from, relation.to, relation.metaEdge);
+        declare(relation.to, relation.from, relation.metaEdge);
         break;
       }
       default: {
@@ -84,6 +91,42 @@ function declaredSubsumptionPairs(
     }
   }
   return pairs;
+}
+
+/**
+ * The relation a violation is reported under: a declared pair names a
+ * meta-edge that declares it, and an implied one the relations it follows
+ * from. A persisted `sameAs` folds into the same equivalence class as
+ * `equivalentTo`, so the class alone cannot say which the user wrote; for an
+ * implied pair `equivalentTo` is named whenever the class declares it.
+ */
+function violatedRelationName(
+  violation: StructuralSubsumptionViolation,
+  declaredPairs: ReadonlyMap<string, ReadonlySet<string>>,
+  ontology: readonly NamedOntologyRelation[],
+  registry: KindRegistry,
+): string {
+  if (!violation.viaEquivalence) return META_EDGE_SUB_CLASS_OF;
+  const inClass = (kind: string): boolean =>
+    kind === violation.childKind ||
+    registry.areEquivalent(violation.childKind, kind);
+  const declaring =
+    violation.declared ?
+      requireDefined(
+        declaredPairs.get(
+          encodeTupleKey([violation.childKind, violation.parentKind]),
+        ),
+      )
+    : new Set(
+        ontology
+          .filter((relation) => inClass(relation.from) && inClass(relation.to))
+          .map((relation) => relation.metaEdge),
+      );
+  return (
+    [META_EDGE_EQUIVALENT_TO, META_EDGE_SAME_AS, META_EDGE_SUB_CLASS_OF].find(
+      (metaEdge) => declaring.has(metaEdge),
+    ) ?? META_EDGE_EQUIVALENT_TO
+  );
 }
 
 function structuralSubsumptionErrorCode(
@@ -133,8 +176,12 @@ function assertStructuralSubsumption(
   if (violations.length === 0) return;
 
   const first = requireDefined(violations[0]);
-  const relationName =
-    first.viaEquivalence ? META_EDGE_EQUIVALENT_TO : META_EDGE_SUB_CLASS_OF;
+  const relationName = violatedRelationName(
+    first,
+    declaredPairs,
+    ontology,
+    registry,
+  );
   const declaredNote = first.declared ? "declared" : "implied transitively";
   throw new ConfigurationError(
     `Ontology is incoherent: ${relationName}(${first.childKind}, ${first.parentKind}) ` +
@@ -142,6 +189,7 @@ function assertStructuralSubsumption(
       `(${first.verdict}: ${first.reason}).`,
     {
       code: structuralSubsumptionErrorCode(first),
+      relation: relationName,
       childKind: first.childKind,
       parentKind: first.parentKind,
       viaEquivalence: first.viaEquivalence,

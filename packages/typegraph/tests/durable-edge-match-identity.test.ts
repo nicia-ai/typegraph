@@ -1422,6 +1422,67 @@ describe("durable edge match identity", () => {
     }
   });
 
+  it("refuses a re-key on a backend without the atomic preflight by naming edge match identity", async () => {
+    const graphId = "durable_identity_rekey_without_preflight";
+    const { backend } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(legacyGraph(graphId), backend);
+      const narrowed = projectBackendWithout(backend, [
+        "commitSchemaVersionWithPreflight",
+      ]);
+
+      const error = await migrateSchema(
+        narrowed,
+        durableGraph(graphId),
+        1,
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toEqual({
+        code: "EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId,
+        edgeKinds: ["knows"],
+      });
+      await expect(backend.getActiveSchema(graphId)).resolves.toMatchObject({
+        version: 1,
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+  // MUTATION CHECK: dropping the `edgeMatchIdentity` arm from
+  // `planSchemaCommitPreflight` commits the re-key through the plain
+  // primitive with no emptiness probe; answering it with identity's bag
+  // refuses with IDENTITY_REQUIRES_ATOMIC_BACKEND on a graph with no identity.
+
+  it("refuses a re-keying rollback on a backend without the atomic preflight by naming edge match identity", async () => {
+    const graphId = "durable_identity_rollback_without_preflight";
+    const { backend } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(durableGraph(graphId), backend);
+      await migrateSchema(backend, legacyGraph(graphId), 1);
+      const narrowed = projectBackendWithout(backend, [
+        "setActiveVersionWithPreflight",
+      ]);
+
+      const error = await rollbackSchema(narrowed, graphId, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toEqual({
+        code: "EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId,
+        edgeKinds: ["knows"],
+      });
+      await expect(backend.getActiveSchema(graphId)).resolves.toMatchObject({
+        version: 2,
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("persists durable identity through a normal interchange import", async () => {
     const { backend } = createLocalSqliteBackend();
     try {

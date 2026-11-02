@@ -317,7 +317,55 @@ describe("registry check — equivalentTo refused in the failing direction only"
     expect(configError.details["childKind"]).toBe("Y");
     expect(configError.details["parentKind"]).toBe("X");
     expect(configError.details["viaEquivalence"]).toBe(true);
+    expect(configError.details["relation"]).toBe("equivalentTo");
+    expect(configError.message).toContain("equivalentTo(Y, X) (declared)");
   });
+
+  it("names a persisted sameAs as the relation it declared", () => {
+    const X = defineNode("X", {
+      schema: z.object({ a: z.string().min(3) }),
+    });
+    const Y = defineNode("Y", {
+      schema: z.object({ a: z.string() }),
+    });
+    const serialized = serializeSchema(
+      defineGraph({
+        id: "same_as_direction",
+        nodes: { X: { type: X }, Y: { type: Y } },
+        edges: {},
+      }),
+      1,
+    );
+    const withSameAs = {
+      ...serialized,
+      ontology: {
+        ...serialized.ontology,
+        relations: [{ metaEdge: "sameAs", from: "X", to: "Y" }],
+      },
+    };
+
+    let caught: unknown;
+    try {
+      deserializeSchema(withSameAs).buildRegistry();
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    const configError = caught as ConfigurationError;
+    expect(configError.details).toMatchObject({
+      code: "ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE",
+      relation: "sameAs",
+      childKind: "Y",
+      parentKind: "X",
+      viaEquivalence: true,
+      declared: true,
+    });
+    expect(configError.message).toContain("sameAs(Y, X) (declared)");
+  });
+  // MUTATION CHECK: naming every equivalence violation `equivalentTo` (the
+  // relation-blind spelling `violatedRelationName` replaces) reports
+  // `equivalentTo(Y, X)` for a relation the document never declared.
 });
 
 describe("registry check — deserialized documents are checked identically to live graphs", () => {

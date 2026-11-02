@@ -172,9 +172,8 @@ const ACTIVE_SCHEMA_HASH_CACHE = new WeakMap<SerializedSchema, SchemaHash>();
  * For a document written by this release the result equals the column. The
  * hash is taken over the document as stored (validated by
  * {@link parseSerializedSchema}, then read raw), never over the parsed form:
- * the parser defaults keys the serializer omits (a unique constraint's
- * `scope` and `collation`), and a defaulted key cannot be told from the same
- * value written explicitly.
+ * the parser fills in defaults, and the canonical form is defined over what
+ * was stored.
  *
  * @throws DatabaseOperationError when the stored document is not a valid
  *   schema document.
@@ -621,7 +620,7 @@ export async function ensureSchemaInternal<G extends GraphDef>(
         // `diff` above already classified this exact before/after pair.
         changes: diff.ontology,
       });
-      const preflight = composeSchemaCommitPreflight({
+      const preflight = planSchemaCommitPreflight({
         structural: undefined,
         edgeMatchIdentity: undefined,
         tightening: schemaTighteningPreflight,
@@ -641,10 +640,6 @@ export async function ensureSchemaInternal<G extends GraphDef>(
             activeSchema.version,
             preflight,
             storedSchema,
-            schemaCommitCapabilityError(
-              identityPreflight !== undefined,
-              schemaTighteningPreflight,
-            ),
           );
       await options?.onAfterMigrate?.(hookContext);
       return {
@@ -908,16 +903,30 @@ function schemaNotInitializedError(
 /**
  * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
  * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
- * for a tightening-only commit would misdirect an operator on a graph with
- * identity disabled, so the primitive takes this bag rather than hardcoding
- * one message. The tightening-specific bags live in `./tightening-preflight`,
- * beside the decision that picks between them.
+ * for a commit identity takes no part in would misdirect an operator on a
+ * graph with identity disabled, so the primitive takes the bag
+ * {@link planSchemaCommitPreflight} picks rather than hardcoding one message.
+ * The tightening-specific bags live in `./tightening-preflight`, beside the
+ * decision that picks between them.
  */
 const IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
   {
     code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically commit identity data with a schema transition.",
+  };
+
+/**
+ * Thrown when a commit that activates or changes an edge kind's match
+ * identity needs the atomic preflight-commit primitive: the emptiness probe
+ * that lets the new durable key be declared must run in the transaction that
+ * publishes it.
+ */
+const EDGE_MATCH_IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically verify that an edge kind is empty while activating or changing its match identity as part of a schema transition.",
   };
 
 /**
@@ -944,7 +953,7 @@ function atomicPreflightUnsupportedError(
 ): ConfigurationError {
   return new ConfigurationError(
     capabilityError.message,
-    { code: capabilityError.code, graphId },
+    { code: capabilityError.code, graphId, ...capabilityError.details },
     capabilityError.suggestion === undefined ?
       undefined
     : { suggestion: capabilityError.suggestion },
@@ -960,6 +969,16 @@ type SchemaCommitPreflightFunction = (
 ) => Promise<void>;
 
 /**
+ * The edge match-identity re-key step: the emptiness probe of the edge kinds
+ * whose durable key the commit activates or changes, and the refusal it owes
+ * a backend that cannot run it atomically, naming those kinds.
+ */
+type EdgeMatchIdentityPreflight = Readonly<{
+  run: SchemaCommitPreflightFunction;
+  capabilityError: AtomicPreflightCapabilityError;
+}>;
+
+/**
  * The steps a schema-commit preflight is composed from, by role. Every key is
  * required — a path with nothing to run for a role passes `undefined` — so a
  * commit path cannot drop a role by forgetting it, and never spells the order
@@ -968,35 +987,55 @@ type SchemaCommitPreflightFunction = (
 export type SchemaCommitPreflightSteps = Readonly<{
   /** Gates deciding whether the commit is legal at all (dropped/required kinds empty). */
   structural: SchemaCommitPreflightStep;
-  edgeMatchIdentity: SchemaCommitPreflightStep;
+  edgeMatchIdentity: EdgeMatchIdentityPreflight | undefined;
   tightening: SchemaTighteningPreflight | undefined;
   identity: SchemaCommitPreflightStep;
 }>;
 
 /**
- * THE atomic-preflight capability error a commit owes, given whether identity
- * contributed a preflight step of its own and which tightening preflight (if
- * any) this commit carries.
- *
- * Identity's error wins whenever identity contributed a step, because its
- * preflight is the one that cannot be split from the commit, and is the
- * answer for a commit carrying no tightening preflight; a tightening-only
- * commit names the axis it is actually about (see
- * {@link SchemaTighteningPreflight.capabilityError}). One owner, because
- * every commit path that relies on the backend's atomic preflight primitive
- * (`ensureSchema`'s auto-migrate branch, `migrateSchema`, `Store.evolve`)
- * owes the same decision and a copy that drifts would blame the wrong
- * subsystem in an operator-facing refusal. `withEvolvedTransaction` runs its
- * preflight inside the caller's adopted transaction and owes no such error.
+ * The preflight a schema commit runs inside the backend's atomic
+ * preflight-commit primitive, with the refusal it owes a backend that lacks
+ * that primitive.
  */
-export function schemaCommitCapabilityError(
-  hasIdentityPreflight: boolean,
-  tightening: SchemaTighteningPreflight | undefined,
-): AtomicPreflightCapabilityError {
-  if (hasIdentityPreflight || tightening === undefined) {
-    return IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR;
-  }
-  return tightening.capabilityError;
+export type SchemaCommitPreflightPlan = Readonly<{
+  run: SchemaCommitPreflightFunction;
+  capabilityError: AtomicPreflightCapabilityError;
+}>;
+
+/**
+ * THE decision whether a schema commit needs the backend's atomic
+ * preflight-commit primitive, the preflight it runs there, and the refusal it
+ * owes a backend that lacks the primitive — `undefined` when no step needs it.
+ *
+ * A `structural` gate alone never needs it: dropped-kinds and
+ * required-kinds-empty probes commit through
+ * `commitSchemaVersionIfKindsEmpty`. Once another step is present the
+ * structural gate runs inside the same preflight, ahead of it.
+ *
+ * The refusal names the step that cannot be split from the commit. Identity's
+ * wins whenever identity contributed a step; then the tightening's, which
+ * names the axis it is about (see
+ * {@link SchemaTighteningPreflight.capabilityError}); then the edge match
+ * identity re-key's. One owner, because every commit path that relies on the
+ * primitive (`ensureSchema`'s auto-migrate branch, `migrateSchema`,
+ * `Store.evolve`, `Store.removeKinds`, `rollbackSchema`) owes the same
+ * decision, and a copy that drifts would blame the wrong subsystem in an
+ * operator-facing refusal. `withEvolvedTransaction` runs its preflight inside
+ * the caller's adopted transaction and owes no such error.
+ */
+export function planSchemaCommitPreflight(
+  steps: SchemaCommitPreflightSteps,
+): SchemaCommitPreflightPlan | undefined {
+  const capabilityError =
+    steps.identity === undefined ?
+      steps.tightening === undefined ?
+        steps.edgeMatchIdentity === undefined ?
+          undefined
+        : steps.edgeMatchIdentity.capabilityError
+      : steps.tightening.capabilityError
+    : IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR;
+  if (capabilityError === undefined) return undefined;
+  return { run: composeSchemaCommitPreflight(steps), capabilityError };
 }
 
 /**
@@ -1014,38 +1053,26 @@ export function schemaCommitCapabilityError(
  * from the target registry), so rebuilding it under an ontology the data
  * falsifies is work a refusal would only throw away.
  *
- * `undefined` steps drop out; an all-`undefined` set yields `undefined`,
- * which is the caller's signal to take the plain commit primitive and pay
- * for no transaction it does not need. The first overload is for a caller
- * with an unconditional structural gate (`assertDroppedKindsEmpty` and
- * `assertEvolvedSchemaRequiredKindsEmpty` are both no-ops on an empty list,
- * so they are safe to run unconditionally): its result is guaranteed
- * defined, which lets `migrateSchema`, `Store.evolve`, and
- * `withEvolvedTransaction` run it without an unsound narrowing.
+ * `undefined` steps drop out. Whether a commit needs the atomic primitive at
+ * all is {@link planSchemaCommitPreflight}'s decision, which composes its
+ * preflight here; `withEvolvedTransaction`, already inside the caller's
+ * transaction, composes directly.
  *
  * @internal Not re-exported through `src/schema/index.ts` or the package
  * root, the same convention `commitNewSchemaVersionWithPreflight` uses.
  */
 export function composeSchemaCommitPreflight(
-  steps: SchemaCommitPreflightSteps &
-    Readonly<{ structural: SchemaCommitPreflightFunction }>,
-): SchemaCommitPreflightFunction;
-export function composeSchemaCommitPreflight(
   steps: SchemaCommitPreflightSteps,
-): SchemaCommitPreflightFunction | undefined;
-export function composeSchemaCommitPreflight(
-  steps: SchemaCommitPreflightSteps,
-): SchemaCommitPreflightFunction | undefined {
+): SchemaCommitPreflightFunction {
   const ordered: readonly SchemaCommitPreflightStep[] = [
     steps.structural,
-    steps.edgeMatchIdentity,
+    steps.edgeMatchIdentity?.run,
     steps.tightening?.run,
     steps.identity,
   ];
   const defined = ordered.filter(
     (step): step is SchemaCommitPreflightFunction => step !== undefined,
   );
-  if (defined.length === 0) return undefined;
   return async (target: SchemaCommitPreflightBackend): Promise<void> => {
     for (const step of defined) await step(target);
   };
@@ -1183,7 +1210,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
           commit,
           edgeIdentityKinds,
         )
-      : commitWithPreflight(commit, edgeMatchIdentityPreflight);
+      : commitWithPreflight(commit, edgeMatchIdentityPreflight.run);
   }
 
   const commitWithPreflight = requireCommitWithPreflight(
@@ -1218,7 +1245,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // instead of silently succeeding.
   return withIdentityDdlRaceRetry(() =>
     commitWithPreflight(commit, async (transactionBackend) => {
-      await edgeMatchIdentityPreflight?.(transactionBackend);
+      await edgeMatchIdentityPreflight?.run(transactionBackend);
       await preflight(transactionBackend);
     }),
   );
@@ -1388,12 +1415,26 @@ export async function migrateSchema<G extends GraphDef>(
       })
     );
 
+  // When a preflight is owed, the emptiness fence moves inside the commit
+  // transaction: the preflight-carrying primitive is the only one that can
+  // also run the identity rebuild atomically, so the probe runs alongside it
+  // rather than through `commitSchemaVersionIfKindsEmpty`. Ordering — and the
+  // "ontology before identity" reasoning — is spelled once, at
+  // `composeSchemaCommitPreflight`.
+  const preflight = planSchemaCommitPreflight({
+    structural: (transactionBackend) =>
+      assertDroppedKindsEmpty(
+        transactionBackend,
+        target.id,
+        currentVersion,
+        guardedDrops,
+      ),
+    edgeMatchIdentity: edgeMatchIdentityPreflight,
+    tightening: schemaTighteningPreflight,
+    identity: identityPreflight,
+  });
   const committed =
-    (
-      identityPreflight === undefined &&
-      edgeMatchIdentityPreflight === undefined &&
-      schemaTighteningPreflight === undefined
-    ) ?
+    preflight === undefined ?
       guardedDrops.length > 0 ?
         await commitDroppedKindsOnlyWhenEmpty(
           backend,
@@ -1412,29 +1453,8 @@ export async function migrateSchema<G extends GraphDef>(
         backend,
         target,
         currentVersion,
-        // The emptiness fence moves inside the commit transaction here: the
-        // preflight-carrying primitive is the only one that can also run the
-        // identity rebuild atomically, so the probe runs alongside it rather
-        // than through `commitSchemaVersionIfKindsEmpty`. Ordering — and the
-        // "ontology before identity" reasoning — is spelled once, at
-        // `composeSchemaCommitPreflight`.
-        composeSchemaCommitPreflight({
-          structural: (transactionBackend) =>
-            assertDroppedKindsEmpty(
-              transactionBackend,
-              target.id,
-              currentVersion,
-              guardedDrops,
-            ),
-          edgeMatchIdentity: edgeMatchIdentityPreflight,
-          tightening: schemaTighteningPreflight,
-          identity: identityPreflight,
-        }),
+        preflight,
         storedSchema,
-        schemaCommitCapabilityError(
-          identityPreflight !== undefined,
-          schemaTighteningPreflight,
-        ),
       );
   return committed.version;
 }
@@ -1537,20 +1557,28 @@ function prepareEdgeMatchIdentityCommitPreflight(
   target: Readonly<{ id: string }>,
   edgeKinds: readonly string[],
   transition: Pick<SchemaCommitTransition, "fromVersion" | "toVersion">,
-): ((backend: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
+): EdgeMatchIdentityPreflight | undefined {
   if (edgeKinds.length === 0) return undefined;
-  return async (backend): Promise<void> => {
-    const populated = await populatedSchemaKinds(
-      backend,
-      target.id,
-      edgeKinds.map((kind) => ({ entity: "edge", kind, rows: "all" }) as const),
-    );
-    if (populated.length === 0) return;
-    throw edgeMatchIdentityRekeyPopulatedError(
-      target.id,
-      transition,
-      populated.map((probe) => probe.kind),
-    );
+  return {
+    run: async (backend): Promise<void> => {
+      const populated = await populatedSchemaKinds(
+        backend,
+        target.id,
+        edgeKinds.map(
+          (kind) => ({ entity: "edge", kind, rows: "all" }) as const,
+        ),
+      );
+      if (populated.length === 0) return;
+      throw edgeMatchIdentityRekeyPopulatedError(
+        target.id,
+        transition,
+        populated.map((probe) => probe.kind),
+      );
+    },
+    capabilityError: {
+      ...EDGE_MATCH_IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+      details: { edgeKinds },
+    },
   };
 }
 
@@ -1889,19 +1917,15 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
 }
 
 /**
- * @internal Commits a data preflight and schema CAS in one transaction.
- *
- * `capabilityError` is the refusal raised when the backend cannot commit a
- * preflight atomically; every caller passes
- * {@link schemaCommitCapabilityError}'s decision.
+ * @internal Commits a data preflight and schema CAS in one transaction, or
+ * refuses with the plan's `capabilityError` when the backend cannot.
  */
 export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
-  preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
+  plan: SchemaCommitPreflightPlan,
   previous: SerializedSchema | undefined,
-  capabilityError: AtomicPreflightCapabilityError,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
@@ -1911,7 +1935,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   const commitWithPreflight = requireCommitWithPreflight(
     backend,
     graph,
-    capabilityError,
+    plan.capabilityError,
   );
   // Same catalog-race retry as `initializeSchema`, for the same in-transaction
   // identity DDL. The commit payload is built once, outside the retry, so a
@@ -1921,7 +1945,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
     currentVersion,
     previous,
   );
-  return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, preflight));
+  return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, plan.run));
 }
 
 /**
@@ -2061,21 +2085,18 @@ function prepareRollbackPreflight(
     ),
     { fromVersion: active.version, toVersion: target.version },
   );
-  const run = composeSchemaCommitPreflight({
+  const preflight = planSchemaCommitPreflight({
     structural: undefined,
     edgeMatchIdentity,
     tightening,
     identity,
   });
-  if (run === undefined) return undefined;
+  if (preflight === undefined) return undefined;
   return {
-    run,
+    run: preflight.run,
     unsupportedError:
       identity === undefined ?
-        atomicPreflightUnsupportedError(
-          graphId,
-          schemaCommitCapabilityError(false, tightening),
-        )
+        atomicPreflightUnsupportedError(graphId, preflight.capabilityError)
       : identityRollbackRequiresMigrationError(
           graphId,
           active.version,

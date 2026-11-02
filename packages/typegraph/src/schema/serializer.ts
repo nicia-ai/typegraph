@@ -21,6 +21,10 @@ import {
   type NullCheckOp,
   type UniqueConstraint,
 } from "../core/types";
+import {
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  withUniqueConstraintDefaults,
+} from "../core/unique-constraint-options";
 import { ConfigurationError } from "../errors";
 import {
   type GraphExtension,
@@ -365,14 +369,22 @@ function serializeNodeDef(registration: NodeRegistration): SerializedNodeDef {
 function serializeUniqueConstraints(
   constraints: readonly UniqueConstraint[],
 ): readonly SerializedUniqueConstraint[] {
-  return constraints.map((constraint) => ({
-    name: constraint.name,
-    fields: [...constraint.fields],
-    where:
-      constraint.where ? serializeWherePredicate(constraint.where) : undefined,
-    scope: constraint.scope,
-    collation: constraint.collation,
-  }));
+  return constraints.map((constraint) => {
+    const { scope, collation } = withUniqueConstraintDefaults(
+      constraint,
+      NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+    );
+    return {
+      name: constraint.name,
+      fields: [...constraint.fields],
+      where:
+        constraint.where ?
+          serializeWherePredicate(constraint.where)
+        : undefined,
+      scope,
+      collation,
+    };
+  });
 }
 
 /**
@@ -899,11 +911,14 @@ export async function getGraphDefinitionHash(
  *   They are recomputed from the document's own relations.
  * - An absent edge `targetCardinality` means `"many"`, which the serializer
  *   omits.
+ * - An absent unique-constraint `scope` or `collation` means what
+ *   `NODE_UNIQUE_CONSTRAINT_DEFAULTS` says, which `defineGraph` writes into
+ *   the declaration an untyped caller left them out of, so the serializer
+ *   writes them out.
  *
  * The document must be the stored JSON as written, not the output of the
- * schema parser: the parser fills in keys the serializer omits (a unique
- * constraint's `scope` and `collation`) and an explicit value cannot be told
- * from a filled-in one afterwards.
+ * schema parser: the parser fills in defaults, and the canonical form is
+ * defined over what was stored.
  *
  * Everything else is kept verbatim, so a document that differs from today's
  * serialization in anything the schema states still hashes differently.
@@ -911,7 +926,19 @@ export async function getGraphDefinitionHash(
 export function canonicalStoredSchemaDocument(
   document: SerializedSchema,
 ): SerializedSchema {
-  // Data-keyed: edge kind names and meta-edge names.
+  // Data-keyed: node and edge kind names and meta-edge names.
+  const nodes = createDataKeyedBag<SerializedNodeDef>();
+  for (const [kind, node] of Object.entries(document.nodes)) {
+    nodes[kind] = {
+      ...node,
+      uniqueConstraints: node.uniqueConstraints.map((constraint) =>
+        withUniqueConstraintDefaults(
+          constraint,
+          NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+        ),
+      ),
+    };
+  }
   const edges = createDataKeyedBag<SerializedEdgeDef>();
   for (const [kind, edge] of Object.entries(document.edges)) {
     const { targetCardinality, ...rest } = edge;
@@ -926,6 +953,7 @@ export function canonicalStoredSchemaDocument(
   }
   return {
     ...document,
+    nodes: { ...nodes },
     edges: { ...edges },
     ontology: {
       ...document.ontology,

@@ -102,6 +102,7 @@
  * `safe`/`warning` removal, `sameAs`'s and `differentFrom`'s included).
  */
 import type { EdgeEndpointAllowance } from "../backend/types";
+import { uniquenessScopeSpansSubclasses } from "../core/unique-constraint-options";
 import {
   ALL_META_EDGE_NAMES,
   META_EDGE_BROADER,
@@ -488,7 +489,7 @@ function nodeUniquenessComponentGroups(
         : undefined;
       if (memberDef === undefined) continue;
       for (const constraint of memberDef.uniqueConstraints) {
-        if (constraint.scope === "kindWithSubClasses") {
+        if (uniquenessScopeSpansSubclasses(constraint.scope)) {
           constraintNames.add(constraint.name);
         }
       }
