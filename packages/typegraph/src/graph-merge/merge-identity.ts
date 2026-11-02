@@ -315,28 +315,6 @@ function resolveIdentityEndpoint(
 }
 
 /**
- * A COMMITTED row's endpoints must never be canonicalized away: the applier
- * cannot rewrite a stored row, so a plan carrying its id with moved — or
- * collapsed — endpoints could only end as a false one-truth refusal, a
- * report/ledger divergence, or a drop reported for a row the target still
- * holds. Refused early with the specific cause instead.
- */
-function committedEndpointsMovedError(
-  assertion: IdentityTransferAssertion,
-  stored: LedgerAssertion,
-  remapped: IdentityTransferAssertion,
-): IdentityMergeConflictError {
-  return new IdentityMergeConflictError(
-    "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
-    {
-      details: { assertionId: assertion.id, stored, remapped },
-      suggestion:
-        "Exclude the colliding nodes from entity resolution, or manually retract the committed assertion and re-assert the canonical pair under a new id before merging.",
-    },
-  );
-}
-
-/**
  * Repoints every planned identity assertion's endpoints onto the identity they
  * will hold after the commit ({@link resolveIdentityEndpoint}), so an assertion
  * naming a branch node that reconciliation folded away — or retyped — references
@@ -345,7 +323,9 @@ function committedEndpointsMovedError(
  * the whole merge). After remapping it re-establishes the identity-pair invariants:
  * a `same` assertion whose endpoints collapse onto one survivor is redundant
  * and dropped (reported), as is a collapsed `different` that no longer holds,
- * while a collapsed CURRENT `different` assertion is a typed conflict;
+ * while a collapsed CURRENT `different` assertion is a typed conflict. A row
+ * the target already holds with the staged truth is never reported dropped —
+ * it stays on the target untouched;
  * surviving endpoints are re-normalized into code-point order (the
  * import path rejects a non-normalized pair), and assertions that now share a
  * semantic key are re-deduped by the same survivor rule
@@ -385,32 +365,24 @@ export function remapIdentityAssertionEndpoints(
       stored !== undefined &&
       assertionTruthKey(stored) === assertionTruthKey(assertion);
     if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
-      if (committed) {
-        throw committedEndpointsMovedError(assertion, stored, {
-          ...assertion,
-          a: remappedA,
-          b: remappedB,
-        });
-      }
-      if (assertion.relation === "same") {
-        dropped.push(
-          droppedIdentityAssertion(
-            assertion,
-            REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
-          ),
-        );
-        continue;
-      }
-      if (isCurrentIdentityAssertion(assertion)) {
+      if (
+        assertion.relation === "different" &&
+        isCurrentIdentityAssertion(assertion)
+      ) {
         throw new IdentityMergeConflictError(
           "Node reconciliation collapsed a different-identity assertion onto one survivor.",
           { details: { assertion, survivor: remappedA } },
         );
       }
+      // A row the target already holds stays there as it is: the merge writes
+      // nothing for it, so reporting it dropped would contradict the target.
+      if (committed) continue;
       dropped.push(
         droppedIdentityAssertion(
           assertion,
-          COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
+          assertion.relation === "same" ?
+            REDUNDANT_IDENTITY_ASSERTION_DROP_REASON
+          : COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
         ),
       );
       continue;
@@ -441,6 +413,7 @@ export function remapIdentityAssertionEndpoints(
         undefined,
       );
     if (validTo !== undefined && compareCodePoints(validFrom, validTo) >= 0) {
+      if (committed) continue;
       dropped.push(
         droppedIdentityAssertion(
           assertion,
@@ -464,11 +437,23 @@ export function remapIdentityAssertionEndpoints(
       validFrom,
       ...(validTo === undefined ? {} : { validTo }),
     };
+    // A COMMITTED row's endpoints must never be canonicalized away: the
+    // applier cannot rewrite a stored row, so a plan carrying its id with
+    // moved endpoints could only end as a false one-truth refusal or —
+    // worse, if the challenger won the dedupe — a report/ledger divergence.
+    // Refuse early with the specific cause instead.
     if (
       committed &&
       assertionTruthKey(result) !== assertionTruthKey(assertion)
     ) {
-      throw committedEndpointsMovedError(assertion, stored, result);
+      throw new IdentityMergeConflictError(
+        "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
+        {
+          details: { assertionId: assertion.id, stored, remapped: result },
+          suggestion:
+            "Exclude the colliding nodes from entity resolution, or manually retract the committed assertion and re-assert the canonical pair under a new id before merging.",
+        },
+      );
     }
     remapped.push(result);
   }

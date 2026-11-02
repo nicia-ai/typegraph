@@ -779,14 +779,14 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
 
   /**
    * Reconciliation that fuses the endpoints of a row the target already holds
-   * cannot rewrite that row, so the merge refuses — it must not report the row
-   * dropped while the target keeps it. An incremental merge re-stages the
-   * target's own post-fork assertions, which is how such a row reaches the
-   * remap: a `same` the target asserted, and a `different` it asserted and
-   * then retracted.
+   * writes nothing for it: the row stays on the target as it is, so it must not
+   * be reported dropped. An incremental merge re-stages the target's own
+   * post-fork assertions, which is how such a row reaches the remap: a `same`
+   * the target asserted (exactly what a scorer re-matches), and a `different`
+   * it asserted and then retracted.
    */
   it.each(["same", "different"] as const)(
-    "refuses fusing the endpoints of a %s assertion the target already holds",
+    "keeps, unreported, a %s assertion the target holds when resolution fuses its endpoints",
     async (relation) => {
       const { store: forkPoint } = await createBase();
       const target = unwrap(
@@ -808,6 +808,15 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
         await new Promise((resolve) => setTimeout(resolve, 2));
         await target.identity.retractAssertion(assertion.id);
       }
+      const targetRow = async () =>
+        (
+          await storeRuntime(target).identityAssertionsAtTarget(
+            storeRuntime(target).backend,
+            "archival",
+          )
+        ).find((row) => row.id === assertion.id);
+      const before = await targetRow();
+      expect(before).toBeDefined();
       const source = unwrap(
         await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
       );
@@ -833,15 +842,18 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
         },
       });
 
-      if (isOk(result)) {
-        console.info("merged", result.data.resolutions, result.data.dropped);
-        throw new Error("Expected a committed-row refusal");
+      if (isErr(result)) {
+        console.info("refusal", result.error.message, result.error.details);
+        throw result.error;
       }
-      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
-      expect(result.error.message).toBe(
-        "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
+      console.info("dropped", result.data.dropped);
+      expect(result.data.resolutions).toEqual([
+        expect.objectContaining({ memberIds: ["n1", "n2"] }),
+      ]);
+      expect(result.data.dropped).not.toContainEqual(
+        expect.objectContaining({ id: assertion.id }),
       );
-      expect(result.error.details).toMatchObject({ assertionId: assertion.id });
+      expect(await targetRow()).toEqual(before);
     },
   );
 
@@ -1945,6 +1957,24 @@ describe("remapIdentityAssertionEndpoints validity", () => {
       },
     ]);
     expect(result.warnings).toEqual([]);
+  });
+
+  it("keeps, unreported, a committed row whose remapped window is empty", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map([[assertion.id, assertion]]),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          { validFrom: "2025-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([]);
+    expect(result.dropped).toEqual([]);
   });
 
   it("honors a survivor window with only an upper bound", () => {

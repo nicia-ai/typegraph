@@ -1072,7 +1072,8 @@ The rules are fixed; there is no policy to choose.
 | A branch re-asserts a pair and then ends that re-assertion, or records a bounded historical window for it | Not a re-assertion: only an assertion that still holds re-asserts a pair. The ended row lands as history beside the other branch's retraction |
 | A branch's assertion names a node a branch deleted | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT` while the assertion still holds. One that ended — retracted, or ended by that very deletion — lands as history |
 | A branch's assertion names a node the incremental target deleted after the fork | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT` at plan time, whether the assertion still holds or ended: the target's earlier deletion leaves no endpoint covering the assertion's window |
-| Entity resolution fuses the two endpoints of an assertion the target already holds | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`: a merge cannot rewrite a committed identity row |
+| Entity resolution fuses the two endpoints of an assertion a branch adds | A `same` is dropped as `identity:endpoints-collapsed` and an ended `different` as `identity:ended-different-collapsed`; a current `different` fails the merge with `GRAPH_MERGE_IDENTITY_CONFLICT` |
+| Entity resolution fuses the endpoints of an assertion the target already holds | Nothing is written for it: the row stays on the target as it is and is not reported on `dropped` |
 | Branches assert `same` and `different` for one pair over overlapping validity windows | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`, naming both assertions |
 | A scored candidate match spans two identity classes held apart by a `different` assertion | The match is dropped and reported (see below); the merge continues |
 
