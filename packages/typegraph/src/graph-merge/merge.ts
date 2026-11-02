@@ -1784,7 +1784,9 @@ function buildInternalMergePlan<G extends GraphDef>(
   assertIdentityEndpointsNotDeleted(
     identityRemap.assertions,
     nodeDeletions,
+    staging.deletedNodes,
     reconciliation.retypeMap,
+    storedIdentityRowsById,
   );
   // Each canonical entity enters the universe under the kind the commit will
   // actually WRITE — the retyped one when the ontology cascade retypes it —

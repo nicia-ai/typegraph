@@ -43,7 +43,7 @@ import {
 } from "../identity/reference";
 import { isCurrentIdentityAssertion } from "../identity/validity-window";
 import { encodeTupleKey } from "../utils/tuple-key";
-import type { CanonicalEntity } from "./canonicalize";
+import { type CanonicalEntity, COMMITTED_TARGET_BRANCH } from "./canonicalize";
 import {
   BaseVersionMismatchError,
   describeCause,
@@ -315,6 +315,28 @@ function resolveIdentityEndpoint(
 }
 
 /**
+ * A COMMITTED row's endpoints must never be canonicalized away: the applier
+ * cannot rewrite a stored row, so a plan carrying its id with moved — or
+ * collapsed — endpoints could only end as a false one-truth refusal, a
+ * report/ledger divergence, or a drop reported for a row the target still
+ * holds. Refused early with the specific cause instead.
+ */
+function committedEndpointsMovedError(
+  assertion: IdentityTransferAssertion,
+  stored: LedgerAssertion,
+  remapped: IdentityTransferAssertion,
+): IdentityMergeConflictError {
+  return new IdentityMergeConflictError(
+    "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
+    {
+      details: { assertionId: assertion.id, stored, remapped },
+      suggestion:
+        "Exclude the colliding nodes from entity resolution, or manually retract the committed assertion and re-assert the canonical pair under a new id before merging.",
+    },
+  );
+}
+
+/**
  * Repoints every planned identity assertion's endpoints onto the identity they
  * will hold after the commit ({@link resolveIdentityEndpoint}), so an assertion
  * naming a branch node that reconciliation folded away — or retyped — references
@@ -358,7 +380,18 @@ export function remapIdentityAssertionEndpoints(
       canonicalOf,
       retypeMap,
     );
+    const stored = storedRowsById.get(assertion.id);
+    const committed =
+      stored !== undefined &&
+      assertionTruthKey(stored) === assertionTruthKey(assertion);
     if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
+      if (committed) {
+        throw committedEndpointsMovedError(assertion, stored, {
+          ...assertion,
+          a: remappedA,
+          b: remappedB,
+        });
+      }
       if (assertion.relation === "same") {
         dropped.push(
           droppedIdentityAssertion(
@@ -431,25 +464,11 @@ export function remapIdentityAssertionEndpoints(
       validFrom,
       ...(validTo === undefined ? {} : { validTo }),
     };
-    // A COMMITTED row's endpoints must never be canonicalized away: the
-    // applier cannot rewrite a stored row, so a plan carrying its id with
-    // moved endpoints could only end as a false one-truth refusal or —
-    // worse, if the challenger won the dedupe — a report/ledger divergence.
-    // Refuse early with the specific cause instead.
-    const stored = storedRowsById.get(assertion.id);
     if (
-      stored !== undefined &&
-      assertionTruthKey(stored) === assertionTruthKey(assertion) &&
+      committed &&
       assertionTruthKey(result) !== assertionTruthKey(assertion)
     ) {
-      throw new IdentityMergeConflictError(
-        "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
-        {
-          details: { assertionId: assertion.id, stored, remapped: result },
-          suggestion:
-            "Exclude the colliding nodes from entity resolution, or manually retract the committed assertion and re-assert the canonical pair under a new id before merging.",
-        },
-      );
+      throw committedEndpointsMovedError(assertion, stored, result);
     }
     remapped.push(result);
   }
@@ -487,10 +506,18 @@ export function remapIdentityAssertionEndpoints(
  * and is (not) the same as another, a second says it is gone, and unlike the
  * delete/modify case there is no policy the caller can set to arbitrate.
  *
- * Only an assertion that holds NOW conflicts with the deletion. One that ended —
- * retracted, or ended by the very deletion of its endpoint — claims nothing
- * about the entity's present, and the commit lands it as history: an ended row
- * needs only its endpoint ROWS, which a soft delete keeps.
+ * Only an assertion that holds NOW conflicts with a deletion this merge
+ * applies from a branch. One that ended — retracted, or ended by the very
+ * deletion of its endpoint — claims nothing about the entity's present, and the
+ * commit lands it as history: an ended row needs only its endpoint ROWS, which
+ * the merge's soft delete keeps, and that delete lands at the merge instant,
+ * after the row ended.
+ *
+ * A deletion the incremental TARGET already holds is different: it landed at the
+ * target's own, earlier instant, or removed the row outright, so even an ended
+ * assertion over it cannot be written. Every assertion over such a node is
+ * refused, except a row the target itself already holds with the exact staged
+ * truth — the applier writes nothing for it.
  *
  * `nodeDeletions` is keyed by the deleted node's own kind, while the assertions
  * arrive post-retype, so a retyped identity is checked in BOTH forms.
@@ -498,22 +525,36 @@ export function remapIdentityAssertionEndpoints(
 export function assertIdentityEndpointsNotDeleted(
   assertions: readonly IdentityTransferAssertion[],
   nodeDeletions: ReadonlyMap<MergeKey, string>,
+  stagedDeletions: StagingSet["deletedNodes"],
   retypeMap: ReadonlyMap<MergeKey, string>,
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
 ): void {
-  const deletedIdentities = new Set<MergeKey>();
-  for (const key of nodeDeletions.keys()) {
-    deletedIdentities.add(key);
-    const retyped = retypeMap.get(key);
-    if (retyped !== undefined) {
-      deletedIdentities.add(mergeKey(retyped, idOf(key)));
+  const withRetypedForms = (
+    keys: Iterable<MergeKey>,
+  ): ReadonlySet<MergeKey> => {
+    const identities = new Set<MergeKey>();
+    for (const key of keys) {
+      identities.add(key);
+      const retyped = retypeMap.get(key);
+      if (retyped !== undefined) identities.add(mergeKey(retyped, idOf(key)));
     }
-  }
+    return identities;
+  };
+  const deletedIdentities = withRetypedForms(nodeDeletions.keys());
+  const targetHeldDeletions = withRetypedForms(
+    stagedDeletions
+      .filter((staged) => staged.branchId === COMMITTED_TARGET_BRANCH)
+      .map((staged) => mergeKey(staged.node.kind, staged.node.id))
+      .filter((key) => nodeDeletions.has(key)),
+  );
+  const committedIds = committedIdentityIds(assertions, storedRowsById);
   for (const assertion of assertions) {
-    if (!isCurrentIdentityAssertion(assertion)) continue;
+    const current = isCurrentIdentityAssertion(assertion);
     for (const endpoint of [assertion.a, assertion.b]) {
-      if (!deletedIdentities.has(mergeKeyOf(endpoint))) {
-        continue;
-      }
+      const key = mergeKeyOf(endpoint);
+      if (!deletedIdentities.has(key)) continue;
+      if (!current && !targetHeldDeletions.has(key)) continue;
+      if (!current && committedIds.has(assertion.id)) continue;
       throw new IdentityMergeConflictError(
         "A branch asserted an identity relation over a node another branch deleted.",
         { details: { assertion, deletedEndpoint: endpoint } },

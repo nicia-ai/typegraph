@@ -26,6 +26,7 @@ import {
   merge,
   mergeIncremental,
   planMerge,
+  planMergeIncremental,
 } from "../../src/graph-merge/merge";
 import {
   assertNoContradictoryIdentityClosure,
@@ -669,6 +670,178 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       console.info("landed history", landed);
       expect(landed).toMatchObject({ relation });
       expect(landed?.validTo).toBeDefined();
+    },
+  );
+
+  /**
+   * A deletion the incremental TARGET made after the fork is not one this
+   * merge applies: it landed at the target's own, earlier instant (or removed
+   * the row outright), so even an ENDED branch assertion over it cannot be
+   * written. Planning refuses it with the typed conflict, and the merge
+   * refuses it the same way rather than dying inside the commit.
+   */
+  it.each([
+    { deletion: "soft-delete before the branch retracts" },
+    { deletion: "hard-delete" },
+  ] as const)(
+    "refuses an ended branch assertion over a node the target deleted ($deletion)",
+    async ({ deletion }) => {
+      // Planning an incremental merge needs durable revision tracking.
+      const [forkPoint] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { history: true },
+      );
+      const first = await forkPoint.nodes.Person.create(
+        { name: "First" },
+        { id: "first" },
+      );
+      const second = await forkPoint.nodes.Person.create(
+        { name: "Second" },
+        { id: "second" },
+      );
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+      ).store;
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      const { assertion } = await source.store.identity.assertSame(
+        first,
+        second,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      if (deletion === "hard-delete") {
+        await source.store.identity.retractAssertion(assertion.id);
+        await target.nodes.Person.hardDelete(second.id);
+      } else {
+        await target.nodes.Person.delete(second.id);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        await source.store.identity.retractAssertion(assertion.id);
+      }
+      const request = {
+        forkPoint,
+        target,
+        branches: [source],
+        options: { branchOrder: [BRANCH_A] },
+      };
+
+      const planned = await planMergeIncremental(request);
+      const merged = await mergeIncremental(request);
+
+      for (const [label, result] of [
+        ["plan", planned],
+        ["merge", merged],
+      ] as const) {
+        if (result.success) throw new Error(`Expected a ${label} refusal`);
+        console.info(label, "refusal", result.error.message);
+        expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+        expect(result.error.message).toBe(
+          "A branch asserted an identity relation over a node another branch deleted.",
+        );
+        expect(result.error.details).toMatchObject({
+          assertion: { id: assertion.id },
+          deletedEndpoint: { kind: "Person", id: second.id },
+        });
+      }
+    },
+  );
+
+  it("merges incrementally when the target ended its own assertion by deleting the endpoint", async () => {
+    const { store: forkPoint, first, second } = await createBase();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    ).store;
+    const { assertion } = await target.identity.assertSame(first, second);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await target.nodes.Person.delete(second.id);
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await source.store.nodes.Person.create({ name: "Third" }, { id: "third" });
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [source],
+      options: { branchOrder: [BRANCH_A] },
+    });
+
+    if (isErr(result)) {
+      console.info("refusal", result.error.message, result.error.details);
+      throw result.error;
+    }
+    expect(result.data.dropped).not.toContainEqual(
+      expect.objectContaining({ id: assertion.id }),
+    );
+    expect(await target.nodes.Person.getById("third" as never)).toBeDefined();
+  });
+
+  /**
+   * Reconciliation that fuses the endpoints of a row the target already holds
+   * cannot rewrite that row, so the merge refuses — it must not report the row
+   * dropped while the target keeps it. An incremental merge re-stages the
+   * target's own post-fork assertions, which is how such a row reaches the
+   * remap: a `same` the target asserted, and a `different` it asserted and
+   * then retracted.
+   */
+  it.each(["same", "different"] as const)(
+    "refuses fusing the endpoints of a %s assertion the target already holds",
+    async (relation) => {
+      const { store: forkPoint } = await createBase();
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+      ).store;
+      const n1 = await target.nodes.Person.create(
+        { name: "Ada" },
+        { id: "n1" },
+      );
+      const n2 = await target.nodes.Person.create(
+        { name: "Ada" },
+        { id: "n2" },
+      );
+      const { assertion } =
+        relation === "same" ?
+          await target.identity.assertSame(n1, n2)
+        : await target.identity.assertDifferent(n1, n2);
+      if (relation === "different") {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        await target.identity.retractAssertion(assertion.id);
+      }
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+        options: {
+          branchOrder: [BRANCH_A],
+          resolve: {
+            Person: {
+              block: () => "all",
+              threshold: 0.5,
+              similarity: {
+                kind: "custom",
+                score: (left, right) =>
+                  [left.id, right.id].toSorted().join(",") === "n1,n2" ? 1 : 0,
+              },
+            },
+          },
+        },
+      });
+
+      if (isOk(result)) {
+        console.info("merged", result.data.resolutions, result.data.dropped);
+        throw new Error("Expected a committed-row refusal");
+      }
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+      expect(result.error.message).toBe(
+        "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
+      );
+      expect(result.error.details).toMatchObject({ assertionId: assertion.id });
     },
   );
 
