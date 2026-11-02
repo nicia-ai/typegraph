@@ -85,6 +85,18 @@ function createSchema(
 // computeSchemaDiff - Empty/No Changes
 // ============================================================
 
+function worksAtEdge(endpointExistence: "notDeleted" | "ever") {
+  return {
+    kind: "worksAt",
+    fromKinds: ["Person"],
+    toKinds: ["Company"],
+    properties: { type: "object" as const, properties: {} },
+    cardinality: "many" as const,
+    endpointExistence,
+    description: undefined,
+  };
+}
+
 describe("computeSchemaDiff", () => {
   describe("empty and unchanged schemas", () => {
     it("returns no changes for identical empty schemas", () => {
@@ -927,6 +939,31 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.edges[0]).details).toContain("Cardinality");
       expect(requireDefined(diff.edges[0]).details).toContain("many");
       expect(requireDefined(diff.edges[0]).details).toContain("one");
+    });
+
+    it("detects endpointExistence change as warning", () => {
+      const before = createSchema({
+        version: 1,
+        edges: { worksAt: worksAtEdge("notDeleted") },
+      });
+      const after = createSchema({
+        version: 2,
+        edges: { worksAt: worksAtEdge("ever") },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(true);
+      expect(diff.edges).toHaveLength(1);
+      expect(diff.edges[0]).toMatchObject({
+        type: "modified",
+        severity: "warning",
+      });
+      expect(requireDefined(diff.edges[0]).details).toContain(
+        'endpointExistence changed from "notDeleted" to "ever"',
+      );
+      expect(computeSchemaDiff(before, before).hasChanges).toBe(false);
     });
 
     it("detects edge property change as safe", () => {
