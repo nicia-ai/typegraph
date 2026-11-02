@@ -8,7 +8,7 @@
  * tmpfs. A tmpfs is RAM-backed by the Docker VM, and real LDBC SF1 data plus
  * indexes (multiple GB) overflows a laptop-sized Docker VM (observed: "no
  * space left on device" mid-load against a 4g tmpfs on an 8GB VM) — the same
- * lesson the sibling braiddb project's own SNB benchmark driver documents
+ * lesson a reference SNB benchmark driver documents
  * (`storage = dataDir ? PGDATA-on-disk : tmpfs`). `fsync=off` still labels
  * this as a fast, non-durable mode; only the RAM-vs-disk backing changed.
  */

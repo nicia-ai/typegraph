@@ -2,7 +2,7 @@ import { median, percentile } from "../../utils";
 
 /**
  * Coefficient-of-variation threshold above which a latency distribution is
- * flagged noisy rather than trusted at face value. Matches the braiddb
+ * flagged noisy rather than trusted at face value. Matches the reference
  * benchmark discipline this program adopts (docs/design/benchmark-program-plan.md).
  */
 const NOISY_CV_THRESHOLD_PERCENT = 25;

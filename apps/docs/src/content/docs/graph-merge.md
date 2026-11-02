@@ -1834,12 +1834,12 @@ and attest the sealed origin when reopening it.
 For a hosted PostgreSQL branch such as [Neon](https://neon.com/docs/get-started-with-neon/workflow-primer),
 `connect` must use that branch's connection string and compute endpoint for
 every pooled checkout and transaction. Reusing the source pool can appear to
-pass a base-version check while writing to the source. Doltgres can pin a
-connection through a [database revision specifier](https://www.doltgres.com/docs/reference/version-control/branches/);
-avoid session-level branch switching on a pool whose checkouts may retain
-different branch state. Doltgres exposes native branch and merge commands,
-but TypeGraph continues to use its own merge planner and apply path; native
-merge and Doltgres backend support require separate conformance testing.
+pass a base-version check while writing to the source. A version-controlled SQL engine may let a connection
+pin a database revision or branch; prefer that to session-level branch switching on a pool whose
+checkouts may retain different branch state. Such an engine may also expose
+native branch and merge commands, but TypeGraph continues to use its own merge
+planner and apply path; native merge and backend support for such an engine
+require separate conformance testing.
 `create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
 backend's `close` is composed with the fork's `dispose` through `deriveBackend`
 (never a spread), so `worker.close()` — the branch's public release call —
@@ -2067,12 +2067,11 @@ A future native merge capability needs a host-native compare-and-swap on the
 actual target, plus proof that the full physical diff equals the approved
 TypeGraph writes, including schema, history, identity, and sidecars.
 
-For a Doltgres strategy, pin each Store connection to the intended database
-branch. [Doltgres revision specifiers](https://www.doltgres.com/docs/reference/version-control/branches/)
-provide that connection-level selection. Its
-[`DOLT_BRANCH()` and `DOLT_MERGE()` functions](https://www.doltgres.com/docs/reference/version-control/dolt-sql-functions/)
-implicitly commit the current transaction, so a fence checked before those
-functions cannot by itself protect their target.
+For a strategy on a version-controlled SQL engine, pin each Store connection
+to the intended database branch using the engine's connection-level revision
+selection. If the engine's native branch and merge functions implicitly commit
+the current transaction, a fence checked before those functions cannot by
+itself protect their target.
 
 #### Atomic operations and immutable evidence
 
