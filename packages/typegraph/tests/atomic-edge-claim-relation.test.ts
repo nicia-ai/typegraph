@@ -34,6 +34,7 @@ import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import type {
   ClaimEdgeCardinalityParams,
   CompositionClaimScope,
+  SqlDialect,
 } from "../src/backend/types";
 
 const SCHEMA_FENCE = { graphId: "graph-1", expectedVersion: 1 } as const;
@@ -100,6 +101,10 @@ const DIALECTS = [
   ["PostgreSQL", postgresTables, new PgDialect()],
   ["SQLite", sqliteTables, new SQLiteSyncDialect()],
 ] as const;
+
+function dialectOf(tables: Tables): SqlDialect {
+  return tables === postgresTables ? "postgres" : "sqlite";
+}
 
 function render(
   dialect: PgDialect | SQLiteSyncDialect,
@@ -168,7 +173,8 @@ const SINGLE_ROW_BUILDERS: readonly (readonly [
 ])[] = [
   [
     "buildLockEdgeClaimGuarded",
-    (tables, params) => buildLockEdgeClaimGuarded(tables, params, TIMESTAMP),
+    (tables, params) =>
+      buildLockEdgeClaimGuarded(tables, dialectOf(tables), params, TIMESTAMP),
   ],
   [
     "buildTakeOverEdgeClaim",
@@ -329,7 +335,7 @@ describe.each(DIALECTS)(
       [
         "buildReadEdgeClaimIncumbents",
         (entries: readonly ClaimEdgeCardinalityParams[]) =>
-          buildReadEdgeClaimIncumbents(tables, entries),
+          buildReadEdgeClaimIncumbents(tables, dialectOf(tables), entries),
       ],
     ] as const)("%s spells each group's own spec", (_name, build) => {
       it.each([
@@ -442,3 +448,42 @@ describe("buildInsertEdgeIfEndpointsLiveWithCardinalityClaim on PostgreSQL", () 
     });
   });
 });
+
+function requireClaim(
+  entries: readonly ClaimEdgeCardinalityParams[],
+): ClaimEdgeCardinalityParams {
+  const [first] = entries;
+  if (first === undefined) throw new Error("no claim");
+  return first;
+}
+
+describe.each(DIALECTS)(
+  "incumbent order on %s",
+  (_dialectName, tables, dialect) => {
+    it.each([
+      [
+        "buildReadEdgeClaimIncumbents",
+        (entries: readonly ClaimEdgeCardinalityParams[]) =>
+          buildReadEdgeClaimIncumbents(tables, dialectOf(tables), entries)[0],
+      ],
+      [
+        "buildLockEdgeClaimGuarded",
+        (entries: readonly ClaimEdgeCardinalityParams[]) =>
+          buildLockEdgeClaimGuarded(
+            tables,
+            dialectOf(tables),
+            requireClaim(entries),
+            TIMESTAMP,
+          ),
+      ],
+    ] as const)("%s orders by code point", (_name, build) => {
+      const statement = build([claim(0, "one")]);
+      if (statement === undefined) throw new Error("no statement");
+      const rendered = render(dialect, statement).sql;
+
+      expect(rendered.includes('COLLATE "C"')).toBe(
+        dialectOf(tables) === "postgres",
+      );
+    });
+  },
+);
