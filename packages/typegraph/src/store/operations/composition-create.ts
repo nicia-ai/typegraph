@@ -1064,6 +1064,9 @@ export async function findLiveCompositionAttachment(
  * that asks the stronger question — "does this part hang from a whole that is
  * itself live" — composes this verdict with {@link readLiveCompositionWholes},
  * the way {@link readCompositionUnattachedParts} does.
+ *
+ * When several live edges attach the part, the lowest id in code-point order
+ * is named, the same incumbent the claim statements' `ORDER BY` reports.
  */
 function selectLiveCompositionAttachment(
   registry: KindRegistry,
@@ -1072,6 +1075,8 @@ function selectLiveCompositionAttachment(
   candidateEdges: readonly EdgeRow[],
   excludeEdgeIds?: ReadonlySet<string>,
 ): Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }> | undefined {
+  let selected:
+    Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }> | undefined;
   for (const edge of candidateEdges) {
     if (excludeEdgeIds?.has(edge.id) === true) continue;
     const partSide = registry.compositionPartSide(edge.kind);
@@ -1079,9 +1084,14 @@ function selectLiveCompositionAttachment(
     const { part, whole } = compositionRowEndpoints(partSide, edge);
     if (part.kind !== concreteKind || part.id !== concreteId) continue;
     if (!compositionEdgeAttachesPart(registry, concreteKind, edge)) continue;
-    return { edge, whole };
+    if (
+      selected === undefined ||
+      compareCodePoints(edge.id, selected.edge.id) < 0
+    ) {
+      selected = { edge, whole };
+    }
   }
-  return undefined;
+  return selected;
 }
 
 /**

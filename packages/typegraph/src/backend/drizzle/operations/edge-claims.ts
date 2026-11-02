@@ -1,5 +1,6 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import { sql as fragmentSql } from "../../../query/sql-fragment";
 import {
   axisRowMembership,
   edgeCardinalityAxisName,
@@ -16,10 +17,12 @@ import type {
   InsertEdgeParams,
   PurgeEdgeClaimsParams,
   SchemaWriteFenceParams,
+  SqlDialect,
 } from "../../types";
 import { buildLiveEndpointPredicate, liveEndpointLockOrder } from "./edges";
 import {
   castBoundValueForColumn,
+  codePointOrderKey,
   edgeColumnList,
   qualifiedColumn,
   quotedColumn,
@@ -738,6 +741,14 @@ export function buildLockEdgeClaims(
   `;
 }
 
+/** Incumbent order shared by both incumbent readers: code point, on every engine. */
+function incumbentOrder(tables: Tables, dialect: SqlDialect): SQL {
+  const { edges } = tables;
+  const relation = getTableName(edges).replaceAll('"', '""');
+  const column = edges.id.name.replaceAll('"', '""');
+  return codePointOrderKey(fragmentSql.raw(`"${relation}"."${column}"`), dialect);
+}
+
 /**
  * The batch counterpart of {@link buildLockEdgeClaimGuarded}'s
  * `incumbent_edge_id`:
@@ -752,12 +763,13 @@ export function buildLockEdgeClaims(
  * the lock, it reads a snapshot that includes every claimant the lock waited
  * on.
  *
- * Ordered by incumbent id, so a caller keeping the first row per axis reports
+ * Ordered by incumbent id in code-point order on both engines, so a caller keeping the first row per axis reports
  * a deterministic one. One statement per predicate-shape group; see
  * {@link groupEntriesByPredicateShape}.
  */
 export function buildReadEdgeClaimIncumbents(
   tables: Tables,
+  dialect: SqlDialect,
   entries: readonly ClaimEdgeCardinalityParams[],
 ): readonly SQL[] {
   const { edges } = tables;
@@ -773,7 +785,7 @@ export function buildReadEdgeClaimIncumbents(
         ${qualifiedColumn(edgesName, edges.id)} AS incumbent_edge_id
       FROM ${PROPOSED_RELATION_REF}
       JOIN ${edges} ON ${competingLiveEdgePredicate(tables, values, axis)}
-      ORDER BY ${qualifiedColumn(edgesName, edges.id)}
+      ORDER BY ${incumbentOrder(tables, dialect)}
     `;
   });
 }
@@ -798,6 +810,7 @@ export function buildReadEdgeClaimIncumbents(
  */
 export function buildLockEdgeClaimGuarded(
   tables: Tables,
+  dialect: SqlDialect,
   params: ClaimEdgeCardinalityParams,
   timestamp: string,
 ): SQL {
@@ -827,7 +840,7 @@ export function buildLockEdgeClaimGuarded(
       (
         SELECT ${qualifiedColumn(edgesName, edges.id)} FROM ${edges}
         WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), params)}
-        ORDER BY ${qualifiedColumn(edgesName, edges.id)}
+        ORDER BY ${incumbentOrder(tables, dialect)}
         LIMIT 1
       ) AS incumbent_edge_id
   `;

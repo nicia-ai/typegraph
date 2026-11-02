@@ -451,6 +451,51 @@ export function registerCompositionTighteningIntegrationTests(
     // incumbent the lock inserted the writing edge's own claim, so the
     // refusal names the refused edge rather than `unclaimed.id`.
 
+    it("names the same incumbent on every backend when several live edges occupy the axis", async () => {
+      const store = await context.createStore(
+        buildGraph("composition_tightening_incumbent_order", true),
+      );
+      const chapter = await store.nodes.CtChapter.create({});
+      const firstBook = await store.nodes.CtBook.create({});
+      const secondBook = await store.nodes.CtBook.create({});
+      const anthology = await store.nodes.CtAnthology.create({});
+      // Beneath the store, so neither holds a claim row: only the incumbent
+      // reads see them. The ids differ only in case, the order a database
+      // collation and a code-point sort disagree on.
+      for (const [edgeId, book] of [
+        ["a-ordered-incumbent", firstBook],
+        ["B-ordered-incumbent", secondBook],
+      ] as const) {
+        await store.backend.insertEdge({
+          graphId: store.graphId,
+          id: edgeId,
+          kind: "ctChapterOf",
+          fromKind: "CtChapter",
+          fromId: chapter.id,
+          toKind: "CtBook",
+          toId: book.id,
+          props: {},
+        });
+      }
+
+      await expect(
+        store.edges.ctIncludedIn.create(chapter, anthology, {}),
+      ).rejects.toMatchObject({
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        details: { incumbentEdgeId: "B-ordered-incumbent" },
+      });
+      await expect(
+        store.edges.ctIncludedIn.bulkCreate([{ from: chapter, to: anthology }]),
+      ).rejects.toMatchObject({
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        details: { incumbentEdgeId: "B-ordered-incumbent" },
+      });
+    });
+    // MUTATION CHECK: drop `incumbentOrder` from the `ORDER BY` of
+    // `buildLockEdgeClaimGuarded` and `buildReadEdgeClaimIncumbents`
+    // (src/backend/drizzle/operations/edge-claims.ts). A PostgreSQL database
+    // whose collation sorts case-insensitively then names "a-ordered-incumbent".
+
     it('flipping an already-declared pair to existence: "required" refuses a DIRTY graph directly through ensureSchema, never reaching "breaking-change"', async () => {
       const id = "composition_tightening_flip_required";
       const store = await context.createStore(buildFlipGraph(id, false));

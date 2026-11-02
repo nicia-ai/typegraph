@@ -19,7 +19,7 @@
  *   transition, produced with a real export/import round trip
  *
  * Run with:
- *   npx tsx examples/29-identity-history.ts
+ *   npx tsx examples/34-identity-history.ts
  */
 import { deepStrictEqual } from "node:assert/strict";
 

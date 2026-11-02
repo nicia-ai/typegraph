@@ -1399,13 +1399,13 @@ function createCommonOperationStrategy(
     buildReadEdgeClaimIncumbents(
       entries: readonly ClaimEdgeCardinalityParams[],
     ): readonly SQL[] {
-      return buildReadEdgeClaimIncumbents(tables, entries);
+      return buildReadEdgeClaimIncumbents(tables, dialect, entries);
     },
     buildLockEdgeClaimGuarded(
       params: ClaimEdgeCardinalityParams,
       timestamp: string,
     ): SQL {
-      return buildLockEdgeClaimGuarded(tables, params, timestamp);
+      return buildLockEdgeClaimGuarded(tables, dialect, params, timestamp);
     },
     buildTakeOverEdgeClaim(
       params: ClaimEdgeCardinalityParams,

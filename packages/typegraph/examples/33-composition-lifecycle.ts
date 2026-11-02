@@ -30,7 +30,7 @@
  *   `onOperationEnd` hook and on a `transactionWithReceipt` receipt
  *
  * Run with:
- *   npx tsx examples/28-composition-lifecycle.ts
+ *   npx tsx examples/33-composition-lifecycle.ts
  */
 import { deepStrictEqual } from "node:assert/strict";
 
