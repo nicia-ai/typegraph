@@ -558,11 +558,14 @@ function nodeBatchConstraintProbes<G extends GraphDef>(
 }
 
 /**
- * The constraint probes a set of node updates owes: each entry's own update
- * probe and, for an entry that clears a tombstone, the restore probe
- * ({@link file://../constraints.ts nodeRestoreNeedsConstraintFence}) — so
- * every restore entry, single or batched, fences its required-part verdict
- * through one fold.
+ * The constraint probes a set of node updates owes: for an entry that clears
+ * a tombstone, the restore probe
+ * ({@link file://../constraints.ts nodeRestoreNeedsConstraintFence}), then
+ * each entry's own update probe — so every restore entry, single or batched,
+ * fences its required-part verdict through one fold. The restore probe comes
+ * first so a plan that owes it names it, and takes the fence in the deciding
+ * form up front; the verdict's own gate
+ * (`fenceCompositionExistenceDecision`) holds whichever reason is named.
  */
 function nodeUpdateConstraintProbes<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
@@ -571,12 +574,16 @@ function nodeUpdateConstraintProbes<G extends GraphDef>(
     clearDeleted: boolean;
   }>[],
 ): readonly (ConstraintFenceReason | undefined)[] {
-  return entries.flatMap((entry) => [
-    nodeFencesConstraintProbe(ctx, entry.input.kind, "update"),
-    entry.clearDeleted ?
-      nodeRestoreNeedsConstraintFence(ctx.registry, entry.input.kind)
-    : undefined,
-  ]);
+  return [
+    ...entries.map((entry) =>
+      entry.clearDeleted ?
+        nodeRestoreNeedsConstraintFence(ctx.registry, entry.input.kind)
+      : undefined,
+    ),
+    ...entries.map((entry) =>
+      nodeFencesConstraintProbe(ctx, entry.input.kind, "update"),
+    ),
+  ];
 }
 
 /**
@@ -4814,8 +4821,12 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     mixedBatchWritePlan(
       [
-        ...revisions.map(({ existing }) =>
-          nodeFencesConstraintProbe(ctx, existing.kind, "update"),
+        ...nodeUpdateConstraintProbes(
+          ctx,
+          revisions.map(({ existing, leg }) => ({
+            input: existing,
+            clearDeleted: leg.restoresRow,
+          })),
         ),
         ...owed.map(({ leg }) =>
           leg.request === undefined ? undefined : COMPOSITION_EDGE_FENCE,

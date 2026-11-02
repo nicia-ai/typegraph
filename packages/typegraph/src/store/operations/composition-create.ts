@@ -77,7 +77,10 @@ import {
 import { isObjectRecord } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { nodeRefKey } from "../../utils/tuple-key";
-import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  fenceLockOnlyDecision,
+  type GraphWriteLock,
+} from "../recorded-capture/clock";
 import { pageEdgesByKind, pageNodesByKind } from "../row-fetch";
 import {
   type CompositionAttachment,
@@ -908,6 +911,37 @@ export function compositionEdgeAttachesPart(
 }
 
 /**
+ * The frame target a required-existence verdict reads through: a read surface
+ * that can also gate the read behind the per-graph write fence
+ * ({@link fenceCompositionExistenceDecision}).
+ */
+type CompositionExistenceTarget = GraphReadBackend &
+  Pick<GraphBackend, "capabilities" | "commands" | "execute">;
+
+/**
+ * The gate of every required-existence verdict — whether a part keeps a live
+ * whole — taken before its first read. No claim row records that verdict, so
+ * it is a lock-only decision whatever reason the frame's own plan named: a
+ * frame fenced for another constraint (a shared-scope unique, say) took the
+ * fence without advancing the graph's fence row, and a snapshot that predates
+ * a concurrent detach would otherwise decide from it.
+ *
+ * @throws TransactionConflictError when another decider committed after this
+ *   session's snapshot
+ * @throws ConfigurationError (`COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT`)
+ */
+function fenceCompositionExistenceDecision(
+  target: CompositionExistenceTarget,
+  graphId: string,
+  lock: GraphWriteLock,
+): Promise<void> {
+  return fenceLockOnlyDecision(target, graphId, lock, {
+    code: "COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT",
+    subject: "Deciding whether a required composition part holds a whole",
+  });
+}
+
+/**
  * THE refusal every path that would separate a live required part from its
  * whole raises: ending a composition edge's open window, soft-deleting it,
  * or hard-deleting it.
@@ -924,9 +958,10 @@ export function compositionEdgeAttachesPart(
  * would make a soft-deleted part's composition edge permanently
  * undeletable-from.
  *
- * `lock: GraphWriteLock` in the parameter is compile-time evidence that this
- * read cannot precede the per-graph write lock — the same device
- * `planCompositionCascade` uses.
+ * `lock` is the frame's fence evidence, and the read is gated by
+ * {@link fenceCompositionExistenceDecision} on it — the same gate
+ * `planCompositionCascade` takes — so the verdict is a lock-only decision
+ * however the frame's plan was named.
  *
  * `reattachedPart` names the ONE part whose composition edge this same write
  * frame retires only to attach it to a new whole immediately afterwards
@@ -945,7 +980,7 @@ export async function assertCompositionExistencePreserved(
     reattachedPart?: CompositionNodeRef;
   }>,
   edge: EdgeRow,
-  backend: GraphReadBackend,
+  backend: CompositionExistenceTarget,
 ): Promise<void> {
   // `compositionPartSide` is total per edge KIND (a second, contradicting
   // orientation for one edge kind is itself refused at registry-build time,
@@ -977,6 +1012,7 @@ export async function assertCompositionExistencePreserved(
   // row that audit already reports unattached is never refused here.
   if (!compositionEdgeAttachesPart(ctx.registry, part.kind, edge)) return;
 
+  await fenceCompositionExistenceDecision(backend, ctx.graphId, ctx.lock);
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
   if (!isLiveNodeRowPresent(partRow)) return;
 
@@ -1711,10 +1747,12 @@ export async function findLiveCompositionWhole(
  * Called before the frame's first statement, for every candidate at once, so
  * a caller that catches the refusal inside an enclosing `store.transaction`
  * keeps nothing of the batch. A candidate whose row is live is not being
- * restored and is skipped; a kind that requires no whole costs no read. The
- * frame holds the per-graph write lock for every kind that does
- * (`nodeRestoreNeedsConstraintFence`, `constraints.ts`): the edge and whole
- * read here are exactly what a concurrent detach or whole delete changes.
+ * restored and is skipped; a kind that requires no whole costs no read. Every
+ * caller's frame holds the per-graph write lock for every kind that does
+ * (`nodeRestoreNeedsConstraintFence`, `constraints.ts`), and the reads are
+ * gated by {@link fenceCompositionExistenceDecision} on it: the edge and
+ * whole read here are exactly what a concurrent detach or whole delete
+ * changes.
  */
 export async function assertRestoredRequiredPartsAttached(
   ctx: Readonly<{
@@ -1722,12 +1760,13 @@ export async function assertRestoredRequiredPartsAttached(
     registry: KindRegistry;
     lock: GraphWriteLock;
   }>,
-  target: GraphReadBackend,
+  target: CompositionExistenceTarget,
   parts: readonly CompositionNodeRef[],
 ): Promise<void> {
   for (const part of parts) {
     if (ctx.registry.compositionExistence(part.kind) !== "required") continue;
     if (compositionExistenceDeferred(target, part)) continue;
+    await fenceCompositionExistenceDecision(target, ctx.graphId, ctx.lock);
     const row = await target.getNode(ctx.graphId, part.kind, part.id);
     if (isLiveNodeRowPresent(row)) continue;
     const attachment = await findLiveCompositionAttachment(

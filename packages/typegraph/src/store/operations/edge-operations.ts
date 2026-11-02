@@ -3766,6 +3766,35 @@ async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
 }
 
 /**
+ * The row a single edge delete's detach verdict
+ * (`assertCompositionExistencePreserved`) is judged from.
+ *
+ * The gate row was read before the frame took the fence, so for a kind whose
+ * detach decides required-part existence
+ * ({@link file://../constraints.ts edgeDetachNeedsConstraintFence}) it can be
+ * stale by the time the fence is held: a concurrent writer may have reopened
+ * an ended window and restored the part in between. That row is re-read on the
+ * frame's own target. Every other kind's delete decides nothing from the row,
+ * and keeps the gate. A row gone, or now holding another kind under the id,
+ * answers `undefined`: the delete then matches no row of `expectedKind` and
+ * detaches nothing.
+ */
+async function readEdgeDetachVerdictRow<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  gate: BackendEdgeRow,
+  expectedKind: string,
+): Promise<BackendEdgeRow | undefined> {
+  if (
+    edgeDetachNeedsConstraintFence(ctx.registry, expectedKind) === undefined
+  ) {
+    return gate;
+  }
+  const current = await target.getEdge(ctx.graphId, gate.id);
+  return current?.kind === expectedKind ? current : undefined;
+}
+
+/**
  * Executes an edge delete operation.
  */
 export async function executeEdgeDelete<G extends GraphDef>(
@@ -3825,19 +3854,23 @@ export async function executeEdgeDelete<G extends GraphDef>(
     edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      // `gate`'s kind/from/to are immutable for the row's lifetime, so
-      // reusing it here (rather than re-reading) is safe even though the
-      // DELETE itself carries no in-transaction re-read: a concurrent writer
-      // that tombstones this edge, or hard-deletes it and recreates the id
-      // under another kind, leaves the DELETE matching zero rows — the same
-      // no-op the re-read produced, one round trip cheaper and without the
-      // window between a lock-free `getEdge` and a `(graph_id, id)`-keyed
-      // write that PostgreSQL READ COMMITTED left open.
-      await assertCompositionExistencePreserved(
-        { graphId: ctx.graphId, registry: ctx.registry, lock },
-        gate,
+      // The DELETE itself carries no in-transaction re-read: a concurrent
+      // writer that tombstones this edge, or hard-deletes it and recreates
+      // the id under another kind, leaves it matching zero rows. Only the
+      // detach verdict reads the row again, and only where it decides.
+      const judged = await readEdgeDetachVerdictRow(
+        ctx,
         target,
+        gate,
+        expectedKind,
       );
+      if (judged !== undefined) {
+        await assertCompositionExistencePreserved(
+          { graphId: ctx.graphId, registry: ctx.registry, lock },
+          judged,
+          target,
+        );
+      }
       await session.retireEdge({ id, kind: expectedKind });
     },
   );
@@ -4004,11 +4037,19 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
     backend,
     async (session, target, _overlaidSession, lock) => {
       // See executeEdgeDelete's identical check.
-      await assertCompositionExistencePreserved(
-        { graphId: ctx.graphId, registry: ctx.registry, lock },
-        gate,
+      const judged = await readEdgeDetachVerdictRow(
+        ctx,
         target,
+        gate,
+        expectedKind,
       );
+      if (judged !== undefined) {
+        await assertCompositionExistencePreserved(
+          { graphId: ctx.graphId, registry: ctx.registry, lock },
+          judged,
+          target,
+        );
+      }
       // No in-transaction re-read: see executeEdgeDelete. The DELETE carries the
       // expected kind, so an id concurrently re-pointed at another kind's edge
       // matches zero rows instead of destroying that other edge.

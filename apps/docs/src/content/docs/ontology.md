@@ -792,8 +792,13 @@ surviving composition edge, its whole — so every write that decides them
 takes the per-graph write fence: a restore of a required part kind, and a
 soft delete, hard delete or stated window end of a composition edge whose
 part kind is required. A concurrent restore and detach (or whole delete) of
-the same part therefore run one after the other, and the second sees what
-the first committed. Like every constrained write, these are refused with
+the same part therefore run one after the other. At `READ COMMITTED` the
+second reads what the first committed and refuses or cascades accordingly.
+At PostgreSQL `REPEATABLE READ` or `SERIALIZABLE`, a second whose snapshot
+predates the first's commit fails at the fence with a retryable
+`TransactionConflictError` instead of deciding from that snapshot, whatever
+other constraint the write is also fenced for. Like every constrained write,
+these are refused with
 `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` on a backend without transactions.
 Optional parts and other edge kinds take no fence for them.
 

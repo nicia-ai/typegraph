@@ -507,9 +507,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
-      "reports only the parts its cascade deleted when a part was deleted while the cascade waited on its lock",
+      "an unguarded whole delete that waited on a concurrently deleted part's lock reports and deletes only the parts left",
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
+        // The end-to-end outcome only: the locked liveness read and the
+        // receipt's derivation from the members actually deleted each produce
+        // it on their own (the guarded-delete case above pins the read).
         const outcome = await raceCascadeAgainstPartDelete((deleter, showId) =>
           deleter.transactionWithReceipt((tx) => tx.nodes.Show.delete(showId)),
         );

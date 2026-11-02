@@ -15,16 +15,18 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  CompositionExistenceError,
   createStore,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { type GraphBackend } from "../src/backend/types";
-import { matchingObject } from "./test-utils";
+import { createTestBackend, matchingObject } from "./test-utils";
 
 const Show = defineNode("Show", { schema: z.object({}) });
 const Clip = defineNode("Clip", { schema: z.object({ name: z.string() }) });
@@ -164,4 +166,92 @@ describe("the required-part composition fence on a backend without transactions"
       ).resolves.toBeDefined();
     });
   });
+});
+
+type EdgeDetach = Readonly<{
+  name: string;
+  run: (
+    store: ReturnType<typeof createStore<typeof graph>>,
+    edgeId: ReturnType<typeof asEdgeId<typeof clipOf>>,
+  ) => Promise<unknown>;
+}>;
+
+const SINGLE_EDGE_DETACHES: readonly EdgeDetach[] = [
+  { name: "delete", run: (store, edgeId) => store.edges.clipOf.delete(edgeId) },
+  {
+    name: "hardDelete",
+    run: (store, edgeId) => store.edges.clipOf.hardDelete(edgeId),
+  },
+];
+
+describe("a single edge detach judged against the row the fence holds", () => {
+  for (const detach of SINGLE_EDGE_DETACHES) {
+    it(`${detach.name} refuses when the part was restored onto a reopened window after the delete read its gate row`, async () => {
+      const backend = createTestBackend();
+      const edgeId = asEdgeId<typeof clipOf>("clip-of");
+      await backend.insertNode({
+        graphId: graph.id,
+        kind: "Show",
+        id: "show",
+        props: {},
+      });
+      await backend.insertNode({
+        graphId: graph.id,
+        kind: "Clip",
+        id: "clip",
+        props: { name: "Clip" },
+      });
+      // An ended attachment of a tombstoned part: detaching it orphans
+      // nothing, which is what the gate row read below shows.
+      await backend.insertEdge({
+        graphId: graph.id,
+        kind: "clipOf",
+        id: edgeId,
+        fromKind: "Clip",
+        fromId: "clip",
+        toKind: "Show",
+        toId: "show",
+        props: {},
+        validTo: "2020-01-01T00:00:00.000Z",
+      });
+      await backend.deleteNode({ graphId: graph.id, kind: "Clip", id: "clip" });
+
+      const peer = createStore(graph, backend);
+      const interleaved = { done: false };
+      // The peer runs to commit inside the detach's lock-free gate read, after
+      // that read has answered: SQLite admits one writer at a time, so this
+      // is the only point at which a write can land between the gate and
+      // the detach's fenced frame.
+      const detacher = createStore(
+        graph,
+        deriveBackend(backend, {
+          getEdge: async (graphId, id) => {
+            const row = await backend.getEdge(graphId, id);
+            if (!interleaved.done && id === edgeId) {
+              interleaved.done = true;
+              await peer.edges.clipOf.update(
+                edgeId,
+                {},
+                { clearValidTo: true },
+              );
+              await peer.nodes.Clip.upsertById("clip", { name: "Back" });
+            }
+            return row;
+          },
+        }),
+      );
+
+      // MUTATION CHECK: return `gate` unconditionally from
+      // `readEdgeDetachVerdictRow` (src/store/operations/edge-operations.ts)
+      // — the detach then judges the ended gate row, succeeds, and leaves the
+      // restored clip with no live whole.
+      await expect(detach.run(detacher, edgeId)).rejects.toBeInstanceOf(
+        CompositionExistenceError,
+      );
+      expect(interleaved.done).toBe(true);
+      const edge = await peer.edges.clipOf.getById(edgeId);
+      expect(edge?.meta.validTo).toBeUndefined();
+      expect(await peer.verifyConstraintFences()).toEqual([]);
+    });
+  }
 });
