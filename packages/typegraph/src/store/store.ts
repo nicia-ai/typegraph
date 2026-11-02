@@ -4055,10 +4055,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const pending: PendingOperationOutcome[] = [];
       const runHooks = this.#createBufferedHookRunner(pending);
       const runBulkHooks = this.#createBufferedBulkHookRunner(pending);
-      const receiptRecorder = createReceiptRecorder?.();
+      // Every attempt owns a recorder so the handle's write lifetime ends
+      // when the callback settles, receipt requested or not; only a requested
+      // receipt is reported, counted by the mutation witness, and measurable.
+      const receiptRequested = createReceiptRecorder !== undefined;
+      const receiptRecorder = (
+        createReceiptRecorder ?? createTransactionReceiptRecorder
+      )();
       let recordedByGraph: RecordedFlushInstants | undefined;
       const transactionOptions = beginPreCommitHookAttempt(
-        receiptRecorder !== undefined && this.#captureEnabled ?
+        receiptRequested && this.#captureEnabled ?
           withRecordedFlushObserver(backendOptions, (instants) => {
             recordedByGraph = instants;
           })
@@ -4086,7 +4092,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // share the identical target or a write issued through the wrapper
           // resolves a session/lease the raw `txBackend` registered under.
           const mutationWitness =
-            this.#engineNativeHistory && receiptRecorder !== undefined ?
+            this.#engineNativeHistory && receiptRequested ?
               createMutationWitness()
             : undefined;
           const writeTarget =
@@ -4115,8 +4121,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 runBulkHooks,
                 frame.attempt,
                 backendOptions.accessMode !== "read_only",
+                receiptRequested,
               ),
-              invoke,
+              async (activeContext) => {
+                try {
+                  return await invoke(activeContext);
+                } finally {
+                  receiptRecorder.seal();
+                }
+              },
             );
           const invokeWithSchemaFenceLease = (): Promise<T> =>
             this.#adapterBackend === undefined ?
@@ -4179,7 +4192,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         // done by the caller of `runRetriedUnit`, not here, so a hook that
         // throws can never be mistaken for a conflict on an attempt that
         // already durably committed. See `TransactionRunResult.pending`.
-        return { result, recordedByGraph, recorder: receiptRecorder, pending };
+        return {
+          result,
+          recordedByGraph,
+          recorder: receiptRequested ? receiptRecorder : undefined,
+          pending,
+        };
       } catch (error) {
         // `frame.willRetry`/`frame.reportedFailure` are the same decision
         // `runRetriedUnit` itself will apply to this very error — never a
@@ -4506,6 +4524,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             return await invoke(activeContext);
           } finally {
             executionScope?.seal();
+            // Under history capture the capture session owns the refusal (it
+            // seals on flush and its guard throws before the live write).
+            if (!this.#captureEnabled) receiptRecorder.seal();
           }
         },
       );
@@ -4527,12 +4548,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             [this.graphId, await this.#engineRecordedInstant(txBackend)],
           ])
         : await scope.flush();
-      // Seal the context so a write through a retained `tx` after this returns
-      // fails loud instead of persisting a row the snapshotted receipt can't
-      // count. Under history capture the capture session already sealed on flush
-      // (its guard throws before the live write); this covers the non-history
-      // path, which has no capture session.
-      if (!this.#captureEnabled) receiptRecorder.seal();
       return transactionOutcome(
         result,
         receiptRecorder,
@@ -4832,6 +4847,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // factory is the only caller that supplies anything else.
     attempt = 1,
     recordedRevisionRequestAllowed = true,
+    measurable = receiptRecorder !== undefined,
   ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
@@ -4985,9 +5001,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // Scoped write measurement (`tx.measure`) is only meaningful with a recorder
     // to scope; the plain `transaction()` path stays free of a `measure` the
     // caller has no receiver for.
-    return receiptRecorder === undefined ? withSql : (
-        this.#attachMeasure(withSql)
-      );
+    return measurable ? this.#attachMeasure(withSql) : withSql;
   }
 
   #identityContext(

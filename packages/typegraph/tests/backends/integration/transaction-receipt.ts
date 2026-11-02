@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -20,6 +21,7 @@ import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import { requireDefined } from "../../../src/utils/presence";
 import { recordedRevisionFromDriver } from "../../test-utils";
 import {
   type HistoryIntegrationStore,
@@ -848,6 +850,122 @@ export function registerTransactionReceiptIntegrationTests(
 
         // The outer transaction still allocates and surfaces the anchor.
         expect(outcome.receipt.recorded).toBeDefined();
+      });
+    });
+
+    describe("retained transaction handle", () => {
+      type RetainedHandle = Parameters<
+        Parameters<IntegrationStore["transaction"]>[0]
+      >[0];
+
+      async function expectRefusedAfterSettle(
+        context: IntegrationTestContext,
+        settle: (
+          store: IntegrationStore,
+          capture: (tx: RetainedHandle) => void,
+        ) => Promise<unknown>,
+      ): Promise<void> {
+        const store = context.getStore();
+        let retained: RetainedHandle | undefined;
+        const seed = await store.nodes.Person.create({ name: "Seed" });
+        const other = await store.nodes.Person.create({ name: "Other" });
+
+        await settle(store, (tx) => {
+          retained = tx;
+        });
+        const handle = requireDefined(retained);
+
+        await expect(
+          handle.nodes.Person.create({ name: "Late" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          handle.nodes.Person.update(seed.id, { name: "Changed" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          handle.nodes.Person.delete(seed.id),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          handle.edges.knows.create(seed, other, { since: "2020" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+
+        const people = await store.nodes.Person.find();
+        expect(people.map((person) => person.name).toSorted()).toEqual([
+          "Other",
+          "Seed",
+        ]);
+        expect(await store.edges.knows.find()).toHaveLength(0);
+      }
+
+      it("refuses every write after store.transaction commits", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store.transaction((tx) => {
+            capture(tx);
+            return Promise.resolve();
+          }),
+        );
+      });
+
+      it("refuses every write after store.transaction rolls back", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store
+            .transaction((tx) => {
+              capture(tx);
+              return Promise.reject(new Error("rollback"));
+            })
+            .catch(() => 0),
+        );
+      });
+
+      it("refuses every write after transactionWithReceipt commits", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store.transactionWithReceipt((tx) => {
+            capture(tx);
+            return Promise.resolve();
+          }),
+        );
+      });
+
+      it("refuses every write after transactionWithReceipt rolls back", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store
+            .transactionWithReceipt((tx) => {
+              capture(tx);
+              return Promise.reject(new Error("rollback"));
+            })
+            .catch(() => 0),
+        );
+      });
+
+      it("keeps the returned receipt unchanged by a refused retained write", async () => {
+        const store = context.getStore();
+        let retained: RetainedHandle | undefined;
+        const outcome = await store.transactionWithReceipt(async (tx) => {
+          retained = tx;
+          await tx.nodes.Person.create({ name: "In" });
+        });
+
+        await expect(
+          requireDefined(retained).nodes.Person.create({ name: "Late" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+
+        expect(outcome.receipt.writes.total).toBe(1);
+        expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
+      });
+
+      it("refuses a write through a measure scope retained past the callback", async () => {
+        const store = context.getStore();
+        let scopedHandle: RetainedHandle | undefined;
+        await store.transactionWithReceipt(async (tx) => {
+          await tx.measure((scoped) => {
+            scopedHandle = scoped;
+            return Promise.resolve();
+          });
+        });
+
+        await expect(
+          requireDefined(scopedHandle).nodes.Person.create({ name: "Late" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        expect(await store.nodes.Person.find()).toHaveLength(0);
       });
     });
   });
