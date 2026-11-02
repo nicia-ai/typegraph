@@ -40,6 +40,12 @@ import {
   type NodeType,
   type TemporalMode,
 } from "./types";
+import {
+  assertUniqueConstraintOptions,
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  type StatedUniqueConstraintOptions,
+  withUniqueConstraintDefaults,
+} from "./unique-constraint-options";
 
 // ============================================================
 // Graph Definition Brand Symbol
@@ -601,7 +607,8 @@ function defineGraphUnchecked<
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
   assertClaimNamesAreSafe(config.nodes, normalizedEdges);
-  assertUniqueConstraintsAreDeclared(config.nodes);
+  const nodes = withUniqueConstraintDefaultsWritten(config.nodes);
+  assertUniqueConstraintsAreDeclared(nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
   // passed via `defineGraph({ indexes })` win on (kind, fieldPath)
@@ -631,7 +638,7 @@ function defineGraphUnchecked<
     [GRAPH_DEF_BRAND]: true as const,
     id: config.id,
     annotations,
-    nodes: config.nodes,
+    nodes,
     edges: normalizedEdges,
     ontology: config.ontology ?? ([] as unknown as TOntology),
     identity: config.identity as TIdentity,
@@ -706,6 +713,54 @@ function assertClaimNamesAreSafe(
   for (const registration of Object.values(edges)) {
     assertClaimAxisSafe(registration.type.kind, "Edge kind");
   }
+}
+
+/**
+ * `nodes` with every unique constraint's `scope` and `collation` written out,
+ * refusing a stated value outside its domain.
+ *
+ * Every reader of a registration — the claim axis, the serializer, and
+ * through it the stored-schema parser — then sees one declaration, read as
+ * {@link NODE_UNIQUE_CONSTRAINT_DEFAULTS} says. Only an untyped caller can
+ * omit either member, so a graph whose declarations state both is returned
+ * as given.
+ *
+ * @throws ConfigurationError (`UNIQUE_CONSTRAINT_OPTION_INVALID`)
+ */
+function withUniqueConstraintDefaultsWritten<
+  TNodes extends Record<string, NodeRegistration>,
+>(nodes: TNodes): TNodes {
+  const registrations = Object.entries(nodes);
+  for (const [, registration] of registrations) {
+    for (const constraint of registration.unique ?? []) {
+      assertUniqueConstraintOptions(registration.type.kind, constraint);
+    }
+  }
+  const statesEveryOption = registrations.every(([, registration]) =>
+    (registration.unique ?? []).every(
+      (constraint: StatedUniqueConstraintOptions) =>
+        constraint.scope !== undefined && constraint.collation !== undefined,
+    ),
+  );
+  if (statesEveryOption) return nodes;
+  const written = createDataKeyedBag<NodeRegistration>();
+  for (const [kind, registration] of registrations) {
+    written[kind] =
+      registration.unique === undefined ?
+        registration
+      : {
+          ...registration,
+          unique: registration.unique.map((constraint) =>
+            withUniqueConstraintDefaults(
+              constraint,
+              NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+            ),
+          ),
+        };
+  }
+  // Spread at the boundary: this becomes `GraphDef.nodes`. See
+  // `createDataKeyedBag` in ../utils/object.ts.
+  return { ...written } as TNodes;
 }
 
 /**

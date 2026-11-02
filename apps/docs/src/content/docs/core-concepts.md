@@ -754,6 +754,11 @@ const graph = defineGraph({
 - `"kind"`: Unique within this exact type only
 - `"kindWithSubClasses"`: Unique across this type and all subclasses
 
+TypeScript requires both `scope` and `collation`. An untyped caller that omits
+`scope` gets `"kindWithSubClasses"`, and one that omits `collation` gets
+`"binary"`. A [graph extension](/graph-extensions) that omits `scope` gets
+`"kind"`.
+
 ### Collation Options
 
 - `"binary"`: Case-sensitive comparison

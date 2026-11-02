@@ -10,6 +10,7 @@
  * committing.
  */
 import type { KindEntity } from "../core/types";
+import { EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS } from "../core/unique-constraint-options";
 import { uniqueConstraintEnforcementChange } from "../schema/unique-constraint-change";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -603,7 +604,11 @@ function classifyUnique(
   // `uniqueConstraintEnforcementChange`'s, shared with the schema-commit
   // preflight that gates the same change on compile-time kinds.
   for (const constraint of next) {
-    const change = uniqueConstraintEnforcementChange(existing, constraint);
+    const change = uniqueConstraintEnforcementChange(
+      existing,
+      constraint,
+      EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS,
+    );
     if (change === undefined) continue;
     recorders.recordRequireEmpty({
       kind,

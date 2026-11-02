@@ -21,6 +21,7 @@
  */
 import { subClassComponent } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
+import { uniquenessScopeSpansSubclasses } from "../../core/unique-constraint-options";
 import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareCodePoints, compareStrings } from "../../utils/compare";
@@ -169,7 +170,9 @@ function uniquenessClaimKinds(
   scope: UniquenessScope,
   registry: KindRegistry,
 ): readonly string[] {
-  return scope === "kind" ? [kind] : subClassComponent(kind, registry);
+  return uniquenessScopeSpansSubclasses(scope) ?
+      subClassComponent(kind, registry)
+    : [kind];
 }
 
 /**

@@ -26,6 +26,10 @@ import {
   type UniquenessScope,
 } from "../core/types";
 import {
+  uniqueCollationFoldsCase,
+  uniquenessScopeSpansSubclasses,
+} from "../core/unique-constraint-options";
+import {
   ConfigurationError,
   DisjointError,
   EndpointError,
@@ -71,7 +75,7 @@ export function computeUniqueKey(
       : typeof value === "number" || typeof value === "boolean" ?
         value.toString()
       : JSON.stringify(value);
-    return collation === "caseInsensitive" ?
+    return uniqueCollationFoldsCase(collation) ?
         stringValue.toLowerCase()
       : stringValue;
   });
@@ -364,7 +368,7 @@ export function getKindsForUniquenessCheck(
   scope: UniquenessScope,
   registry: KindRegistry,
 ): readonly string[] {
-  if (scope === "kind") {
+  if (!uniquenessScopeSpansSubclasses(scope)) {
     return [baseKind];
   }
 

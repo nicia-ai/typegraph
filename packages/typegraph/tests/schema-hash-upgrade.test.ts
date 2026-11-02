@@ -19,6 +19,7 @@ import {
   partOf,
   subClassOf,
   type UniqueConstraint,
+  UniquenessError,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
@@ -38,7 +39,10 @@ import {
   getSchemaHash,
   serializeSchema,
 } from "../src/schema/serializer";
-import { type SerializedSchema } from "../src/schema/types";
+import {
+  type SerializedSchema,
+  type SerializedUniqueConstraint,
+} from "../src/schema/types";
 import {
   createAdapterStoreWithSchema,
   createVerifiedAdapterStore,
@@ -111,7 +115,8 @@ const containsFolder = defineEdge("upgradeContainsFolder", {
 const linksTo = defineEdge("upgradeLinksTo", { schema: z.object({}) });
 /**
  * The types require `scope` and `collation`, but a JavaScript caller can omit
- * them, and the serializer then omits them from the stored document.
+ * them. `defineGraph` writes the defaults in; an earlier release serialized
+ * them away instead ({@link withoutFolderNameEnforcementOptions}).
  */
 function uniqueWithoutScopeOrCollation(
   name: string,
@@ -204,12 +209,99 @@ function sqliteHandle(): SqliteHandle {
   return { backend, client };
 }
 
+/**
+ * `subClassGraph` with a unique constraint on both kinds that leaves `scope`
+ * and `collation` out, or states them as `"kindWithSubClasses"` and
+ * `"binary"`. An earlier release enforced the omitted form exactly as the
+ * stated one: across the subclass component, with claims at its code-point
+ * minimum, `UpgradeAnimal`.
+ */
+function hierarchyGraphDeclaring(
+  constraint: (name: string, field: string) => UniqueConstraint,
+) {
+  return defineGraph({
+    id: "schema_hash_upgrade_defaulted_hierarchy",
+    nodes: {
+      UpgradeAnimal: {
+        type: Animal,
+        unique: [constraint("animal_name", "name")],
+      },
+      UpgradeDog: { type: Dog, unique: [constraint("animal_name", "name")] },
+    },
+    edges: {},
+    ontology: [subClassOf(Dog, Animal)],
+  });
+}
+const defaultedHierarchyGraph = hierarchyGraphDeclaring(
+  uniqueWithoutScopeOrCollation,
+);
+const componentScopedHierarchyGraph = hierarchyGraphDeclaring(
+  (name, field) => ({
+    name,
+    fields: [field],
+    scope: "kindWithSubClasses",
+    collation: "binary",
+  }),
+);
+
+/** `current` with every unique constraint's `scope` and `collation` removed. */
+function withoutEnforcementOptions(
+  current: SerializedSchema,
+): SerializedSchema {
+  return {
+    ...current,
+    nodes: Object.fromEntries(
+      Object.entries(current.nodes).map(([kind, node]) => [
+        kind,
+        {
+          ...node,
+          uniqueConstraints: node.uniqueConstraints.map((constraint) => {
+            const {
+              scope: _scope,
+              collation: _collation,
+              ...rest
+            } = constraint;
+            return rest as SerializedUniqueConstraint;
+          }),
+        },
+      ]),
+    ),
+  };
+}
+
+/**
+ * The document an earlier release wrote for `representativeGraph`: the
+ * serializer copied the `folder_name` declaration as given, so the `scope`
+ * and `collation` its caller omitted are absent.
+ */
+function withoutFolderNameEnforcementOptions(
+  current: SerializedSchema,
+): SerializedSchema {
+  const folder = requireDefined(current.nodes["UpgradeFolder"]);
+  return {
+    ...current,
+    nodes: {
+      ...current.nodes,
+      UpgradeFolder: {
+        ...folder,
+        uniqueConstraints: folder.uniqueConstraints.map((constraint) => {
+          if (constraint.name !== "folder_name") return constraint;
+          const { scope: _scope, collation: _collation, ...rest } = constraint;
+          return rest as SerializedUniqueConstraint;
+        }),
+      },
+    },
+  };
+}
+
 /** Rewrites the active v1 row to what an earlier release committed. */
 async function storeEarlierReleaseRow(
   handle: SqliteHandle,
   graph: GraphDef,
+  document: SerializedSchema = earlierReleaseDocument(
+    serializeSchema(graph, 1),
+  ),
 ): Promise<Readonly<{ schemaDoc: string; schemaHash: string }>> {
-  const document = earlierReleaseDocument(serializeSchema(graph, 1));
   const schemaDocument = JSON.stringify(document);
   const schemaHash = await computeSchemaHash(document);
   handle.client
@@ -372,6 +464,93 @@ describe("a schema version an earlier release committed", () => {
   // MUTATION CHECK: reading `row.schema_hash` in `schemaMetadataFromRow`
   // (store.ts) makes `registerGraphTemplate` throw
   // GRAPH_TEMPLATE_RECONCILED_HASH_MISMATCH.
+
+  it("reopens unchanged when it left a defaulted unique constraint's scope and collation out", async () => {
+    const handle = sqliteHandle();
+    await createAdapterStoreWithSchema(representativeGraph, handle.backend);
+    const current = serializeSchema(representativeGraph, 1);
+    const earlier = await storeEarlierReleaseRow(
+      handle,
+      representativeGraph,
+      withoutFolderNameEnforcementOptions(current),
+    );
+
+    const [store, result] = await createAdapterStoreWithSchema(
+      representativeGraph,
+      handle.backend,
+    );
+    const row = requireDefined(
+      await handle.backend.getActiveSchema(representativeGraph.id),
+    );
+    const template = await registerGraphTemplate(handle.backend, {
+      templateId: "schema-hash-upgrade-defaulted-unique-template",
+      reconciled: store.reconciledSchema,
+    });
+
+    expect(
+      current.nodes["UpgradeFolder"]?.uniqueConstraints.find(
+        (constraint) => constraint.name === "folder_name",
+      ),
+    ).toMatchObject({ scope: "kindWithSubClasses", collation: "binary" });
+    expect(earlier.schemaHash).not.toBe(
+      await getSchemaHash(representativeGraph, 1),
+    );
+    expect(result.status).toBe("unchanged");
+    expect(row.version).toBe(1);
+    expect(row.schema_doc).toBe(earlier.schemaDoc);
+    expect(row.schema_hash).toBe(earlier.schemaHash);
+    expect(store.reconciledSchema.hash).toBe(
+      await getSchemaHash(representativeGraph, 1),
+    );
+    expect(template.schemaHash).toBe(store.reconciledSchema.hash);
+  });
+  // MUTATION CHECK: dropping the unique-constraint defaults from
+  // `canonicalStoredSchemaDocument` hashes the earlier row differently from
+  // today's serialization of the same graph: the diff still calls the reopen
+  // unchanged, but `registerGraphTemplate` throws
+  // GRAPH_TEMPLATE_RECONCILED_HASH_MISMATCH.
+
+  it("keeps reaching the claims it wrote for an omitted scope at the component axis", async () => {
+    const handle = sqliteHandle();
+    // Seeded through the stated scope, independent of how this release reads
+    // an omitted one: the `UpgradeDog` claim sits at the component axis,
+    // `UpgradeAnimal`, where the earlier release wrote it.
+    const [before] = await createAdapterStoreWithSchema(
+      componentScopedHierarchyGraph,
+      handle.backend,
+    );
+    await before.nodes.UpgradeDog.create({ name: "rex" });
+    const earlier = await storeEarlierReleaseRow(
+      handle,
+      defaultedHierarchyGraph,
+      withoutEnforcementOptions(
+        serializeSchema(componentScopedHierarchyGraph, 1),
+      ),
+    );
+
+    const [store, result] = await createAdapterStoreWithSchema(
+      defaultedHierarchyGraph,
+      handle.backend,
+    );
+    const row = requireDefined(
+      await handle.backend.getActiveSchema(defaultedHierarchyGraph.id),
+    );
+
+    expect(result.status).toBe("unchanged");
+    expect(row.schema_doc).toBe(earlier.schemaDoc);
+    await expect(
+      store.nodes.UpgradeDog.create({ name: "rex" }),
+    ).rejects.toBeInstanceOf(UniquenessError);
+    await expect(
+      store.nodes.UpgradeAnimal.create({ name: "rex" }),
+    ).rejects.toBeInstanceOf(UniquenessError);
+    await store.nodes.UpgradeAnimal.create({ name: "fido" });
+    expect(await store.verifyConstraintFences()).toEqual([]);
+  });
+  // MUTATION CHECK: reading an omitted node scope as `"kind"` in
+  // `NODE_UNIQUE_CONSTRAINT_DEFAULTS` still reopens unchanged, but the
+  // `UpgradeDog` probe no longer reaches the seeded claim at `UpgradeAnimal`,
+  // and the same-kind `UpgradeDog` duplicate is accepted.
 
   it("plans and revalidates a candidate merge review against it", async () => {
     const handle = sqliteHandle();

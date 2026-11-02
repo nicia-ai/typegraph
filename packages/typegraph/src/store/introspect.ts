@@ -34,6 +34,10 @@ import {
   type TargetCardinality,
   type UniquenessScope,
 } from "../core/types";
+import {
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  withUniqueConstraintDefaults,
+} from "../core/unique-constraint-options";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   buildGraphExtensionOntologyKeySet,
@@ -152,12 +156,18 @@ export function introspectSchema<G extends GraphDef>(
       annotations: reg.type.annotations,
       deprecated: deprecated.has(name),
       properties: serializeSchemaProperties(reg.type.schema),
-      unique: (reg.unique ?? []).map((constraint) => ({
-        name: constraint.name,
-        fields: [...constraint.fields],
-        scope: constraint.scope,
-        collation: constraint.collation,
-      })),
+      unique: (reg.unique ?? []).map((constraint) => {
+        const { scope, collation } = withUniqueConstraintDefaults(
+          constraint,
+          NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+        );
+        return {
+          name: constraint.name,
+          fields: [...constraint.fields],
+          scope,
+          collation,
+        };
+      }),
     });
   }
 

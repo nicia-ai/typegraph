@@ -26,6 +26,11 @@ import {
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
+import {
+  COLLATION_VALUES,
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  UNIQUENESS_SCOPE_VALUES,
+} from "../core/unique-constraint-options";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   validateEdgeIndexKeysPresence,
@@ -71,9 +76,9 @@ const temporalModeZod = z.enum([
   "includeTombstones",
 ]);
 
-const uniquenessScopeZod = z.enum(["kind", "kindWithSubClasses"]);
+const uniquenessScopeZod = z.enum(UNIQUENESS_SCOPE_VALUES);
 
-const collationZod = z.enum(["binary", "caseInsensitive"]);
+const collationZod = z.enum(COLLATION_VALUES);
 
 const indexScopeZod = z.enum(["graphAndKind", "graph", "none"]);
 
@@ -640,8 +645,12 @@ export const serializedSchemaZod = z
                   name: z.string(),
                   fields: z.array(z.string()),
                   where: z.string().optional(),
-                  scope: uniquenessScopeZod.default("kind"),
-                  collation: collationZod.default("binary"),
+                  scope: uniquenessScopeZod.default(
+                    NODE_UNIQUE_CONSTRAINT_DEFAULTS.scope,
+                  ),
+                  collation: collationZod.default(
+                    NODE_UNIQUE_CONSTRAINT_DEFAULTS.collation,
+                  ),
                 })
                 .loose(),
             ),
