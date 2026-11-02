@@ -6,11 +6,14 @@ runner uses this backend; it no longer substitutes a better-sqlite3 shim.
 Public setup and capability details are in
 [Backend Setup](../../../../apps/docs/src/content/docs/backend-setup.md#doltlite).
 
-The published Node binding 0.51.1 drops extended SQLite errors and disables
-vec1/math functions. The source-build workflow applies
-[the upstream patch](../../../../patches/doltlite-node-0.51.1.patch), pinned
-to binding commit `120662566453e808ed799ac6f69f9eebf165809f` and the SHA-256
-verified 0.51.1 engine release. This remains a release prerequisite until
+The published Node binding 0.51.6 drops extended SQLite errors and disables
+vec1/math functions
+([doltlite-node#9](https://github.com/dolthub/doltlite-node/issues/9),
+[doltlite-node#10](https://github.com/dolthub/doltlite-node/issues/10)).
+The source-build workflow applies
+[the upstream patch](../../../../patches/doltlite-node-0.51.6.patch), pinned
+to binding commit `f94da902de8bd110f7125b0e079fcdc3a5c4117d` and the SHA-256
+verified 0.51.6 engine release. This remains a release prerequisite until
 upstream publishes those fixes. The backend refuses the unpatched binding
 before opening user data; it never invents error codes from messages.
 
@@ -34,7 +37,8 @@ GAP, and FAIL separately. Ten checks pass with the patched binding. Two
 raw-SQL observations remain GAPs: `dolt_commit` can commit an enclosing SQL
 transaction, and native row merge can conflict on shared recorded-clock
 metadata. They are documented engine semantics, not a claim that the managed
-backend fails its contract. Unexpected results, including a changed pinned
+backend fails its contract. Upstream confirmed the first matches Dolt and is
+intended ([doltlite#2742](https://github.com/dolthub/doltlite/issues/2742)). Unexpected results, including a changed pinned
 gap, fail the command.
 
 The shared adapter/integration battery runs without weakened assertions.
@@ -44,8 +48,11 @@ The shared graph-merge matrix has a DoltLite selector and runs all 40 existing
 matrix suites. Additional cases cover native branch allocation, semantic
 merge, cleanup, recorded reads after reopen, and writer contention.
 
-Validation on Node 24/Linux with the patched binding: 1,183 shared cases
-passed, with the shared suite's existing 28 skips; 432 graph-merge cases
-passed; dedicated cases cover lifecycle, crash recovery, and vectors. CI runs
-Node 22 and 24 on Linux. Other platforms, ANN indexing, and browser/WASM
-remain outside the validated capability set.
+Validation on Node 24 with the patched 0.51.6 binding (macOS arm64): 1,297
+shared cases passed, with the shared suite's existing 28 skips; 432
+graph-merge cases passed; dedicated cases cover lifecycle, crash recovery,
+and vectors. CI runs Node 22 and 24 on Linux. Windows, ANN indexing, and
+browser/WASM remain outside the validated capability set. On Windows the
+binding's `close()` keeps the file open until unfinalized statements are
+garbage-collected
+([doltlite-node#11](https://github.com/dolthub/doltlite-node/issues/11)).

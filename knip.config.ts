@@ -14,7 +14,9 @@ const config: KnipConfig = {
       ],
       // `cloudflare:test` / `cloudflare:workers` are workerd virtual
       // modules provided by the pool at runtime, not npm packages.
-      ignoreDependencies: ["cloudflare"],
+      // node-gyp is invoked from scripts/build-doltlite-binding.sh, which
+      // knip does not parse.
+      ignoreDependencies: ["cloudflare", "node-gyp"],
       project: [
         "src/**/*.ts",
         "tests/**/*.ts",

@@ -183,8 +183,8 @@ importers:
         specifier: ^0.22.0
         version: 0.22.0(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
       '@dolthub/doltlite':
-        specifier: 0.51.1
-        version: 0.51.1
+        specifier: 0.51.6
+        version: 0.51.6
       '@electric-sql/pglite':
         specifier: ^0.5.8
         version: 0.5.8
@@ -957,8 +957,8 @@ packages:
     resolution: {integrity: sha512-Vh5uy9Y1JBMId6J1f68TMXnZrTCvNdo9Fu2k0d1YnJngR+sM5kWTKl441c/3TFs+cG0NWOjRWgQ/iaWhbYx+7A==}
     engines: {node: '>=14'}
 
-  '@dolthub/doltlite@0.51.1':
-    resolution: {integrity: sha512-/DkkJcJtHeWeu3e7VdZKgZDgFfrePAg5tF8KlEfHUg4XX/5FCZGNqppxL0+zZbyaflC8cTnAxIbjITnOci2n+A==}
+  '@dolthub/doltlite@0.51.6':
+    resolution: {integrity: sha512-/ubZt5SmViH8I8JnwulQ3Wi9la6YFrjebDLblDblMHfjQ8vqK0uVTdHaJVUqxGEiN4jb8tFnPdFZHW0x7ex83A==}
     engines: {node: '>=18.0.0'}
 
   '@electric-sql/pglite-pgvector@0.0.9':
@@ -7614,7 +7614,7 @@ snapshots:
 
   '@ctrl/tinycolor@4.2.1': {}
 
-  '@dolthub/doltlite@0.51.1':
+  '@dolthub/doltlite@0.51.6':
     dependencies:
       node-addon-api: 8.9.2
 

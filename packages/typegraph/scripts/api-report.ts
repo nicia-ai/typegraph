@@ -672,14 +672,15 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // The new managed Store and native working-copy entrypoints render the same
   // portable Store/GraphBackend graph as the existing adapters. Pin only their
-  // new symbol sets; established entrypoint debt remains unchanged.
+  // new symbol sets; established entrypoint debt remains unchanged. Each
+  // includes NodeRowLock, reachable through GraphBackend.lockNodes.
   "./doltlite": {
-    count: 880,
-    sha256: "e49c886d3dba44d5e36758f697ec67c193a42f7bc1e645c90f8af473728b54f4",
+    count: 881,
+    sha256: "30d66ca64a178b12f987d22677b2ab1b977c02f05e6f21ab3d5dac00808b6d31",
   },
   "./adapters/drizzle/doltlite": {
-    count: 875,
-    sha256: "7f81259e2b48ccbf89b50a28a056d40d186afd5b12bb73df75b9d08124800d75",
+    count: 876,
+    sha256: "3a9a7d1f36d05aca70ccded80b66152c8069fd5d9c5817789962b237f3b5d55e",
   },
   ".": {
     count: 500,

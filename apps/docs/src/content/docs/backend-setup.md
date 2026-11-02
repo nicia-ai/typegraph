@@ -17,8 +17,8 @@ DoltLite embeds a versioned SQLite-compatible database. TypeGraph reuses its SQL
 FTS5, schema lifecycle, identity, recorded history, and revision journal.
 
 The Node binding currently requires the upstream patch in
-`patches/doltlite-node-0.51.1.patch`: structured SQLite errors and builds with vec1 and math
-functions enabled. The published unpatched 0.51.1 binding is refused before opening user data.
+`patches/doltlite-node-0.51.6.patch`: structured SQLite errors and builds with vec1 and math
+functions enabled. The published unpatched 0.51.6 binding is refused before opening user data.
 From a development checkout, with Node 22 or 24, a C/C++ compiler, Python 3, Git, and curl:
 
 ```sh
@@ -90,8 +90,8 @@ One durable writer owns the database file, even across branches. Raw access thro
 native connection can bypass the managed checkpoint guard: DoltLite version-control commands
 may commit an enclosing SQL transaction. Use the managed APIs when operating on a Store.
 Backup and restore must preserve the native DoltLite file and its history, not SQLite page
-images; follow DoltLite's supported backup/GC procedures. Browser/WASM and non-Linux platforms
-are not validated by the Node/Linux lane.
+images; follow DoltLite's supported backup/GC procedures. Browser/WASM and Windows are not
+validated.
 
 ## SQLite
 
