@@ -491,6 +491,17 @@ export type Traversal = Readonly<{
   includeIdentityMembers?: boolean;
   /** Variable-length traversal configuration (for recursive CTEs) */
   variableLength?: VariableLengthSpec;
+  /**
+   * Present on a composition navigation (`parts()` / `wholes()`): each walked
+   * edge kind's composition membership rule. The traversal's edges are then
+   * read by ownership — a `"openRows"` kind's row binds only while open, an
+   * `"allRows"` kind's for its whole life — at the read's instant, rather
+   * than by the read's validity window.
+   */
+  compositionMembership?: readonly Readonly<{
+    edgeKind: string;
+    membership: "allRows" | "openRows";
+  }>[];
 }>;
 
 /**

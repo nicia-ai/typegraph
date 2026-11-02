@@ -2919,15 +2919,15 @@ store.subgraph<EK, NK>(
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `edges` | `readonly EK[]` | *(required)* | Edge kinds to follow during traversal |
-| `maxDepth` | `number` | `10` | Integer traversal depth from root, from 0 through `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000); larger values are rejected |
+| `maxDepth` | `number` | `10` | Integer traversal depth from root for the `edges` walk, from 0 through `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000); larger values are rejected. It does not bound the `composition` closure |
 | `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output. Kinds are exact: a subclass or `equivalentTo` kind is included only when listed |
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
-| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
-| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to both nodes and edges along the traversal — same semantics as `store.query()` and collection reads |
+| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during the `edges` walk. The `composition` closure needs no policy: it stops at the nodes it has already visited |
+| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to nodes, and to the edges of the `edges` walk — same semantics as `store.query()` and collection reads. Composition edges follow ownership at the read's instant instead — see [Composition export](#composition-export) |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
-| `composition` | `boolean` | `false` | Close the root over its declared composition parts — see [Composition export](#composition-export) below |
+| `composition` | `boolean \| { via? }` | `false` | Close the root over its declared composition parts (`true`), or over one realizing edge (`{ via }`) — see [Composition export](#composition-export) below |
 
 **Result:**
 
@@ -3051,11 +3051,37 @@ const sg = await store.subgraph(episode, {
 // no need to name segmentOf/episodeOf/... by hand.
 ```
 
-The unit is the closure at the read's temporal coordinate: a part attached
-through a `population: "one"` edge whose validity window has ended is not in a
-current read, although deleting its whole still cascades to it. See
-[Composition Cascade](/limitations#composition-cascade) before relying on the
-export as a pre-delete inventory.
+The unit is what the root **owns**, not what its edges' validity windows
+show. The closure follows the composition rows that bind a part to its whole —
+the same membership the delete cascade removes and
+[`planDelete`](/ontology#previewing-a-delete) previews: an ended
+`population: "one"` edge still binds its part, because a `one` binding holds
+for the row's whole life, and an ended `population: "oneActive"` edge, the
+history a `reparent` leaves behind, binds nothing. Such an ended `"one"` edge
+is returned in `edges` with its `validTo`. The read's temporal mode sets the
+instant the closure is evaluated at, and still decides which nodes are
+visible:
+
+- A current read, and an `includeEnded` or `includeTombstones` read, closes
+  over what the root owns now. Those two modes widen what the `edges` walk
+  and node visibility admit, never what the root owns, so they do not
+  re-attach a part through an ended `"oneActive"` edge or a deleted one.
+- `store.asOf(t)` closes over what the root owned at `t`: an edge that
+  existed at `t` and, for `"oneActive"`, had not yet ended. A `"one"` edge
+  that ended before `t` still binds at `t`.
+- A recorded read (`store.asOfRecorded(...)`) closes over the ownership its
+  pinned revision recorded.
+
+The `edges` list you name keeps the read's validity window. When a kind is in
+both lists, an edge is returned if either admits it.
+
+`composition: { via }` closes over one realizing edge instead of all of them:
+pass the edge's type or its kind string. `via` follows the same rule as
+[`parts({ via })`](/queries/recursive#composition-shortcuts-parts-and-wholes):
+it must realize a pair at the root's kind itself. An edge that realizes a pair
+only further down the tree is refused with `ConfigurationError`
+(`COMPOSITION_VIA_NOT_DECLARED`), and `details.declaredVia` lists the edges
+that would work.
 
 This is set-level, not per-root-kind-required: a root whose kind declares
 no composition parts contributes nothing extra and the read still runs

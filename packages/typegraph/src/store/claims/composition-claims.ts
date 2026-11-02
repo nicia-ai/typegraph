@@ -101,6 +101,32 @@ export function compositionRowMembership(
 }
 
 /**
+ * Each composition edge kind's own {@link compositionRowMembership} rule, read
+ * off the registry: the per-kind input every SQL reader of composition
+ * membership renders (`compileEdgeMembershipFilters`,
+ * `src/query/compiler/temporal.ts`) — the `subgraph({ composition })` closure,
+ * `parts()`/`wholes()` and the composition acyclicity relation.
+ */
+export function compositionEdgeKindMembers(
+  registry: KindRegistry,
+  edgeKinds: Iterable<string>,
+): readonly Readonly<{ edgeKind: string; membership: RowMembership }>[] {
+  return [...edgeKinds].map((edgeKind) => ({
+    edgeKind,
+    membership: compositionRowMembership(
+      requireDefined(
+        registry.compositionPartSide(edgeKind),
+        `"${edgeKind}" is not a composition edge kind, but was named as one`,
+      ),
+      requireDefined(
+        registry.compositionEdgePopulation(edgeKind),
+        `"${edgeKind}" is a composition edge kind but has no recorded composition population`,
+      ),
+    ),
+  }));
+}
+
+/**
  * THE composition claim an edge insert owes, or `undefined` when it owes
  * none (an ordinary, non-composition edge kind).
  *

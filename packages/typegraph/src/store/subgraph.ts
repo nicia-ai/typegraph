@@ -39,8 +39,10 @@ import {
   type SqlSchema,
 } from "../query/compiler/schema";
 import {
+  compileEdgeMembershipFilters,
   compileTemporalFilter,
   currentReadInstant,
+  type EdgeKindMembership,
 } from "../query/compiler/temporal";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
@@ -56,6 +58,7 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import {
   compositionViaKind,
+  compositionViaReach,
   type CompositionViaRef,
   partitionCompositionEdgeKindsByDirection,
 } from "../registry/composition-relation";
@@ -67,6 +70,7 @@ import { hasOwnKey, isPlainObject } from "../utils/object";
 import { kindQualifiedToken } from "../utils/path";
 import { requireDefined } from "../utils/presence";
 import { isStatementCutShortError } from "../utils/sql-errors";
+import { compositionEdgeKindMembers } from "./claims/composition-claims";
 import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
 import {
   buildExhaustiveDirectedReachableCte,
@@ -389,7 +393,18 @@ export type SubgraphOptions<
    * export unit. When `true`, every composition edge kind transitively under
    * the root's kind (`registry.compositionEdgeKindsUnder`) is added to the
    * traversal and to the hydrated edge set, in addition to whatever `edges`
-   * already lists.
+   * already lists. `{ via }` closes over that one realizing edge instead; it
+   * must realize a pair at the root's kind itself, the rule `parts({ via })`
+   * applies, or the read refuses with `ConfigurationError`
+   * (`COMPOSITION_VIA_NOT_DECLARED`).
+   *
+   * The closure follows OWNERSHIP, not the read's validity window: the
+   * composition rows that bind a part to its whole, the same membership the
+   * delete cascade removes. An ended `population: "one"` row still binds (and
+   * is returned with its `validTo`); an ended `population: "oneActive"` row
+   * does not. `temporalMode` sets the instant ownership is evaluated at
+   * (`"asOf"` at `asOf`, every other mode now — `includeEnded` and
+   * `includeTombstones` do not widen it) and still decides node visibility.
    *
    * This is set-level, not per-root-kind-required: a root whose kind declares
    * no composition parts contributes nothing extra and the read still runs
@@ -413,8 +428,10 @@ export type SubgraphOptions<
    */
   composition?: C;
   /**
-   * Temporal mode applied to both nodes and edges along the traversal and in
-   * the hydrated result. Defaults to `graph.defaults.temporalMode`.
+   * Temporal mode applied to nodes, and to the `edges` traversal and its
+   * hydrated edges. Composition edges follow ownership at the mode's instant
+   * instead — see {@link SubgraphOptions.composition}. Defaults to
+   * `graph.defaults.temporalMode`.
    */
   temporalMode?: TemporalMode;
   /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
@@ -641,6 +658,13 @@ type SubgraphContext = Readonly<{
   recordedReadBinding: RecordedReadBinding | undefined;
   backend: GraphBackend;
   edgeWindows: Readonly<Record<string, EdgeReadWindow | undefined>> | undefined;
+  /**
+   * The composition edge kinds a composition read closes over and hydrates,
+   * each with its membership rule; empty for any other read. Their rows are
+   * read by membership at the read's instant, the `edgeKinds` walk's by the
+   * read's validity window.
+   */
+  compositionMembership: readonly EdgeKindMembership[];
 }>;
 
 type SubgraphNodeFetchRow = Readonly<
@@ -688,9 +712,7 @@ type SubgraphExecutionParams<
 type SubgraphPlan = Readonly<{
   baseSchema: SqlSchema;
   ctx: SubgraphContext;
-  /** The realizing edge kinds a composition read also walks; empty for any other read. */
-  compositionEdgeKinds: readonly string[];
-  /** `ctx` widened by {@link compositionEdgeKinds}: the context node and edge hydration read through. */
+  /** `ctx` widened by the composition edge kinds a composition read also walks: the context node and edge hydration read through. */
   readContext: SubgraphContext;
   reachableCte: SqlFragment;
   includedIdsCte: SqlFragment;
@@ -769,6 +791,7 @@ function buildSubgraphPlan<
       options.edgeWindows === undefined ?
         undefined
       : structuredClone(options.edgeWindows),
+    compositionMembership: [],
   };
   const introspector = getSubgraphSchemaIntrospector(params.graph);
   const nodeProjectionPlan = buildProjectionPlan(
@@ -787,7 +810,6 @@ function buildSubgraphPlan<
   const plan = {
     baseSchema,
     ctx,
-    compositionEdgeKinds,
     readContext: ctx,
     reachableCte,
     includedIdsCte: buildIncludedIdsCte(ctx),
@@ -796,16 +818,18 @@ function buildSubgraphPlan<
   };
   if (compositionEdgeKinds.length === 0) return plan;
 
-  const readEdgeKinds = dedupeStrings([
-    ...ctx.edgeKinds,
-    ...compositionEdgeKinds,
-  ]);
-  const compositionOnlyEdgeKinds = readEdgeKinds.filter(
+  const compositionOnlyEdgeKinds = compositionEdgeKinds.filter(
     (edgeKind) => !ctx.edgeKinds.includes(edgeKind),
   );
   return {
     ...plan,
-    readContext: { ...ctx, edgeKinds: readEdgeKinds },
+    readContext: {
+      ...ctx,
+      compositionMembership: compositionEdgeKindMembers(
+        params.registry,
+        compositionEdgeKinds,
+      ),
+    },
     edgeProjectionPlan: extendProjectionPlan(
       edgeProjectionPlan,
       buildEdgeProjectionPlan(
@@ -932,7 +956,6 @@ export async function executeSubgraph<
 ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
   const {
     ctx,
-    compositionEdgeKinds,
     readContext,
     reachableCte,
     includedIdsCte,
@@ -956,7 +979,7 @@ export async function executeSubgraph<
   // whole->part realizing edges. Those are walked as their own closure and
   // the two (kind, id) sets are unioned.
   let membership: SubgraphMembership;
-  if (compositionEdgeKinds.length > 0) {
+  if (readContext.compositionMembership.length > 0) {
     const baseMembers = await fetchIncludedNodes(
       ctx,
       reachableCte,
@@ -964,12 +987,7 @@ export async function executeSubgraph<
     );
     const compositionMembers = await fetchCompositionClosureNodes(
       readContext,
-      buildSubgraphCompositionReachableCte(
-        params,
-        readContext,
-        baseSchema,
-        compositionEdgeKinds,
-      ),
+      buildSubgraphCompositionReachableCte(params, readContext, baseSchema),
       includedIdsCte,
     );
     membership = nodeListMembership(
@@ -1055,19 +1073,24 @@ function resolveSubgraphCompositionEdgeKinds<
       },
     );
   }
-  const compositionEdgeKinds = params.registry.compositionEdgeKindsUnder(
-    ctx.root.kind,
-  );
   const requestedVia = compositionViaOf(params.options.composition);
-  if (requestedVia === undefined) return compositionEdgeKinds;
-  if (!compositionEdgeKinds.includes(requestedVia)) {
+  if (requestedVia === undefined) {
+    return params.registry.compositionEdgeKindsUnder(ctx.root.kind);
+  }
+  const viaReach = compositionViaReach(
+    params.registry,
+    "parts",
+    [ctx.root.kind],
+    requestedVia,
+  );
+  if (!viaReach.realized) {
     throw new ConfigurationError(
-      `subgraph composition via "${requestedVia}" realizes no partOf/hasPart pair under root kind "${ctx.root.kind}".`,
+      `subgraph composition via "${requestedVia}" realizes no partOf/hasPart pair at root kind "${ctx.root.kind}".`,
       {
         code: "COMPOSITION_VIA_NOT_DECLARED",
         via: requestedVia,
         rootKind: ctx.root.kind,
-        declaredVia: compositionEdgeKinds,
+        declaredVia: viaReach.declaredVia,
       },
       {
         suggestion:
@@ -1088,12 +1111,11 @@ function buildSubgraphCompositionReachableCte<
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
   ctx: SubgraphContext,
   baseSchema: SqlSchema,
-  compositionEdgeKinds: readonly string[],
 ): SqlFragment {
   const { outEdgeKinds, inEdgeKinds } =
     partitionCompositionEdgeKindsByDirection(
       params.registry,
-      compositionEdgeKinds,
+      ctx.compositionMembership.map((member) => member.edgeKind),
       "parts",
     );
   return buildExhaustiveDirectedReachableCte({
@@ -1101,6 +1123,7 @@ function buildSubgraphCompositionReachableCte<
     source: ctx.root,
     outEdgeKinds,
     inEdgeKinds,
+    edgeMembership: ctx.compositionMembership,
     temporalMode: ctx.temporalMode,
     currentTimestamp: ctx.currentTimestamp,
     ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
@@ -1526,24 +1549,59 @@ function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
   return sql`, included_ids AS (SELECT DISTINCT kind, id FROM reachable${whereClause})`;
 }
 
-function buildSubgraphEdgeSource(
+/**
+ * Which edge rows a subgraph read hydrates: a row of a walked `edges` kind by
+ * the read's validity window (`edgeTemporalFilter`), a row of a composition
+ * kind by its membership at the read's instant — so the owned unit comes back
+ * with the rows that bind it, an ended `"allRows"` row (and its `validTo`)
+ * included. A kind in both lists is hydrated when either admits the row.
+ */
+function subgraphEdgeRowFilter(
   ctx: SubgraphContext,
   edgeTemporalFilter: SqlFragment,
+): SqlFragment {
+  const windowArm = sql`${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporalFilter}`;
+  if (ctx.compositionMembership.length === 0) return windowArm;
+  const membershipArm = sql.join(
+    [
+      compileKindFilter(
+        sql.raw("e.kind"),
+        ctx.compositionMembership.map((member) => member.edgeKind),
+      ),
+      ...compileEdgeMembershipFilters({
+        members: ctx.compositionMembership,
+        tableAlias: "e",
+        mode: ctx.temporalMode,
+        asOf: ctx.asOf,
+        recordedAsOf: ctx.recordedAsOf,
+        recordedReadBinding: ctx.recordedReadBinding,
+      }),
+    ],
+    sql` AND `,
+  );
+  return ctx.edgeKinds.length === 0 ?
+      membershipArm
+    : sql`((${windowArm}) OR (${membershipArm}))`;
+}
+
+function buildSubgraphEdgeSource(
+  ctx: SubgraphContext,
+  edgeRowFilter: SqlFragment,
 ): SqlFragment {
   const windows = Object.entries(ctx.edgeWindows ?? {}).filter(
     (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
   );
   if (windows.length === 0) return ctx.schema.edgesTable;
 
-  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds);
+  const hydratedEdgeKinds = dedupeStrings([
+    ...ctx.edgeKinds,
+    ...ctx.compositionMembership.map((member) => member.edgeKind),
+  ]);
   const windowedEdges = buildWindowedEdgesCte(
     ctx.schema.edgesTable,
     ctx.direction,
-    ctx.edgeKinds.map((kind) => [kind, ctx.edgeWindows?.[kind]]),
-    sql.join(
-      [sql`e.graph_id = ${ctx.graphId}`, edgeKindFilter, edgeTemporalFilter],
-      sql` AND `,
-    ),
+    hydratedEdgeKinds.map((kind) => [kind, ctx.edgeWindows?.[kind]]),
+    sql.join([sql`e.graph_id = ${ctx.graphId}`, edgeRowFilter], sql` AND `),
   );
   const physicalColumns = [
     "graph_id",
@@ -1807,12 +1865,13 @@ function buildOneStatementSubgraphQuery(
     ...nullProjectionColumns(nodePlan),
     ...buildProjectedPropertyColumns("e", edgePlan, ctx.dialect),
   ];
-  const edgeSource = buildSubgraphEdgeSource(ctx, edgeTemporal);
+  const edgeRowFilter = subgraphEdgeRowFilter(ctx, edgeTemporal);
+  const edgeSource = buildSubgraphEdgeSource(ctx, edgeRowFilter);
   const edgeMembership =
     sharedOrigins ?
       sql`EXISTS (SELECT 1 FROM included_ids source_membership JOIN included_ids target_membership ON source_membership.origin_kind = target_membership.origin_kind AND source_membership.origin_id = target_membership.origin_id WHERE source_membership.kind = e.from_kind AND source_membership.id = e.from_id AND target_membership.kind = e.to_kind AND target_membership.id = e.to_id)`
     : sql`(e.from_kind, e.from_id) IN (SELECT kind, id FROM included_ids) AND (e.to_kind, e.to_id) IN (SELECT kind, id FROM included_ids)`;
-  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND (n.kind, n.id) IN (SELECT kind, id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporal} AND ${edgeMembership}`;
+  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND (n.kind, n.id) IN (SELECT kind, id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeRowFilter} AND ${edgeMembership}`;
 }
 
 function mapOneStatementSubgraphRows<
@@ -2020,15 +2079,17 @@ async function fetchSubgraphEdges(
   membership: SubgraphMembership,
   projectionPlan: ProjectionPlan,
 ): Promise<SubgraphEdgeFetchRow[]> {
-  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds);
-  const edgeTemporalFilter = compileTemporalFilter({
-    mode: ctx.temporalMode,
-    asOf: ctx.asOf,
-    recordedAsOf: ctx.recordedAsOf,
-    tableAlias: "e",
-    currentTimestamp: ctx.currentTimestamp,
-    recordedReadBinding: ctx.recordedReadBinding,
-  });
+  const edgeRowFilter = subgraphEdgeRowFilter(
+    ctx,
+    compileTemporalFilter({
+      mode: ctx.temporalMode,
+      asOf: ctx.asOf,
+      recordedAsOf: ctx.recordedAsOf,
+      tableAlias: "e",
+      currentTimestamp: ctx.currentTimestamp,
+      recordedReadBinding: ctx.recordedReadBinding,
+    }),
+  );
   const columns: SqlFragment[] = [
     sql`e.id`,
     sql`e.kind`,
@@ -2047,8 +2108,8 @@ async function fetchSubgraphEdges(
     ...buildProjectedPropertyColumns("e", projectionPlan, ctx.dialect),
   ];
 
-  const edgesSource = buildSubgraphEdgeSource(ctx, edgeTemporalFilter);
-  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${edgesSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.memberFilter(sql.raw("e.from_kind"), sql.raw("e.from_id"))} AND ${membership.memberFilter(sql.raw("e.to_kind"), sql.raw("e.to_id"))}`;
+  const edgesSource = buildSubgraphEdgeSource(ctx, edgeRowFilter);
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${edgesSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeRowFilter} AND ${membership.memberFilter(sql.raw("e.from_kind"), sql.raw("e.from_id"))} AND ${membership.memberFilter(sql.raw("e.to_kind"), sql.raw("e.to_id"))}`;
   if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(

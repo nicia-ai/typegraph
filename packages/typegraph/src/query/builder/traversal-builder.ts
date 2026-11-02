@@ -260,6 +260,7 @@ export class TraversalBuilder<
   readonly #fromAlias: string;
   readonly #optional: Optional;
   readonly #includeIdentityMembers: boolean;
+  readonly #compositionMembership: Traversal["compositionMembership"];
   readonly #variableLength: VariableLengthState;
   readonly #pendingEdgePredicates: readonly NodePredicate[];
 
@@ -277,6 +278,7 @@ export class TraversalBuilder<
     // Appended, never inserted: TraversalBuilder is public, so every
     // pre-existing positional slot must keep its meaning.
     includeIdentityMembers = false,
+    compositionMembership?: Traversal["compositionMembership"],
   ) {
     this.#config = config;
     this.#state = state;
@@ -287,6 +289,7 @@ export class TraversalBuilder<
     this.#fromAlias = fromAlias;
     this.#optional = optional;
     this.#includeIdentityMembers = includeIdentityMembers;
+    this.#compositionMembership = compositionMembership;
     this.#variableLength = variableLength;
     this.#pendingEdgePredicates = pendingEdgePredicates;
   }
@@ -393,6 +396,7 @@ export class TraversalBuilder<
       },
       this.#pendingEdgePredicates,
       this.#includeIdentityMembers,
+      this.#compositionMembership,
     );
   }
 
@@ -453,6 +457,7 @@ export class TraversalBuilder<
       this.#variableLength,
       [...this.#pendingEdgePredicates, newPredicate],
       this.#includeIdentityMembers,
+      this.#compositionMembership,
     );
   }
 
@@ -953,6 +958,9 @@ export class TraversalBuilder<
       joinEdgeField: this.#direction === "out" ? "from_id" : "to_id",
       optional: this.#optional,
       ...(this.#includeIdentityMembers ? { includeIdentityMembers: true } : {}),
+      ...(this.#compositionMembership === undefined ?
+        {}
+      : { compositionMembership: this.#compositionMembership }),
     };
 
     const baseTraversal: Traversal =

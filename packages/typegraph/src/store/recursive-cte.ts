@@ -13,8 +13,10 @@ import {
   type SqlSchema,
 } from "../query/compiler/schema";
 import {
+  compileEdgeMembershipFilters,
   compileTemporalFilter,
   currentReadInstant,
+  type EdgeKindMembership,
 } from "../query/compiler/temporal";
 import { type DialectAdapter } from "../query/dialect/types";
 import { sql, type SqlFragment } from "../query/sql-fragment";
@@ -115,8 +117,14 @@ type ReachableCteFilters = Readonly<{
  * Everything a reachable-CTE's base case and recursive WHERE clauses need
  * that does not depend on direction OR on how the walk is bounded: the
  * edge-kind filter (evaluated against whatever superset of kinds the caller's
- * shape requires), both temporal filters, the recorded-schema swap, and the
- * dialect's worktable join-order fact.
+ * shape requires), the node temporal filter and the edge row filter, the
+ * recorded-schema swap, and the dialect's worktable join-order fact.
+ *
+ * The edge row filter is the read's validity window, unless the walk is over
+ * a membership relation (`edgeMembership`): then it is that relation's
+ * membership at the read's coordinate ({@link compileEdgeMembershipFilters}),
+ * because an owned part is reached through the rows that bind it, not through
+ * the rows still valid.
  *
  * Shared by the hop-bounded preparation ({@link prepareReachableCte}, used by
  * {@link buildReachableCte}) and by the
@@ -128,6 +136,7 @@ type ReachableCteFilters = Readonly<{
 function prepareReachableFilters(
   options: ReachableCteFiltersCore,
   edgeKindsForFilter: readonly string[],
+  edgeMembership?: readonly EdgeKindMembership[],
 ): ReachableCteFilters {
   assertRecursiveTraversal(options.recursiveTraversal, options.operation);
   const edgeKindFilter = compileKindFilter(
@@ -143,14 +152,26 @@ function prepareReachableFilters(
     currentTimestamp,
     recordedReadBinding: options.recordedReadBinding,
   });
-  const edgeTemporalFilter = compileTemporalFilter({
-    mode: options.temporalMode,
-    asOf: options.asOf,
-    recordedAsOf: options.recordedAsOf,
-    tableAlias: "e",
-    currentTimestamp,
-    recordedReadBinding: options.recordedReadBinding,
-  });
+  const edgeRowFilters =
+    edgeMembership === undefined ?
+      [
+        compileTemporalFilter({
+          mode: options.temporalMode,
+          asOf: options.asOf,
+          recordedAsOf: options.recordedAsOf,
+          tableAlias: "e",
+          currentTimestamp,
+          recordedReadBinding: options.recordedReadBinding,
+        }),
+      ]
+    : compileEdgeMembershipFilters({
+        members: edgeMembership,
+        tableAlias: "e",
+        mode: options.temporalMode,
+        asOf: options.asOf,
+        recordedAsOf: options.recordedAsOf,
+        recordedReadBinding: options.recordedReadBinding,
+      });
   // Derive the read schema from the same `recordedAsOf` that drives the temporal
   // filters above: when a recorded pin is set the node/edge sources become the
   // recorded relations, matching the `recorded_from/to` interval predicate. One
@@ -166,7 +187,7 @@ function prepareReachableFilters(
     edgeWhere: [
       sql`e.graph_id = ${options.graphId}`,
       edgeKindFilter,
-      edgeTemporalFilter,
+      ...edgeRowFilters,
     ],
     nodeTemporalFilter,
     schema,
@@ -269,7 +290,11 @@ function prepareExhaustiveReachableCte(
     nodeTemporalFilter,
     schema,
     forceWorktableOuterJoinOrder,
-  } = prepareReachableFilters(options, edgeKindsForFilter);
+  } = prepareReachableFilters(
+    options,
+    edgeKindsForFilter,
+    options.edgeMembership,
+  );
 
   return {
     baseCase: sql`SELECT n.id, n.kind FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND ${compileSeedFilter(options.source)} AND ${nodeTemporalFilter}`,
@@ -340,6 +365,14 @@ type BuildExhaustiveDirectedReachableCteOptions = ReachableCteFiltersCore &
     outEdgeKinds: readonly string[];
     /** Edge kinds walked in the "in" direction (`e.to_id = r.id`). */
     inEdgeKinds: readonly string[];
+    /**
+     * The membership rule of every walked edge kind. The closure follows the
+     * rows that bind a part to its whole at the read's instant, never the
+     * read's validity window: an ended row of an `"allRows"` kind still binds,
+     * and a read that widens visibility (`includeEnded`) does not re-attach an
+     * ended `"openRows"` row.
+     */
+    edgeMembership: readonly EdgeKindMembership[];
   }>;
 
 /**
@@ -682,33 +715,24 @@ function kindKeys(members: readonly AcyclicRelationMember[]): {
 }
 
 /**
- * The window predicate a relation's stored rows must also satisfy to be in
- * it: the SQL rendering of `membershipCountsRow`
- * (`src/store/claims/edge-claims.ts`) under each member's own
- * `membership` rule — an `"openRows"` member's row counts only while
- * `valid_to IS NULL`. Empty when every member counts all rows — every
- * standalone relation, so those statements stay byte-identical. The one
- * spelling every reader of stored rows below appends, so the seed and the
- * walk cannot disagree about which rows are in the relation. Rows the caller
- * supplies (`proposedSeedRow`, `buildAcyclicityTargets`) were already judged
- * by the same rule (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`)
- * before they reach a statement.
+ * Which stored rows are in the relation now, each member under its own rule
+ * ({@link compileEdgeMembershipFilters}): the one spelling every reader of
+ * stored rows below appends, so the seed and the walk cannot disagree about
+ * which rows are in it. A relation whose members all count every row reads
+ * `deleted_at IS NULL` alone, so every standalone relation's statement stays
+ * byte-identical. Rows the caller supplies (`proposedSeedRow`,
+ * `buildAcyclicityTargets`) were already judged by the same rule
+ * (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`) before they reach a
+ * statement.
  */
-function relationWindowFilters(
+function relationMembershipFilters(
   members: readonly AcyclicRelationMember[],
-  alias: string,
 ): readonly SqlFragment[] {
-  const openRowsOnly = members
-    .filter((member) => member.membership === "openRows")
-    .map((member) => member.edgeKind);
-  if (openRowsOnly.length === 0) return [];
-  const isOpenRowsOnlyRow = compileKindFilter(
-    sql.raw(`${alias}.kind`),
-    openRowsOnly,
-  );
-  return [
-    sql`(NOT (${isOpenRowsOnlyRow}) OR ${sql.raw(`${alias}.valid_to`)} IS NULL)`,
-  ];
+  return compileEdgeMembershipFilters({
+    members,
+    tableAlias: "e",
+    mode: "current",
+  });
 }
 
 function reversedForEdgeKind(
@@ -842,8 +866,7 @@ function buildAcyclicitySeed(
   const rowFilters = [
     sql`e.graph_id = ${graphId}`,
     edgeKindFilter,
-    sql`e.deleted_at IS NULL`,
-    ...relationWindowFilters(members, "e"),
+    ...relationMembershipFilters(members),
   ];
   return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE ${sql.join(rowFilters, sql` AND `)})`;
 }
@@ -911,8 +934,7 @@ function buildAcyclicityAncestryStepDirect(
   const { forward, reversed, all } = kindKeys(members);
   const commonWhere = [
     sql`e.graph_id = ${graphId}`,
-    sql`e.deleted_at IS NULL`,
-    ...relationWindowFilters(members, "e"),
+    ...relationMembershipFilters(members),
     ...(options.excludedEdgeIds.length === 0 ?
       []
     : [

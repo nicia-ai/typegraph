@@ -31,7 +31,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  hasPart,
   migrateLegacyRecordedTime,
+  partOf,
   pruneIdentityTransitions,
   recordedRelation,
   UnsupportedBackendCapabilityError,
@@ -1071,6 +1073,94 @@ describe("engine-native recorded time: live point read and scan", () => {
 
     const scanned = await view.nodes.Widget.scan();
     expect(scanned.data.map((node) => node.id)).toEqual([widget.id]);
+  });
+
+  /**
+   * A composition relation mixing `part -> whole` (`engineOf`) and
+   * `whole -> part` (`carHasWheel`) realizing edges makes `parts()` compile
+   * the recursive walk's narrowed `<alias>_directed_edges` CTE, and makes the
+   * `subgraph` closure walk both orientations at once. MUTATION-PROOF: make
+   * `createTemporalFilterPass` (src/query/compiler/passes/temporal.ts) report
+   * `RECORDED_TEMPORAL_COLUMNS` for every recorded-pinned read again,
+   * ignoring `carriesInterval`, and the `parts()` read fails with SQLite "no
+   * such column: e.recorded_from" — the narrowed CTE projects a column the
+   * engine-native source does not have.
+   */
+  it("walks a mixed-orientation composition through the engine-native source", async () => {
+    const Car = defineNode("EnCar", { schema: z.object({}) });
+    const Engine = defineNode("EnEngine", { schema: z.object({}) });
+    const Wheel = defineNode("EnWheel", { schema: z.object({}) });
+    const engineOf = defineEdge("enEngineOf", { schema: z.object({}) });
+    const carHasWheel = defineEdge("enCarHasWheel", { schema: z.object({}) });
+    const carGraph = defineGraph({
+      id: "engine_native_recorded_time_composition",
+      nodes: {
+        EnCar: { type: Car },
+        EnEngine: { type: Engine },
+        EnWheel: { type: Wheel },
+      },
+      edges: {
+        enEngineOf: {
+          type: engineOf,
+          from: [Engine],
+          to: [Car],
+          cardinality: "one",
+        },
+        enCarHasWheel: {
+          type: carHasWheel,
+          from: [Car],
+          to: [Wheel],
+          targetCardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(Engine, Car, { via: engineOf }),
+        hasPart(Car, Wheel, { via: carHasWheel }),
+      ],
+    });
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+    });
+    const profile = buildSqliteEngineProfile(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+    });
+    attachEngineNativeRecordedTime(
+      profile.provisioning,
+      liveTableDressedRecordedTime(),
+      scriptedLineage(),
+    );
+    const [store] = await createStoreWithSchema(
+      carGraph,
+      createSqlBackend(profile),
+      { history: true },
+    );
+    const car = await store.nodes.EnCar.create({});
+    const engine = await store.nodes.EnEngine.create({});
+    const wheel = await store.nodes.EnWheel.create({});
+    await store.edges.enEngineOf.create(engine, car, {});
+    await store.edges.enCarHasWheel.create(car, wheel, {});
+    const view = store.asOfRecorded(
+      createEngineRecordedInstant(
+        LIVE_REVISION.revision,
+        LIVE_REVISION.recordedAt,
+      ),
+    );
+
+    const parts = await view
+      .query()
+      .from("EnCar", "c")
+      .whereNode("c", (node) => node.id.eq(car.id))
+      .parts("p")
+      .select((ctx) => ctx.p.id)
+      .execute();
+    expect(parts.toSorted()).toEqual([engine.id, wheel.id].toSorted());
+
+    const unit = await view.subgraph(car, { edges: [], composition: true });
+    expect(unit.nodes.map((node) => node.id).toSorted()).toEqual(
+      [car.id, engine.id, wheel.id].toSorted(),
+    );
+    expect(unit.edges).toHaveLength(2);
   });
 });
 

@@ -841,7 +841,7 @@ function compileCountAggregateFastPath(
   const edgeKinds = [...new Set(traversal.edgeKinds)];
   const nodeKinds = traversal.nodeKinds;
 
-  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const edgeRowFilter = temporalFilterPass.forTraversalEdges(traversal, "e");
   const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   const nodePredicateContext: PredicateCompilerContext = {
@@ -900,7 +900,7 @@ function compileCountAggregateFastPath(
     compileKindFilter(sql.raw("e.kind"), edgeKinds),
     compileKindFilter(sql.raw(`e.${joinKindField}`), previousNodeKinds),
     compileKindFilter(sql.raw(`e.${targetKindField}`), nodeKinds),
-    edgeTemporalFilter,
+    edgeRowFilter,
     ...edgePredicateClauses,
     // INNER JOIN mode: node-side filters in WHERE constrain every aggregate.
     ...(requiresNodeJoin && useInnerJoin ?

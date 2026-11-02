@@ -661,6 +661,27 @@ realizes no pair at the source alias itself, such as `segmentOf` on a Podcast,
 is refused with `ConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`), and
 `details.declaredVia` lists the edges that would work.
 
+**They read ownership, not validity.** A composition step follows the rows
+that bind a part to its whole — the same membership the delete cascade
+removes and [`planDelete`](/ontology#previewing-a-delete) previews — rather
+than the edge's validity window. An ended `population: "one"` edge still binds
+its part, because a `one` binding holds for the row's whole life, so it is
+still walked and its row still carries its `validTo`. An ended
+`population: "oneActive"` edge is the history a `reparent` leaves behind and
+is not walked. The query's temporal mode sets the instant:
+
+- A current query, and an `includeEnded` or `includeTombstones` query, walks
+  what is owned now. Those modes widen which nodes and which other edges a
+  query sees, not what a whole owns.
+- `store.asOf(t)` walks what was owned at `t`: an edge that existed at `t`
+  and, for `"oneActive"`, had not yet ended. A `"one"` edge ended before `t`
+  still binds at `t`.
+- `store.asOfRecorded(...)` walks the ownership its pinned revision recorded.
+
+The mode still decides which nodes are visible. A plain `.traverse()` over a
+realizing edge kind is not a composition step and keeps the edge's validity
+window.
+
 **The result alias is untyped** (reached via `.field(name)`, like
 [`fromDynamic`](/queries/source#runtime-declared-kinds)): the parts or wholes
 closure under a kind is registry data — it may span more than one node kind

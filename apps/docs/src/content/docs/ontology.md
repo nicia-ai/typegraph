@@ -545,7 +545,8 @@ leaves nothing of the refused create behind.
   an edge kind that realizes no declared pair between them raises
   `COMPOSITION_VIA_NOT_DECLARED`. `parts()`, `wholes()`, and
   `subgraph({ composition: { via } })` take the same value and refuse a via
-  that realizes no pair, rather than silently walking every realizing edge.
+  that realizes no pair at the source kind itself, rather than silently
+  walking every realizing edge or reading nothing.
 - **`validFrom` / `validTo`** are the realizing edge's window, not the part
   node's. A `validFrom` on `create` is not copied onto the edge. A malformed
   bound or an inverted pair is refused with `ValidationError` on every
@@ -1040,13 +1041,19 @@ Tier 1 is enforced, in full, at write time:
   never exist without a live whole (see below).
 - **Navigation and export.** `parts()`/`wholes()` cross heterogeneous,
   mixed-orientation edge kinds, and `subgraph({ composition: true })` returns
-  the owned unit at the read's temporal coordinate — a root plus its entire
-  parts closure, at whatever depth the part tree happens to be rather than at
-  the caller's `maxDepth`. A part attached through a `population: "one"` edge
-  whose validity window has ended is outside a current read, though the
-  delete cascade still takes it (see
-  [Composition Cascade](/limitations#composition-cascade)); preview a delete
-  with [`planDelete`](#previewing-a-delete), not this export.
+  the owned unit — a root plus its entire parts closure, at whatever depth the
+  part tree happens to be rather than at the caller's `maxDepth`. All three
+  read **ownership**, not validity: they follow the same memberships the
+  claim and the delete cascade count, so an ended `population: "one"` edge
+  still binds its part and an ended `population: "oneActive"` edge does not.
+  The read's temporal mode sets the instant: a current read, and an
+  `includeEnded` or `includeTombstones` read, reads what is owned now —
+  those modes do not widen ownership — while `store.asOf(t)` reads what was
+  owned at `t`, where a `"one"` edge ended before `t` still binds. The mode
+  still decides which nodes are visible, and a plain `.traverse()` over a
+  realizing edge kind keeps the edge's validity window. Preview a delete with
+  [`planDelete`](#previewing-a-delete), which also checks the plan still
+  holds when the delete runs.
   There is no depth ceiling on that closure and no partial answer: it is a
   set-semantics recursion bounded by its own visited set, the same way the
   acyclicity probe is exhaustive, so a part chain of any length comes back

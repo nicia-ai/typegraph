@@ -2871,6 +2871,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   introspect(): SchemaIntrospection {
     return introspectSchema(this.#graph, {
       graphId: this.graphId,
+      registry: this.#registry,
       schemaVersion: this.#schemaMetadata.schemaVersion,
       schemaHash: this.#schemaMetadata.schemaHash,
     });

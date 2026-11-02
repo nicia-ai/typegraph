@@ -37,6 +37,7 @@ import {
   type TypedEdgeCollection,
 } from "../src";
 import { ConfigurationError } from "../src/errors";
+import type { Traversal } from "../src/query/ast";
 import type { TraversalBuilder } from "../src/query/builder/traversal-builder";
 import type { DialectAdapter } from "../src/query/dialect/types";
 import type {
@@ -584,9 +585,11 @@ describe("Query Builder Type Safety", () => {
     it("pins the positional constructor parameter order", () => {
       type Params = ConstructorParameters<typeof TraversalBuilder>;
 
-      // Six required parameters followed by five optional ones. Any insertion
+      // Six required parameters followed by six optional ones. Any insertion
       // widens this union and fails here first.
-      expectTypeOf<Params["length"]>().toEqualTypeOf<6 | 7 | 8 | 9 | 10 | 11>();
+      expectTypeOf<Params["length"]>().toEqualTypeOf<
+        6 | 7 | 8 | 9 | 10 | 11 | 12
+      >();
 
       expectTypeOf<Params[2]>().toEqualTypeOf<readonly string[]>();
       expectTypeOf<Params[3]>().toEqualTypeOf<string>();
@@ -599,6 +602,9 @@ describe("Query Builder Type Safety", () => {
       expectTypeOf<IsIdentityFlagSlot<Params[8]>>().toEqualTypeOf<false>();
       expectTypeOf<IsIdentityFlagSlot<Params[9]>>().toEqualTypeOf<false>();
       expectTypeOf<IsIdentityFlagSlot<Params[10]>>().toEqualTypeOf<true>();
+      expectTypeOf<Params[11]>().toEqualTypeOf<
+        Traversal["compositionMembership"]
+      >();
     });
 
     it("carries identity expansion through recursive and edge-predicate rebuilds", () => {

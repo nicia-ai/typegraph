@@ -802,3 +802,44 @@ export function compositionReadersTowards(
           registry.compositionWholeKindsOverVia(kind, viaEdgeKind),
       };
 }
+
+/**
+ * THE rule a composition navigator's `via` must satisfy, and what it reaches:
+ * `viaEdgeKind` must realize a pair AT one of `sourceKinds` itself (towards
+ * `towards`), because a walk narrowed to one edge starts from the source and
+ * follows that edge alone — an edge that realizes a pair only further down
+ * the closure is never reached from the source, so naming it would read
+ * nothing at all rather than refuse.
+ *
+ * Realized: the target kinds that edge's own closure reaches. Not realized:
+ * the edges that WOULD be accepted, code-point ordered, for the refusal.
+ * `parts()`/`wholes()` and `subgraph({ composition: { via } })` both decide
+ * through this, so neither can accept a `via` the other refuses.
+ */
+export function compositionViaReach(
+  registry: KindRegistry,
+  towards: "parts" | "wholes",
+  sourceKinds: readonly string[],
+  viaEdgeKind: string,
+):
+  | Readonly<{ realized: true; targetKinds: readonly string[] }>
+  | Readonly<{ realized: false; declaredVia: readonly string[] }> {
+  const { edgeKindsFrom, targetKindsFromVia } = compositionReadersTowards(
+    registry,
+    towards,
+  );
+  const targetKinds = [
+    ...new Set(
+      sourceKinds.flatMap((kind) => targetKindsFromVia(kind, viaEdgeKind)),
+    ),
+  ];
+  if (targetKinds.length > 0) return { realized: true, targetKinds };
+  const declaredVia = [
+    ...new Set(sourceKinds.flatMap((kind) => edgeKindsFrom(kind))),
+  ]
+    .filter((edgeKind) =>
+      sourceKinds.some((kind) => targetKindsFromVia(kind, edgeKind).length > 0),
+    )
+    .toSorted((left, right) => compareStrings(left, right));
+  return { realized: false, declaredVia };
+}

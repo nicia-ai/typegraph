@@ -28,7 +28,7 @@
  * {@link RowMembership}, and {@link acyclicRelationCountsRow} is the one
  * reader that applies it to a row a write proposes, resurrects, reopens or
  * retires; the walk over stored rows renders the same rule in SQL
- * (`relationWindowFilters`, `src/store/recursive-cte.ts`).
+ * (`compileEdgeMembershipFilters`, `src/query/compiler/temporal.ts`).
  */
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import { type GraphBackend } from "../backend/types";
@@ -49,7 +49,7 @@ import {
   COMPOSITION_RELATION_NAME,
   displayAcyclicRelationName,
 } from "./claims/axis";
-import { compositionRowMembership } from "./claims/composition-claims";
+import { compositionEdgeKindMembers } from "./claims/composition-claims";
 import { membershipCountsRow, type RowMembership } from "./claims/edge-claims";
 import {
   fenceLockOnlyDecision,
@@ -123,7 +123,7 @@ function standaloneAcyclicRelation(edgeKind: string): AcyclicEdgeRelation {
  * neither edge kind is acyclic alone.
  *
  * Membership follows the composition relation's own population rule
- * ({@link compositionRowMembership}), not the standalone one: an ended row
+ * (`compositionEdgeKindMembers`), not the standalone one: an ended row
  * of a `oneActive` realizing edge is the history a reparent leaves and is not
  * in the relation, exactly as the composition claim, the cascade's closure
  * and the attachment reader treat it. Counting it would make every move a
@@ -157,20 +157,15 @@ function compositionAcyclicRelation(
   if (edgeKinds.length === 0) return undefined;
   return {
     name: COMPOSITION_RELATION_NAME,
-    members: edgeKinds.map((edgeKind) => {
-      const partSide = requireDefined(registry.compositionPartSide(edgeKind));
-      const population = requireDefined(
-        registry.compositionEdgePopulation(edgeKind),
-      );
-      return {
+    members: compositionEdgeKindMembers(registry, edgeKinds).map(
+      ({ edgeKind, membership }) => ({
         edgeKind,
-        reversed: partSide === "to",
+        reversed:
+          requireDefined(registry.compositionPartSide(edgeKind)) === "to",
         membership:
-          standaloneAcyclicEdgeKinds.has(edgeKind) ? "allRows" : (
-            compositionRowMembership(partSide, population)
-          ),
-      };
-    }),
+          standaloneAcyclicEdgeKinds.has(edgeKind) ? "allRows" : membership,
+      }),
+    ),
   };
 }
 
