@@ -1,7 +1,7 @@
 /**
  * Process/network helpers shared by the imperative-container engine drivers
- * (Postgres, Neo4j) and the competitor doctor. Adapted from the sibling
- * braiddb project's `scripts/lib.ts`.
+ * (Postgres, Neo4j) and the competitor doctor. Adapted from a sibling
+ * reference project's `scripts/lib.ts`.
  */
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";

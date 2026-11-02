@@ -142,12 +142,12 @@ const UNOBSERVED_FENCE_ACQUISITION: GraphWriteFenceAcquisition = {
 function boundGraphCommandCoordination(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
-  graphId?: string,
+  graphId: string,
 ) {
   const binding = graphCommandCoordinationBindings.get(coordination);
   return (
       binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
-        (graphId === undefined || binding.graphId === graphId)
+        binding.graphId === graphId
     ) ?
       binding
     : undefined;
@@ -161,7 +161,7 @@ function boundGraphCommandCoordination(
 export function graphCommandCoordinationAcquisition(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
-  graphId?: string,
+  graphId: string,
 ): GraphWriteFenceAcquisition {
   return (
     boundGraphCommandCoordination(port, coordination, graphId)?.acquisition ??
@@ -294,9 +294,14 @@ export function assertFencedSnapshotIsFresh(
  */
 export function assertGraphCommandConvergenceIsolation(
   port: GraphCommandPort,
+  graphId: string,
   coordination: GraphCommandCoordination,
 ): void {
-  const acquisition = graphCommandCoordinationAcquisition(port, coordination);
+  const acquisition = graphCommandCoordinationAcquisition(
+    port,
+    coordination,
+    graphId,
+  );
   if (observesPostFenceCommits(acquisition)) return;
   throw new ConfigurationError(
     "Match-key convergence requires a transaction isolation that observes " +
@@ -532,7 +537,11 @@ export function executeAuthoritativeGraphCommand(
     if (command.kind === "edge.converge-create") {
       // Store and public helper callers are checked here before a custom port
       // can execute the convergence command.
-      assertGraphCommandConvergenceIsolation(port, coordination);
+      assertGraphCommandConvergenceIsolation(
+        port,
+        command.plan.params.graphId,
+        coordination,
+      );
     }
   }
   return port.execute(command, context).then((result) => {

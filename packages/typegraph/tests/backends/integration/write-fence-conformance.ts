@@ -592,7 +592,11 @@ export function registerWriteFenceConformanceIntegrationTests(
           { isolation: "unknown", fenceRow: "advanced" },
         );
         expect(() => {
-          assertGraphCommandConvergenceIsolation(backend.commands, uncertified);
+          assertGraphCommandConvergenceIsolation(
+            backend.commands,
+            "write-fence-conformance-uncertified",
+            uncertified,
+          );
         }).toThrow(
           expect.objectContaining({
             details: expect.objectContaining({

@@ -8,7 +8,7 @@
  * the TypeGraph/PostgreSQL side of that pairing. `/data` is disk-backed
  * (not tmpfs): real LDBC SF1 data plus constraint indexes overflows a
  * laptop-sized Docker VM's RAM (observed on an 8GB VM), the same lesson
- * the sibling braiddb project's own Neo4j driver documents.
+ * a reference Neo4j driver documents.
  *
  * Unlike TypeGraph (which needs an artificial ontological `Message`
  * supertype so the polymorphic replyOf chain can be walked with one
@@ -70,7 +70,7 @@
  * query time.
  *
  * Container construction happens inside `load()` (not the factory), so
- * `loadMs` reflects the full Neo4j setup cost the same way braiddb's
+ * `loadMs` reflects the full Neo4j setup cost the same way a reference driver
  * reference driver measures it: CSV staging + the offline import + server
  * container startup + constraint creation, fairly comparable to the other
  * engines.
@@ -265,7 +265,7 @@ async function resolveNeo4jMemorySettings(
  * constraint indexes overflows a laptop-sized Docker VM — the same
  * "no space left on device" failure mode observed against the
  * TypeGraph/PostgreSQL container's tmpfs on an 8GB VM, and the exact
- * reason the sibling braiddb project's own Neo4j driver switches off
+ * reason a reference Neo4j driver switches off
  * tmpfs for anything but its tiny synthetic profile. `/logs` and `/tmp`
  * stay tmpfs — their contents never scale with dataset size.
  */
@@ -303,7 +303,7 @@ async function runNeo4jContainer(
 
 /**
  * Poll until the container accepts bolt connections, or throw (with the
- * container's logs) if it exits first. Mirrors braiddb's
+ * container's logs) if it exits first. Mirrors a reference driver's
  * `waitForNeo4jStarted`/`waitForNeo4jBolt` pair, collapsed into one loop.
  */
 async function waitForNeo4jBolt(

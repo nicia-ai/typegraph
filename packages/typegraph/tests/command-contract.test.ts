@@ -281,6 +281,24 @@ describe("authoritative graph command contract", () => {
       "root command",
     );
   });
+
+  it("refuses convergence coordination acquired for another graph", () => {
+    const port: GraphCommandPort = {
+      session: "transaction",
+      execute: () => Promise.resolve(RESULT),
+    };
+    const coordination = mintGraphCommandCoordination(port, "graph-a", {
+      isolation: "read_committed",
+      fenceRow: "none",
+    });
+
+    expect(() => {
+      assertGraphCommandConvergenceIsolation(port, "graph-a", coordination);
+    }).not.toThrow();
+    expect(() => {
+      assertGraphCommandConvergenceIsolation(port, "graph-b", coordination);
+    }).toThrow("Match-key convergence requires");
+  });
 });
 
 /**
@@ -350,7 +368,7 @@ describe("a fenced decision observes the fence's previous holders", () => {
         assertFencedSnapshotIsFresh(port, "graph", coordination, refusal);
       }).not.toThrow();
       expect(() => {
-        assertGraphCommandConvergenceIsolation(port, coordination);
+        assertGraphCommandConvergenceIsolation(port, "graph", coordination);
       }).not.toThrow();
     },
   );
@@ -375,7 +393,7 @@ describe("a fenced decision observes the fence's previous holders", () => {
         }),
       );
       expect(() => {
-        assertGraphCommandConvergenceIsolation(port, coordination);
+        assertGraphCommandConvergenceIsolation(port, "graph", coordination);
       }).toThrow(
         expect.objectContaining({
           details: expect.objectContaining({

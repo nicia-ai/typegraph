@@ -38,7 +38,7 @@ export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower",
 export function assertFiniteEmbedding(embedding: readonly number[], name: string): void;
 
 // @public
-export function assertGraphCommandConvergenceIsolation(port: GraphCommandPort, coordination: GraphCommandCoordination): void;
+export function assertGraphCommandConvergenceIsolation(port: GraphCommandPort, graphId: string, coordination: GraphCommandCoordination): void;
 
 // @public
 export function assertGraphCommandExecutionContext(context: unknown): asserts context is GraphCommandExecutionContext;

@@ -1,9 +1,9 @@
 /**
  * Streaming reader for official LDBC SNB Interactive v1 datagen output
  * (CsvBasic serializer, LongDateFormatter epoch-millis dates). Adapted from
- * the sibling braiddb project's `scripts/ldbc-csv.ts`, retargeted to emit
+ * a sibling reference project's `scripts/ldbc-csv.ts`, retargeted to emit
  * TypeGraph node/edge rows (Person/Forum/Post/Comment nodes; knows /
- * hasCreator / containerOf / replyOf edges) instead of BraidDB relational
+ * hasCreator / containerOf / replyOf edges) instead of relational
  * table rows — the graph structure the relational mapping otherwise hides
  * inside foreign-key columns becomes real edges here, matching this
  * program's TypeGraph node/edge schema

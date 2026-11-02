@@ -1224,6 +1224,19 @@ function diffEdgeDef(
     });
   }
 
+  // Write-time validation only: stored edges are not invalidated, so this
+  // is a warning (like cardinality), not a breaking change.
+  if (before.endpointExistence !== after.endpointExistence) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "warning",
+      details: `endpointExistence changed from "${before.endpointExistence}" to "${after.endpointExistence}" for "${name}"`,
+      before,
+      after,
+    });
+  }
+
   if (!matchIdentitiesEqual(before.matchIdentity, after.matchIdentity)) {
     const details =
       before.matchIdentity === undefined ?
