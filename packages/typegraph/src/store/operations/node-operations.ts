@@ -190,6 +190,7 @@ import {
   type ConstraintFenceReason,
   edgeWriteNeedsConstraintFence,
   nodeDeleteNeedsConstraintFence,
+  nodeRestoreNeedsConstraintFence,
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
 import {
@@ -260,14 +261,17 @@ import {
 } from "./autocommit-single-statement";
 import {
   cascadedPartReferences,
+  type CascadeMemberRowReader,
   type CompositionCascadePlan,
   planCompositionCascade,
+  readCascadeMemberRows,
   requireCompositionPairVia,
 } from "./composition-cascade";
 import {
   assertCompositionExistencePreserved,
   assertCompositionWholeEndpointLive,
   assertRestoredRequiredPartsAttached,
+  assertSatisfiedMoveInstantHonored,
   buildCompositionCreateEdgeInput,
   type CompositionAttachmentRequest,
   type CompositionCreateWork,
@@ -324,6 +328,7 @@ import { type NodeUpdateFences } from "./write-fences";
 import {
   mixedBatchWritePlan,
   mixedWritePlan,
+  nodeBatchWritePlan,
   nodeWritePlan,
 } from "./write-plan";
 import {
@@ -553,6 +558,35 @@ function nodeBatchConstraintProbes<G extends GraphDef>(
 }
 
 /**
+ * The constraint probes a set of node updates owes: for an entry that clears
+ * a tombstone, the restore probe
+ * ({@link file://../constraints.ts nodeRestoreNeedsConstraintFence}), then
+ * each entry's own update probe — so every restore entry, single or batched,
+ * fences its required-part verdict through one fold. The restore probe comes
+ * first so a plan that owes it names it, and takes the fence in the deciding
+ * form up front; the verdict's own gate
+ * (`fenceCompositionExistenceDecision`) holds whichever reason is named.
+ */
+function nodeUpdateConstraintProbes<G extends GraphDef>(
+  ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
+  entries: readonly Readonly<{
+    input: Readonly<{ kind: string }>;
+    clearDeleted: boolean;
+  }>[],
+): readonly (ConstraintFenceReason | undefined)[] {
+  return [
+    ...entries.map((entry) =>
+      entry.clearDeleted ?
+        nodeRestoreNeedsConstraintFence(ctx.registry, entry.input.kind)
+      : undefined,
+    ),
+    ...entries.map((entry) =>
+      nodeFencesConstraintProbe(ctx, entry.input.kind, "update"),
+    ),
+  ];
+}
+
+/**
  * WHICH constraint makes a node DELETE a constrained write — the graph-def
  * lookup only. The classification itself lives with the constraints
  * ({@link file://../constraints.ts nodeDeleteNeedsConstraintFence}); this
@@ -710,9 +744,11 @@ function noPlannedDeleteEffects(): PlannedDeleteEffects {
  * cascade with a consumed edge to remove writes first, so its root is judged
  * here whatever the caller says ({@link cascadeWritesBeforeRoot}).
  *
- * `lockMembers` is every delete that goes on to write: it takes each member's
- * delete lock before the first member is judged ({@link lockCascadeMembers}).
- * `planDelete`'s preview writes nothing and takes none.
+ * `lockMembers` is every delete that goes on to write: it reads the members'
+ * liveness through their delete locks ({@link lockCascadeMembers}), so a part
+ * deleted concurrently drops out of the plan before the first member is
+ * judged rather than staying in it. `planDelete`'s preview writes nothing and
+ * takes none.
  *
  * An empty plan when `policy?.cascadeComposition` is `false` (merge apply's
  * request: its plan already carries the part deletions) or when the kind
@@ -735,10 +771,12 @@ async function planCascadingNodeDelete<G extends GraphDef>(
         root.kind,
         root.id,
         target,
+        options.lockMembers ?
+          lockCascadeMembers(ctx, target)
+        : readCascadeMemberRows(ctx, target),
       ),
     effects,
   );
-  if (options.lockMembers) await lockCascadeMembers(ctx, target, plan);
 
   const judge = async (
     node: Readonly<{ kind: string; id: string }>,
@@ -770,37 +808,52 @@ async function planCascadingNodeDelete<G extends GraphDef>(
 }
 
 /**
- * Takes the delete lock on every cascade member before any member's connected
- * edges are read — the lock a direct delete of that member takes
- * (`node-row-locks.ts`). An edge write that holds a member as a locked
- * endpoint then commits first, and the member's delete sees and removes its
- * edge instead of leaving it pointing at a deleted part. One statement per
- * member kind, kinds in code-point order like every other multi-kind lock
- * read, and each kind's rows in id order inside `lockNodes`; the per-graph
- * write lock the cascade holds already orders it against every other
- * cascade. Where writers
- * serialize there is no concurrent edge write to wait for, so no statement is
- * issued.
+ * The cascade's member reader for a delete that writes: it reads every
+ * discovered member's row through the delete lock a direct delete of that
+ * member takes (`node-row-locks.ts`), before any member's connected edges are
+ * read. Liveness is judged from the locked row, so a part deleted
+ * concurrently is either committed before the read (and drops out of the
+ * plan) or waits for this frame; and an edge write that holds a member as a
+ * locked endpoint commits first, so the member's delete sees and removes its
+ * edge instead of leaving it pointing at a deleted part.
+ *
+ * One statement per member kind, kinds in code-point order like every other
+ * multi-kind lock read, and each kind's rows in id order inside `lockNodes`;
+ * the per-graph write lock the cascade holds already orders it against every
+ * other cascade. Where writers serialize there is nothing to wait for, so the
+ * members are read without a lock clause.
  */
-async function lockCascadeMembers<G extends GraphDef>(
+function lockCascadeMembers<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   target: WriteTarget,
-  plan: CompositionCascadePlan,
-): Promise<void> {
-  if (plan.members.length === 0) return;
-  if (serializesWriters(resolveWriteFencePlan(target))) return;
-  const memberIdsByKind = new Map<string, string[]>();
-  for (const member of plan.members) {
-    const ids = memberIdsByKind.get(member.kind) ?? [];
-    ids.push(member.id);
-    memberIdsByKind.set(member.kind, ids);
+): CascadeMemberRowReader {
+  if (serializesWriters(resolveWriteFencePlan(target))) {
+    return readCascadeMemberRows(ctx, target);
   }
-  const lockOrder = [...memberIdsByKind].toSorted(([left], [right]) =>
-    compareCodePoints(left, right),
-  );
-  for (const [kind, ids] of lockOrder) {
-    await lockNodeRows(target, ctx.graphId, kind, ids, "delete");
-  }
+  return async (members) => {
+    const memberIdsByKind = new Map<string, string[]>();
+    for (const member of members) {
+      const ids = memberIdsByKind.get(member.kind) ?? [];
+      ids.push(member.id);
+      memberIdsByKind.set(member.kind, ids);
+    }
+    const lockOrder = [...memberIdsByKind].toSorted(([left], [right]) =>
+      compareCodePoints(left, right),
+    );
+    const lockedRows = new Map<string, BackendNodeRow>();
+    for (const [kind, ids] of lockOrder) {
+      for (const row of await lockNodeRows(
+        target,
+        ctx.graphId,
+        kind,
+        ids,
+        "delete",
+      )) {
+        lockedRows.set(nodeRefKey(row), row);
+      }
+    }
+    return members.map((member) => lockedRows.get(nodeRefKey(member)));
+  };
 }
 
 /**
@@ -867,6 +920,8 @@ function cascadeMemberDeletePolicy(
  *
  * The caller folds `plan.consumedEdgeIds` into the ROOT's own policy
  * ({@link withCascadeConsumedEdges}) for the root delete that follows.
+ * Returns the members it deleted, in deletion order — what `cascadedParts`
+ * reports.
  */
 async function applyCompositionCascade<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -874,15 +929,16 @@ async function applyCompositionCascade<G extends GraphDef>(
   target: WriteTarget,
   mode: NodeDeleteMode,
   session: NodeWriteSession,
-): Promise<void> {
+): Promise<readonly CompositionCascadedPart[]> {
   const memberPolicy = cascadeMemberDeletePolicy(plan);
+  const deletedMembers: CompositionCascadePlan["members"][number][] = [];
   for (const member of plan.members) {
     // Each member's delete reads its own row now rather than writing against
-    // one the plan read: a member gone by then is skipped. What the delete
-    // releases is decided later still, from the row as tombstoned
-    // (`applyNodeSoftDelete`), because an ordinary update takes no per-graph
-    // lock and can commit at any point before that.
-    await deleteNodeRowInFrame(
+    // one the plan read: a member gone by then is skipped, and not reported.
+    // What the delete releases is decided later still, from the row as
+    // tombstoned (`applyNodeSoftDelete`), because an ordinary update takes no
+    // per-graph lock and can commit at any point before that.
+    const deleted = await deleteNodeRowInFrame(
       ctx,
       session,
       target,
@@ -891,6 +947,7 @@ async function applyCompositionCascade<G extends GraphDef>(
       member.id,
       memberPolicy,
     );
+    if (deleted) deletedMembers.push(member);
   }
   // Runs even when no member is live. A member the plan found already dead is
   // absent from `plan.members` while its edge is still in
@@ -912,6 +969,7 @@ async function applyCompositionCascade<G extends GraphDef>(
     ),
     mode,
   );
+  return cascadedPartReferences({ ...plan, members: deletedMembers });
 }
 
 /**
@@ -934,7 +992,13 @@ async function deleteRootWithCascade<G extends GraphDef>(
   cascadePlan: CompositionCascadePlan,
   preflight?: LiveNodeRow,
 ): Promise<readonly CompositionCascadedPart[]> {
-  await applyCompositionCascade(ctx, cascadePlan, target, mode, session);
+  const cascadedParts = await applyCompositionCascade(
+    ctx,
+    cascadePlan,
+    target,
+    mode,
+    session,
+  );
   await deleteNodeRowInFrame(
     ctx,
     session,
@@ -945,7 +1009,7 @@ async function deleteRootWithCascade<G extends GraphDef>(
     withCascadeConsumedEdges(policy, cascadePlan.consumedEdgeIds),
     preflight,
   );
-  return cascadedPartReferences(cascadePlan);
+  return cascadedParts;
 }
 
 /**
@@ -3977,6 +4041,17 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
   for (const [index, move] of moves.entries()) {
     const { partId, decided, endpoints } = move;
     if (decided.disposition === "satisfied") {
+      if (move.moveAt !== undefined) {
+        assertSatisfiedMoveInstantHonored(
+          decided.request.work.partKind,
+          partId,
+          move.moveAt,
+          requireDefined(
+            decided.incumbent,
+            'decideCompositionIncumbent answered "satisfied" with no incumbent read',
+          ).edge,
+        );
+      }
       prepared.push({ partId, decided });
       continue;
     }
@@ -4746,8 +4821,12 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     mixedBatchWritePlan(
       [
-        ...revisions.map(({ existing }) =>
-          nodeFencesConstraintProbe(ctx, existing.kind, "update"),
+        ...nodeUpdateConstraintProbes(
+          ctx,
+          revisions.map(({ existing, leg }) => ({
+            input: existing,
+            clearDeleted: leg.restoresRow,
+          })),
         ),
         ...owed.map(({ leg }) =>
           leg.request === undefined ? undefined : COMPOSITION_EDGE_FENCE,
@@ -5843,11 +5922,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         ...nodeBatchConstraintProbes(ctx, inputs, "create"),
         ...compositionBatchConstraintProbes(compositionWorks),
         // The paired updates are decided under this frame's fence.
-        ...nodeBatchConstraintProbes(
-          ctx,
-          pairedUpdates.map((entry) => entry.input),
-          "update",
-        ),
+        ...nodeUpdateConstraintProbes(ctx, pairedUpdates),
       ],
       nodeRequiresIdentityLock(ctx),
     ),
@@ -6102,8 +6177,8 @@ export async function executeNodeUpdate<G extends GraphDef>(
   return runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
-    nodeWritePlan(
-      nodeFencesConstraintProbe(ctx, input.kind, "update"),
+    nodeBatchWritePlan(
+      nodeUpdateConstraintProbes(ctx, [atomicEntry]),
       nodeUpdateTouchesIdentity(input, options?.clearDeleted === true) &&
         nodeRequiresIdentityLock(ctx),
     ),
@@ -6481,7 +6556,9 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     // runtime effect on a call that carries no `compositionAttachment`.
     mixedBatchWritePlan(
       [
-        nodeFencesConstraintProbe(ctx, input.kind, "update"),
+        ...nodeUpdateConstraintProbes(ctx, [
+          { input, clearDeleted: options?.clearDeleted === true },
+        ]),
         compositionAttachment === undefined ? undefined : (
           COMPOSITION_EDGE_FENCE
         ),
@@ -6712,8 +6789,8 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
 
   return runWritePlan(
     nodeWritePlanContext(ctx),
-    nodeWritePlan(
-      nodeFencesConstraintProbe(ctx, first.input.kind, "update"),
+    nodeBatchWritePlan(
+      nodeUpdateConstraintProbes(ctx, entries),
       entries.some((entry) =>
         nodeUpdateTouchesIdentity(entry.input, entry.clearDeleted),
       ) && nodeRequiresIdentityLock(ctx),

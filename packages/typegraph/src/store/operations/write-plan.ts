@@ -74,6 +74,21 @@ function foldBatchConstraintProbe(
 }
 
 /**
+ * The plan for a node write whose constraint probe folds several sources: a
+ * batch's members, or one update's own probe beside the restore probe a
+ * cleared tombstone owes.
+ */
+export function nodeBatchWritePlan(
+  constraintProbes: readonly (ConstraintFenceReason | undefined)[],
+  requiresIdentityLock: boolean,
+): WritePlan<"node"> {
+  return nodeWritePlan(
+    foldBatchConstraintProbe(constraintProbes),
+    requiresIdentityLock,
+  );
+}
+
+/**
  * The plan for one edge write. Edge writes do not participate in identity —
  * identity folds node references, and an edge carries none of its own — so the
  * participation is not a parameter.
@@ -85,7 +100,9 @@ export function edgeWritePlan(
 }
 
 /**
- * The plan for a batched edge write. A batch of purely `many`, non-acyclic,
+ * The plan for an edge write whose constraint probe folds several sources: a
+ * batch's members, or one update's reopen probe beside the detach probe a
+ * stated window end owes. A batch of purely `many`, non-acyclic,
  * non-composition edges still takes no lock.
  */
 export function edgeBatchWritePlan(

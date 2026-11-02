@@ -657,7 +657,13 @@ to the realizing edge's live stored props, the no-op stands; valid but
 different raises `CompositionExistenceError` (`situation: "props"`,
 `COMPOSITION_PROPS_CONFLICT`) rather
 than being silently dropped, since the no-op performs no write to apply it —
-`store.edges.<via>.update(...)` changes the edge directly. A kind that
+`store.edges.<via>.update(...)` changes the edge directly. A stated `at` is
+checked the same way: the no-op opens no new window, so `at` stands only when
+it equals the realizing edge's stored `validFrom`, and any other instant is
+refused with `ValidationError` under `options.at`
+(`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`), as a differing `partOf.validFrom`
+is on get-or-create. An omitted `at` states nothing and is never refused here.
+A kind that
 declares no `partOf`/`hasPart` pair at all raises
 `ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
@@ -789,6 +795,21 @@ Two refusals follow from that one declaration:
   attachment and creates the new one in one transaction so the part is never
   detached at all.
 
+Both refusals read state no claim row records — the part's liveness, its
+surviving composition edge, its whole — so every write that decides them
+takes the per-graph write fence: a restore of a required part kind, and a
+soft delete, hard delete or stated window end of a composition edge whose
+part kind is required. A concurrent restore and detach (or whole delete) of
+the same part therefore run one after the other. At `READ COMMITTED` the
+second reads what the first committed and refuses or cascades accordingly.
+At PostgreSQL `REPEATABLE READ` or `SERIALIZABLE`, a second whose snapshot
+predates the first's commit fails at the fence with a retryable
+`TransactionConflictError` instead of deciding from that snapshot, whatever
+other constraint the write is also fenced for. Like every constrained write,
+these are refused with
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` on a backend without transactions.
+Optional parts and other edge kinds take no fence for them.
+
 A required part found by `getOrCreateByConstraint` is held to the same
 postcondition as an optional one — see [`partOf` on get-or-create is a
 postcondition](#partof-on-get-or-create-is-a-postcondition).
@@ -871,11 +892,14 @@ composition whole, no concurrent attach or reparent can change that plan
 before the delete runs it. A delete of any other kind takes no per-graph lock,
 so every concurrent write can change the answer up to the comparison.
 
-A write that takes no per-graph lock can also commit after the comparison and
-before the delete's statements: for a whole, a detach, a part's own delete, or
-an edge of a kind with no cardinality or acyclicity constraint; for any other
-kind, every write. The delete treats such a write exactly as an unguarded
-delete does:
+A whole's delete reads each part's liveness through the delete lock that
+part's own delete takes, so a part deleted concurrently either committed
+before that read — and drops out of the plan, which `expect` then refuses —
+or waits for the whole's delete and finds the part gone. A write that takes no
+per-graph lock can still commit after the comparison and before the delete's
+statements: for a whole, a detach of an optional part, or an edge of a kind
+with no cardinality or acyclicity constraint; for any other kind, every
+write. The delete treats such a write exactly as an unguarded delete does:
 
 - At `READ COMMITTED`, an edge created on a node the delete removes is removed
   with it under `cascade` / `disconnect`, or refuses the delete with

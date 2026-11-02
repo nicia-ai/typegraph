@@ -77,7 +77,10 @@ import {
 import { isObjectRecord } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { nodeRefKey } from "../../utils/tuple-key";
-import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  fenceLockOnlyDecision,
+  type GraphWriteLock,
+} from "../recorded-capture/clock";
 import { pageEdgesByKind, pageNodesByKind } from "../row-fetch";
 import {
   type CompositionAttachment,
@@ -908,22 +911,57 @@ export function compositionEdgeAttachesPart(
 }
 
 /**
+ * The frame target a required-existence verdict reads through: a read surface
+ * that can also gate the read behind the per-graph write fence
+ * ({@link fenceCompositionExistenceDecision}).
+ */
+type CompositionExistenceTarget = GraphReadBackend &
+  Pick<GraphBackend, "capabilities" | "commands" | "execute">;
+
+/**
+ * The gate of every required-existence verdict — whether a part keeps a live
+ * whole — taken before its first read. No claim row records that verdict, so
+ * it is a lock-only decision whatever reason the frame's own plan named: a
+ * frame fenced for another constraint (a shared-scope unique, say) took the
+ * fence without advancing the graph's fence row, and a snapshot that predates
+ * a concurrent detach would otherwise decide from it.
+ *
+ * @throws TransactionConflictError when another decider committed after this
+ *   session's snapshot
+ * @throws ConfigurationError (`COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT`)
+ */
+function fenceCompositionExistenceDecision(
+  target: CompositionExistenceTarget,
+  graphId: string,
+  lock: GraphWriteLock,
+): Promise<void> {
+  return fenceLockOnlyDecision(target, graphId, lock, {
+    code: "COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT",
+    subject: "Deciding whether a required composition part holds a whole",
+  });
+}
+
+/**
  * THE refusal every path that would separate a live required part from its
  * whole raises: ending a composition edge's open window, soft-deleting it,
  * or hard-deleting it.
  *
  * Fast path first (no read at all) when `edge.kind` is not a composition
  * edge, or its declared pair's existence is `"optional"`. Only then does it
- * read the part row — under the held write lock, so a concurrent write
- * cannot land between the read and this write's own row change — and
- * refuses only when the part is LIVE. A part that is already retired
+ * read the part row — under the held per-graph write lock, which every
+ * caller's plan takes for exactly these kinds
+ * (`edgeDetachNeedsConstraintFence`, `constraints.ts`, or the composition
+ * fence a reparent holds), so a concurrent restore of the part or delete of
+ * its whole cannot land between the read and this write's own row change —
+ * and refuses only when the part is LIVE. A part that is already retired
  * (soft-deleted or gone) is not orphaned by losing its edge: refusing that
  * would make a soft-deleted part's composition edge permanently
  * undeletable-from.
  *
- * `lock: GraphWriteLock` in the parameter is compile-time evidence that this
- * read cannot precede the per-graph write lock — the same device
- * `planCompositionCascade` uses.
+ * `lock` is the frame's fence evidence, and the read is gated by
+ * {@link fenceCompositionExistenceDecision} on it — the same gate
+ * `planCompositionCascade` takes — so the verdict is a lock-only decision
+ * however the frame's plan was named.
  *
  * `reattachedPart` names the ONE part whose composition edge this same write
  * frame retires only to attach it to a new whole immediately afterwards
@@ -942,7 +980,7 @@ export async function assertCompositionExistencePreserved(
     reattachedPart?: CompositionNodeRef;
   }>,
   edge: EdgeRow,
-  backend: GraphReadBackend,
+  backend: CompositionExistenceTarget,
 ): Promise<void> {
   // `compositionPartSide` is total per edge KIND (a second, contradicting
   // orientation for one edge kind is itself refused at registry-build time,
@@ -974,6 +1012,7 @@ export async function assertCompositionExistencePreserved(
   // row that audit already reports unattached is never refused here.
   if (!compositionEdgeAttachesPart(ctx.registry, part.kind, edge)) return;
 
+  await fenceCompositionExistenceDecision(backend, ctx.graphId, ctx.lock);
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
   if (!isLiveNodeRowPresent(partRow)) return;
 
@@ -1244,10 +1283,55 @@ function assertSatisfiedAttachmentHonored(
       requestedProps: verdict.requestedProps,
     });
   }
-  const path = `${PART_OF_SURFACE.path}.${verdict.bound}`;
+  throw attachmentWindowConflict(
+    `${PART_OF_SURFACE.path}.${verdict.bound}`,
+    partKind,
+    partId,
+    verdict,
+    currentEdge,
+  );
+}
+
+/**
+ * The refusal of a stated `reparent` instant toward the whole the part
+ * already holds. The move is a no-op that writes no edge, so a stated `at` —
+ * the lower bound the new attachment would have — is honored only when it is
+ * the incumbent's stored `validFrom`; any other instant is refused rather
+ * than dropped, as {@link assertSatisfiedAttachmentHonored} refuses a
+ * differing `partOf.validFrom`. A defaulted instant states nothing.
+ */
+export function assertSatisfiedMoveInstantHonored(
+  partKind: string,
+  partId: string,
+  moveAt: CompositionMoveInstant,
+  currentEdge: Pick<EdgeRow, "id" | "kind" | "valid_from">,
+): void {
+  if (moveAt.source === "defaulted") return;
+  if (statedBoundMatchesStored(moveAt.at, currentEdge.valid_from)) return;
+  throw attachmentWindowConflict(
+    `${REPARENT_SURFACE.path}.at`,
+    partKind,
+    partId,
+    { stated: moveAt.at, stored: currentEdge.valid_from },
+    currentEdge,
+  );
+}
+
+/**
+ * The one shape of a stated window bound an already-held attachment cannot
+ * apply: `ValidationError` under the stated option's own path, with
+ * `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` naming both instants.
+ */
+function attachmentWindowConflict(
+  path: string,
+  partKind: string,
+  partId: string,
+  bound: Readonly<{ stated: string | null; stored: string | undefined }>,
+  currentEdge: Pick<EdgeRow, "id" | "kind">,
+): ValidationError {
   const storedDescription =
-    verdict.stored === undefined ? "no such bound" : `"${verdict.stored}"`;
-  throw new ValidationError(
+    bound.stored === undefined ? "no such bound" : `"${bound.stored}"`;
+  return new ValidationError(
     `Unappliable ${path} for ${partKind} "${partId}": it already holds this whole via "${currentEdge.kind}" (edge ${currentEdge.id}) with a different window.`,
     {
       entityType: "node",
@@ -1257,7 +1341,7 @@ function assertSatisfiedAttachmentHonored(
         {
           path,
           code: COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE,
-          message: `Stated ${verdict.stated === null ? "no lower bound" : `"${verdict.stated}"`}, but the realizing edge stores ${storedDescription}.`,
+          message: `Stated ${bound.stated === null ? "no lower bound" : `"${bound.stated}"`}, but the realizing edge stores ${storedDescription}.`,
         },
       ],
     },
@@ -1673,7 +1757,12 @@ export async function findLiveCompositionWhole(
  * Called before the frame's first statement, for every candidate at once, so
  * a caller that catches the refusal inside an enclosing `store.transaction`
  * keeps nothing of the batch. A candidate whose row is live is not being
- * restored and is skipped; a kind that requires no whole costs no read.
+ * restored and is skipped; a kind that requires no whole costs no read. Every
+ * caller's frame holds the per-graph write lock for every kind that does
+ * (`nodeRestoreNeedsConstraintFence`, `constraints.ts`), and the reads are
+ * gated by {@link fenceCompositionExistenceDecision} on it: the edge and
+ * whole read here are exactly what a concurrent detach or whole delete
+ * changes.
  */
 export async function assertRestoredRequiredPartsAttached(
   ctx: Readonly<{
@@ -1681,12 +1770,13 @@ export async function assertRestoredRequiredPartsAttached(
     registry: KindRegistry;
     lock: GraphWriteLock;
   }>,
-  target: GraphReadBackend,
+  target: CompositionExistenceTarget,
   parts: readonly CompositionNodeRef[],
 ): Promise<void> {
   for (const part of parts) {
     if (ctx.registry.compositionExistence(part.kind) !== "required") continue;
     if (compositionExistenceDeferred(target, part)) continue;
+    await fenceCompositionExistenceDecision(target, ctx.graphId, ctx.lock);
     const row = await target.getNode(ctx.graphId, part.kind, part.id);
     if (isLiveNodeRowPresent(row)) continue;
     const attachment = await findLiveCompositionAttachment(

@@ -847,7 +847,8 @@ deadlock:
 - **A composition whole's delete.** The cascade locks the whole first, then its
   parts one kind at a time, while an edge write between the whole and one of
   its parts, or between two of its parts, locks the same nodes in `(kind, id)`
-  order.
+  order. The parts it locks are every part its closure walk reaches, including
+  ones already deleted, since it reads each part's liveness through that lock.
 - **An edge write that locks many endpoints.** A transaction that creates
   several edges, or one closed batch edge program, locks endpoints row by row
   in its own order.

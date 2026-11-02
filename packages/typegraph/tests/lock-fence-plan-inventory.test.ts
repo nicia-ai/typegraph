@@ -283,10 +283,10 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/operations/node-operations.ts",
-    line: "if (serializesWriters(resolveWriteFencePlan(target))) return;",
+    line: "if (serializesWriters(resolveWriteFencePlan(target))) {",
     site: "J27",
     reason:
-      "A composition cascade takes each member's delete lock before it reads the members' connected edges only where writers contend, the same rule as J25's hard delete; a writer-serializing plan has no concurrent edge write to wait for.",
+      "A composition cascade reads its members' liveness through each member's delete lock, before it reads the members' connected edges, only where writers contend, the same rule as J25's hard delete; a writer-serializing plan has no concurrent write to wait for and reads the members unlocked.",
   },
 ];
 
