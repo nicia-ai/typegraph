@@ -914,9 +914,12 @@ export function compositionEdgeAttachesPart(
  *
  * Fast path first (no read at all) when `edge.kind` is not a composition
  * edge, or its declared pair's existence is `"optional"`. Only then does it
- * read the part row — under the held write lock, so a concurrent write
- * cannot land between the read and this write's own row change — and
- * refuses only when the part is LIVE. A part that is already retired
+ * read the part row — under the held per-graph write lock, which every
+ * caller's plan takes for exactly these kinds
+ * (`edgeDetachNeedsConstraintFence`, `constraints.ts`, or the composition
+ * fence a reparent holds), so a concurrent restore of the part or delete of
+ * its whole cannot land between the read and this write's own row change —
+ * and refuses only when the part is LIVE. A part that is already retired
  * (soft-deleted or gone) is not orphaned by losing its edge: refusing that
  * would make a soft-deleted part's composition edge permanently
  * undeletable-from.
@@ -1234,10 +1237,55 @@ function assertSatisfiedAttachmentHonored(
       requestedProps: verdict.requestedProps,
     });
   }
-  const path = `${PART_OF_SURFACE.path}.${verdict.bound}`;
+  throw attachmentWindowConflict(
+    `${PART_OF_SURFACE.path}.${verdict.bound}`,
+    partKind,
+    partId,
+    verdict,
+    currentEdge,
+  );
+}
+
+/**
+ * The refusal of a stated `reparent` instant toward the whole the part
+ * already holds. The move is a no-op that writes no edge, so a stated `at` —
+ * the lower bound the new attachment would have — is honored only when it is
+ * the incumbent's stored `validFrom`; any other instant is refused rather
+ * than dropped, as {@link assertSatisfiedAttachmentHonored} refuses a
+ * differing `partOf.validFrom`. A defaulted instant states nothing.
+ */
+export function assertSatisfiedMoveInstantHonored(
+  partKind: string,
+  partId: string,
+  moveAt: CompositionMoveInstant,
+  currentEdge: Pick<EdgeRow, "id" | "kind" | "valid_from">,
+): void {
+  if (moveAt.source === "defaulted") return;
+  if (statedBoundMatchesStored(moveAt.at, currentEdge.valid_from)) return;
+  throw attachmentWindowConflict(
+    `${REPARENT_SURFACE.path}.at`,
+    partKind,
+    partId,
+    { stated: moveAt.at, stored: currentEdge.valid_from },
+    currentEdge,
+  );
+}
+
+/**
+ * The one shape of a stated window bound an already-held attachment cannot
+ * apply: `ValidationError` under the stated option's own path, with
+ * `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` naming both instants.
+ */
+function attachmentWindowConflict(
+  path: string,
+  partKind: string,
+  partId: string,
+  bound: Readonly<{ stated: string | null; stored: string | undefined }>,
+  currentEdge: Pick<EdgeRow, "id" | "kind">,
+): ValidationError {
   const storedDescription =
-    verdict.stored === undefined ? "no such bound" : `"${verdict.stored}"`;
-  throw new ValidationError(
+    bound.stored === undefined ? "no such bound" : `"${bound.stored}"`;
+  return new ValidationError(
     `Unappliable ${path} for ${partKind} "${partId}": it already holds this whole via "${currentEdge.kind}" (edge ${currentEdge.id}) with a different window.`,
     {
       entityType: "node",
@@ -1247,7 +1295,7 @@ function assertSatisfiedAttachmentHonored(
         {
           path,
           code: COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE,
-          message: `Stated ${verdict.stated === null ? "no lower bound" : `"${verdict.stated}"`}, but the realizing edge stores ${storedDescription}.`,
+          message: `Stated ${bound.stated === null ? "no lower bound" : `"${bound.stated}"`}, but the realizing edge stores ${storedDescription}.`,
         },
       ],
     },
@@ -1663,7 +1711,10 @@ export async function findLiveCompositionWhole(
  * Called before the frame's first statement, for every candidate at once, so
  * a caller that catches the refusal inside an enclosing `store.transaction`
  * keeps nothing of the batch. A candidate whose row is live is not being
- * restored and is skipped; a kind that requires no whole costs no read.
+ * restored and is skipped; a kind that requires no whole costs no read. The
+ * frame holds the per-graph write lock for every kind that does
+ * (`nodeRestoreNeedsConstraintFence`, `constraints.ts`): the edge and whole
+ * read here are exactly what a concurrent detach or whole delete changes.
  */
 export async function assertRestoredRequiredPartsAttached(
   ctx: Readonly<{

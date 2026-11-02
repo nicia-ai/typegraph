@@ -755,6 +755,63 @@ export function registerCompositionAttachmentIntegrationTests(
       );
     });
 
+    it("reparent to the whole the part already holds refuses a stated `at` other than the incumbent's start, and honors that start", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const show = await store.nodes.CaShow.create({});
+      const attachedAt = "2024-06-01T00:00:00.000Z";
+      const clip = await store.nodes.CaClip.create(
+        {},
+        {
+          partOf: {
+            whole: { kind: "CaShow", id: show.id },
+            validFrom: attachedAt,
+          },
+        },
+      );
+      const [incumbent] = await store.edges.caClipOf.find({});
+      if (incumbent === undefined) throw new Error("the clip's attachment");
+      const whole = { kind: "CaShow", id: show.id } as const;
+
+      // MUTATION CHECK: drop the `assertSatisfiedMoveInstantHonored` call
+      // from `prepareCompositionAttachmentMoves`
+      // (src/store/operations/node-operations.ts) — every call below then
+      // answers `{ moved: false }`, dropping the stated instant.
+      const calls: readonly (() => Promise<unknown>)[] = [
+        "2024-01-01T00:00:00.000Z",
+        "2025-01-01T00:00:00.000Z",
+      ].flatMap((at) => [
+        () => store.nodes.CaClip.reparent(clip.id, { whole, at }),
+        () =>
+          store.nodes.CaClip.bulkReparent([
+            { id: clip.id, options: { whole, at } },
+          ]),
+      ]);
+      for (const call of calls) {
+        const error = await call().catch((error_: unknown) => error_);
+        expect(error).toBeInstanceOf(ValidationError);
+        expect((error as ValidationError).details.issues).toEqual([
+          expect.objectContaining({
+            path: "options.at",
+            code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
+          }),
+        ]);
+      }
+
+      const restated = await store.nodes.CaClip.reparent(clip.id, {
+        whole,
+        at: attachedAt,
+      });
+      expect(restated.moved).toBe(false);
+      expect(restated.edge.id).toBe(incumbent.id);
+      const after = await store.edges.caClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      expect(
+        after.map((edge) => [edge.id, edge.meta.validFrom, edge.meta.validTo]),
+      ).toEqual([[incumbent.id, attachedAt, undefined]]);
+    });
+
     it("reparent refuses a kind that is not a composition part", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const reader = await store.nodes.CaReader.create({});

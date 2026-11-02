@@ -185,6 +185,7 @@ import {
   checkEdgeCardinalityConstraints,
   type ConstraintContext,
   type ConstraintFenceReason,
+  edgeDetachNeedsConstraintFence,
   edgeKindCardinalityDeclarations,
   edgeKindFenceReason,
 } from "../constraints";
@@ -779,6 +780,23 @@ function edgeWriteFenceReason<G extends GraphDef>(
   acyclic: boolean,
 ): ConstraintFenceReason | undefined {
   return edgeKindFenceReason(ctx.graph, ctx.registry, kind, acyclic);
+}
+
+/**
+ * The detach probe ({@link file://../constraints.ts edgeDetachNeedsConstraintFence})
+ * an edge update owes for the window end it states. A plan reads nothing, so
+ * whether that end closes a currently OPEN window (`edgeWriteEndsOpenWindow`)
+ * is unknown here: any stated end of a fenced kind pays, a restated one
+ * included.
+ */
+function edgeWindowEndFenceReason<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+  validTo: string | undefined,
+): ConstraintFenceReason | undefined {
+  return validTo === undefined ? undefined : (
+      edgeDetachNeedsConstraintFence(ctx.registry, kind)
+    );
 }
 
 /** {@link edgeWriteFenceReason} for a create of `kind`, which re-admits it to its acyclic relation. */
@@ -3271,13 +3289,14 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     // An in-place props update on a live edge re-derives no constraint verdict.
     // Clearing an end DOES when it re-admits the row to a counted population:
     // an active-only cardinality axis's, on either side, or an acyclic
-    // relation that counts only open rows (a composition kind's).
-    edgeWritePlan(
+    // relation that counts only open rows (a composition kind's). Stating an
+    // end does when it can separate a required part from its whole.
+    edgeBatchWritePlan([
       (
         input.clearValidTo === true &&
-          (activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
-            .length > 0 ||
-            windowReopenReentersAcyclicRelation(ctx, gate.kind))
+        (activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
+          .length > 0 ||
+          windowReopenReentersAcyclicRelation(ctx, gate.kind))
       ) ?
         edgeWriteFenceReason(
           ctx,
@@ -3285,7 +3304,8 @@ export async function executeEdgeUpdate<G extends GraphDef>(
           windowReopenReentersAcyclicRelation(ctx, gate.kind),
         )
       : undefined,
-    ),
+      edgeWindowEndFenceReason(ctx, gate.kind, input.validTo),
+    ]),
     backend,
     (session, target, _overlaidSession, lock) =>
       performEdgeUpdateConverging(
@@ -3336,8 +3356,8 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     // are immutable, so cardinality cannot change under it. A coalescing upsert
     // converges on a match key no database key backs; a resurrect or a cleared
     // end re-admits the row to the counted population its cardinality
-    // constrains.
-    edgeWritePlan(
+    // constrains. A stated end can separate a required part from its whole.
+    edgeBatchWritePlan([
       options?.coalesceUnchanged === true ? "edgeMatchKeyConvergence"
       : input.clearValidTo === true || options?.clearDeleted === true ?
         // A resurrection re-admits the row to its acyclic relation; a cleared
@@ -3350,7 +3370,8 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
           : windowReopenReentersAcyclicRelation(ctx, input.identity.kind),
         )
       : undefined,
-    ),
+      edgeWindowEndFenceReason(ctx, input.identity.kind, input.validTo),
+    ]),
     backend,
     async (session, target, _overlaidSession, lock) => {
       if (options?.coalesceUnchanged === true && !options.clearDeleted) {
@@ -3606,7 +3627,7 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
   );
   return runWritePlan(
     ctx,
-    edgeWritePlan(
+    edgeBatchWritePlan([
       needsConstraintFence ?
         edgeWriteFenceReason(
           ctx,
@@ -3614,7 +3635,14 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
           needsAcyclicityFence,
         )
       : undefined,
-    ),
+      ...entries.map((entry) =>
+        edgeWindowEndFenceReason(
+          ctx,
+          entry.input.identity.kind,
+          entry.input.validTo,
+        ),
+      ),
+    ]),
     backend,
     async (session, target, _overlaidSession, lock) => {
       const resolvedRows =
@@ -3793,11 +3821,8 @@ export async function executeEdgeDelete<G extends GraphDef>(
     ctx,
     opContext,
     // A soft delete decides nothing a concurrent write could invalidate —
-    // except the composition-existence check, which is a READ, not a
-    // key a write plan fences: `assertCompositionExistencePreserved`'s own
-    // fast path (not a composition edge, or an optional-existence pair)
-    // costs nothing for the ordinary case.
-    edgeWritePlan(undefined),
+    // except whether it separates a live required part from its whole.
+    edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
     backend,
     async (session, target, _overlaidSession, lock) => {
       // `gate`'s kind/from/to are immutable for the row's lifetime, so
@@ -3854,7 +3879,7 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
 
   await runWritePlan(
     ctx,
-    edgeWritePlan(undefined),
+    edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
     backend,
     async (session, target, _overlaidSession, lock) => {
       const rowsById = await getEdgeRowsByIds(
@@ -3975,7 +4000,7 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
   return runHookedWritePlan(
     ctx,
     opContext,
-    edgeWritePlan(undefined),
+    edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
     backend,
     async (session, target, _overlaidSession, lock) => {
       // See executeEdgeDelete's identical check.

@@ -229,6 +229,53 @@ function createPausedDeleter(db: NodePgDatabase): Readonly<{
   return { deleter: createStore(graph, pausedBackend), planned, resume };
 }
 
+/**
+ * A part deleted by a writer that takes no per-graph lock, between the
+ * cascade's closure walk and its member locks: the walk still finds the
+ * part through its uncommitted edge tombstone, and the cascade waits on
+ * the part's row lock until that delete commits.
+ */
+async function raceCascadeAgainstPartDelete(
+  deleteWhole: (
+    deleter: ReturnType<typeof createStore<typeof graph>>,
+    showId: NodeId<typeof Show>,
+  ) => Promise<unknown>,
+): Promise<unknown> {
+  const live = requirePostgres();
+  const deleter = createStore(graph, createPostgresBackend(live.first));
+  const partDeleter = createStore(graph, createPostgresBackend(live.second));
+  const show = await deleter.nodes.Show.create({}, { id: "show" });
+  await deleter.nodes.Clip.create(
+    { slug: "c0" },
+    { id: "clip0", partOf: { whole: show } },
+  );
+  const clip1 = await deleter.nodes.Clip.create(
+    { slug: "c1" },
+    { id: "clip1", partOf: { whole: show } },
+  );
+
+  const deletedPart = createGate();
+  const release = createGate();
+  const partDeletion = partDeleter.transaction(async (tx) => {
+    await tx.nodes.Clip.delete(clip1.id);
+    deletedPart.open();
+    await release.opened;
+  });
+  await deletedPart.opened;
+
+  const wholeDeletion = deleteWhole(deleter, show.id);
+  const wholeOutcome = wholeDeletion.then(
+    (result) => result,
+    (error: unknown) => error,
+  );
+  expect(await settledOrWaitingOnRowLock(live.observer, wholeDeletion)).toBe(
+    "waiting",
+  );
+  release.open();
+  await partDeletion;
+  return wholeOutcome;
+}
+
 describe.runIf(process.env["POSTGRES_URL"])(
   "composition cascade against a concurrent writer (PostgreSQL)",
   () => {
@@ -408,6 +455,83 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(
           await deleter.nodes.Clip.getById("clip1" as never),
         ).toBeDefined();
+      },
+    );
+
+    it(
+      "refuses a guarded whole delete whose expected part was deleted while the cascade waited on its lock",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // MUTATION CHECK: read the members' liveness lock-free
+        // (`readCascadeMemberRows`) in `planCascadingNodeDelete`
+        // (src/store/operations/node-operations.ts) and lock them afterwards
+        // — the delete then commits against the stale plan instead of
+        // refusing, and reports clip1 as cascaded although its own delete
+        // removed it.
+        const outcome = await raceCascadeAgainstPartDelete(
+          async (deleter, showId) => {
+            const plan = requireDefined(
+              await deleter.nodes.Show.planDelete(showId),
+            );
+            expect(plan.cascadedParts.map((part) => part.id)).toEqual([
+              "clip0",
+              "clip1",
+            ]);
+            return deleter.nodes.Show.delete(showId, { expect: plan });
+          },
+        );
+        expect(outcome).toBeInstanceOf(NodeDeletePlanMismatchError);
+        expect((outcome as NodeDeletePlanMismatchError).details).toMatchObject({
+          situation: "changed",
+          addedParts: [],
+          droppedParts: [
+            {
+              kind: "Clip",
+              id: "clip1",
+              whole: { kind: "Show", id: "show" },
+              viaEdgeKind: "clipOf",
+            },
+          ],
+        });
+        const observer = createStore(
+          graph,
+          createPostgresBackend(requirePostgres().first),
+        );
+        expect(
+          await observer.nodes.Show.getById("show" as never),
+        ).toBeDefined();
+        expect(
+          await observer.nodes.Clip.getById("clip0" as never),
+        ).toBeDefined();
+      },
+    );
+
+    it(
+      "reports only the parts its cascade deleted when a part was deleted while the cascade waited on its lock",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        const outcome = await raceCascadeAgainstPartDelete((deleter, showId) =>
+          deleter.transactionWithReceipt((tx) => tx.nodes.Show.delete(showId)),
+        );
+        const { receipt } = outcome as Awaited<
+          ReturnType<
+            ReturnType<
+              typeof createStore<typeof graph>
+            >["transactionWithReceipt"]
+          >
+        >;
+        expect(receipt.cascadedParts.map((part) => part.id)).toEqual(["clip0"]);
+        const observer = createStore(
+          graph,
+          createPostgresBackend(requirePostgres().first),
+        );
+        expect(
+          await observer.nodes.Show.getById("show" as never),
+        ).toBeUndefined();
+        expect(
+          await observer.nodes.Clip.getById("clip0" as never),
+        ).toBeUndefined();
+        expect(await observer.verifyConstraintFences()).toEqual([]);
       },
     );
 

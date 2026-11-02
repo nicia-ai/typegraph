@@ -14,6 +14,7 @@ import {
   type GraphBackend,
   type GraphReadBackend,
   isLiveNodeRowPresent,
+  type NodeRow,
 } from "../../backend/types";
 import { CompilerInvariantError, CompositionCycleError } from "../../errors";
 import {
@@ -94,10 +95,11 @@ const EMPTY_COMPOSITION_CASCADE_PLAN: CompositionCascadePlan = {
  * its operation hook and to the transaction receipt (`cascadedParts`), and
  * what `planDelete` previews.
  *
- * A projection of the plan the cascade ALREADY computes, not a second walk:
- * the exposure and the deletions are the same list by construction, so a
- * consumer invalidating a cache from `cascadedParts` can never be told about
- * a part the cascade did not delete (or miss one it did).
+ * A projection of the plan the cascade ALREADY computes, not a second walk.
+ * A writing delete reports the members its cascade actually deleted
+ * (`applyCompositionCascade`, `node-operations.ts`), so a consumer
+ * invalidating a cache from `cascadedParts` can never be told about a part
+ * the cascade did not delete (or miss one it did).
  */
 export function cascadedPartReferences(
   plan: CompositionCascadePlan,
@@ -362,6 +364,30 @@ function requirePartSide(
 }
 
 /**
+ * How a cascade reads its discovered members' node rows: one row (or
+ * `undefined`) per member, index-aligned with `members`. A delete that goes on
+ * to write supplies a reader that takes each member's delete lock as it reads
+ * (`node-operations.ts`), so the liveness the plan keeps cannot change before
+ * the member's own delete; a preview supplies {@link readCascadeMemberRows}.
+ */
+export type CascadeMemberRowReader = (
+  members: readonly Readonly<{ kind: string; id: string }>[],
+) => Promise<readonly (NodeRow | undefined)[]>;
+
+/** The lock-free {@link CascadeMemberRowReader}: one `getNode` per member. */
+export function readCascadeMemberRows(
+  ctx: Readonly<{ graphId: string }>,
+  backend: GraphReadBackend,
+): CascadeMemberRowReader {
+  return (members) =>
+    Promise.all(
+      members.map((member) =>
+        backend.getNode(ctx.graphId, member.kind, member.id),
+      ),
+    );
+}
+
+/**
  * Drops discovered members whose node row is no longer live.
  *
  * A composition edge row and its endpoint's node row can go stale relative
@@ -377,22 +403,16 @@ function requirePartSide(
  * member actually still there" on its own.
  *
  * One batched read: `discoveryOrder` is already the complete, deduplicated
- * closure, so a single parallel round of `getNode` calls suffices — no need
- * to interleave this with the round-by-round edge traversal above, which
- * must still walk THROUGH a dead member to find any live descendants
- * beneath it (edge reads are keyed by `(kind, id)`, not by the node's own
- * liveness).
+ * closure, so one call of `readMemberRows` suffices — no need to interleave
+ * this with the round-by-round edge traversal above, which must still walk
+ * THROUGH a dead member to find any live descendants beneath it (edge reads
+ * are keyed by `(kind, id)`, not by the node's own liveness).
  */
 async function liveDiscoveredMembers(
-  ctx: Readonly<{ graphId: string }>,
-  backend: GraphReadBackend,
+  readMemberRows: CascadeMemberRowReader,
   discoveryOrder: readonly DiscoveredCascadeMember[],
 ): Promise<readonly DiscoveredCascadeMember[]> {
-  const nodeRows = await Promise.all(
-    discoveryOrder.map((member) =>
-      backend.getNode(ctx.graphId, member.kind, member.id),
-    ),
-  );
+  const nodeRows = await readMemberRows(discoveryOrder);
   return discoveryOrder.filter((_member, index) =>
     isLiveNodeRowPresent(nodeRows[index]),
   );
@@ -467,7 +487,9 @@ function cascadeDeletionOrder(
  *
  * `members` is ordered by {@link cascadeDeletionOrder} — leaf-first, then
  * deterministically by kind, then id, within each level — never in the order
- * the edge reads returned their rows.
+ * the edge reads returned their rows. Their liveness is read through
+ * `readMemberRows` once the closure is complete; a member whose row is locked
+ * by that read stays exactly as live as the plan says until the frame ends.
  */
 export async function planCompositionCascade(
   ctx: Readonly<{
@@ -479,6 +501,7 @@ export async function planCompositionCascade(
   wholeId: string,
   backend: GraphReadBackend &
     Pick<GraphBackend, "capabilities" | "commands" | "execute">,
+  readMemberRows: CascadeMemberRowReader = readCascadeMemberRows(ctx, backend),
 ): Promise<CompositionCascadePlan> {
   const edgeKinds = ctx.registry.compositionEdgeKindsUnder(wholeKind);
   if (edgeKinds.length === 0) return EMPTY_COMPOSITION_CASCADE_PLAN;
@@ -554,8 +577,7 @@ export async function planCompositionCascade(
   // so the plan's order is fixed by the closure alone — never by the order any
   // read returned its rows.
   const liveMembers = await liveDiscoveredMembers(
-    ctx,
-    backend,
+    readMemberRows,
     cascadeDeletionOrder(discoveryRounds),
   );
   return { members: liveMembers, consumedEdgeIds };

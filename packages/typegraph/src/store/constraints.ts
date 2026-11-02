@@ -63,7 +63,10 @@ import {
   edgeCardinalityViolation,
 } from "./claims/edge-claims";
 import { nodeClaimSites } from "./claims/sites";
-import { findLiveCompositionAttachment } from "./operations/composition-create";
+import {
+  compositionEdgeHasRequiredExistencePart,
+  findLiveCompositionAttachment,
+} from "./operations/composition-create";
 
 export { type ConstraintFenceReason } from "./claims/backing";
 
@@ -238,6 +241,44 @@ export function nodeDeleteNeedsConstraintFence(
   kind: string,
 ): ConstraintFenceReason | undefined {
   return registry.isCompositionWhole(kind) ? "edgeComposition" : undefined;
+}
+
+/**
+ * WHICH constraint makes a node RESTORE — any write that clears a tombstone
+ * without stating an attachment — a constrained write: a required-existence
+ * part may only come back holding a live whole
+ * (`assertRestoredRequiredPartsAttached`), a verdict read from the part's
+ * composition edge and its whole that no claim row records. A concurrent
+ * detach ({@link edgeDetachNeedsConstraintFence}) or whole delete
+ * ({@link nodeDeleteNeedsConstraintFence}) reads the part's liveness just as
+ * unbacked, so all three serialize on the per-graph write fence, named for
+ * the composition relation. A kind that requires no whole restores unfenced.
+ */
+export function nodeRestoreNeedsConstraintFence(
+  registry: KindRegistry,
+  kind: string,
+): ConstraintFenceReason | undefined {
+  return registry.compositionExistence(kind) === "required" ?
+      "edgeComposition"
+    : undefined;
+}
+
+/**
+ * WHICH constraint makes an edge write that can SEPARATE a part from its
+ * whole — a soft delete, a hard delete, or a stated window end — a
+ * constrained write: `assertCompositionExistencePreserved` refuses it while
+ * the part is live, judged from a part-row read no claim row backs. The
+ * restore twin is {@link nodeRestoreNeedsConstraintFence}. Only a composition
+ * edge kind realizing a required-existence part pays; every other detach
+ * decides nothing and stays unfenced.
+ */
+export function edgeDetachNeedsConstraintFence(
+  registry: KindRegistry,
+  edgeKind: string,
+): ConstraintFenceReason | undefined {
+  return compositionEdgeHasRequiredExistencePart(registry, edgeKind) ?
+      "edgeComposition"
+    : undefined;
 }
 
 /**
