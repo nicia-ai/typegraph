@@ -103,6 +103,18 @@ export const MISSING_PEER_LEDGER = [
     formats: ["import", "require"],
   },
   {
+    entrypoint: "./doltlite",
+    arm: "typed-refusal",
+    formats: ["import", "require"],
+  },
+  {
+    entrypoint: "./adapters/drizzle/doltlite",
+    arm: "documented-resolution-error",
+    formats: ["import", "require"],
+    reason: ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON,
+    documentedIn: ["apps/docs/src/content/docs/backend-setup.md"],
+  },
+  {
     entrypoint: "./adapters/drizzle/sqlite",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
@@ -189,20 +201,25 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
  * reach it only through {@link loadDrizzleBackedModule}.
  */
 export function isMissingDrizzlePeerError(error: unknown): boolean {
-  if (!isRecord(error)) return false;
+  const specifier = missingPeerSpecifier(error);
+  return (
+    specifier !== undefined && DRIZZLE_ORM_SPECIFIER_PATTERN.test(specifier)
+  );
+}
+
+function missingPeerSpecifier(error: unknown): string | undefined {
+  if (!isRecord(error)) return undefined;
 
   const code = error["code"];
   if (typeof code !== "string" || !MISSING_MODULE_ERROR_CODES.has(code)) {
-    return false;
+    return undefined;
   }
 
   const message = error["message"];
-  if (typeof message !== "string") return false;
+  if (typeof message !== "string") return undefined;
 
   const specifier = MISSING_SPECIFIER_PATTERN.exec(message)?.[1];
-  if (specifier === undefined) return false;
-
-  return DRIZZLE_ORM_SPECIFIER_PATTERN.test(specifier);
+  return specifier;
 }
 
 /**
@@ -219,14 +236,15 @@ export function isMissingDrizzlePeerError(error: unknown): boolean {
 function missingDrizzlePeerError(
   entrypoint: string,
   cause: unknown,
+  peer = MISSING_PEER_PACKAGE,
 ): ConfigurationError {
   const packageSpecifier = `@nicia-ai/typegraph${entrypoint.slice(1)}`;
-  const suggestion = `Run \`${MISSING_PEER_INSTALL_COMMAND}\`.`;
+  const suggestion = `Run \`${peer === MISSING_PEER_PACKAGE ? MISSING_PEER_INSTALL_COMMAND : `npm install ${peer}`}\`.`;
   return new ConfigurationError(
-    `${packageSpecifier} requires the optional peer dependency "${MISSING_PEER_PACKAGE}", which is not installed. ${suggestion}`,
+    `${packageSpecifier} requires the optional peer dependency "${peer}", which is not installed. ${suggestion}`,
     {
       code: "MISSING_PEER_DEPENDENCY",
-      package: MISSING_PEER_PACKAGE,
+      package: peer,
       entrypoint,
     },
     { cause, suggestion },
@@ -247,12 +265,17 @@ function missingDrizzlePeerError(
 export async function loadDrizzleBackedModule<T>(
   entrypoint: string,
   load: () => Promise<T>,
+  additionalPeers: readonly string[] = [],
 ): Promise<T> {
   try {
     return await load();
   } catch (error) {
     if (isMissingDrizzlePeerError(error)) {
       throw missingDrizzlePeerError(entrypoint, error);
+    }
+    const peer = missingPeerSpecifier(error);
+    if (peer !== undefined && additionalPeers.includes(peer)) {
+      throw missingDrizzlePeerError(entrypoint, error, peer);
     }
     throw error;
   }

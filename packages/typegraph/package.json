@@ -7,6 +7,16 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./doltlite": {
+      "types": "./dist/backend/doltlite/store.d.ts",
+      "import": "./dist/backend/doltlite/store.js",
+      "require": "./dist/backend/doltlite/store.cjs"
+    },
+    "./adapters/drizzle/doltlite": {
+      "types": "./dist/backend/doltlite/index.d.ts",
+      "import": "./dist/backend/doltlite/index.js",
+      "require": "./dist/backend/doltlite/index.cjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
@@ -143,6 +153,10 @@
     "bench:perf:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks perf:postgres",
     "test:postgres": "./scripts/test-postgres.sh",
     "test:do": "vitest run --config vitest.workers.config.ts",
+    "test:doltlite": "vitest run --config vitest.doltlite.config.ts",
+    "test:doltlite:merge": "TYPEGRAPH_TEST_BACKEND=doltlite vitest run --config vitest.doltlite-merge.config.ts",
+    "smoke:doltlite": "node --import tsx scripts/doltlite-smoke.ts",
+    "build:doltlite-binding": "bash scripts/build-doltlite-binding.sh",
     "test:coverage": "vitest run --coverage",
     "test:coverage:merge": "vitest run --merge-reports=.vitest-reports --coverage",
     "test:mutation": "stryker run",
@@ -177,6 +191,7 @@
     "node": ">=22"
   },
   "peerDependencies": {
+    "@dolthub/doltlite": ">=0.51.1 <0.52.0",
     "@electric-sql/pglite": ">=0.5.0 <0.6.0",
     "@electric-sql/pglite-pgvector": ">=0.0.2 <1.0.0",
     "@libsql/client": ">=0.6.0",
@@ -188,6 +203,9 @@
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@dolthub/doltlite": {
+      "optional": true
+    },
     "@electric-sql/pglite": {
       "optional": true
     },
@@ -218,6 +236,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@dolthub/doltlite": "0.51.1",
     "@electric-sql/pglite": "^0.5.8",
     "@electric-sql/pglite-pgvector": "^0.0.9",
     "@libsql/client": "^0.18.0",
@@ -234,6 +253,7 @@
     "eslint": "^10.11.0",
     "fast-check": "^4.10.2",
     "libsql-client-017": "npm:@libsql/client@^0.17.4",
+    "node-gyp": "12.4.0",
     "pg": "^8.23.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",

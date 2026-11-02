@@ -1,0 +1,192 @@
+diff --git a/binding.gyp b/binding.gyp
+index 359cda9..6d80aa9 100644
+--- a/binding.gyp
++++ b/binding.gyp
+@@ -23,7 +23,9 @@
+         "SQLITE_ENABLE_JSON1",
+         "SQLITE_ENABLE_RTREE",
+         "SQLITE_ENABLE_COLUMN_METADATA",
++        "SQLITE_ENABLE_MATH_FUNCTIONS",
+         "DOLTLITE_PROLLY=1",
++        "DOLTLITE_VEC1=1",
+         "BLAKE3_NO_SSE41=1",
+         "BLAKE3_NO_AVX2=1",
+         "BLAKE3_NO_AVX512=1"
+diff --git a/index.d.ts b/index.d.ts
+index 767f276..8cba775 100644
+--- a/index.d.ts
++++ b/index.d.ts
+@@ -14,6 +14,14 @@
+  */
+ export function binPath(): string
+ 
++export interface SQLiteError extends Error {
++  code: "ERR_SQLITE_ERROR"
++  /** Extended SQLite result code, matching node:sqlite. */
++  errcode: number
++  errstr: string
++  operation?: string
++}
++
+ export interface ColumnInfo {
+   name: string | null
+   column: string | null
+diff --git a/src/database.cpp b/src/database.cpp
+index 1537104..74539bd 100644
+--- a/src/database.cpp
++++ b/src/database.cpp
+@@ -48,9 +48,9 @@ Database::Database(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Database>(
+   std::string openPath = SqliteOpenPath(path);
+   int rc = sqlite3_open_v2(openPath.c_str(), &db_, flags, nullptr);
+   if (rc != SQLITE_OK) {
+-    std::string msg = db_ ? sqlite3_errmsg(db_) : "Failed to open database";
++    if (db_) ThrowSQLiteError(env, db_, "open");
++    else Napi::Error::New(env, "Failed to open database").ThrowAsJavaScriptException();
+     if (db_) { sqlite3_close(db_); db_ = nullptr; }
+-    Napi::Error::New(env, msg).ThrowAsJavaScriptException();
+     return;
+   }
+   if (path != ":memory:") path_ = path;
+@@ -85,9 +85,9 @@ Napi::Value Database::Open(const Napi::CallbackInfo& info) {
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI,
+                            nullptr);
+   if (rc != SQLITE_OK) {
+-    std::string msg = db_ ? sqlite3_errmsg(db_) : "Failed to open database";
++    if (db_) ThrowSQLiteError(env, db_, "open");
++    else Napi::Error::New(env, "Failed to open database").ThrowAsJavaScriptException();
+     if (db_) { sqlite3_close(db_); db_ = nullptr; }
+-    Napi::Error::New(env, msg).ThrowAsJavaScriptException();
+   }
+   if (rc == SQLITE_OK && path != ":memory:") path_ = path;
+   return env.Undefined();
+@@ -110,9 +110,8 @@ Napi::Value Database::Exec(const Napi::CallbackInfo& info) {
+   char* errmsg = nullptr;
+   int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
+   if (rc != SQLITE_OK) {
+-    std::string msg = errmsg ? errmsg : "exec failed";
++    ThrowSQLiteError(env, db_, "exec");
+     sqlite3_free(errmsg);
+-    Napi::Error::New(env, msg).ThrowAsJavaScriptException();
+   }
+   return env.Undefined();
+ }
+diff --git a/src/statement.cpp b/src/statement.cpp
+index 8474344..a2731f3 100644
+--- a/src/statement.cpp
++++ b/src/statement.cpp
+@@ -43,11 +43,12 @@ Napi::Value Statement::Run(const Napi::CallbackInfo& info) {
+                 allowUnknownNamedParameters_)) return env.Undefined();
+ 
+   int rc = sqlite3_step(stmt_);
+-  sqlite3_reset(stmt_);
+-
+   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+-    ThrowSQLiteError(env, db_->Handle(), "run"); return env.Undefined();
++    ThrowSQLiteError(env, db_->Handle(), "run");
++    sqlite3_reset(stmt_);
++    return env.Undefined();
+   }
++  sqlite3_reset(stmt_);
+ 
+   auto result = Napi::Object::New(env);
+   result.Set("changes", Napi::Number::New(env, sqlite3_changes(db_->Handle())));
+@@ -89,8 +90,8 @@ Napi::Value Statement::All(const Napi::CallbackInfo& info) {
+   while ((rc = sqlite3_step(stmt_)) == SQLITE_ROW)
+     result.Set(idx++, returnArrays_ ? (Napi::Value)RowToArray(env, stmt_, readBigInts_)
+                                     : (Napi::Value)RowToObject(env, stmt_, readBigInts_));
+-  sqlite3_reset(stmt_);
+   if (rc != SQLITE_DONE) ThrowSQLiteError(env, db_->Handle(), "all");
++  sqlite3_reset(stmt_);
+   return result;
+ }
+ 
+diff --git a/src/util.h b/src/util.h
+index 99ddd3b..dd5284b 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -140,8 +140,11 @@ inline bool BindArgs(Napi::Env env, sqlite3_stmt* stmt,
+ 
+ // Throws a SQLite error as a JS Error.
+ inline void ThrowSQLiteError(Napi::Env env, sqlite3* db, const char* context = nullptr) {
+-  std::string msg;
+-  if (context) { msg += context; msg += ": "; }
+-  msg += sqlite3_errmsg(db);
+-  Napi::Error::New(env, msg).ThrowAsJavaScriptException();
++  const int code = sqlite3_extended_errcode(db);
++  auto error = Napi::Error::New(env, sqlite3_errmsg(db));
++  error.Set("code", "ERR_SQLITE_ERROR");
++  error.Set("errcode", Napi::Number::New(env, code));
++  error.Set("errstr", sqlite3_errstr(code));
++  if (context) error.Set("operation", context);
++  error.ThrowAsJavaScriptException();
+ }
+diff --git a/test/errors.test.cjs b/test/errors.test.cjs
+new file mode 100644
+index 0000000..8e59041
+--- /dev/null
++++ b/test/errors.test.cjs
+@@ -0,0 +1,64 @@
++const assert = require('node:assert/strict');
++const { test } = require('node:test');
++const { mkdtempSync, rmSync } = require('node:fs');
++const { tmpdir } = require('node:os');
++const path = require('node:path');
++const { DatabaseSync } = require('..');
++
++function expectSqliteError(run, errcode, message) {
++  assert.throws(run, error => {
++    assert.equal(error.code, 'ERR_SQLITE_ERROR');
++    assert.equal(error.errcode, errcode);
++    assert.equal(typeof error.errstr, 'string');
++    assert.equal(error.message, message);
++    return true;
++  });
++}
++
++test('preserves engine messages and extended codes from every statement entry point', () => {
++  const db = new DatabaseSync(':memory:');
++  try {
++    db.exec('CREATE TABLE p(id TEXT PRIMARY KEY, name TEXT UNIQUE, required TEXT NOT NULL); INSERT INTO p VALUES (\'one\',\'one\',\'yes\')');
++    const sql = "INSERT INTO p VALUES ('one','other','yes') RETURNING id";
++    expectSqliteError(() => db.exec(sql), 1555, 'UNIQUE constraint failed: p.id');
++    for (const method of ['run', 'get', 'all', 'iterate']) {
++      const statement = db.prepare(sql);
++      expectSqliteError(() => [...(method === 'iterate' ? statement.iterate() : [statement[method]()])], 1555, 'UNIQUE constraint failed: p.id');
++      expectSqliteError(() => statement[method](), 1555, 'UNIQUE constraint failed: p.id');
++    }
++    expectSqliteError(() => db.exec("INSERT INTO p VALUES ('two','one','yes')"), 2067, 'UNIQUE constraint failed: p.name');
++    expectSqliteError(() => db.exec("INSERT INTO p VALUES ('two','two',NULL)"), 1299, 'NOT NULL constraint failed: p.required');
++    expectSqliteError(() => db.prepare('SELECT * FROM missing_table'), 1, 'no such table: missing_table');
++  } finally { db.close(); }
++});
++
++test('distinguishes writer contention from stale read snapshots', () => {
++  const directory = mkdtempSync(path.join(tmpdir(), 'doltlite-errors-'));
++  const filename = path.join(directory, 'test.db');
++  const first = new DatabaseSync(filename);
++  const second = new DatabaseSync(filename);
++  try {
++    first.exec('PRAGMA busy_timeout=0; CREATE TABLE p(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO p VALUES (1,0)');
++    second.exec('PRAGMA busy_timeout=0');
++    first.exec('BEGIN IMMEDIATE');
++    expectSqliteError(() => second.exec('UPDATE p SET value=1'), 5, 'database is locked');
++    first.exec('ROLLBACK; BEGIN');
++    first.prepare('SELECT * FROM p').all();
++    second.exec('UPDATE p SET value=1');
++    expectSqliteError(() => first.prepare('UPDATE p SET value=2').run(), 517, 'database is locked');
++    first.exec('ROLLBACK');
++  } finally {
++    if (first.inTransaction) first.exec('ROLLBACK');
++    if (second.inTransaction) second.exec('ROLLBACK');
++    first.close(); second.close(); rmSync(directory, {recursive:true,force:true});
++  }
++});
++
++test('bundles vec1 distance functions and SQLite math functions', () => {
++  const db = new DatabaseSync(':memory:');
++  try {
++    const zero = new Uint8Array(new Float32Array([0, 0]).buffer);
++    const other = new Uint8Array(new Float32Array([3, 4]).buffer);
++    assert.equal(db.prepare('SELECT sqrt(vec1_l2_distance(?,?)) AS value').get(zero, other).value, 5);
++  } finally { db.close(); }
++});

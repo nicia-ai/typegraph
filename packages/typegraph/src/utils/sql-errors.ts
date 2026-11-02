@@ -45,11 +45,25 @@ const SQLITE_STALE_SNAPSHOT_EXTENDED_CODE = 517;
 
 /** A SQLite writer-slot wait failure, excluding stale DEFERRED snapshots. */
 export function isSqliteWriterSlotBusy(error: unknown): boolean {
+  if (isSqliteStaleSnapshotError(error)) return false;
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     const code: unknown = Reflect.get(link, "code");
     if (code === SQLITE_STALE_SNAPSHOT_CODE) return false;
     if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+    if (
+      SQLITE_EXTENDED_CODE_FIELDS.some((field) => {
+        const value: unknown = Reflect.get(link, field);
+        if (
+          typeof value !== "number" ||
+          !Number.isSafeInteger(value) ||
+          value < 0
+        )
+          return false;
+        return (value & 0xff) === 5 || (value & 0xff) === 6;
+      })
+    )
+      return true;
   }
   return false;
 }
@@ -383,7 +397,11 @@ const SQLITE_UNIQUE_VIOLATION_CODE = "SQLITE_CONSTRAINT_UNIQUE";
 const SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE = 2067;
 const SQLITE_NOT_NULL_VIOLATION_CODE = "SQLITE_CONSTRAINT_NOTNULL";
 const SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE = 1299;
-const SQLITE_EXTENDED_CODE_FIELDS = ["rawCode", "extendedCode"] as const;
+const SQLITE_EXTENDED_CODE_FIELDS = [
+  "rawCode",
+  "extendedCode",
+  "errcode",
+] as const;
 
 /**
  * A relation plus the names its PRIMARY KEY constraint can carry — how far a

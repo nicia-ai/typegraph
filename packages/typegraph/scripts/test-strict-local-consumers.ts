@@ -79,6 +79,7 @@ export const FIXTURE_PLAN: readonly FixturePlanEntry[] = [
  * (design §4.4c step 5).
  */
 export const TYPED_REFUSAL_FACTORIES: Readonly<Record<string, string>> = {
+  "./doltlite": "createDoltliteStore",
   "./sqlite/local": "createLocalSqliteStore",
   "./postgres/pglite": "createLocalPgliteStore",
 };

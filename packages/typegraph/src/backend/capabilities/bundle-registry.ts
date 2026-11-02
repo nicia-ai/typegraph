@@ -933,8 +933,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   bootstrapTables: {
     kind: "reasoned",
     reason:
-      "One-shot provisioning hook consulted by createStore and the managed libSQL legacy fallback before any capability question exists; it has no operation that could refuse or degrade.",
-    accesses: 4,
+      "One-shot provisioning hook consulted by createStore, the managed libSQL legacy fallback, and the managed DoltLite factory before any capability question exists; it has no operation that could refuse or degrade.",
+    accesses: 5,
   },
   tableNames: {
     kind: "reasoned",

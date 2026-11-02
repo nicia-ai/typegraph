@@ -460,6 +460,11 @@ const DRIZZLE_ADAPTER_IMPLEMENTATION_REASON =
  */
 export const DRIZZLE_ZONE = [
   {
+    file: "src/backend/drizzle/doltlite-connection.ts",
+    reason:
+      "the typed DoltLite connection transport constructs its Drizzle facade",
+  },
+  {
     file: "src/backend/drizzle/columns/fulltext.ts",
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },

@@ -83,6 +83,12 @@ type InventoryEntry = Readonly<{
 
 const INVENTORY: readonly InventoryEntry[] = [
   {
+    file: "backend/doltlite/index.ts",
+    line: "const backend = wrapWithManagedClose(",
+    reason:
+      "The managed DoltLite factory owns its native connection, so closing the derived backend closes that connection once while preserving transaction and serialized-resource provenance.",
+  },
+  {
     file: "store/execution-lifetime.ts",
     line: "const backend = deriveBackend(sourceBackend, guardedMembers as T);",
     reason:

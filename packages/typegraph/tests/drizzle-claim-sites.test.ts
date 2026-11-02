@@ -119,7 +119,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "packages/typegraph/type-smoke/strict-local-consumers.ts",
-    line: 126,
+    line: 127,
     text:
       "// declaration graph must remain " +
       CLAIM_WORD +
