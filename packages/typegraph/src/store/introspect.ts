@@ -50,8 +50,10 @@ import {
   type CompositionPartSide,
   compositionRelationFields,
 } from "../registry/composition-relation";
+import { type KindRegistry } from "../registry/kind-registry";
 import { serializeSchemaProperties } from "../schema/serializer";
 import { type JsonSchema } from "../schema/types";
+import { edgeKindIsInAcyclicRelation } from "./acyclicity";
 
 export type SchemaIntrospection = Readonly<{
   graphId: string;
@@ -100,10 +102,13 @@ export type EdgeIntrospection = Readonly<{
   targetCardinality: TargetCardinality;
   endpointExistence: EndpointExistence;
   /**
-   * Whether this edge kind's live relation is enforced as a DAG. Required
-   * (never optional): introspection reports the RESOLVED value, not the
-   * declaration's sparse form — see `SerializedEdgeDef.acyclic`'s docblock
-   * for why the declaration itself is emit-when-true only.
+   * Whether this edge kind's rows are enforced acyclic: declared
+   * `acyclic: true`, or a composition-realizing kind (a `partOf`/`hasPart`
+   * `via`), which the composition relation enforces acyclic across every
+   * realizing kind together. Required (never optional): introspection reports
+   * the RESOLVED value, not the declaration's sparse form — see
+   * `SerializedEdgeDef.acyclic`'s docblock for why the declaration itself is
+   * emit-when-true only.
    */
   acyclic: boolean;
   properties: JsonSchema;
@@ -133,6 +138,7 @@ export type UniqueIntrospection = Readonly<{
 
 type IntrospectContext = Readonly<{
   graphId: string;
+  registry: KindRegistry;
   schemaVersion: number | undefined;
   schemaHash: string | undefined;
 }>;
@@ -184,7 +190,7 @@ export function introspectSchema<G extends GraphDef>(
       cardinality: reg.cardinality ?? "many",
       targetCardinality: effectiveTargetCardinality(reg.targetCardinality),
       endpointExistence: reg.endpointExistence ?? "notDeleted",
-      acyclic: reg.acyclic ?? false,
+      acyclic: edgeKindIsInAcyclicRelation(graph, context.registry, name),
       properties: serializeSchemaProperties(edgeType.schema),
       annotations: edgeType.annotations,
       deprecated: deprecated.has(name),

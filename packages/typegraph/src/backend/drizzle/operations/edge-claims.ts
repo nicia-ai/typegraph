@@ -1,6 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import { sql as fragmentSql } from "../../../query/sql-fragment";
+import { type RowMembership } from "../../../registry/row-membership";
 import {
   axisRowMembership,
   edgeCardinalityAxisName,
@@ -8,7 +9,6 @@ import {
   edgeCardinalityClaimTarget,
   type EdgeCardinalitySpec,
   edgeCardinalitySpec,
-  type RowMembership,
 } from "../../../store/claims/edge-claims";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
@@ -436,6 +436,17 @@ export function partEndpoint<From, To>(
  * rule — an `"openRows"` population additionally requires an open validity
  * window. Rendered for the outer row and for the correlated peer from the
  * same ternary, so the two sides of one statement cannot disagree.
+ *
+ * The second of the rule's two SQL renderings, beside
+ * `compileEdgeMembershipFilters` (`src/query/compiler/temporal.ts`), and
+ * deliberately not routed through it: that one renders a relation of several
+ * edge kinds — a per-kind guard on each `"openRows"` kind, its own
+ * `deleted_at` term, a read coordinate's instant and recorded narrowing — as
+ * TypeGraph SQL fragments, while this one renders one axis's population, whose
+ * statement already pins the edge kind and the `deleted_at` term, as a Drizzle
+ * fragment over the backend's own table objects on the claim hot path. Both
+ * read the same {@link RowMembership} value, so neither can choose its own
+ * rule.
  */
 export function holderLivenessTerm(
   membership: RowMembership,

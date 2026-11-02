@@ -322,7 +322,7 @@ export function buildStandardTraversalCte(
   const nodeKinds = traversal.nodeKinds;
   const nodeKindFilter = compileKindFilter(sql.raw("n.kind"), nodeKinds);
 
-  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const edgeRowFilter = temporalFilterPass.forTraversalEdges(traversal, "e");
   const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   const nodeCteContext: PredicateCompilerContext = {
@@ -346,7 +346,7 @@ export function buildStandardTraversalCte(
   const baseWhereClauses = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
-    edgeTemporalFilter,
+    edgeRowFilter,
     nodeTemporalFilter,
     ...nodePredicateClauses,
     ...edgePredicateClauses,

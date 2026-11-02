@@ -180,7 +180,7 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
     line: "return sql`WITH RECURSIVE reachable(id, kind) AS (${prepared.baseCase} UNION ${recursiveCase})`;",
     site: "H",
     reason:
-      "buildExhaustiveDirectedReachableCte compiles the composition closure subgraph({ composition: true }) reads as a SET-SEMANTICS walk: `UNION` over an (id, kind) frontier, bounded by its visited set with no hop ceiling, because a truncated prefix of a part tree is not an owned unit. Shares every row filter with the hop-bounded builders via prepareReachableFilters.",
+      "buildExhaustiveDirectedReachableCte compiles the composition closure subgraph({ composition: true }) reads as a SET-SEMANTICS walk: `UNION` over an (id, kind) frontier, bounded by its visited set with no hop ceiling, because a truncated prefix of a part tree is not an owned unit. Shares its node and kind filters with the hop-bounded builders via prepareReachableFilters, and reads its edge rows by composition membership rather than the read's validity window.",
   },
   {
     file: "identity/service-read.ts",

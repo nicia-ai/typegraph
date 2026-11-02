@@ -1169,6 +1169,43 @@ export function registerCompositionNavigationIntegrationTests(
       );
     });
 
+    it("subgraph({ composition: { via } }) refuses exactly the via parts() refuses", async () => {
+      const store = await context.createStore(compositionViaGraph);
+      const { podcast, episode, segment } =
+        await seedCompositionViaFixtures(store);
+
+      // MUTATION CHECK: validate `via` against
+      // `registry.compositionEdgeKindsUnder(root.kind)` in
+      // `resolveSubgraphCompositionEdgeKinds` (src/store/subgraph.ts), as it
+      // once did, and this read silently returns the podcast alone instead of
+      // refusing — `vnSegmentOf` is under the podcast transitively but
+      // realizes no pair at it, so the one-edge walk from the root reads
+      // nothing — verified and reverted.
+      await expect(
+        store.subgraph(podcast, {
+          edges: [],
+          composition: { via: vnSegmentOf },
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "COMPOSITION_VIA_NOT_DECLARED",
+            via: "vnSegmentOf",
+            rootKind: "VnPodcast",
+            declaredVia: ["vnEpisodeOf", "vnTrailerOf"],
+          }),
+        }),
+      );
+
+      const viaSegments = await store.subgraph(episode, {
+        edges: [],
+        composition: { via: vnSegmentOf },
+      });
+      expect(new Set(viaSegments.nodes.map((node) => node.id))).toEqual(
+        new Set([episode.id, segment.id]),
+      );
+    });
+
     it("parts() refuses when the derived edge alias collides with an existing traversal", async () => {
       const store = await context.createStore(compositionNavigationGraph);
       await seedCompositionFixtures(store);
@@ -1644,7 +1681,10 @@ export function registerCompositionNavigationIntegrationTests(
       const { podcast } = await seedCompositionFixtures(store);
       // The batch builder's options type admits no `composition`; only a
       // JavaScript caller can reach this refusal, so the options are
-      // untyped here.
+      // untyped here. MUTATION CHECK: drop the `"batchOnce.subgraph"`
+      // composition refusal from `buildSubgraphPlan` (src/store/subgraph.ts)
+      // and both batches resolve, the one-statement read silently ignoring
+      // `composition` — verified and reverted.
       const compositionSelections: readonly unknown[] = [
         true,
         { via: "cnEpisodeOf" },
@@ -1668,6 +1708,18 @@ export function registerCompositionNavigationIntegrationTests(
           }),
         );
         expect(statements).toEqual([]);
+
+        await expect(
+          store.transaction((tx) =>
+            tx.batchOnce((read) => [read.subgraph(podcast, options)]),
+          ),
+        ).rejects.toThrow(
+          expect.objectContaining({
+            details: matchingObject({
+              code: "SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED",
+            }),
+          }),
+        );
       }
     });
 

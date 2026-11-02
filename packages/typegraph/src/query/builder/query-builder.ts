@@ -27,8 +27,10 @@ import {
 import { ConfigurationError, KindNotFoundError } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
 import {
+  compositionEdgeKindMembers,
   compositionReadersTowards,
   compositionViaKind,
+  compositionViaReach,
   type CompositionViaRef,
   partitionCompositionEdgeKindsByDirection,
 } from "../../registry/composition-relation";
@@ -1168,8 +1170,10 @@ export class QueryBuilder<
       );
     }
 
-    const { edgeKindsFrom, targetKindsFrom, targetKindsFromVia } =
-      compositionReadersTowards(registry, relation);
+    const { edgeKindsFrom, targetKindsFrom } = compositionReadersTowards(
+      registry,
+      relation,
+    );
 
     const edgeKinds = new Set<string>();
     for (const kind of sourceKinds) {
@@ -1183,36 +1187,31 @@ export class QueryBuilder<
     // kinds, subclasses of every declared endpoint included, so a live row
     // whose kind is an undeclared subclass of a declared target is returned
     // rather than silently dropped.
+    const viaReach =
+      viaKind === undefined ? undefined : (
+        compositionViaReach(registry, relation, sourceKinds, viaKind)
+      );
+    if (viaReach?.realized === false) {
+      throw new ConfigurationError(
+        `.${relation}("${nodeAlias}") via "${viaKind}" realizes no composition pair for alias "${fromAlias}".`,
+        {
+          code: "COMPOSITION_VIA_NOT_DECLARED",
+          relation,
+          alias: fromAlias,
+          via: viaKind,
+          declaredVia: viaReach.declaredVia,
+        },
+        {
+          suggestion: `Pass via naming one of the declared realizing edges, or omit it to walk every composition edge of this alias.`,
+        },
+      );
+    }
     const targetKinds = new Set(
-      sourceKinds.flatMap((kind) =>
-        viaKind === undefined ?
-          targetKindsFrom(kind)
-        : targetKindsFromVia(kind, viaKind),
-      ),
+      viaReach === undefined ?
+        sourceKinds.flatMap((kind) => targetKindsFrom(kind))
+      : viaReach.targetKinds,
     );
     if (viaKind !== undefined) {
-      if (targetKinds.size === 0) {
-        const declaredVia = [...edgeKinds]
-          .filter((edgeKind) =>
-            sourceKinds.some(
-              (kind) => targetKindsFromVia(kind, edgeKind).length > 0,
-            ),
-          )
-          .toSorted();
-        throw new ConfigurationError(
-          `.${relation}("${nodeAlias}") via "${viaKind}" realizes no composition pair for alias "${fromAlias}".`,
-          {
-            code: "COMPOSITION_VIA_NOT_DECLARED",
-            relation,
-            alias: fromAlias,
-            via: viaKind,
-            declaredVia,
-          },
-          {
-            suggestion: `Pass via naming one of the declared realizing edges, or omit it to walk every composition edge of this alias.`,
-          },
-        );
-      }
       edgeKinds.clear();
       edgeKinds.add(viaKind);
     }
@@ -1312,6 +1311,9 @@ export class QueryBuilder<
       EXHAUSTIVE_VARIABLE_LENGTH_STATE,
       undefined, // pendingEdgePredicates — default
       false,
+      // A composition walk follows the rows that bind a part to its whole,
+      // the same membership the cascade deletes by, not the read's window.
+      compositionEdgeKindMembers(registry, edgeKinds),
     );
 
     // Sorted for deterministic output.

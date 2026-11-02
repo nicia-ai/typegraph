@@ -19,12 +19,12 @@ import { CompilerInvariantError, CompositionCycleError } from "../../errors";
 import {
   type CompositionPair,
   type CompositionPartSide,
+  compositionPopulationMembership,
   orientCompositionEndpoints,
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStringTuples } from "../../utils/compare";
 import { nodeRefKey } from "../../utils/tuple-key";
-import { compositionRowMembership } from "../claims/composition-claims";
 import { membershipCountsRow } from "../claims/edge-claims";
 import {
   fenceLockOnlyDecision,
@@ -114,7 +114,7 @@ export function cascadedPartReferences(
  * Whether one composition edge row still counts as a live membership under
  * its pair's declared whole-side population.
  *
- * {@link membershipCountsRow} under {@link compositionRowMembership}'s rule,
+ * {@link membershipCountsRow} under {@link compositionPopulationMembership}'s rule,
  * applied to a row already known non-deleted (every reader of this predicate
  * excludes deleted rows before calling it).
  *
@@ -129,10 +129,9 @@ export function compositionEdgeCounts(
   pair: Pick<CompositionPair, "partSide" | "population">,
   row: Pick<EdgeRow, "valid_to">,
 ): boolean {
-  return membershipCountsRow(
-    compositionRowMembership(pair.partSide, pair.population),
-    { validTo: row.valid_to },
-  );
+  return membershipCountsRow(compositionPopulationMembership(pair.population), {
+    validTo: row.valid_to,
+  });
 }
 
 type CascadeNode = Readonly<{ kind: string; id: string }>;

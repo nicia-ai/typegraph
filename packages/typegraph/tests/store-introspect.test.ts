@@ -128,6 +128,41 @@ describe("Store.introspect", () => {
     expect(edge?.acyclic).toBe(true);
   });
 
+  it("reports a composition-realizing edge kind as acyclic, and an ordinary one as not", async () => {
+    const Folder = defineNode("Folder", {
+      schema: z.object({ name: z.string() }),
+    });
+    const parentFolder = defineEdge("parentFolder", { schema: z.object({}) });
+    const links = defineEdge("links", { schema: z.object({}) });
+    const graph = defineGraph({
+      id: "introspect_composition_acyclic",
+      nodes: { Folder: { type: Folder } },
+      edges: {
+        parentFolder: {
+          type: parentFolder,
+          from: [Folder],
+          to: [Folder],
+          cardinality: "one",
+        },
+        links: { type: links, from: [Folder], to: [Folder] },
+      },
+      ontology: [
+        partOf(Folder, Folder, { via: parentFolder, partSide: "from" }),
+      ],
+    });
+    const [store] = await createStoreWithSchema(graph, createTestBackend());
+
+    // MUTATION CHECK: report `registration.acyclic ?? false` in
+    // `introspectSchema` (src/store/introspect.ts), as it once did, and the
+    // composition kind — which every write probes for cycles through the
+    // composition relation — reads `false` — verified and reverted.
+    const edges = new Map(
+      store.introspect().edges.map((edge) => [edge.name, edge.acyclic]),
+    );
+    expect(edges.get("parentFolder")).toBe(true);
+    expect(edges.get("links")).toBe(false);
+  });
+
   it("includes runtime ontology with origin: runtime", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);

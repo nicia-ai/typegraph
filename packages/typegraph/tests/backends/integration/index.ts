@@ -22,6 +22,7 @@ export { registerCompositionAttachmentIntegrationTests } from "./composition-att
 export { registerCompositionDeletePlanIntegrationTests } from "./composition-delete-plan";
 export { registerCompositionExistenceIntegrationTests } from "./composition-existence";
 export { registerCompositionFenceIntegrationTests } from "./composition-fence";
+export { registerCompositionMembershipReadIntegrationTests } from "./composition-membership-reads";
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
 export { registerCompositionTighteningIntegrationTests } from "./composition-tightening";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";

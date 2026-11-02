@@ -29,7 +29,6 @@ import {
   edgeCardinalityClaims,
   type EdgeCardinalityDeclarations,
   type EdgeClaimSubject,
-  type RowMembership,
   sortedByClaimTarget,
 } from "./edge-claims";
 
@@ -69,8 +68,9 @@ function compositionHolders(registry: KindRegistry): CompositionHolders {
  * `holderLiveness` with no new table: `edgeCardinalitySpec` already answers
  * both for every `(direction, cardinality)` pair, composition or not.
  *
- * The one owner of that mapping: {@link compositionRowMembership} reads its
- * rule through this function rather than re-spelling the orientation fold.
+ * Its `holderLiveness` is the composition rule `compositionPopulationMembership`
+ * (`src/registry/composition-relation.ts`) states for every other reader;
+ * `tests/composition-row-membership.test.ts` pins the two together.
  */
 function compositionAxisRef(
   partSide: CompositionPartSide,
@@ -79,25 +79,6 @@ function compositionAxisRef(
   return partSide === "from" ?
       { direction: "source", cardinality: population }
     : { direction: "target", cardinality: population };
-}
-
-/**
- * The membership rule of a composition row under this orientation and
- * population, for {@link membershipCountsRow}.
- *
- * `population: "one"` binds part and whole for the row's whole life, ended or
- * not (`"allRows"`). `population: "oneActive"` holds only while the window is
- * open (`"openRows"`): an ended row is the history a reparent leaves behind
- * and attaches nothing. Read off the composition axis's own
- * {@link axisRowMembership} rather than re-spelled, so the claim, the
- * cascade's closure and the acyclicity relation agree on which rows are in
- * the composition relation.
- */
-export function compositionRowMembership(
-  partSide: CompositionPartSide,
-  population: "one" | "oneActive",
-): RowMembership {
-  return axisRowMembership(compositionAxisRef(partSide, population));
 }
 
 /**

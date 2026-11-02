@@ -583,7 +583,7 @@ function compileRecursiveCte(
   const nodeKindFilter = compileKindFilter(nodeKinds, "n.kind");
 
   const startTemporalFilter = temporalFilterPass.forAlias("n0");
-  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const edgeRowFilter = temporalFilterPass.forTraversalEdges(traversal, "e");
   const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   // Start predicates (with cteColumnPrefix "" for raw n0 columns)
@@ -688,7 +688,7 @@ function compileRecursiveCte(
   const recursiveBaseWhereClauses: SqlFragment[] = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
-    edgeTemporalFilter,
+    edgeRowFilter,
     nodeTemporalFilter,
     ...(maxDepthCondition === undefined ? [] : [maxDepthCondition]),
     ...(stopExpression === undefined ?
@@ -851,7 +851,7 @@ function compileRecursiveCte(
     // only ever reads graph_id/kind (structural filters), the temporal
     // columns — including `recorded_from`/`recorded_to` on a recorded-pinned
     // read, which `temporalFilterPass.recordedColumns` is the one owner of,
-    // so that `edgeTemporalFilter`'s references to them below always have a
+    // so that `edgeRowFilter`'s references to them below always have a
     // column to read — and the four tg_source_*/tg_target_* aliases derived
     // below — UNLESS a predicate on this edge alias or the identity
     // frontier widening can reference an arbitrary column (e.g. `e.props`
@@ -882,12 +882,12 @@ function compileRecursiveCte(
         : sql``;
     }
 
-    // Both arms also filter on `e.graph_id` and on the edge temporal filter —
+    // Both arms also filter on `e.graph_id` and on the edge row filter —
     // not only the recursive term downstream — so this CTE normalizes just the
     // current graph's currently-visible edge versions of these kinds instead
     // of every graph's every version, which SQLite would MATERIALIZE and index
     // on every execution. The result is unchanged either way (the recursive
-    // term applies both again, and `edgeTemporalFilter` is row-local over
+    // term applies both again, and `edgeRowFilter` is row-local over
     // `e`'s own temporal columns); this only bounds what gets normalized
     // before those filters run.
     function compileDirectedEdgeArm(
@@ -902,7 +902,7 @@ function compileRecursiveCte(
           e.${sql.raw(columns.targetField)} AS tg_target_id,
           e.${sql.raw(columns.targetKindField)} AS tg_target_kind${armDirectionColumn(columns.joinField)}
         FROM ${ctx.schema.edgesTable} e
-        WHERE e.graph_id = ${graphId} AND ${compileKindFilter(edgeKinds, "e.kind")} AND ${edgeTemporalFilter}${
+        WHERE e.graph_id = ${graphId} AND ${compileKindFilter(edgeKinds, "e.kind")} AND ${edgeRowFilter}${
           duplicateGuard === undefined ? sql`` : sql` AND ${duplicateGuard}`
         }
       `;

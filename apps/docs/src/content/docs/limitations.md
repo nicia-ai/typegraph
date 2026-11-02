@@ -304,19 +304,24 @@ are not what happens:
   that already holds one of those nodes and waits on another can deadlock with
   it. See
   [Deadlocks between deletes and edge writes](#deadlocks-between-deletes-and-edge-writes-postgresql).
-- **`subgraph({ composition: true })` is an export, not a delete preview.**
-  [`store.subgraph(root, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier)
-  returns the owned unit as a read sees it, in the read's temporal mode
-  (current, unless the read is pinned). The cascade admits each composition
-  row by its pair's population instead. A composition row's window never
-  starts or ends later than its write, so an open-ended row is a membership
-  for both, and the two differ only in how they treat ENDED rows. The
-  cascade follows an ended `population: "one"` row, because a `one` binding
-  holds for the row's whole life, and a current read does not. It does not
-  follow an ended `population: "oneActive"` row, the history a `reparent`
-  leaves behind, and an `includeEnded` read does. So the export can name
-  fewer or more parts than a delete removes. To know what a delete will do,
-  use [`planDelete`](/ontology#previewing-a-delete).
+- **`subgraph({ composition: true })` follows the edges the cascade
+  follows, but is not a delete preview.**
+  [`store.subgraph(root, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
+  `parts()` and `wholes()` admit each composition EDGE by its pair's
+  population, exactly as the cascade does, not by the row's validity window:
+  an ended `population: "one"` row still binds its part, because a `one`
+  binding holds for the row's whole life, and an ended `population:
+  "oneActive"` row, the history a `reparent` leaves behind, does not.
+  `includeEnded` / `includeTombstones` do not widen that, and a pinned read
+  (`asOf`, `asOfRecorded`) follows the edges that bound at its instant. NODES
+  still follow the read's temporal filter at every hop, while the cascade
+  deletes every live part however its window stands: a part node whose own
+  validity window has ended (or not yet started) is not returned, and
+  neither is anything reachable only through it, although the delete removes
+  them. A read also takes no lock, so a write between the read and the
+  delete can change the answer. To know what a delete will do, and to delete
+  only if that still holds, use
+  [`planDelete`](/ontology#previewing-a-delete).
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`
@@ -325,9 +330,8 @@ instance depth. The same holds for the `subgraph({ composition: true })`
 export above: its composition closure has no hop ceiling and never returns a
 truncated unit — a part chain of any length comes back whole, and an engine
 that cuts the closure statement short refuses with a `ConfigurationError`
-(`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached
-(the read's temporal mode, described above, is what separates the export from
-the cascade). The write path refuses an INSTANCE-level cycle (the
+(`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached.
+The write path refuses an INSTANCE-level cycle (the
 composition union's acyclicity fence), so one only survives in rows written
 before the pair was declared, by trusted import, or by direct SQL; deleting
 any node in such a cycle throws `CompositionCycleError` (see
