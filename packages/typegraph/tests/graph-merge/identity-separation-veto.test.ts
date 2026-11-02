@@ -34,6 +34,7 @@ import { z } from "zod";
 import { branch } from "../../src/graph-merge/branch";
 import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import { merge, mergeIncremental } from "../../src/graph-merge/merge";
+import { COLLAPSED_ENDED_DIFFERENT_DROP_REASON } from "../../src/graph-merge/merge-identity";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 import { backendMatrix } from "./test-utils";
@@ -416,6 +417,164 @@ describe.each(backendMatrix())("identity separation veto [$name]", (entry) => {
         { kind: "Robot", id: "r1" },
       ),
     ).toBe(true);
+  });
+
+  /**
+   * Only a `different` that holds NOW separates. A branch that asserts and then
+   * retracts `different(alpha, beta)` no longer holds them apart, exactly as a
+   * retracted row in the target's ledger would not, so its match is neither
+   * dropped (scored) nor refused (definitional). The ended row's pair is one
+   * node after the fusion, so the row is dropped with a typed reason.
+   */
+  it("lets a scored match through once the branch retracted the different that held it apart", async () => {
+    const forkPoint = await makeSimilarityStore();
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const alpha = { kind: "Person", id: "alpha" } as const;
+    const beta = { kind: "Person", id: "beta" } as const;
+    const props = { name: "Ada", email: "ada@example.test" };
+    await source.store.nodes.Person.create(props, { id: "alpha" });
+    await source.store.nodes.Person.create(props, { id: "beta" });
+    const { assertion: retracted } =
+      await source.store.identity.assertDifferent(alpha, beta);
+    await source.store.identity.retractAssertion(retracted.id);
+    expect(await source.store.identity.areDifferent(alpha, beta)).toBe(false);
+
+    const result = await merge(forkPoint, [source], {
+      branchOrder: [BRANCH_A],
+      resolve: {
+        Person: {
+          ...ONE_BUCKET,
+          threshold: 0.5,
+          similarity: { kind: "custom", score: () => 1 },
+        },
+      },
+    });
+
+    if (isErr(result)) {
+      console.info("merge refused", result.error.code, result.error.message);
+      throw result.error;
+    }
+    console.info("identity conflicts", result.data.identityConflicts);
+    expect(result.data.identityConflicts).toEqual([]);
+    expect(result.data.resolutions).toEqual([
+      expect.objectContaining({ memberIds: ["alpha", "beta"] }),
+    ]);
+    expect(await livePersonIds(forkPoint)).toHaveLength(1);
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: retracted.id,
+      reason: COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
+    });
+  });
+
+  it("does not refuse a definitional match whose different the branch retracted", async () => {
+    const [forkPoint] = await createStoreWithSchema(
+      retypeGraph,
+      await makeBackend(),
+      { history: true },
+    );
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const person = { kind: "Person", id: "x" } as const;
+    const employee = { kind: "Employee", id: "x" } as const;
+    const props = { name: "X", email: "x@example.test" };
+    await source.store.nodes.Person.create(props, { id: "x" });
+    await source.store.nodes.Employee.create(props, { id: "x" });
+    const { assertion: retracted } =
+      await source.store.identity.assertDifferent(person, employee);
+    await source.store.identity.retractAssertion(retracted.id);
+
+    const result = await merge(forkPoint, [source], {
+      branchOrder: [BRANCH_A],
+      reconcileTypes: "ontology",
+    });
+
+    if (isErr(result)) {
+      console.info("merge refused", result.error.code, result.error.details);
+      throw result.error;
+    }
+    expect(result.data.identityConflicts).toEqual([]);
+    expect(await forkPoint.nodes.Employee.getById("x" as never)).toBeDefined();
+    expect(await forkPoint.nodes.Person.getById("x" as never)).toBeUndefined();
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: retracted.id,
+      reason: COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
+    });
+  });
+
+  /**
+   * The veto judges the target's ledger as it stands BEFORE the merge. Which
+   * staged retractions of target-held rows the merge applies is decided inside
+   * plan construction, after the veto's facts are captured, so a target-held
+   * `different` the branch retracts still separates for the veto: the scored
+   * match is dropped citing it, while the retraction itself lands.
+   */
+  it("still drops a scored match held apart by a target-held different the branch retracts", async () => {
+    const forkPoint = await makeSimilarityStore();
+    const a = { kind: "Person", id: "a" } as const;
+    const c = { kind: "Person", id: "c" } as const;
+    const n1 = { kind: "Person", id: "n1" } as const;
+    const n2 = { kind: "Person", id: "n2" } as const;
+    await forkPoint.nodes.Person.create(
+      { name: "A", email: "a@example.test" },
+      { id: "a" },
+    );
+    await forkPoint.nodes.Person.create(
+      { name: "C", email: "c@example.test" },
+      { id: "c" },
+    );
+    const { assertion: separation } = await forkPoint.identity.assertDifferent(
+      a,
+      c,
+    );
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await source.store.identity.retractAssertion(separation.id);
+    const props = { name: "Ada", email: "ada@example.test" };
+    await source.store.nodes.Person.create(props, { id: "n1" });
+    await source.store.nodes.Person.create(props, { id: "n2" });
+    await source.store.identity.assertSame(n1, a);
+    await source.store.identity.assertSame(n2, c);
+
+    const result = await merge(forkPoint, [source], {
+      branchOrder: [BRANCH_A],
+      resolve: {
+        Person: {
+          ...ONE_BUCKET,
+          threshold: 0.5,
+          similarity: {
+            kind: "custom",
+            score: (left, right) =>
+              (
+                [left.id as string, right.id as string].toSorted().join(",") ===
+                "n1,n2"
+              ) ?
+                1
+              : 0,
+          },
+        },
+      },
+    });
+
+    if (isErr(result)) throw result.error;
+    console.info("identity conflicts", result.data.identityConflicts);
+    expect(result.data.identityConflicts).toEqual([
+      {
+        kind: "separation",
+        a: n1,
+        b: n2,
+        assertionIds: [separation.id],
+        source: expect.anything() as unknown,
+      },
+    ]);
+    expect(result.data.resolutions).toEqual([]);
+    expect(await forkPoint.identity.areDifferent(a, c)).toBe(false);
   });
 
   /**

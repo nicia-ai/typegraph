@@ -41,8 +41,9 @@ import {
   identityReferenceKey,
   normalizeIdentityPair,
 } from "../identity/reference";
+import { isCurrentIdentityAssertion } from "../identity/validity-window";
 import { encodeTupleKey } from "../utils/tuple-key";
-import type { CanonicalEntity } from "./canonicalize";
+import { type CanonicalEntity, COMMITTED_TARGET_BRANCH } from "./canonicalize";
 import {
   BaseVersionMismatchError,
   describeCause,
@@ -105,6 +106,15 @@ export { DUPLICATE_IDENTITY_ASSERTION_DROP_REASON } from "./identity-three-way";
  */
 export const REDUNDANT_IDENTITY_ASSERTION_DROP_REASON =
   "identity:endpoints-collapsed";
+
+/**
+ * Reason recorded when node reconciliation fused both endpoints of a
+ * `different` assertion that no longer holds — retracted, or ended by deleting
+ * an endpoint. It forbade nothing, and its pair is now one node, so the
+ * history row has no pair left to describe.
+ */
+export const COLLAPSED_ENDED_DIFFERENT_DROP_REASON =
+  "identity:ended-different-collapsed";
 
 /** Reason recorded when endpoint remapping leaves no shared validity window. */
 export const EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON =
@@ -235,7 +245,7 @@ export function planIdentityChanges(
     const stored = storedIdentityRowsById.get(assertionId);
     if (
       stored !== undefined &&
-      stored.validTo === undefined &&
+      isCurrentIdentityAssertion(stored) &&
       assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
     ) {
       retractionDropped.push({
@@ -312,8 +322,11 @@ function resolveIdentityEndpoint(
  * `requireLiveEndpoints` guard would reject with a NodeNotFoundError, rolling back
  * the whole merge). After remapping it re-establishes the identity-pair invariants:
  * a `same` assertion whose endpoints collapse onto one survivor is redundant
- * and dropped (reported), while a collapsed `different` assertion is a typed
- * conflict; surviving endpoints are re-normalized into code-point order (the
+ * and dropped (reported), as is a collapsed `different` that no longer holds,
+ * while a collapsed CURRENT `different` assertion is a typed conflict. A row
+ * the target already holds with the staged truth is never reported dropped —
+ * it stays on the target untouched;
+ * surviving endpoints are re-normalized into code-point order (the
  * import path rejects a non-normalized pair), and assertions that now share a
  * semantic key are re-deduped by the same survivor rule
  * ({@link compareIdentitySurvivors}) that {@link planIdentityChanges} applied
@@ -347,17 +360,29 @@ export function remapIdentityAssertionEndpoints(
       canonicalOf,
       retypeMap,
     );
+    const stored = storedRowsById.get(assertion.id);
+    const committed =
+      stored !== undefined &&
+      assertionTruthKey(stored) === assertionTruthKey(assertion);
     if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
-      if (assertion.relation === "different") {
+      if (
+        assertion.relation === "different" &&
+        isCurrentIdentityAssertion(assertion)
+      ) {
         throw new IdentityMergeConflictError(
           "Node reconciliation collapsed a different-identity assertion onto one survivor.",
           { details: { assertion, survivor: remappedA } },
         );
       }
+      // A row the target already holds stays there as it is: the merge writes
+      // nothing for it, so reporting it dropped would contradict the target.
+      if (committed) continue;
       dropped.push(
         droppedIdentityAssertion(
           assertion,
-          REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
+          assertion.relation === "same" ?
+            REDUNDANT_IDENTITY_ASSERTION_DROP_REASON
+          : COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
         ),
       );
       continue;
@@ -388,6 +413,7 @@ export function remapIdentityAssertionEndpoints(
         undefined,
       );
     if (validTo !== undefined && compareCodePoints(validFrom, validTo) >= 0) {
+      if (committed) continue;
       dropped.push(
         droppedIdentityAssertion(
           assertion,
@@ -416,10 +442,8 @@ export function remapIdentityAssertionEndpoints(
     // moved endpoints could only end as a false one-truth refusal or —
     // worse, if the challenger won the dedupe — a report/ledger divergence.
     // Refuse early with the specific cause instead.
-    const stored = storedRowsById.get(assertion.id);
     if (
-      stored !== undefined &&
-      assertionTruthKey(stored) === assertionTruthKey(assertion) &&
+      committed &&
       assertionTruthKey(result) !== assertionTruthKey(assertion)
     ) {
       throw new IdentityMergeConflictError(
@@ -467,27 +491,55 @@ export function remapIdentityAssertionEndpoints(
  * and is (not) the same as another, a second says it is gone, and unlike the
  * delete/modify case there is no policy the caller can set to arbitrate.
  *
+ * Only an assertion that holds NOW conflicts with a deletion this merge
+ * applies from a branch. One that ended — retracted, or ended by the very
+ * deletion of its endpoint — claims nothing about the entity's present, and the
+ * commit lands it as history: an ended row needs only its endpoint ROWS, which
+ * the merge's soft delete keeps, and that delete lands at the merge instant,
+ * after the row ended.
+ *
+ * A deletion the incremental TARGET already holds is different: it landed at the
+ * target's own, earlier instant, or removed the row outright, so even an ended
+ * assertion over it cannot be written. Every assertion over such a node is
+ * refused, except a row the target itself already holds with the exact staged
+ * truth — the applier writes nothing for it.
+ *
  * `nodeDeletions` is keyed by the deleted node's own kind, while the assertions
  * arrive post-retype, so a retyped identity is checked in BOTH forms.
  */
 export function assertIdentityEndpointsNotDeleted(
   assertions: readonly IdentityTransferAssertion[],
   nodeDeletions: ReadonlyMap<MergeKey, string>,
+  stagedDeletions: StagingSet["deletedNodes"],
   retypeMap: ReadonlyMap<MergeKey, string>,
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
 ): void {
-  const deletedIdentities = new Set<MergeKey>();
-  for (const key of nodeDeletions.keys()) {
-    deletedIdentities.add(key);
-    const retyped = retypeMap.get(key);
-    if (retyped !== undefined) {
-      deletedIdentities.add(mergeKey(retyped, idOf(key)));
+  const withRetypedForms = (
+    keys: Iterable<MergeKey>,
+  ): ReadonlySet<MergeKey> => {
+    const identities = new Set<MergeKey>();
+    for (const key of keys) {
+      identities.add(key);
+      const retyped = retypeMap.get(key);
+      if (retyped !== undefined) identities.add(mergeKey(retyped, idOf(key)));
     }
-  }
+    return identities;
+  };
+  const deletedIdentities = withRetypedForms(nodeDeletions.keys());
+  const targetHeldDeletions = withRetypedForms(
+    stagedDeletions
+      .filter((staged) => staged.branchId === COMMITTED_TARGET_BRANCH)
+      .map((staged) => mergeKey(staged.node.kind, staged.node.id))
+      .filter((key) => nodeDeletions.has(key)),
+  );
+  const committedIds = committedIdentityIds(assertions, storedRowsById);
   for (const assertion of assertions) {
+    const current = isCurrentIdentityAssertion(assertion);
     for (const endpoint of [assertion.a, assertion.b]) {
-      if (!deletedIdentities.has(mergeKeyOf(endpoint))) {
-        continue;
-      }
+      const key = mergeKeyOf(endpoint);
+      if (!deletedIdentities.has(key)) continue;
+      if (!current && !targetHeldDeletions.has(key)) continue;
+      if (!current && committedIds.has(assertion.id)) continue;
       throw new IdentityMergeConflictError(
         "A branch asserted an identity relation over a node another branch deleted.",
         { details: { assertion, deletedEndpoint: endpoint } },
@@ -990,7 +1042,7 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
     const stored = storedById.get(retraction.id);
     if (
       stored !== undefined &&
-      stored.validTo === undefined &&
+      isCurrentIdentityAssertion(stored) &&
       assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
     ) {
       throw new BaseVersionMismatchError(

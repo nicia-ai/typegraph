@@ -12,7 +12,10 @@
  * forbids re-spelling.
  */
 import { identityAssertionSemanticKey } from "../identity/assertion-key";
-import { identityValidityWindowsOverlap } from "../identity/validity-window";
+import {
+  identityValidityWindowsOverlap,
+  isCurrentIdentityAssertion,
+} from "../identity/validity-window";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
@@ -163,14 +166,12 @@ function pairEndpointKey(
 }
 
 /**
- * One endpoint pair whose staged claims OPPOSE each other: the `same` side, the
- * `different` side, and the first pair of the two whose validity windows
- * actually overlap — the witness a refusal names.
+ * One endpoint pair whose staged claims OPPOSE each other: the first `same` and
+ * `different` of the pair whose validity windows actually overlap — the
+ * witness a refusal names.
  */
 type OpposingRelationGroup<T> = Readonly<{
   endpoint: string;
-  same: readonly T[];
-  different: readonly T[];
   overlap: Readonly<{ same: T; different: T }>;
 }>;
 
@@ -217,7 +218,7 @@ function opposingRelationGroups<T>(
     );
     const overlap = firstOverlappingOpposingPair(same, different, assertionOf);
     if (overlap === undefined) continue;
-    groups.push({ endpoint, same, different, overlap });
+    groups.push({ endpoint, overlap });
   }
   return groups;
 }
@@ -425,8 +426,8 @@ function assertNoStagedOpposingRelations(staging: StagingSet): void {
   );
   if (group === undefined) return;
   throw opposingRelationsConflictError(
-    requireDefined(group.same[0]).assertion,
-    requireDefined(group.different[0]).assertion,
+    group.overlap.same.assertion,
+    group.overlap.different.assertion,
     group.endpoint,
   );
 }
@@ -446,17 +447,23 @@ function assertNoStagedOpposingRelations(staging: StagingSet): void {
  *
  * A branch that retracts AND reasserts the same pair itself, with no other
  * branch disagreeing, is convergent, not a race.
+ *
+ * Only an assertion that holds NOW reasserts the pair. One that ended — or was
+ * written bounded — records history and leaves its branch's verdict on the
+ * pair's current truth to its retraction alone.
  */
 function assertNoRetractReassertRace(staging: StagingSet): void {
+  const reassertions = staging.newIdentityAssertions.filter((staged) =>
+    isCurrentIdentityAssertion(staged.assertion),
+  );
   const retractedBySemantic = groupBy(
     staging.retractedIdentityAssertions,
     (staged) => identitySemanticKey(staged.assertion),
   );
-  const reassertedBySemantic = groupBy(
-    staging.newIdentityAssertions,
-    (staged) => identitySemanticKey(staged.assertion),
+  const reassertedBySemantic = groupBy(reassertions, (staged) =>
+    identitySemanticKey(staged.assertion),
   );
-  for (const staged of staging.newIdentityAssertions) {
+  for (const staged of reassertions) {
     const retractions = (
       retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? []
     ).filter((candidate) => candidate.assertion.id !== staged.assertion.id);
