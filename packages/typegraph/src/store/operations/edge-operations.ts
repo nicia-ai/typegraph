@@ -4108,6 +4108,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           if (lock.coordination !== undefined) {
             assertGraphCommandConvergenceIsolation(
               target.commands,
+              ctx.graphId,
               lock.coordination,
             );
           }

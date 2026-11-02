@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertGraphCommandConvergenceIsolation,
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   graphCommandCoordinationIsolation,
@@ -274,5 +275,24 @@ describe("authoritative graph command contract", () => {
     expect(() => graphCommandExecutionContext("root", coordination)).toThrow(
       "root command",
     );
+  });
+
+  it("refuses convergence coordination acquired for another graph", () => {
+    const port: GraphCommandPort = {
+      session: "transaction",
+      execute: () => Promise.resolve(RESULT),
+    };
+    const coordination = mintGraphCommandCoordination(
+      port,
+      "graph-a",
+      "read_committed",
+    );
+
+    expect(() => {
+      assertGraphCommandConvergenceIsolation(port, "graph-a", coordination);
+    }).not.toThrow();
+    expect(() => {
+      assertGraphCommandConvergenceIsolation(port, "graph-b", coordination);
+    }).toThrow("Match-key convergence requires");
   });
 });
