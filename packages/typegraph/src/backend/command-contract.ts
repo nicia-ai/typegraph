@@ -109,12 +109,12 @@ export function normalizeGraphCommandIsolation(
 function boundGraphCommandCoordination(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
-  graphId?: string,
+  graphId: string,
 ) {
   const binding = graphCommandCoordinationBindings.get(coordination);
   return (
       binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
-        (graphId === undefined || binding.graphId === graphId)
+        binding.graphId === graphId
     ) ?
       binding
     : undefined;
@@ -140,10 +140,14 @@ export function graphCommandCoordinationIsolation(
  */
 export function assertGraphCommandConvergenceIsolation(
   port: GraphCommandPort,
+  graphId: string,
   coordination: GraphCommandCoordination,
 ): void {
-  const isolation =
-    boundGraphCommandCoordination(port, coordination)?.isolation ?? "unknown";
+  const isolation = graphCommandCoordinationIsolation(
+    port,
+    graphId,
+    coordination,
+  );
   if (isolation === "read_committed" || isolation === "serializable") return;
   throw new ConfigurationError(
     "Match-key convergence requires read-committed or serializable transaction isolation.",
@@ -380,7 +384,11 @@ export function executeAuthoritativeGraphCommand(
     if (command.kind === "edge.converge-create") {
       // Store and public helper callers are checked here before a custom port
       // can execute the convergence command.
-      assertGraphCommandConvergenceIsolation(port, coordination);
+      assertGraphCommandConvergenceIsolation(
+        port,
+        command.plan.params.graphId,
+        coordination,
+      );
     }
   }
   return port.execute(command, context).then((result) => {

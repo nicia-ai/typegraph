@@ -4530,6 +4530,7 @@ export function createCommonOperationBackend(
           // public authoritative-command helper.
           assertGraphCommandConvergenceIsolation(
             commandsPort,
+            command.plan.params.graphId,
             context.coordination,
           );
         }
