@@ -1,0 +1,328 @@
+{
+  "graphId": "schema_golden_document",
+  "annotations": { "domain": "library", "revision": 1 },
+  "version": 1,
+  "generatedAt": "2026-11-03T00:00:00.000Z",
+  "nodes": {
+    "GoldenLibrary": {
+      "kind": "GoldenLibrary",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "code": { "type": "string" }
+        },
+        "required": ["name", "code"],
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [
+        {
+          "name": "golden_library_name",
+          "fields": ["name"],
+          "scope": "kindWithSubClasses",
+          "collation": "binary"
+        },
+        {
+          "name": "golden_library_code",
+          "fields": ["code"],
+          "scope": "kind",
+          "collation": "caseInsensitive"
+        }
+      ],
+      "onDelete": "restrict",
+      "annotations": { "owner": "catalog" }
+    },
+    "GoldenShelf": {
+      "kind": "GoldenShelf",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": { "label": { "type": "string", "minLength": 1 } },
+        "required": ["label"],
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [],
+      "onDelete": "restrict"
+    },
+    "GoldenBook": {
+      "kind": "GoldenBook",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "isbn": { "type": "string" }
+        },
+        "required": ["title"],
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [
+        {
+          "name": "golden_book_isbn",
+          "fields": ["isbn"],
+          "where": "{\"field\":\"isbn\",\"op\":\"isNotNull\"}",
+          "scope": "kindWithSubClasses",
+          "collation": "binary"
+        }
+      ],
+      "onDelete": "restrict"
+    },
+    "GoldenRareBook": {
+      "kind": "GoldenRareBook",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "isbn": { "type": "string" },
+          "vault": { "type": "string" }
+        },
+        "required": ["title", "vault"],
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [],
+      "onDelete": "restrict"
+    },
+    "GoldenPatron": {
+      "kind": "GoldenPatron",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": { "email": { "type": "string" } },
+        "required": ["email"],
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [],
+      "onDelete": "restrict"
+    },
+    "GoldenLegacy": {
+      "kind": "GoldenLegacy",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [],
+      "onDelete": "restrict"
+    },
+    "GoldenSection": {
+      "kind": "GoldenSection",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [],
+      "onDelete": "restrict"
+    },
+    "GoldenArchive": {
+      "kind": "GoldenArchive",
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": { "box": { "type": "string" } },
+        "required": ["box"],
+        "additionalProperties": false
+      },
+      "uniqueConstraints": [
+        {
+          "name": "golden_archive_box",
+          "fields": ["box"],
+          "scope": "kind",
+          "collation": "binary"
+        }
+      ],
+      "onDelete": "restrict"
+    }
+  },
+  "edges": {
+    "goldenShelfIn": {
+      "kind": "goldenShelfIn",
+      "fromKinds": ["GoldenShelf"],
+      "toKinds": ["GoldenLibrary"],
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "cardinality": "one",
+      "endpointExistence": "notDeleted"
+    },
+    "goldenHolds": {
+      "kind": "goldenHolds",
+      "fromKinds": ["GoldenShelf"],
+      "toKinds": ["GoldenBook"],
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "cardinality": "many",
+      "targetCardinality": "oneActive",
+      "endpointExistence": "notDeleted"
+    },
+    "goldenCites": {
+      "kind": "goldenCites",
+      "fromKinds": ["GoldenBook"],
+      "toKinds": ["GoldenBook"],
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "cardinality": "many",
+      "endpointExistence": "currentlyValid",
+      "acyclic": true
+    },
+    "goldenNests": {
+      "kind": "goldenNests",
+      "fromKinds": ["GoldenSection"],
+      "toKinds": ["GoldenSection"],
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "cardinality": "one",
+      "endpointExistence": "notDeleted"
+    },
+    "goldenBorrows": {
+      "kind": "goldenBorrows",
+      "fromKinds": ["GoldenPatron"],
+      "toKinds": ["GoldenBook"],
+      "properties": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": { "loanCode": { "type": "string" } },
+        "required": ["loanCode"],
+        "additionalProperties": false
+      },
+      "cardinality": "many",
+      "endpointExistence": "notDeleted",
+      "matchIdentity": { "name": "golden-loan", "fields": ["loanCode"] }
+    }
+  },
+  "ontology": {
+    "metaEdges": {
+      "subClassOf": {
+        "name": "subClassOf",
+        "description": "Type inheritance (Podcast subClassOf Media)"
+      },
+      "disjointWith": {
+        "name": "disjointWith",
+        "description": "Mutually exclusive types"
+      },
+      "partOf": { "name": "partOf", "description": "X is part of Y" },
+      "hasPart": { "name": "hasPart", "description": "Y has part X" }
+    },
+    "relations": [
+      {
+        "metaEdge": "subClassOf",
+        "from": "GoldenRareBook",
+        "to": "GoldenBook"
+      },
+      {
+        "metaEdge": "disjointWith",
+        "from": "GoldenPatron",
+        "to": "GoldenBook"
+      },
+      {
+        "metaEdge": "partOf",
+        "from": "GoldenShelf",
+        "to": "GoldenLibrary",
+        "via": "goldenShelfIn",
+        "existence": "required"
+      },
+      {
+        "metaEdge": "hasPart",
+        "from": "GoldenShelf",
+        "to": "GoldenBook",
+        "via": "goldenHolds"
+      },
+      {
+        "metaEdge": "partOf",
+        "from": "GoldenSection",
+        "to": "GoldenSection",
+        "via": "goldenNests",
+        "partSide": "from"
+      }
+    ],
+    "closures": {
+      "subClassAncestors": { "GoldenRareBook": ["GoldenBook"] },
+      "subClassDescendants": { "GoldenBook": ["GoldenRareBook"] },
+      "broaderClosure": {},
+      "narrowerClosure": {},
+      "equivalenceSets": {},
+      "disjointPairs": [
+        "GoldenBook|GoldenPatron",
+        "GoldenPatron|GoldenRareBook"
+      ],
+      "partOfClosure": {
+        "GoldenShelf": ["GoldenLibrary"],
+        "GoldenLibrary": [],
+        "GoldenBook": ["GoldenShelf", "GoldenLibrary"],
+        "GoldenSection": ["GoldenSection"]
+      },
+      "hasPartClosure": {
+        "GoldenLibrary": ["GoldenShelf", "GoldenBook"],
+        "GoldenShelf": ["GoldenBook"],
+        "GoldenSection": ["GoldenSection"]
+      },
+      "iriToKind": {},
+      "edgeInverses": {},
+      "edgeImplicationsClosure": {},
+      "edgeImplyingClosure": {}
+    }
+  },
+  "defaults": { "onNodeDelete": "restrict", "temporalMode": "current" },
+  "identity": { "sameIdAcrossKinds": "ignore" },
+  "indexes": [
+    {
+      "entity": "node",
+      "kind": "GoldenBook",
+      "name": "idx_tg_node_goldenbook_title_1878ea1",
+      "fields": ["/title"],
+      "fieldValueTypes": ["string"],
+      "coveringFields": [],
+      "coveringFieldValueTypes": [],
+      "unique": false,
+      "scope": "graphAndKind"
+    },
+    {
+      "entity": "node",
+      "kind": "GoldenPatron",
+      "name": "idx_tg_node_goldenpatron_email_1jwim40",
+      "fields": ["/email"],
+      "fieldValueTypes": ["string"],
+      "coveringFields": [],
+      "coveringFieldValueTypes": [],
+      "unique": false,
+      "scope": "graphAndKind",
+      "where": {
+        "__type": "index_where_null_check",
+        "operand": {
+          "__type": "index_operand_prop",
+          "field": "email",
+          "valueType": "string"
+        },
+        "op": "isNotNull"
+      }
+    }
+  ],
+  "extension": {
+    "nodes": {
+      "GoldenArchive": {
+        "properties": { "box": { "type": "string" } },
+        "unique": [{ "name": "golden_archive_box", "fields": ["box"] }]
+      }
+    }
+  },
+  "deprecatedKinds": ["GoldenLegacy"]
+}
