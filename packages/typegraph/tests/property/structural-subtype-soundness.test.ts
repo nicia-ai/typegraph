@@ -8,9 +8,13 @@
  * registry compares them. A child is the parent spec under a few random
  * edits (a near miss is where an unsound accept hides) or an unrelated spec.
  *
- * Sample inputs are JSON values, the only values a row can carry. A
- * non-JSON input such as `{ x: undefined }` passes an exhaustive enum-key
- * record and fails its parent for a reason no stored row can reach.
+ * Sample inputs are read the way JSON reads them (an `undefined` member is
+ * absent): a non-JSON input such as `{ x: undefined }` passes an exhaustive
+ * enum-key record and fails its parent for a reason no stored row can
+ * reach. Dates (an invalid one included) and bigints are kept as values,
+ * so the nodes that parse them are judged on them too. Fallbacks
+ * (`.default()`, `.catch()`, `.prefault()`), pipes, `z.preprocess()` and
+ * records with optional values are drawn around any node.
  *
  * Unconvertible constructs (transforms, custom checks, dates, embeddings)
  * are drawn in variants that share a Zod node type, and each draws a slot:
@@ -56,7 +60,13 @@ type UnprojectableVariant =
   | "customShortString"
   | "embedding2"
   | "embedding3"
-  | "embedding2L2";
+  | "embedding2L2"
+  | "bigint"
+  | "int64"
+  | "uint64";
+
+type FallbackWrapper = "default" | "catch" | "prefault";
+type PreprocessFunction = "trim" | "upper" | "identity";
 
 type Spec =
   | Readonly<{
@@ -83,8 +93,17 @@ type Spec =
       kind: "record";
       keys: readonly string[];
       partial: boolean;
+      optionalValues: boolean;
       value: Spec;
     }>
+  | Readonly<{
+      kind: "fallback";
+      wrapper: FallbackWrapper;
+      value: string | number;
+      inner: Spec;
+    }>
+  | Readonly<{ kind: "pipe"; from: Spec; to: Spec }>
+  | Readonly<{ kind: "preprocess"; fn: PreprocessFunction; inner: Spec }>
   | Readonly<{ kind: "union"; members: readonly Spec[] }>
   | Readonly<{ kind: "nullable"; inner: Spec }>
   | Readonly<{
@@ -104,6 +123,9 @@ const UNPROJECTABLE_VARIANTS: readonly UnprojectableVariant[] = [
   "embedding2",
   "embedding3",
   "embedding2L2",
+  "bigint",
+  "int64",
+  "uint64",
 ];
 
 const STRING_POOL = [
@@ -148,6 +170,46 @@ const NUMBER_POOL = [
   10,
   0.1 + 0.2,
   1e21,
+];
+
+/**
+ * Values no JSON row holds, for the nodes that admit them: dates (one of
+ * them invalid) and bigints on both sides of the 64-bit ranges.
+ */
+const NATIVE_VALUE_POOL: readonly unknown[] = [
+  new Date(0),
+  new Date(-86_400_000),
+  new Date(Number.NaN),
+  new Date("2026-01-01T00:00:00.000Z"),
+  -1n,
+  0n,
+  5n,
+  2n ** 64n,
+  -(2n ** 63n) - 1n,
+];
+
+const DATE_VALUES = NATIVE_VALUE_POOL.filter((value) => value instanceof Date);
+const BIGINT_VALUES = NATIVE_VALUE_POOL.filter(
+  (value) => typeof value === "bigint",
+);
+
+/** The Zod-native values each date and bigint variant is sampled with. */
+const NATIVE_VALUES_BY_VARIANT: Readonly<
+  Partial<Record<UnprojectableVariant, readonly unknown[]>>
+> = {
+  date: DATE_VALUES,
+  dateMin: DATE_VALUES,
+  bigint: BIGINT_VALUES,
+  int64: BIGINT_VALUES,
+  uint64: BIGINT_VALUES,
+};
+
+/** Variants that share a Zod node type, the near misses for one another. */
+const SIBLING_VARIANTS: readonly (readonly UnprojectableVariant[])[] = [
+  ["bigint", "int64", "uint64"],
+  ["date", "dateMin"],
+  ["transform", "transformMin3", "transformUpper"],
+  ["customString", "customShortString"],
 ];
 
 const KEY_POOL = ["a", "b", "c", "A", ""];
@@ -270,6 +332,15 @@ function buildUnprojectable(variant: UnprojectableVariant): z.ZodType {
     case "dateMin": {
       return z.date().min(new Date(0));
     }
+    case "bigint": {
+      return z.bigint();
+    }
+    case "int64": {
+      return z.int64();
+    }
+    case "uint64": {
+      return z.uint64();
+    }
     case "customString": {
       return z.custom<string>((value) => typeof value === "string");
     }
@@ -306,6 +377,38 @@ function sharedUnprojectable(
   const built = buildUnprojectable(spec.variant);
   cache.set(key, built);
   return built;
+}
+
+function buildFallback(
+  spec: Extract<Spec, { kind: "fallback" }>,
+  inner: z.ZodType,
+): z.ZodType {
+  switch (spec.wrapper) {
+    case "default": {
+      return inner.default(spec.value as never);
+    }
+    case "catch": {
+      return inner.catch(spec.value as never);
+    }
+    case "prefault": {
+      return inner.prefault(spec.value as never);
+    }
+  }
+}
+
+function preprocessValue(fn: PreprocessFunction, value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  switch (fn) {
+    case "trim": {
+      return value.trim();
+    }
+    case "upper": {
+      return value.toUpperCase();
+    }
+    case "identity": {
+      return value;
+    }
+  }
 }
 
 function buildObject(
@@ -378,9 +481,23 @@ function build(spec: Spec, cache: InstanceCache): z.ZodType {
     }
     case "record": {
       const keys = z.enum(spec.keys as [string, ...string[]]);
+      const built = build(spec.value, cache);
+      const value = spec.optionalValues ? built.optional() : built;
       return spec.partial ?
-          z.partialRecord(keys, build(spec.value, cache))
-        : z.record(keys, build(spec.value, cache));
+          z.partialRecord(keys, value)
+        : z.record(keys, value);
+    }
+    case "fallback": {
+      return buildFallback(spec, build(spec.inner, cache));
+    }
+    case "pipe": {
+      return build(spec.from, cache).pipe(build(spec.to, cache));
+    }
+    case "preprocess": {
+      return z.preprocess(
+        (value) => preprocessValue(spec.fn, value),
+        build(spec.inner, cache),
+      );
     }
     case "union": {
       return z.union(
@@ -535,6 +652,11 @@ function fixedArrayArb(length: number): fc.Arbitrary<Spec> {
   });
 }
 
+const fallbackValueArb: fc.Arbitrary<string | number> = fc.oneof(
+  fc.constantFrom(...STRING_POOL),
+  fc.constantFrom(...NUMBER_POOL),
+);
+
 const FIELD_NAMES = ["f", "g", "h"] as const;
 
 const specLetrec = fc.letrec<{ spec: Spec; container: Spec }>((tie) => ({
@@ -589,7 +711,24 @@ const specLetrec = fc.letrec<{ spec: Spec; container: Spec }>((tie) => ({
         maxLength: 3,
       }),
       partial: fc.boolean(),
+      optionalValues: fc.boolean(),
       value: tie("spec"),
+    }),
+    fc.record({
+      kind: fc.constant("fallback"),
+      wrapper: fc.constantFrom<FallbackWrapper>("default", "catch", "prefault"),
+      value: fallbackValueArb,
+      inner: tie("spec"),
+    }),
+    fc.record({
+      kind: fc.constant("pipe"),
+      from: tie("spec"),
+      to: tie("spec"),
+    }),
+    fc.record({
+      kind: fc.constant("preprocess"),
+      fn: fc.constantFrom<PreprocessFunction>("trim", "upper", "identity"),
+      inner: tie("spec"),
     }),
     fc.record({
       kind: fc.constant("union"),
@@ -616,6 +755,19 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
   const local: fc.Arbitrary<Spec>[] = [
     specArb,
     fc.constant<Spec>({ kind: "nullable", inner: spec }),
+    fc.record({
+      kind: fc.constant("fallback"),
+      wrapper: fc.constantFrom<FallbackWrapper>("default", "catch", "prefault"),
+      value: fallbackValueArb,
+      inner: fc.constant(spec),
+    }),
+    fc.record({
+      kind: fc.constant("preprocess"),
+      fn: fc.constantFrom<PreprocessFunction>("trim", "upper", "identity"),
+      inner: fc.constant(spec),
+    }),
+    specArb.map((from): Spec => ({ kind: "pipe", from, to: spec })),
+    fc.constant<Spec>({ kind: "pipe", from: { kind: "unknown" }, to: spec }),
   ];
   switch (spec.kind) {
     case "string": {
@@ -720,6 +872,7 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
       local.push(
         editArb(spec.value).map((value) => ({ ...spec, value })),
         fc.constant({ ...spec, partial: !spec.partial }),
+        fc.constant({ ...spec, optionalValues: !spec.optionalValues }),
         fc.constant({ ...spec, keys: spec.keys.slice(0, 1) }),
       );
       break;
@@ -750,8 +903,32 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
           .map((variant) => ({ ...spec, variant })),
         fc.constant({ ...spec, slot: 1 - spec.slot }),
       );
+      const siblings = SIBLING_VARIANTS.find((family) =>
+        family.includes(spec.variant),
+      );
+      if (siblings !== undefined) {
+        local.push(
+          fc.constantFrom(...siblings).map((variant) => ({ ...spec, variant })),
+        );
+      }
       const dimensions = EMBEDDING_DIMENSIONS[spec.variant];
       if (dimensions !== undefined) local.push(fixedArrayArb(dimensions));
+      break;
+    }
+    case "fallback":
+    case "preprocess": {
+      local.push(
+        fc.constant(spec.inner),
+        editArb(spec.inner).map((inner) => ({ ...spec, inner })),
+      );
+      break;
+    }
+    case "pipe": {
+      local.push(
+        fc.constant(spec.to),
+        fc.constant(spec.from),
+        editArb(spec.from).map((from) => ({ ...spec, from })),
+      );
       break;
     }
     case "boolean":
@@ -803,13 +980,32 @@ function shapedCandidateArb(spec: Spec): fc.Arbitrary<unknown> {
       return fc.constantFrom(...STRING_POOL);
     }
     case "unprojectable": {
+      const native = NATIVE_VALUES_BY_VARIANT[spec.variant];
+      if (native !== undefined) {
+        return fc.oneof(
+          { weight: 4, arbitrary: fc.constantFrom(...native) },
+          { weight: 1, arbitrary: scalarPoolArb },
+        );
+      }
       return fc.oneof(
         fc.constantFrom(...STRING_POOL),
         fc.array(fc.constantFrom(...NUMBER_POOL), {
           minLength: 2,
           maxLength: 3,
         }),
+        fc.constantFrom(...NATIVE_VALUE_POOL),
       );
+    }
+    case "fallback":
+    case "preprocess": {
+      return fc.oneof(
+        fc.constant(undefined),
+        fc.constantFrom(...STRING_POOL),
+        candidateArb(spec.inner),
+      );
+    }
+    case "pipe": {
+      return candidateArb(spec.from);
     }
     case "number": {
       return fc.constantFrom(...NUMBER_POOL);
@@ -875,9 +1071,30 @@ function shapedCandidateArb(spec: Spec): fc.Arbitrary<unknown> {
   }
 }
 
-function asJsonValue(value: unknown): unknown {
-  // eslint-disable-next-line unicorn/prefer-structured-clone -- a JSON round trip, not a clone: it drops what no row can hold
-  return JSON.parse(JSON.stringify(value));
+/**
+ * `value` as an input reaches a node: JSON's reading of every plain value
+ * (an absent `undefined` member, `null` for a missing array slot or a
+ * non-finite number), with dates and bigints kept for the nodes that parse
+ * them.
+ */
+function asInputValue(value: unknown): unknown {
+  if (value instanceof Date || typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    // eslint-disable-next-line unicorn/no-null -- JSON writes a non-finite number as null
+    return Number.isFinite(value) ? value : null;
+  }
+  if (Array.isArray(value)) {
+    // eslint-disable-next-line unicorn/no-null -- JSON writes a missing array slot as null
+    return value.map((member) => asInputValue(member) ?? null);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, member]) => member !== undefined)
+        .map(([key, member]) => [key, asInputValue(member)]),
+    );
+  }
+  return value;
 }
 
 // ============================================================
@@ -904,15 +1121,17 @@ function expectSoundVerdict(
   );
   if (verdict.verdict !== "subtype") return;
   for (const sample of samples) {
-    const input = asJsonValue({ field: sample });
+    const input = asInputValue({ field: sample });
     const stored = childSchema.safeParse(input);
     if (!stored.success) continue;
+    // What a row holds is the stored output as storage reads it back.
+    const row = asInputValue(stored.data);
     expect({
       child,
       parent,
       input,
-      stored: stored.data,
-      parentAccepts: parentSchema.safeParse(stored.data).success,
+      row,
+      parentAccepts: parentSchema.safeParse(row).success,
     }).toMatchObject({ parentAccepts: true });
   }
 }
