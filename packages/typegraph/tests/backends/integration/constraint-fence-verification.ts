@@ -35,6 +35,7 @@ import {
   uniquenessClaimAxis,
 } from "../../../src/store/claims/axis";
 import { compositionEdgeCardinalityDeclarations } from "../../../src/store/claims/composition-claims";
+import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { encodeTupleKey } from "../../../src/utils/tuple-key";
 import { type IntegrationTestContext } from "./test-context";
@@ -226,10 +227,10 @@ export function registerConstraintFenceVerificationIntegrationTests(
           owners: [
             { concreteKind: "VerifyContractor", nodeId: contractor.id },
             { concreteKind: "VerifyEmployee", nodeId: employee.id },
-          ].toSorted((left, right) =>
-            left.concreteKind === right.concreteKind ?
-              left.nodeId.localeCompare(right.nodeId)
-            : left.concreteKind.localeCompare(right.concreteKind),
+          ].toSorted(
+            (left, right) =>
+              compareStrings(left.concreteKind, right.concreteKind) ||
+              compareStrings(left.nodeId, right.nodeId),
           ),
         },
       ]);

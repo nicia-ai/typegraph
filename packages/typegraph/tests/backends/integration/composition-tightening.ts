@@ -43,7 +43,7 @@ const CtSegment = defineNode("CtSegment", { schema: z.object({}) });
 const CtEpisode = defineNode("CtEpisode", { schema: z.object({}) });
 const ctSegmentOf = defineEdge("ctSegmentOf", { schema: z.object({}) });
 
-function buildFlipGraph(id: string, required: boolean) {
+function buildFlipGraph(id: string, required: boolean, declared = true) {
   return defineGraph({
     id,
     nodes: { CtSegment: { type: CtSegment }, CtEpisode: { type: CtEpisode } },
@@ -55,12 +55,15 @@ function buildFlipGraph(id: string, required: boolean) {
         cardinality: "one",
       },
     },
-    ontology: [
-      partOf(CtSegment, CtEpisode, {
-        via: ctSegmentOf,
-        ...(required ? { existence: "required" as const } : {}),
-      }),
-    ],
+    ontology:
+      declared ?
+        [
+          partOf(CtSegment, CtEpisode, {
+            via: ctSegmentOf,
+            ...(required ? { existence: "required" as const } : {}),
+          }),
+        ]
+      : [],
   });
 }
 
@@ -538,6 +541,37 @@ export function registerCompositionTighteningIntegrationTests(
     // `"ontology-tightening-violated"`, and the test above fails on the
     // `details.reason` check before ever reaching the composition
     // violation assertions.
+
+    it('refuses declaring a brand-new existence: "required" pair over a part with no whole', async () => {
+      const id = "composition_tightening_new_required_pair";
+      const store = await context.createStore(buildFlipGraph(id, false, false));
+      const orphan = await store.nodes.CtSegment.create({});
+
+      const error = await createAdapterStoreWithSchema(
+        buildFlipGraph(id, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      expect(details.violations).toContainEqual(
+        expect.objectContaining({
+          family: "compositionExistence",
+          partKind: "CtSegment",
+          parts: [{ kind: "CtSegment", id: orphan.id }],
+        }),
+      );
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK (verified): in `classifyKnownRelationSeverity`
+    // (src/schema/ontology-change.ts), probe an added `required` pair with
+    // `["composition"]` alone. The orphan then goes unchecked, the commit
+    // succeeds, and `activeVersion` reads 2.
 
     it('flipping an already-declared pair to existence: "required" auto-migrates a CLEAN graph directly through ensureSchema', async () => {
       const id = "composition_tightening_flip_required_clean";

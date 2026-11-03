@@ -187,7 +187,7 @@ const RedeclaredTitleMemo = defineNode("TsRedeclaredTitleMemo", {
   schema: z.object({ title: z.string().optional(), note: z.string() }),
 });
 const RedeclaredVectorMemo = defineNode("TsRedeclaredVectorMemo", {
-  schema: z.object({ vector: z.array(z.number()).optional() }),
+  schema: z.object({ vector: z.array(z.number()).length(3).optional() }),
 });
 
 const omittedSearchableGraph = defineGraph({
@@ -219,7 +219,8 @@ const redeclaredVectorGraph = defineGraph({
   edges: {},
   ontology: [
     // The compile-time filter reads the branded `EmbeddingValue`; the registry
-    // build, which compares projected JSON Schema, accepts the plain array.
+    // build compares an embedding as the fixed-length number array it
+    // validates, so it accepts a plain array of the same length.
     // @ts-expect-error a plain number array is not the branded embedding type
     subClassOf(RedeclaredVectorMemo, SearchableDocument),
   ],
@@ -229,7 +230,7 @@ const redeclaredVectorGraph = defineGraph({
 // number array and the subclass tags it embedding(), so the subclass's rows are
 // indexed and the parent's are not.
 const PlainVectorDocument = defineNode("TsPlainVectorDoc", {
-  schema: z.object({ vector: z.array(z.number()).optional() }),
+  schema: z.object({ vector: z.array(z.number()).length(3).optional() }),
 });
 const TaggedVectorMemo = defineNode("TsTaggedVectorMemo", {
   schema: z.object({ vector: embedding(3).optional() }),
@@ -243,7 +244,8 @@ const taggedSubclassGraph = defineGraph({
   edges: {},
   ontology: [
     // The compile-time filter reads the branded `EmbeddingValue` on the child
-    // against the plain array on the parent; the registry accepts it.
+    // against the plain array on the parent; the registry, comparing the
+    // embedding as a fixed-length number array, accepts it.
     // @ts-expect-error a branded embedding is not a plain number array to the filter
     subClassOf(TaggedVectorMemo, PlainVectorDocument),
   ],

@@ -1,23 +1,32 @@
 /**
- * The compile-time ↔ registry-build agreement property.
+ * The compile-time ↔ registry-build agreement.
  *
- * The compile-time rule is a TypeScript conditional type and cannot be called at
- * runtime, so it is pinned in two halves, with NO second comparison engine:
+ * The compile-time rule is the `SubClassOfCheck` conditional type
+ * (`src/ontology/types.ts`); `isTypeLevelSubtype` is its runtime
+ * prediction, `isStructuralSubtype` over each side's `projectTypeVisible`
+ * projection. Two things are pinned here:
  *
- * 1. `isTypeLevelSubtype` (`src/schema/structural-subtype.ts`) —
- *    `isStructuralSubtype` applied to each side's `projectTypeVisible`
- *    projection, which drops exactly the keywords `z.infer` cannot see.
- * 2. This property: for every generated pair `isStructuralSubtype` accepts,
- *    `isTypeLevelSubtype` also accepts it. This is the ONE direction that
- *    can be true — a hierarchy the registry accepts must compile —
- *    since TypeScript cannot see value-level constraints and so
- *    necessarily accepts strictly MORE than the registry does. The converse is asserted below as a NAMED counterexample, not
- *    left implicit.
+ * 1. A table of node pairs whose expected verdict the TYPE CHECKER holds to
+ *    the real conditional type (`agreementRow`), and the runtime holds to
+ *    `isTypeLevelSubtype`. A row whose prediction drifts from the type fails
+ *    one side or the other, and a registry-accepted row must compile.
+ * 2. A property of the comparison engine itself, not of TypeScript:
+ *    projecting value-level keywords away never turns a `subtype` verdict
+ *    into a refusal, so whatever the registry accepts, the prediction
+ *    accepts too. It compares one engine over two views of the same pair,
+ *    so it cannot detect a prediction that disagrees with the type checker;
+ *    that is what the table is for.
+ *
+ * The converse does not hold — TypeScript cannot see value-level
+ * constraints — and is asserted below as a named counterexample.
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { defineNode } from "../../src/core/node";
+import { type NodeType } from "../../src/core/types";
+import { type SubClassOfCheck } from "../../src/ontology/types";
 import { serializeSchemaProperties } from "../../src/schema/serializer";
 import {
   isStructuralSubtype,
@@ -25,8 +34,32 @@ import {
 } from "../../src/schema/structural-subtype";
 import { comparableSchemaArb, tightenArb } from "./arbitraries";
 
+/** Whether `subClassOf(C, P)` compiles: the check resolves to `unknown`. */
+type CompilesAsSubclass<C extends NodeType, P extends NodeType> =
+  unknown extends SubClassOfCheck<C, P> ? true : false;
+
+type AgreementRow = Readonly<{
+  name: string;
+  child: NodeType;
+  parent: NodeType;
+  compiles: boolean;
+}>;
+
+/**
+ * A row whose `compiles` the type checker verifies: passing `true` where
+ * `subClassOf(child, parent)` does not compile, or `false` where it does, is
+ * a type error.
+ */
+function agreementRow<C extends NodeType, P extends NodeType>(
+  child: C,
+  parent: P,
+  compiles: CompilesAsSubclass<C, P>,
+): AgreementRow {
+  return { name: `${child.kind} ⊑ ${parent.kind}`, child, parent, compiles };
+}
+
 describe("compile-time ↔ registry-build agreement", () => {
-  it("every structural subtype (the registry accepts) is also a type-level subtype (it compiles)", () => {
+  it("erasing the value-level keywords never turns an accepted pair into a refused one", () => {
     fc.assert(
       fc.property(
         comparableSchemaArb.chain((parent) =>
@@ -60,58 +93,132 @@ describe("compile-time ↔ registry-build agreement", () => {
     );
   });
 
-  it("fixture table: a representative row set the compile-time contract must agree with", () => {
-    const rows: readonly {
-      readonly name: string;
-      readonly child: z.ZodType;
-      readonly parent: z.ZodType;
-      readonly expected: "subtype" | "not-subtype" | "incomparable";
-    }[] = [
-      {
-        name: "identical string",
-        child: z.string(),
-        parent: z.string(),
-        expected: "subtype",
-      },
-      {
-        name: "width subtyping — child adds a property",
-        child: z.object({ a: z.string(), b: z.string() }),
-        parent: z.object({ a: z.string() }),
-        expected: "subtype",
-      },
-      {
-        name: "child missing a required parent property",
-        child: z.object({ a: z.string() }),
-        parent: z.object({ a: z.string(), b: z.string() }),
-        expected: "not-subtype",
-      },
-      {
-        name: "child narrows an enum to a literal",
-        child: z.literal("active"),
-        parent: z.enum(["active", "inactive"]),
-        expected: "subtype",
-      },
+  it("agrees with the compile-time check itself on a table of node pairs", () => {
+    // Each row's `compiles` is checked by the type checker against the real
+    // `SubClassOfCheck` conditional type (`agreementRow`'s third parameter),
+    // and at runtime against `isTypeLevelSubtype` over the same pair's
+    // projection — the two predictions this file exists to keep in step.
+    const rows: readonly AgreementRow[] = [
+      agreementRow(
+        defineNode("AgreeSameChild", { schema: z.object({ a: z.string() }) }),
+        defineNode("AgreeSameParent", { schema: z.object({ a: z.string() }) }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeWidthChild", {
+          schema: z.object({ a: z.string(), b: z.number() }),
+        }),
+        defineNode("AgreeWidthParent", { schema: z.object({ a: z.string() }) }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeMissingChild", {
+          schema: z.object({ a: z.string() }),
+        }),
+        defineNode("AgreeMissingParent", {
+          schema: z.object({ a: z.string(), b: z.string() }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeTypeChild", { schema: z.object({ a: z.number() }) }),
+        defineNode("AgreeTypeParent", { schema: z.object({ a: z.string() }) }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeOptionalChild", {
+          schema: z.object({ a: z.string().optional() }),
+        }),
+        defineNode("AgreeOptionalParent", {
+          schema: z.object({ a: z.string() }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeRequiredChild", {
+          schema: z.object({ a: z.string() }),
+        }),
+        defineNode("AgreeRequiredParent", {
+          schema: z.object({ a: z.string().optional() }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeLiteralChild", {
+          schema: z.object({ a: z.literal("active") }),
+        }),
+        defineNode("AgreeLiteralParent", {
+          schema: z.object({ a: z.enum(["active", "inactive"]) }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeEnumChild", {
+          schema: z.object({ a: z.enum(["active", "inactive"]) }),
+        }),
+        defineNode("AgreeEnumParent", {
+          schema: z.object({ a: z.literal("active") }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeBoundChild", { schema: z.object({ a: z.string() }) }),
+        defineNode("AgreeBoundParent", {
+          schema: z.object({ a: z.string().min(3) }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeNullableChild", {
+          schema: z.object({ a: z.string().nullable() }),
+        }),
+        defineNode("AgreeNullableParent", {
+          schema: z.object({ a: z.string() }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeArrayChild", {
+          schema: z.object({ a: z.array(z.number()) }),
+        }),
+        defineNode("AgreeArrayParent", {
+          schema: z.object({ a: z.array(z.string()) }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeNestedChild", {
+          schema: z.object({ a: z.object({ b: z.string(), c: z.number() }) }),
+        }),
+        defineNode("AgreeNestedParent", {
+          schema: z.object({ a: z.object({ b: z.string() }) }),
+        }),
+        true,
+      ),
     ];
 
     for (const row of rows) {
-      const childSchema = serializeSchemaProperties(row.child);
-      const parentSchema = serializeSchemaProperties(row.parent);
-      expect(
-        isTypeLevelSubtype(childSchema, parentSchema).verdict,
-        `type-level: ${row.name}`,
-      ).toBe(row.expected === "subtype" ? "subtype" : row.expected);
+      const child = serializeSchemaProperties(row.child.schema);
+      const parent = serializeSchemaProperties(row.parent.schema);
+      expect({
+        row: row.name,
+        compiles: isTypeLevelSubtype(child, parent).verdict === "subtype",
+      }).toEqual({ row: row.name, compiles: row.compiles });
+      const registryAccepts =
+        isStructuralSubtype(child, parent).verdict === "subtype";
+      expect({
+        row: row.name,
+        compiles: row.compiles || !registryAccepts,
+      }).toEqual({ row: row.name, compiles: true });
     }
   });
 
   /**
-   * Mutation check performed manually: adding `"minLength"` to
+   * MUTATION CHECK (verified): adding `"minLength"` to
    * `TYPE_VISIBLE_KEYWORDS` in `src/schema/structural-subtype.ts` (so the
-   * projection stops erasing it) makes the "named counterexample" test above
-   * fail — with `minLength` visible, `isTypeLevelSubtype` no longer misreads
-   * a bare `z.string()` as a subtype of a `z.string().min(3)` parent, which
-   * is exactly the erasure gap that test pins. (`comparableSchemaArb` /
-   * `tightenArb` never generate `pattern`, so mutating that keyword instead
-   * — the plan's original suggestion — exercises no generated schema and is
-   * not a usable mutation target for this generator.)
+   * projection stops erasing it) fails the named counterexample and the
+   * table's bounded-string row; dropping `"required"` from it fails the
+   * table's optional-field row. Flipping any row's `compiles` literal is a
+   * type error in this file.
    */
 });

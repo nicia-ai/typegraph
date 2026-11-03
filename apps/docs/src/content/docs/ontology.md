@@ -134,22 +134,76 @@ schema:
   value that check never saw;
 - either side holding `z.literal(NaN)` or `z.literal(Infinity)`, which JSON
   cannot carry.
+- a parent `z.codec()` or `z.preprocess()`, whose function rewrites the value
+  before the output side judges it, and a parent `.pipe()` whose input side
+  states a check (`z.string().min(5).pipe(z.string())`): only the output side
+  has a JSON Schema form.
+
+The check is sound in one precise sense: a child stores nothing its parent
+could not store itself. A field the child shares with its parent (the same Zod
+schema, as `.extend()` gives it) stores exactly what the parent's does, so it
+is accepted whatever its `.default()` or `.catch()` value — even one that fails
+the field's own checks, since both kinds store it. A field the child declares
+separately has each `.default()` or `.catch()` value, which is stored without
+the field's own checks, judged against the parent field the way a literal child
+would: `z.string().min(1).default("")` does not extend a separately declared
+`z.string().min(1)`. A value that cannot be judged by value, such as a default
+on `z.email()` or a `z.date()` factory, is refused unless the field is shared. A
+parent's default applies only to an absent value, so it does not widen what the
+parent accepts for a value the child stores.
+
+Which keys a kind stores and which it requires are read from Zod's own
+property metadata rather than from the JSON Schema's `required`, which follows
+neither: a key Zod may leave out of what the child stores counts as optional
+(an exhaustive `z.record(z.enum([...]), V.optional())` does not extend the
+same record with required values, and a `.catch()` field under a required
+parent field is refused unless shared), and a key whose input the parent
+requires counts as required even where its output may be absent
+(`z.unknown().pipe(z.string().optional())`).
 
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:
 `z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, and any
-`z.custom()`, which includes TypeGraph's own `embedding()`. In a
-compile-time graph or an `evolve()`-authored extension, each such field is
-accepted without a value-level comparison, and every other field of the pair
-is still compared. A subclass that adds an `embedding()` to its parent opens
-normally, two independently declared `z.date()` fields are accepted, and a
-pair that is also incompatible elsewhere (a tighter `z.string().min(5)` on
-the parent, say) is refused. The compile-time check still applies to the
-unconverted fields. A field Zod converts only in part, such as a `.catch()`
-with a dynamic fallback, keeps the type it states and is comparable only to
-the same schema. A deserialized document has no Zod schemas, and it stores
-such a kind without a property projection, so a pair with that kind on
-**either** side is skipped there.
+`z.custom()`. TypeGraph's own `embedding(n)` is the exception: it is
+compared as what it validates, an array of exactly `n` numbers, so
+`embedding(3)` extends `z.array(z.number())`, `z.array(z.number()).length(3)`
+extends `embedding(3)`, and `embedding(3)` does not extend `embedding(4)`.
+An embedding's index options (`metric`, `indexType`, …) do not affect
+subsumption.
+
+In a compile-time graph or an `evolve()`-authored extension, every other such
+field is judged on its own and every other field of the pair is still
+compared. Since nothing about its values can be compared, the field is
+accepted only when:
+
+- the parent's field admits every value (`z.unknown()` or `z.any()`), so a
+  subclass may narrow it to a `z.date()`;
+- both fields are the same Zod schema, as when the child reuses the parent's
+  field through `.extend()`;
+- both are plain, check-free fields of the same type, such as two
+  independently declared `z.date()` or `z.bigint()` fields.
+
+Every other pair is refused as `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` with
+`reason: "unsupported-construct"` and the field's `path`. That includes a
+`.transform()` child field under a constrained parent field
+(`z.string().transform(f)` under `z.string().min(3)`: the transform's output
+is never shown to satisfy the bound), a plain child field under a parent whose
+own transform hides its checks, a `z.date()` replacing a `z.string()`, two
+separately declared transforms or `z.custom()` checks, and a bounded or
+refined `z.date()` beside a plain one. The check also stays conservative
+where it could in principle do better: two separately declared `z.set()`,
+`z.uint64()` or bounded `z.date()` fields, an `embedding()` re-created by
+`.describe()` or `.meta()` (a new schema without its dimensions), and an
+`embedding(3)` under a three-element `z.tuple()` (the reverse is accepted)
+are all refused.
+Share the field schema between the two kinds to keep such a pair comparable. A subclass that adds a `z.date()` or an
+`embedding()` to its parent still opens normally, and a pair that is also
+incompatible elsewhere (a tighter `z.string().min(5)` on the parent, say) is
+refused for that field. A field Zod converts only in part, such as a `.catch()`
+with a dynamic fallback, keeps the type it states and is comparable only to the
+same schema. A deserialized document has no Zod schemas, and it stores such a
+kind without a property projection, so a pair with that kind on **either**
+side is skipped there.
 Every commit, `createStore`, `getSchemaChanges` and `requiresMigration` also
 check the graph in your code, so this coarser check never decides alone.
 

@@ -569,11 +569,12 @@ function registryRefusal(graph: GraphDef): ConfigurationError | undefined {
   }
 }
 
-describe("registry check — a field the projection cannot convert is accepted unjudged, every other field is still compared", () => {
+describe("registry check — a field the projection cannot convert is judged on its own, every other field is still compared", () => {
   // `z.toJSONSchema` has no spelling for `embedding()` (a `z.custom()`),
   // `z.date()`, `z.set()`, `z.map()`, `z.bigint()` or a `.transform()`. A
   // live graph's comparison projection marks each such node on its own, so
-  // that node is accepted without a verdict while its siblings are judged.
+  // that node is accepted only under a parent field that admits every value
+  // or is itself unconvertible, while its siblings are judged.
   it("refuses a subclass that adds embedding() when an unrelated field is incompatible", () => {
     const Tight = defineNode("Tight", {
       schema: z.object({ code: z.string().min(5) }),
@@ -677,7 +678,7 @@ describe("registry check — a field the projection cannot convert is accepted u
     );
   });
 
-  it("accepts a subclass that redeclares a parent's plain field through a .transform()", () => {
+  it("refuses a subclass that redeclares a constrained parent field through a .transform()", () => {
     const Tagged = defineNode("Tagged", {
       schema: z.object({ label: z.string().min(2) }),
     });
@@ -687,13 +688,75 @@ describe("registry check — a field the projection cannot convert is accepted u
       }),
     });
 
+    const refusal = registryRefusal(
+      defineGraph({
+        id: "subclass_transform_redeclaration",
+        nodes: { Tagged: { type: Tagged }, Normalized: { type: Normalized } },
+        edges: {},
+        ontology: [subClassOf(Normalized, Tagged)],
+      }),
+    );
+
+    // `" a"` stores as `"a"`, which `min(2)` refuses: nothing the projection
+    // states shows the transform's output satisfies the parent.
+    expect(refusal?.details).toMatchObject({
+      code: "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+      childKind: "Normalized",
+      parentKind: "Tagged",
+      reason: "unsupported-construct",
+      path: ["label"],
+    });
+  });
+
+  it("refuses a parent field whose own transform hides a constraint from a plain child", () => {
+    const Trimmed = defineNode("Trimmed", {
+      schema: z.object({
+        label: z
+          .string()
+          .min(3)
+          .transform((value) => value.trim()),
+      }),
+    });
+    const Plain = defineNode("Plain", {
+      schema: z.object({ label: z.string() }),
+    });
+
+    const refusal = registryRefusal(
+      defineGraph({
+        id: "subclass_under_transformed_parent",
+        nodes: { Trimmed: { type: Trimmed }, Plain: { type: Plain } },
+        edges: {},
+        ontology: [subClassOf(Plain, Trimmed)],
+      }),
+    );
+
+    expect(refusal?.details).toMatchObject({
+      code: "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+      reason: "unsupported-construct",
+      path: ["label"],
+    });
+  });
+
+  it("accepts an unconvertible child field under a parent field that admits every value", () => {
+    const Loose = defineNode("Loose", {
+      schema: z.object({ label: z.unknown() }),
+    });
+    const Normalized = defineNode("NormalizedUnderLoose", {
+      schema: z.object({
+        label: z.string().transform((value) => value.trim()),
+      }),
+    });
+
     expect(
       registryRefusal(
         defineGraph({
-          id: "subclass_transform_redeclaration",
-          nodes: { Tagged: { type: Tagged }, Normalized: { type: Normalized } },
+          id: "subclass_transform_under_unknown",
+          nodes: {
+            Loose: { type: Loose },
+            NormalizedUnderLoose: { type: Normalized },
+          },
           edges: {},
-          ontology: [subClassOf(Normalized, Tagged)],
+          ontology: [subClassOf(Normalized, Loose)],
         }),
       ),
     ).toBeUndefined();
@@ -734,12 +797,40 @@ describe("registry check — a field the projection cannot convert is accepted u
       );
 
       console.log(`dynamic .catch() on the ${side}:`, refusal?.details);
-      expect(refusal?.details["code"]).toBe(
+      // A child `.catch()` may also leave the key out of what it stores, a
+      // refusal of its own; either way the pair is refused at the field.
+      expect([
         "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
-      );
+        "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+      ]).toContain(refusal?.details["code"]);
       expect(refusal?.details["path"]).toEqual(["name"]);
     });
   }
+
+  it("accepts a subclass that extends a parent with defaulted format and date fields", () => {
+    // `.extend()` shares each field: the child stores exactly what the parent
+    // stores, defaults included, even where they cannot be judged by value.
+    const parentSchema = z.object({
+      contact: z.email().default("team@example.com"),
+      createdAt: z.date().default(() => new Date(0)),
+      label: z.string().min(1).default(""),
+    });
+    const Ticket = defineNode("Ticket", { schema: parentSchema });
+    const Escalation = defineNode("Escalation", {
+      schema: parentSchema.extend({ level: z.number() }),
+    });
+
+    expect(
+      registryRefusal(
+        defineGraph({
+          id: "subclass_extended_defaults",
+          nodes: { Ticket: { type: Ticket }, Escalation: { type: Escalation } },
+          edges: {},
+          ontology: [subClassOf(Escalation, Ticket)],
+        }),
+      ),
+    ).toBeUndefined();
+  });
 
   it("accepts a subclass that shares its parent's dynamic .catch() field schema", () => {
     const name = z.string().catch((error) => String(error.value));

@@ -12,9 +12,18 @@
  * trace cannot be judged. A live graph's registry check therefore compares
  * `structuralSubtypeProjection` (./structural-subtype-projection.ts), which
  * marks where the projection dropped a regex flag, a refinement, a strict
- * object, or read a `.meta()` key as a constraint, so such a pair answers
+ * object, a pipe's input side (a projectable `.pipe()` or `z.preprocess()`
+ * included), or read a `.meta()` key as a constraint, so such a pair answers
  * `incomparable` (rule 3) instead of a guess. It also marks each node the
- * projection cannot convert at all, which rule 2 accepts unjudged.
+ * projection cannot convert at all, which rule 2 accepts only under an
+ * unconstrained parent node or beside a node of the same identity, and
+ * lists every value a node stores unvalidated (`.default()`, `.catch()`),
+ * each of which must satisfy the parent the way a literal child would
+ * unless the field is the parent's own. Soundness throughout means the
+ * child stores nothing the parent could not store itself, so a field shared
+ * through `.extend()` is accepted as identical storage. It also records,
+ * per key, whether the node always stores it and whether it refuses to see
+ * it missing (`KEY_OPTIONALITY_KEYWORD`), read in place of `required`.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -53,9 +62,19 @@
  *    reference is refused the same way. Rule 6 decides through the same test.
  *    Right after it, a node marked {@link UNPROJECTABLE_NODE_KEYWORD} on
  *    either side (a Zod construct with no JSON Schema spelling, such as
- *    `embedding()` or `z.date()`) is accepted UNJUDGED: there is nothing to
- *    compare, and the node's siblings are still compared by the enclosing
- *    object or union. Only a live graph's comparison projection carries it.
+ *    `z.date()` or a `.transform()`) states nothing to compare, so the pair
+ *    is accepted only where no comparison is needed: the parent node admits
+ *    every value (`{}`, from `z.unknown()`/`z.any()`, carrying no
+ *    constraining keyword), or both nodes carry the same marker identity —
+ *    the same Zod instance, or plain check-free nodes of one type
+ *    (`z.date()` and `z.date()`). An `embedding()` carries no marker: the
+ *    comparison projection writes it as the fixed-length number array it
+ *    validates, so embeddings compare as arrays and their index options do
+ *    not affect subsumption. Every other pair with an unprojectable side is
+ *    `incomparable` ("unsupported-construct"), except that a union on the
+ *    other side is compared member by member first. The node's siblings are
+ *    still compared by the enclosing object or union. Only a live graph's
+ *    comparison projection carries the marker.
  * 3. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
  *    which is why recursion here cannot diverge. So is a node carrying a
@@ -480,17 +499,47 @@ export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
 
 /**
  * Marks a schema node `z.toJSONSchema` has no spelling for at all —
- * `embedding()` and any other `z.custom()`, `z.date()`, `z.set()`, `z.map()`,
+ * a `z.custom()` other than `embedding()`, `z.date()`, `z.set()`, `z.map()`,
  * `z.bigint()`, a `.transform()` — where the persisted projection would
  * collapse the whole kind to its placeholder instead. Such a node states
- * nothing to compare, so it is accepted without a verdict while every other
- * node of the pair is still judged. A node Zod converts only in part (a
+ * nothing to compare, so it narrows only a parent node that admits every
+ * value, and matches another unprojectable node only when the two carry the
+ * same value here: its IDENTITY, written by the projection as the node type
+ * alone for a plain check-free node of a type whose values it fully
+ * describes (`z.date()`, `z.bigint()`), and as the Zod instance otherwise.
+ * An `embedding()` is projected as the fixed-length number array it
+ * validates instead of this marker. Every other node of the
+ * pair is still judged. A node Zod converts only in part (a
  * dynamic `.catch()` keeps its `type`) does not carry this marker; the
  * projection marks it with {@link ZOD_ONLY_CONSTRAINT_KEYWORD} instead.
  * Written only by `structuralSubtypeProjection`
  * (`./structural-subtype-projection`), never into a persisted document.
  */
 export const UNPROJECTABLE_NODE_KEYWORD = "x-typegraph-unprojectable";
+
+/**
+ * For each property of an object, or each key an exhaustive record lists,
+ * whether the node always stores it (read when it is the child) and whether
+ * it refuses to see it missing (read when it is the parent), with the Zod
+ * metadata both were read from. Zod decides
+ * both from each property's `optin`/`optout` and what its value schema can
+ * output, which the projection's one `required` follows in neither
+ * direction. Written only by `structuralSubtypeProjection`; a persisted
+ * document is read through `required`.
+ */
+export const KEY_OPTIONALITY_KEYWORD = "x-typegraph-key-optionality";
+
+/**
+ * One key's two readings, as {@link KEY_OPTIONALITY_KEYWORD} records them,
+ * beside the Zod `optin`/`optout` they were read from, so two equal entries
+ * mean the same parsing of that key.
+ */
+export type KeyOptionality = Readonly<{
+  stored: boolean;
+  required: boolean;
+  optin?: "optional" | "defaulted";
+  optout?: "optional";
+}>;
 
 const SUBTYPE: StructuralSubtypeResult = { verdict: "subtype" };
 
@@ -546,9 +595,47 @@ function comparableKeywords(
 ): Record<string, unknown> {
   const kept = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(stripped)) {
-    if (COMPARABLE_KEYWORDS.has(key)) kept[key] = value;
+    if (COMPARABLE_KEYWORDS.has(key) || key === KEY_OPTIONALITY_KEYWORD) {
+      kept[key] = value;
+    }
   }
   return kept;
+}
+
+function keyOptionality(
+  schema: JsonSchema,
+): Readonly<Record<string, KeyOptionality>> | undefined {
+  const recorded = schema[KEY_OPTIONALITY_KEYWORD];
+  return recorded !== null && typeof recorded === "object" ?
+      (recorded as Readonly<Record<string, KeyOptionality>>)
+    : undefined;
+}
+
+/**
+ * The keys `schema` always stores, as a child: those its properties'
+ * optionality guarantees, or `required` where none is recorded.
+ */
+function storedKeys(schema: JsonSchema): readonly string[] {
+  const recorded = keyOptionality(schema);
+  if (recorded === undefined) return schema.required ?? [];
+  return Object.entries(recorded)
+    .filter(([, optionality]) => optionality.stored)
+    .map(([key]) => key);
+}
+
+/**
+ * The keys `schema` refuses to see missing, as a parent, as the projection
+ * recorded them: for an object `required` and every property whose input is
+ * required even where its output may be absent
+ * (`z.unknown().pipe(z.string().optional())`), for a record every key unless
+ * its value is optional on both sides. `required` where none is recorded.
+ */
+function requiredKeys(schema: JsonSchema): readonly string[] {
+  const recorded = keyOptionality(schema);
+  if (recorded === undefined) return schema.required ?? [];
+  return Object.entries(recorded)
+    .filter(([, optionality]) => optionality.required)
+    .map(([key]) => key);
 }
 
 function hasKeywordOutsideValueSet(keywords: Record<string, unknown>): boolean {
@@ -696,6 +783,189 @@ function sameSchema(child: unknown, parent: unknown, walk: Walk): boolean {
   );
 }
 
+// ============================================================
+// Unprojectable nodes
+// ============================================================
+
+/**
+ * Keywords that make a schema node constrain values: every keyword this
+ * predicate compares or refuses as unmodeled, a reference, and each marker
+ * the comparison projection writes.
+ */
+function isConstraintBearingKeyword(key: string): boolean {
+  return (
+    COMPARABLE_KEYWORDS.has(key) ||
+    UNMODELED_CONSTRAINING_KEYWORDS.has(key) ||
+    key === REFERENCE_KEYWORD ||
+    key === ZOD_ONLY_CONSTRAINT_KEYWORD ||
+    key === ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD ||
+    key === UNPROJECTABLE_NODE_KEYWORD
+  );
+}
+
+/**
+ * Whether `stripped` (a schema after {@link stripSchemaMetadata}) admits
+ * every value: `z.unknown()`, `z.any()`, or a node carrying only
+ * annotations and keywords rule 5 ignores.
+ */
+function isUnconstrained(stripped: Readonly<Record<string, unknown>>): boolean {
+  return Object.keys(stripped).every((key) => !isConstraintBearingKeyword(key));
+}
+
+/**
+ * What an unprojectable node stands for (see
+ * {@link UNPROJECTABLE_NODE_KEYWORD}), if it is one.
+ */
+function unprojectableIdentity(schema: JsonSchema): string | undefined {
+  if (!hasOwnKey(schema, UNPROJECTABLE_NODE_KEYWORD)) return undefined;
+  return String(schema[UNPROJECTABLE_NODE_KEYWORD]);
+}
+
+/**
+ * The verdict for a pair where either side is an unprojectable node, or
+ * `undefined` when neither is, or when the other side is a union whose
+ * members must each be compared on their own.
+ *
+ * An unprojectable node states nothing about the values it admits, so no
+ * comparison can show it narrows a parent that constrains anything, nor that
+ * a child satisfies a parent it stands for. It is accepted only where that
+ * needs no comparison: the parent admits every value, or both sides are
+ * unprojectable nodes with the same identity — provably the same values.
+ */
+function compareUnprojectable(
+  child: JsonSchema,
+  parent: JsonSchema,
+  strippedParent: Readonly<Record<string, unknown>>,
+  path: readonly string[],
+): StructuralSubtypeResult | undefined {
+  const childIdentity = unprojectableIdentity(child);
+  const parentIdentity = unprojectableIdentity(parent);
+  if (childIdentity === undefined && parentIdentity === undefined) {
+    return undefined;
+  }
+  if (isUnconstrained(strippedParent)) return SUBTYPE;
+  if (childIdentity === undefined) {
+    return isUnionSchema(child) ? undefined : (
+        incomparable("unsupported-construct", path)
+      );
+  }
+  if (parentIdentity === undefined) {
+    return isUnionSchema(parent) ? undefined : (
+        incomparable("unsupported-construct", path)
+      );
+  }
+  return childIdentity === parentIdentity ? SUBTYPE : (
+      incomparable("unsupported-construct", path)
+    );
+}
+
+// ============================================================
+// Stored fallbacks
+// ============================================================
+
+const DEFAULT_KEYWORD = "default";
+
+/**
+ * Every value a node stores without validating it — its `.default()` and
+ * `.catch()` values, the outer one and each one it wraps — as `{ instance,
+ * values }`, `instance` naming the outermost such Zod instance. The
+ * projection writes only the outermost value as `default`, so the
+ * comparison projection lists them all here. Written only by
+ * `structuralSubtypeProjection`, never into a persisted document.
+ */
+export const STORED_FALLBACKS_KEYWORD = "x-typegraph-stored-fallbacks";
+
+/** The outermost `.default()`/`.catch()` instance `schema` stores through. */
+function fallbackInstance(schema: JsonSchema): string | undefined {
+  const listed = schema[STORED_FALLBACKS_KEYWORD] as
+    Readonly<{ instance?: unknown }> | undefined;
+  return typeof listed?.instance === "string" ? listed.instance : undefined;
+}
+
+/** The values `schema` stores unvalidated, as the projection states them. */
+function storedFallbacks(schema: JsonSchema): readonly unknown[] {
+  const listed = schema[STORED_FALLBACKS_KEYWORD] as
+    Readonly<{ values?: unknown }> | undefined;
+  if (Array.isArray(listed?.values)) return listed.values;
+  return hasOwnKey(schema, DEFAULT_KEYWORD) ? [schema[DEFAULT_KEYWORD]] : [];
+}
+
+/**
+ * The verdict for a child node that stores a value it never validates, or
+ * `undefined` when it stores none, the parent stores the same ones, or each
+ * one satisfies the parent.
+ *
+ * Soundness here means the child stores nothing the parent could not store
+ * itself. Zod's `.default(v)` stores `v` for an absent input and `.catch(v)`
+ * stores it for an input that fails, both without running the node's own
+ * checks. A child field that IS the parent's (the same Zod instance, shared
+ * through `.extend()`) stores exactly what the parent stores, fallbacks
+ * included, so it is accepted whatever they are: equal markers, or the
+ * identity rule's equal schemas, say so. A field the child declares
+ * separately has each fallback judged as a one-value child, under both
+ * readings of the finite-value comparison; one the comparison cannot judge
+ * by value (a format, a date) is refused. `.prefault(v)` is parsed like any
+ * input and projects nothing.
+ */
+/**
+ * The schema admitting exactly `value`: a scalar pinned with `const`, an
+ * array as the closed tuple of its members, an object as the closed object
+ * of its members, so the comparison walks into a structured value instead
+ * of refusing an unjudgeable `const`.
+ */
+function singletonSchema(value: unknown): JsonSchema {
+  if (Array.isArray(value)) {
+    return {
+      type: ARRAY_TYPE_TOKEN,
+      prefixItems: value.map((member) => singletonSchema(member)),
+      items: false,
+      minItems: value.length,
+      maxItems: value.length,
+    };
+  }
+  if (value !== null && typeof value === "object") {
+    const properties = createDataKeyedBag<JsonSchema>();
+    for (const [key, member] of Object.entries(value)) {
+      properties[key] = singletonSchema(member);
+    }
+    return {
+      type: OBJECT_TYPE_TOKEN,
+      properties,
+      required: Object.keys(value),
+      additionalProperties: false,
+    };
+  }
+  return { const: value };
+}
+
+function compareStoredFallback(
+  child: JsonSchema,
+  parent: JsonSchema,
+  path: readonly string[],
+  walk: Walk,
+): StructuralSubtypeResult | undefined {
+  // The instance alone decides: Zod evaluates a default factory each time it
+  // projects, so one shared `z.date().default(() => new Date())` lists a
+  // different value on each side.
+  const childInstance = fallbackInstance(child);
+  if (
+    childInstance !== undefined &&
+    childInstance === fallbackInstance(parent)
+  ) {
+    return undefined;
+  }
+  for (const value of storedFallbacks(child)) {
+    const result = compareSchemas(
+      singletonSchema(value),
+      parent,
+      path,
+      descend(walk),
+    );
+    if (result.verdict !== "subtype") return result;
+  }
+  return undefined;
+}
+
 function compareSchemas(
   child: JsonSchema,
   parent: JsonSchema,
@@ -705,6 +975,9 @@ function compareSchemas(
   if (walk.depth > MAX_STRUCTURAL_SUBTYPE_DEPTH) {
     return incomparable("max-depth-exceeded", path);
   }
+
+  const fallbackResult = compareStoredFallback(child, parent, path, walk);
+  if (fallbackResult !== undefined) return fallbackResult;
 
   // A schema is trivially a subtype of itself, regardless of which keywords
   // it carries — including `$ref` (recursive `z.lazy`) and `allOf`
@@ -718,12 +991,13 @@ function compareSchemas(
   const strippedParent = stripSchemaMetadata(parent);
   if (sameSchema(strippedChild, strippedParent, walk)) return SUBTYPE;
 
-  if (
-    hasOwnKey(child, UNPROJECTABLE_NODE_KEYWORD) ||
-    hasOwnKey(parent, UNPROJECTABLE_NODE_KEYWORD)
-  ) {
-    return SUBTYPE;
-  }
+  const unprojectableResult = compareUnprojectable(
+    child,
+    parent,
+    strippedParent,
+    path,
+  );
+  if (unprojectableResult !== undefined) return unprojectableResult;
 
   if (
     hasOwnKey(child, REFERENCE_KEYWORD) ||
@@ -828,7 +1102,7 @@ function requiredPropertyValues(
   schema: JsonSchema,
   propertyName: string,
 ): ReadonlySet<string> | undefined {
-  if (!(schema.required ?? []).includes(propertyName)) return undefined;
+  if (!requiredKeys(schema).includes(propertyName)) return undefined;
   const properties = schema.properties;
   if (properties === undefined || !hasOwnKey(properties, propertyName)) {
     return undefined;
@@ -1260,22 +1534,41 @@ function compareObject(
 ): StructuralSubtypeResult {
   const childProps = child.properties ?? {};
   const parentProps = parent.properties ?? {};
-  const childRequired = new Set(child.required);
-  const parentRequired = new Set(parent.required);
-
-  for (const name of parentRequired) {
-    if (!hasOwnKey(childProps, name)) {
-      return notSubtype("missing-required-property", [...path, name]);
-    }
-    if (!childRequired.has(name)) {
-      return notSubtype("optional-in-child-required-in-parent", [
-        ...path,
-        name,
-      ]);
-    }
-  }
-
+  const childRequired = new Set(storedKeys(child));
+  const parentRequired = new Set(requiredKeys(parent));
   const childExtrasSchema = openExtrasSchema(child);
+
+  // A key the child does not name may still be one it always stores, under
+  // its additional properties (an exhaustive record), which the comparison
+  // below then holds to the parent's schema for it.
+  for (const name of parentRequired) {
+    if (childRequired.has(name)) continue;
+    // The same property schema with the same optionality on both sides
+    // stores, and omits, exactly what the parent's does: a field shared
+    // through `.extend()`.
+    const childOptionality = keyOptionality(child)?.[name];
+    const parentOptionality = keyOptionality(parent)?.[name];
+    if (
+      childOptionality !== undefined &&
+      parentOptionality !== undefined &&
+      canonicalJson(childOptionality) === canonicalJson(parentOptionality) &&
+      hasOwnKey(childProps, name) &&
+      hasOwnKey(parentProps, name) &&
+      sameSchema(
+        stripSchemaMetadata(requireDefined(childProps[name])),
+        stripSchemaMetadata(requireDefined(parentProps[name])),
+        walk,
+      )
+    ) {
+      continue;
+    }
+    return notSubtype(
+      hasOwnKey(childProps, name) ?
+        "optional-in-child-required-in-parent"
+      : "missing-required-property",
+      [...path, name],
+    );
+  }
 
   for (const [name, parentProperty] of Object.entries(parentProps)) {
     if (hasOwnKey(childProps, name)) {

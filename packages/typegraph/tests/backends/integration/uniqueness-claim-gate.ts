@@ -47,8 +47,14 @@ const ACCOUNT_EMAIL_UNIQUE = {
   collation: "binary",
 } as const;
 
-/** One kind, with or without its unique constraint (optionally widened). */
-function accountGraph(id: string, unique: "none" | "kind" | "caseInsensitive") {
+/**
+ * One kind, with or without its unique constraint (optionally widened, or
+ * narrowed to the rows a `where` predicate selects).
+ */
+function accountGraph(
+  id: string,
+  unique: "none" | "kind" | "caseInsensitive" | "partial",
+) {
   return defineGraph({
     id,
     nodes: {
@@ -57,6 +63,13 @@ function accountGraph(id: string, unique: "none" | "kind" | "caseInsensitive") {
         unique:
           unique === "none" ? []
           : unique === "kind" ? [ACCOUNT_EMAIL_UNIQUE]
+          : unique === "partial" ?
+            [
+              {
+                ...ACCOUNT_EMAIL_UNIQUE,
+                where: (fields) => requireDefined(fields["email"]).isNotNull(),
+              },
+            ]
           : [{ ...ACCOUNT_EMAIL_UNIQUE, collation: "caseInsensitive" }],
       },
     },
@@ -476,6 +489,25 @@ export function registerUniquenessClaimGateIntegrationTests(
     // `undefined` for a same-named constraint of a different shape commits
     // the reshape, and this case fails.
 
+    it("refuses a reshape that changes only the constraint's where predicate on a populated kind", async () => {
+      const id = "uniqueness_gate_reshape_where";
+      const store = await context.createStore(accountGraph(id, "kind"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "partial"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        { ...ACCOUNT_CONSTRAINT_ADDED, cause: "constraint-reshaped" },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK (verified): leaving `where` out of `enforcedShape`
+    // (src/schema/unique-constraint-change.ts) reads the reshape as
+    // unchanged, the commit succeeds, and this case fails.
+
     it("redeploys a populated kind whose unique constraint leaves scope and collation at their defaults", async () => {
       const declarations: readonly DefaultedAccountDeclaration[] = [
         {},
@@ -665,6 +697,36 @@ export function registerUniquenessClaimGateIntegrationTests(
     // declaration as given AND the gate's scope test back to
     // `scope === "kindWithSubClasses"`, the subClassOf removal commits over
     // the claim at the `GateEmployee` axis. Either one alone still refuses.
+
+    it("enforces a declaration that skipped defineGraph across the subclass component, with binary keys", async () => {
+      const store = await context.createStore(
+        withUndefaultedDeclarations(
+          defaultedScopeHierarchyGraph(
+            "uniqueness_gate_defaults_enforced",
+            true,
+          ),
+          "gate_person_email",
+          ["GatePerson", "GateEmployee"],
+        ),
+      );
+      await store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      // The omitted scope spans the component, so a subclass row collides.
+      await expect(
+        store.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      // The omitted collation is binary, so a value differing in case does not.
+      await expect(
+        store.nodes.GateEmployee.create({
+          email: DUPLICATE_EMAIL.toUpperCase(),
+        }),
+      ).resolves.toBeDefined();
+    });
+    // MUTATION CHECK (verified): dropping the omitted-scope fallback in
+    // `uniquenessScopeSpansSubclasses` (src/core/unique-constraint-options.ts)
+    // admits the subclass row; reading an omitted collation as
+    // `"caseInsensitive"` in `uniqueCollationFoldsCase` refuses the
+    // upper-cased one.
 
     it("migrates a graph whose declarations skipped defineGraph without a phantom unique-constraint change", async () => {
       const id = "uniqueness_gate_defaults_spread_diff";

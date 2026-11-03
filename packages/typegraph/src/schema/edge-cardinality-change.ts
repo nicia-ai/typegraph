@@ -12,19 +12,39 @@
  */
 import type { EdgeCardinalityDeclaration } from "../backend/types";
 import { effectiveTargetCardinality } from "../core/edge-integrity-options";
+import { type Cardinality } from "../core/types";
 import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import type { OntologySnapshot } from "./ontology-change";
+
+/**
+ * Whether a row population that satisfies `stored` on an axis direction
+ * already satisfies `proposed`, so a commit moving the axis between them owes
+ * no data check.
+ *
+ * `one` counts a row for its whole life and `oneActive` only while its
+ * `validTo` is open, so at most one row of all implies at most one open row:
+ * `one` → `oneActive` only stops counting ended rows. The reverse is a
+ * tightening (an ended row and an open one from the same endpoint satisfy
+ * `oneActive` and violate `one`), and every other transition is probed.
+ */
+function cardinalityLoosens(
+  stored: Cardinality,
+  proposed: Cardinality,
+): boolean {
+  return stored === "one" && proposed === "oneActive";
+}
 
 /**
  * THE axes a schema commit newly constrains, i.e. those whose existing rows
  * this commit owes a data check.
  *
- * An axis is probed whenever the proposed value is a constrained one and
- * differs from the stored value. Deliberately coarser than an implication
- * lattice over the cardinalities: probing a genuine loosening (`one` →
- * `oneActive`) costs one read of a population that is already clean, while
- * missing a tightening publishes a constraint the data violates. The cheap
- * error is the one this takes.
+ * An axis is probed whenever the proposed value is a constrained one, differs
+ * from the stored value, and is not a proven loosening of it
+ * ({@link cardinalityLoosens}). Deliberately coarser than a full implication
+ * lattice over the cardinalities: probing a genuine loosening costs one read
+ * of a population that is already clean, while missing a tightening
+ * publishes a constraint the data violates. The cheap error is the one this
+ * takes, except where the loosening is proven.
  *
  * A stored declaration this proposal does not carry (a brand-new edge kind)
  * reads as `"many"` on both axes — the same default an old schema loads as —
@@ -48,7 +68,10 @@ export function newlyConstrainedEdgeAxes(
         ref.direction === "source" ?
           (beforeDef?.cardinality ?? "many")
         : effectiveTargetCardinality(beforeDef?.targetCardinality);
-      if (storedCardinality !== ref.cardinality) {
+      if (
+        storedCardinality !== ref.cardinality &&
+        !cardinalityLoosens(storedCardinality, ref.cardinality)
+      ) {
         result.push({ ...ref, edgeKind });
       }
     }
