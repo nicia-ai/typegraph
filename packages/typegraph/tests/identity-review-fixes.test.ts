@@ -696,6 +696,46 @@ describe("identity review fixes", () => {
     });
   });
 
+  it("#closure a recompute that absorbs a member the stale closure left out rewrites that member's separations", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const a = await store.nodes.Person.create({ name: "A" }, { id: "aaa" });
+    const b = await store.nodes.Person.create({ name: "B" }, { id: "bbb" });
+    const c = await store.nodes.Person.create({ name: "C" }, { id: "ccc" });
+    const d = await store.nodes.Person.create({ name: "D" }, { id: "ddd" });
+    await store.identity.assertSame(a, b);
+    const bridge = await store.identity.assertSame(b, c);
+    await store.identity.assertDifferent(c, d);
+    expect(await store.identity.areDifferent(a, d)).toBe(true);
+
+    // Drop `a` from the materialized closure, so the recompute below starts
+    // from b's class as {b, c} and ABSORBS `a` back from the ledger.
+    const schema = createSqlSchema(store.backend.tableNames);
+    const { executeStatement } = store.backend;
+    if (executeStatement === undefined) {
+      throw new Error("test backend must execute statements");
+    }
+    await executeStatement(
+      asCompiledStatementSql(sql`
+        DELETE FROM ${schema.identityClosureTable}
+        WHERE graph_id = ${store.graphId} AND member_id = ${a.id}
+      `),
+    );
+
+    await store.identity.retractAssertion(bridge.assertion.id);
+
+    // {a, b} no longer reaches c, so nothing separates it from d.
+    expect(await store.identity.membersOf(a)).toEqual([
+      { kind: "Person", id: a.id },
+      { kind: "Person", id: b.id },
+    ]);
+    expect(await store.identity.areDifferent(a, d)).toBe(false);
+    expect(await store.identity.areDifferent(b, d)).toBe(false);
+    expect(await store.identity.areDifferent(c, d)).toBe(true);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
   it("#19 receipt pins identity write intent, not persisted effect", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const a = await store.nodes.Person.create({ name: "A" }, { id: "aaa" });
