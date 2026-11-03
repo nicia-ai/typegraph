@@ -47,8 +47,14 @@ const ACCOUNT_EMAIL_UNIQUE = {
   collation: "binary",
 } as const;
 
-/** One kind, with or without its unique constraint (optionally widened). */
-function accountGraph(id: string, unique: "none" | "kind" | "caseInsensitive") {
+/**
+ * One kind, with or without its unique constraint (optionally widened, or
+ * narrowed to the rows a `where` predicate selects).
+ */
+function accountGraph(
+  id: string,
+  unique: "none" | "kind" | "caseInsensitive" | "partial",
+) {
   return defineGraph({
     id,
     nodes: {
@@ -57,6 +63,13 @@ function accountGraph(id: string, unique: "none" | "kind" | "caseInsensitive") {
         unique:
           unique === "none" ? []
           : unique === "kind" ? [ACCOUNT_EMAIL_UNIQUE]
+          : unique === "partial" ?
+            [
+              {
+                ...ACCOUNT_EMAIL_UNIQUE,
+                where: (fields) => fields.email.isNotNull(),
+              },
+            ]
           : [{ ...ACCOUNT_EMAIL_UNIQUE, collation: "caseInsensitive" }],
       },
     },
@@ -475,6 +488,25 @@ export function registerUniquenessClaimGateIntegrationTests(
     // MUTATION CHECK: making `uniqueConstraintEnforcementChange` return
     // `undefined` for a same-named constraint of a different shape commits
     // the reshape, and this case fails.
+
+    it("refuses a reshape that changes only the constraint's where predicate on a populated kind", async () => {
+      const id = "uniqueness_gate_reshape_where";
+      const store = await context.createStore(accountGraph(id, "kind"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "partial"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        { ...ACCOUNT_CONSTRAINT_ADDED, cause: "constraint-reshaped" },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK (verified): leaving `where` out of `enforcedShape`
+    // (src/schema/unique-constraint-change.ts) reads the reshape as
+    // unchanged, the commit succeeds, and this case fails.
 
     it("redeploys a populated kind whose unique constraint leaves scope and collation at their defaults", async () => {
       const declarations: readonly DefaultedAccountDeclaration[] = [

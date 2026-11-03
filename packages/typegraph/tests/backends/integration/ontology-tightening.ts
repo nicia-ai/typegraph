@@ -48,6 +48,9 @@ const Person = defineNode("Person", { schema: z.object({}) });
 const Company = defineNode("Company", { schema: z.object({}) });
 const Organization = defineNode("Organization", { schema: z.object({}) });
 const worksFor = defineEdge("worksFor", { schema: z.object({}) });
+const keyedKnows = defineEdge("keyedKnows", {
+  schema: z.object({ label: z.string(), note: z.string() }),
+});
 
 /**
  * A subClassOf/disjointWith relation between these two never changes across
@@ -409,6 +412,56 @@ export function registerOntologyTighteningIntegrationTests(
     // MUTATION CHECK: flipping through `backend.setActiveVersion` without the
     // tightening preflight in `rollbackSchema` makes the rollback succeed and
     // this case fail.
+
+    it("refuses rolling back to a version that keys a populated edge kind by a different match identity", async () => {
+      const id = "ontology_tightening_rollback_match_identity";
+      const keyedGraph = (fields: readonly ("label" | "note")[]) =>
+        defineGraph({
+          id,
+          nodes: { Person: { type: Person } },
+          edges: {
+            keyedKnows: {
+              type: keyedKnows,
+              from: [Person],
+              to: [Person],
+              matchIdentity: { name: `keyed-${fields.join("-")}`, fields },
+            },
+          },
+        });
+      await context.createStore(keyedGraph(["label"]));
+      await migrateSchema(
+        context.getBackend(),
+        keyedGraph(["label", "note"]),
+        1,
+      );
+      const [store] = await createAdapterStoreWithSchema(
+        keyedGraph(["label", "note"]),
+        context.getBackend(),
+      );
+      const alice = await store.nodes.Person.create({});
+      const bob = await store.nodes.Person.create({});
+      await store.edges.keyedKnows.create(alice, bob, {
+        label: "friend",
+        note: "met at work",
+      });
+
+      const error = await rollbackSchema(context.getBackend(), id, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(MigrationError);
+      expect((error as MigrationError).details).toMatchObject({
+        reason: "edge-match-identity-rekey",
+        fromVersion: 2,
+        toVersion: 1,
+        edgeKinds: ["keyedKnows"],
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK (verified): passing `edgeMatchIdentity: undefined` to
+    // `planSchemaCommitPreflight` in `prepareRollbackPreflight`
+    // (src/schema/manager.ts) reactivates version 1 over rows keyed by
+    // version 2's identity, and this case fails.
 
     it("rolls back to a stricter version when live rows satisfy it", async () => {
       const id = "ontology_tightening_rollback_clean";
