@@ -286,6 +286,59 @@ export function registerConstraintFenceVerificationIntegrationTests(
       );
     });
 
+    it("reports an ended and a future-dated edge contending one cardinality:one axis", async () => {
+      const store = await context.createStore(verifyGraph);
+      const employee = await store.nodes.VerifyEmployee.create({
+        email: "windows@example.com",
+      });
+      const first = await store.nodes.VerifyProject.create({ title: "First" });
+      const second = await store.nodes.VerifyProject.create({
+        title: "Second",
+      });
+
+      // A `one` axis counts a row for its whole life: an ended edge is what an
+      // `asOf` read inside its window returns, and a future-dated one becomes
+      // current once the clock reaches it. Neither is current today, so an
+      // audit narrowed to the current window would report a clean axis.
+      const planted = [
+        {
+          id: "verify-ended-edge",
+          toId: first.id,
+          validFrom: "2000-01-01T00:00:00.000Z",
+          validTo: "2001-01-01T00:00:00.000Z",
+        },
+        {
+          id: "verify-future-edge",
+          toId: second.id,
+          validFrom: "2999-01-01T00:00:00.000Z",
+        },
+      ];
+      for (const edge of planted) {
+        await store.backend.insertEdge({
+          graphId: verifyGraph.id,
+          kind: "verifyManages",
+          fromKind: "VerifyEmployee",
+          fromId: employee.id,
+          toKind: "VerifyProject",
+          props: {},
+          ...edge,
+        });
+      }
+
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "edgeCardinality",
+          target: {
+            relation: "edgeClaims",
+            graphId: verifyGraph.id,
+            axis: "one:verifyManages",
+            key: encodeTupleKey(["VerifyEmployee", employee.id]),
+          },
+          edgeIds: ["verify-ended-edge", "verify-future-edge"],
+        },
+      ]);
+    });
+
     it("reports a target-side violation with the target-axis ClaimTarget (issue #610)", async () => {
       const store = await context.createStore(verifyGraph);
       const first = await store.nodes.VerifyEmployee.create({
