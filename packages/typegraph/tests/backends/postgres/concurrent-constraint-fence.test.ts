@@ -34,20 +34,18 @@
  * `tests/constraint-write-fence.test.ts` pins the MECHANISM on PGlite — that
  * the lock is taken, before the probe, and NOT taken by unconstrained writes.
  * It cannot pin the outcome: PGlite is single-connection and serial, so two
- * writers can never actually overlap there. This suite is the other half. It
- * runs two independent connections against one database and asserts only
- * OUTCOMES — how many callers succeeded and what the loser was told — never
- * timing or ordering, because which of the two wins the lock is genuinely
- * arbitrary and asserting on it would make the suite flaky by construction.
+ * writers can never actually overlap there. This suite is the other half: two
+ * independent connections against one database, with the interleaving FORCED
+ * by hold-and-gate (`./held-transaction-race.ts`). The holder writes inside a
+ * transaction it keeps open; the contender starts on the other pool and must be
+ * observed parked on a lock the holder took before the holder commits. Which
+ * writer wins is therefore fixed by construction, and each case asserts the
+ * contender's exact refusal.
  *
- * Against the pre-fix code every case here fails nondeterministically: both
- * writers commit, leaving two edges / two live cardinality-`one` edges / two
- * sibling rows sharing a unique key / two disjoint-kind rows sharing an id.
- *
- * Each concurrent pair carries an explicit timeout. A blocked
- * `pg_advisory_xact_lock` waits indefinitely, so a lock-order regression would
- * otherwise stall the run rather than report; the timeout turns a hang into a
- * failure.
+ * Against the pre-fix code every constrained case here fails
+ * deterministically: the contender settles while the holder is still open, and
+ * both commit — two edges / two live cardinality-`one` edges / two sibling rows
+ * sharing a unique key / two disjoint-kind rows sharing an id.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -66,6 +64,7 @@ import {
   DisjointError,
   disjointWith,
   partOf,
+  type Store,
   subClassOf,
   UniquenessError,
 } from "../../../src";
@@ -75,12 +74,22 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { GraphBackend, GraphCommand } from "../../../src/backend/types";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import {
+  type HeldRace,
+  poolApplicationName,
+  raceAgainstHeldTransaction,
+  requireError,
+  requireValue,
+  summarizeRace,
+} from "./held-transaction-race";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
-/** Each concurrent pair: one writer holds the fence while the other waits. */
-const CONTENTION_TIMEOUT_MS = 20_000;
+const CASE_TIMEOUT_MS = 20_000;
+
+const HOLDER_APPLICATION = "concurrent-constraint-fence:holder";
+const CONTENDER_APPLICATION = "concurrent-constraint-fence:contender";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -164,20 +173,23 @@ const graph = defineGraph({
   ],
 });
 
+type GraphStore = Store<typeof graph>;
+
 /**
- * TWO pools, not one with a larger `max`.
+ * Separate pools, not one with a larger `max`.
  *
- * The losing writer parks inside `pg_advisory_xact_lock` while holding its
+ * The contender parks inside `pg_advisory_xact_lock` while holding its
  * connection, and it must be impossible for that wait to sit behind the
- * winner's own connection in a shared checkout queue — that would be a
+ * holder's own connection in a shared checkout queue — that would be a
  * self-deadlock of the test harness rather than a product result. Separate
- * pools make the two writers independent by construction.
+ * pools make the two writers independent by construction. The probe pool
+ * observes the wait.
  */
-let firstPool: Pool | undefined;
-let secondPool: Pool | undefined;
-let firstDb: NodePgDatabase | undefined;
-let secondDb: NodePgDatabase | undefined;
-let isPostgresAvailable = false;
+let holderPool: Pool | undefined;
+let contenderPool: Pool | undefined;
+let probePool: Pool | undefined;
+let holderDb: NodePgDatabase | undefined;
+let contenderDb: NodePgDatabase | undefined;
 
 /**
  * The suite is gated on `POSTGRES_URL`, and its setup now FAILS rather than
@@ -187,85 +199,91 @@ let isPostgresAvailable = false;
  * the setup fix exists to remove.
  */
 function requirePostgres(): Readonly<{
-  first: NodePgDatabase;
-  second: NodePgDatabase;
+  holder: NodePgDatabase;
+  contender: NodePgDatabase;
+  probe: Pool;
 }> {
-  if (!isPostgresAvailable || firstDb === undefined || secondDb === undefined) {
+  if (
+    holderDb === undefined ||
+    contenderDb === undefined ||
+    probePool === undefined
+  ) {
     throw new Error(
       "concurrent-constraint-fence: PostgreSQL connections are unavailable after setup reported success.",
     );
   }
-  return { first: firstDb, second: secondDb };
+  return { holder: holderDb, contender: contenderDb, probe: probePool };
 }
 
-function createPool(): Pool {
+function createPool(applicationName?: string): Pool {
   return new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
     max: 4,
+    ...(applicationName === undefined ?
+      {}
+    : poolApplicationName(applicationName)),
   });
 }
 
 beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
-  const first = createPool();
-  const second = createPool();
-  await runServerSuiteSetup(
-    "concurrent-constraint-fence",
-    [first, second],
-    async () => {
-      await first.query("SELECT 1");
-      await second.query("SELECT 1");
-      await first.query(generatePostgresMigrationSQL());
-      firstPool = first;
-      secondPool = second;
-      firstDb = drizzle(first);
-      secondDb = drizzle(second);
-      isPostgresAvailable = true;
-    },
-  );
+  const pools = [
+    createPool(HOLDER_APPLICATION),
+    createPool(CONTENDER_APPLICATION),
+    createPool(),
+  ] as const;
+  await runServerSuiteSetup("concurrent-constraint-fence", pools, async () => {
+    const [holder, contender, probe] = pools;
+    await holder.query("SELECT 1");
+    await contender.query("SELECT 1");
+    await probe.query(generatePostgresMigrationSQL());
+    holderPool = holder;
+    contenderPool = contender;
+    probePool = probe;
+    holderDb = drizzle(holder);
+    contenderDb = drizzle(contender);
+  });
 });
 
 afterAll(async () => {
-  if (firstPool !== undefined) await firstPool.end();
-  if (secondPool !== undefined) await secondPool.end();
+  for (const pool of [holderPool, contenderPool, probePool]) {
+    if (pool !== undefined) await pool.end();
+  }
 });
 
 beforeEach(async () => {
-  if (firstPool === undefined) return;
+  if (probePool === undefined) return;
   // `typegraph_edge_claims` included: the cardinality-`one` and composition
   // cases both reserve a claim row, and a row left behind would refuse the
   // same write on the next run against this persistent per-suite database.
-  await firstPool.query(
+  await probePool.query(
     "TRUNCATE typegraph_node_uniques, typegraph_edge_claims, typegraph_edges, typegraph_nodes",
   );
 });
 
-type Settled<T> = Readonly<{
-  fulfilled: readonly T[];
-  rejected: readonly unknown[];
-}>;
-
-/**
- * Splits a settled pair into winners and losers. The assertions are always
- * about the COUNTS and the loser's error TYPE — never about which of the two
- * stores won, which is arbitrary and would make the case flaky.
- */
-function partitionSettled<T>(
-  results: readonly PromiseSettledResult<T>[],
-): Settled<T> {
+/** The holder's and contender's stores, each on its own pool. */
+function createRacingStores(
+  live: ReturnType<typeof requirePostgres>,
+): Readonly<{ holderStore: GraphStore; contenderStore: GraphStore }> {
   return {
-    fulfilled: results
-      .filter((result): result is PromiseFulfilledResult<T> => {
-        return result.status === "fulfilled";
-      })
-      .map((result) => result.value),
-    rejected: results
-      .filter((result): result is PromiseRejectedResult => {
-        return result.status === "rejected";
-      })
-      .map((result): unknown => result.reason),
+    holderStore: createStore(graph, createPostgresBackend(live.holder)),
+    contenderStore: createStore(graph, createPostgresBackend(live.contender)),
   };
+}
+
+function raceOnLivePools<THolder, TContender>(
+  live: ReturnType<typeof requirePostgres>,
+  holder: (holdOpen: () => Promise<void>) => Promise<THolder>,
+  contender: () => Promise<TContender>,
+): Promise<HeldRace<THolder, TContender>> {
+  return raceAgainstHeldTransaction({
+    probe: live.probe,
+    holderApplication: HOLDER_APPLICATION,
+    contenderApplication: CONTENDER_APPLICATION,
+    holder,
+    contender,
+  });
 }
 
 /** Records the transaction-scoped managed plans without changing capability truth. */
@@ -300,11 +318,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
   "constrained writes under genuine contention (PostgreSQL)",
   () => {
     it(
-      "converges two concurrent getOrCreateByEndpoints onto ONE edge",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "converges two getOrCreateByEndpoints onto ONE edge, the second waiting on the fence",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setup = createStore(graph, createPostgresBackend(live.holder));
         const alice = await setup.nodes.Person.create(
           { name: "Alice" },
           { id: "alice" },
@@ -313,44 +331,49 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { name: "Bob" },
           { id: "bob" },
         );
-
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
+        const { holderStore, contenderStore } = createRacingStores(live);
 
         // Identical props, so both callers name the SAME match key: converging
         // on it is the whole contract, and differing props would be two
         // legitimately different edges under `matchOn`.
-        const [first, second] = await Promise.all([
-          storeA.edges.knows.getOrCreateByEndpoints(alice, bob, {
-            since: "2024",
-          }),
-          storeB.edges.knows.getOrCreateByEndpoints(alice, bob, {
-            since: "2024",
-          }),
-        ]);
+        const race = await raceOnLivePools(
+          live,
+          (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              const result = await tx.edges.knows.getOrCreateByEndpoints(
+                alice,
+                bob,
+                { since: "2024" },
+              );
+              await holdOpen();
+              return result;
+            }),
+          () =>
+            contenderStore.edges.knows.getOrCreateByEndpoints(alice, bob, {
+              since: "2024",
+            }),
+        );
 
-        // Both callers hold the same edge...
-        expect(first.edge.id).toBe(second.edge.id);
-        // ...exactly one of them made it...
-        expect(
-          [first.action, second.action].filter(
-            (action) => action === "created",
-          ),
-        ).toHaveLength(1);
-        expect(
-          [first.action, second.action].filter((action) => action === "found"),
-        ).toHaveLength(1);
-        // ...and the relation holds one edge, not two.
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: "ok",
+        });
+        const created = requireValue(race.holder);
+        const found = requireValue(race.contender);
+        expect(created.action).toBe("created");
+        expect(found.action).toBe("found");
+        expect(found.edge.id).toBe(created.edge.id);
         expect(await setup.edges.knows.findFrom(alice)).toHaveLength(1);
       },
     );
 
     it(
-      "admits exactly one of two concurrent cardinality-one creates",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "refuses the second of two cardinality-one creates",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setup = createStore(graph, createPostgresBackend(live.holder));
         const alice = await setup.nodes.Person.create(
           { name: "Alice" },
           { id: "alice" },
@@ -363,69 +386,83 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { name: "Carol" },
           { id: "carol" },
         );
-
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
+        const { holderStore, contenderStore } = createRacingStores(live);
 
         // Same source, different targets: `one` allows at most one edge of this
         // kind FROM alice, so the two are in direct conflict.
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.edges.reportsTo.create(alice, bob, {}),
-            storeB.edges.reportsTo.create(alice, carol, {}),
-          ]),
+        const race = await raceOnLivePools(
+          live,
+          (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.edges.reportsTo.create(alice, bob, {});
+              await holdOpen();
+            }),
+          () => contenderStore.edges.reportsTo.create(alice, carol, {}),
         );
 
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect(rejected[0]).toBeInstanceOf(CardinalityError);
-        expect(await setup.edges.reportsTo.findFrom(alice)).toHaveLength(1);
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: CardinalityError.name,
+        });
+        const survivors = await setup.edges.reportsTo.findFrom(alice);
+        expect(survivors.map((edge) => edge.toId)).toEqual([bob.id]);
       },
     );
 
     it(
-      "admits exactly one of two concurrent sibling-kind inserts sharing a scoped unique key",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "refuses the second of two sibling-kind inserts sharing a scoped unique key",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const plansA: GraphCommand[] = [];
-        const plansB: GraphCommand[] = [];
-        const storeA = createStore(
+        const holderPlans: GraphCommand[] = [];
+        const contenderPlans: GraphCommand[] = [];
+        const holderStore = createStore(
           graph,
-          recordManagedPlans(createPostgresBackend(live.first), plansA),
+          recordManagedPlans(createPostgresBackend(live.holder), holderPlans),
         );
-        const storeB = createStore(
+        const contenderStore = createStore(
           graph,
-          recordManagedPlans(createPostgresBackend(live.second), plansB),
+          recordManagedPlans(
+            createPostgresBackend(live.contender),
+            contenderPlans,
+          ),
         );
 
         // Employee and Contractor are SIBLINGS under Worker. Their uniques rows
         // are keyed by their own kinds, so the sidecar's primary key cannot
         // refuse the second — only the serialized probe can.
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.nodes.Employee.create({
-              name: "Employee",
-              email: "shared@example.com",
+        const race = await raceOnLivePools(
+          live,
+          (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.nodes.Employee.create({
+                name: "Employee",
+                email: "shared@example.com",
+              });
+              await holdOpen();
             }),
-            storeB.nodes.Contractor.create({
+          () =>
+            contenderStore.nodes.Contractor.create({
               name: "Contractor",
               email: "shared@example.com",
             }),
-          ]),
         );
 
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect(rejected[0]).toBeInstanceOf(UniquenessError);
-        expect((rejected[0] as UniquenessError).details.constraintName).toBe(
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: UniquenessError.name,
+        });
+        const refusal = requireError(race.contender);
+        expect(refusal).toBeInstanceOf(UniquenessError);
+        expect((refusal as UniquenessError).details.constraintName).toBe(
           "staff_email",
         );
 
-        const employees = await storeA.nodes.Employee.find();
-        const contractors = await storeA.nodes.Contractor.find();
-        expect(employees.length + contractors.length).toBe(1);
-        const commands = [...plansA, ...plansB];
+        expect(await holderStore.nodes.Employee.find()).toHaveLength(1);
+        expect(await holderStore.nodes.Contractor.find()).toEqual([]);
+        const commands = [...holderPlans, ...contenderPlans];
         expect(commands).toHaveLength(2);
         for (const command of commands) {
           expect(command.kind).toBe("node.create");
@@ -439,45 +476,51 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
-      "admits exactly one of two concurrent disjoint-kind creates sharing an id",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "refuses the second of two disjoint-kind creates sharing an id",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
+        const { holderStore, contenderStore } = createRacingStores(live);
 
         // `(graph_id, kind, id)` makes these two DIFFERENT rows, so the nodes
         // primary key is structurally incapable of refusing the second.
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.nodes.Person.create({ name: "Person" }, { id: "shared-id" }),
-            storeB.nodes.Company.create(
+        const race = await raceOnLivePools(
+          live,
+          (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.nodes.Person.create(
+                { name: "Person" },
+                { id: "shared-id" },
+              );
+              await holdOpen();
+            }),
+          () =>
+            contenderStore.nodes.Company.create(
               { name: "Company" },
               { id: "shared-id" },
             ),
-          ]),
         );
 
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect(rejected[0]).toBeInstanceOf(DisjointError);
-
-        const people = await storeA.nodes.Person.find();
-        const companies = await storeA.nodes.Company.find();
-        expect(people.length + companies.length).toBe(1);
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: DisjointError.name,
+        });
+        expect(await holderStore.nodes.Person.find()).toHaveLength(1);
+        expect(await holderStore.nodes.Company.find()).toEqual([]);
       },
     );
 
     it(
-      "admits exactly one of two concurrent partOf postconditions naming DIFFERENT wholes",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "refuses the second of two partOf postconditions naming DIFFERENT wholes",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         // The composition counterpart of the cases above, and the half the
         // in-process simulation (`tests/composition-attachment-fence.test.ts`)
         // cannot reach: that file forces the interleaving by running the
         // competing write inside the loser's own read, on one connection. Here
-        // two independent connections overlap naturally, which is the only way
-        // to see what the engine actually admits.
+        // two independent connections overlap, which is the only way to see
+        // what the engine actually admits.
         //
         // Both callers match the SAME already-existing, UNATTACHED part, so
         // neither creates a row and each one's lookup can legitimately observe
@@ -485,74 +528,73 @@ describe.runIf(process.env["POSTGRES_URL"])(
         // decision is "what does the incumbent whole mean", which only a
         // verdict re-read under the per-graph fence can answer.
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setup = createStore(graph, createPostgresBackend(live.holder));
         const shelfA = await setup.nodes.Shelf.create({}, { id: "shelf-a" });
         const shelfB = await setup.nodes.Shelf.create({}, { id: "shelf-b" });
         await setup.nodes.Book.create({ slug: "contested" }, { id: "book" });
+        const { holderStore, contenderStore } = createRacingStores(live);
 
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
-
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.nodes.Book.getOrCreateByConstraint(
-              "book_slug",
-              { slug: "contested" },
-              { partOf: { whole: { kind: "Shelf", id: shelfA.id } } },
-            ),
-            storeB.nodes.Book.getOrCreateByConstraint(
+        const race = await raceOnLivePools(
+          live,
+          (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.nodes.Book.getOrCreateByConstraint(
+                "book_slug",
+                { slug: "contested" },
+                { partOf: { whole: { kind: "Shelf", id: shelfA.id } } },
+              );
+              await holdOpen();
+            }),
+          () =>
+            contenderStore.nodes.Book.getOrCreateByConstraint(
               "book_slug",
               { slug: "contested" },
               { partOf: { whole: { kind: "Shelf", id: shelfB.id } } },
             ),
-          ]),
         );
 
         // One attachment, one refusal — never two attachments, and never a
-        // silent move that leaves the loser reporting success.
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect(rejected[0]).toBeInstanceOf(CompositionExistenceError);
-        const details = (rejected[0] as CompositionExistenceError).details;
+        // silent move that leaves the contender reporting success.
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: CompositionExistenceError.name,
+        });
+        const refusal = requireError(race.contender);
+        expect(refusal).toBeInstanceOf(CompositionExistenceError);
+        const details = (refusal as CompositionExistenceError).details;
         expect(details.situation).toBe("existing");
         expect(details.requestedVia).toBe("shelvedIn");
+        expect(details.currentWhole).toEqual({ kind: "Shelf", id: shelfA.id });
+        expect(details.requestedWhole?.id).toBe(shelfB.id);
 
-        // The part holds the winner's whole, through exactly one edge, with no
+        // The part holds the holder's whole, through exactly one edge, with no
         // retired window: a move would leave two rows, one of them ended.
         const edges = await setup.edges.shelvedIn.find(
           {},
           { temporalMode: "includeEnded" },
         );
-        expect(edges).toHaveLength(1);
-        const held = edges[0];
-        if (held === undefined) throw new Error("Expected one shelvedIn edge");
-        expect(held.meta.validTo).toBeUndefined();
-        expect([shelfA.id, shelfB.id]).toContain(held.toId);
-        // Whichever side won, the refusal named the OTHER shelf as requested
-        // and the held one as current.
-        expect(details.currentWhole).toEqual({
-          kind: "Shelf",
-          id: held.toId,
-        });
-        expect(details.requestedWhole?.id).not.toBe(held.toId);
+        expect(
+          edges.map((edge) => ({
+            toId: edge.toId,
+            validTo: edge.meta.validTo,
+          })),
+        ).toEqual([{ toId: shelfA.id, validTo: undefined }]);
       },
     );
 
     it(
-      "lets two concurrent UNCONSTRAINED writes both succeed",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "lets two UNCONSTRAINED writes both succeed without waiting on each other",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
-        // The control, on OUTCOMES only: the fence must not turn independent
-        // writes into failures. `knows` is cardinality `many` and a plain
-        // `create` runs no probe, so both writers must simply succeed.
-        //
-        // This case deliberately does NOT claim the lock is absent — nothing
-        // here observes lock acquisition, and two successes are equally
-        // consistent with a lock that was taken and released. The deterministic
-        // absence assertion is `tests/constraint-write-fence.test.ts`, which
-        // counts the statements themselves on PGlite.
+        // The control: the fence must not turn independent writes into
+        // failures, nor serialize them. `knows` is cardinality `many` and a
+        // plain `create` runs no probe, so the contender commits while the
+        // holder's transaction is still open. The statement-level absence
+        // assertion is `tests/constraint-write-fence.test.ts`, which counts
+        // the statements themselves on PGlite.
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setup = createStore(graph, createPostgresBackend(live.holder));
         const alice = await setup.nodes.Person.create(
           { name: "Alice" },
           { id: "alice" },
@@ -565,19 +607,23 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { name: "Carol" },
           { id: "carol" },
         );
+        const { holderStore, contenderStore } = createRacingStores(live);
 
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
-
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.edges.knows.create(alice, bob, { since: "a" }),
-            storeB.edges.knows.create(alice, carol, { since: "b" }),
-          ]),
+        const race = await raceOnLivePools(
+          live,
+          (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.edges.knows.create(alice, bob, { since: "a" });
+              await holdOpen();
+            }),
+          () => contenderStore.edges.knows.create(alice, carol, { since: "b" }),
         );
 
-        expect(rejected).toEqual([]);
-        expect(fulfilled).toHaveLength(2);
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "settled",
+          holder: "ok",
+          contender: "ok",
+        });
         expect(await setup.edges.knows.findFrom(alice)).toHaveLength(2);
       },
     );

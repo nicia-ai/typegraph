@@ -608,6 +608,51 @@ export function registerCompositionFenceIntegrationTests(
     // `one:cfIncludedIn`), each with exactly one holder, and this test finds
     // a clean graph instead of the violation.
 
+    it("verifyConstraintFences reports an ended and a future-dated whole of one part across both orientations", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const section = await store.nodes.CfSection.create({});
+      const book = await store.nodes.CfBook.create({});
+      const anthology = await store.nodes.CfAnthology.create({});
+
+      // The composition population here is `one`, which counts a row for its
+      // whole life — so an ended attachment (part `from`, via cfSectionOf) and
+      // a future-dated one (part `to`, via cfHasSection) contend the part's
+      // axis even though neither is current.
+      await store.backend.insertEdge({
+        graphId: store.graphId,
+        id: "cf-ended-whole",
+        kind: "cfSectionOf",
+        fromKind: "CfSection",
+        fromId: section.id,
+        toKind: "CfBook",
+        toId: book.id,
+        props: {},
+        validFrom: "2000-01-01T00:00:00.000Z",
+        validTo: "2001-01-01T00:00:00.000Z",
+      });
+      await store.backend.insertEdge({
+        graphId: store.graphId,
+        id: "cf-future-whole",
+        kind: "cfHasSection",
+        fromKind: "CfAnthology",
+        fromId: anthology.id,
+        toKind: "CfSection",
+        toId: section.id,
+        props: {},
+        validFrom: "2999-01-01T00:00:00.000Z",
+      });
+
+      const violations = await store.verifyConstraintFences();
+      const compositionViolations = violations.filter(
+        (violation) => violation.family === "composition",
+      );
+      expect(compositionViolations).toHaveLength(1);
+      expect(requireDefined(compositionViolations[0]).edgeIds).toEqual([
+        "cf-ended-whole",
+        "cf-future-whole",
+      ]);
+    });
+
     it("verifyConstraintFences still reports a composition edge kind's OWN orthogonal axis violation", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const backend = store.backend;

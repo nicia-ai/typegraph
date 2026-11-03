@@ -1,7 +1,7 @@
 /**
  * Edge acyclicity (`acyclic: true`) under GENUINE contention on a real PostgreSQL
  * server: two independent connections each try to close the SAME two-node
- * cycle from opposite ends at once.
+ * cycle from opposite ends.
  *
  * The reachability probe (`src/store/recursive-cte.ts`'s
  * `buildEdgeAcyclicityProbe`) is an APPLICATION probe with no database key
@@ -20,21 +20,17 @@
  * the per-graph lock is taken, before the reachability probe, for an acyclic
  * edge create. It cannot pin the OUTCOME: PGlite is single-connection and
  * serial, so two writers can never actually overlap there. This suite is the
- * other half, and the test the whole design exists
- * for. It runs two independent connections against one database and
- * asserts only OUTCOMES — how many callers succeeded, and that the surviving
- * graph has no cycle — never timing or ordering, because which of the two
- * wins the lock is genuinely arbitrary and asserting on it would make the
- * suite flaky by construction.
+ * other half: two independent connections against one database, with the
+ * interleaving FORCED by hold-and-gate (`./held-transaction-race.ts`). The
+ * holder writes inside a transaction it keeps open; the contender starts on
+ * the other pool and must be observed parked on the holder's lock before the
+ * holder commits.
  *
  * Against the pre-fix code (drop `"edgeAcyclicity"` from
- * `edgeWriteNeedsConstraintFence`'s acyclic arm) this case fails
- * nondeterministically: both writers' probes read "no cycle" and both
- * commit, leaving a live two-edge cycle `a -> b -> a` in the database.
- *
- * The pair carries an explicit timeout. A blocked `pg_advisory_xact_lock`
- * waits indefinitely, so a lock-order regression would otherwise stall the
- * run rather than report; the timeout turns a hang into a failure.
+ * `edgeWriteNeedsConstraintFence`'s acyclic arm) the contender's probe runs
+ * while the holder is still open, reads "no cycle", and commits: the case
+ * fails deterministically on `contenderState: "settled"` and a live two-edge
+ * cycle `a -> b -> a`.
  *
  * ## A genuine engine cutoff mid-probe
  *
@@ -42,17 +38,15 @@
  * `EdgeAcyclicityIndeterminateError` is reported when the backend's
  * `execute` throws a recognized cut-short code, but it SIMULATES that
  * throw — it never actually asks a real engine to abandon a running
- * statement. This is the one test that does: `SET LOCAL statement_timeout
- * = '50ms'` inside the SAME transaction as an acyclic create over a
- * 10^5-edge relation, so the reachability probe is genuinely still
- * walking when PostgreSQL cancels the statement (`57014
- * query_canceled`) — never "too small to notice a 50ms budget", which
- * would make this a test of statement-dispatch latency instead of the
- * probe itself. Asserts `EdgeAcyclicityIndeterminateError` and that no row
- * was written; `isStatementCutShortError` classifying `57014` is what
- * makes the write path report indeterminate rather than "no cycle" or a
- * raw driver error. Skipped here (no `POSTGRES_URL` in this environment);
- * a PostgreSQL run exercises it.
+ * statement. This is the one test that does: a third connection holds
+ * `ACCESS EXCLUSIVE` on the edges table, and the acyclic create runs under
+ * `SET LOCAL statement_timeout` in its own transaction. The reachability probe
+ * is the create's first statement to read the edges table, so it parks on that
+ * lock until PostgreSQL cancels it (`57014 query_canceled`) — however fast or
+ * loaded the machine is. Asserts `EdgeAcyclicityIndeterminateError` and that
+ * no row was written; `isStatementCutShortError` classifying `57014` is what
+ * makes the write path report indeterminate rather than "no cycle" or a raw
+ * driver error.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -73,14 +67,26 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import {
+  poolApplicationName,
+  raceAgainstHeldTransaction,
+  summarizeRace,
+} from "./held-transaction-race";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
-/** One writer holds the fence while the other waits for the reachability probe. */
-const CONTENTION_TIMEOUT_MS = 20_000;
+const CASE_TIMEOUT_MS = 20_000;
+/**
+ * The cut-short case's statement budget. Generous for the fence statement
+ * that precedes the probe; the probe itself waits on a held table lock, so
+ * no budget is ever enough for it.
+ */
+const PROBE_STATEMENT_TIMEOUT_MS = 1000;
+
+const HOLDER_APPLICATION = "concurrent-edge-acyclicity:holder";
+const CONTENDER_APPLICATION = "concurrent-edge-acyclicity:contender";
 
 const Task = defineNode("Task", { schema: z.object({ name: z.string() }) });
 
@@ -102,129 +108,125 @@ const graph = defineGraph({
 });
 
 /**
- * TWO pools, not one with a larger `max`. The losing writer parks inside
+ * Separate pools, not one with a larger `max`. The contender parks inside
  * `pg_advisory_xact_lock` while holding its connection, and it must be
- * impossible for that wait to sit behind the winner's own connection in a
+ * impossible for that wait to sit behind the holder's own connection in a
  * shared checkout queue — see `concurrent-constraint-fence.test.ts`'s
- * identical rationale.
+ * identical rationale. The probe pool observes the wait and holds the table
+ * lock in the cut-short case.
  */
-let firstPool: Pool | undefined;
-let secondPool: Pool | undefined;
-let firstDb: NodePgDatabase | undefined;
-let secondDb: NodePgDatabase | undefined;
-let isPostgresAvailable = false;
+let holderPool: Pool | undefined;
+let contenderPool: Pool | undefined;
+let probePool: Pool | undefined;
+let holderDb: NodePgDatabase | undefined;
+let contenderDb: NodePgDatabase | undefined;
 
 function requirePostgres(): Readonly<{
-  first: NodePgDatabase;
-  second: NodePgDatabase;
+  holder: NodePgDatabase;
+  contender: NodePgDatabase;
+  probe: Pool;
 }> {
-  if (!isPostgresAvailable || firstDb === undefined || secondDb === undefined) {
+  if (
+    holderDb === undefined ||
+    contenderDb === undefined ||
+    probePool === undefined
+  ) {
     throw new Error(
       "concurrent-edge-acyclicity: PostgreSQL connections are unavailable after setup reported success.",
     );
   }
-  return { first: firstDb, second: secondDb };
+  return { holder: holderDb, contender: contenderDb, probe: probePool };
 }
 
-function createPool(): Pool {
+function createPool(applicationName?: string): Pool {
   return new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
     max: 4,
+    ...(applicationName === undefined ?
+      {}
+    : poolApplicationName(applicationName)),
   });
 }
 
 beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
-  const first = createPool();
-  const second = createPool();
-  await runServerSuiteSetup(
-    "concurrent-edge-acyclicity",
-    [first, second],
-    async () => {
-      await first.query("SELECT 1");
-      await second.query("SELECT 1");
-      await first.query(generatePostgresMigrationSQL());
-      firstPool = first;
-      secondPool = second;
-      firstDb = drizzle(first);
-      secondDb = drizzle(second);
-      isPostgresAvailable = true;
-    },
-  );
+  const pools = [
+    createPool(HOLDER_APPLICATION),
+    createPool(CONTENDER_APPLICATION),
+    createPool(),
+  ] as const;
+  await runServerSuiteSetup("concurrent-edge-acyclicity", pools, async () => {
+    const [holder, contender, probe] = pools;
+    await holder.query("SELECT 1");
+    await contender.query("SELECT 1");
+    await probe.query(generatePostgresMigrationSQL());
+    holderPool = holder;
+    contenderPool = contender;
+    probePool = probe;
+    holderDb = drizzle(holder);
+    contenderDb = drizzle(contender);
+  });
 });
 
 afterAll(async () => {
-  if (firstPool !== undefined) await firstPool.end();
-  if (secondPool !== undefined) await secondPool.end();
+  for (const pool of [holderPool, contenderPool, probePool]) {
+    if (pool !== undefined) await pool.end();
+  }
 });
 
 beforeEach(async () => {
-  if (firstPool === undefined) return;
-  await firstPool.query("TRUNCATE typegraph_edges, typegraph_nodes");
+  if (probePool === undefined) return;
+  await probePool.query("TRUNCATE typegraph_edges, typegraph_nodes");
 });
-
-type Settled<T> = Readonly<{
-  fulfilled: readonly T[];
-  rejected: readonly unknown[];
-}>;
-
-/**
- * Splits a settled pair into winners and losers. Assertions are always about
- * COUNTS and the loser's error TYPE — never about which of the two writers
- * won, which is arbitrary and would make the suite flaky.
- */
-function partitionSettled<T>(
-  results: readonly PromiseSettledResult<T>[],
-): Settled<T> {
-  return {
-    fulfilled: results
-      .filter((result): result is PromiseFulfilledResult<T> => {
-        return result.status === "fulfilled";
-      })
-      .map((result) => result.value),
-    rejected: results
-      .filter((result): result is PromiseRejectedResult => {
-        return result.status === "rejected";
-      })
-      .map((result): unknown => result.reason),
-  };
-}
 
 describe.runIf(process.env["POSTGRES_URL"])(
   "edge acyclicity under genuine contention (PostgreSQL)",
   () => {
     it(
-      "admits exactly one of two concurrent creates that close the SAME two-node cycle from opposite ends",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "refuses the second of two creates that close the SAME two-node cycle from opposite ends",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setup = createStore(graph, createPostgresBackend(live.holder));
         const a = await setup.nodes.Task.create({ name: "a" }, { id: "a" });
         const b = await setup.nodes.Task.create({ name: "b" }, { id: "b" });
 
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
-
-        // a -> b and b -> a fired at once: each writer's own probe sees no
-        // cycle in the population it can read BEFORE either commits. Only
-        // the per-graph fence keeps the second writer's probe from running
-        // until the first has committed (or aborted).
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.edges.dependsOn.create(a, b),
-            storeB.edges.dependsOn.create(b, a),
-          ]),
+        const holderStore = createStore(
+          graph,
+          createPostgresBackend(live.holder),
+        );
+        const contenderStore = createStore(
+          graph,
+          createPostgresBackend(live.contender),
         );
 
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect(rejected[0]).toBeInstanceOf(EdgeAcyclicityError);
+        // The contender's own probe would see no cycle in the population it
+        // can read while the holder is open. Only the per-graph fence keeps
+        // that probe from running until the holder has committed.
+        const race = await raceAgainstHeldTransaction({
+          probe: live.probe,
+          holderApplication: HOLDER_APPLICATION,
+          contenderApplication: CONTENDER_APPLICATION,
+          holder: (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.edges.dependsOn.create(a, b);
+              await holdOpen();
+            }),
+          contender: () => contenderStore.edges.dependsOn.create(b, a),
+        });
 
-        // The surviving graph has exactly one edge and no cycle: the loser's
-        // refusal left nothing behind for a third writer to trip over.
-        const edges = await setup.edges.dependsOn.find({});
-        expect(edges).toHaveLength(1);
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: EdgeAcyclicityError.name,
+        });
+
+        // The surviving graph has exactly the holder's edge and no cycle: the
+        // contender's refusal left nothing behind for a third writer to trip
+        // over.
+        expect(await setup.edges.dependsOn.findFrom(a)).toHaveLength(1);
+        expect(await setup.edges.dependsOn.find({})).toHaveLength(1);
         await expect(
           setup
             .verifyConstraintFences()
@@ -238,98 +240,101 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
 
     it(
-      "lets two concurrent creates that do NOT close a cycle both commit",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      "lets two creates that do NOT close a cycle both commit, the second after waiting on the fence",
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
-        // The control, on OUTCOMES only: the fence must not turn independent
-        // acyclic writes into failures just because they share the lock.
+        // The control: the fence must not turn independent acyclic writes into
+        // failures just because they share the lock. Both take it, so the
+        // contender still waits — and then commits.
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        const setup = createStore(graph, createPostgresBackend(live.holder));
         const a = await setup.nodes.Task.create({ name: "a" }, { id: "a" });
         const b = await setup.nodes.Task.create({ name: "b" }, { id: "b" });
         const c = await setup.nodes.Task.create({ name: "c" }, { id: "c" });
 
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
-
-        const { fulfilled, rejected } = partitionSettled(
-          await Promise.allSettled([
-            storeA.edges.dependsOn.create(a, b),
-            storeB.edges.dependsOn.create(a, c),
-          ]),
+        const holderStore = createStore(
+          graph,
+          createPostgresBackend(live.holder),
+        );
+        const contenderStore = createStore(
+          graph,
+          createPostgresBackend(live.contender),
         );
 
-        expect(rejected).toEqual([]);
-        expect(fulfilled).toHaveLength(2);
+        const race = await raceAgainstHeldTransaction({
+          probe: live.probe,
+          holderApplication: HOLDER_APPLICATION,
+          contenderApplication: CONTENDER_APPLICATION,
+          holder: (holdOpen) =>
+            holderStore.transaction(async (tx) => {
+              await tx.edges.dependsOn.create(a, b);
+              await holdOpen();
+            }),
+          contender: () => contenderStore.edges.dependsOn.create(a, c),
+        });
+
+        expect(summarizeRace(race)).toEqual({
+          contenderState: "blocked",
+          holder: "ok",
+          contender: "ok",
+        });
         expect(await setup.edges.dependsOn.findFrom(a)).toHaveLength(2);
       },
     );
 
     it(
       "a statement_timeout cutoff mid-probe reports EdgeAcyclicityIndeterminateError and writes nothing",
-      { timeout: CONTENTION_TIMEOUT_MS },
+      { timeout: CASE_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
+        const setup = createStore(graph, createPostgresBackend(live.holder));
+        const head = await setup.nodes.Task.create(
+          { name: "head" },
+          { id: "head" },
+        );
+        const tail = await setup.nodes.Task.create(
+          { name: "tail" },
+          { id: "tail" },
+        );
+        await setup.edges.dependsOn.create(head, tail);
 
-        // A 10^5-edge chain: long enough that the reachability probe is
-        // genuinely still walking it when the 50ms budget expires (the walk
-        // costs microseconds per hop), not just dispatching the statement.
-        // Seeded with two set-based INSERTs straight into the store's tables
-        // rather than through the store: a chain this long is the shape a
-        // per-row or per-batch acyclicity probe is slowest on, and the seed
-        // is fixture setup, not the behavior under test. Node and edge ids
-        // are derived from a generated series so the rows are exactly what
-        // `nodes.Task.bulkCreate` / `edges.dependsOn.bulkCreate` would have
-        // written for the same ids.
-        const CHAIN_LENGTH = 100_000;
-        const db = requireDefined(firstDb);
-        const graphId = graph.id;
-        await db.execute(sql`
-          INSERT INTO typegraph_nodes (graph_id, id, kind, props, created_at, updated_at)
-          SELECT ${graphId}, 'chain-' || i, 'Task',
-                 jsonb_build_object('name', 'chain-' || i), now(), now()
-          FROM generate_series(0, ${CHAIN_LENGTH}) AS s(i)
-        `);
-        await db.execute(sql`
-          INSERT INTO typegraph_edges (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, created_at, updated_at)
-          SELECT ${graphId}, 'chain-edge-' || i, 'dependsOn',
-                 'Task', 'chain-' || i, 'Task', 'chain-' || (i + 1),
-                 '{}'::jsonb, now(), now()
-          FROM generate_series(0, ${CHAIN_LENGTH - 1}) AS s(i)
-        `);
-        await db.execute(sql`ANALYZE typegraph_edges`);
-        const setup = createStore(graph, createPostgresBackend(live.first));
+        // `tail -> head` closes a cycle, so a probe that ran to completion
+        // would refuse it with `EdgeAcyclicityError`; only a cut-short probe
+        // reports indeterminate.
+        const adapterStore = createAdapterStore(
+          graph,
+          createPostgresBackend(live.holder),
+        );
+        const tableLock = await live.probe.connect();
+        try {
+          await tableLock.query("BEGIN");
+          await tableLock.query(
+            "LOCK TABLE typegraph_edges IN ACCESS EXCLUSIVE MODE",
+          );
 
-        // The closing edge, attempted inside a caller-adopted transaction
-        // with a 50ms statement budget — room for the fence acquisition, which
-        // writes the graph's fence row, and a fraction of what the walk needs:
-        // `tail -> head` would walk the ENTIRE
-        // chain to discover `head` already reaches `tail`.
-        const head = { kind: "Task" as const, id: "chain-0" };
-        const tail = {
-          kind: "Task" as const,
-          id: `chain-${String(CHAIN_LENGTH)}`,
-        };
-
-        const adapterBackend = createPostgresBackend(db);
-        const adapterStore = createAdapterStore(graph, adapterBackend);
-
-        await expect(
-          db.transaction(async (sqlTx) => {
-            await sqlTx.execute(sql`SET LOCAL statement_timeout = '50ms'`);
-            const txStore = adapterStore.withTransaction(sqlTx);
-            await txStore.edges.dependsOn.create(tail, head);
-          }),
-        ).rejects.toThrow(EdgeAcyclicityIndeterminateError);
+          await expect(
+            live.holder.transaction(async (sqlTx) => {
+              await sqlTx.execute(
+                sql.raw(
+                  `SET LOCAL statement_timeout = '${String(PROBE_STATEMENT_TIMEOUT_MS)}ms'`,
+                ),
+              );
+              await adapterStore
+                .withTransaction(sqlTx)
+                .edges.dependsOn.create(tail, head);
+            }),
+          ).rejects.toThrow(EdgeAcyclicityIndeterminateError);
+        } finally {
+          await tableLock.query("ROLLBACK");
+          tableLock.release();
+        }
 
         // No row was written: the caller's transaction rolled back on the
         // thrown error, and the closing edge never lands.
-        const closingEdge = await setup.edges.dependsOn.find({
-          from: tail,
-          to: head,
-        });
-        expect(closingEdge).toEqual([]);
-        expect(await setup.edges.dependsOn.find({})).toHaveLength(CHAIN_LENGTH);
+        expect(
+          await setup.edges.dependsOn.find({ from: tail, to: head }),
+        ).toEqual([]);
+        expect(await setup.edges.dependsOn.find({})).toHaveLength(1);
       },
     );
   },

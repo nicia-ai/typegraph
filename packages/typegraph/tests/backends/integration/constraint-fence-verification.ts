@@ -18,11 +18,13 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   defineEdge,
   defineGraph,
   defineGraphExtension,
   defineNode,
   disjointWith,
+  partOf,
   subClassOf,
 } from "../../../src";
 import { computeUniqueKey } from "../../../src/constraints";
@@ -32,6 +34,7 @@ import {
   disjointnessClaimAxis,
   uniquenessClaimAxis,
 } from "../../../src/store/claims/axis";
+import { compositionEdgeCardinalityDeclarations } from "../../../src/store/claims/composition-claims";
 import { requireDefined } from "../../../src/utils/presence";
 import { encodeTupleKey } from "../../../src/utils/tuple-key";
 import { type IntegrationTestContext } from "./test-context";
@@ -118,6 +121,55 @@ const STAFF_AXIS = uniquenessClaimAxis(
 function emailKey(email: string): string {
   return computeUniqueKey({ email }, ["email"], "binary");
 }
+
+const ROW_CONTRACT_EMAIL_CONSTRAINT = "row_contract_email";
+
+const RcWorker = defineNode("RcWorker", {
+  schema: z.object({ email: z.string() }),
+});
+const RcWhole = defineNode("RcWhole", { schema: z.object({}) });
+const RcPart = defineNode("RcPart", { schema: z.object({}) });
+const rcAssigned = defineEdge("rcAssigned", { schema: z.object({}) });
+const rcPartOf = defineEdge("rcPartOf", { schema: z.object({}) });
+
+/**
+ * One family per audit statement whose peer filter `verifyConstraintFences`
+ * cannot observe: a `kind`-scoped unique, an ordinary `oneActive` axis, and a
+ * composition axis.
+ */
+const rowContractGraph = defineGraph({
+  id: "constraint_fence_row_contract",
+  nodes: {
+    RcWorker: {
+      type: RcWorker,
+      unique: [
+        {
+          name: ROW_CONTRACT_EMAIL_CONSTRAINT,
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    RcWhole: { type: RcWhole },
+    RcPart: { type: RcPart },
+  },
+  edges: {
+    rcAssigned: {
+      type: rcAssigned,
+      from: [RcWorker],
+      to: [RcWhole],
+      cardinality: "oneActive",
+    },
+    rcPartOf: {
+      type: rcPartOf,
+      from: [RcPart],
+      to: [RcWhole],
+      cardinality: "one",
+    },
+  },
+  ontology: [partOf(RcPart, RcWhole, { via: rcPartOf })],
+});
 
 /** Cross-backend fence diagnostics. */
 export function registerConstraintFenceVerificationIntegrationTests(
@@ -284,6 +336,59 @@ export function registerConstraintFenceVerificationIntegrationTests(
       expect(violation.edgeIds).toEqual(
         [edge.id, "verify-unfenced-edge"].toSorted(),
       );
+    });
+
+    it("reports an ended and a future-dated edge contending one cardinality:one axis", async () => {
+      const store = await context.createStore(verifyGraph);
+      const employee = await store.nodes.VerifyEmployee.create({
+        email: "windows@example.com",
+      });
+      const first = await store.nodes.VerifyProject.create({ title: "First" });
+      const second = await store.nodes.VerifyProject.create({
+        title: "Second",
+      });
+
+      // A `one` axis counts a row for its whole life: an ended edge is what an
+      // `asOf` read inside its window returns, and a future-dated one becomes
+      // current once the clock reaches it. Neither is current today, so an
+      // audit narrowed to the current window would report a clean axis.
+      const planted = [
+        {
+          id: "verify-ended-edge",
+          toId: first.id,
+          validFrom: "2000-01-01T00:00:00.000Z",
+          validTo: "2001-01-01T00:00:00.000Z",
+        },
+        {
+          id: "verify-future-edge",
+          toId: second.id,
+          validFrom: "2999-01-01T00:00:00.000Z",
+        },
+      ];
+      for (const edge of planted) {
+        await store.backend.insertEdge({
+          graphId: verifyGraph.id,
+          kind: "verifyManages",
+          fromKind: "VerifyEmployee",
+          fromId: employee.id,
+          toKind: "VerifyProject",
+          props: {},
+          ...edge,
+        });
+      }
+
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "edgeCardinality",
+          target: {
+            relation: "edgeClaims",
+            graphId: verifyGraph.id,
+            axis: "one:verifyManages",
+            key: encodeTupleKey(["VerifyEmployee", employee.id]),
+          },
+          edgeIds: ["verify-ended-edge", "verify-future-edge"],
+        },
+      ]);
     });
 
     it("reports a target-side violation with the target-axis ClaimTarget (issue #610)", async () => {
@@ -757,6 +862,158 @@ export function registerConstraintFenceVerificationIntegrationTests(
           ],
         },
       ]);
+    });
+
+    // The backend member returns contending ROWS and `verifyConstraintFences`
+    // keeps only axes with two or more holders, so a peer filter that admits
+    // a dead peer (tombstoned, ended on an active-only axis, or the row
+    // itself) changes the rows returned but never the report. This pins the
+    // member's own contract: a row whose only peer is dead is not contending.
+    it("readConstraintFenceViolations returns only rows with a live peer on their axis", async () => {
+      const store = await context.createStore(rowContractGraph);
+      const backend = store.backend;
+      const graphId = rowContractGraph.id;
+      const readViolations = requireDefined(
+        backend.readConstraintFenceViolations,
+        "backend.readConstraintFenceViolations",
+      );
+      const wholeA = await store.nodes.RcWhole.create({}, { id: "whole-a" });
+      const wholeB = await store.nodes.RcWhole.create({}, { id: "whole-b" });
+
+      // Uniqueness: "solo" shares its key only with a TOMBSTONED row; "dup"
+      // shares it with a live row at another axis.
+      await store.nodes.RcWorker.create(
+        { email: "solo@example.com" },
+        { id: "solo" },
+      );
+      const dup = await store.nodes.RcWorker.create(
+        { email: "dup@example.com" },
+        { id: "dup" },
+      );
+      const plantedUniques = [
+        { email: "solo@example.com", nodeId: "ghost" },
+        { email: "dup@example.com", nodeId: "intruder" },
+      ];
+      for (const planted of plantedUniques) {
+        await backend.insertUnique({
+          graphId,
+          nodeKind: "RcWhole",
+          constraintName: ROW_CONTRACT_EMAIL_CONSTRAINT,
+          key: computeUniqueKey({ email: planted.email }, ["email"], "binary"),
+          nodeId: planted.nodeId,
+          concreteKind: "RcWhole",
+        });
+      }
+      await backend.deleteUnique({
+        graphId,
+        constraintName: ROW_CONTRACT_EMAIL_CONSTRAINT,
+        key: computeUniqueKey(
+          { email: "solo@example.com" },
+          ["email"],
+          "binary",
+        ),
+        concreteKind: "RcWhole",
+        nodeId: "ghost",
+      });
+
+      // `oneActive`: "solo"'s only peer is ENDED; "dup" has two active edges.
+      await store.edges.rcAssigned.create(
+        { kind: "RcWorker", id: asNodeId<typeof RcWorker>("solo") },
+        wholeA,
+        {},
+        { id: "assigned-solo-active" },
+      );
+      await store.edges.rcAssigned.create(
+        dup,
+        wholeA,
+        {},
+        {
+          id: "assigned-dup-first",
+        },
+      );
+      const plantedAssignments = [
+        {
+          id: "assigned-solo-ended",
+          fromId: "solo",
+          validFrom: "2000-01-01T00:00:00.000Z",
+          validTo: "2001-01-01T00:00:00.000Z",
+        },
+        { id: "assigned-dup-second", fromId: "dup" },
+      ];
+      for (const planted of plantedAssignments) {
+        await backend.insertEdge({
+          graphId,
+          kind: "rcAssigned",
+          fromKind: "RcWorker",
+          toKind: "RcWhole",
+          toId: wholeB.id,
+          props: {},
+          ...planted,
+        });
+      }
+
+      // Composition: "lone" has one whole (its only candidate peer is
+      // itself), "tombstoned" has a second whole that was soft-deleted, and
+      // "contended" has two live wholes.
+      for (const partId of ["lone", "tombstoned", "contended"]) {
+        const part = await store.nodes.RcPart.create({}, { id: partId });
+        await store.edges.rcPartOf.create(
+          part,
+          wholeA,
+          {},
+          {
+            id: `part-${partId}-first`,
+          },
+        );
+      }
+      for (const partId of ["tombstoned", "contended"]) {
+        await backend.insertEdge({
+          graphId,
+          id: `part-${partId}-second`,
+          kind: "rcPartOf",
+          fromKind: "RcPart",
+          fromId: partId,
+          toKind: "RcWhole",
+          toId: wholeB.id,
+          props: {},
+        });
+      }
+      await backend.deleteEdge({
+        graphId,
+        id: "part-tombstoned-second",
+        kind: "rcPartOf",
+      });
+
+      const rows = await readViolations({
+        graphId,
+        uniqueConstraintNames: [ROW_CONTRACT_EMAIL_CONSTRAINT],
+        disjointKindPairs: [],
+        edgeCardinalities: [
+          {
+            direction: "source",
+            cardinality: "oneActive",
+            edgeKind: "rcAssigned",
+          },
+          ...compositionEdgeCardinalityDeclarations(
+            buildKindRegistry(rowContractGraph),
+          ),
+        ],
+      });
+
+      expect(
+        rows.contendedUniqueRows
+          .map((row) => `${row.concreteKind}/${row.nodeId}`)
+          .toSorted(),
+      ).toEqual(["RcWhole/intruder", "RcWorker/dup"]);
+      expect(
+        rows.contendedEdgeRows.map((row) => row.edgeId).toSorted(),
+      ).toEqual([
+        "assigned-dup-first",
+        "assigned-dup-second",
+        "part-contended-first",
+        "part-contended-second",
+      ]);
+      expect(rows.disjointOverlaps).toEqual([]);
     });
   });
 }
