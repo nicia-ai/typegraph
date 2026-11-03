@@ -1162,20 +1162,27 @@ function scalarHasTypeToken(value: ScalarValue, token: string): boolean {
 }
 
 /**
- * Every value `schema` can admit when it pins its values with `const` or
- * `enum`: the pinned values of its own `type`, since a pinned value of another
- * type is not admitted at all. `undefined` when the schema pins nothing, or
- * pins an object or array, which this comparison does not judge.
+ * The values `schema` pins with `const` or `enum`, when this comparison can
+ * judge them: a non-empty set of scalars, each a value of the schema's own
+ * `type`. `undefined` otherwise. A pinned value of another type would make the
+ * set describe less than the schema's source may admit — the projection
+ * writes a literal `NaN` or `Infinity` as `null` under `type: "number"` — and
+ * an empty set would satisfy every keyword vacuously.
  */
 function admittedScalarValues(
   schema: JsonSchema,
 ): readonly ScalarValue[] | undefined {
   const pinned = pinnedValues(schema);
-  if (pinned === undefined) return undefined;
+  if (pinned === undefined || pinned.length === 0) return undefined;
   if (!pinned.every((value) => isScalarValue(value))) return undefined;
   const { type } = schema;
-  if (typeof type !== "string") return pinned;
-  return pinned.filter((value) => scalarHasTypeToken(value, type));
+  if (
+    typeof type === "string" &&
+    !pinned.every((value) => scalarHasTypeToken(value, type))
+  ) {
+    return undefined;
+  }
+  return pinned;
 }
 
 /**

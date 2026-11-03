@@ -12,6 +12,7 @@ import { z } from "zod";
 import { isObjectSchema } from "../../src/schema/migration";
 import { serializeSchemaProperties } from "../../src/schema/serializer";
 import { isStructuralSubtype } from "../../src/schema/structural-subtype";
+import { structuralSubtypeProjection } from "../../src/schema/structural-subtype-projection";
 import { type JsonSchema } from "../../src/schema/types";
 import { comparableSchemaArb, tightenArb } from "./arbitraries";
 
@@ -156,7 +157,7 @@ describe("structural subtyping properties", () => {
 // Finite value sets under bounded parents
 // ============================================================
 
-type StringCheck = (schema: z.ZodString) => z.ZodString;
+type StringCheck = (schema: z._ZodString) => z._ZodString;
 type NumberCheck = (schema: z.ZodNumber) => z.ZodNumber;
 
 function withChecks<S>(schema: S, checks: readonly ((schema: S) => S)[]): S {
@@ -220,9 +221,32 @@ const NUMBER_VALUE_POOL = [
 
 const MULTIPLE_OF_POOL = [2, 3, 0.01, 0.07, 0.1, 0.25];
 
+/**
+ * Bases whose own format check the projection loses once a pattern-stated
+ * format follows it.
+ */
+const FORMAT_BASES: readonly (() => z._ZodString)[] = [
+  () => z.url(),
+  () => z.httpUrl(),
+  () => z.jwt(),
+  () => z.stringFormat("even-length", (value) => value.length % 2 === 0),
+];
+
+const OVERWRITE_CHECKS: readonly StringCheck[] = [
+  (s) => s.trim(),
+  (s) => s.toLowerCase(),
+  (s) => s.toUpperCase(),
+  (s) => s.normalize(),
+];
+
+/**
+ * A bounded string parent. A lossy one also draws a format base and
+ * overwrite checks, which the JSON Schema projection does not state.
+ */
 function stringParentArb(
   patternPool: readonly string[],
-): fc.Arbitrary<z.ZodString> {
+  options: Readonly<{ lossy: boolean }>,
+): fc.Arbitrary<z._ZodString> {
   const boundArb = fc.oneof(
     fc.nat({ max: 3 }).map(
       (length): StringCheck =>
@@ -251,17 +275,28 @@ function stringParentArb(
     fc.constant<StringCheck>((s) => s.lowercase()),
     fc.constant<StringCheck>((s) => s.includes("a", { position: 1 })),
   );
+  const checkArb =
+    options.lossy ?
+      fc.oneof(boundArb, fc.constantFrom(...OVERWRITE_CHECKS))
+    : boundArb;
+  const baseArb =
+    options.lossy ?
+      fc.constantFrom<() => z._ZodString>(() => z.string(), ...FORMAT_BASES)
+    : fc.constant<() => z._ZodString>(() => z.string());
   return fc
-    .tuple(
-      fc.array(boundArb, { maxLength: 2 }),
-      fc.option(patternCheckArb, { nil: undefined }),
-    )
-    .map(([bounds, patternCheck]) =>
-      withChecks(z.string(), [
-        ...bounds,
-        ...(patternCheck === undefined ? [] : [patternCheck]),
-      ]),
-    );
+    .record({
+      base: baseArb,
+      checks: fc.array(checkArb, { maxLength: 3 }),
+      patternCheck: fc.option(patternCheckArb, { nil: undefined }),
+      patternFirst: fc.boolean(),
+    })
+    .map(({ base, checks, patternCheck, patternFirst }) => {
+      const pattern = patternCheck === undefined ? [] : [patternCheck];
+      return withChecks(
+        base(),
+        patternFirst ? [...pattern, ...checks] : [...checks, ...pattern],
+      );
+    });
 }
 
 function numberParentArb(): fc.Arbitrary<z.ZodNumber> {
@@ -315,12 +350,96 @@ function valueSubsetArb<T>(pool: readonly T[]): fc.Arbitrary<readonly T[]> {
   });
 }
 
-function pinnedStrings(values: readonly string[]): z.ZodType {
+function pinnedStrings(
+  values: readonly string[],
+): z.ZodEnum<Readonly<Record<string, string>>> {
   return z.enum(values as [string, ...string[]]);
 }
 
 function pinnedNumbers(values: readonly number[]): z.ZodType {
   return z.literal(values);
+}
+
+/** Values JSON cannot carry: the projection writes each as `null`. */
+const NON_JSON_NUMBER_POOL = [
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  Number.NEGATIVE_INFINITY,
+];
+
+/** Strings an overwrite or a lost format check treats differently. */
+const LOSSY_STRING_POOL = [
+  " a",
+  " ab",
+  "ß",
+  "\u0958",
+  "https://",
+  "eyX",
+  "ABC",
+];
+
+const LITERAL_POOL = [
+  ...STRING_VALUE_POOL,
+  ...LOSSY_STRING_POOL,
+  ...NUMBER_VALUE_POOL,
+  ...NON_JSON_NUMBER_POOL,
+  // eslint-disable-next-line unicorn/no-null -- JSON null is a literal value
+  null,
+  true,
+];
+
+type PinnedChild = Readonly<{
+  schema: z.ZodType;
+  samples: readonly unknown[];
+}>;
+
+/**
+ * A child pinned to a finite value set, bare or under the wrappers the
+ * comparison walks: nullable, a union of two pinned members, and a record
+ * whose keys are pinned.
+ */
+function pinnedChildArb(): fc.Arbitrary<PinnedChild> {
+  const literalsArb = valueSubsetArb(LITERAL_POOL);
+  const keysArb = valueSubsetArb([...STRING_VALUE_POOL, ...LOSSY_STRING_POOL]);
+  return fc.oneof(
+    literalsArb.map((values) => ({
+      schema: z.literal(values),
+      samples: values,
+    })),
+    literalsArb.map((values) => ({
+      schema: z.literal(values).nullable(),
+      // eslint-disable-next-line unicorn/no-null -- the value `.nullable()` adds
+      samples: [...values, null],
+    })),
+    fc.tuple(literalsArb, literalsArb).map(([first, second]) => ({
+      schema: z.union([z.literal(first), z.literal(second)]),
+      samples: [...first, ...second],
+    })),
+    keysArb.map((keys) => ({
+      schema: z.partialRecord(pinnedStrings(keys), z.string()),
+      samples: keys.map((key) => ({ [key]: "value" })),
+    })),
+  );
+}
+
+function parentArb(): fc.Arbitrary<z.ZodType> {
+  const stringArb = stringParentArb(
+    [...AGREEING_PATTERN_POOL, ...DIVERGENT_PATTERN_POOL],
+    { lossy: true },
+  );
+  return fc.oneof(
+    stringArb,
+    stringArb.map((parent) => parent.nullable()),
+    stringArb.map((parent) => z.record(parent, z.string())),
+    numberParentArb(),
+    numberParentArb().map((parent) => parent.nullable()),
+    fc.constantFrom<z.ZodType>(
+      z.boolean(),
+      z.null(),
+      z.object({}),
+      z.enum(["a"]).or(z.boolean()),
+    ),
+  );
 }
 
 function finiteVerdict(child: z.ZodType, parent: z.ZodType) {
@@ -341,7 +460,7 @@ describe("structural subtyping properties — finite value sets", () => {
   it("P7: a finite child the parent admits in full is a subtype, wherever the readings agree", () => {
     fc.assert(
       fc.property(
-        stringParentArb(AGREEING_PATTERN_POOL),
+        stringParentArb(AGREEING_PATTERN_POOL, { lossy: false }),
         valueSubsetArb(AGREEING_STRING_POOL),
         (parent, candidates) => {
           const values = admittedByParent(parent, candidates) as string[];
@@ -367,30 +486,24 @@ describe("structural subtyping properties — finite value sets", () => {
     );
   });
 
-  it("P8: an accepted finite child admits no value the parent's Zod schema refuses", () => {
+  it("P8: over the live projection, an accepted finite child admits no value the parent refuses", () => {
     fc.assert(
-      fc.property(
-        stringParentArb([...AGREEING_PATTERN_POOL, ...DIVERGENT_PATTERN_POOL]),
-        valueSubsetArb(STRING_VALUE_POOL),
-        (parent, values) => {
-          const result = finiteVerdict(pinnedStrings(values), parent);
-          if (result.verdict !== "subtype") return;
-          expect(admittedByParent(parent, values)).toEqual(values);
-        },
-      ),
-      { numRuns: 500 },
-    );
-    fc.assert(
-      fc.property(
-        numberParentArb(),
-        valueSubsetArb(NUMBER_VALUE_POOL),
-        (parent, values) => {
-          const result = finiteVerdict(pinnedNumbers(values), parent);
-          if (result.verdict !== "subtype") return;
-          expect(admittedByParent(parent, values)).toEqual(values);
-        },
-      ),
-      { numRuns: 500 },
+      fc.property(pinnedChildArb(), parentArb(), (child, parent) => {
+        const result = isStructuralSubtype(
+          structuralSubtypeProjection(z.object({ field: child.schema })),
+          structuralSubtypeProjection(z.object({ field: parent })),
+        );
+        if (result.verdict !== "subtype") return;
+        for (const sample of child.samples) {
+          const stored = child.schema.safeParse(sample);
+          if (!stored.success) continue;
+          expect({
+            sample,
+            admitted: parent.safeParse(stored.data).success,
+          }).toEqual({ sample, admitted: true });
+        }
+      }),
+      { numRuns: 10_000 },
     );
   });
 });

@@ -121,6 +121,20 @@ it, so a length is judged in code points and in UTF-16 units, and a pattern
 with and without the `u` flag. Formats such as `z.email()` or `z.uuid()` are
 not checked value by value; a child under one must use the same format.
 
+Some constraints have no JSON Schema form, so the check stays conservative
+around them and refuses the pair as incomparable unless both sides use the same
+schema:
+
+- a parent whose format is followed by another format —
+  `z.url().startsWith("https://")` projects only the second;
+- a parent whose overwrite (`.trim()`, `.toLowerCase()`, `.toUpperCase()`,
+  `.normalize()`) runs before another check, which then judges the transformed
+  value;
+- either side whose overwrite runs after another check, since the node stores a
+  value that check never saw;
+- either side holding `z.literal(NaN)` or `z.literal(Infinity)`, which JSON
+  cannot carry.
+
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:
 `z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, and any

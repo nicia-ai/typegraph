@@ -885,13 +885,69 @@ describe("finite value sets under bounded parents", () => {
     ).toMatchObject({ verdict: "not-subtype", reason: "pattern-mismatch" });
   });
 
-  it("ignores a pinned value of another type than the child's own, which the child never admits", () => {
+  it("does not judge a value set holding a value of another type than the child's own", () => {
     expect(
       isStructuralSubtype(
         { type: "string", enum: ["a", 99] },
         { type: "string", maxLength: 1 },
       ),
-    ).toEqual({ verdict: "subtype" });
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "string-length-not-tighter",
+    });
+    // How a persisted document spells `z.literal(Infinity)`.
+    // eslint-disable-next-line unicorn/no-null -- JSON spells Infinity as null
+    const infinityLiteral: JsonSchema = { type: "number", const: null };
+    expect(
+      isStructuralSubtype(infinityLiteral, { type: "string", minLength: 5 }),
+    ).toMatchObject({ verdict: "not-subtype", reason: "type-token-mismatch" });
+    expect(
+      isStructuralSubtype(infinityLiteral, { type: "number", minimum: 0 }),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "numeric-bound-not-tighter",
+    });
+  });
+
+  it("does not judge multipleOf where Zod's floating-point reading departs from the exact one", () => {
+    const rows = [
+      // A subnormal divisor: Zod's relative tolerance no longer holds.
+      { value: 1e-320, divisor: 1e-321 },
+      // An exact multiple whose floating-point quotient overflows to Infinity.
+      { value: 1e308, divisor: 1e-10 },
+    ];
+    for (const { value, divisor } of rows) {
+      expect(z.number().multipleOf(divisor).safeParse(value).success).toBe(
+        false,
+      );
+      expect(
+        isStructuralSubtype(
+          { type: "number", const: value },
+          { type: "number", multipleOf: divisor },
+        ),
+      ).toMatchObject({
+        verdict: "not-subtype",
+        reason: "multiple-of-mismatch",
+      });
+    }
+  });
+
+  it("never satisfies a keyword vacuously through an empty value set", () => {
+    expect(
+      isStructuralSubtype(
+        { type: "string", enum: [] },
+        { type: "string", minLength: 5 },
+      ),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "string-length-not-tighter",
+    });
+    expect(
+      isStructuralSubtype({ enum: [] }, { type: "boolean" }),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "unconstrained-where-parent-constrains",
+    });
   });
 });
 

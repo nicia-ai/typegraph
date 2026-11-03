@@ -3,7 +3,7 @@
  * kind's persisted JSON Schema projection, plus a marker wherever the Zod
  * schema constrains values in a way that projection cannot state.
  *
- * `z.toJSONSchema` drops four such facts, each of which can make
+ * `z.toJSONSchema` drops seven such facts, each of which can make
  * `isStructuralSubtype` answer `subtype` for a pair whose child admits a value
  * its parent refuses:
  *
@@ -18,6 +18,12 @@
  *   a stripping `z.object()`, but refuses a key the child may add.
  * - A `.meta()` key spelled like a constraining keyword. It is merged into
  *   the projection as if it were one, though it constrains nothing.
+ * - A string format a later format replaced. Only the last `format` is kept,
+ *   so `z.url().startsWith("https://")` loses its URL check.
+ * - An overwrite (`.trim()`, `.toLowerCase()`, `.toUpperCase()`,
+ *   `.normalize()`, `.overwrite()`), which projects nothing, though the
+ *   checks after it judge the transformed value and the node stores it.
+ * - A literal `NaN` or `±Infinity`, which projects as `null`.
  *
  * The persisted projection itself is not changed: it is the schema document
  * and its hash, and none of these facts was ever part of it. The markers live
@@ -82,9 +88,81 @@ type ZodCheckDef = Readonly<{
 type ZodNodeDef = Readonly<{
   type?: string;
   pattern?: RegExp;
+  values?: readonly unknown[];
   checks?: readonly Readonly<{ _zod: Readonly<{ def: ZodCheckDef }> }>[];
   catchall?: Readonly<{ _zod: Readonly<{ def: Readonly<{ type?: string }> }> }>;
 }>;
+
+const CUSTOM_CHECK = "custom";
+const OVERWRITE_CHECK = "overwrite";
+const STRING_FORMAT_CHECK = "string_format";
+const LITERAL_NODE_TYPE = "literal";
+
+/**
+ * A node's checks in the order Zod runs them. A schema that is itself a
+ * check (`z.email()`, `z.url()`, `z.int()`) runs its own check before the
+ * checks chained onto it.
+ */
+function checksInRunOrder(zodSchema: z.core.$ZodTypes): readonly ZodCheckDef[] {
+  const def = zodSchema._zod.def as ZodNodeDef;
+  const chained = (def.checks ?? []).map((check) => check._zod.def);
+  return zodSchema._zod.traits.has("$ZodCheck") ? [def, ...chained] : chained;
+}
+
+/**
+ * Whether a node states more than one string format. `z.toJSONSchema` keeps
+ * only the last one, so `z.url().startsWith("https://")` projects as a
+ * `starts_with` format and loses the URL check entirely.
+ */
+function overwritesFormat(checks: readonly ZodCheckDef[]): boolean {
+  return (
+    checks.filter((check) => check.check === STRING_FORMAT_CHECK).length > 1
+  );
+}
+
+type OverwritePlacement = Readonly<{
+  /** An overwrite runs before a check, which then judges the new value. */
+  beforeCheck: boolean;
+  /** An overwrite runs after a check, so the output may fail that check. */
+  afterCheck: boolean;
+}>;
+
+/**
+ * Where a node's `overwrite` checks (`.trim()`, `.toLowerCase()`,
+ * `.toUpperCase()`, `.normalize()`, `.overwrite()`) run relative to the
+ * checks the projection states. None projects anything. A refinement is
+ * left out: it is marked on its own, and only a parent's matters.
+ */
+function overwritePlacement(
+  checks: readonly ZodCheckDef[],
+): OverwritePlacement {
+  const overwrites: number[] = [];
+  const stated: number[] = [];
+  for (const [index, check] of checks.entries()) {
+    if (check.check === OVERWRITE_CHECK) overwrites.push(index);
+    else if (check.check !== CUSTOM_CHECK) stated.push(index);
+  }
+  if (overwrites.length === 0 || stated.length === 0) {
+    return { beforeCheck: false, afterCheck: false };
+  }
+  return {
+    beforeCheck: Math.min(...overwrites) < Math.max(...stated),
+    afterCheck: Math.min(...stated) < Math.max(...overwrites),
+  };
+}
+
+/**
+ * Whether a literal holds a value JSON cannot carry: the projection writes
+ * `NaN` and `±Infinity` as `null`.
+ */
+function hasNonJsonLiteralValue(def: ZodNodeDef): boolean {
+  return (
+    def.type === LITERAL_NODE_TYPE &&
+    (def.values ?? []).some(
+      (value) => typeof value === "number" && !Number.isFinite(value),
+    )
+  );
+}
 
 /** Regex flags that change which strings match. */
 function hasSemanticRegexFlags(pattern: RegExp): boolean {
@@ -115,6 +193,61 @@ function markSemanticRegexFlags(
   markOpaque(jsonSchema, ZOD_ONLY_CONSTRAINT_KEYWORD, `flags:${pattern.flags}`);
 }
 
+/**
+ * Marks the checks `z.toJSONSchema` drops without trace: a string format a
+ * later format replaced, an overwrite, and a literal value JSON cannot carry.
+ *
+ * A replaced format only matters on a parent: the child's projection then
+ * states less than the child checks, which can only cost a refusal. A
+ * literal `NaN` or `±Infinity` matters on both sides, since its projection
+ * names a different value set altogether.
+ *
+ * An overwrite matters on a parent when a stated check runs after it, since
+ * that check judges the transformed value, not the child's. It matters on a
+ * child when a stated check runs before it, since the child then stores a
+ * value that check never saw: `z.string().min(2).trim()` stores `"a"`. A
+ * child whose overwrites all run first stores only values its stated checks
+ * accepted, so it stays comparable.
+ */
+function markLostChecks(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const checks = checksInRunOrder(context.zodSchema);
+  const token = instanceToken(context.zodSchema);
+  if (overwritesFormat(checks)) {
+    markOpaque(
+      context.jsonSchema,
+      ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
+      `formats:${token}`,
+    );
+  }
+  const overwrites = overwritePlacement(checks);
+  if (overwrites.afterCheck) {
+    markOpaque(
+      context.jsonSchema,
+      ZOD_ONLY_CONSTRAINT_KEYWORD,
+      `overwrite:${token}`,
+    );
+  }
+  if (overwrites.beforeCheck) {
+    markOpaque(
+      context.jsonSchema,
+      ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
+      `overwrite:${token}`,
+    );
+  }
+  if (hasNonJsonLiteralValue(context.zodSchema._zod.def as ZodNodeDef)) {
+    markOpaque(
+      context.jsonSchema,
+      ZOD_ONLY_CONSTRAINT_KEYWORD,
+      `literal:${token}`,
+    );
+  }
+}
+
 function markZodOnlyConstraints(
   context: Readonly<{
     zodSchema: z.core.$ZodTypes;
@@ -127,7 +260,7 @@ function markZodOnlyConstraints(
   markSemanticRegexFlags(context.jsonSchema, def.pattern);
   for (const check of def.checks ?? []) {
     const checkDef = check._zod.def;
-    if (checkDef.check === "custom") {
+    if (checkDef.check === CUSTOM_CHECK) {
       markOpaque(
         context.jsonSchema,
         ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
@@ -136,6 +269,7 @@ function markZodOnlyConstraints(
     }
     markSemanticRegexFlags(context.jsonSchema, checkDef.pattern);
   }
+  markLostChecks(context);
   if (def.type === "object" && def.catchall?._zod.def.type === "never") {
     markOpaque(
       context.jsonSchema,

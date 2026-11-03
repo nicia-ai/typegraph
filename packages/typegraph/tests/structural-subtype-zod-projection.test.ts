@@ -14,9 +14,12 @@ import { ConfigurationError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
 import { serializeSchemaProperties } from "../src/schema/serializer";
 import {
+  isStructuralSubtype,
+  type StructuralSubtypeResult,
   ZOD_ONLY_CONSTRAINT_KEYWORD,
   ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
 } from "../src/schema/structural-subtype";
+import { structuralSubtypeProjection } from "../src/schema/structural-subtype-projection";
 
 function subclassRegistryError(
   childSchema: z.ZodObject,
@@ -176,5 +179,245 @@ describe("structural subsumption over constraints the JSON Schema projection dro
     const serialized = JSON.stringify(projection);
     expect(serialized).not.toContain(ZOD_ONLY_CONSTRAINT_KEYWORD);
     expect(serialized).not.toContain(ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD);
+  });
+});
+
+function liveVerdict(
+  child: z.ZodType,
+  parent: z.ZodType,
+): StructuralSubtypeResult {
+  return isStructuralSubtype(
+    structuralSubtypeProjection(z.object({ field: child })),
+    structuralSubtypeProjection(z.object({ field: parent })),
+  );
+}
+
+describe("structural subsumption over formats, overwrites and literals the projection drops", () => {
+  const refused: readonly {
+    name: string;
+    child: z.ZodType;
+    parent: z.ZodType;
+    witness: unknown;
+  }[] = [
+    {
+      name: "z.literal(Infinity) under z.string().min(5)",
+      child: z.literal(Number.POSITIVE_INFINITY),
+      parent: z.string().min(5),
+      witness: Number.POSITIVE_INFINITY,
+    },
+    {
+      name: "z.literal(NaN) under z.boolean()",
+      child: z.literal(Number.NaN),
+      parent: z.boolean(),
+      witness: Number.NaN,
+    },
+    {
+      name: "z.literal(-Infinity) under z.null()",
+      child: z.literal(Number.NEGATIVE_INFINITY),
+      parent: z.null(),
+      witness: Number.NEGATIVE_INFINITY,
+    },
+    {
+      name: "z.literal(Infinity) under z.object({})",
+      child: z.literal(Number.POSITIVE_INFINITY),
+      parent: z.object({}),
+      witness: Number.POSITIVE_INFINITY,
+    },
+    {
+      name: "z.literal(-Infinity) under z.enum(['a']).or(z.boolean())",
+      child: z.literal(Number.NEGATIVE_INFINITY),
+      parent: z.enum(["a"]).or(z.boolean()),
+      witness: Number.NEGATIVE_INFINITY,
+    },
+    {
+      name: "z.literal(Infinity).nullable() under z.string().nullable()",
+      child: z.literal(Number.POSITIVE_INFINITY).nullable(),
+      parent: z.string().nullable(),
+      witness: Number.POSITIVE_INFINITY,
+    },
+    {
+      name: "z.literal([1, Infinity]) under z.int().max(5)",
+      child: z.literal([1, Number.POSITIVE_INFINITY]),
+      parent: z.int().max(5),
+      witness: Number.POSITIVE_INFINITY,
+    },
+    {
+      name: "z.literal([1, NaN]) under z.number().multipleOf(1)",
+      child: z.literal([1, Number.NaN]),
+      parent: z.number().multipleOf(1),
+      witness: Number.NaN,
+    },
+    {
+      name: "z.literal(NaN) under z.number()",
+      child: z.literal(Number.NaN),
+      parent: z.number(),
+      witness: Number.NaN,
+    },
+    {
+      name: "z.literal(['a', NaN]) under z.string().nullable()",
+      child: z.literal(["a", Number.NaN]),
+      parent: z.string().nullable(),
+      witness: Number.NaN,
+    },
+    {
+      name: "z.literal('https://') under z.url().startsWith('https://')",
+      child: z.literal("https://"),
+      parent: z.url().startsWith("https://"),
+      witness: "https://",
+    },
+    {
+      name: "z.string().startsWith('https://') under z.url().startsWith('https://')",
+      child: z.string().startsWith("https://"),
+      parent: z.url().startsWith("https://"),
+      witness: "https://",
+    },
+    {
+      name: "z.literal('abc') under z.url().lowercase()",
+      child: z.literal("abc"),
+      parent: z.url().lowercase(),
+      witness: "abc",
+    },
+    {
+      name: "z.literal('eyX') under z.jwt().startsWith('ey')",
+      child: z.literal("eyX"),
+      parent: z.jwt().startsWith("ey"),
+      witness: "eyX",
+    },
+    {
+      name: "z.literal('ABC') under z.httpUrl().uppercase()",
+      child: z.literal("ABC"),
+      parent: z.httpUrl().uppercase(),
+      witness: "ABC",
+    },
+    {
+      name: "z.literal('x') under z.string().url().endsWith('x')",
+      child: z.literal("x"),
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- the format then arrives as a check, not on the schema
+      parent: z.string().url().endsWith("x"),
+      witness: "x",
+    },
+    {
+      name: "z.literal('a') under z.stringFormat(fn).includes('a')",
+      child: z.literal("a"),
+      parent: z
+        .stringFormat("even-length", (value) => value.length % 2 === 0)
+        .includes("a"),
+      witness: "a",
+    },
+    {
+      name: "z.literal(' a') under z.string().trim().min(2)",
+      child: z.literal(" a"),
+      parent: z.string().trim().min(2),
+      witness: " a",
+    },
+    {
+      name: "z.string().min(2) under z.string().trim().min(2)",
+      child: z.string().min(2),
+      parent: z.string().trim().min(2),
+      witness: " a",
+    },
+    {
+      name: "z.literal(' ab') under z.string().trim().length(3)",
+      child: z.literal(" ab"),
+      parent: z.string().trim().length(3),
+      witness: " ab",
+    },
+    {
+      name: "z.literal('abc') under z.string().toUpperCase().regex(/^[a-z]+$/)",
+      child: z.literal("abc"),
+      parent: z
+        .string()
+        .toUpperCase()
+        .regex(/^[a-z]+$/),
+      witness: "abc",
+    },
+    {
+      name: "z.literal('A') under z.string().toLowerCase().regex(/^A$/)",
+      child: z.literal("A"),
+      parent: z.string().toLowerCase().regex(/^A$/),
+      witness: "A",
+    },
+    {
+      name: "z.literal(U+0958) under z.string().normalize().max(1) (NFC decomposes it into two units)",
+      child: z.literal("\u0958"),
+      parent: z.string().normalize().max(1),
+      witness: "\u0958",
+    },
+    {
+      name: "z.string().min(2).trim() under z.string().min(2) (the child stores what min(2) never saw)",
+      child: z.string().min(2).trim(),
+      parent: z.string().min(2),
+      witness: " a",
+    },
+    {
+      name: "record z.enum([' a']) keys under z.string().trim().min(2) keys",
+      child: z.record(z.enum([" a"]), z.number()),
+      parent: z.record(z.string().trim().min(2), z.number()),
+      witness: { " a": 1 },
+    },
+    {
+      name: "record z.enum(['abc']) keys under z.url().lowercase() keys",
+      child: z.record(z.enum(["abc"]), z.number()),
+      parent: z.record(z.url().lowercase(), z.number()),
+      witness: { abc: 1 },
+    },
+  ];
+
+  it.each(refused.map((row) => [row.name, row] as const))(
+    "refuses %s",
+    (_name, row) => {
+      const stored = row.child.safeParse(row.witness);
+      expect(stored.success).toBe(true);
+      expect(row.parent.safeParse(stored.data).success).toBe(false);
+      expect(liveVerdict(row.child, row.parent).verdict).not.toBe("subtype");
+    },
+  );
+
+  it("still accepts an overwrite that cannot make the pair unsound", () => {
+    expect(liveVerdict(z.string().trim(), z.string())).toEqual({
+      verdict: "subtype",
+    });
+    expect(liveVerdict(z.string(), z.string().trim())).toEqual({
+      verdict: "subtype",
+    });
+    expect(liveVerdict(z.string().min(2), z.string().min(2).trim())).toEqual({
+      verdict: "incomparable",
+      reason: "unsupported-construct",
+      path: ["field"],
+    });
+    expect(liveVerdict(z.string().trim().min(3), z.string().min(2))).toEqual({
+      verdict: "subtype",
+    });
+    const shared = z.string().trim().min(2);
+    expect(liveVerdict(shared, shared)).toEqual({ verdict: "subtype" });
+  });
+
+  it("judges a finite union member on its own beside an unprojectable one", () => {
+    // The `z.date()` member is accepted unjudged, as every unprojectable node
+    // is; the literal member answers exactly as a bounded string would.
+    expect(
+      liveVerdict(z.union([z.date(), z.literal("x")]), z.string().min(1)),
+    ).toEqual(
+      liveVerdict(z.union([z.date(), z.string().min(1)]), z.string().min(1)),
+    );
+    expect(
+      liveVerdict(z.union([z.date(), z.literal("")]), z.string().min(1)),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "no-matching-union-member",
+    });
+  });
+
+  it("still accepts a single format under a bare string, and a pattern-stated format alone", () => {
+    expect(liveVerdict(z.url(), z.string())).toEqual({ verdict: "subtype" });
+    expect(
+      liveVerdict(
+        z.url().startsWith("https://"),
+        z.string().startsWith("https://"),
+      ),
+    ).toEqual({ verdict: "subtype" });
+    expect(liveVerdict(z.literal("ab"), z.string().startsWith("a"))).toEqual({
+      verdict: "subtype",
+    });
   });
 });
