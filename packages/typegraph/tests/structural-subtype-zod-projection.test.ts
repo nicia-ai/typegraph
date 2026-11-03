@@ -676,3 +676,154 @@ describe("structural subsumption over a field the projection cannot convert", ()
     expect(liveVerdict(child(), parent())).toEqual({ verdict: "subtype" });
   });
 });
+
+function trim(value: unknown): unknown {
+  return typeof value === "string" ? value.trim() : value;
+}
+
+describe("structural subsumption over what a node stores beyond its projection", () => {
+  const epoch = new Date(0);
+
+  // Each child stores `witness` from `input`, and the parent refuses it.
+  const refused: readonly Readonly<{
+    name: string;
+    child: () => z.ZodType;
+    parent: () => z.ZodType;
+    input: unknown;
+  }>[] = [
+    {
+      name: "z.bigint() under z.uint64(), whose bound is its own check",
+      child: () => z.bigint(),
+      parent: () => z.uint64(),
+      input: -1n,
+    },
+    {
+      name: "z.bigint() under z.int64()",
+      child: () => z.bigint(),
+      parent: () => z.int64(),
+      input: 2n ** 63n,
+    },
+    {
+      name: "z.string() under a pipe whose input side is bounded",
+      child: () => z.string(),
+      parent: () => z.string().min(5).pipe(z.string()),
+      input: "a",
+    },
+    {
+      name: "z.string().min(3) under a preprocessed z.string().min(3)",
+      child: () => z.string().min(3),
+      parent: () => z.preprocess((value) => trim(value), z.string().min(3)),
+      input: " ab ",
+    },
+    {
+      name: "z.date() under a bounded date piped into z.any()",
+      child: () => z.date(),
+      parent: () => z.date().min(epoch).pipe(z.any()),
+      input: new Date(-1),
+    },
+    {
+      name: "a child defaulting to a value its parent refuses",
+      child: () => z.string().min(1).default(""),
+      parent: () => z.string().min(1),
+      input: undefined,
+    },
+    {
+      name: "a child catching to a value its parent refuses",
+      child: () => z.string().min(1).catch(""),
+      parent: () => z.string().min(1),
+      input: 5,
+    },
+    {
+      name: "a child whose wrapped default the outer catch hides",
+      // The default stores a number, unvalidated; only the catch value
+      // reaches the projection's `default`.
+      child: () =>
+        z
+          .string()
+          .default(5 as unknown as string)
+          .catch("ok"),
+      parent: () => z.string(),
+      input: undefined,
+    },
+    {
+      name: "a shared schema whose default fails its own check",
+      child: () => sharedBadDefault,
+      parent: () => sharedBadDefault,
+      input: undefined,
+    },
+    {
+      name: "an exhaustive record with optional values under one with required values",
+      child: () => z.record(z.enum(["a", "b"]), z.string().optional()),
+      parent: () => z.record(z.enum(["a", "b"]), z.string()),
+      input: {},
+    },
+    {
+      name: "a field Zod leaves out of what it stores",
+      child: () => z.preprocess((value) => value, z.unknown()),
+      parent: () => z.unknown(),
+      input: undefined,
+    },
+  ];
+
+  const sharedBadDefault = z.string().min(1).default("");
+
+  it.each(refused)("refuses $name", ({ child, parent, input }) => {
+    const childSchema = z.object({ field: child() });
+    const parentSchema = z.object({ field: parent() });
+    const stored = childSchema.safeParse(
+      input === undefined ? {} : { field: input },
+    );
+    expect(stored.success).toBe(true);
+    expect(parentSchema.safeParse(stored.data).success).toBe(false);
+    expect(
+      isStructuralSubtype(
+        structuralSubtypeProjection(childSchema),
+        structuralSubtypeProjection(parentSchema),
+      ).verdict,
+    ).not.toBe("subtype");
+  });
+
+  it.each([
+    {
+      name: "a default its parent admits",
+      child: () => z.string().min(1).default("x"),
+      parent: () => z.string().min(1),
+    },
+    {
+      name: "a structured default its parent admits",
+      child: () => z.object({ x: z.number() }).default({ x: 1 }),
+      parent: () => z.object({ x: z.number() }),
+    },
+    {
+      name: "a bounded child under a parent whose default is never stored for it",
+      child: () => z.string().min(3),
+      parent: () => z.string().min(3).default("abc"),
+    },
+    {
+      name: "a pipe whose input side the output judges in full",
+      child: () => z.string().min(3),
+      parent: () => z.string().pipe(z.string().min(2)),
+    },
+    {
+      name: "an exhaustive record with required values under one with optional values",
+      child: () => z.record(z.enum(["a", "b"]), z.string()),
+      parent: () => z.record(z.enum(["a", "b"]), z.string().optional()),
+    },
+    {
+      name: "plain bigints",
+      child: () => z.bigint(),
+      parent: () => z.bigint(),
+    },
+  ])("accepts $name", ({ child, parent }) => {
+    expect(liveVerdict(child(), parent())).toEqual({ verdict: "subtype" });
+  });
+
+  it("refuses a parent whose present value its default does not widen", () => {
+    expect(
+      liveVerdict(z.string(), z.string().min(3).default("abc")),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "string-length-not-tighter",
+    });
+  });
+});

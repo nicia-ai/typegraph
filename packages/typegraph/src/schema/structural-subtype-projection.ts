@@ -3,7 +3,7 @@
  * kind's persisted JSON Schema projection, plus a marker wherever the Zod
  * schema constrains values in a way that projection cannot state.
  *
- * `z.toJSONSchema` drops seven such facts, each of which can make
+ * `z.toJSONSchema` drops eleven such facts, each of which can make
  * `isStructuralSubtype` answer `subtype` for a pair whose child admits a value
  * its parent refuses:
  *
@@ -24,6 +24,22 @@
  *   `.normalize()`, `.overwrite()`), which projects nothing, though the
  *   checks after it judge the transformed value and the node stores it.
  * - A literal `NaN` or `±Infinity`, which projects as `null`.
+ * - A pipe's input side (`.pipe()`, `z.preprocess()`, `z.codec()`): only the
+ *   output side projects, so a bound on the input, or a function that
+ *   rewrites the value first, is lost. Marked on the parent side unless the
+ *   input is `z.unknown()`/`z.any()` or a check-free primitive of the
+ *   output's own type, which the output then judges in full.
+ * - A key an object does not store: Zod leaves a field out of its output, or
+ *   sets it to `undefined`, for some field schemas the projection still lists
+ *   as `required` (an exhaustive enum-keyed record whose values are
+ *   optional, `z.preprocess(f, z.unknown())`), so `required` is restated as
+ *   the keys always stored.
+ * - A `.default()` / `.catch()` value wrapped by another one: only the
+ *   outermost reaches `default`, though each is stored unvalidated, so all
+ *   are listed under {@link STORED_FALLBACKS_KEYWORD}.
+ * - A schema that is itself a check (`z.int64()`, `z.uint64()`): its bound
+ *   sits on its own definition, not among its chained checks, so it is never
+ *   read as a plain unconvertible node.
  *
  * The persisted projection itself is not changed: it is the schema document
  * and its hash, and none of these facts was ever part of it. The markers live
@@ -61,6 +77,7 @@ import {
 } from "./serializer";
 import {
   COMPARABLE_KEYWORDS,
+  STORED_FALLBACKS_KEYWORD,
   UNMODELED_CONSTRAINING_KEYWORDS,
   UNPROJECTABLE_NODE_KEYWORD,
   ZOD_ONLY_CONSTRAINT_KEYWORD,
@@ -96,6 +113,10 @@ type ZodNodeDef = Readonly<{
   values?: readonly unknown[];
   checks?: readonly Readonly<{ _zod: Readonly<{ def: ZodCheckDef }> }>[];
   catchall?: Readonly<{ _zod: Readonly<{ def: Readonly<{ type?: string }> }> }>;
+  in?: z.core.$ZodTypes;
+  out?: z.core.$ZodTypes;
+  valueType?: z.ZodType;
+  shape?: Readonly<Record<string, z.ZodType>>;
 }>;
 
 const CUSTOM_CHECK = "custom";
@@ -253,6 +274,144 @@ function markLostChecks(
   }
 }
 
+/**
+ * Input nodes a pipe can hand to its output without the projection losing
+ * anything: one that admits every value, or a check-free primitive of the
+ * output's own type, which the output then judges in full.
+ */
+const PASS_THROUGH_PIPE_INPUT_TYPES: ReadonlySet<string> = new Set([
+  "unknown",
+  "any",
+]);
+const PASS_THROUGH_PRIMITIVE_TYPES: ReadonlySet<string> = new Set([
+  "string",
+  "number",
+  "boolean",
+  "bigint",
+  "null",
+]);
+
+function passesInputThrough(
+  input: z.core.$ZodTypes,
+  output: z.core.$ZodTypes,
+): boolean {
+  const inputType = input._zod.def.type;
+  if (PASS_THROUGH_PIPE_INPUT_TYPES.has(inputType)) return true;
+  return (
+    PASS_THROUGH_PRIMITIVE_TYPES.has(inputType) &&
+    inputType === output._zod.def.type &&
+    checksInRunOrder(input).length === 0
+  );
+}
+
+/**
+ * A pipe (`.pipe()`, `z.preprocess()`, `z.codec()`) projects as its output
+ * side alone, so whatever its input side requires — a bound, a format, a
+ * preprocessing function that rewrites the value before the output judges
+ * it — is lost. On a parent that is a constraint the child is never compared
+ * with. A child's pipe stores only what its output side admits, so the
+ * output projection states it in full.
+ */
+function markLossyPipe(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const def = context.zodSchema._zod.def as ZodNodeDef;
+  if (def.type !== "pipe" || def.in === undefined || def.out === undefined) {
+    return;
+  }
+  if (passesInputThrough(def.in, def.out)) return;
+  markOpaque(
+    context.jsonSchema,
+    ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
+    `pipe:${instanceToken(context.zodSchema)}`,
+  );
+}
+
+/**
+ * A record whose value schema admits `undefined` admits an object missing
+ * any of its keys, but the projection still lists an exhaustive key set as
+ * `required`. Dropping it states what the record admits; on a parent that
+ * only loosens it.
+ */
+function unrequireOptionalRecordKeys(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const def = context.zodSchema._zod.def as ZodNodeDef;
+  if (def.type !== "record" || def.valueType === undefined) return;
+  if (!def.valueType.safeParse(undefined).success) return;
+  Reflect.deleteProperty(context.jsonSchema, "required");
+}
+
+const PROBE_KEY = "probe";
+
+/**
+ * Whether an object stores no value for `field` when the key is absent from
+ * the input: it leaves the key out or sets it to `undefined`, which a stored
+ * row cannot tell apart. Zod decides that from the field's own input and
+ * output optionality, which the projection's `required` does not always
+ * follow (`z.preprocess(f, z.unknown())`, `z.unknown().catch(v)`), so it is
+ * asked directly. A field whose own code throws on an absent input is read
+ * as omittable, the conservative answer for either side.
+ */
+function omitsAbsentKey(field: z.ZodType): boolean {
+  try {
+    // An `undefined` member is as absent as a missing one once stored.
+    const result = z.object({ [PROBE_KEY]: field }).safeParse({});
+    return result.success && result.data[PROBE_KEY] === undefined;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * An object's `required` restated as the keys it always stores: a key Zod
+ * may leave out of the stored value is not required, whatever the
+ * projection says. On a parent this only loosens it.
+ */
+function unrequireOmittableKeys(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const def = context.zodSchema._zod.def as ZodNodeDef;
+  const { required } = context.jsonSchema;
+  if (def.type !== "object" || def.shape === undefined) return;
+  if (!Array.isArray(required)) return;
+  const shape = def.shape;
+  context.jsonSchema["required"] = required.filter((key) => {
+    const field = typeof key === "string" ? shape[key] : undefined;
+    return field === undefined || !omitsAbsentKey(field);
+  });
+}
+
+/**
+ * Lists every value a node stores unvalidated (see
+ * {@link STORED_FALLBACKS_KEYWORD}). Zod visits a wrapper after the node it
+ * wraps and copies the wrapped result, so each `.default()`/`.catch()` adds
+ * its own value to the list it inherited.
+ */
+function listStoredFallbacks(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const type = context.zodSchema._zod.def.type;
+  if (type !== "default" && type !== "catch") return;
+  const { jsonSchema } = context;
+  if (!Object.hasOwn(jsonSchema, "default")) return;
+  const inherited: unknown = jsonSchema[STORED_FALLBACKS_KEYWORD];
+  const values: readonly unknown[] = Array.isArray(inherited) ? inherited : [];
+  jsonSchema[STORED_FALLBACKS_KEYWORD] = [...values, jsonSchema["default"]];
+}
+
 function markZodOnlyConstraints(
   context: Readonly<{
     zodSchema: z.core.$ZodTypes;
@@ -403,10 +562,12 @@ function stampUnprojectableIdentity(
     return;
   }
   const [nodeType = marker] = marker.split(UNPROJECTABLE_IDENTITY_SEPARATOR);
+  // A schema that is itself a check (`z.int64()`, `z.uint64()`) carries its
+  // bound on its own definition, so its run-order checks decide plainness.
   const isPlain =
     def.type === nodeType &&
     PLAIN_UNPROJECTABLE_NODE_TYPES.has(nodeType) &&
-    (def.checks ?? []).length === 0;
+    checksInRunOrder(zodSchema).length === 0;
   jsonSchema[UNPROJECTABLE_NODE_KEYWORD] =
     isPlain ? nodeType : (
       `${nodeType}${UNPROJECTABLE_IDENTITY_SEPARATOR}${instanceToken(zodSchema)}`
@@ -424,6 +585,10 @@ function projectForComparison(schema: z.ZodType): JsonSchema {
     z.toJSONSchema(schema, {
       override: (context) => {
         markZodOnlyConstraints(context);
+        markLossyPipe(context);
+        unrequireOptionalRecordKeys(context);
+        unrequireOmittableKeys(context);
+        listStoredFallbacks(context);
         markPartlyConvertedNode(context);
         stampUnprojectableIdentity(context);
       },

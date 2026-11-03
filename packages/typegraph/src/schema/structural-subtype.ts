@@ -12,10 +12,14 @@
  * trace cannot be judged. A live graph's registry check therefore compares
  * `structuralSubtypeProjection` (./structural-subtype-projection.ts), which
  * marks where the projection dropped a regex flag, a refinement, a strict
- * object, or read a `.meta()` key as a constraint, so such a pair answers
+ * object, a pipe's input side (a projectable `.pipe()` or `z.preprocess()`
+ * included), or read a `.meta()` key as a constraint, so such a pair answers
  * `incomparable` (rule 3) instead of a guess. It also marks each node the
  * projection cannot convert at all, which rule 2 accepts only under an
- * unconstrained parent node or beside a node of the same identity.
+ * unconstrained parent node or beside a node of the same identity, and
+ * lists every value a node stores unvalidated (`.default()`, `.catch()`),
+ * each of which must satisfy the parent the way a literal child would —
+ * even between equal schemas, since a stored value is validated again.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -789,6 +793,108 @@ function compareUnprojectable(
     );
 }
 
+// ============================================================
+// Stored fallbacks
+// ============================================================
+
+const DEFAULT_KEYWORD = "default";
+
+/**
+ * Every value a node stores without validating it: its `.default()` and
+ * `.catch()` values, the outer one and each one it wraps. The projection
+ * writes only the outermost as `default`, so the comparison projection
+ * lists them all here. Written only by `structuralSubtypeProjection`, never
+ * into a persisted document.
+ */
+export const STORED_FALLBACKS_KEYWORD = "x-typegraph-stored-fallbacks";
+
+/** The values `schema` stores unvalidated, as the projection states them. */
+function storedFallbacks(schema: JsonSchema): readonly unknown[] {
+  const listed = schema[STORED_FALLBACKS_KEYWORD];
+  if (Array.isArray(listed)) return listed;
+  return hasOwnKey(schema, DEFAULT_KEYWORD) ? [schema[DEFAULT_KEYWORD]] : [];
+}
+
+/**
+ * The verdict for a child node that stores a value it never validates, or
+ * `undefined` when it stores none or that value satisfies the parent.
+ *
+ * Zod's `.default(v)` stores `v` for an absent input and `.catch(v)` stores
+ * it for an input that fails, both without running the node's own checks,
+ * and both project as `default: v`. That value is a member of what the child
+ * stores, so it must satisfy the parent the way a one-value child would,
+ * judged under both readings by the finite-value comparison — even when the
+ * two sides are the same schema, since the parent re-validates a stored
+ * value and its own default applies only to an absent one. `.prefault(v)`
+ * is parsed like any input and projects nothing.
+ */
+/**
+ * The schema admitting exactly `value`: a scalar pinned with `const`, an
+ * array as the closed tuple of its members, an object as the closed object
+ * of its members, so the comparison walks into a structured value instead
+ * of refusing an unjudgeable `const`.
+ */
+function singletonSchema(value: unknown): JsonSchema {
+  if (Array.isArray(value)) {
+    return {
+      type: ARRAY_TYPE_TOKEN,
+      prefixItems: value.map((member) => singletonSchema(member)),
+      items: false,
+      minItems: value.length,
+      maxItems: value.length,
+    };
+  }
+  if (value !== null && typeof value === "object") {
+    const properties = createDataKeyedBag<JsonSchema>();
+    for (const [key, member] of Object.entries(value)) {
+      properties[key] = singletonSchema(member);
+    }
+    return {
+      type: OBJECT_TYPE_TOKEN,
+      properties,
+      required: Object.keys(value),
+      additionalProperties: false,
+    };
+  }
+  return { const: value };
+}
+
+/** Whether any schema node nested in `value` carries a `default`. */
+function containsStoredFallback(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsStoredFallback(entry));
+  }
+  if (value === null || typeof value !== "object") return false;
+  return Object.entries(value).some(
+    ([key, entry]) =>
+      ((key === DEFAULT_KEYWORD || key === STORED_FALLBACKS_KEYWORD) &&
+        entry !== undefined) ||
+      (key !== DEFAULT_KEYWORD &&
+        key !== STORED_FALLBACKS_KEYWORD &&
+        key !== "const" &&
+        key !== "enum" &&
+        containsStoredFallback(entry)),
+  );
+}
+
+function compareStoredFallback(
+  child: JsonSchema,
+  parent: JsonSchema,
+  path: readonly string[],
+  walk: Walk,
+): StructuralSubtypeResult | undefined {
+  for (const value of storedFallbacks(child)) {
+    const result = compareSchemas(
+      singletonSchema(value),
+      parent,
+      path,
+      descend(walk),
+    );
+    if (result.verdict !== "subtype") return result;
+  }
+  return undefined;
+}
+
 function compareSchemas(
   child: JsonSchema,
   parent: JsonSchema,
@@ -798,6 +904,9 @@ function compareSchemas(
   if (walk.depth > MAX_STRUCTURAL_SUBTYPE_DEPTH) {
     return incomparable("max-depth-exceeded", path);
   }
+
+  const fallbackResult = compareStoredFallback(child, parent, path, walk);
+  if (fallbackResult !== undefined) return fallbackResult;
 
   // A schema is trivially a subtype of itself, regardless of which keywords
   // it carries — including `$ref` (recursive `z.lazy`) and `allOf`
@@ -809,7 +918,14 @@ function compareSchemas(
   // trivially compatible, property.
   const strippedChild = stripSchemaMetadata(child);
   const strippedParent = stripSchemaMetadata(parent);
-  if (sameSchema(strippedChild, strippedParent, walk)) return SUBTYPE;
+  // A stored fallback nested anywhere below must still be judged, even
+  // between equal schemas: see `compareStoredFallback`.
+  if (
+    sameSchema(strippedChild, strippedParent, walk) &&
+    !containsStoredFallback(strippedChild)
+  ) {
+    return SUBTYPE;
+  }
 
   const unprojectableResult = compareUnprojectable(
     child,
@@ -844,7 +960,8 @@ function compareSchemas(
       comparableKeywords(strippedChild),
       comparableKeywords(strippedParent),
       walk,
-    )
+    ) &&
+    !containsStoredFallback(strippedChild)
   ) {
     return SUBTYPE;
   }

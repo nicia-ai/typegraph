@@ -134,6 +134,19 @@ schema:
   value that check never saw;
 - either side holding `z.literal(NaN)` or `z.literal(Infinity)`, which JSON
   cannot carry.
+- a parent whose `.pipe()`, `z.preprocess()` or `z.codec()` input side states
+  a check or rewrites the value before the output side judges it
+  (`z.string().min(5).pipe(z.string())`): only the output side has a JSON
+  Schema form.
+
+A child field's `.default()` or `.catch()` value is stored without running the
+field's own checks, so each such value must satisfy the parent field the way a
+literal child would: `z.string().min(1).default("")` does not extend
+`z.string().min(1)`, even when both kinds share that field. A parent's default
+applies only to an absent value, so it does not widen what the parent accepts
+for a value the child stores. A key Zod may leave out of what it stores counts
+as optional, whatever its schema says: an exhaustive `z.record(z.enum([...]),
+V.optional())` does not extend the same record with required values.
 
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:
@@ -164,8 +177,13 @@ Every other pair is refused as `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` with
 is never shown to satisfy the bound), a plain child field under a parent whose
 own transform hides its checks, a `z.date()` replacing a `z.string()`, two
 separately declared transforms or `z.custom()` checks, and a bounded or
-refined `z.date()` beside a plain one. Share the field schema between the two
-kinds to keep such a pair comparable. A subclass that adds a `z.date()` or an
+refined `z.date()` beside a plain one. The check also stays conservative
+where it could in principle do better: two separately declared `z.set()`,
+`z.uint64()` or bounded `z.date()` fields, an `embedding()` re-created by
+`.describe()` or `.meta()` (a new schema without its dimensions), and an
+`embedding(3)` under a three-element `z.tuple()` (the reverse is accepted)
+are all refused.
+Share the field schema between the two kinds to keep such a pair comparable. A subclass that adds a `z.date()` or an
 `embedding()` to its parent still opens normally, and a pair that is also
 incompatible elsewhere (a tighter `z.string().min(5)` on the parent, say) is
 refused for that field. A field Zod converts only in part, such as a `.catch()`
