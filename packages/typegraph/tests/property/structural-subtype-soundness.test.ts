@@ -103,6 +103,8 @@ type Spec =
       inner: Spec;
     }>
   | Readonly<{ kind: "pipe"; from: Spec; to: Spec }>
+  | Readonly<{ kind: "codec"; from: Spec; to: Spec }>
+  | Readonly<{ kind: "optional"; inner: Spec }>
   | Readonly<{ kind: "preprocess"; fn: PreprocessFunction; inner: Spec }>
   | Readonly<{ kind: "union"; members: readonly Spec[] }>
   | Readonly<{ kind: "nullable"; inner: Spec }>
@@ -396,6 +398,11 @@ function buildFallback(
   }
 }
 
+/** A decode step that rewrites a string, as a codec may. */
+function dropFirst(value: unknown): unknown {
+  return typeof value === "string" ? value.slice(1) : value;
+}
+
 function preprocessValue(fn: PreprocessFunction, value: unknown): unknown {
   if (typeof value !== "string") return value;
   switch (fn) {
@@ -492,6 +499,15 @@ function build(spec: Spec, cache: InstanceCache): z.ZodType {
     }
     case "pipe": {
       return build(spec.from, cache).pipe(build(spec.to, cache));
+    }
+    case "codec": {
+      return z.codec(build(spec.from, cache), build(spec.to, cache), {
+        decode: (value) => dropFirst(value) as never,
+        encode: (value) => value as never,
+      });
+    }
+    case "optional": {
+      return build(spec.inner, cache).optional();
     }
     case "preprocess": {
       return z.preprocess(
@@ -726,6 +742,12 @@ const specLetrec = fc.letrec<{ spec: Spec; container: Spec }>((tie) => ({
       to: tie("spec"),
     }),
     fc.record({
+      kind: fc.constant("codec"),
+      from: tie("spec"),
+      to: tie("spec"),
+    }),
+    fc.record({ kind: fc.constant("optional"), inner: tie("spec") }),
+    fc.record({
       kind: fc.constant("preprocess"),
       fn: fc.constantFrom<PreprocessFunction>("trim", "upper", "identity"),
       inner: tie("spec"),
@@ -768,6 +790,13 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
     }),
     specArb.map((from): Spec => ({ kind: "pipe", from, to: spec })),
     fc.constant<Spec>({ kind: "pipe", from: { kind: "unknown" }, to: spec }),
+    fc.constant<Spec>({
+      kind: "pipe",
+      from: { kind: "unknown" },
+      to: { kind: "optional", inner: spec },
+    }),
+    fc.constant<Spec>({ kind: "codec", from: spec, to: spec }),
+    fc.constant<Spec>({ kind: "optional", inner: spec }),
   ];
   switch (spec.kind) {
     case "string": {
@@ -923,11 +952,19 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
       );
       break;
     }
-    case "pipe": {
+    case "pipe":
+    case "codec": {
       local.push(
         fc.constant(spec.to),
         fc.constant(spec.from),
         editArb(spec.from).map((from) => ({ ...spec, from })),
+      );
+      break;
+    }
+    case "optional": {
+      local.push(
+        fc.constant(spec.inner),
+        editArb(spec.inner).map((inner) => ({ ...spec, inner })),
       );
       break;
     }
@@ -1004,8 +1041,12 @@ function shapedCandidateArb(spec: Spec): fc.Arbitrary<unknown> {
         candidateArb(spec.inner),
       );
     }
-    case "pipe": {
+    case "pipe":
+    case "codec": {
       return candidateArb(spec.from);
+    }
+    case "optional": {
+      return fc.oneof(fc.constant(undefined), candidateArb(spec.inner));
     }
     case "number": {
       return fc.constantFrom(...NUMBER_POOL);
@@ -1107,6 +1148,34 @@ const pairWithSamplesArb = pairArb.chain((pair) =>
     .map((samples) => ({ ...pair, samples })),
 );
 
+/**
+ * Whether `row` is one the parent's schema could store itself: it accepts
+ * the row as input, or it stores exactly the row from some input — an
+ * absent field its own default fills, a value its own catch replaces. The
+ * check's soundness is that the child stores nothing the parent could not.
+ */
+function parentCouldStore(
+  parentSchema: z.ZodType,
+  row: unknown,
+  parentInputs: readonly unknown[],
+): boolean {
+  if (parentSchema.safeParse(row).success) return true;
+  const target = storedForm(row);
+  return parentInputs.some((input) => {
+    const stored = parentSchema.safeParse(input);
+    return stored.success && storedForm(asInputValue(stored.data)) === target;
+  });
+}
+
+/** A stable rendering of a row, dates and bigints included. */
+function storedForm(value: unknown): string {
+  return JSON.stringify(value, (_key, member: unknown) =>
+    typeof member === "bigint" ? `${member}n`
+    : member instanceof Date ? `date:${member.getTime()}`
+    : member,
+  );
+}
+
 function expectSoundVerdict(
   child: Spec,
   parent: Spec,
@@ -1120,6 +1189,10 @@ function expectSoundVerdict(
     structuralSubtypeProjection(parentSchema),
   );
   if (verdict.verdict !== "subtype") return;
+  const parentInputs = [
+    {},
+    ...samples.map((sample) => asInputValue({ field: sample })),
+  ];
   for (const sample of samples) {
     const input = asInputValue({ field: sample });
     const stored = childSchema.safeParse(input);
@@ -1131,8 +1204,8 @@ function expectSoundVerdict(
       parent,
       input,
       row,
-      parentAccepts: parentSchema.safeParse(row).success,
-    }).toMatchObject({ parentAccepts: true });
+      parentCouldStore: parentCouldStore(parentSchema, row, parentInputs),
+    }).toMatchObject({ parentCouldStore: true });
   }
 }
 
