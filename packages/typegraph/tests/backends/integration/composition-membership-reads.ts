@@ -37,7 +37,7 @@
  * dropping the per-kind `NOT (kind IN openRows)` guard fails the TOP "one" /
  * SUB "oneActive" ended cells — each verified and reverted.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -144,8 +144,13 @@ function plannedDirectParts(
   );
 }
 
-async function pause(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 15));
+/**
+ * Separates two coordinates by moving the faked `Date` (installed for every
+ * test in this file), so each instant and recorded pin is distinct without a
+ * wall-clock sleep.
+ */
+function pause(): void {
+  vi.setSystemTime(Date.now() + 15);
 }
 
 function nowIso(): string {
@@ -305,11 +310,11 @@ async function seed(store: MembershipStore): Promise<
   const whole = await store.nodes.MrWhole.create({ name: "w" });
   const part = await store.nodes.MrPart.create({ name: "p" });
   const sub = await store.nodes.MrSub.create({ name: "s" });
-  await pause();
+  pause();
   const beforeEdges = nowIso();
   const pinBeforeEdges = requireDefined(await store.recordedNow());
   const plansBeforeEdges = await capturePlans(store, { whole, part });
-  await pause();
+  pause();
   const topEdge = await store.edges.mrPartOf.create(part, whole, {});
   await store.edges.mrHasSub.create(part, sub, {});
   return {
@@ -327,18 +332,25 @@ export function registerCompositionMembershipReadIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Composition reads report membership (subgraph / parts / wholes)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     for (const { top, sub } of POPULATION_PAIRS) {
       for (const state of EDGE_STATES) {
         it(`top "${top}" / sub "${sub}", top edge ${state}: with every part node visible, each reader matches the cascade plan at its coordinate`, async () => {
           const store = await context.createHistoryStore(buildGraph(top, sub));
           const seeded = await seed(store);
           const { topEdgeId } = seeded;
-          await pause();
+          pause();
 
           const before = nowIso();
           const pinBefore = requireDefined(await store.recordedNow());
           const planBefore = await capturePlans(store, seeded);
-          await pause();
+          pause();
 
           let endInstant: string | undefined;
           if (state === "ended") {
@@ -351,7 +363,7 @@ export function registerCompositionMembershipReadIntegrationTests(
           } else if (state === "softDeleted") {
             await store.edges.mrPartOf.delete(topEdgeId);
           }
-          await pause();
+          pause();
 
           const after = nowIso();
           const pinAfter = requireDefined(await store.recordedNow());
@@ -455,11 +467,11 @@ export function registerCompositionMembershipReadIntegrationTests(
       const store = await context.createHistoryStore(buildGraph("one", "one"));
       const seeded = await seed(store);
       const { part, sub } = seeded;
-      await pause();
+      pause();
       const beforeEnd = nowIso();
-      await pause();
+      pause();
       await store.nodes.MrPart.update(part.id, {}, { validTo: nowIso() });
-      await pause();
+      pause();
 
       // The delete still owns both: membership is a property of the edges.
       const plans = await capturePlans(store, seeded);
@@ -511,13 +523,13 @@ export function registerCompositionMembershipReadIntegrationTests(
       const seeded = await seed(store);
       const { whole, part } = seeded;
       const nextWhole = await store.nodes.MrWhole.create({ name: "next" });
-      await pause();
+      pause();
       const before = nowIso();
       const plansBefore = [
         requireDefined(await store.nodes.MrWhole.planDelete(whole.id)),
         requireDefined(await store.nodes.MrWhole.planDelete(nextWhole.id)),
       ] as const;
-      await pause();
+      pause();
       await store.nodes.MrPart.reparent(part.id, { whole: nextWhole });
       const [retired] = await store.edges.mrPartOf.find(
         { to: whole },
