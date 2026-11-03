@@ -586,6 +586,48 @@ export function registerCompositionAttachmentIntegrationTests(
       },
     );
 
+    it("resurrecting a deleted attachment after the part took another whole through another edge kind is refused", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "chapter-1" },
+        {
+          partOf: {
+            whole: { kind: "CaBook", id: book.id },
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+      const [incumbent] = await store.edges.caChapterOf.find({});
+      const incumbentId = requireDefined(incumbent).id;
+      await store.edges.caChapterOf.delete(incumbentId);
+      const replacement = await store.edges.caIncludedIn.create(
+        chapter,
+        anthology,
+        {},
+      );
+
+      const refusal = await store.edges.caChapterOf
+        .bulkUpsertById([
+          { id: incumbentId, from: chapter, to: book, props: { order: 1 } },
+        ])
+        .catch((error: unknown) => error);
+
+      expect(refusal).toBeInstanceOf(CompositionError);
+      expect((refusal as CompositionError).details).toMatchObject({
+        situation: "occupied",
+        incumbentEdgeId: replacement.id,
+      });
+      expect(await store.edges.caChapterOf.find({})).toEqual([]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: make `compositionReentryClaim`
+    // (src/store/claims/composition-claims.ts) answer `undefined` — the
+    // resurrection then re-attaches the chapter to the book while the
+    // anthology still holds it.
+
     it("reparent is ONE move instant: the ended window and the new one abut", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const showA = await store.nodes.CaShow.create({});

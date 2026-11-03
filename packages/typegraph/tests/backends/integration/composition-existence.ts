@@ -698,6 +698,50 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
     });
 
+    it("case 9e: a whole's plan and cascade walk past a dead part whose edge survived, and report only the live parts", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const live = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      const dead = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      // The raw backend member tombstones the part and leaves its edge live.
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeSegment",
+        id: dead.id,
+      });
+      const edges = await store.edges.eeSegmentOf.find({});
+      expect(edges).toHaveLength(2);
+
+      const plan = requireDefined(
+        await store.nodes.EeEpisode.planDelete(episode.id),
+      );
+      expect(plan).toEqual({
+        cascadedParts: [
+          {
+            kind: "EeSegment",
+            id: live.id,
+            whole: { kind: "EeEpisode", id: episode.id },
+            viaEdgeKind: "eeSegmentOf",
+          },
+        ],
+        removedEdgeIds: edges.map((edge) => edge.id).toSorted(),
+      });
+
+      await store.nodes.EeEpisode.delete(episode.id, { expect: plan });
+      expect(await store.edges.eeSegmentOf.find({})).toEqual([]);
+      expect(await store.nodes.EeSegment.count()).toBe(0);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: drop the liveness filter from `liveDiscoveredMembers`
+    // (src/store/operations/composition-cascade.ts) — the dead segment then
+    // appears in `cascadedParts` beside the live one.
+
     it("case 9b: a composition edge is not resurrected onto a deleted part", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const episode = await store.nodes.EeEpisode.create({});
@@ -1246,6 +1290,42 @@ export function registerCompositionExistenceIntegrationTests(
       await store.nodes.EeTag.upsertById(tag.id, {});
       expect(await store.nodes.EeTag.getById(tag.id)).toBeDefined();
     });
+
+    it("case 13b: an upsert does not restore a required part whose surviving edge holds a tombstoned whole", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const segment = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      // Both tombstones come from the raw backend member, so the segment's
+      // composition edge stays live and still names the dead episode.
+      for (const node of [segment, episode]) {
+        await store.backend.deleteNode({
+          graphId: store.graphId,
+          kind: node.kind,
+          id: node.id,
+        });
+      }
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
+
+      const refusal = await store.nodes.EeSegment.upsertById(
+        segment.id,
+        {},
+      ).catch((error: unknown) => error);
+
+      expect(refusal).toBeInstanceOf(CompositionExistenceError);
+      expect((refusal as CompositionExistenceError).details).toMatchObject({
+        situation: "create",
+        partId: segment.id,
+      });
+      expect(await store.nodes.EeSegment.getById(segment.id)).toBeUndefined();
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: in `assertRestoredRequiredPartsAttached`
+    // (composition-create.ts), accept any surviving attachment without asking
+    // whether its whole is live — the segment is then restored under a
+    // tombstoned episode.
 
     it("case 14: a composition create refused inside a caught transaction leaves no row of it behind", async () => {
       type ExistenceStore = Awaited<
