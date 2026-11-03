@@ -5,6 +5,7 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
 import type { TransactionContext } from "../store/types";
 import { groupBy } from "../utils/array";
+import { nowIso } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { assertMergeTransactionPristine } from "./adopted-transaction";
@@ -277,6 +278,7 @@ import {
   getEdgeRowsByIds,
   type GraphWriteLock,
   isLiveNodeRow,
+  loadIdentityWindowHistory,
   lockRecordedGraphWrite,
   orientCompositionEndpoints,
   planCompositionCascade,
@@ -1241,9 +1243,7 @@ function buildInternalMergePlan<G extends GraphDef>(
     options: NormalizedMergeOptions<G>;
     branchRank: ReadonlyMap<BranchId, number>;
     registry: KindRegistry;
-    identityContext: PlanIdentityContext;
     storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>;
-    targetPeers: readonly Readonly<{ kind: string; id: string }>[];
     separationFacts: IdentitySeparationFacts;
     separationConflicts: readonly IdentityUnresolvedConflict[];
     vetoedEdges: readonly CandidateEdge[];
@@ -1260,9 +1260,7 @@ function buildInternalMergePlan<G extends GraphDef>(
     options,
     branchRank,
     registry,
-    identityContext,
     storedIdentityRowsById,
-    targetPeers,
     separationFacts,
     separationConflicts,
     vetoedEdges,
@@ -1787,37 +1785,6 @@ function buildInternalMergePlan<G extends GraphDef>(
     staging.deletedNodes,
     reconciliation.retypeMap,
     storedIdentityRowsById,
-  );
-  // Each canonical entity enters the universe under the kind the commit will
-  // actually WRITE — the retyped one when the ontology cascade retypes it —
-  // while its deletion check runs against the source identity, which is how
-  // `nodeDeletions` is keyed.
-  const identityNodeUniverse = [
-    ...canonicalEntities
-      .filter(
-        (entity) =>
-          !nodeDeletions.has(mergeKey(entity.kind, entity.canonicalId)),
-      )
-      .map((entity) => ({
-        kind:
-          reconciliation.retypeMap.get(
-            mergeKey(entity.kind, entity.canonicalId),
-          ) ?? entity.kind,
-        id: entity.canonicalId,
-      })),
-    ...targetPeers.filter(
-      (node) => !nodeDeletions.has(mergeKey(node.kind, node.id)),
-    ),
-  ];
-  assertNoContradictoryIdentityClosure(
-    identityRemap.assertions,
-    survivingRetractions,
-    staging.baseIdentityAssertions,
-    new Set(nodeDeletions.keys()),
-    canonicalOf,
-    reconciliation.retypeMap,
-    identityContext,
-    identityNodeUniverse,
   );
   const {
     edges: stagedEdges,
@@ -4646,14 +4613,19 @@ async function resolveMerge<G extends GraphDef, Output>(
       options,
       branchRank,
       registry,
-      identityContext,
       storedIdentityRowsById,
-      targetPeers,
       separationFacts,
       separationConflicts: veto.conflicts,
       vetoedEdges: veto.vetoedEdges,
       preferredBranchId,
     });
+    await assertPlannedIdentityClosureConsistent(
+      target,
+      staging,
+      plan,
+      identityContext,
+      targetPeers,
+    );
 
     // The commit guard's baseline must be a VALIDATED state: re-probe the
     // live peers and snapshot the final seeds' classes AFTER planning, then
@@ -4873,6 +4845,83 @@ function incrementalSchemaError(): MergeError {
     "mergeIncremental() requires target and forkPoint to share a schema; schema drift is not supported (the target content may differ — only the schema must match).",
     { details: {} },
   );
+}
+
+/**
+ * The plan-time contradiction verdict over the ledger the merge would leave
+ * behind: the base's current rows plus the target's own history — the window
+ * ledger the commit's identity importer validates against, read through the
+ * one shared loader with the importer's own requests — so a claim that
+ * contradicts target history is refused here, typed and before any write,
+ * instead of by the importer inside the commit.
+ */
+async function assertPlannedIdentityClosureConsistent<G extends GraphDef>(
+  target: Store<G>,
+  staging: StagingSet,
+  plan: MergePlan<G>,
+  identityContext: PlanIdentityContext,
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+): Promise<void> {
+  const history =
+    (
+      target.graph.identity === undefined ||
+      plan.identityAssertions.length === 0
+    ) ?
+      []
+    : await loadPlannedIdentityHistory(target, plan.identityAssertions);
+  const baseIds = new Set(
+    staging.baseIdentityAssertions.map((assertion) => assertion.id),
+  );
+  assertNoContradictoryIdentityClosure(
+    plan.identityAssertions,
+    plan.identityRetractions,
+    [
+      ...staging.baseIdentityAssertions,
+      ...history.filter((assertion) => !baseIds.has(assertion.id)),
+    ],
+    new Set(plan.nodeDeletions.keys()),
+    plan.canonicalOf,
+    plan.retypeMap,
+    identityContext,
+    identityNodeUniverse(plan, targetPeers),
+  );
+}
+
+/**
+ * Every node the committed target holds, which the identity simulation treats
+ * as present at every coordinate. Each canonical entity enters under the kind
+ * the commit will actually WRITE — the retyped one when the ontology cascade
+ * retypes it — while its deletion check runs against the source identity,
+ * which is how `nodeDeletions` is keyed.
+ */
+function identityNodeUniverse<G extends GraphDef>(
+  plan: MergePlan<G>,
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+): readonly Readonly<{ kind: string; id: string }>[] {
+  return [
+    ...plan.canonicalEntities
+      .filter(
+        (entity) =>
+          !plan.nodeDeletions.has(mergeKey(entity.kind, entity.canonicalId)),
+      )
+      .map((entity) => ({
+        kind:
+          plan.retypeMap.get(mergeKey(entity.kind, entity.canonicalId)) ??
+          entity.kind,
+        id: entity.canonicalId,
+      })),
+    ...targetPeers.filter(
+      (node) => !plan.nodeDeletions.has(mergeKey(node.kind, node.id)),
+    ),
+  ];
+}
+
+async function loadPlannedIdentityHistory<G extends GraphDef>(
+  target: Store<G>,
+  assertions: readonly IdentityTransferAssertion[],
+): Promise<readonly IdentityTransferAssertion[]> {
+  const ctx = storeRuntime(target).identityContext();
+  return loadIdentityWindowHistory(ctx, ctx.backend, assertions, nowIso());
 }
 
 /** Builds a durable, reviewable snapshot merge plan without mutating the target. */

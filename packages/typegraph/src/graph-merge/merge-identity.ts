@@ -42,6 +42,7 @@ import {
   normalizeIdentityPair,
 } from "../identity/reference";
 import { isCurrentIdentityAssertion } from "../identity/validity-window";
+import { nowIso } from "../utils/date";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { type CanonicalEntity, COMMITTED_TARGET_BRANCH } from "./canonicalize";
 import {
@@ -75,6 +76,7 @@ import {
   hasScopedIdentityReads,
   IdentityContradictionError,
   type IdentityTransferAssertion,
+  loadIdentityWindowHistory,
   NodeNotFoundError,
   type Store,
   storeBackend,
@@ -1219,8 +1221,12 @@ export function translateIdentityCommitError(error: unknown): unknown {
     {
       cause: error,
       details: { ...(identityCode === undefined ? {} : { identityCode }) },
+      // A target that moved after planning is refused earlier, by the plan
+      // fence and identity guards, with their own re-plan errors; reaching
+      // this arm means the plan-time simulation missed an applier rule, so a
+      // re-plan from unchanged state reproduces the refusal.
       suggestion:
-        "Retry once — the plan is recomputed from current state. If the refusal persists, the branches' identity truth conflicts with the target and needs manual resolution (change the branch's assertion, or resolve the target's truth first).",
+        "The plan-time identity checks did not foresee this refusal, so re-planning against the same target refuses again. Resolve the conflict named in the cause — change the branch's assertion, or the target's identity truth — then re-plan the merge.",
     },
   );
 }
@@ -1316,11 +1322,37 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
   // added while a and b are already transitively connected (no class or
   // ledger-slice fingerprint moves) that becomes the surviving link once the
   // plan removes their bridge and asserts them different.
+  // The target's history too, read through the same window-ledger owner the
+  // plan and the importer use: a `different` committed AND ended in the
+  // window moves no current-ledger fingerprint, yet it contradicts a claim
+  // over the span it held — a target change, so it must refuse here as a
+  // re-plan rather than reach the importer's refusal.
+  const ledgerIds = new Set(ledger.map((assertion) => assertion.id));
+  const history =
+    plan.identityAssertions.length === 0 ?
+      []
+    : (
+        await loadIdentityWindowHistory(
+          storeRuntime(target).identityContext(),
+          txBackend,
+          plan.identityAssertions,
+          nowIso(),
+        )
+      ).filter(
+        (assertion) =>
+          !ledgerIds.has(assertion.id) &&
+          !probe.plannedDeletions.has(
+            mergeKey(assertion.a.kind, assertion.a.id),
+          ) &&
+          !probe.plannedDeletions.has(
+            mergeKey(assertion.b.kind, assertion.b.id),
+          ),
+      );
   try {
     assertNoContradictoryIdentityClosure(
       plan.identityAssertions,
       plan.identityRetractions,
-      ledger,
+      [...ledger, ...history],
       probe.plannedDeletions,
       plan.canonicalOf,
       plan.retypeMap,

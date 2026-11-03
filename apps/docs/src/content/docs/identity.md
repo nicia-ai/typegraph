@@ -899,8 +899,10 @@ them and leaving nothing to separate cause from intent, so those endings count
 as cascades. `merge()` detects identity conflicts at plan
 time and returns them as a typed `IdentityMergeConflictError` — direct
 opposing relations on one endpoint pair, transitive contradictions reached
-through a chain of `same` assertions no single branch wrote, retract/reassert
-races, and a still-current assertion over a node another branch deleted. A
+through a chain of `same` assertions no single branch wrote, contradictions
+with the target's history (rows it had ended, and rows the merge retracts, over
+the time they held), retract/reassert races, and a still-current assertion over
+a node another branch deleted. A
 retraction and a reassertion of one pair are convergent, and merge cleanly,
 only when every branch that retracts the pair also reasserts it; a branch that
 only retracts it while another retracts and reasserts it is a race. Only an
@@ -911,7 +913,8 @@ every branch assertion over it, ended or not. This is mechanical truth propagati
 reconciliation. Plan time is the early surface, not the only one: any
 identity refusal that still escapes to the applier inside the commit
 transaction is translated into the same typed `IdentityMergeConflictError`,
-with the original error preserved as its cause (identity environment and
+with the original error preserved as its cause and no retry suggestion, since
+re-planning against an unchanged target refuses again (identity environment and
 storage-corruption codes pass through untranslated — they are not statements
 about merge truth). See
 [`IdentityMergeConflictError`](/errors/#identitymergeconflicterror)

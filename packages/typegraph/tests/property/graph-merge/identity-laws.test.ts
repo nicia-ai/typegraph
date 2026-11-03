@@ -1463,18 +1463,20 @@ interface ModelTally {
 
 /**
  * Compares a finished merge to the reference model's verdict: a refusal the
- * model predicts must be a typed refusal, and a merge the model accepts MUST
+ * model predicts must be a typed refusal planning already makes, and a merge
+ * the model accepts MUST
  * succeed — the success floor a refuse-everything regression fails — and land
  * exactly the ledger the model computed.
  */
 async function expectModelOutcome(args: {
   verdict: ModelVerdict;
+  planned: Awaited<ReturnType<typeof planMerge>>;
   result: Awaited<ReturnType<typeof merge>>;
   target: Store<LawGraph>;
   trackedIds: readonly string[];
   tally: ModelTally;
 }): Promise<void> {
-  const { verdict, result, target, trackedIds, tally } = args;
+  const { verdict, planned, result, target, trackedIds, tally } = args;
   if (verdict.kind === "undetermined") {
     tally.undetermined += 1;
     if (isErr(result)) expectTypedRefusal(result.error);
@@ -1482,6 +1484,12 @@ async function expectModelOutcome(args: {
   }
   if (verdict.kind === "refused") {
     tally.refused += 1;
+    // Every refusal the model knows is a plan-time rule: review must already
+    // see it, never only the commit.
+    expect(
+      isErr(planned),
+      `the model refuses (${verdict.reason}) but planning accepted the merge`,
+    ).toBe(true);
     expect(
       isErr(result),
       `the model refuses (${verdict.reason}) but the merge succeeded`,
@@ -1920,12 +1928,11 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                     options: { branchOrder },
                   })
                 : planMerge(forkPoint, [branchA, branchB], { branchOrder });
+              const planned = await plan([BRANCH_A, BRANCH_B]);
               expect(
                 identityPlanFingerprint(await plan([BRANCH_B, BRANCH_A])),
                 "the identity plan depends on the branch order",
-              ).toEqual(
-                identityPlanFingerprint(await plan([BRANCH_A, BRANCH_B])),
-              );
+              ).toEqual(identityPlanFingerprint(planned));
 
               const result =
                 lane.incremental ?
@@ -1940,6 +1947,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                   });
               await expectModelOutcome({
                 verdict,
+                planned,
                 result,
                 target,
                 trackedIds,

@@ -52,6 +52,8 @@ type KindFirstReferenceChange = Readonly<{
 
 type TemporalClosureState = Readonly<{
   assertions: readonly IdentityTransferAssertion[];
+  /** Every window boundary, ascending: leaf `i` is `[boundaries[i], boundaries[i + 1])`. */
+  boundaries: readonly string[];
   context: PlanIdentityContext;
   references: readonly IdentityReference[];
   referenceIndexByKey: ReadonlyMap<MergeKey, number>;
@@ -330,7 +332,20 @@ function componentKindsInReferenceOrder(
     .map(([kind]) => kind);
 }
 
-function assertCoordinateConsistent(state: TemporalClosureState): void {
+/** The valid-time window leaf `leaf` of the traversal covers. */
+function leafWindow(
+  state: TemporalClosureState,
+  leaf: number,
+): Readonly<{ validFrom: string; validTo?: string }> {
+  const validFrom = requireDefined(state.boundaries[leaf]);
+  const validTo = state.boundaries[leaf + 1];
+  return validTo === undefined ? { validFrom } : { validFrom, validTo };
+}
+
+function assertCoordinateConsistent(
+  state: TemporalClosureState,
+  leaf: number,
+): void {
   if (state.sharedIdViolationCount.value > 0) {
     const activeById = new Map<string, IdentityReference[]>();
     for (const [index, reference] of state.references.entries()) {
@@ -364,6 +379,7 @@ function assertCoordinateConsistent(state: TemporalClosureState): void {
         details: {
           assertion,
           sameClass: activeClassMembers(state, root),
+          window: leafWindow(state, leaf),
         },
       },
     );
@@ -436,7 +452,7 @@ function visitTemporalEvents(
   }
 
   if (right - left === 1) {
-    assertCoordinateConsistent(state);
+    assertCoordinateConsistent(state, left);
   } else {
     const middle = Math.floor((left + right) / 2);
     visitTemporalEvents(events, state, node * 2, left, middle);
@@ -539,6 +555,7 @@ export function assertTemporalIdentityClosureConsistent(
 
   const state: TemporalClosureState = {
     assertions,
+    boundaries: sortedBoundaries,
     context: identityContext,
     references,
     referenceIndexByKey,
