@@ -177,8 +177,15 @@ const TARGET_CLONE = asBranchId("identity-law-target");
  * its pinned ones.
  */
 const LAW_RUNS = propertyRuns({ ci: 12, local: 24 });
+/**
+ * PGlite is the parity lane, not the coverage lane: each run costs several
+ * times a SQLite run, so it draws fewer randomized runs and SQLite carries the
+ * randomized search. Pinned examples run on both.
+ */
+const PGLITE_LAW_RUNS = propertyRuns({ ci: 7, local: 24 });
 /** Randomized runs per reference-model lane; identity-only scenarios are cheap. */
 const MODEL_RUNS = propertyRuns({ ci: 30, local: 60 });
+const PGLITE_MODEL_RUNS = propertyRuns({ ci: 4, local: 20 });
 
 function withExamples<T>(examples: readonly T[], randomized: number) {
   return { examples: [...examples], numRuns: randomized + examples.length };
@@ -1589,6 +1596,7 @@ afterAll(async () => {
 });
 
 describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
+  const lawRuns = entry.name === "PGlite" ? PGLITE_LAW_RUNS : LAW_RUNS;
   type Fixture = Readonly<{
     forkPoint: Store<LawGraph>;
     branchA: Awaited<ReturnType<typeof makeBranches>>["branchA"];
@@ -1735,7 +1743,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             [NODE_END_TIE_BREAK_EXAMPLE],
             [EDGE_END_TIE_BREAK_EXAMPLE],
           ],
-          LAW_RUNS,
+          lawRuns,
         ),
       );
       // Coverage instrumentation and property shrinking can multiply the
@@ -1849,7 +1857,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           [TARGET_WINDOW_PRECEDENCE_EXAMPLE],
           [TARGET_EDGE_WINDOW_PRECEDENCE_EXAMPLE],
         ],
-        LAW_RUNS,
+        lawRuns,
       ),
     );
   }, 300_000);
@@ -2011,7 +2019,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
         ),
         withExamples(
           lane.examples.map((example) => [example] as const),
-          MODEL_RUNS,
+          entry.name === "PGlite" ? PGLITE_MODEL_RUNS : MODEL_RUNS,
         ),
       );
       console.info(`identity model lane ${lane.name} [${entry.name}]`, tally);

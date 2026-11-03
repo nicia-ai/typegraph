@@ -18,7 +18,7 @@ import {
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
@@ -36,6 +36,7 @@ import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 import { importGraph } from "../../src/interchange";
 import { storeRuntime } from "../../src/store/runtime-port";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix } from "./test-utils";
 
 const Agent = defineNode("Agent", { schema: z.object({}) });
@@ -84,13 +85,21 @@ function agent(id: string) {
   return { kind: "Agent" as const, id };
 }
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())(
   "a merge judging claims against retracted base history [$name]",
   (entry) => {
     it("refuses at plan time a claim that contradicts a base row over the time it still held", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
@@ -180,7 +189,10 @@ describe.each(backendMatrix())(
     it("refuses at plan time a branch claim over a row the target ended before the fork", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
@@ -262,7 +274,10 @@ describe.each(backendMatrix())(
     it("refuses at plan time an incremental branch claim over a row the target ended before the fork", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
@@ -333,7 +348,10 @@ describe.each(backendMatrix())(
     it("refuses at plan time an incremental branch claim over a row the advanced target ended", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
@@ -400,7 +418,10 @@ describe.each(backendMatrix())(
     it("refuses as a re-plan a target history row committed and ended between planning and commit", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
@@ -485,7 +506,10 @@ describe.each(backendMatrix())(
     it("keeps a deleted node's ended history in the plan, as the commit does", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
@@ -554,7 +578,10 @@ describe.each(backendMatrix())(
     it("refuses a branch claim valid from after the planner's clock with the typed identity conflict", async () => {
       const cleanups: (() => Promise<void>)[] = [];
       async function makeBackend(): Promise<GraphBackend> {
-        const fixture = await entry.make();
+        const fixture =
+          entry.name === "PGlite" ?
+            await pglitePool.makeFixture()
+          : await entry.make();
         cleanups.push(fixture.cleanup);
         return fixture.backend;
       }
