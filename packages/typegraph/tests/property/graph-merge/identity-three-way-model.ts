@@ -25,7 +25,7 @@
  *    current survivor; bounded survivors land as history rows.
  */
 
-export type ModelRef = Readonly<{ kind: string; id: string }>;
+type ModelRef = Readonly<{ kind: string; id: string }>;
 
 export type ModelRow = Readonly<{
   id: string;
@@ -36,7 +36,7 @@ export type ModelRow = Readonly<{
   validTo?: string | undefined;
 }>;
 
-export type ModelSide = Readonly<{
+type ModelSide = Readonly<{
   branchId: string;
   /** Every tracked row the side holds, ended rows included. */
   rows: ReadonlyMap<string, ModelRow>;
