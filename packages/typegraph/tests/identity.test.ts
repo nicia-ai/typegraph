@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -46,6 +46,30 @@ import {
   recordedRevisionFromDriver,
   revisionsAdvanced,
 } from "./test-utils";
+
+const FAKE_CLOCK_START = "2026-01-01T00:00:00.000Z";
+const FAKE_CLOCK_STEP_MS = 1000;
+
+/** Fakes only `Date`, so recorded and valid instants are chosen by the test. */
+function startFakeClock(): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(FAKE_CLOCK_START));
+}
+
+/**
+ * An instant strictly after every write so far and strictly before the next
+ * one — the fake clock moves forward on both sides of it.
+ */
+function instantBetweenWrites(): string {
+  vi.setSystemTime(Date.now() + FAKE_CLOCK_STEP_MS);
+  const instant = new Date().toISOString();
+  vi.setSystemTime(Date.now() + FAKE_CLOCK_STEP_MS);
+  return instant;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -871,6 +895,7 @@ describe("Operational Identity", () => {
   });
 
   it("reconstructs explicit and folded membership at an as-of coordinate", async () => {
+    startFakeClock();
     const store = await createInitializedStore(graph, createTestBackend());
     const person = await store.nodes.Person.create(
       { name: "Alice" },
@@ -885,9 +910,7 @@ describe("Operational Identity", () => {
       { id: "other" },
     );
     const assertion = await store.identity.assertSame(author, other);
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    const beforeRetraction = new Date().toISOString();
-    await new Promise((resolve) => setTimeout(resolve, 2));
+    const beforeRetraction = instantBetweenWrites();
     await store.identity.retractAssertion(assertion.assertion.id);
 
     expect(
@@ -901,6 +924,7 @@ describe("Operational Identity", () => {
   });
 
   it("conducts historical identity through a soft-deleted invisible bridge", async () => {
+    startFakeClock();
     const store = await createInitializedStore(graph, createTestBackend());
     const first = await store.nodes.Person.create(
       { name: "First" },
@@ -916,9 +940,7 @@ describe("Operational Identity", () => {
     );
     await store.identity.assertSame(first, bridge);
     await store.identity.assertSame(bridge, far);
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    const beforeDelete = new Date().toISOString();
-    await new Promise((resolve) => setTimeout(resolve, 2));
+    const beforeDelete = instantBetweenWrites();
     await store.nodes.Person.delete(bridge.id);
 
     expect(await store.asOf(beforeDelete).identity.membersOf(first)).toEqual([
@@ -1010,6 +1032,7 @@ describe("Operational Identity", () => {
   });
 
   it("expands one traversal through visible identity members without duplicating physical edges", async () => {
+    startFakeClock();
     const store = await createInitializedStore(graph, createTestBackend());
     const person = await store.nodes.Person.create(
       { name: "Alice" },
@@ -1059,9 +1082,7 @@ describe("Operational Identity", () => {
     expect(expanded[0]?.edge.fromId).toBe(author.id);
     expect(expanded[0]?.friend.id).toBe(friend.id);
 
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    const beforeRetraction = new Date().toISOString();
-    await new Promise((resolve) => setTimeout(resolve, 2));
+    const beforeRetraction = instantBetweenWrites();
     await store.identity.retractAssertion(assertion.assertion.id);
     expect(
       await store

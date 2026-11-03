@@ -9,7 +9,7 @@
  * caller actually gets, and the two could in principle diverge if a future
  * change touched only the facade's own thin marshalling.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -108,9 +108,9 @@ function profileFlipGraph(sameIdAcrossKinds: "fold" | "ignore") {
   });
 }
 
-/** How long a test waits for a future-dated validity window to lapse. */
+/** How far ahead of the faked clock a future-dated validity window ends. */
 const WINDOW_LAPSE_MS = 250;
-const WINDOW_LAPSE_MARGIN_MS = 150;
+const WINDOW_LAPSE_CLOCK_START = "2026-01-01T00:00:00.000Z";
 
 function personRef(id: string) {
   return { kind: "Person" as const, id };
@@ -1145,39 +1145,44 @@ export function registerIdentityReplayIntegrationTests(
     // the Robot appears to join BECAUSE of it.
 
     it("answers the same step identically after a future-dated window lapses", async () => {
-      const store = await provisionDepartedLineageStore(
-        context,
-        departedLineageGraph("identity_replay_window_lapse"),
-      );
-      const person = personRef("lapse-x");
-      await store.nodes.Person.create({}, { id: person.id });
-      await store.nodes.Org.create({}, { id: person.id });
-      const lapsesAt = new Date(Date.now() + WINDOW_LAPSE_MS).toISOString();
-      await store.nodes.Org.update(
-        asNodeId(person.id),
-        {},
-        {
-          validTo: lapsesAt,
-        },
-      );
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(WINDOW_LAPSE_CLOCK_START));
+        const store = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph("identity_replay_window_lapse"),
+        );
+        const person = personRef("lapse-x");
+        await store.nodes.Person.create({}, { id: person.id });
+        await store.nodes.Org.create({}, { id: person.id });
+        const lapsesAt = new Date(Date.now() + WINDOW_LAPSE_MS).toISOString();
+        await store.nodes.Org.update(
+          asNodeId(person.id),
+          {},
+          {
+            validTo: lapsesAt,
+          },
+        );
 
-      const earlyReplay = await store.identity.replay(person);
-      const early = requireDefined(earlyReplay.steps.at(-1));
-      await new Promise((resolve) =>
-        setTimeout(resolve, WINDOW_LAPSE_MS + WINDOW_LAPSE_MARGIN_MS),
-      );
-      expect(Date.now()).toBeGreaterThan(Date.parse(lapsesAt));
-      const lateReplay = await store.identity.replay(person);
-      const late = requireDefined(lateReplay.steps.at(-1));
-      const live = await store
-        .asOfRecorded(late.transition.recorded)
-        .identity.membersOf(person);
+        const earlyReplay = await store.identity.replay(person);
+        const early = requireDefined(earlyReplay.steps.at(-1));
+        vi.setSystemTime(Date.parse(lapsesAt) + WINDOW_LAPSE_MS);
+        const lateReplay = await store.identity.replay(person);
+        const late = requireDefined(lateReplay.steps.at(-1));
+        const live = await store
+          .asOfRecorded(late.transition.recorded)
+          .identity.membersOf(person);
 
-      expect(late.transition.transitionId).toBe(early.transition.transitionId);
-      expect(memberKeys(late.after)).toEqual(memberKeys(early.after));
-      expect(memberKeys(late.before)).toEqual(memberKeys(early.before));
-      expect(memberKeys(late.after)).toEqual(memberKeys(live));
-      expect(memberKeys(live)).toEqual(["Org:lapse-x", "Person:lapse-x"]);
+        expect(late.transition.transitionId).toBe(
+          early.transition.transitionId,
+        );
+        expect(memberKeys(late.after)).toEqual(memberKeys(early.after));
+        expect(memberKeys(late.before)).toEqual(memberKeys(early.before));
+        expect(memberKeys(late.after)).toEqual(memberKeys(live));
+        expect(memberKeys(live)).toEqual(["Org:lapse-x", "Person:lapse-x"]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
     // MUTATION CHECK: pairing each revision with the wall clock's "now" as
     // its valid instant drops Org:lapse-x from the late read's `after`.
