@@ -618,5 +618,100 @@ describe.each(backendMatrix())(
         for (const cleanup of cleanups.reverse()) await cleanup();
       }
     });
+
+    for (const mode of ["snapshot", "incremental"] as const) {
+      // The target holds a deleted node's assertions until the merge deletes
+      // it, however early the branch deleted it: a branch claim over that
+      // span contradicts them and is refused at plan time, never inside the
+      // commit.
+      it(`refuses at plan time a claim over a deleted node's assertions the target held until the merge (${mode})`, async () => {
+        const cleanups: (() => Promise<void>)[] = [];
+        async function makeBackend(): Promise<GraphBackend> {
+          const fixture =
+            entry.name === "PGlite" ?
+              await pglitePool.makeFixture()
+            : await entry.make();
+          cleanups.push(fixture.cleanup);
+          return fixture.backend;
+        }
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+          vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+          const [base] = await createStoreWithSchema(
+            graph,
+            await makeBackend(),
+            { revisionTracking: true },
+          );
+          for (const id of ["n1", "n2", "n3"]) {
+            await base.nodes.Agent.create(
+              {},
+              { id, validFrom: "2020-01-01T00:00:00.000Z" },
+            );
+          }
+          vi.setSystemTime(new Date("2026-02-01T00:00:00.000Z"));
+          const joined = await base.identity.assertSame(
+            agent("n1"),
+            agent("n3"),
+          );
+          const separated = await base.identity.assertDifferent(
+            agent("n3"),
+            agent("n2"),
+          );
+          const target =
+            mode === "snapshot" ? base : (
+              unwrap(
+                await branch(base, () => makeBackend(), { id: TARGET_CLONE }),
+              ).store
+            );
+          const branchA = unwrap(
+            await branch(base, () => makeBackend(), { id: BRANCH_A }),
+          );
+          // On the branch, deleting n3 ends both of its assertions on April 1,
+          // so n1 ~ n2 from April 2 contradicts nothing there.
+          vi.setSystemTime(new Date("2026-04-01T00:00:00.000Z"));
+          await branchA.store.nodes.Agent.delete(asNodeId<typeof Agent>("n3"));
+          vi.setSystemTime(new Date("2026-04-02T00:00:00.000Z"));
+          const asserted = await branchA.store.identity.assertSame(
+            agent("n1"),
+            agent("n2"),
+          );
+
+          vi.setSystemTime(new Date("2026-05-01T00:00:00.000Z"));
+          const planned =
+            mode === "snapshot" ?
+              await planMerge(base, [branchA])
+            : await planMergeIncremental({
+                forkPoint: base,
+                target,
+                branches: [branchA],
+              });
+          expect(isErr(planned)).toBe(true);
+          if (!isErr(planned)) return;
+          expect(planned.error).toBeInstanceOf(IdentityMergeConflictError);
+          expect(planned.error.message).toBe(CONTRADICTION);
+          expect(planned.error.details).toMatchObject({
+            assertion: { id: separated.assertion.id },
+          });
+          const merged =
+            mode === "snapshot" ?
+              await merge(base, [branchA])
+            : await mergeIncremental({
+                forkPoint: base,
+                target,
+                branches: [branchA],
+              });
+          expect(isErr(merged) && merged.error.message).toBe(CONTRADICTION);
+          const rows = await storeRuntime(target).identityAssertionRowsByIds([
+            joined.assertion.id,
+            asserted.assertion.id,
+          ]);
+          expect(rows.get(joined.assertion.id)?.validTo).toBeUndefined();
+          expect(rows.has(asserted.assertion.id)).toBe(false);
+        } finally {
+          vi.useRealTimers();
+          for (const cleanup of cleanups.reverse()) await cleanup();
+        }
+      });
+    }
   },
 );

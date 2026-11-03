@@ -1066,7 +1066,16 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
         });
         expect(isErr(result)).toBe(true);
         if (isOk(result)) throw new Error("Expected typed replan refusal");
-        expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+        // Deleting the bridge leaves its assertions holding on the target
+        // until the merge (see "refuses backdating a post-deletion relation"),
+        // so planning already refuses that variant, before the window write
+        // could matter; only the retraction variant reaches the commit guard.
+        expect(result.error).toBeInstanceOf(
+          mode === "delete" ?
+            IdentityMergeConflictError
+          : BaseVersionMismatchError,
+        );
+        expect(injected).toBe(mode === "retract");
       } finally {
         (target as { transaction: unknown }).transaction = original;
       }
