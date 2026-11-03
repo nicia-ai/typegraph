@@ -40,8 +40,10 @@
  * A node `z.toJSONSchema` has no spelling for at all (`embedding()` and any
  * other `z.custom()`, `z.date()`, `z.set()`, `z.map()`, `z.bigint()`, a
  * `.transform()`) makes the persisted projection give up on the whole kind,
- * which projects as the unprojectable placeholder. Here each such node is
- * replaced by {@link UNPROJECTABLE_NODE_KEYWORD} instead, carrying the
+ * which projects as the unprojectable placeholder. Here an `embedding()` is
+ * written as the fixed-length number array it validates
+ * (`embeddingProjection`), and every other such node is replaced by
+ * {@link UNPROJECTABLE_NODE_KEYWORD} instead, carrying the
  * node's identity (`stampUnprojectableIdentity`), so every other field of
  * the kind is still compared. `isStructuralSubtype` accepts such a node only
  * under a parent node that admits every value, or beside a node of the same
@@ -52,12 +54,7 @@
  */
 import { z } from "zod";
 
-import {
-  EMBEDDING_DIMENSIONS_KEY,
-  EMBEDDING_INDEX_KEY,
-  isEmbeddingSchema,
-} from "../core/embedding";
-import { canonicalJson } from "./canonical";
+import { EMBEDDING_DIMENSIONS_KEY, isEmbeddingSchema } from "../core/embedding";
 import {
   isUnprojectableSchemaProjection,
   serializeSchemaProperties,
@@ -352,14 +349,35 @@ const IDENTITY_PRESERVING_WRAPPER_TYPES: ReadonlySet<string> = new Set([
 const UNPROJECTABLE_IDENTITY_SEPARATOR = "#";
 
 /**
+ * What an `embedding()` validates, as JSON Schema: an array of exactly its
+ * dimension count of numbers. Its validator also requires each number to be
+ * finite, which every JSON number is and `type: "number"` already states to
+ * Zod, and it transforms nothing, so this states exactly what it admits.
+ * Its index options (metric, index type) describe how rows are searched,
+ * not which values are valid, so they are not part of it. `undefined` for
+ * any other node; an `embedding()` refined or described afresh is a new
+ * Zod instance without the dimension marker, and stays unprojectable.
+ */
+function embeddingProjection(
+  zodSchema: z.core.$ZodTypes,
+): z.core.JSONSchema.JSONSchema | undefined {
+  if (!isEmbeddingSchema(zodSchema)) return undefined;
+  const dimensions = zodSchema[EMBEDDING_DIMENSIONS_KEY];
+  return {
+    type: "array",
+    items: { type: "number" },
+    minItems: dimensions,
+    maxItems: dimensions,
+  };
+}
+
+/**
  * Restates an unconvertible node's marker as what makes two such nodes
  * provably admit the same values (see {@link UNPROJECTABLE_NODE_KEYWORD}):
  *
  * - a plain node — a type of {@link PLAIN_UNPROJECTABLE_NODE_TYPES} with no
  *   check — is its node type alone, so `z.date()` matches any other
  *   `z.date()`;
- * - an `embedding()` is its dimensions and index options, so a child that
- *   redeclares `embedding(384)` matches its parent's;
  * - every other node (a check, refinement, transform, pipe, default or
  *   custom function) is the Zod instance that carries it, so it matches only
  *   a field shared through `.extend()` or a reused schema.
@@ -385,13 +403,6 @@ function stampUnprojectableIdentity(
     return;
   }
   const [nodeType = marker] = marker.split(UNPROJECTABLE_IDENTITY_SEPARATOR);
-  if (isEmbeddingSchema(zodSchema)) {
-    const dimensions = zodSchema[EMBEDDING_DIMENSIONS_KEY];
-    const index = canonicalJson(zodSchema[EMBEDDING_INDEX_KEY]);
-    jsonSchema[UNPROJECTABLE_NODE_KEYWORD] =
-      `${nodeType}${UNPROJECTABLE_IDENTITY_SEPARATOR}embedding:${dimensions}:${index}`;
-    return;
-  }
   const isPlain =
     def.type === nodeType &&
     PLAIN_UNPROJECTABLE_NODE_TYPES.has(nodeType) &&
@@ -419,7 +430,11 @@ function projectForComparison(schema: z.ZodType): JsonSchema {
       unrepresentable: (context) => {
         const nodeType = context.zodSchema._zod.def.type;
         unconvertibleNodeTypes.push(nodeType);
-        return { [UNPROJECTABLE_NODE_KEYWORD]: nodeType };
+        return (
+          embeddingProjection(context.zodSchema) ?? {
+            [UNPROJECTABLE_NODE_KEYWORD]: nodeType,
+          }
+        );
       },
     }) as JsonSchema;
 

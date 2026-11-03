@@ -601,12 +601,8 @@ nodes and nodes outside their validity window never rank). Kinds expanded
 via `expansion: "subclasses"` must share one declared metric: scores from
 different metrics cannot merge into one ranking (and a per-call `metric`
 cannot bridge the gap — each kind's storage is validated against its
-declared metric). A subclass that redeclares the parent's `embedding()`
-field with another metric or other index options is already refused when
-the registry is built (see
-[Ontology](/ontology#subsumption-type-inheritance)); a mixed-metric
-expansion over kinds a stored document still relates throws, so search those
-kinds separately.
+declared metric), so mixed-metric expansions throw; search those kinds
+separately.
 
 ### Choosing a Distance Metric
 

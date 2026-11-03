@@ -54,13 +54,15 @@
  *    reference is refused the same way. Rule 6 decides through the same test.
  *    Right after it, a node marked {@link UNPROJECTABLE_NODE_KEYWORD} on
  *    either side (a Zod construct with no JSON Schema spelling, such as
- *    `embedding()`, `z.date()` or a `.transform()`) states nothing to
- *    compare, so the pair is accepted only where no comparison is needed:
- *    the parent node admits every value (`{}`, from `z.unknown()`/`z.any()`,
- *    carrying no constraining keyword), or both nodes carry the same marker
- *    identity — the same Zod instance, plain check-free nodes of one type
- *    (`z.date()` and `z.date()`), or `embedding()`s of equal dimensions and
- *    index options. Every other pair with an unprojectable side is
+ *    `z.date()` or a `.transform()`) states nothing to compare, so the pair
+ *    is accepted only where no comparison is needed: the parent node admits
+ *    every value (`{}`, from `z.unknown()`/`z.any()`, carrying no
+ *    constraining keyword), or both nodes carry the same marker identity —
+ *    the same Zod instance, or plain check-free nodes of one type
+ *    (`z.date()` and `z.date()`). An `embedding()` carries no marker: the
+ *    comparison projection writes it as the fixed-length number array it
+ *    validates, so embeddings compare as arrays and their index options do
+ *    not affect subsumption. Every other pair with an unprojectable side is
  *    `incomparable` ("unsupported-construct"), except that a union on the
  *    other side is compared member by member first. The node's siblings are
  *    still compared by the enclosing object or union. Only a live graph's
@@ -489,15 +491,16 @@ export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
 
 /**
  * Marks a schema node `z.toJSONSchema` has no spelling for at all —
- * `embedding()` and any other `z.custom()`, `z.date()`, `z.set()`, `z.map()`,
+ * a `z.custom()` other than `embedding()`, `z.date()`, `z.set()`, `z.map()`,
  * `z.bigint()`, a `.transform()` — where the persisted projection would
  * collapse the whole kind to its placeholder instead. Such a node states
  * nothing to compare, so it narrows only a parent node that admits every
  * value, and matches another unprojectable node only when the two carry the
  * same value here: its IDENTITY, written by the projection as the node type
  * alone for a plain check-free node of a type whose values it fully
- * describes (`z.date()`, `z.bigint()`), the dimensions and index options for
- * an `embedding()`, and the Zod instance otherwise. Every other node of the
+ * describes (`z.date()`, `z.bigint()`), and as the Zod instance otherwise.
+ * An `embedding()` is projected as the fixed-length number array it
+ * validates instead of this marker. Every other node of the
  * pair is still judged. A node Zod converts only in part (a
  * dynamic `.catch()` keeps its `type`) does not carry this marker; the
  * projection marks it with {@link ZOD_ONLY_CONSTRAINT_KEYWORD} instead.

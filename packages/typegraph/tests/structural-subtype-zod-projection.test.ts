@@ -528,13 +528,8 @@ describe("structural subsumption over a field the projection cannot convert", ()
       parent: () => z.string().transform((value) => upper(value)),
     },
     {
-      name: "embeddings of different dimensions",
-      child: () => embedding(3),
-      parent: () => embedding(4),
-    },
-    {
-      name: "embeddings of different metrics",
-      child: () => embedding(3, { metric: "l2" }),
+      name: "a described embedding, a fresh instance without its dimensions",
+      child: () => embedding(3).describe("vector"),
       parent: () => embedding(3),
     },
     {
@@ -625,7 +620,57 @@ describe("structural subsumption over a field the projection cannot convert", ()
       child: () => embedding(384),
       parent: () => embedding(384),
     },
+    {
+      name: "embeddings of different metrics, which validate the same values",
+      child: () => embedding(3, { metric: "l2" }),
+      parent: () => embedding(3),
+    },
+    {
+      name: "an embedding under a plain number array",
+      child: () => embedding(3),
+      parent: () => z.array(z.number()),
+    },
+    {
+      name: "a number array of the embedding's length under the embedding",
+      child: () => z.array(z.number()).length(3),
+      parent: () => embedding(3),
+    },
   ];
+
+  it.each([
+    {
+      name: "embeddings of different dimensions",
+      child: () => embedding(3),
+      parent: () => embedding(4),
+    },
+    {
+      name: "a plain number array under an embedding",
+      child: () => z.array(z.number()),
+      parent: () => embedding(3),
+    },
+    {
+      name: "a number array one longer than the embedding",
+      child: () => z.array(z.number()).min(3).max(4),
+      parent: () => embedding(3),
+    },
+    {
+      name: "a number array one shorter than the embedding",
+      child: () => z.array(z.number()).min(2).max(3),
+      parent: () => embedding(3),
+    },
+  ])("refuses $name as a bounds mismatch", ({ child, parent }) => {
+    expect(liveVerdict(child(), parent())).toEqual({
+      verdict: "not-subtype",
+      reason: "array-bounds-not-tighter",
+      path: ["field"],
+    });
+  });
+
+  it("refuses a string array of the embedding's length under the embedding", () => {
+    expect(
+      liveVerdict(z.array(z.string()).length(3), embedding(3)),
+    ).toMatchObject({ verdict: "not-subtype", path: ["field", "[]"] });
+  });
 
   it.each(accepted)("accepts $name", ({ child, parent }) => {
     expect(liveVerdict(child(), parent())).toEqual({ verdict: "subtype" });

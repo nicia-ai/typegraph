@@ -500,7 +500,40 @@ const leafSpecArb: fc.Arbitrary<Spec> = fc.oneof(
       slot: fc.nat({ max: 1 }),
     }),
   },
+  {
+    weight: 1,
+    arbitrary: fc.constantFrom(2, 3).chain((length) => fixedArrayArb(length)),
+  },
 );
+
+/** The dimension count of each `embedding()` variant. */
+const EMBEDDING_DIMENSIONS: Readonly<
+  Partial<Record<UnprojectableVariant, number>>
+> = { embedding2: 2, embedding3: 3, embedding2L2: 2 };
+
+const embeddingSpecArb: fc.Arbitrary<Spec> = fc.record({
+  kind: fc.constant("unprojectable"),
+  variant: fc.constantFrom<UnprojectableVariant>(
+    "embedding2",
+    "embedding3",
+    "embedding2L2",
+  ),
+  slot: fc.nat({ max: 1 }),
+});
+
+/**
+ * An array of `length` numbers, bounded numbers or strings, around an
+ * `embedding()`'s length: the plain arrays an embedding is compared with
+ * in both directions.
+ */
+function fixedArrayArb(length: number): fc.Arbitrary<Spec> {
+  return fc.record({
+    kind: fc.constant("array"),
+    item: fc.oneof(numberSpecArb, stringSpecArb),
+    min: fc.constantFrom(length - 1, length),
+    max: fc.constantFrom(length, length + 1),
+  });
+}
 
 const FIELD_NAMES = ["f", "g", "h"] as const;
 
@@ -629,6 +662,7 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
     }
     case "array": {
       local.push(
+        embeddingSpecArb,
         editArb(spec.item).map((item) => ({ ...spec, item })),
         fc.record({ min: fc.nat({ max: 3 }) }).map(({ min }) => ({
           ...spec,
@@ -716,6 +750,8 @@ function editArb(spec: Spec): fc.Arbitrary<Spec> {
           .map((variant) => ({ ...spec, variant })),
         fc.constant({ ...spec, slot: 1 - spec.slot }),
       );
+      const dimensions = EMBEDDING_DIMENSIONS[spec.variant];
+      if (dimensions !== undefined) local.push(fixedArrayArb(dimensions));
       break;
     }
     case "boolean":
@@ -782,7 +818,14 @@ function shapedCandidateArb(spec: Spec): fc.Arbitrary<unknown> {
       return fc.constantFrom(...spec.values);
     }
     case "array": {
-      return fc.array(candidateArb(spec.item), { maxLength: 5 });
+      return fc.oneof(
+        fc.array(candidateArb(spec.item), { maxLength: 5 }),
+        // Lengths the bounds admit, where a near-miss bound shows up.
+        fc.array(candidateArb(spec.item), {
+          minLength: spec.min ?? 0,
+          maxLength: Math.max(spec.min ?? 0, spec.max ?? 5),
+        }),
+      );
     }
     case "tuple": {
       return fc
@@ -847,32 +890,69 @@ const pairWithSamplesArb = pairArb.chain((pair) =>
     .map((samples) => ({ ...pair, samples })),
 );
 
+function expectSoundVerdict(
+  child: Spec,
+  parent: Spec,
+  samples: readonly unknown[],
+): void {
+  const cache: InstanceCache = new Map();
+  const childSchema = z.object({ field: build(child, cache) });
+  const parentSchema = z.object({ field: build(parent, cache) });
+  const verdict = isStructuralSubtype(
+    structuralSubtypeProjection(childSchema),
+    structuralSubtypeProjection(parentSchema),
+  );
+  if (verdict.verdict !== "subtype") return;
+  for (const sample of samples) {
+    const input = asJsonValue({ field: sample });
+    const stored = childSchema.safeParse(input);
+    if (!stored.success) continue;
+    expect({
+      child,
+      parent,
+      input,
+      stored: stored.data,
+      parentAccepts: parentSchema.safeParse(stored.data).success,
+    }).toMatchObject({ parentAccepts: true });
+  }
+}
+
+/** An `embedding()` and a plain array near its length, in either order. */
+const embeddingPairArb = embeddingSpecArb.chain((embeddingSpec) => {
+  const dimensions =
+    embeddingSpec.kind === "unprojectable" ?
+      (EMBEDDING_DIMENSIONS[embeddingSpec.variant] ?? 2)
+    : 2;
+  return fc
+    .record({
+      array: fixedArrayArb(dimensions),
+      embeddingIsChild: fc.boolean(),
+    })
+    .chain(({ array, embeddingIsChild }) => {
+      const child = embeddingIsChild ? embeddingSpec : array;
+      const parent = embeddingIsChild ? array : embeddingSpec;
+      return fc
+        .array(candidateArb(child), { minLength: 4, maxLength: 12 })
+        .map((samples) => ({ child, parent, samples }));
+    });
+});
+
 describe("structural subtyping soundness against Zod", () => {
   it("an accepted pair admits no stored child value the parent's Zod schema refuses", () => {
     fc.assert(
       fc.property(pairWithSamplesArb, ({ child, parent, samples }) => {
-        const cache: InstanceCache = new Map();
-        const childSchema = z.object({ field: build(child, cache) });
-        const parentSchema = z.object({ field: build(parent, cache) });
-        const verdict = isStructuralSubtype(
-          structuralSubtypeProjection(childSchema),
-          structuralSubtypeProjection(parentSchema),
-        );
-        if (verdict.verdict !== "subtype") return;
-        for (const sample of samples) {
-          const input = asJsonValue({ field: sample });
-          const stored = childSchema.safeParse(input);
-          if (!stored.success) continue;
-          expect({
-            child,
-            parent,
-            input,
-            stored: stored.data,
-            parentAccepts: parentSchema.safeParse(stored.data).success,
-          }).toMatchObject({ parentAccepts: true });
-        }
+        expectSoundVerdict(child, parent, samples);
       }),
       { numRuns: propertyRuns({ ci: 3000, local: 5000 }) },
+    );
+  });
+
+  it("an embedding and a plain array admit nothing the other refuses, in either direction", () => {
+    fc.assert(
+      fc.property(embeddingPairArb, ({ child, parent, samples }) => {
+        expectSoundVerdict(child, parent, samples);
+      }),
+      { numRuns: propertyRuns({ ci: 1000, local: 2000 }) },
     );
   });
 });

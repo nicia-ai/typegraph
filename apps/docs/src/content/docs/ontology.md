@@ -138,19 +138,24 @@ schema:
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:
 `z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, and any
-`z.custom()`, which includes TypeGraph's own `embedding()`. In a
-compile-time graph or an `evolve()`-authored extension, each such field is
-judged on its own and every other field of the pair is still compared. Since
-nothing about its values can be compared, the field is accepted only when:
+`z.custom()`. TypeGraph's own `embedding(n)` is the exception: it is
+compared as what it validates, an array of exactly `n` numbers, so
+`embedding(3)` extends `z.array(z.number())`, `z.array(z.number()).length(3)`
+extends `embedding(3)`, and `embedding(3)` does not extend `embedding(4)`.
+An embedding's index options (`metric`, `indexType`, …) do not affect
+subsumption.
+
+In a compile-time graph or an `evolve()`-authored extension, every other such
+field is judged on its own and every other field of the pair is still
+compared. Since nothing about its values can be compared, the field is
+accepted only when:
 
 - the parent's field admits every value (`z.unknown()` or `z.any()`), so a
-  subclass may narrow it to an `embedding()` or a `z.date()`;
+  subclass may narrow it to a `z.date()`;
 - both fields are the same Zod schema, as when the child reuses the parent's
   field through `.extend()`;
 - both are plain, check-free fields of the same type, such as two
-  independently declared `z.date()` or `z.bigint()` fields;
-- both are `embedding()` fields with the same dimensions and index options,
-  so a child may redeclare `embedding(384)` on its own.
+  independently declared `z.date()` or `z.bigint()` fields.
 
 Every other pair is refused as `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` with
 `reason: "unsupported-construct"` and the field's `path`. That includes a
@@ -158,16 +163,16 @@ Every other pair is refused as `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` with
 (`z.string().transform(f)` under `z.string().min(3)`: the transform's output
 is never shown to satisfy the bound), a plain child field under a parent whose
 own transform hides its checks, a `z.date()` replacing a `z.string()`, two
-separately declared transforms or `z.custom()` checks, `embedding(3)` under
-`embedding(4)`, and a bounded or refined `z.date()` beside a plain one. Share
-the field schema between the two kinds to keep such a pair comparable. A
-subclass that adds an `embedding()` to its parent still opens normally, and a
-pair that is also incompatible elsewhere (a tighter `z.string().min(5)` on the
-parent, say) is refused for that field. A field Zod converts only in part,
-such as a `.catch()` with a dynamic fallback, keeps the type it states and is
-comparable only to the same schema. A deserialized document has no Zod
-schemas, and it stores such a kind without a property projection, so a pair
-with that kind on **either** side is skipped there.
+separately declared transforms or `z.custom()` checks, and a bounded or
+refined `z.date()` beside a plain one. Share the field schema between the two
+kinds to keep such a pair comparable. A subclass that adds a `z.date()` or an
+`embedding()` to its parent still opens normally, and a pair that is also
+incompatible elsewhere (a tighter `z.string().min(5)` on the parent, say) is
+refused for that field. A field Zod converts only in part, such as a `.catch()`
+with a dynamic fallback, keeps the type it states and is comparable only to the
+same schema. A deserialized document has no Zod schemas, and it stores such a
+kind without a property projection, so a pair with that kind on **either**
+side is skipped there.
 Every commit, `createStore`, `getSchemaChanges` and `requiresMigration` also
 check the graph in your code, so this coarser check never decides alone.
 
