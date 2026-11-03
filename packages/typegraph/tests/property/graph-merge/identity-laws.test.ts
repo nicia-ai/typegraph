@@ -64,7 +64,7 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { asEdgeId, asNodeId } from "../../../src/core/types";
@@ -106,6 +106,7 @@ import { backendMatrix } from "../../graph-merge/test-utils";
 import { propertyRuns } from "../run-budget";
 import {
   modelIdentityThreeWay,
+  type ModelRefusalRule,
   type ModelRow,
   type ModelVerdict,
 } from "./identity-three-way-model";
@@ -1396,6 +1397,20 @@ const ENDED_REASSERTION_EXAMPLE: ModelScenario = {
 };
 
 /**
+ * Both branches retract an inherited row and only one reasserts its pair: the
+ * branches disagree about whether the pair holds, a retract/reassert race.
+ */
+const RACE_EXAMPLE: ModelScenario = {
+  baseOps: [{ op: "same", left: 0, right: 1 }],
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [{ op: "retract", pick: 0 }],
+  branchBOps: [
+    { op: "retract", pick: 0 },
+    { op: "same", left: 0, right: 1 },
+  ],
+};
+
+/**
  * The advanced target imported an id that one branch imports with the exact
  * same truth while the other branch imports an EARLIER-valid id for the pair:
  * the committed id survives regardless of the comparator.
@@ -1455,6 +1470,31 @@ function identityPlanFingerprint(
   };
 }
 
+/** The refusal message each model rule must surface as. */
+const REFUSAL_MESSAGES: Readonly<Record<ModelRefusalRule, string>> = {
+  opposing:
+    "Branches asserted opposing identity relations for one endpoint pair.",
+  race: "Branches contain a retract/reassert race for one identity pair.",
+  "one-id-two-truths":
+    "One assertion id was staged for two different identity truths.",
+  contradiction:
+    "The merged identity ledger would assert one pair of nodes is both the same and different.",
+  "id-held-other-truth":
+    "A staged assertion id already identifies different truth in the target ledger.",
+};
+
+/**
+ * The model lanes' clock: faked, and moved forward before every operation,
+ * so every window is distinct and the outcome never depends on how many
+ * writes landed in one millisecond.
+ */
+const MODEL_CLOCK_START = Date.parse("2026-01-01T00:00:00.000Z");
+const MODEL_CLOCK_STEP_MS = 60_000;
+
+function tickModelClock(): void {
+  vi.setSystemTime(Date.now() + MODEL_CLOCK_STEP_MS);
+}
+
 interface ModelTally {
   merged: number;
   refused: number;
@@ -1487,14 +1527,16 @@ async function expectModelOutcome(args: {
     // Every refusal the model knows is a plan-time rule: review must already
     // see it, never only the commit.
     expect(
-      isErr(planned),
-      `the model refuses (${verdict.reason}) but planning accepted the merge`,
-    ).toBe(true);
+      isErr(planned) && planned.error.message,
+      `the model refuses by ${verdict.rule} (${verdict.reason}); planning answered otherwise`,
+    ).toBe(REFUSAL_MESSAGES[verdict.rule]);
     expect(
-      isErr(result),
-      `the model refuses (${verdict.reason}) but the merge succeeded`,
-    ).toBe(true);
-    if (isErr(result)) expectTypedRefusal(result.error);
+      isErr(result) && result.error.message,
+      `the model refuses by ${verdict.rule} (${verdict.reason}); the merge answered otherwise`,
+    ).toBe(REFUSAL_MESSAGES[verdict.rule]);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    }
     return;
   }
   tally.merged += 1;
@@ -1828,6 +1870,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
         DISJOINT_WINDOWS_EXAMPLE,
         CONVERGENT_REASSERT_EXAMPLE,
         ENDED_REASSERTION_EXAMPLE,
+        RACE_EXAMPLE,
       ],
     },
     {
@@ -1854,6 +1897,8 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
               cleanups.push(fixture.cleanup);
               return fixture.backend;
             }
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(MODEL_CLOCK_START);
             try {
               const [forkPoint] = await createStoreWithSchema(
                 lane.graph,
@@ -1863,6 +1908,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
               await seedUniverse(forkPoint);
               const baseHistory = emptyHistory();
               for (const op of scenario.baseOps) {
+                tickModelClock();
                 await applyOp(forkPoint, op, baseHistory);
               }
               const target =
@@ -1875,6 +1921,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                 : forkPoint;
               const targetHistory = copyHistory(baseHistory);
               for (const op of scenario.targetOps) {
+                tickModelClock();
                 await applyOp(target, op, targetHistory);
               }
               const { branchA, branchB } = await makeBranches(
@@ -1884,11 +1931,14 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
               const branchAHistory = copyHistory(baseHistory);
               const branchBHistory = copyHistory(baseHistory);
               for (const op of scenario.branchAOps) {
+                tickModelClock();
                 await applyOp(branchA.store, op, branchAHistory);
               }
               for (const op of scenario.branchBOps) {
+                tickModelClock();
                 await applyOp(branchB.store, op, branchBHistory);
               }
+              tickModelClock();
               const trackedIds = [
                 ...new Set(
                   [branchAHistory, branchBHistory, targetHistory].flatMap(
@@ -1954,6 +2004,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                 tally,
               });
             } finally {
+              vi.useRealTimers();
               for (const cleanup of cleanups.reverse()) await cleanup();
             }
           },

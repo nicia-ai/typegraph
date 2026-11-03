@@ -54,8 +54,21 @@ export type ModelInput = Readonly<{
   sides: readonly ModelSide[];
 }>;
 
+/**
+ * The rule a refusal comes from, in the order the merge applies them: the
+ * three-way classifier's opposing-relations, race and one-id-one-truth checks,
+ * then the merged-ledger contradiction, then a surviving id the target already
+ * holds with other truth.
+ */
+export type ModelRefusalRule =
+  | "opposing"
+  | "race"
+  | "one-id-two-truths"
+  | "contradiction"
+  | "id-held-other-truth";
+
 export type ModelVerdict =
-  | Readonly<{ kind: "refused"; reason: string }>
+  | Readonly<{ kind: "refused"; rule: ModelRefusalRule; reason: string }>
   | Readonly<{
       kind: "merged";
       /** The current rows after the merge, by id. */
@@ -185,7 +198,9 @@ function stage(input: ModelInput): Readonly<{
   return { staged, ends };
 }
 
-function opposingRefusal(staged: readonly Staged[]): string | undefined {
+type Refusal = Readonly<{ rule: ModelRefusalRule; reason: string }>;
+
+function opposingRefusal(staged: readonly Staged[]): Refusal | undefined {
   for (const left of staged) {
     for (const right of staged) {
       if (left.row.relation !== "same" || right.row.relation !== "different") {
@@ -193,7 +208,10 @@ function opposingRefusal(staged: readonly Staged[]): string | undefined {
       }
       if (pairKey(left.row) !== pairKey(right.row)) continue;
       if (windowsOverlap(left.row, right.row)) {
-        return `opposing ${left.row.id} / ${right.row.id}`;
+        return {
+          rule: "opposing",
+          reason: `opposing ${left.row.id} / ${right.row.id}`,
+        };
       }
     }
   }
@@ -203,7 +221,7 @@ function opposingRefusal(staged: readonly Staged[]): string | undefined {
 function raceRefusal(
   staged: readonly Staged[],
   ends: readonly StagedEnd[],
-): string | undefined {
+): Refusal | undefined {
   const keys = new Set(ends.map((entry) => semanticKey(entry.row)));
   for (const key of keys) {
     const retracting = new Set(
@@ -222,17 +240,20 @@ function raceRefusal(
     const agree =
       retracting.size === reasserting.size &&
       [...retracting].every((branchId) => reasserting.has(branchId));
-    if (!agree) return `race on ${key}`;
+    if (!agree) return { rule: "race", reason: `race on ${key}` };
   }
   return undefined;
 }
 
-function oneIdOneTruthRefusal(staged: readonly Staged[]): string | undefined {
+function oneIdOneTruthRefusal(staged: readonly Staged[]): Refusal | undefined {
   const truthById = new Map<string, string>();
   for (const { row } of staged) {
     const previous = truthById.get(row.id);
     if (previous !== undefined && previous !== truthKey(row)) {
-      return `id ${row.id} staged for two truths`;
+      return {
+        rule: "one-id-two-truths",
+        reason: `id ${row.id} staged for two truths`,
+      };
     }
     truthById.set(row.id, truthKey(row));
   }
@@ -245,7 +266,7 @@ export function modelIdentityThreeWay(input: ModelInput): ModelVerdict {
     opposingRefusal(staged) ??
     raceRefusal(staged, ends) ??
     oneIdOneTruthRefusal(staged);
-  if (refusal !== undefined) return { kind: "refused", reason: refusal };
+  if (refusal !== undefined) return { kind: "refused", ...refusal };
 
   const committed = (row: ModelRow): boolean => {
     const held = input.target.get(row.id);
@@ -281,25 +302,18 @@ export function modelIdentityThreeWay(input: ModelInput): ModelVerdict {
       duplicates.add(loser.id);
     }
   }
-  for (const survivor of survivors) {
-    const held = input.target.get(survivor.id);
-    if (held !== undefined && truthKey(held) !== truthKey(survivor)) {
-      return {
-        kind: "refused",
-        reason: `survivor ${survivor.id} names other target truth`,
-      };
-    }
-  }
-
   const endedAt = new Map<string, string>();
   for (const entry of ends) {
     const held = input.target.get(entry.row.id);
-    if (held === undefined || !isCurrent(held)) {
+    if (held === undefined) {
       return {
         kind: "undetermined",
-        reason: `retraction of ${entry.row.id}, which the target no longer holds open`,
+        reason: `retraction of ${entry.row.id}, which the target does not hold`,
       };
     }
+    // A retraction of a row the target already ended ends no current row: the
+    // row keeps the target's own end.
+    if (!isCurrent(held)) continue;
     const previous = endedAt.get(entry.row.id);
     if (previous === undefined || entry.end < previous) {
       endedAt.set(entry.row.id, entry.end);
@@ -320,6 +334,9 @@ export function modelIdentityThreeWay(input: ModelInput): ModelVerdict {
       continue;
     }
     if (current.has(survivor.id)) continue;
+    // No side can restate a pair the target still holds without retracting
+    // it first (the store answers `existing`), so this arm only guards the
+    // model's own assumptions.
     if (heldSemantics.has(semanticKey(survivor))) {
       return {
         kind: "undetermined",
@@ -343,8 +360,19 @@ export function modelIdentityThreeWay(input: ModelInput): ModelVerdict {
   if (contradicted !== undefined) {
     return {
       kind: "refused",
+      rule: "contradiction",
       reason: `merged ledger contradicts itself at ${contradicted}`,
     };
+  }
+  for (const survivor of survivors) {
+    const held = input.target.get(survivor.id);
+    if (held !== undefined && truthKey(held) !== truthKey(survivor)) {
+      return {
+        kind: "refused",
+        rule: "id-held-other-truth",
+        reason: `survivor ${survivor.id} names other target truth`,
+      };
+    }
   }
   return { kind: "merged", current, ended: endedAt, history, duplicates };
 }
