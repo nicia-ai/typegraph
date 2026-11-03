@@ -498,6 +498,56 @@ describe("composition registration checks (buildKindRegistry)", () => {
   // answers whichever pair happens to be iterated last, silently — the
   // exact ambiguity `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` exists to refuse.
 
+  it("ONTOLOGY_COMPOSITION_EXISTENCE_MIXED: a subclass of two part kinds whose pairs disagree on existence", () => {
+    // Neither declared part kind is mixed on its own; only the diamond's
+    // shared descendant inherits both pairs.
+    const Optional = defineNode("DiamondOptionalPart", { schema: emptySchema });
+    const Required = defineNode("DiamondRequiredPart", { schema: emptySchema });
+    const Shared = defineNode("DiamondSharedPart", { schema: emptySchema });
+    const WholeOne = defineNode("DiamondWholeOne", { schema: emptySchema });
+    const WholeTwo = defineNode("DiamondWholeTwo", { schema: emptySchema });
+    const edgeOne = defineEdge("diamondEdgeOne", { schema: emptySchema });
+    const edgeTwo = defineEdge("diamondEdgeTwo", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "composition-existence-mixed-diamond",
+      nodes: {
+        DiamondOptionalPart: { type: Optional },
+        DiamondRequiredPart: { type: Required },
+        DiamondSharedPart: { type: Shared },
+        DiamondWholeOne: { type: WholeOne },
+        DiamondWholeTwo: { type: WholeTwo },
+      },
+      edges: {
+        diamondEdgeOne: {
+          type: edgeOne,
+          from: [Optional],
+          to: [WholeOne],
+          cardinality: "one",
+        },
+        diamondEdgeTwo: {
+          type: edgeTwo,
+          from: [Required],
+          to: [WholeTwo],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        subClassOf(Shared, Optional),
+        subClassOf(Shared, Required),
+        partOf(Optional, WholeOne, { via: edgeOne }),
+        partOf(Required, WholeTwo, { via: edgeTwo, existence: "required" }),
+      ],
+    });
+    expectCompositionCode(
+      () => buildKindRegistry(graph),
+      "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+    );
+  });
+  // MUTATION CHECK (verified): stop adding each declared part kind's
+  // descendants to `candidateKinds` in `buildCompositionRelation`
+  // (src/registry/composition-relation.ts). The diamond's shared descendant
+  // is then never judged and the graph builds.
+
   it("ONTOLOGY_COMPOSITION_EXISTENCE_MIXED: a mirrored partOf/hasPart pair disagreeing on existence, in either declaration order", () => {
     const mirrored = (ontology: readonly OntologyRelation[]) =>
       defineGraph({
