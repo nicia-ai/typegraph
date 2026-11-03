@@ -623,12 +623,16 @@ describe("validating import: an accepted composition edge is not evidence of att
     const { backend } = createLocalSqliteBackend();
     try {
       const [store] = await createStoreWithSchema(
-        buildNestedGraph("one"),
+        buildNestedGraph("oneActive"),
         backend,
       );
+      const root = await store.nodes.CeiRoot.create({});
 
-      // `mid-1` has no whole, so it is purged; that removes the edge holding
-      // `leaf-1`, which the same pass may already have accepted.
+      // `mid-1` is named by a composition edge, so it reaches the standing
+      // read, but that edge is an ended window: no live whole, so it is
+      // purged. The first pass already accepted `leaf-1` (its whole `mid-1`
+      // was still a live row); only re-queueing the parts a purged whole held
+      // finds that `leaf-1` lost its whole.
       //
       // MUTATION CHECK: in `assertImportedRequiredPartsAttached`, stop after
       // the first pass (`candidates = []` instead of re-queueing the parts a
@@ -641,6 +645,15 @@ describe("validating import: an accepted composition edge is not evidence of att
             { kind: "CeiMid", id: "mid-1", properties: {} },
           ],
           edges: [
+            {
+              kind: "ceiMidOf",
+              id: "e-mid-1",
+              from: { kind: "CeiMid", id: "mid-1" },
+              to: { kind: "CeiRoot", id: root.id },
+              properties: {},
+              validFrom: ENDED_FROM,
+              validTo: ENDED_TO,
+            },
             {
               kind: "ceiLeafOf",
               id: "e-leaf-1",
@@ -655,6 +668,7 @@ describe("validating import: an accepted composition edge is not evidence of att
 
       expect(await store.nodes.CeiMid.find({})).toEqual([]);
       expect(await store.nodes.CeiLeaf.find({})).toEqual([]);
+      expect(await store.edges.ceiMidOf.find({})).toEqual([]);
       expect(await store.edges.ceiLeafOf.find({})).toEqual([]);
       expect(result.nodes.created).toBe(0);
       expect(result.edges.created).toBe(0);
@@ -662,7 +676,7 @@ describe("validating import: an accepted composition edge is not evidence of att
         result.errors
           .map((error) => `${error.entityType}:${error.id}`)
           .toSorted(),
-      ).toEqual(["edge:e-leaf-1", "node:leaf-1", "node:mid-1"]);
+      ).toEqual(["edge:e-leaf-1", "edge:e-mid-1", "node:leaf-1", "node:mid-1"]);
       expect(await store.verifyConstraintFences()).toEqual([]);
     } finally {
       await backend.close();
