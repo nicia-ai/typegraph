@@ -11,7 +11,7 @@
  * Each case states, in a comment, the mutation/revert that must make it
  * fail (the revert/mutation check load-bearing tests require).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -515,6 +515,112 @@ export function registerCompositionExistenceIntegrationTests(
     // `EdgeUpdateWork` assembly site only (the `work.validTo !== undefined`
     // branch in `edge-operations.ts`).
 
+    it("case 7d: an edge bulkDelete holding a live required part's edge is refused and retires no edge of the batch, inside and outside a transaction", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const retired = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      const live = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      // The retired part's edge comes FIRST, so a batch that only judged its
+      // first member, or wrote as it went, would retire it before refusing.
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeSegment",
+        id: retired.id,
+      });
+      const segmentEdges = async () => {
+        const edges = await store.edges.eeSegmentOf.find({});
+        return edges.map((edge) => ({ id: edge.id, partId: edge.fromId }));
+      };
+      const before = await segmentEdges();
+      const edgeIdOf = (partId: string) =>
+        requireDefined(before.find((edge) => edge.partId === partId)).id;
+      const batch = [edgeIdOf(retired.id), edgeIdOf(live.id)];
+
+      const outside = await store.edges.eeSegmentOf
+        .bulkDelete(batch)
+        .catch((error: unknown) => error);
+      let inside: unknown;
+      await store.transaction(async (tx) => {
+        inside = await tx.edges.eeSegmentOf
+          .bulkDelete(batch)
+          .catch((error: unknown) => error);
+      });
+
+      for (const refusal of [outside, inside]) {
+        expect(refusal).toBeInstanceOf(CompositionExistenceError);
+        expect((refusal as CompositionExistenceError).details).toMatchObject({
+          situation: "detach",
+          partId: live.id,
+          edgeId: batch[1],
+        });
+      }
+      expect(await segmentEdges()).toEqual(before);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+
+      // The retired part's edge alone is no detachment, so the same batch
+      // minus the live member goes through.
+      await store.edges.eeSegmentOf.bulkDelete([requireDefined(batch[0])]);
+      expect(await segmentEdges()).toEqual([{ id: batch[1], partId: live.id }]);
+    });
+
+    it('case 7e: re-stating `validTo` on a live required part\'s already-ended `population: "one"` edge is not a detachment', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const firstEnd = "2099-02-01T00:00:00.000Z";
+      const tighterEnd = "2099-01-15T00:00:00.000Z";
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2099-01-01T00:00:00.000Z"));
+        const episode = await store.nodes.EeEpisode.create({});
+        const segment = await store.nodes.EeSegment.create(
+          {},
+          { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+        );
+        const [edge] = await store.edges.eeSegmentOf.find({});
+        const edgeId = requireDefined(edge).id;
+        // Ending the window is refused while the part is live (case 7c), so
+        // it is ended while the raw backend member has the part retired, and
+        // the part is restored afterwards: a `population: "one"` edge still
+        // attaches its part once its window has ended, so the restore finds
+        // a live whole.
+        vi.setSystemTime(new Date("2099-03-01T00:00:00.000Z"));
+        await store.backend.deleteNode({
+          graphId: store.graphId,
+          kind: "EeSegment",
+          id: segment.id,
+        });
+        await store.edges.eeSegmentOf.update(edgeId, {}, { validTo: firstEnd });
+        await store.nodes.EeSegment.upsertById(segment.id, {});
+        expect(await store.nodes.EeSegment.getById(segment.id)).toBeDefined();
+
+        for (const validTo of [firstEnd, tighterEnd]) {
+          const updated = await store.edges.eeSegmentOf.update(
+            edgeId,
+            {},
+            { validTo },
+          );
+          expect(updated.meta.validTo).toBe(validTo);
+        }
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    // MUTATION CHECK: make `edgeWriteEndsOpenWindow` (composition-create.ts)
+    // ignore `existing.valid_to` — the first re-statement is then refused
+    // with `CompositionExistenceError` although the window closed long ago.
+
+    // MUTATION CHECK: drop the per-member `assertCompositionExistencePreserved`
+    // call from `executeEdgeDeleteBatch` (edge-operations.ts) — both bulk
+    // deletes then resolve and orphan the live segment. The fused-command
+    // decline for the same delete is pinned on the one backend that can
+    // reach the fused path, `composition-edge-delete-pglite.test.ts`.
+
     it("case 8: a retired part frees its composition edge", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const episode = await store.nodes.EeEpisode.create({});
@@ -591,6 +697,50 @@ export function registerCompositionExistenceIntegrationTests(
 
       expect(await store.edges.eeSegmentOf.find({})).toHaveLength(0);
     });
+
+    it("case 9e: a whole's plan and cascade walk past a dead part whose edge survived, and report only the live parts", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const live = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      const dead = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      // The raw backend member tombstones the part and leaves its edge live.
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeSegment",
+        id: dead.id,
+      });
+      const edges = await store.edges.eeSegmentOf.find({});
+      expect(edges).toHaveLength(2);
+
+      const plan = requireDefined(
+        await store.nodes.EeEpisode.planDelete(episode.id),
+      );
+      expect(plan).toEqual({
+        cascadedParts: [
+          {
+            kind: "EeSegment",
+            id: live.id,
+            whole: { kind: "EeEpisode", id: episode.id },
+            viaEdgeKind: "eeSegmentOf",
+          },
+        ],
+        removedEdgeIds: edges.map((edge) => edge.id).toSorted(),
+      });
+
+      await store.nodes.EeEpisode.delete(episode.id, { expect: plan });
+      expect(await store.edges.eeSegmentOf.find({})).toEqual([]);
+      expect(await store.nodes.EeSegment.count()).toBe(0);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: drop the liveness filter from `liveDiscoveredMembers`
+    // (src/store/operations/composition-cascade.ts) — the dead segment then
+    // appears in `cascadedParts` beside the live one.
 
     it("case 9b: a composition edge is not resurrected onto a deleted part", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
@@ -1140,6 +1290,42 @@ export function registerCompositionExistenceIntegrationTests(
       await store.nodes.EeTag.upsertById(tag.id, {});
       expect(await store.nodes.EeTag.getById(tag.id)).toBeDefined();
     });
+
+    it("case 13b: an upsert does not restore a required part whose surviving edge holds a tombstoned whole", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const segment = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
+      );
+      // Both tombstones come from the raw backend member, so the segment's
+      // composition edge stays live and still names the dead episode.
+      for (const node of [segment, episode]) {
+        await store.backend.deleteNode({
+          graphId: store.graphId,
+          kind: node.kind,
+          id: node.id,
+        });
+      }
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
+
+      const refusal = await store.nodes.EeSegment.upsertById(
+        segment.id,
+        {},
+      ).catch((error: unknown) => error);
+
+      expect(refusal).toBeInstanceOf(CompositionExistenceError);
+      expect((refusal as CompositionExistenceError).details).toMatchObject({
+        situation: "create",
+        partId: segment.id,
+      });
+      expect(await store.nodes.EeSegment.getById(segment.id)).toBeUndefined();
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: in `assertRestoredRequiredPartsAttached`
+    // (composition-create.ts), accept any surviving attachment without asking
+    // whether its whole is live — the segment is then restored under a
+    // tombstoned episode.
 
     it("case 14: a composition create refused inside a caught transaction leaves no row of it behind", async () => {
       type ExistenceStore = Awaited<
