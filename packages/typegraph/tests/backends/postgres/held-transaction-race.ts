@@ -33,7 +33,7 @@ export type Outcome<T> = Readonly<
 >;
 
 /** Whether the contender settled on its own or parked on the holder's lock. */
-export type ContenderState = "settled" | "blocked";
+type ContenderState = "settled" | "blocked";
 
 export type HeldRace<THolder, TContender> = Readonly<{
   contenderState: ContenderState;
