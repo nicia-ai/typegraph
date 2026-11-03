@@ -450,6 +450,64 @@ describe("classifyOntologyChanges", () => {
     // exact row of the matrix fail.
   });
 
+  describe("symmetric relations", () => {
+    const kinds = {
+      Alpha: nodeDef("Alpha"),
+      Gamma: nodeDef("Gamma"),
+    };
+
+    it.each([
+      "disjointWith",
+      "equivalentTo",
+      "sameAs",
+      "differentFrom",
+      "relatedTo",
+    ])(
+      "reads %s restated with its arguments swapped as no change",
+      (metaEdge) => {
+        const before = snapshot(kinds, {}, [
+          relation(metaEdge, "Gamma", "Alpha"),
+        ]);
+        const after = snapshot(kinds, {}, [
+          relation(metaEdge, "Alpha", "Gamma"),
+        ]);
+
+        expect(classifyOntologyChanges(before, after)).toEqual([]);
+      },
+    );
+
+    it("reads an inverseOf restated with its edge kinds swapped as no change", () => {
+      const edges = {
+        follows: edgeDef("follows", ["Alpha"], ["Gamma"]),
+        followedBy: edgeDef("followedBy", ["Gamma"], ["Alpha"]),
+      };
+      const before = snapshot(kinds, edges, [
+        relation("inverseOf", "follows", "followedBy"),
+      ]);
+      const after = snapshot(kinds, edges, [
+        relation("inverseOf", "followedBy", "follows"),
+      ]);
+
+      expect(classifyOntologyChanges(before, after)).toEqual([]);
+    });
+
+    it("still reads a swapped subClassOf as a removal and an addition", () => {
+      const before = snapshot(kinds, {}, [
+        relation("subClassOf", "Gamma", "Alpha"),
+      ]);
+      const after = snapshot(kinds, {}, [
+        relation("subClassOf", "Alpha", "Gamma"),
+      ]);
+
+      expect(
+        classifyOntologyChanges(before, after).map((change) => change.type),
+      ).toEqual(["removed", "added"]);
+    });
+  });
+  // MUTATION CHECK (verified): keying `keyedRelations` by
+  // `ontologyRelationIdentityKey` alone (src/schema/ontology-change.ts) reads
+  // each swap as a removal beside a probed addition.
+
   describe("the removed-kind rule", () => {
     it("classifies a removed relation as safe with no probe when this commit also removes one of its kinds", () => {
       const before = snapshot(

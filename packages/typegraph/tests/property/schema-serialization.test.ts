@@ -31,14 +31,17 @@ import {
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
 import { validateOntologyRelations } from "../../src/ontology/validation";
+import { buildKindRegistry } from "../../src/registry";
 import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
+import { computeSchemaDiff } from "../../src/schema/migration";
 import {
   computeSchemaHash,
   serializeSchema,
 } from "../../src/schema/serializer";
 import { serializedSchemaZod } from "../../src/schema/types";
 import { requireDefined } from "../../src/utils/presence";
+import { propertyRuns } from "./run-budget";
 
 // ============================================================
 // Arbitrary Generators
@@ -488,6 +491,101 @@ const graphDefArb = fc
       });
   });
 
+type GraphUnderTest = Parameters<typeof serializeSchema>[0];
+
+function buildsRegistry(graph: GraphUnderTest): boolean {
+  try {
+    buildKindRegistry(graph);
+    return true;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return false;
+    throw error;
+  }
+}
+type DeclaredRelation = GraphUnderTest["ontology"][number];
+
+/** A symmetric relation's factory, keyed by meta-edge name. */
+const SYMMETRIC_RELATION_FACTORIES: Readonly<
+  Record<
+    string,
+    (
+      left: ReturnType<typeof defineNode>,
+      right: ReturnType<typeof defineNode>,
+    ) => DeclaredRelation
+  >
+> = {
+  disjointWith: (left, right) => disjointWith(left, right),
+  relatedTo: (left, right) => relatedTo(left, right),
+  equivalentTo: (left, right) => equivalentTo(left, right),
+};
+
+function withSwappedArguments(relation: DeclaredRelation): DeclaredRelation {
+  const factory = SYMMETRIC_RELATION_FACTORIES[relation.metaEdge.name];
+  if (
+    factory === undefined ||
+    typeof relation.from === "string" ||
+    typeof relation.to === "string"
+  ) {
+    return relation;
+  }
+  return factory(
+    relation.to as ReturnType<typeof defineNode>,
+    relation.from as ReturnType<typeof defineNode>,
+  );
+}
+
+/**
+ * `graph` declared again with its node, edge and relation order shuffled
+ * and some symmetric relations' arguments swapped.
+ */
+function restatedGraphArb(
+  graph: GraphUnderTest,
+): fc.Arbitrary<
+  Readonly<{ graph: GraphUnderTest; kindsOnly: GraphUnderTest }>
+> {
+  const nodeEntries = Object.entries(graph.nodes);
+  const edgeEntries = Object.entries(graph.edges);
+  const relations = graph.ontology;
+  const declare = (
+    nodes: typeof nodeEntries,
+    edges: typeof edgeEntries,
+    ontology: readonly DeclaredRelation[],
+  ) =>
+    defineGraph({
+      id: graph.id,
+      nodes: Object.fromEntries(nodes),
+      edges: Object.fromEntries(edges),
+      ontology,
+      defaults: graph.defaults,
+    }) as unknown as GraphUnderTest;
+  return fc
+    .record({
+      nodeOrder: fc.shuffledSubarray(nodeEntries, {
+        minLength: nodeEntries.length,
+      }),
+      edgeOrder: fc.shuffledSubarray(edgeEntries, {
+        minLength: edgeEntries.length,
+      }),
+      relationOrder: fc.shuffledSubarray([...relations], {
+        minLength: relations.length,
+      }),
+      swaps: fc.array(fc.boolean(), {
+        minLength: relations.length,
+        maxLength: relations.length,
+      }),
+    })
+    .map(({ nodeOrder, edgeOrder, relationOrder, swaps }) => ({
+      graph: declare(
+        nodeOrder,
+        edgeOrder,
+        relationOrder.map((relation, index) =>
+          swaps[index] === true ? withSwappedArguments(relation) : relation,
+        ),
+      ),
+      kindsOnly: declare(nodeOrder, edgeOrder, relations),
+    }));
+}
+
 /**
  * Generate a version number.
  */
@@ -594,18 +692,35 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("hash properties", () => {
-    it("hash is deterministic (same input produces same hash)", async () => {
+    it("declaration order and a symmetric relation's argument order change nothing", async () => {
       await fc.assert(
-        fc.asyncProperty(graphDefArb, versionArb, async (graph, version) => {
-          const serialized1 = serializeSchema(graph, version);
-          const serialized2 = serializeSchema(graph, version);
+        fc.asyncProperty(
+          graphDefArb.chain((graph) =>
+            restatedGraphArb(graph).map(
+              (restated) => [graph, restated] as const,
+            ),
+          ),
+          async ([graph, restated]) => {
+            // A fuzzed subClassOf whose schemas do not nest is refused by the
+            // registry the diff builds; that refusal is covered below.
+            fc.pre(buildsRegistry(graph));
+            const before = serializeSchema(graph, 1);
+            const after = serializeSchema(restated.graph, 2);
 
-          const hash1 = await computeSchemaHash(serialized1);
-          const hash2 = await computeSchemaHash(serialized2);
-
-          expect(hash1).toBe(hash2);
-        }),
-        { numRuns: 50 },
+            expect(computeSchemaDiff(before, after)).toMatchObject({
+              hasChanges: false,
+              nodes: [],
+              edges: [],
+              ontology: [],
+            });
+            // Kind declaration order is not part of the document's content;
+            // relation order is, so only the kinds' reordering keeps the hash.
+            expect(
+              await computeSchemaHash(serializeSchema(restated.kindsOnly, 1)),
+            ).toBe(await computeSchemaHash(before));
+          },
+        ),
+        { numRuns: propertyRuns({ ci: 100, local: 200 }) },
       );
     });
 

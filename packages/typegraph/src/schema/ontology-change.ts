@@ -332,7 +332,7 @@ function relationDescription(relation: SerializedOntologyRelation): string {
 }
 
 /**
- * The relations of one side, keyed by {@link ontologyRelationIdentityKey}.
+ * The relations of one side, keyed by {@link relationClassificationKey}.
  *
  * `via` and `partSide` are part of that identity, so a composition relation
  * re-pointed at a different realizing edge diffs as remove + add rather than
@@ -349,9 +349,44 @@ function keyedRelations(
 ): ReadonlyMap<string, SerializedOntologyRelation> {
   const result = new Map<string, SerializedOntologyRelation>();
   for (const relation of relations) {
-    result.set(ontologyRelationIdentityKey(relation), relation);
+    result.set(relationClassificationKey(relation), relation);
   }
   return result;
+}
+
+/**
+ * The meta-edges whose relation means the same thing with its endpoints
+ * swapped: `disjointWith(A, C)` is `disjointWith(C, A)`.
+ */
+const SYMMETRIC_META_EDGES: ReadonlySet<string> = new Set([
+  META_EDGE_DISJOINT_WITH,
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SAME_AS,
+  META_EDGE_DIFFERENT_FROM,
+  META_EDGE_RELATED_TO,
+  META_EDGE_INVERSE_OF,
+]);
+
+/**
+ * {@link ontologyRelationIdentityKey}, read with a symmetric relation's
+ * endpoints in a fixed order, so restating one with its arguments
+ * swapped is the same relation on both sides of a diff rather than a
+ * removal beside an addition the commit would probe.
+ */
+function relationClassificationKey(
+  relation: SerializedOntologyRelation,
+): string {
+  if (
+    !SYMMETRIC_META_EDGES.has(relation.metaEdge) ||
+    compareStrings(relation.from, relation.to) <= 0
+  ) {
+    return ontologyRelationIdentityKey(relation);
+  }
+  return ontologyRelationIdentityKey({
+    ...relation,
+    from: relation.to,
+    to: relation.from,
+  });
 }
 
 /** Which kinds a schema transition removes, keeps and adds. */
