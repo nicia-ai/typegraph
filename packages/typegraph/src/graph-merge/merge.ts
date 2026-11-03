@@ -1811,7 +1811,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   ];
   assertNoContradictoryIdentityClosure(
     identityRemap.assertions,
-    survivingRetractions.map((retraction) => retraction.id),
+    survivingRetractions,
     staging.baseIdentityAssertions,
     new Set(nodeDeletions.keys()),
     canonicalOf,
@@ -4702,7 +4702,7 @@ async function resolveMerge<G extends GraphDef, Output>(
       const canonicalIdentityOf = plan.canonicalOf;
       assertNoContradictoryIdentityClosure(
         plan.identityAssertions,
-        plan.identityRetractions.map((retraction) => retraction.id),
+        plan.identityRetractions,
         // The FRESH target ledger, not the pre-planning staging capture —
         // a `different` committed in the window must invalidate the plan
         // here, as a typed conflict, before it can become the baseline.

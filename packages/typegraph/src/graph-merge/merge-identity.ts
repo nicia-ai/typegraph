@@ -572,8 +572,10 @@ export function assertIdentityEndpointsNotDeleted(
  * `MergeError` — the documented `GRAPH_MERGE_IDENTITY_CONFLICT` code never fired.
  *
  * The check evaluates the ledger the merge would actually leave behind: the base's
- * CURRENT assertions minus the staged retractions, plus the already remapped and
- * deduped staged assertions. Base endpoints are put through the same
+ * CURRENT assertions, each one a planned retraction ends kept as the history it
+ * becomes (valid until the retraction's own end, so a branch claim that
+ * overlaps the time it still held is judged against it), plus the already
+ * remapped and deduped staged assertions. Base endpoints are put through the same
  * {@link resolveIdentityEndpoint} mapping, so an inherited assertion whose node
  * was folded or retyped is judged at its post-merge identity. The `same`
  * assertions are folded into equivalence classes and every `different` pair —
@@ -591,7 +593,7 @@ export function assertIdentityEndpointsNotDeleted(
  */
 export function assertNoContradictoryIdentityClosure(
   plannedAssertions: readonly IdentityTransferAssertion[],
-  retractions: readonly string[],
+  retractions: readonly IdentityTransferAssertion[],
   baseAssertions: readonly IdentityTransferAssertion[],
   deletedNodes: ReadonlySet<MergeKey>,
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
@@ -599,7 +601,9 @@ export function assertNoContradictoryIdentityClosure(
   identityContext: PlanIdentityContext,
   nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
 ): void {
-  const retracted = new Set(retractions);
+  const retractionEndById = new Map(
+    retractions.map((retraction) => [retraction.id, retraction.validTo]),
+  );
   // Deleting a node ends its assertions, so a base assertion touching a
   // plan-deleted endpoint must not conduct in the simulated post-merge
   // ledger. The commit-guard re-runs filter their fresh ledger the same way
@@ -617,10 +621,14 @@ export function assertNoContradictoryIdentityClosure(
   const mergedLedger: readonly IdentityTransferAssertion[] = [
     ...plannedAssertions,
     ...baseAssertions
-      .filter(
-        (assertion) =>
-          !retracted.has(assertion.id) && survivesDeletion(assertion),
-      )
+      .filter((assertion) => survivesDeletion(assertion))
+      .flatMap((assertion) => {
+        if (!retractionEndById.has(assertion.id)) return [assertion];
+        const validTo = retractionEndById.get(assertion.id);
+        return validTo === undefined || validTo <= assertion.validFrom ?
+            []
+          : [{ ...assertion, validTo }];
+      })
       .map((assertion) => ({
         ...assertion,
         a: resolveIdentityEndpoint(assertion.a, canonicalOf, retypeMap),
@@ -1311,7 +1319,7 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
   try {
     assertNoContradictoryIdentityClosure(
       plan.identityAssertions,
-      plan.identityRetractions.map((retraction) => retraction.id),
+      plan.identityRetractions,
       ledger,
       probe.plannedDeletions,
       plan.canonicalOf,
