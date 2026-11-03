@@ -90,6 +90,12 @@ describe("structural subtyping properties", () => {
         (parent, newPropertySchema) => {
           const parentProps = parent.properties ?? {};
           fc.pre(!Object.hasOwn(parentProps, FRESH_PROPERTY_NAME));
+          // A typed catchall or a record constrains the added key too.
+          fc.pre(
+            parent.additionalProperties === false ||
+              (typeof parent.additionalProperties === "object" &&
+                Object.keys(parent.additionalProperties).length === 0),
+          );
 
           const child: JsonSchema = {
             ...parent,

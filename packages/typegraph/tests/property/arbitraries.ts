@@ -83,6 +83,10 @@ const ENUM_VALUE_POOL: readonly unknown[] = [
   false,
 ];
 
+/** Patterns and formats a string leaf may carry; compared by equality. */
+const PATTERN_POOL = ["^a", "b$", "^[a-c]+$"] as const;
+const FORMAT_POOL = ["email", "uuid", "date-time"] as const;
+
 function stringLeafArb(): fc.Arbitrary<JsonSchema> {
   return fc
     .record(
@@ -91,6 +95,10 @@ function stringLeafArb(): fc.Arbitrary<JsonSchema> {
         maxLength: fc.option(fc.integer({ min: 4, max: 12 }), {
           nil: undefined,
         }),
+        pattern: fc.option(fc.constantFrom(...PATTERN_POOL), {
+          nil: undefined,
+        }),
+        format: fc.option(fc.constantFrom(...FORMAT_POOL), { nil: undefined }),
       },
       { requiredKeys: [] },
     )
@@ -101,14 +109,41 @@ function numberLeafArb(): fc.Arbitrary<JsonSchema> {
   return fc
     .record(
       {
+        type: fc.constantFrom("number", "integer"),
         minimum: fc.option(fc.integer({ min: -10, max: 0 }), {
           nil: undefined,
         }),
         maximum: fc.option(fc.integer({ min: 0, max: 10 }), { nil: undefined }),
+        exclusiveMinimum: fc.option(fc.integer({ min: -12, max: -1 }), {
+          nil: undefined,
+        }),
+        exclusiveMaximum: fc.option(fc.integer({ min: 1, max: 12 }), {
+          nil: undefined,
+        }),
+        multipleOf: fc.option(fc.constantFrom(2, 0.5, 0.25), {
+          nil: undefined,
+        }),
       },
-      { requiredKeys: [] },
+      { requiredKeys: ["type"] },
     )
-    .map((bounds) => ({ type: "number", ...bounds }) as JsonSchema);
+    .map((bounds) => bounds as JsonSchema);
+}
+
+/** A union of bare primitives, as the projection writes `.nullable()`. */
+function typeTokenArrayLeafArb(): fc.Arbitrary<JsonSchema> {
+  return fc
+    .record(
+      {
+        type: fc.constantFrom<JsonSchema["type"]>(
+          ["string", "null"],
+          ["number", "null"],
+          ["string", "number"],
+        ),
+        minLength: fc.option(fc.nat({ max: 3 }), { nil: undefined }),
+      },
+      { requiredKeys: ["type"] },
+    )
+    .map((fields) => fields as JsonSchema);
 }
 
 function enumLeafArb(): fc.Arbitrary<JsonSchema> {
@@ -125,6 +160,7 @@ function scalarSchemaArb(): fc.Arbitrary<JsonSchema> {
   return fc.oneof(
     stringLeafArb(),
     numberLeafArb(),
+    typeTokenArrayLeafArb(),
     fc.constant<JsonSchema>({ type: "integer" }),
     fc.constant<JsonSchema>({ type: "boolean" }),
     fc.constant<JsonSchema>({ type: "null" }),
@@ -148,6 +184,19 @@ function arrayContainerArb(
     .map((fields) => ({ type: "array", ...fields }) as JsonSchema);
 }
 
+/** A closed tuple, as the projection writes `z.tuple()` with no rest. */
+function tupleContainerArb(
+  schemaArb: fc.Arbitrary<JsonSchema>,
+): fc.Arbitrary<JsonSchema> {
+  return fc.array(schemaArb, { minLength: 1, maxLength: 3 }).map((members) => ({
+    type: "array",
+    prefixItems: members,
+    items: false,
+    minItems: members.length,
+    maxItems: members.length,
+  }));
+}
+
 function objectContainerArb(
   schemaArb: fc.Arbitrary<JsonSchema>,
 ): fc.Arbitrary<JsonSchema> {
@@ -162,16 +211,20 @@ function objectContainerArb(
         selector: (field) => field.name,
         maxLength: OBJECT_FIELD_NAME_POOL.length,
       }),
-      // `false` (the common `z.object` shape) or `{}` — an explicitly OPEN,
-      // unconstrained extras schema (`z.looseObject`'s projection) — so P2
-      // and P6 also exercise compareObject's width-subtyping branch for a
-      // parent property the child leaves to its own open extras.
-      // Always `{}` rather than a typed catchall schema: `{}` is the top
-      // type, so every tightening operation below stays sound regardless of
-      // which additionalProperties value a generated object carries.
-      isOpen: fc.boolean(),
+      // `false` (the common `z.object` shape), `{}` — an explicitly OPEN,
+      // unconstrained extras schema (`z.looseObject`'s projection) — or a
+      // typed catchall (`.catchall(schema)`), so P2 and P6 also exercise
+      // compareObject's width-subtyping branch for a parent property the
+      // child leaves to its own open extras. The tightening operations
+      // below keep a typed catchall's extras under it (see
+      // `tightenAddRequiredPropertyArb`).
+      extras: fc.oneof(
+        fc.constant<false | JsonSchema>(false),
+        fc.constant<false | JsonSchema>({}),
+        schemaArb,
+      ),
     })
-    .map(({ fields, isOpen }) => {
+    .map(({ fields, extras }) => {
       const properties: Record<string, JsonSchema> = {};
       const required: string[] = [];
       for (const field of fields) {
@@ -182,17 +235,45 @@ function objectContainerArb(
         type: "object",
         properties,
         required,
-        additionalProperties: isOpen ? {} : false,
+        additionalProperties: extras,
       };
     });
+}
+
+/** A record, as the projection writes `z.record(keys, values)`. */
+function recordContainerArb(
+  schemaArb: fc.Arbitrary<JsonSchema>,
+): fc.Arbitrary<JsonSchema> {
+  return fc
+    .record({
+      keys: fc.oneof(
+        fc.constant<JsonSchema>({ type: "string" }),
+        fc.constant<JsonSchema>({ type: "string", minLength: 1 }),
+        fc
+          .subarray([...OBJECT_FIELD_NAME_POOL], { minLength: 1 })
+          .map((names): JsonSchema => ({ type: "string", enum: names })),
+      ),
+      values: schemaArb,
+    })
+    .map(({ keys, values }) => ({
+      type: "object",
+      propertyNames: keys,
+      additionalProperties: values,
+    }));
 }
 
 function unionContainerArb(
   schemaArb: fc.Arbitrary<JsonSchema>,
 ): fc.Arbitrary<JsonSchema> {
-  return fc
-    .tuple(schemaArb, schemaArb)
-    .map(([first, second]) => ({ anyOf: [first, second] }));
+  return fc.oneof(
+    fc
+      .tuple(schemaArb, schemaArb)
+      .map(([first, second]) => ({ anyOf: [first, second] })),
+    // Members of different types, the shape of an exclusive `oneOf`.
+    fc
+      .tuple(stringLeafArb(), numberLeafArb())
+      .map(([first, second]) => ({ oneOf: [first, second] })),
+  );
 }
 
 const jsonSchemaLetrec = fc.letrec<{
@@ -202,19 +283,23 @@ const jsonSchemaLetrec = fc.letrec<{
   schema: fc.oneof({ maxDepth: 3 }, scalarSchemaArb(), tie("container")),
   container: fc.oneof(
     arrayContainerArb(tie("schema")),
+    tupleContainerArb(tie("schema")),
     objectContainerArb(tie("schema")),
+    recordContainerArb(tie("schema")),
     unionContainerArb(tie("schema")),
   ),
 }));
 
 /**
  * A JSON Schema drawn from the fragment `isStructuralSubtype` actually
- * compares: scalars (string with optional length bounds, number with
- * optional numeric bounds, integer, boolean, null), `enum` / `const` over a
- * small fixed value pool, an array of a subschema with optional item-count
- * bounds, an object with 0-3 properties split between required and optional
- * (always `additionalProperties: false`), and a 2-member `anyOf`. Depth is
- * capped at 3. Deliberately never generates `$ref`, `not`, `allOf`, or an
+ * compares: scalars (string with optional length bounds, `pattern` and
+ * `format`; number or integer with optional inclusive and exclusive bounds
+ * and `multipleOf`; a `type` token array; integer, boolean, null), `enum` /
+ * `const` over a small fixed value pool, an array of a subschema with
+ * optional item-count bounds, a closed tuple, an object with 0-3 properties
+ * split between required and optional whose extras are closed, open or a
+ * typed catchall, a record with `propertyNames`, a 2-member `anyOf`, and a
+ * `oneOf` of a string and a number. Depth is capped at 3. Deliberately never generates `$ref`, `not`, `allOf`, or an
  * unrecognized key — reflexivity is claimed only over this comparable
  * fragment, not over constructs the predicate refuses.
  */
@@ -306,8 +391,14 @@ function tightenAddRequiredPropertyArb(
     (name) => !Object.hasOwn(parentProps, name),
   );
   if (freshNames.length === 0) return undefined;
+  // A key the parent does not name must satisfy the parent's typed catchall.
+  const extras = parent.additionalProperties;
+  const propertySchemaArb =
+    typeof extras === "object" && Object.keys(extras).length > 0 ?
+      tightenArb(extras)
+    : comparableSchemaArb;
   return fc
-    .tuple(fc.constantFrom(...freshNames), comparableSchemaArb)
+    .tuple(fc.constantFrom(...freshNames), propertySchemaArb)
     .map(([name, propertySchema]) => ({
       ...parent,
       properties: { ...parentProps, [name]: propertySchema },
@@ -357,12 +448,80 @@ function tightenNestedPropertyArb(
   );
 }
 
+function tightenExclusiveBoundsArb(
+  parent: JsonSchema,
+): fc.Arbitrary<JsonSchema> | undefined {
+  const exclusiveMinimum =
+    typeof parent["exclusiveMinimum"] === "number" ?
+      parent["exclusiveMinimum"]
+    : undefined;
+  const exclusiveMaximum =
+    typeof parent["exclusiveMaximum"] === "number" ?
+      parent["exclusiveMaximum"]
+    : undefined;
+  if (exclusiveMinimum === undefined && exclusiveMaximum === undefined) {
+    return undefined;
+  }
+  return fc
+    .record({ lowerDelta: fc.nat({ max: 2 }), upperDelta: fc.nat({ max: 2 }) })
+    .map(({ lowerDelta, upperDelta }) => ({
+      ...parent,
+      ...(exclusiveMinimum === undefined ?
+        {}
+      : { exclusiveMinimum: exclusiveMinimum + lowerDelta }),
+      ...(exclusiveMaximum === undefined ?
+        {}
+      : { exclusiveMaximum: exclusiveMaximum - upperDelta }),
+    }));
+}
+
+function replaceMember(
+  members: readonly JsonSchema[],
+  index: number,
+  member: JsonSchema,
+): JsonSchema[] {
+  return members.map((existing, position) =>
+    position === index ? member : existing,
+  );
+}
+
+/** One `key` member list (`prefixItems`, `anyOf`, `oneOf`) with a member tightened. */
+function tightenMemberArb(
+  parent: JsonSchema,
+  key: "prefixItems" | "anyOf" | "oneOf",
+): fc.Arbitrary<JsonSchema> | undefined {
+  const members = parent[key];
+  if (members === undefined || members.length === 0) return undefined;
+  return fc.nat({ max: members.length - 1 }).chain((index) =>
+    tightenArb(requireDefined(members[index])).map((member) => ({
+      ...parent,
+      [key]: replaceMember(members, index, member),
+    })),
+  );
+}
+
+/** An array's `items`, or an object's typed extras, tightened. */
+function tightenSubschemaArb(
+  parent: JsonSchema,
+  key: "items" | "additionalProperties",
+): fc.Arbitrary<JsonSchema> | undefined {
+  const subschema = parent[key];
+  if (typeof subschema !== "object" || Object.keys(subschema).length === 0) {
+    return undefined;
+  }
+  return tightenArb(subschema).map((tightened) => ({
+    ...parent,
+    [key]: tightened,
+  }));
+}
+
 /**
  * A schema guaranteed BY CONSTRUCTION to be a structural subtype of `parent`:
  * identity, or one of the tightening operations applicable to `parent`'s
- * shape (raise a string/number bound, narrow an enum, promote an enum member
- * to `const`, add a fresh required property, drop an optional property, or
- * recursively tighten one existing property). Only operations that apply to
+ * shape (raise a string/number bound or an exclusive bound, narrow an enum,
+ * promote an enum member to `const`, add a fresh required property, drop an
+ * optional property, or recursively tighten one existing property, tuple
+ * member, union member, array item schema or typed extras schema). Only operations that apply to
  * `parent`'s actual shape are offered, so the result is always well-typed.
  */
 export function tightenArb(parent: JsonSchema): fc.Arbitrary<JsonSchema> {
@@ -375,6 +534,12 @@ export function tightenArb(parent: JsonSchema): fc.Arbitrary<JsonSchema> {
     tightenAddRequiredPropertyArb(parent),
     tightenDropOptionalPropertyArb(parent),
     tightenNestedPropertyArb(parent),
+    tightenExclusiveBoundsArb(parent),
+    tightenMemberArb(parent, "prefixItems"),
+    tightenMemberArb(parent, "anyOf"),
+    tightenMemberArb(parent, "oneOf"),
+    tightenSubschemaArb(parent, "items"),
+    tightenSubschemaArb(parent, "additionalProperties"),
   ].filter(
     (candidate): candidate is fc.Arbitrary<JsonSchema> =>
       candidate !== undefined,
