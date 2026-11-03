@@ -578,6 +578,53 @@ describe("composition cascade — delete", () => {
   // `deleteNodeRowInFrame`'s `existing` in `applyCompositionCascade`
   // (src/store/operations/node-operations.ts) — both filters then find 1 read.
 
+  it("finds a part through the one-time fallback when the set read answers empty although rows exist", async () => {
+    const graph = buildPodcastGraph("cascade-set-read-empty-fallback");
+    const raw = createTestBackend();
+    // A port whose set read is out of step with its rows: it answers every
+    // call with no rows at all. An empty answer is not evidence, so the
+    // first round must confirm it through `findEdgesConnectedTo`.
+    const setReadCalls: number[] = [];
+    function emptySetRead<T extends GraphBackend | TransactionBackend>(
+      target: T,
+    ): T {
+      const overlay: Pick<GraphBackend, "findEdgesByHeterogeneousEndpointSet"> =
+        {
+          findEdgesByHeterogeneousEndpointSet: () => {
+            setReadCalls.push(1);
+            return Promise.resolve([]);
+          },
+        };
+      return deriveBackend<T, Partial<T>>(
+        target,
+        overlay as ExactBackendOverlay<T, Partial<T>>,
+      );
+    }
+    const backend = deriveBackend(emptySetRead(raw), {
+      transaction: (fn, options) =>
+        raw.transaction((target) => fn(emptySetRead(target)), options),
+    });
+    const [store] = await createStoreWithSchema(graph, backend);
+    const podcast = await store.nodes.Podcast.create({ title: "My Show" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+
+    const plan = await store.nodes.Podcast.planDelete(podcast.id);
+    await store.nodes.Podcast.delete(podcast.id);
+
+    expect(setReadCalls.length).toBeGreaterThan(0);
+    expect(plan?.cascadedParts).toEqual([
+      cascadedPart(episode, podcast, "episodeOf"),
+    ]);
+    await expect(
+      store.nodes.Episode.getById(episode.id),
+    ).resolves.toBeUndefined();
+    expect(await store.edges.episodeOf.find({})).toEqual([]);
+  });
+  // MUTATION: trust the set read's first empty answer in
+  // `readWholeSideEdges` (src/store/operations/composition-cascade.ts) — the
+  // plan then names no part and the episode survives its podcast's delete.
+
   it("aborts a restricting grandchild's delete ATOMICALLY — zero rows changed", async () => {
     const graph = buildPodcastGraph("cascade-restrict-abort");
     const backend = createTestBackend();
