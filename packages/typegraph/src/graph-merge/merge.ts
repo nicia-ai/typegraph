@@ -168,6 +168,7 @@ import {
   remapIdentityAssertionEndpoints,
   RETRACTION_DELETION_OVERRULED_DROP_REASON,
   translateIdentityCommitError,
+  translateIdentityPlanError,
 } from "./merge-identity";
 import {
   compareMergeKeys,
@@ -4927,7 +4928,16 @@ async function loadPlannedIdentityHistory<G extends GraphDef>(
 ): Promise<readonly IdentityTransferAssertion[]> {
   if (target.graph.identity === undefined || assertions.length === 0) return [];
   const ctx = storeRuntime(target).identityContext();
-  return loadIdentityWindowHistory(ctx, ctx.backend, assertions, nowIso());
+  try {
+    return await loadIdentityWindowHistory(
+      ctx,
+      ctx.backend,
+      assertions,
+      nowIso(),
+    );
+  } catch (error) {
+    throw translateIdentityPlanError(error);
+  }
 }
 
 /** Builds a durable, reviewable snapshot merge plan without mutating the target. */

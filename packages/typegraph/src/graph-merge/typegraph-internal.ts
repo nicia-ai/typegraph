@@ -57,10 +57,8 @@ export {
   separationFactsEmpty,
 } from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";
-export {
-  currentClassKey,
-  loadIdentityWindowHistory,
-} from "../identity/service-mutation";
+export { loadIdentityWindowHistory } from "../identity/service-interchange-write";
+export { currentClassKey } from "../identity/service-mutation";
 export {
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,

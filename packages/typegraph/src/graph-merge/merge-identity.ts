@@ -606,29 +606,35 @@ export function assertNoContradictoryIdentityClosure(
   const retractionEndById = new Map(
     retractions.map((retraction) => [retraction.id, retraction.validTo]),
   );
-  // Deleting a node ends its assertions, so a base assertion touching a
-  // plan-deleted endpoint must not conduct in the simulated post-merge
-  // ledger. The commit-guard re-runs filter their fresh ledger the same way
-  // BEFORE calling here; applying the rule inside the checker keeps all
-  // three call sites on one rule even when a retraction was dropped (e.g.
-  // target-truth mismatch) and the cascade id never reaches `retractions`.
-  const survivesDeletion = (
+  // The one rule for how a planned deletion changes the ledger, applied
+  // here for all three call sites, exactly as the commit's validator sees it:
+  // deleting a node ends the assertions still holding over it at the merge
+  // instant — they held until then — and never erases the history it already
+  // had. Applying it inside the checker also covers a retraction dropped as a
+  // target-truth mismatch, whose cascade id never reaches `retractions`.
+  const deletionInstant = nowIso();
+  const touchesDeletedNode = (
     assertion: Readonly<{
       a: Readonly<{ kind: string; id: string }>;
       b: Readonly<{ kind: string; id: string }>;
     }>,
   ): boolean =>
-    !deletedNodes.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
-    !deletedNodes.has(mergeKey(assertion.b.kind, assertion.b.id));
+    deletedNodes.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
+    deletedNodes.has(mergeKey(assertion.b.kind, assertion.b.id));
   const mergedLedger: readonly IdentityTransferAssertion[] = [
     ...plannedAssertions,
     ...baseAssertions
-      .filter((assertion) => survivesDeletion(assertion))
       .flatMap((assertion) => {
-        if (!retractionEndById.has(assertion.id)) return [assertion];
-        const validTo = retractionEndById.get(assertion.id);
-        return validTo === undefined || validTo <= assertion.validFrom ?
-            []
+        const retracted = retractionEndById.has(assertion.id);
+        const validTo =
+          retracted ? retractionEndById.get(assertion.id)
+          : assertion.validTo === undefined && touchesDeletedNode(assertion) ?
+            deletionInstant
+          : assertion.validTo;
+        if (retracted && validTo === undefined) return [];
+        if (validTo !== undefined && validTo <= assertion.validFrom) return [];
+        return validTo === assertion.validTo ?
+            [assertion]
           : [{ ...assertion, validTo }];
       })
       .map((assertion) => ({
@@ -777,12 +783,10 @@ export async function buildIdentityPeerProbe<G extends GraphDef>(
   // the CURRENT ledger touching the universe is read fresh here: the recheck
   // validates the plan against it, and its `different` slice is fingerprinted
   // for the in-transaction comparison.
-  const ledger = (
-    await relevantLedgerAssertions(target, memberKeys, storeBackend(target))
-  ).filter(
-    (assertion) =>
-      !plannedDeletions.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
-      !plannedDeletions.has(mergeKey(assertion.b.kind, assertion.b.id)),
+  const ledger = await relevantLedgerAssertions(
+    target,
+    memberKeys,
+    storeBackend(target),
   );
   return {
     probe: {
@@ -793,7 +797,9 @@ export async function buildIdentityPeerProbe<G extends GraphDef>(
         relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
       ),
       memberKeys,
-      differentFingerprint: differentLedgerFingerprint(ledger),
+      differentFingerprint: differentLedgerFingerprint(
+        withoutPlannedDeletions(ledger, plannedDeletions),
+      ),
       classFingerprints: snapshot.fingerprints,
       seeds,
     },
@@ -874,6 +880,21 @@ async function relevantLedgerAssertions<G extends GraphDef>(
     (assertion) =>
       memberKeys.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
       memberKeys.has(mergeKey(assertion.b.kind, assertion.b.id)),
+  );
+}
+
+/**
+ * A ledger slice without the rows over nodes the plan deletes — the slice a
+ * drift fingerprint compares, since those rows end with the merge anyway.
+ */
+function withoutPlannedDeletions(
+  ledger: readonly LedgerAssertion[],
+  plannedDeletions: ReadonlySet<MergeKey>,
+): readonly LedgerAssertion[] {
+  return ledger.filter(
+    (assertion) =>
+      !plannedDeletions.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
+      !plannedDeletions.has(mergeKey(assertion.b.kind, assertion.b.id)),
   );
 }
 
@@ -1207,6 +1228,38 @@ function identityRefusalCode(error: TypeGraphError): string | undefined {
  * @internal Exported for isolated verification of the translation contract.
  */
 export function translateIdentityCommitError(error: unknown): unknown {
+  return asIdentityMergeConflict(
+    error,
+    (cause) =>
+      `The identity applier refused the resolved plan inside the commit transaction — identity truth on the target is incompatible with the plan. Cause: ${cause}`,
+    // A target that moved after planning is refused earlier, by the plan
+    // fence and identity guards, with their own re-plan errors; reaching
+    // this arm means the plan-time simulation missed an applier rule, so a
+    // re-plan from unchanged state reproduces the refusal.
+    "The plan-time identity checks did not foresee this refusal, so re-planning against the same target refuses again. Resolve the conflict named in the cause — change the branch's assertion, or the target's identity truth — then re-plan the merge.",
+  );
+}
+
+/**
+ * The plan-time twin of {@link translateIdentityCommitError}: an identity
+ * refusal raised while the planner reads what the importer would read (a
+ * staged assertion the importer's own shape validation refuses) becomes the
+ * same typed conflict, through the same classification, before any write.
+ */
+export function translateIdentityPlanError(error: unknown): unknown {
+  return asIdentityMergeConflict(
+    error,
+    (cause) =>
+      `A staged identity assertion cannot be applied to the target. Cause: ${cause}`,
+    "Correct the branch's assertion named in the cause, then re-plan the merge.",
+  );
+}
+
+function asIdentityMergeConflict(
+  error: unknown,
+  message: (cause: string) => string,
+  suggestion: string,
+): unknown {
   if (error instanceof MergeError) return error;
   if (!(error instanceof TypeGraphError)) return error;
   const identityCode = identityRefusalCode(error);
@@ -1216,19 +1269,11 @@ export function translateIdentityCommitError(error: unknown): unknown {
     (identityCode !== undefined &&
       !IDENTITY_ENVIRONMENT_CODES.has(identityCode));
   if (!identityRefusal) return error;
-  return new IdentityMergeConflictError(
-    `The identity applier refused the resolved plan inside the commit transaction — identity truth on the target is incompatible with the plan. Cause: ${describeCause(error)}`,
-    {
-      cause: error,
-      details: { ...(identityCode === undefined ? {} : { identityCode }) },
-      // A target that moved after planning is refused earlier, by the plan
-      // fence and identity guards, with their own re-plan errors; reaching
-      // this arm means the plan-time simulation missed an applier rule, so a
-      // re-plan from unchanged state reproduces the refusal.
-      suggestion:
-        "The plan-time identity checks did not foresee this refusal, so re-planning against the same target refuses again. Resolve the conflict named in the cause — change the branch's assertion, or the target's identity truth — then re-plan the merge.",
-    },
-  );
+  return new IdentityMergeConflictError(message(describeCause(error)), {
+    cause: error,
+    details: { ...(identityCode === undefined ? {} : { identityCode }) },
+    suggestion,
+  });
 }
 
 /**
@@ -1302,14 +1347,16 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
   }
   // Negative truth: a `different` assertion committed (or retracted) in the
   // window changes plan legality without moving any class or peer.
-  const ledger = (
-    await relevantLedgerAssertions(target, probe.memberKeys, txBackend)
-  ).filter(
-    (assertion) =>
-      !probe.plannedDeletions.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
-      !probe.plannedDeletions.has(mergeKey(assertion.b.kind, assertion.b.id)),
+  const ledger = await relevantLedgerAssertions(
+    target,
+    probe.memberKeys,
+    txBackend,
   );
-  if (differentLedgerFingerprint(ledger) !== probe.differentFingerprint) {
+  if (
+    differentLedgerFingerprint(
+      withoutPlannedDeletions(ledger, probe.plannedDeletions),
+    ) !== probe.differentFingerprint
+  ) {
     throw new BaseVersionMismatchError(
       "mergeIncremental() validated identity against the `different` assertions visible at planning, but that ledger changed before the commit transaction. Committing the plan could contradict identity truth it never validated.",
       { details: {} },
@@ -1338,16 +1385,7 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
           plan.identityAssertions,
           nowIso(),
         )
-      ).filter(
-        (assertion) =>
-          !ledgerIds.has(assertion.id) &&
-          !probe.plannedDeletions.has(
-            mergeKey(assertion.a.kind, assertion.a.id),
-          ) &&
-          !probe.plannedDeletions.has(
-            mergeKey(assertion.b.kind, assertion.b.id),
-          ),
-      );
+      ).filter((assertion) => !ledgerIds.has(assertion.id));
   try {
     assertNoContradictoryIdentityClosure(
       plan.identityAssertions,

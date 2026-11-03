@@ -13,6 +13,7 @@
  */
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
+  asNodeId,
   createStoreWithSchema,
   defineGraph,
   defineNode,
@@ -303,6 +304,11 @@ describe.each(backendMatrix())(
         expect(imported.errors).toEqual([]);
 
         vi.setSystemTime(new Date("2026-05-01T00:00:00.000Z"));
+        // The plan check alone: a snapshot plan runs no post-plan recheck.
+        const snapshotPlan = await planMerge(forkPoint, [branchA]);
+        expect(isErr(snapshotPlan) && snapshotPlan.error.message).toBe(
+          CONTRADICTION,
+        );
         const args = { forkPoint, target, branches: [branchA] };
         const planned = await planMergeIncremental(args);
         expect(isErr(planned)).toBe(true);
@@ -470,6 +476,116 @@ describe.each(backendMatrix())(
           ],
           "nothing was written",
         ).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+        for (const cleanup of cleanups.reverse()) await cleanup();
+      }
+    });
+
+    it("keeps a deleted node's ended history in the plan, as the commit does", async () => {
+      const cleanups: (() => Promise<void>)[] = [];
+      async function makeBackend(): Promise<GraphBackend> {
+        const fixture = await entry.make();
+        cleanups.push(fixture.cleanup);
+        return fixture.backend;
+      }
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+        const [base] = await createStoreWithSchema(graph, await makeBackend(), {
+          revisionTracking: true,
+        });
+        for (const id of ["n1", "n2", "n3"]) {
+          await base.nodes.Agent.create(
+            {},
+            { id, validFrom: "2020-01-01T00:00:00.000Z" },
+          );
+        }
+        // February to March: n1 ~ n3 while n3 and n2 differ.
+        vi.setSystemTime(new Date("2026-02-01T00:00:00.000Z"));
+        const joined = await base.identity.assertSame(agent("n1"), agent("n3"));
+        const separated = await base.identity.assertDifferent(
+          agent("n3"),
+          agent("n2"),
+        );
+        vi.setSystemTime(new Date("2026-03-01T00:00:00.000Z"));
+        await base.identity.retractAssertion(joined.assertion.id);
+        await base.identity.retractAssertion(separated.assertion.id);
+
+        // The branch carries none of that history: it claims n1 ~ n2 since
+        // 2024 and deletes n3, whose ended rows the deletion does not erase.
+        const branchA = unwrap(
+          await branch(base, () => makeBackend(), { id: BRANCH_A }),
+        );
+        vi.setSystemTime(new Date("2026-04-01T00:00:00.000Z"));
+        const imported = await importGraph(
+          branchA.store,
+          backdatedSame("backdated-same", "n1", "n2"),
+          { onConflict: "skip" },
+        );
+        expect(imported.errors).toEqual([]);
+        await branchA.store.nodes.Agent.delete(asNodeId<typeof Agent>("n3"));
+
+        vi.setSystemTime(new Date("2026-05-01T00:00:00.000Z"));
+        const planned = await planMerge(base, [branchA]);
+        expect(isErr(planned)).toBe(true);
+        if (!isErr(planned)) return;
+        console.info("deleted-node history refusal", planned.error.details);
+        expect(planned.error).toBeInstanceOf(IdentityMergeConflictError);
+        expect(planned.error.message).toBe(CONTRADICTION);
+        expect(planned.error.details).toMatchObject({
+          assertion: { id: separated.assertion.id },
+          window: {
+            validFrom: "2026-02-01T00:00:00.000Z",
+            validTo: "2026-03-01T00:00:00.000Z",
+          },
+        });
+        const merged = await merge(base, [branchA]);
+        expect(isErr(merged) && merged.error.message).toBe(CONTRADICTION);
+        expect(
+          await base.nodes.Agent.getById(asNodeId<typeof Agent>("n3")),
+        ).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+        for (const cleanup of cleanups.reverse()) await cleanup();
+      }
+    });
+
+    it("refuses a branch claim valid from after the planner's clock with the typed identity conflict", async () => {
+      const cleanups: (() => Promise<void>)[] = [];
+      async function makeBackend(): Promise<GraphBackend> {
+        const fixture = await entry.make();
+        cleanups.push(fixture.cleanup);
+        return fixture.backend;
+      }
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+        const [base] = await createStoreWithSchema(graph, await makeBackend(), {
+          revisionTracking: true,
+        });
+        for (const id of ["n1", "n2"]) {
+          await base.nodes.Agent.create(
+            {},
+            { id, validFrom: "2020-01-01T00:00:00.000Z" },
+          );
+        }
+        const branchA = unwrap(
+          await branch(base, () => makeBackend(), { id: BRANCH_A }),
+        );
+        // The branch's clock runs a day ahead of the planner's.
+        vi.setSystemTime(new Date("2026-02-02T00:00:00.000Z"));
+        await branchA.store.identity.assertSame(agent("n1"), agent("n2"));
+        vi.setSystemTime(new Date("2026-02-01T00:00:00.000Z"));
+
+        const planned = await planMerge(base, [branchA]);
+        expect(isErr(planned)).toBe(true);
+        if (!isErr(planned)) return;
+        console.info("future validFrom refusal", planned.error.message);
+        expect(planned.error).toBeInstanceOf(IdentityMergeConflictError);
+        expect(planned.error.details).toEqual({
+          identityCode: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
+        });
       } finally {
         vi.useRealTimers();
         for (const cleanup of cleanups.reverse()) await cleanup();

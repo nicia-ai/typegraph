@@ -24,7 +24,6 @@ import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
 import {
   normalizeIdentityAssertionRow,
   type RawIdentityAssertionRow,
-  toTransferAssertion,
 } from "./row-codec";
 import {
   buildSeparationProjection,
@@ -68,10 +67,7 @@ import {
   refKey,
   registeredPlainRef,
 } from "./service-read";
-import {
-  type IdentityServiceContext,
-  type IdentityTransferAssertion,
-} from "./service-types";
+import { type IdentityServiceContext } from "./service-types";
 import {
   executeIdentityStatement,
   identityChunkSize,
@@ -736,11 +732,11 @@ type IdentityWindowLedgerContext = Pick<
  * every assertion — ended ones included — and every node the requests'
  * classes reach over their windows. Both the commit's per-assertion validator
  * ({@link createIdentityWindowValidator}) and a graph merge's plan-time
- * contradiction simulation ({@link loadIdentityWindowHistory}) read it here,
+ * contradiction simulation (`loadIdentityWindowHistory`) read it here,
  * so a plan can never pass a claim the commit then refuses against history
  * the plan did not see.
  */
-async function readIdentityWindowLedger(
+export async function readIdentityWindowLedger(
   ctx: IdentityWindowLedgerContext,
   target: Backend,
   requests: readonly IdentityWindowValidationRequest[],
@@ -755,41 +751,6 @@ async function readIdentityWindowLedger(
     sameIdAcrossKinds: ctx.sameIdAcrossKinds,
     recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
   });
-}
-
-/**
- * The target's live assertion rows — current and ended — that the commit's
- * validator would read for importing `assertions`, as transfer rows: the
- * history a merge plan's contradiction simulation must judge its claims
- * against, read through {@link readIdentityWindowLedger} with the requests the
- * importer itself builds.
- */
-export async function loadIdentityWindowHistory(
-  ctx: IdentityWindowLedgerContext,
-  target: Backend,
-  assertions: readonly IdentityTransferAssertion[],
-  operationInstant: string,
-): Promise<readonly IdentityTransferAssertion[]> {
-  const ledger = await readIdentityWindowLedger(
-    ctx,
-    target,
-    assertions.map((assertion) => ({
-      references: [assertion.a, assertion.b],
-      window: resolveIdentityValidityWindow(
-        {
-          validFrom: assertion.validFrom,
-          ...(assertion.validTo === undefined ?
-            {}
-          : { validTo: assertion.validTo }),
-        },
-        operationInstant,
-      ),
-    })),
-    operationInstant,
-  );
-  return ledger.assertions
-    .filter((row) => row.deleted_at === undefined)
-    .map((row) => toTransferAssertion(row));
 }
 
 export async function createIdentityWindowValidator(
