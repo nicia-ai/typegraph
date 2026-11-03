@@ -117,7 +117,7 @@ export function buildRoundTripGraph(
   });
 }
 
-export type RoundTripGraph = ReturnType<typeof buildRoundTripGraph>;
+type RoundTripGraph = ReturnType<typeof buildRoundTripGraph>;
 export type RoundTripStore = Store<RoundTripGraph>;
 
 export const WHOLE_KIND = "RtWhole";
@@ -135,7 +135,7 @@ export const PART_RELATIONS = [
 type PartRelation = (typeof PART_RELATIONS)[number];
 type CompositionEdgeKind = PartRelation["via"];
 
-export const NODE_KINDS = [
+const NODE_KINDS = [
   WHOLE_KIND,
   ...PART_RELATIONS.filter((relation) => relation.part !== SECTION_KIND).map(
     (relation) => relation.part,
@@ -156,7 +156,7 @@ export function instantAt(step: number): string {
 }
 
 /** Halfway between two steps: inside every window that spans the step. */
-export function instantBetween(step: number): string {
+function instantBetween(step: number): string {
   return new Date(FIRST_STEP_MS + step * DAY_MS + DAY_MS / 2).toISOString();
 }
 
@@ -376,7 +376,7 @@ type DynamicEdges = Record<
   }>
 >;
 
-export function dynamicNodes(store: RoundTripStore): DynamicNodes {
+function dynamicNodes(store: RoundTripStore): DynamicNodes {
   return store.nodes as unknown as DynamicNodes;
 }
 
@@ -531,7 +531,7 @@ async function applyOp(
  * outcome of a random step (a second whole, a cycle, a contradiction) and is
  * counted; anything else is a defect and propagates.
  */
-export async function applyHistory(
+async function applyHistory(
   store: RoundTripStore,
   history: readonly HistoryOp[],
 ): Promise<HistoryOutcome> {
@@ -618,7 +618,7 @@ async function readCoordinate(
  * readers at `now` plus each sampled past coordinate — every answer a
  * consumer reads through the composition surface.
  */
-export async function readCompositionAnswers(
+async function readCompositionAnswers(
   store: RoundTripStore,
   coordinates: readonly string[],
 ): Promise<unknown> {
@@ -678,7 +678,7 @@ function normalizePlan(plan: unknown): unknown {
 }
 
 /** Valid-time coordinates worth reading after a history of `steps` steps. */
-export function sampleCoordinates(steps: number): readonly string[] {
+function sampleCoordinates(steps: number): readonly string[] {
   const picks = new Set<number>([0, Math.floor(steps / 2), steps - 1]);
   return [...picks].flatMap((step) =>
     step < 0 ? [] : [instantAt(step), instantBetween(step)],
