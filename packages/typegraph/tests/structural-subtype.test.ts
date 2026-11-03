@@ -555,6 +555,24 @@ describe("scalars", () => {
       expected: { reason: "numeric-bound-not-tighter" },
     },
     {
+      name: "z.number().max(1) not subtype z.number().lt(1) (inclusive upper bound at the exclusive one's value)",
+      child: z.number().max(1),
+      parent: z.number().lt(1),
+      expected: { reason: "numeric-bound-not-tighter" },
+    },
+    {
+      name: "z.number().lt(1) subtype z.number().max(1) (exclusive tighter at equal value)",
+      child: z.number().lt(1),
+      parent: z.number().max(1),
+      expected: "subtype",
+    },
+    {
+      name: "z.number().lt(1).int() subtype z.number().lt(1)",
+      child: z.number().lt(1).int(),
+      parent: z.number().lt(1),
+      expected: "subtype",
+    },
+    {
       name: "child drops the parent's multipleOf -> multiple-of-mismatch",
       child: z.number(),
       parent: z.number().multipleOf(2),
@@ -955,7 +973,90 @@ describe("finite value sets under bounded parents", () => {
 // Arrays and tuples
 // ============================================================
 
+describe("a numeric bound stated both inclusively and exclusively", () => {
+  // Zod never projects both keywords on one side; a hand-written or
+  // persisted document can. The tighter of the two is the bound.
+  const rows: readonly Readonly<{
+    name: string;
+    child: JsonSchema;
+    parent: JsonSchema;
+    expected: StructuralSubtypeResult["verdict"];
+  }>[] = [
+    {
+      name: "child minimum 2 beside exclusiveMinimum 1 is bounded at 2",
+      child: { type: "number", minimum: 2, exclusiveMinimum: 1 },
+      parent: { type: "number", minimum: 2 },
+      expected: "subtype",
+    },
+    {
+      name: "child minimum 1 beside exclusiveMinimum 1 is bounded exclusively at 1",
+      child: { type: "number", minimum: 1, exclusiveMinimum: 1 },
+      parent: { type: "number", exclusiveMinimum: 1 },
+      expected: "subtype",
+    },
+    {
+      name: "parent minimum 0 beside exclusiveMinimum 1 refuses an inclusive 1",
+      child: { type: "number", minimum: 1 },
+      parent: { type: "number", minimum: 0, exclusiveMinimum: 1 },
+      expected: "not-subtype",
+    },
+    {
+      name: "child maximum 2 beside exclusiveMaximum 3 is bounded at 2",
+      child: { type: "number", maximum: 2, exclusiveMaximum: 3 },
+      parent: { type: "number", maximum: 2 },
+      expected: "subtype",
+    },
+    {
+      name: "child maximum 1 beside exclusiveMaximum 1 is bounded exclusively at 1",
+      child: { type: "number", maximum: 1, exclusiveMaximum: 1 },
+      parent: { type: "number", exclusiveMaximum: 1 },
+      expected: "subtype",
+    },
+    {
+      name: "parent maximum 5 beside exclusiveMaximum 1 refuses an inclusive 1",
+      child: { type: "number", maximum: 1 },
+      parent: { type: "number", maximum: 5, exclusiveMaximum: 1 },
+      expected: "not-subtype",
+    },
+  ];
+
+  it.each(rows)("$name", ({ child, parent, expected }) => {
+    expect(isStructuralSubtype(child, parent).verdict).toBe(expected);
+  });
+});
+
 describe("arrays and tuples", () => {
+  it("a tuple whose member does not narrow the parent tuple's member is not a subtype", () => {
+    expect(verdict(z.tuple([z.number()]), z.tuple([z.string()]))).toMatchObject(
+      {
+        verdict: "not-subtype",
+        reason: "type-token-mismatch",
+        path: ["[0]"],
+      },
+    );
+  });
+
+  it("a tuple whose member does not narrow a homogeneous parent's items is not a subtype", () => {
+    expect(verdict(z.tuple([z.number()]), z.array(z.string()))).toMatchObject({
+      verdict: "not-subtype",
+      reason: "type-token-mismatch",
+      path: ["[0]"],
+    });
+  });
+
+  it("an array with no items schema is not a subtype of one whose items are typed", () => {
+    expect(
+      isStructuralSubtype(
+        { type: "array" },
+        { type: "array", items: { type: "string" } },
+      ),
+    ).toEqual({
+      verdict: "not-subtype",
+      reason: "unconstrained-where-parent-constrains",
+      path: ["[]"],
+    });
+  });
+
   it("z.array(z.string().min(2)) subtype z.array(z.string())", () => {
     assertVerdict(
       verdict(z.array(z.string().min(2)), z.array(z.string())),
