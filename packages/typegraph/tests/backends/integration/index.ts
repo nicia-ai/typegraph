@@ -24,6 +24,7 @@ export { registerCompositionExistenceIntegrationTests } from "./composition-exis
 export { registerCompositionFenceIntegrationTests } from "./composition-fence";
 export { registerCompositionMembershipReadIntegrationTests } from "./composition-membership-reads";
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
+export { registerCompositionReadsModelIntegrationTests } from "./composition-reads-model";
 export { registerCompositionTighteningIntegrationTests } from "./composition-tightening";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";
 export { registerConstraintFenceTransactionHealthTests } from "./constraint-fence-transaction-health";
