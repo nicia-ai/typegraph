@@ -14,7 +14,8 @@
  * marks where the projection dropped a regex flag, a refinement, a strict
  * object, or read a `.meta()` key as a constraint, so such a pair answers
  * `incomparable` (rule 3) instead of a guess. It also marks each node the
- * projection cannot convert at all, which rule 2 accepts unjudged.
+ * projection cannot convert at all, which rule 2 accepts only under an
+ * unconstrained parent node or beside a node of the same identity.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -53,9 +54,17 @@
  *    reference is refused the same way. Rule 6 decides through the same test.
  *    Right after it, a node marked {@link UNPROJECTABLE_NODE_KEYWORD} on
  *    either side (a Zod construct with no JSON Schema spelling, such as
- *    `embedding()` or `z.date()`) is accepted UNJUDGED: there is nothing to
- *    compare, and the node's siblings are still compared by the enclosing
- *    object or union. Only a live graph's comparison projection carries it.
+ *    `embedding()`, `z.date()` or a `.transform()`) states nothing to
+ *    compare, so the pair is accepted only where no comparison is needed:
+ *    the parent node admits every value (`{}`, from `z.unknown()`/`z.any()`,
+ *    carrying no constraining keyword), or both nodes carry the same marker
+ *    identity — the same Zod instance, plain check-free nodes of one type
+ *    (`z.date()` and `z.date()`), or `embedding()`s of equal dimensions and
+ *    index options. Every other pair with an unprojectable side is
+ *    `incomparable` ("unsupported-construct"), except that a union on the
+ *    other side is compared member by member first. The node's siblings are
+ *    still compared by the enclosing object or union. Only a live graph's
+ *    comparison projection carries the marker.
  * 3. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
  *    which is why recursion here cannot diverge. So is a node carrying a
@@ -483,8 +492,13 @@ export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
  * `embedding()` and any other `z.custom()`, `z.date()`, `z.set()`, `z.map()`,
  * `z.bigint()`, a `.transform()` — where the persisted projection would
  * collapse the whole kind to its placeholder instead. Such a node states
- * nothing to compare, so it is accepted without a verdict while every other
- * node of the pair is still judged. A node Zod converts only in part (a
+ * nothing to compare, so it narrows only a parent node that admits every
+ * value, and matches another unprojectable node only when the two carry the
+ * same value here: its IDENTITY, written by the projection as the node type
+ * alone for a plain check-free node of a type whose values it fully
+ * describes (`z.date()`, `z.bigint()`), the dimensions and index options for
+ * an `embedding()`, and the Zod instance otherwise. Every other node of the
+ * pair is still judged. A node Zod converts only in part (a
  * dynamic `.catch()` keeps its `type`) does not carry this marker; the
  * projection marks it with {@link ZOD_ONLY_CONSTRAINT_KEYWORD} instead.
  * Written only by `structuralSubtypeProjection`
@@ -696,6 +710,82 @@ function sameSchema(child: unknown, parent: unknown, walk: Walk): boolean {
   );
 }
 
+// ============================================================
+// Unprojectable nodes
+// ============================================================
+
+/**
+ * Keywords that make a schema node constrain values: every keyword this
+ * predicate compares or refuses as unmodeled, a reference, and each marker
+ * the comparison projection writes.
+ */
+function isConstraintBearingKeyword(key: string): boolean {
+  return (
+    COMPARABLE_KEYWORDS.has(key) ||
+    UNMODELED_CONSTRAINING_KEYWORDS.has(key) ||
+    key === REFERENCE_KEYWORD ||
+    key === ZOD_ONLY_CONSTRAINT_KEYWORD ||
+    key === ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD ||
+    key === UNPROJECTABLE_NODE_KEYWORD
+  );
+}
+
+/**
+ * Whether `stripped` (a schema after {@link stripSchemaMetadata}) admits
+ * every value: `z.unknown()`, `z.any()`, or a node carrying only
+ * annotations and keywords rule 5 ignores.
+ */
+function isUnconstrained(stripped: Readonly<Record<string, unknown>>): boolean {
+  return Object.keys(stripped).every((key) => !isConstraintBearingKeyword(key));
+}
+
+/**
+ * What an unprojectable node stands for (see
+ * {@link UNPROJECTABLE_NODE_KEYWORD}), if it is one.
+ */
+function unprojectableIdentity(schema: JsonSchema): string | undefined {
+  if (!hasOwnKey(schema, UNPROJECTABLE_NODE_KEYWORD)) return undefined;
+  return String(schema[UNPROJECTABLE_NODE_KEYWORD]);
+}
+
+/**
+ * The verdict for a pair where either side is an unprojectable node, or
+ * `undefined` when neither is, or when the other side is a union whose
+ * members must each be compared on their own.
+ *
+ * An unprojectable node states nothing about the values it admits, so no
+ * comparison can show it narrows a parent that constrains anything, nor that
+ * a child satisfies a parent it stands for. It is accepted only where that
+ * needs no comparison: the parent admits every value, or both sides are
+ * unprojectable nodes with the same identity — provably the same values.
+ */
+function compareUnprojectable(
+  child: JsonSchema,
+  parent: JsonSchema,
+  strippedParent: Readonly<Record<string, unknown>>,
+  path: readonly string[],
+): StructuralSubtypeResult | undefined {
+  const childIdentity = unprojectableIdentity(child);
+  const parentIdentity = unprojectableIdentity(parent);
+  if (childIdentity === undefined && parentIdentity === undefined) {
+    return undefined;
+  }
+  if (isUnconstrained(strippedParent)) return SUBTYPE;
+  if (childIdentity === undefined) {
+    return isUnionSchema(child) ? undefined : (
+        incomparable("unsupported-construct", path)
+      );
+  }
+  if (parentIdentity === undefined) {
+    return isUnionSchema(parent) ? undefined : (
+        incomparable("unsupported-construct", path)
+      );
+  }
+  return childIdentity === parentIdentity ? SUBTYPE : (
+      incomparable("unsupported-construct", path)
+    );
+}
+
 function compareSchemas(
   child: JsonSchema,
   parent: JsonSchema,
@@ -718,12 +808,13 @@ function compareSchemas(
   const strippedParent = stripSchemaMetadata(parent);
   if (sameSchema(strippedChild, strippedParent, walk)) return SUBTYPE;
 
-  if (
-    hasOwnKey(child, UNPROJECTABLE_NODE_KEYWORD) ||
-    hasOwnKey(parent, UNPROJECTABLE_NODE_KEYWORD)
-  ) {
-    return SUBTYPE;
-  }
+  const unprojectableResult = compareUnprojectable(
+    child,
+    parent,
+    strippedParent,
+    path,
+  );
+  if (unprojectableResult !== undefined) return unprojectableResult;
 
   if (
     hasOwnKey(child, REFERENCE_KEYWORD) ||

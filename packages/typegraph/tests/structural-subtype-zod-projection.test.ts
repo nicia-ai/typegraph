@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, subClassOf } from "../src";
+import { defineGraph, defineNode, embedding, subClassOf } from "../src";
 import { ConfigurationError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
 import { serializeSchemaProperties } from "../src/schema/serializer";
@@ -350,6 +350,18 @@ describe("structural subsumption over formats, overwrites and literals the proje
       witness: " a",
     },
     {
+      name: "z.string().min(2).trim().max(5) under z.string().min(2).max(5) (an overwrite between two stated checks)",
+      child: z.string().min(2).trim().max(5),
+      parent: z.string().min(2).max(5),
+      witness: " a",
+    },
+    {
+      name: "z.literal(' a') under z.string().max(5).trim().min(2) (a check after the parent's interleaved overwrite)",
+      child: z.literal(" a"),
+      parent: z.string().max(5).trim().min(2),
+      witness: " a",
+    },
+    {
       name: "record z.enum([' a']) keys under z.string().trim().min(2) keys",
       child: z.record(z.enum([" a"]), z.number()),
       parent: z.record(z.string().trim().min(2), z.number()),
@@ -393,18 +405,22 @@ describe("structural subsumption over formats, overwrites and literals the proje
   });
 
   it("judges a finite union member on its own beside an unprojectable one", () => {
-    // The `z.date()` member is accepted unjudged, as every unprojectable node
-    // is; the literal member answers exactly as a bounded string would.
+    // The `z.date()` member matches the parent's own `z.date()` member; the
+    // literal member answers exactly as a bounded string would.
+    const parent = z.union([z.date(), z.string().min(1)]);
+    expect(liveVerdict(z.union([z.date(), z.literal("x")]), parent)).toEqual({
+      verdict: "subtype",
+    });
+    expect(
+      liveVerdict(z.union([z.date(), z.literal("")]), parent).verdict,
+    ).not.toBe("subtype");
+    // Under a parent with no unconvertible member, the `z.date()` member
+    // matches nothing that can be judged.
     expect(
       liveVerdict(z.union([z.date(), z.literal("x")]), z.string().min(1)),
-    ).toEqual(
-      liveVerdict(z.union([z.date(), z.string().min(1)]), z.string().min(1)),
-    );
-    expect(
-      liveVerdict(z.union([z.date(), z.literal("")]), z.string().min(1)),
     ).toMatchObject({
-      verdict: "not-subtype",
-      reason: "no-matching-union-member",
+      verdict: "incomparable",
+      reason: "unsupported-construct",
     });
   });
 
@@ -419,5 +435,199 @@ describe("structural subsumption over formats, overwrites and literals the proje
     expect(liveVerdict(z.literal("ab"), z.string().startsWith("a"))).toEqual({
       verdict: "subtype",
     });
+  });
+});
+
+function upper(value: string): string {
+  return value.toUpperCase();
+}
+
+describe("structural subsumption over a field the projection cannot convert", () => {
+  const sharedTransform = z.string().transform((value) => upper(value));
+
+  // The unconvertible side states nothing, so nothing shows it narrows a
+  // parent that constrains values, or satisfies a parent it stands for.
+  const refused: readonly Readonly<{
+    name: string;
+    child: () => z.ZodType;
+    parent: () => z.ZodType;
+    path?: readonly string[];
+  }>[] = [
+    {
+      name: "a transformed child under a bounded string",
+      child: () => z.string().transform((value) => upper(value)),
+      parent: () => z.string().min(3),
+    },
+    {
+      name: "a plain child under a parent whose transform hides its bound",
+      child: () => z.string(),
+      parent: () =>
+        z
+          .string()
+          .min(3)
+          .transform((value) => upper(value)),
+    },
+    {
+      name: "a custom child under a bounded number",
+      child: () => z.custom<number>(),
+      parent: () => z.number().min(5),
+    },
+    {
+      name: "a date child under a bare string, which constrains by type",
+      child: () => z.date(),
+      parent: () => z.string(),
+    },
+    {
+      name: "a bigint child under a bare number",
+      child: () => z.bigint(),
+      parent: () => z.number(),
+    },
+    {
+      name: "a date child under an empty object",
+      child: () => z.date(),
+      parent: () => z.object({}),
+    },
+    {
+      name: "a date child under a refined parent that projects as {}",
+      child: () => z.date(),
+      parent: () => z.unknown().refine((value) => value !== undefined),
+    },
+    {
+      name: "an unknown child under a date parent",
+      child: () => z.unknown(),
+      parent: () => z.date(),
+    },
+    {
+      name: "a date child under a custom parent, a different node type",
+      child: () => z.date(),
+      parent: () => z.custom<Date>(),
+    },
+    {
+      name: "a date child under a nullable string",
+      child: () => z.date(),
+      parent: () => z.string().nullable(),
+    },
+    {
+      name: "a nullable date child under a date parent",
+      child: () => z.date().nullable(),
+      parent: () => z.date(),
+      path: ["field", "anyOf[1]"],
+    },
+    {
+      name: "two independently declared transforms with different checks",
+      child: () => z.string().transform((value) => upper(value)),
+      parent: () =>
+        z
+          .string()
+          .min(3)
+          .transform((value) => upper(value)),
+    },
+    {
+      name: "two independently declared identical transforms",
+      child: () => z.string().transform((value) => upper(value)),
+      parent: () => z.string().transform((value) => upper(value)),
+    },
+    {
+      name: "embeddings of different dimensions",
+      child: () => embedding(3),
+      parent: () => embedding(4),
+    },
+    {
+      name: "embeddings of different metrics",
+      child: () => embedding(3, { metric: "l2" }),
+      parent: () => embedding(3),
+    },
+    {
+      name: "a bounded date under a plain one",
+      child: () => z.date(),
+      parent: () => z.date().min(new Date(0)),
+    },
+    {
+      name: "a refined date under a plain one",
+      child: () => z.date().refine((value) => value.getTime() > 0),
+      parent: () => z.date(),
+    },
+    {
+      name: "two independently declared custom checks",
+      child: () => z.custom<string>((value) => typeof value === "string"),
+      parent: () => z.custom<string>((value) => typeof value === "string"),
+    },
+    {
+      name: "two independently declared sets",
+      child: () => z.set(z.number()),
+      parent: () => z.set(z.string()),
+    },
+    {
+      name: "a defaulted transform under the transform it wraps",
+      child: () => sharedTransform.default("x"),
+      parent: () => sharedTransform,
+    },
+  ];
+
+  it.each(refused)(
+    "refuses $name as incomparable",
+    ({ child, parent, path }) => {
+      expect(liveVerdict(child(), parent())).toEqual({
+        verdict: "incomparable",
+        reason: "unsupported-construct",
+        path: path ?? ["field"],
+      });
+    },
+  );
+
+  const accepted: readonly Readonly<{
+    name: string;
+    child: () => z.ZodType;
+    parent: () => z.ZodType;
+  }>[] = [
+    {
+      name: "a transformed child under z.unknown()",
+      child: () => z.string().transform((value) => upper(value)),
+      parent: () => z.unknown(),
+    },
+    {
+      name: "a date child under z.any() carrying only a description",
+      child: () => z.date(),
+      parent: () => z.any().describe("anything"),
+    },
+    {
+      name: "independently declared dates",
+      child: () => z.date(),
+      parent: () => z.date(),
+    },
+    {
+      name: "a described date under a plain one",
+      child: () => z.date().describe("when"),
+      parent: () => z.date().readonly(),
+    },
+    {
+      name: "a date child under a nullable date parent",
+      child: () => z.date(),
+      parent: () => z.date().nullable(),
+    },
+    {
+      name: "plain bigints",
+      child: () => z.bigint(),
+      parent: () => z.bigint(),
+    },
+    {
+      name: "a transform both sides share, as `.extend()` does",
+      child: () => sharedTransform,
+      parent: () => sharedTransform,
+    },
+    {
+      name: "an optional wrapper around a shared transform",
+      child: () => sharedTransform,
+      parent: () => sharedTransform.optional(),
+    },
+    {
+      name: "a separately redeclared embedding of equal dimensions",
+      child: () => embedding(384),
+      parent: () => embedding(384),
+    },
+  ];
+
+  it.each(accepted)("accepts $name", ({ child, parent }) => {
+    expect(liveVerdict(child(), parent())).toEqual({ verdict: "subtype" });
   });
 });

@@ -41,15 +41,23 @@
  * other `z.custom()`, `z.date()`, `z.set()`, `z.map()`, `z.bigint()`, a
  * `.transform()`) makes the persisted projection give up on the whole kind,
  * which projects as the unprojectable placeholder. Here each such node is
- * replaced by {@link UNPROJECTABLE_NODE_KEYWORD} instead, which
- * `isStructuralSubtype` accepts unjudged, so every other field of the kind
- * is still compared. A node Zod converts only in part (a dynamic `.catch()`
+ * replaced by {@link UNPROJECTABLE_NODE_KEYWORD} instead, carrying the
+ * node's identity (`stampUnprojectableIdentity`), so every other field of
+ * the kind is still compared. `isStructuralSubtype` accepts such a node only
+ * under a parent node that admits every value, or beside a node of the same
+ * identity. A node Zod converts only in part (a dynamic `.catch()`
  * keeps its `type`) is marked as carrying a Zod-only constraint instead. The
  * persisted placeholder is kept when this projection cannot do better: a
  * conversion that fails for another reason.
  */
 import { z } from "zod";
 
+import {
+  EMBEDDING_DIMENSIONS_KEY,
+  EMBEDDING_INDEX_KEY,
+  isEmbeddingSchema,
+} from "../core/embedding";
+import { canonicalJson } from "./canonical";
 import {
   isUnprojectableSchemaProjection,
   serializeSchemaProperties,
@@ -318,6 +326,83 @@ function markPartlyConvertedNode(
 }
 
 /**
+ * Zod node types whose values an unconvertible node with no checks fully
+ * describes: two such nodes of one type admit exactly the same values.
+ */
+const PLAIN_UNPROJECTABLE_NODE_TYPES: ReadonlySet<string> = new Set([
+  "date",
+  "bigint",
+  "symbol",
+  "undefined",
+  "void",
+  "nan",
+]);
+
+/**
+ * Wrappers that store exactly what the node they wrap stores, so a node
+ * keeps the identity of the one it wraps. Optionality is compared by the
+ * enclosing object's `required`.
+ */
+const IDENTITY_PRESERVING_WRAPPER_TYPES: ReadonlySet<string> = new Set([
+  "optional",
+  "readonly",
+  "lazy",
+]);
+
+const UNPROJECTABLE_IDENTITY_SEPARATOR = "#";
+
+/**
+ * Restates an unconvertible node's marker as what makes two such nodes
+ * provably admit the same values (see {@link UNPROJECTABLE_NODE_KEYWORD}):
+ *
+ * - a plain node — a type of {@link PLAIN_UNPROJECTABLE_NODE_TYPES} with no
+ *   check — is its node type alone, so `z.date()` matches any other
+ *   `z.date()`;
+ * - an `embedding()` is its dimensions and index options, so a child that
+ *   redeclares `embedding(384)` matches its parent's;
+ * - every other node (a check, refinement, transform, pipe, default or
+ *   custom function) is the Zod instance that carries it, so it matches only
+ *   a field shared through `.extend()` or a reused schema.
+ *
+ * Zod visits a wrapper after the node it wraps, with the wrapped marker
+ * copied into its own result, so the outermost node's identity is the one
+ * that stays.
+ */
+function stampUnprojectableIdentity(
+  context: Readonly<{
+    zodSchema: z.core.$ZodTypes;
+    jsonSchema: Record<string, unknown>;
+  }>,
+): void {
+  const { jsonSchema, zodSchema } = context;
+  const marker = jsonSchema[UNPROJECTABLE_NODE_KEYWORD];
+  if (typeof marker !== "string") return;
+  const def = zodSchema._zod.def as ZodNodeDef;
+  if (
+    def.type !== undefined &&
+    IDENTITY_PRESERVING_WRAPPER_TYPES.has(def.type)
+  ) {
+    return;
+  }
+  const [nodeType = marker] = marker.split(UNPROJECTABLE_IDENTITY_SEPARATOR);
+  if (isEmbeddingSchema(zodSchema)) {
+    const dimensions = zodSchema[EMBEDDING_DIMENSIONS_KEY];
+    const index = canonicalJson(zodSchema[EMBEDDING_INDEX_KEY]);
+    jsonSchema[UNPROJECTABLE_NODE_KEYWORD] =
+      `${nodeType}${UNPROJECTABLE_IDENTITY_SEPARATOR}embedding:${dimensions}:${index}`;
+    return;
+  }
+  const isPlain =
+    def.type === nodeType &&
+    PLAIN_UNPROJECTABLE_NODE_TYPES.has(nodeType) &&
+    (def.checks ?? []).length === 0;
+  jsonSchema[UNPROJECTABLE_NODE_KEYWORD] =
+    isPlain ? nodeType : (
+      `${nodeType}${UNPROJECTABLE_IDENTITY_SEPARATOR}${instanceToken(zodSchema)}`
+    );
+}
+
+/**
  * `schema` converted with every Zod-only constraint and every unconvertible
  * node marked, or the persisted placeholder when that conversion cannot
  * replace it (see the module docblock).
@@ -329,6 +414,7 @@ function projectForComparison(schema: z.ZodType): JsonSchema {
       override: (context) => {
         markZodOnlyConstraints(context);
         markPartlyConvertedNode(context);
+        stampUnprojectableIdentity(context);
       },
       unrepresentable: (context) => {
         const nodeType = context.zodSchema._zod.def.type;

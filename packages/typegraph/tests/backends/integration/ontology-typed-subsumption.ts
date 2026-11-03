@@ -218,8 +218,8 @@ const redeclaredVectorGraph = defineGraph({
   },
   edges: {},
   ontology: [
-    // The compile-time filter reads the branded `EmbeddingValue`; the registry
-    // build, which compares projected JSON Schema, accepts the plain array.
+    // Both checks refuse it: the compile-time filter reads the branded
+    // `EmbeddingValue`, and the registry build cannot judge the embedding.
     // @ts-expect-error a plain number array is not the branded embedding type
     subClassOf(RedeclaredVectorMemo, SearchableDocument),
   ],
@@ -243,7 +243,8 @@ const taggedSubclassGraph = defineGraph({
   edges: {},
   ontology: [
     // The compile-time filter reads the branded `EmbeddingValue` on the child
-    // against the plain array on the parent; the registry accepts it.
+    // against the plain array on the parent, and the registry build cannot
+    // judge the embedding against it either.
     // @ts-expect-error a branded embedding is not a plain number array to the filter
     subClassOf(TaggedVectorMemo, PlainVectorDocument),
   ],
@@ -446,6 +447,14 @@ async function rejectionOf(attempt: Promise<unknown>): Promise<unknown> {
 function expectConfigurationError(caught: unknown): ConfigurationError {
   expect(caught).toBeInstanceOf(ConfigurationError);
   return caught as ConfigurationError;
+}
+
+function expectVectorFieldIncomparable(caught: unknown): void {
+  expect(expectConfigurationError(caught).details).toMatchObject({
+    code: "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+    reason: "unsupported-construct",
+    path: ["vector"],
+  });
 }
 
 function kindsOf(rows: readonly Readonly<{ kind: string }>[]): string[] {
@@ -1017,15 +1026,12 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       ]);
     });
 
-    it("refuses an embedding accessor when a subclass redeclares the vector field untagged", async () => {
-      const store = await context.createStore(redeclaredVectorGraph);
-
-      expect(() =>
-        store
-          .query()
-          .from("TsSearchableDoc", "d")
-          .whereNode("d", (d) => d.vector.similarTo([1, 0, 0], 5)),
-      ).toThrow(ConfigurationError);
+    it("refuses at registry build a subclass that redeclares an embedding field as a plain array", async () => {
+      // The plain array admits vectors of any length, which the parent's
+      // `embedding(3)` refuses, so the pair never reaches a query.
+      expectVectorFieldIncomparable(
+        await rejectionOf(context.createStore(redeclaredVectorGraph)),
+      );
     });
   });
 
@@ -1088,38 +1094,6 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       expect(refusal.details).toMatchObject({
         code: UNINDEXED_SEARCH_CODE,
         capability: "fulltext",
-      });
-    });
-
-    it(`refuses a vector expansion when a subclass redeclares the embedding field untagged`, async (ctx) => {
-      const store = await context.createStore(redeclaredVectorGraph);
-      if (store.backend.capabilities.vector?.supported !== true) {
-        ctx.skip();
-      }
-      await store.nodes.TsSearchableDoc.create({ vector: [1, 0, 0] });
-      await store.nodes.TsRedeclaredVectorMemo.create({ vector: [1, 0, 0] });
-
-      const exact = await store.search.vector("TsSearchableDoc", {
-        fieldPath: "vector",
-        queryEmbedding: [1, 0, 0],
-        limit: 10,
-      });
-      expect(exact.map((hit) => hit.node.kind)).toEqual(["TsSearchableDoc"]);
-
-      const refusal = expectConfigurationError(
-        await rejectionOf(
-          store.search.vector("TsSearchableDoc", {
-            fieldPath: "vector",
-            queryEmbedding: [1, 0, 0],
-            limit: 10,
-            expansion: "subclasses",
-          }),
-        ),
-      );
-      expect(refusal.details).toMatchObject({
-        code: UNINDEXED_SEARCH_CODE,
-        capability: "vector",
-        kinds: ["TsRedeclaredVectorMemo"],
       });
     });
 
@@ -1193,42 +1167,12 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       });
     });
 
-    it(`refuses a vector expansion whose subclass tags a field the parent declares plain, as the builder does`, async (ctx) => {
-      const store = await context.createStore(taggedSubclassGraph);
-      if (store.backend.capabilities.vector?.supported !== true) {
-        ctx.skip();
-      }
-
-      expect(() =>
-        store
-          .query()
-          .from("TsPlainVectorDoc", "d")
-          .whereNode("d", (d) =>
-            // The parent declares a plain array, so the typed accessor has no
-            // `similarTo`; the runtime accessor is what the builder decides on.
-            (
-              d.vector as unknown as Readonly<{
-                similarTo: (query: readonly number[], limit: number) => never;
-              }>
-            ).similarTo([1, 0, 0], 5),
-          ),
-      ).toThrow(ConfigurationError);
-
-      const refusal = expectConfigurationError(
-        await rejectionOf(
-          store.search.vector("TsPlainVectorDoc", {
-            fieldPath: "vector",
-            queryEmbedding: [1, 0, 0],
-            limit: 10,
-            expansion: "subclasses",
-          }),
-        ),
+    it("refuses at registry build a subclass that tags a field its parent declares as a plain array", async () => {
+      // Nothing the projection states about an `embedding()` shows its values
+      // satisfy the parent's array schema, so the pair is incomparable.
+      expectVectorFieldIncomparable(
+        await rejectionOf(context.createStore(taggedSubclassGraph)),
       );
-      expect(refusal.details).toMatchObject({
-        code: UNINDEXED_SEARCH_CODE,
-        capability: "vector",
-        kinds: ["TsTaggedVectorMemo"],
-      });
     });
 
     it(`still runs a fulltext expansion whose subclass omits the searchable field, which holds no text there`, async (ctx) => {

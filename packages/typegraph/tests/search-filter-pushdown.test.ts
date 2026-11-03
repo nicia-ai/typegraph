@@ -467,10 +467,9 @@ describe("facade search filter pushdown", () => {
     await runScenario(postgresDescriptor);
   });
 
-  it("rejects mixed declared metrics across a subclass expansion", async () => {
-    // No per-call metric can bridge mixed declared metrics: each kind's
-    // storage is validated against its declared metric, so the expansion
-    // is unsupported outright.
+  it("refuses a subclass whose embedding declares a different metric at registry build", async () => {
+    // Two embeddings match only with equal dimensions and index options, so
+    // a subclass cannot declare a metric its parent's expansion would mix.
     const L2Note = defineNode("L2Note", {
       schema: z.object({
         title: searchable({ language: "english" }),
@@ -487,16 +486,14 @@ describe("facade search filter pushdown", () => {
     const { backend, cleanup } = await localSqliteDescriptor.create();
     try {
       if (backend.capabilities.vector?.supported !== true) return;
-      const [store] = await createStoreWithSchema(graph, backend);
-      await expect(
-        store.search.vector("Article", {
-          fieldPath: FIELD_PATH,
-          queryEmbedding: QUERY_EMBEDDING,
-          limit: 3,
-          expansion: "subclasses",
-        }),
-      ).rejects.toThrow(
-        /declare different metrics.*search the kinds separately/s,
+      await expect(createStoreWithSchema(graph, backend)).rejects.toMatchObject(
+        {
+          details: {
+            code: "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+            reason: "unsupported-construct",
+            path: [FIELD_PATH],
+          },
+        },
       );
     } finally {
       await cleanup();

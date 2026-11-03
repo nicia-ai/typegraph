@@ -1,0 +1,878 @@
+/**
+ * Soundness of the live structural subtype check against Zod itself.
+ *
+ * The oracle is independent of the predicate: a pair the check accepts must
+ * have every value the CHILD's Zod schema stores accepted by the PARENT's
+ * Zod `safeParse`. Pairs are drawn as plain specs, built into Zod, and
+ * compared through `structuralSubtypeProjection` exactly as a live graph's
+ * registry compares them. A child is the parent spec under a few random
+ * edits (a near miss is where an unsound accept hides) or an unrelated spec.
+ *
+ * Sample inputs are JSON values, the only values a row can carry. A
+ * non-JSON input such as `{ x: undefined }` passes an exhaustive enum-key
+ * record and fails its parent for a reason no stored row can reach.
+ *
+ * Unconvertible constructs (transforms, custom checks, dates, embeddings)
+ * are drawn in variants that share a Zod node type, and each draws a slot:
+ * the two sides of a pair reuse one instance per variant and slot, the way a
+ * field shared through `.extend()` does, so both the same-instance and the
+ * independently-declared cases are judged.
+ */
+import fc from "fast-check";
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { embedding } from "../../src";
+import { isStructuralSubtype } from "../../src/schema/structural-subtype";
+import { structuralSubtypeProjection } from "../../src/schema/structural-subtype-projection";
+import { propertyRuns } from "./run-budget";
+
+// ============================================================
+// Specs
+// ============================================================
+
+type StringCheck =
+  | Readonly<{ check: "min" | "max" | "length"; value: number }>
+  | Readonly<{ check: "regex"; source: string; flags: string }>
+  | Readonly<{ check: "startsWith" | "endsWith" | "includes"; value: string }>
+  | Readonly<{
+      check: "lowercase" | "uppercase" | "trim" | "toLowerCase" | "toUpperCase";
+    }>;
+
+type NumberCheck = Readonly<{
+  check: "min" | "max" | "gt" | "lt" | "multipleOf";
+  value: number;
+}>;
+
+type ObjectMode = "strip" | "loose" | "strict" | "catchall";
+
+type UnprojectableVariant =
+  | "transform"
+  | "transformMin3"
+  | "transformUpper"
+  | "date"
+  | "dateMin"
+  | "customString"
+  | "customShortString"
+  | "embedding2"
+  | "embedding3"
+  | "embedding2L2";
+
+type Spec =
+  | Readonly<{
+      kind: "string";
+      base: "string" | "email" | "uuid" | "url";
+      checks: readonly StringCheck[];
+    }>
+  | Readonly<{ kind: "number"; int: boolean; checks: readonly NumberCheck[] }>
+  | Readonly<{ kind: "boolean" | "null" | "unknown" }>
+  | Readonly<{ kind: "literal"; values: readonly (string | number)[] }>
+  | Readonly<{ kind: "array"; item: Spec; min?: number; max?: number }>
+  | Readonly<{ kind: "tuple"; items: readonly Spec[]; rest?: Spec }>
+  | Readonly<{
+      kind: "object";
+      fields: readonly Readonly<{
+        name: string;
+        spec: Spec;
+        optional: boolean;
+      }>[];
+      mode: ObjectMode;
+      catchall?: Spec;
+    }>
+  | Readonly<{
+      kind: "record";
+      keys: readonly string[];
+      partial: boolean;
+      value: Spec;
+    }>
+  | Readonly<{ kind: "union"; members: readonly Spec[] }>
+  | Readonly<{ kind: "nullable"; inner: Spec }>
+  | Readonly<{
+      kind: "unprojectable";
+      variant: UnprojectableVariant;
+      slot: number;
+    }>;
+
+const UNPROJECTABLE_VARIANTS: readonly UnprojectableVariant[] = [
+  "transform",
+  "transformMin3",
+  "transformUpper",
+  "date",
+  "dateMin",
+  "customString",
+  "customShortString",
+  "embedding2",
+  "embedding3",
+  "embedding2L2",
+];
+
+const STRING_POOL = [
+  "",
+  "a",
+  "ab",
+  "abc",
+  "abcd",
+  "ABC",
+  "Ab",
+  " a",
+  " ab ",
+  "ß",
+  "é",
+  "😀",
+  "a😀",
+  "1",
+  "b",
+  "ba",
+  "x@y.co",
+  "https://example.com",
+  "http://e.io",
+  "123e4567-e89b-42d3-a456-426614174000",
+  "aaaaaa",
+];
+
+const NUMBER_POOL = [
+  -5,
+  -1,
+  -0.5,
+  0,
+  0.1,
+  0.25,
+  0.3,
+  1,
+  1.5,
+  2,
+  3,
+  4,
+  5,
+  6,
+  10,
+  0.1 + 0.2,
+  1e21,
+];
+
+const KEY_POOL = ["a", "b", "c", "A", ""];
+
+const PATTERN_POOL = ["^a", "b$", "^[a-c]+$", "^.{2}$", String.raw`\d`, "^.$"];
+
+// ============================================================
+// Building Zod schemas from specs
+// ============================================================
+
+function applyStringCheck(
+  schema: z.ZodString,
+  check: StringCheck,
+): z.ZodString {
+  switch (check.check) {
+    case "min": {
+      return schema.min(check.value);
+    }
+    case "max": {
+      return schema.max(check.value);
+    }
+    case "length": {
+      return schema.length(check.value);
+    }
+    case "regex": {
+      return schema.regex(new RegExp(check.source, check.flags));
+    }
+    case "startsWith": {
+      return schema.startsWith(check.value);
+    }
+    case "endsWith": {
+      return schema.endsWith(check.value);
+    }
+    case "includes": {
+      return schema.includes(check.value);
+    }
+    case "lowercase": {
+      return schema.lowercase();
+    }
+    case "uppercase": {
+      return schema.uppercase();
+    }
+    case "trim": {
+      return schema.trim();
+    }
+    case "toLowerCase": {
+      return schema.toLowerCase();
+    }
+    case "toUpperCase": {
+      return schema.toUpperCase();
+    }
+  }
+}
+
+function stringBase(base: Extract<Spec, { kind: "string" }>["base"]) {
+  switch (base) {
+    case "string": {
+      return z.string();
+    }
+    case "email": {
+      return z.email();
+    }
+    case "uuid": {
+      return z.uuid();
+    }
+    case "url": {
+      return z.url();
+    }
+  }
+}
+
+function applyNumberCheck(
+  schema: z.ZodNumber,
+  check: NumberCheck,
+): z.ZodNumber {
+  switch (check.check) {
+    case "min": {
+      return schema.min(check.value);
+    }
+    case "max": {
+      return schema.max(check.value);
+    }
+    case "gt": {
+      return schema.gt(check.value);
+    }
+    case "lt": {
+      return schema.lt(check.value);
+    }
+    case "multipleOf": {
+      return schema.multipleOf(check.value);
+    }
+  }
+}
+
+function identity(value: string): string {
+  return value;
+}
+
+function upper(value: string): string {
+  return value.toUpperCase();
+}
+
+function buildUnprojectable(variant: UnprojectableVariant): z.ZodType {
+  switch (variant) {
+    case "transform": {
+      return z.string().transform((value) => identity(value));
+    }
+    case "transformMin3": {
+      return z
+        .string()
+        .min(3)
+        .transform((value) => identity(value));
+    }
+    case "transformUpper": {
+      return z.string().transform((value) => upper(value));
+    }
+    case "date": {
+      return z.date();
+    }
+    case "dateMin": {
+      return z.date().min(new Date(0));
+    }
+    case "customString": {
+      return z.custom<string>((value) => typeof value === "string");
+    }
+    case "customShortString": {
+      return z.custom<string>(
+        (value) => typeof value === "string" && value.length < 2,
+      );
+    }
+    case "embedding2": {
+      return embedding(2);
+    }
+    case "embedding3": {
+      return embedding(3);
+    }
+    case "embedding2L2": {
+      return embedding(2, { metric: "l2" });
+    }
+  }
+}
+
+/**
+ * One Zod instance per unconvertible variant and slot, shared by both sides
+ * of the pair being built.
+ */
+type InstanceCache = Map<string, z.ZodType>;
+
+function sharedUnprojectable(
+  spec: Extract<Spec, { kind: "unprojectable" }>,
+  cache: InstanceCache,
+): z.ZodType {
+  const key = `${spec.variant}:${spec.slot}`;
+  const existing = cache.get(key);
+  if (existing !== undefined) return existing;
+  const built = buildUnprojectable(spec.variant);
+  cache.set(key, built);
+  return built;
+}
+
+function buildObject(
+  spec: Extract<Spec, { kind: "object" }>,
+  cache: InstanceCache,
+): z.ZodType {
+  const shape: Record<string, z.ZodType> = {};
+  for (const field of spec.fields) {
+    const built = build(field.spec, cache);
+    shape[field.name] = field.optional ? built.optional() : built;
+  }
+  switch (spec.mode) {
+    case "strip": {
+      return z.object(shape);
+    }
+    case "loose": {
+      return z.looseObject(shape);
+    }
+    case "strict": {
+      return z.strictObject(shape);
+    }
+    case "catchall": {
+      return z
+        .object(shape)
+        .catchall(build(spec.catchall ?? { kind: "unknown" }, cache));
+    }
+  }
+}
+
+function build(spec: Spec, cache: InstanceCache): z.ZodType {
+  switch (spec.kind) {
+    case "string": {
+      let schema = stringBase(spec.base) as z.ZodString;
+      for (const check of spec.checks) schema = applyStringCheck(schema, check);
+      return schema;
+    }
+    case "number": {
+      let schema: z.ZodNumber = spec.int ? z.int() : z.number();
+      for (const check of spec.checks) schema = applyNumberCheck(schema, check);
+      return schema;
+    }
+    case "boolean": {
+      return z.boolean();
+    }
+    case "null": {
+      return z.null();
+    }
+    case "unknown": {
+      return z.unknown();
+    }
+    case "literal": {
+      return z.literal(spec.values);
+    }
+    case "array": {
+      const array = z.array(build(spec.item, cache));
+      const withMin = spec.min === undefined ? array : array.min(spec.min);
+      return spec.max === undefined ? withMin : withMin.max(spec.max);
+    }
+    case "tuple": {
+      const items = spec.items.map((item) => build(item, cache)) as [
+        z.ZodType,
+        ...z.ZodType[],
+      ];
+      return spec.rest === undefined ?
+          z.tuple(items)
+        : z.tuple(items, build(spec.rest, cache));
+    }
+    case "object": {
+      return buildObject(spec, cache);
+    }
+    case "record": {
+      const keys = z.enum(spec.keys as [string, ...string[]]);
+      return spec.partial ?
+          z.partialRecord(keys, build(spec.value, cache))
+        : z.record(keys, build(spec.value, cache));
+    }
+    case "union": {
+      return z.union(
+        spec.members.map((member) => build(member, cache)) as [
+          z.ZodType,
+          z.ZodType,
+          ...z.ZodType[],
+        ],
+      );
+    }
+    case "nullable": {
+      return build(spec.inner, cache).nullable();
+    }
+    case "unprojectable": {
+      return sharedUnprojectable(spec, cache);
+    }
+  }
+}
+
+// ============================================================
+// Spec arbitraries
+// ============================================================
+
+const stringCheckArb: fc.Arbitrary<StringCheck> = fc.oneof(
+  fc.record({
+    check: fc.constantFrom("min", "max", "length"),
+    value: fc.nat({ max: 4 }),
+  }),
+  fc.record({
+    check: fc.constant("regex"),
+    source: fc.constantFrom(...PATTERN_POOL),
+    flags: fc.constantFrom("", "", "i", "u", "g"),
+  }),
+  fc.record({
+    check: fc.constantFrom("startsWith", "endsWith", "includes"),
+    value: fc.constantFrom("a", "b", "A"),
+  }),
+  fc.record({
+    check: fc.constantFrom(
+      "lowercase",
+      "uppercase",
+      "trim",
+      "toLowerCase",
+      "toUpperCase",
+    ),
+  }),
+);
+
+/** At most one pattern-bearing check: two project as `allOf`, refused outright. */
+function hasAtMostOnePattern(checks: readonly StringCheck[]): boolean {
+  const patternChecks = new Set([
+    "regex",
+    "startsWith",
+    "endsWith",
+    "includes",
+    "lowercase",
+    "uppercase",
+  ]);
+  return checks.filter((check) => patternChecks.has(check.check)).length <= 1;
+}
+
+const stringSpecArb: fc.Arbitrary<Spec> = fc.record({
+  kind: fc.constant("string"),
+  base: fc.constantFrom("string", "string", "string", "email", "uuid", "url"),
+  checks: fc
+    .array(stringCheckArb, { maxLength: 3 })
+    .filter((checks) => hasAtMostOnePattern(checks)),
+});
+
+const numberCheckArb: fc.Arbitrary<NumberCheck> = fc.oneof(
+  fc.record({
+    check: fc.constantFrom("min", "max", "gt", "lt"),
+    value: fc.integer({ min: -2, max: 5 }),
+  }),
+  fc.record({
+    check: fc.constant("multipleOf"),
+    value: fc.constantFrom(2, 3, 0.1, 0.25),
+  }),
+);
+
+const numberSpecArb: fc.Arbitrary<Spec> = fc.record({
+  kind: fc.constant("number"),
+  int: fc.boolean(),
+  checks: fc
+    .array(numberCheckArb, { maxLength: 3 })
+    .filter(
+      (checks) =>
+        checks.filter((check) => check.check === "multipleOf").length <= 1,
+    ),
+});
+
+const literalSpecArb: fc.Arbitrary<Spec> = fc.record({
+  kind: fc.constant("literal"),
+  values: fc.uniqueArray(
+    fc.oneof(fc.constantFrom(...STRING_POOL), fc.constantFrom(...NUMBER_POOL)),
+    { minLength: 1, maxLength: 3 },
+  ),
+});
+
+const leafSpecArb: fc.Arbitrary<Spec> = fc.oneof(
+  { weight: 4, arbitrary: stringSpecArb },
+  { weight: 3, arbitrary: numberSpecArb },
+  { weight: 2, arbitrary: literalSpecArb },
+  {
+    weight: 1,
+    arbitrary: fc.constantFrom<Spec>(
+      { kind: "boolean" },
+      { kind: "null" },
+      { kind: "unknown" },
+    ),
+  },
+  {
+    weight: 2,
+    arbitrary: fc.record({
+      kind: fc.constant("unprojectable"),
+      variant: fc.constantFrom(...UNPROJECTABLE_VARIANTS),
+      slot: fc.nat({ max: 1 }),
+    }),
+  },
+);
+
+const FIELD_NAMES = ["f", "g", "h"] as const;
+
+const specLetrec = fc.letrec<{ spec: Spec; container: Spec }>((tie) => ({
+  spec: fc.oneof(
+    { maxDepth: 2, depthIdentifier: "spec" },
+    { weight: 3, arbitrary: leafSpecArb },
+    { weight: 2, arbitrary: tie("container") },
+  ),
+  container: fc.oneof(
+    fc.record(
+      {
+        kind: fc.constant("array"),
+        item: tie("spec"),
+        min: fc.nat({ max: 2 }),
+        max: fc.integer({ min: 1, max: 4 }),
+      },
+      { requiredKeys: ["kind", "item"] },
+    ),
+    fc.record(
+      {
+        kind: fc.constant("tuple"),
+        items: fc.array(tie("spec"), { minLength: 1, maxLength: 2 }),
+        rest: tie("spec"),
+      },
+      { requiredKeys: ["kind", "items"] },
+    ),
+    fc.record(
+      {
+        kind: fc.constant("object"),
+        fields: fc.uniqueArray(
+          fc.record({
+            name: fc.constantFrom(...FIELD_NAMES),
+            spec: tie("spec"),
+            optional: fc.boolean(),
+          }),
+          { selector: (field) => field.name, maxLength: 2 },
+        ),
+        mode: fc.constantFrom<ObjectMode>(
+          "strip",
+          "loose",
+          "strict",
+          "catchall",
+        ),
+        catchall: tie("spec"),
+      },
+      { requiredKeys: ["kind", "fields", "mode"] },
+    ),
+    fc.record({
+      kind: fc.constant("record"),
+      keys: fc.uniqueArray(fc.constantFrom(...KEY_POOL), {
+        minLength: 1,
+        maxLength: 3,
+      }),
+      partial: fc.boolean(),
+      value: tie("spec"),
+    }),
+    fc.record({
+      kind: fc.constant("union"),
+      members: fc.array(tie("spec"), { minLength: 2, maxLength: 2 }),
+    }),
+    fc.record({ kind: fc.constant("nullable"), inner: tie("spec") }),
+  ),
+}));
+
+const specArb: fc.Arbitrary<Spec> = specLetrec.spec;
+
+// ============================================================
+// Near-miss children
+// ============================================================
+
+function replaceAt<T>(items: readonly T[], index: number, item: T): T[] {
+  return items.map((existing, position) =>
+    position === index ? item : existing,
+  );
+}
+
+/** `spec` with one random edit applied somewhere in its tree. */
+function editArb(spec: Spec): fc.Arbitrary<Spec> {
+  const local: fc.Arbitrary<Spec>[] = [
+    specArb,
+    fc.constant<Spec>({ kind: "nullable", inner: spec }),
+  ];
+  switch (spec.kind) {
+    case "string": {
+      local.push(
+        fc
+          .tuple(stringCheckArb, fc.nat({ max: spec.checks.length }))
+          .map(([check, at]) => ({
+            ...spec,
+            checks: [
+              ...spec.checks.slice(0, at),
+              check,
+              ...spec.checks.slice(at),
+            ],
+          }))
+          .filter((edited) => hasAtMostOnePattern(edited.checks)),
+      );
+      if (spec.checks.length > 0) {
+        local.push(
+          fc.nat({ max: spec.checks.length - 1 }).map((at) => ({
+            ...spec,
+            checks: spec.checks.filter((_check, index) => index !== at),
+          })),
+        );
+      }
+      break;
+    }
+    case "number": {
+      local.push(
+        numberCheckArb.map((check) => ({
+          ...spec,
+          checks: [...spec.checks, check],
+        })),
+        fc.constant({ ...spec, int: !spec.int }),
+      );
+      if (spec.checks.length > 0) {
+        local.push(
+          fc.nat({ max: spec.checks.length - 1 }).map((at) => ({
+            ...spec,
+            checks: spec.checks.filter((_check, index) => index !== at),
+          })),
+        );
+      }
+      break;
+    }
+    case "array": {
+      local.push(
+        editArb(spec.item).map((item) => ({ ...spec, item })),
+        fc.record({ min: fc.nat({ max: 3 }) }).map(({ min }) => ({
+          ...spec,
+          min,
+        })),
+      );
+      break;
+    }
+    case "tuple": {
+      local.push(
+        fc.nat({ max: spec.items.length - 1 }).chain((at) =>
+          editArb(spec.items[at] ?? { kind: "unknown" }).map((item) => ({
+            ...spec,
+            items: replaceAt(spec.items, at, item),
+          })),
+        ),
+        fc.constant({ kind: "array", item: spec.items[0] ?? spec }),
+      );
+      break;
+    }
+    case "object": {
+      local.push(
+        fc
+          .constantFrom<ObjectMode>("strip", "loose", "strict", "catchall")
+          .map((mode) => ({ ...spec, mode })),
+      );
+      if (spec.fields.length > 0) {
+        local.push(
+          fc.nat({ max: spec.fields.length - 1 }).chain((at) => {
+            const field = spec.fields[at];
+            if (field === undefined) return fc.constant(spec);
+            return fc.oneof(
+              editArb(field.spec).map((edited) => ({
+                ...spec,
+                fields: replaceAt(spec.fields, at, { ...field, spec: edited }),
+              })),
+              fc.constant({
+                ...spec,
+                fields: replaceAt(spec.fields, at, {
+                  ...field,
+                  optional: !field.optional,
+                }),
+              }),
+              fc.constant({
+                ...spec,
+                fields: spec.fields.filter((_field, index) => index !== at),
+              }),
+            );
+          }),
+        );
+      }
+      break;
+    }
+    case "record": {
+      local.push(
+        editArb(spec.value).map((value) => ({ ...spec, value })),
+        fc.constant({ ...spec, partial: !spec.partial }),
+        fc.constant({ ...spec, keys: spec.keys.slice(0, 1) }),
+      );
+      break;
+    }
+    case "union": {
+      local.push(
+        fc.nat({ max: spec.members.length - 1 }).chain((at) =>
+          editArb(spec.members[at] ?? { kind: "unknown" }).map((member) => ({
+            ...spec,
+            members: replaceAt(spec.members, at, member),
+          })),
+        ),
+        fc.constant(spec.members[0] ?? spec),
+      );
+      break;
+    }
+    case "nullable": {
+      local.push(
+        fc.constant(spec.inner),
+        editArb(spec.inner).map((inner) => ({ ...spec, inner })),
+      );
+      break;
+    }
+    case "unprojectable": {
+      local.push(
+        fc
+          .constantFrom(...UNPROJECTABLE_VARIANTS)
+          .map((variant) => ({ ...spec, variant })),
+        fc.constant({ ...spec, slot: 1 - spec.slot }),
+      );
+      break;
+    }
+    case "boolean":
+    case "null":
+    case "unknown":
+    case "literal": {
+      break;
+    }
+  }
+  return fc.oneof(...local);
+}
+
+const pairArb: fc.Arbitrary<Readonly<{ child: Spec; parent: Spec }>> =
+  specArb.chain((parent) =>
+    fc
+      .oneof(
+        { weight: 6, arbitrary: editArb(parent) },
+        {
+          weight: 3,
+          arbitrary: editArb(parent).chain((edited) => editArb(edited)),
+        },
+        { weight: 1, arbitrary: specArb },
+      )
+      .map((child) => ({ child, parent })),
+  );
+
+// ============================================================
+// Candidate values a child may store
+// ============================================================
+
+const scalarPoolArb: fc.Arbitrary<unknown> = fc.oneof(
+  fc.constantFrom(...STRING_POOL),
+  fc.constantFrom(...NUMBER_POOL),
+  // eslint-disable-next-line unicorn/no-null -- JSON null is a stored value
+  fc.constantFrom<unknown>(true, false, null),
+);
+
+/** JSON values shaped roughly like `spec`, plus pool noise. */
+function candidateArb(spec: Spec): fc.Arbitrary<unknown> {
+  return fc.oneof(
+    { weight: 1, arbitrary: scalarPoolArb },
+    { weight: 4, arbitrary: shapedCandidateArb(spec) },
+  );
+}
+
+function shapedCandidateArb(spec: Spec): fc.Arbitrary<unknown> {
+  switch (spec.kind) {
+    case "string": {
+      return fc.constantFrom(...STRING_POOL);
+    }
+    case "unprojectable": {
+      return fc.oneof(
+        fc.constantFrom(...STRING_POOL),
+        fc.array(fc.constantFrom(...NUMBER_POOL), {
+          minLength: 2,
+          maxLength: 3,
+        }),
+      );
+    }
+    case "number": {
+      return fc.constantFrom(...NUMBER_POOL);
+    }
+    case "literal": {
+      return fc.constantFrom(...spec.values);
+    }
+    case "array": {
+      return fc.array(candidateArb(spec.item), { maxLength: 5 });
+    }
+    case "tuple": {
+      return fc
+        .tuple(
+          fc.tuple(...spec.items.map((item) => candidateArb(item))),
+          fc.array(candidateArb(spec.rest ?? { kind: "unknown" }), {
+            maxLength: 2,
+          }),
+        )
+        .map(([prefix, rest]) => [...prefix, ...rest]);
+    }
+    case "object": {
+      const fields: Record<string, fc.Arbitrary<unknown>> = {};
+      for (const field of spec.fields) {
+        fields[field.name] = candidateArb(field.spec);
+      }
+      return fc
+        .tuple(
+          fc.record(fields, { requiredKeys: [] }),
+          fc.option(candidateArb(spec.catchall ?? { kind: "unknown" }), {
+            nil: undefined,
+          }),
+        )
+        .map(([declared, extra]) =>
+          extra === undefined ? declared : { ...declared, extra },
+        );
+    }
+    case "record": {
+      return fc.dictionary(
+        fc.constantFrom(...spec.keys, ...KEY_POOL),
+        candidateArb(spec.value),
+        { maxKeys: 4 },
+      );
+    }
+    case "union": {
+      return fc.oneof(...spec.members.map((member) => candidateArb(member)));
+    }
+    case "nullable": {
+      // eslint-disable-next-line unicorn/no-null -- the value `.nullable()` adds
+      return fc.oneof(fc.constant(null), candidateArb(spec.inner));
+    }
+    case "boolean":
+    case "null":
+    case "unknown": {
+      return scalarPoolArb;
+    }
+  }
+}
+
+function asJsonValue(value: unknown): unknown {
+  // eslint-disable-next-line unicorn/prefer-structured-clone -- a JSON round trip, not a clone: it drops what no row can hold
+  return JSON.parse(JSON.stringify(value));
+}
+
+// ============================================================
+// The property
+// ============================================================
+
+const pairWithSamplesArb = pairArb.chain((pair) =>
+  fc
+    .array(candidateArb(pair.child), { minLength: 4, maxLength: 12 })
+    .map((samples) => ({ ...pair, samples })),
+);
+
+describe("structural subtyping soundness against Zod", () => {
+  it("an accepted pair admits no stored child value the parent's Zod schema refuses", () => {
+    fc.assert(
+      fc.property(pairWithSamplesArb, ({ child, parent, samples }) => {
+        const cache: InstanceCache = new Map();
+        const childSchema = z.object({ field: build(child, cache) });
+        const parentSchema = z.object({ field: build(parent, cache) });
+        const verdict = isStructuralSubtype(
+          structuralSubtypeProjection(childSchema),
+          structuralSubtypeProjection(parentSchema),
+        );
+        if (verdict.verdict !== "subtype") return;
+        for (const sample of samples) {
+          const input = asJsonValue({ field: sample });
+          const stored = childSchema.safeParse(input);
+          if (!stored.success) continue;
+          expect({
+            child,
+            parent,
+            input,
+            stored: stored.data,
+            parentAccepts: parentSchema.safeParse(stored.data).success,
+          }).toMatchObject({ parentAccepts: true });
+        }
+      }),
+      { numRuns: propertyRuns({ ci: 3000, local: 5000 }) },
+    );
+  });
+});

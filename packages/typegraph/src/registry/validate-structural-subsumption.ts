@@ -50,8 +50,11 @@
  * **A Zod construct `z.toJSONSchema` cannot convert** (`z.set()`, `z.map()`,
  * `z.date()`, `z.bigint()`, a `.transform()`, `embedding()` and any other
  * `z.custom()`) is judged per node in a live graph: the comparison
- * projection marks that node alone, `isStructuralSubtype` accepts it
- * unjudged, and every other property of the pair is still compared. A
+ * projection marks that node alone, and `isStructuralSubtype` accepts it
+ * only under a parent field that admits every value or beside a node of the
+ * same identity (the same Zod instance, plain `z.date()`s, or `embedding()`s
+ * of equal dimensions), while every other property of the pair is still
+ * compared. A
  * persisted document has no such marker. Its kind holding the construct
  * projects as the whole-kind placeholder (`isUnprojectableSchemaProjection`,
  * `src/schema/serializer.ts`), so a pair with that kind on either side is
