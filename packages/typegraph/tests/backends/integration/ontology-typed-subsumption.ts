@@ -467,6 +467,35 @@ function expectUntypedSubclassRefusal(
   }
 }
 
+// TsSubDoc is a subclass at compile time but has no subclass of its own, so
+// its alias type stays exact; a persisted extension then subclasses it.
+const SubBaseDocument = defineNode("TsSubBase", {
+  schema: z.object({ title: z.string() }),
+});
+const SubDocument = defineNode("TsSubDoc", {
+  schema: z.object({ title: z.string() }),
+});
+const subDocumentCites = defineEdge("tsSubDocCites", { schema: z.object({}) });
+const subclassOfSubclassGraph = defineGraph({
+  id: "typed_subsumption_subclass_of_subclass_integration",
+  nodes: {
+    TsSubBase: { type: SubBaseDocument },
+    TsSubDoc: { type: SubDocument },
+  },
+  edges: {
+    tsSubDocCites: {
+      type: subDocumentCites,
+      from: [SubBaseDocument],
+      to: [SubDocument],
+    },
+  },
+  ontology: [subClassOf(SubDocument, SubBaseDocument)],
+});
+const subclassOfSubclassExtension = defineGraphExtension({
+  nodes: { TsSubMemo: { properties: { title: { type: "string" } } } },
+  ontology: [{ metaEdge: "subClassOf", from: "TsSubMemo", to: "TsSubDoc" }],
+});
+
 // Four compile-time kinds; only TsCoverTopic is polymorphic at compile time.
 // A persisted extension then declares TsCoverNote and TsCoverTag subclasses
 // of TsCoverDoc, and TsCoverTag a subclass of TsCoverTopic too.
@@ -1659,6 +1688,64 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       expect(uncovered.message).toContain("one of the listed kinds");
       expect(uncovered.suggestion).toContain("every listed kind");
       expect(uncovered.suggestion).not.toContain("fromDynamic()");
+    });
+
+    it("refuses an unstated expansion of a compile-time subclass once store.evolve() gives it a subclass of its own", async () => {
+      const backend = context.getBackend();
+      const [store] = await createStoreWithSchema(
+        subclassOfSubclassGraph,
+        backend,
+      );
+      const evolved = await store.evolve(subclassOfSubclassExtension);
+      const base = await evolved.nodes.TsSubBase.create({ title: "base" });
+      const subDocument = await evolved.nodes.TsSubDoc.create({ title: "doc" });
+      await requireDefined(evolved.getNodeCollection("TsSubMemo")).create({
+        title: "memo",
+      });
+      await evolved.edges.tsSubDocCites.create(base, subDocument, {});
+
+      // Being the subject of a `subClassOf` does not make a kind's alias type
+      // polymorphic; only being its target (or an equivalence side) does.
+      // MUTATION CHECK: marking a `subClassOf` source as affected in
+      // `subsumptionAffectedKinds` (src/query/builder/alias-expansion.ts)
+      // answers both reads with an untyped TsSubMemo row.
+      for (const [surface, read] of [
+        ["from()", () => evolved.query().from("TsSubDoc", "d")],
+        [
+          "to()",
+          () =>
+            evolved
+              .query()
+              .from("TsSubBase", "b")
+              .traverse("tsSubDocCites", "e")
+              .to("TsSubDoc", "d"),
+        ],
+      ] as const satisfies readonly (readonly [string, () => unknown])[]) {
+        const error = expectConfigurationError(
+          await rejectionOf(Promise.resolve().then(() => read())),
+        );
+        expect({ surface, details: error.details }).toMatchObject({
+          surface,
+          details: {
+            code: UNTYPED_SUBCLASSES_CODE,
+            kind: "TsSubDoc",
+            extraKinds: ["TsSubMemo"],
+          },
+        });
+        expect(error.suggestion).toContain(surface);
+      }
+
+      // Its superclass was polymorphic at compile time, so it answers the
+      // extension's kind too.
+      expect(
+        kindsOf(
+          await evolved
+            .query()
+            .from("TsSubBase", "b")
+            .select((ctx) => ctx.b)
+            .execute(),
+        ),
+      ).toEqual(["TsSubBase", "TsSubDoc", "TsSubMemo"]);
     });
 
     it("answers an unstated expansion when the compile-time graph already types the kind polymorphically", async () => {
