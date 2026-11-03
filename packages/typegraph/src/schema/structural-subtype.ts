@@ -624,22 +624,18 @@ function storedKeys(schema: JsonSchema): readonly string[] {
 }
 
 /**
- * The keys `schema` refuses to see missing, as a parent: `required`, and
- * every property whose input is required even where its output may be
- * absent (`z.unknown().pipe(z.string().optional())`).
+ * The keys `schema` refuses to see missing, as a parent, as the projection
+ * recorded them: for an object `required` and every property whose input is
+ * required even where its output may be absent
+ * (`z.unknown().pipe(z.string().optional())`), for a record every key unless
+ * its value is optional on both sides. `required` where none is recorded.
  */
 function requiredKeys(schema: JsonSchema): readonly string[] {
-  const declared = schema.required ?? [];
   const recorded = keyOptionality(schema);
-  if (recorded === undefined) return declared;
-  return [
-    ...new Set([
-      ...declared,
-      ...Object.entries(recorded)
-        .filter(([, optionality]) => optionality.required)
-        .map(([key]) => key),
-    ]),
-  ];
+  if (recorded === undefined) return schema.required ?? [];
+  return Object.entries(recorded)
+    .filter(([, optionality]) => optionality.required)
+    .map(([key]) => key);
 }
 
 function hasKeywordOutsideValueSet(keywords: Record<string, unknown>): boolean {
@@ -879,6 +875,13 @@ const DEFAULT_KEYWORD = "default";
  */
 export const STORED_FALLBACKS_KEYWORD = "x-typegraph-stored-fallbacks";
 
+/** The outermost `.default()`/`.catch()` instance `schema` stores through. */
+function fallbackInstance(schema: JsonSchema): string | undefined {
+  const listed = schema[STORED_FALLBACKS_KEYWORD] as
+    Readonly<{ instance?: unknown }> | undefined;
+  return typeof listed?.instance === "string" ? listed.instance : undefined;
+}
+
 /** The values `schema` stores unvalidated, as the projection states them. */
 function storedFallbacks(schema: JsonSchema): readonly unknown[] {
   const listed = schema[STORED_FALLBACKS_KEYWORD] as
@@ -941,10 +944,13 @@ function compareStoredFallback(
   path: readonly string[],
   walk: Walk,
 ): StructuralSubtypeResult | undefined {
+  // The instance alone decides: Zod evaluates a default factory each time it
+  // projects, so one shared `z.date().default(() => new Date())` lists a
+  // different value on each side.
+  const childInstance = fallbackInstance(child);
   if (
-    hasOwnKey(child, STORED_FALLBACKS_KEYWORD) &&
-    canonicalJson(child[STORED_FALLBACKS_KEYWORD]) ===
-      canonicalJson(parent[STORED_FALLBACKS_KEYWORD])
+    childInstance !== undefined &&
+    childInstance === fallbackInstance(parent)
   ) {
     return undefined;
   }

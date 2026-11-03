@@ -606,6 +606,11 @@ describe("structural subsumption over a field the projection cannot convert", ()
       parent: () => z.bigint(),
     },
     {
+      name: "an exhaustive record narrowing its parent's optional values",
+      child: () => z.record(z.enum(["a", "b"]), z.string().min(1).optional()),
+      parent: () => z.record(z.enum(["a", "b"]), z.string().optional()),
+    },
+    {
       name: "a transform both sides share, as `.extend()` does",
       child: () => sharedTransform,
       parent: () => sharedTransform,
@@ -871,6 +876,46 @@ describe("structural subsumption over what a node stores beyond its projection",
     },
   ])("accepts $name", ({ child, parent }) => {
     expect(liveVerdict(child(), parent())).toEqual({ verdict: "subtype" });
+  });
+
+  it("refuses an exhaustive record widening its parent's optional values", () => {
+    expect(
+      liveVerdict(
+        z.record(z.enum(["a", "b"]), z.string().optional()),
+        z.record(z.enum(["a", "b"]), z.string().min(1).optional()),
+      ),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "string-length-not-tighter",
+    });
+  });
+
+  it("accepts a shared date field whose default factory differs on every projection", () => {
+    // Zod evaluates a default factory each time it projects, so the parent's
+    // and the child's projections list different dates for one field.
+    let tick = 0;
+    const createdAt = z.date().default(() => new Date(tick++));
+    const parentSchema = z.object({ createdAt });
+    const Ledger = defineNode("FactoryLedger", { schema: parentSchema });
+    const Entry = defineNode("FactoryEntry", {
+      schema: parentSchema.extend({ amount: z.number() }),
+    });
+    for (let build = 0; build < 3; build += 1) {
+      expect(() =>
+        buildKindRegistry(
+          defineGraph({
+            id: `shared_date_factory_${build}`,
+            nodes: {
+              FactoryLedger: { type: Ledger },
+              FactoryEntry: { type: Entry },
+            },
+            edges: {},
+            ontology: [subClassOf(Entry, Ledger)],
+          }),
+        ),
+      ).not.toThrow();
+    }
+    expect(tick).toBeGreaterThan(1);
   });
 
   it("refuses a separately redeclared format default it cannot judge by value", () => {

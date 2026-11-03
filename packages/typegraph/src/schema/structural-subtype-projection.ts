@@ -428,11 +428,22 @@ function recordStoresKey(value: z.core.$ZodType): boolean {
 }
 
 /**
+ * Whether a value schema surely admits a missing value: optional on its
+ * input and its output, as `.optional()` is. Anything else may refuse it,
+ * so a parent record's key is read as required — the stricter reading.
+ */
+function admitsMissingValue(value: z.core.$ZodType): boolean {
+  const { optin, optout } = zodOptionality(value);
+  return optin !== undefined && optout === "optional";
+}
+
+/**
  * Records, for each property of an object or each key an exhaustive record
  * lists, whether it is always stored and whether its absence is refused
  * (see {@link KEY_OPTIONALITY_KEYWORD}). Read off Zod's own metadata and the
- * schema's structure; no schema code runs. A record's absence reading is
- * its `required`, which may only overstate what it refuses.
+ * schema's structure; no schema code runs. Zod's `required` for an
+ * exhaustive record lists every key, so a record's key is read as required
+ * unless its value is optional on both sides ({@link admitsMissingValue}).
  */
 function recordKeyOptionality(
   context: Readonly<{
@@ -463,7 +474,7 @@ function recordKeyOptionality(
     const entry = {
       ...zodOptionality(def.valueType),
       stored: recordStoresKey(def.valueType),
-      required: true,
+      required: !admitsMissingValue(def.valueType),
     } satisfies KeyOptionality;
     jsonSchema[KEY_OPTIONALITY_KEYWORD] = Object.fromEntries(
       [...declared].map((key) => [String(key), entry]),
