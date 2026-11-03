@@ -12,6 +12,7 @@ import {
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
 import { nowIso } from "../utils/date";
+import { toTransferAssertion } from "./row-codec";
 import {
   requireLiveEndpoints,
   requireStructuralEndpoints,
@@ -29,6 +30,7 @@ import {
   insertAssertion,
   insertAssertionRows,
   loadAssertionsByIds,
+  readIdentityWindowLedger,
   requireEndpointsCoverIdentityWindow,
   validateCurrentRelation,
 } from "./service-mutation";
@@ -250,6 +252,41 @@ function rethrowTaggedWithAssertion(
     });
   }
   throw error;
+}
+
+/**
+ * The target's live assertion rows — current and ended — that this importer's
+ * window validator would read for applying `assertions` as a merge does
+ * (`"archival"`), as transfer rows: the history a merge plan's contradiction
+ * simulation must judge its claims against. Each assertion is validated and
+ * its window resolved exactly as {@link importIdentityAssertionsIntoTarget}
+ * does, so a claim the importer would refuse for its shape is refused here
+ * with the same typed error, and the rows come from the same
+ * `readIdentityWindowLedger` read.
+ */
+export async function loadIdentityWindowHistory(
+  ctx: IdentityAssertionImportContext,
+  target: Backend,
+  assertions: readonly IdentityTransferAssertion[],
+  operationInstant: string,
+): Promise<readonly IdentityTransferAssertion[]> {
+  const ledger = await readIdentityWindowLedger(
+    ctx,
+    target,
+    assertions.map((assertion) => {
+      const { endpoints, window } = validateTransferShape(
+        ctx,
+        assertion,
+        "archival",
+        operationInstant,
+      );
+      return { references: endpoints, window };
+    }),
+    operationInstant,
+  );
+  return ledger.assertions
+    .filter((row) => row.deleted_at === undefined)
+    .map((row) => toTransferAssertion(row));
 }
 
 /**

@@ -9,7 +9,7 @@
  * caller actually gets, and the two could in principle diverge if a future
  * change touched only the facade's own thin marshalling.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -108,9 +108,9 @@ function profileFlipGraph(sameIdAcrossKinds: "fold" | "ignore") {
   });
 }
 
-/** How long a test waits for a future-dated validity window to lapse. */
+/** How far ahead of the faked clock a future-dated validity window ends. */
 const WINDOW_LAPSE_MS = 250;
-const WINDOW_LAPSE_MARGIN_MS = 150;
+const WINDOW_LAPSE_CLOCK_START = "2026-01-01T00:00:00.000Z";
 
 function personRef(id: string) {
   return { kind: "Person" as const, id };
@@ -241,6 +241,63 @@ export function registerIdentityReplayIntegrationTests(
       expect(fresh.steps.map((step) => step.transition.cause)).toEqual([
         "assert",
       ]);
+    });
+
+    it("never lowers the watermark: a prune below it reports, keeps and exports the higher watermark", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const [first, second, third] = ["first", "second", "third"].map(
+        (name) =>
+          [
+            personRef(`monotone-${name}-a`),
+            personRef(`monotone-${name}-b`),
+          ] as const,
+      ) as [
+        readonly [ReturnType<typeof personRef>, ReturnType<typeof personRef>],
+        readonly [ReturnType<typeof personRef>, ReturnType<typeof personRef>],
+        readonly [ReturnType<typeof personRef>, ReturnType<typeof personRef>],
+      ];
+      for (const ref of [...first, ...second, ...third]) {
+        await store.nodes.Person.create({}, { id: ref.id });
+      }
+      await store.identity.assertSame(...first);
+      await store.identity.assertSame(...second);
+      const earlier = requireDefined(await store.recordedNow());
+      await store.identity.assertSame(...third);
+      const later = requireDefined(await store.recordedNow());
+      const earlierRevision = recordedInstantRevision(earlier);
+      const laterRevision = recordedInstantRevision(later);
+      expect(laterRevision).toBeGreaterThan(earlierRevision);
+
+      const high = await pruneIdentityTransitions(store, {
+        beforeRecorded: later,
+      });
+      expect(high).toEqual({ pruned: 2, prunedBeforeRevision: laterRevision });
+
+      const low = await pruneIdentityTransitions(store, {
+        beforeRecorded: earlier,
+      });
+      expect(low).toEqual({ pruned: 0, prunedBeforeRevision: laterRevision });
+
+      // The (earlier, later) range lost its rows to the first prune, so a
+      // read starting inside it must still name the higher cut.
+      const fromEarlier = await store.identity.transitionsOf(second[0], {
+        fromRecorded: earlier,
+      });
+      expect(fromEarlier.transitions).toEqual([]);
+      expect(
+        recordedInstantRevision(requireDefined(truncatedBeforeOf(fromEarlier))),
+      ).toBe(laterRevision);
+      const replay = await store.identity.replay(third[0], {
+        fromRecorded: earlier,
+      });
+      expect(
+        recordedInstantRevision(requireDefined(truncatedBeforeOf(replay))),
+      ).toBe(laterRevision);
+
+      const archive = await exportGraph(store, { identityMode: "archival" });
+      expect(archive.identity?.retention?.prunedBeforeRevision).toBe(
+        laterRevision,
+      );
     });
 
     it("prunes restored transitions whose revisions sit above the destination clock, without raising the watermark past it", async () => {
@@ -1088,39 +1145,44 @@ export function registerIdentityReplayIntegrationTests(
     // the Robot appears to join BECAUSE of it.
 
     it("answers the same step identically after a future-dated window lapses", async () => {
-      const store = await provisionDepartedLineageStore(
-        context,
-        departedLineageGraph("identity_replay_window_lapse"),
-      );
-      const person = personRef("lapse-x");
-      await store.nodes.Person.create({}, { id: person.id });
-      await store.nodes.Org.create({}, { id: person.id });
-      const lapsesAt = new Date(Date.now() + WINDOW_LAPSE_MS).toISOString();
-      await store.nodes.Org.update(
-        asNodeId(person.id),
-        {},
-        {
-          validTo: lapsesAt,
-        },
-      );
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(WINDOW_LAPSE_CLOCK_START));
+        const store = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph("identity_replay_window_lapse"),
+        );
+        const person = personRef("lapse-x");
+        await store.nodes.Person.create({}, { id: person.id });
+        await store.nodes.Org.create({}, { id: person.id });
+        const lapsesAt = new Date(Date.now() + WINDOW_LAPSE_MS).toISOString();
+        await store.nodes.Org.update(
+          asNodeId(person.id),
+          {},
+          {
+            validTo: lapsesAt,
+          },
+        );
 
-      const earlyReplay = await store.identity.replay(person);
-      const early = requireDefined(earlyReplay.steps.at(-1));
-      await new Promise((resolve) =>
-        setTimeout(resolve, WINDOW_LAPSE_MS + WINDOW_LAPSE_MARGIN_MS),
-      );
-      expect(Date.now()).toBeGreaterThan(Date.parse(lapsesAt));
-      const lateReplay = await store.identity.replay(person);
-      const late = requireDefined(lateReplay.steps.at(-1));
-      const live = await store
-        .asOfRecorded(late.transition.recorded)
-        .identity.membersOf(person);
+        const earlyReplay = await store.identity.replay(person);
+        const early = requireDefined(earlyReplay.steps.at(-1));
+        vi.setSystemTime(Date.parse(lapsesAt) + WINDOW_LAPSE_MS);
+        const lateReplay = await store.identity.replay(person);
+        const late = requireDefined(lateReplay.steps.at(-1));
+        const live = await store
+          .asOfRecorded(late.transition.recorded)
+          .identity.membersOf(person);
 
-      expect(late.transition.transitionId).toBe(early.transition.transitionId);
-      expect(memberKeys(late.after)).toEqual(memberKeys(early.after));
-      expect(memberKeys(late.before)).toEqual(memberKeys(early.before));
-      expect(memberKeys(late.after)).toEqual(memberKeys(live));
-      expect(memberKeys(live)).toEqual(["Org:lapse-x", "Person:lapse-x"]);
+        expect(late.transition.transitionId).toBe(
+          early.transition.transitionId,
+        );
+        expect(memberKeys(late.after)).toEqual(memberKeys(early.after));
+        expect(memberKeys(late.before)).toEqual(memberKeys(early.before));
+        expect(memberKeys(late.after)).toEqual(memberKeys(live));
+        expect(memberKeys(live)).toEqual(["Org:lapse-x", "Person:lapse-x"]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
     // MUTATION CHECK: pairing each revision with the wall clock's "now" as
     // its valid instant drops Org:lapse-x from the late read's `after`.

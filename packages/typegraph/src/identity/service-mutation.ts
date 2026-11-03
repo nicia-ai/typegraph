@@ -722,6 +722,37 @@ function validateRelationAgainstLedger(
   }
 }
 
+type IdentityWindowLedgerContext = Pick<
+  IdentityServiceContext<GraphDef>,
+  "graphId" | "sameIdAcrossKinds" | "schema"
+>;
+
+/**
+ * THE window ledger a temporal identity check of `requests` judges against:
+ * every assertion — ended ones included — and every node the requests'
+ * classes reach over their windows. Both the commit's per-assertion validator
+ * ({@link createIdentityWindowValidator}) and a graph merge's plan-time
+ * contradiction simulation (`loadIdentityWindowHistory`) read it here,
+ * so a plan can never pass a claim the commit then refuses against history
+ * the plan did not see.
+ */
+export async function readIdentityWindowLedger(
+  ctx: IdentityWindowLedgerContext,
+  target: Backend,
+  requests: readonly IdentityWindowValidationRequest[],
+  operationInstant: string,
+): ReturnType<typeof loadIdentityWindowLedger> {
+  return loadIdentityWindowLedger({
+    target,
+    schema: ctx.schema,
+    graphId: ctx.graphId,
+    requests,
+    operationInstant,
+    sameIdAcrossKinds: ctx.sameIdAcrossKinds,
+    recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
+  });
+}
+
 export async function createIdentityWindowValidator(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
@@ -732,15 +763,12 @@ export async function createIdentityWindowValidator(
   operationInstant: string,
   ignoredAssertionIds: ReadonlySet<string> = new Set(),
 ): Promise<IdentityWindowValidator> {
-  const ledger = await loadIdentityWindowLedger({
+  const ledger = await readIdentityWindowLedger(
+    ctx,
     target,
-    schema: ctx.schema,
-    graphId: ctx.graphId,
     requests,
     operationInstant,
-    sameIdAcrossKinds: ctx.sameIdAcrossKinds,
-    recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
-  });
+  );
   if (ignoredAssertionIds.size > 0) {
     const retained = ledger.assertions.filter(
       (assertion) => !ignoredAssertionIds.has(assertion.id),

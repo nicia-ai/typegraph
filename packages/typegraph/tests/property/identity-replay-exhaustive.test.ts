@@ -4,18 +4,22 @@
  * consecutive `replay` boundaries.
  *
  * For a randomized sequence of identity-affecting operations, this asserts,
- * for EVERY recorded revision the run produced:
+ * for EVERY reference's lineage (from the revision the reference was first
+ * created at) and EVERY recorded revision the run produced:
  *
  *   - membership changed at r IFF the transition log carries a row at r
- *     touching the seed's class lineage;
- *   - `replay(seed)`'s step boundaries equal exactly the revisions at which
+ *     touching that reference's class lineage;
+ *   - `replay(ref)`'s step boundaries equal exactly the revisions at which
  *     membership changed;
  *   - every step's `after` equals brute-force membership at that revision,
  *     and every step's `before` equals it at the previous boundary.
  *
  * Brute-force membership comes from `store.asOfRecorded(r).identity.membersOf`
  * — a read path that never touches the transition log — so agreement between
- * it and `replay` is the whole equivalence pin, not a tautology.
+ * it and `replay` is the whole equivalence pin, not a tautology. Both same-id
+ * profiles run, each over a fixed-seed corpus (reproducible mutation checks)
+ * and over fresh random histories. Only typed semantic refusals of a random
+ * operation are skipped; any other error fails the run.
  *
  * Scope: assertSame, assertDifferent, retractAssertion, node create
  * (including same-id cross-kind folds and resurrections), soft delete, hard
@@ -23,10 +27,10 @@
  * `store.nodes[kind].update(id, {}, { validTo })` shape
  * identity-transition-log.test.ts's dedicated window-end unit test uses).
  *
- * Half the runs open with the seed joining another class and leaving it
- * again before any generated operation runs, so the class it left goes on
- * changing without it: the seed's lineage keeps naming that class, and none
- * of that class's later history may be reported as the seed's.
+ * Half the runs open with the first reference joining another class and
+ * leaving it again before any generated operation runs, so the class it left
+ * goes on changing without it: its lineage keeps naming that class, and none
+ * of that class's later history may be reported as its own.
  *
  * `kind-drop` is the one cause this generator does NOT model, and cannot:
  * it requires a SCHEMA EVOLUTION (dropping a node kind mid-run), which is a
@@ -42,8 +46,18 @@ import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode } from "../../src";
-import { createAdapterStoreWithSchema } from "../../src";
+import {
+  createAdapterStoreWithSchema,
+  defineGraph,
+  defineNode,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+  IdentityValidityWindowError,
+  NodeNotFoundError,
+  type Store,
+  type TransitionPageCursor,
+  ValidationError,
+} from "../../src";
 import {
   asRecordedInstant,
   createRecordedInstant,
@@ -58,21 +72,42 @@ import { storeRuntime } from "../../src/store/runtime-port";
 import { nowIso } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
+import { propertyRuns } from "./run-budget";
 
 const Person = defineNode("Person", { schema: z.object({}) });
 const Company = defineNode("Company", { schema: z.object({}) });
 const Robot = defineNode("Robot", { schema: z.object({}) });
 
-const graph = defineGraph({
-  id: "identity_replay_exhaustive",
-  nodes: {
-    Person: { type: Person },
-    Company: { type: Company },
-    Robot: { type: Robot },
-  },
-  edges: {},
-  identity: { sameIdAcrossKinds: "fold" },
-});
+function defineExhaustiveGraph(sameIdAcrossKinds: "fold" | "ignore") {
+  return defineGraph({
+    id: `identity_replay_exhaustive_${sameIdAcrossKinds}`,
+    nodes: {
+      Person: { type: Person },
+      Company: { type: Company },
+      Robot: { type: Robot },
+    },
+    edges: {},
+    identity: { sameIdAcrossKinds },
+  });
+}
+
+type ExhaustiveGraph = ReturnType<typeof defineExhaustiveGraph>;
+
+/**
+ * The refusals a random operation may legitimately meet: a contradiction, a
+ * duplicate or missing node, an endpoint or window the store will not accept.
+ * Anything else — a crash, a generic wrapper — fails the run instead of being
+ * skipped as noise.
+ */
+function isSemanticRefusal(error: unknown): boolean {
+  return (
+    error instanceof IdentityContradictionError ||
+    error instanceof IdentityValidityWindowError ||
+    error instanceof IdentityEndpointValidityError ||
+    error instanceof NodeNotFoundError ||
+    error instanceof ValidationError
+  );
+}
 
 // A 6-node, 3-kind universe: two bare ids, each realized under all three
 // kinds — the shared bare id is what makes same-id folding reachable.
@@ -147,6 +182,13 @@ function normalizeMembers(
     .join(",");
 }
 
+/** A page size small enough that most lineages span several pages. */
+const PAGE_LIMIT = 2;
+
+function revisionOf(recorded: string): number {
+  return recordedInstantRevision(asRecordedInstant(recorded));
+}
+
 function referencesEqual(
   left: Readonly<{ kind: string; id: string }>,
   right: Readonly<{ kind: string; id: string }>,
@@ -154,368 +196,355 @@ function referencesEqual(
   return left.kind === right.kind && left.id === right.id;
 }
 
-describe("identity replay exhaustiveness property", () => {
-  it("membership changes iff the transition log carries a boundary, and replay reconstructs every boundary correctly", async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.array(opIntentArbitrary, { minLength: 1, maxLength: 40 }),
-        fc.boolean(),
-        async (intents, seedLeavesAClass) => {
-          const [store] = await createAdapterStoreWithSchema(
-            graph,
-            createTestBackend(),
-            { history: true },
+type ExhaustiveStore = Store<ExhaustiveGraph>;
+
+/** What one generated run left behind, for the per-reference lineage checks. */
+type ExhaustiveRun = Readonly<{
+  store: ExhaustiveStore;
+  recordedByRevision: ReadonlyMap<number, RecordedInstant>;
+  /** The revision at which each reference first became live. */
+  bornAt: ReadonlyMap<string, number>;
+  /**
+   * Revisions at which a `windowEnd` narrowed a real (>=2 member) class, per
+   * member of that class — tracked through `membersOf`, a read path the
+   * transition log never touches.
+   */
+  windowEndRevisions: ReadonlyMap<string, readonly number[]>;
+}>;
+
+async function runExhaustiveScenario(
+  graph: ExhaustiveGraph,
+  intents: readonly OpIntent[],
+  seedLeavesAClass: boolean,
+): Promise<ExhaustiveRun> {
+  const [store] = await createAdapterStoreWithSchema(
+    graph,
+    createTestBackend(),
+    { history: true },
+  );
+  const live = new Set<string>();
+  const assertionIds: string[] = [];
+  const recordedByRevision = new Map<number, RecordedInstant>();
+  const bornAt = new Map<string, number>();
+  const windowEndRevisions = new Map<string, number[]>();
+
+  async function recordCheckpoint(): Promise<number | undefined> {
+    const now = await store.recordedNow();
+    if (now === undefined) return undefined;
+    const revision = recordedInstantRevision(now);
+    recordedByRevision.set(revision, now);
+    for (const key of live) {
+      if (!bornAt.has(key)) bornAt.set(key, revision);
+    }
+    return revision;
+  }
+
+  // The first reference exists from the FIRST observed revision, created
+  // before any generated intent runs, so at least one lineage is checked over
+  // the whole run; every other reference is checked from the revision it was
+  // first created at.
+  const first = requireDefined(UNIVERSE[0]);
+  await store.nodes[first.kind].create({}, { id: first.id });
+  live.add(refKeyOf(first));
+  await recordCheckpoint();
+
+  if (seedLeavesAClass) {
+    const partner = requireDefined(UNIVERSE[1]);
+    await store.nodes[partner.kind].create({}, { id: partner.id });
+    live.add(refKeyOf(partner));
+    await recordCheckpoint();
+    const joined = await store.identity.assertSame(first, partner);
+    await recordCheckpoint();
+    await store.identity.retractAssertion(joined.assertion.id);
+    await recordCheckpoint();
+  }
+
+  for (const intent of intents) {
+    let narrowedClass: readonly string[] = [];
+    try {
+      switch (intent.type) {
+        case "create": {
+          const ref = requireDefined(UNIVERSE[intent.refIndex]);
+          await store.nodes[ref.kind].create({}, { id: ref.id });
+          live.add(refKeyOf(ref));
+          break;
+        }
+        case "assertSame":
+        case "assertDifferent": {
+          const a = requireDefined(UNIVERSE[intent.aIndex]);
+          const b = requireDefined(UNIVERSE[intent.bIndex]);
+          if (refKeyOf(a) === refKeyOf(b)) break;
+          if (!live.has(refKeyOf(a)) || !live.has(refKeyOf(b))) break;
+          const result =
+            intent.type === "assertSame" ?
+              await store.identity.assertSame(a, b)
+            : await store.identity.assertDifferent(a, b);
+          if (result.action === "created") {
+            assertionIds.push(result.assertion.id);
+          }
+          break;
+        }
+        case "retract": {
+          if (assertionIds.length === 0) break;
+          const id = requireDefined(
+            assertionIds[intent.pick % assertionIds.length],
           );
-          const live = new Set<string>();
-          const assertionIds: string[] = [];
-          const recordedByRevision = new Map<number, RecordedInstant>();
-
-          async function recordCheckpoint(): Promise<void> {
-            const now = await store.recordedNow();
-            if (now === undefined) return;
-            recordedByRevision.set(recordedInstantRevision(now), now);
-          }
-
-          // The replay seed exists from the FIRST observed revision,
-          // created before any fc-generated intent runs — matching the
-          // scenario every one of these assertions is actually specified
-          // against (the worked example and the probe both
-          // create every lineage member before the first identity-affecting
-          // op). A seed that a LATER "create" intent brings into existence
-          // partway through the run legitimately sees an empty `membersOf`
-          // for every revision before its own creation — including
-          // revisions where the transition log records a REAL event among
-          // OTHER, already-existing members of what will become its class —
-          // which is a fact about that generator shape, not about replay,
-          // and would make the "changed iff touched" and boundary-equality
-          // assertions below fail for a reason unrelated to what this test
-          // exists to guard.
-          const seed = requireDefined(UNIVERSE[0]);
-          await store.nodes[seed.kind].create({}, { id: seed.id });
-          live.add(refKeyOf(seed));
-          await recordCheckpoint();
-
-          if (seedLeavesAClass) {
-            const partner = requireDefined(UNIVERSE[1]);
-            await store.nodes[partner.kind].create({}, { id: partner.id });
-            live.add(refKeyOf(partner));
-            await recordCheckpoint();
-            const joined = await store.identity.assertSame(seed, partner);
-            await recordCheckpoint();
-            await store.identity.retractAssertion(joined.assertion.id);
-            await recordCheckpoint();
-          }
-
-          // Revisions at which a `windowEnd` intent narrowed a REAL (>=2
-          // member) class the seed itself currently belongs to — the
-          // precondition `requireNodeValidityEndCompatible` notes under.
-          // Tracked independently of the transition log (via `membersOf`,
-          // a read path the log never touches) so the positive check below
-          // — "this op must have produced a window-end row" — can catch an
-          // L2-style removal of that note call, which the diagonal
-          // `changed iff touched` checks alone cannot (see the
-          // self-referential exemption below).
-          const expectedWindowEndRevisions: number[] = [];
-          let pendingWindowEndCheck = false;
-
-          for (const intent of intents) {
-            try {
-              switch (intent.type) {
-                case "create": {
-                  const ref = requireDefined(UNIVERSE[intent.refIndex]);
-                  await store.nodes[ref.kind].create({}, { id: ref.id });
-                  live.add(refKeyOf(ref));
-                  break;
-                }
-                case "assertSame": {
-                  const a = requireDefined(UNIVERSE[intent.aIndex]);
-                  const b = requireDefined(UNIVERSE[intent.bIndex]);
-                  if (refKeyOf(a) === refKeyOf(b)) break;
-                  if (!live.has(refKeyOf(a)) || !live.has(refKeyOf(b))) break;
-                  const result = await store.identity.assertSame(a, b);
-                  if (result.action === "created") {
-                    assertionIds.push(result.assertion.id);
-                  }
-                  break;
-                }
-                case "assertDifferent": {
-                  const a = requireDefined(UNIVERSE[intent.aIndex]);
-                  const b = requireDefined(UNIVERSE[intent.bIndex]);
-                  if (refKeyOf(a) === refKeyOf(b)) break;
-                  if (!live.has(refKeyOf(a)) || !live.has(refKeyOf(b))) break;
-                  const result = await store.identity.assertDifferent(a, b);
-                  if (result.action === "created") {
-                    assertionIds.push(result.assertion.id);
-                  }
-                  break;
-                }
-                case "retract": {
-                  if (assertionIds.length === 0) break;
-                  const id = requireDefined(
-                    assertionIds[intent.pick % assertionIds.length],
-                  );
-                  await store.identity.retractAssertion(
-                    id as Parameters<typeof store.identity.retractAssertion>[0],
-                  );
-                  break;
-                }
-                case "softDelete": {
-                  const ref = requireDefined(UNIVERSE[intent.refIndex]);
-                  if (!live.has(refKeyOf(ref))) break;
-                  await store.nodes[ref.kind].delete(ref.id as never);
-                  live.delete(refKeyOf(ref));
-                  break;
-                }
-                case "hardDelete": {
-                  const ref = requireDefined(UNIVERSE[intent.refIndex]);
-                  if (!live.has(refKeyOf(ref))) break;
-                  await store.nodes[ref.kind].hardDelete(ref.id as never);
-                  live.delete(refKeyOf(ref));
-                  break;
-                }
-                case "windowEnd": {
-                  const ref = requireDefined(UNIVERSE[intent.refIndex]);
-                  if (!live.has(refKeyOf(ref))) break;
-                  const currentMembers = await store.identity.membersOf(ref);
-                  const validTo = new Date(
-                    Date.now() + intent.daysFromNow * 86_400_000,
-                  ).toISOString();
-                  await store.nodes[ref.kind].update(
-                    ref.id as never,
-                    {},
-                    { validTo },
-                  );
-                  // Only tracked when `ref`'s class ALSO contains the seed —
-                  // `identityTransitionsOf(ctx, seed, ...)` walks the seed's
-                  // OWN lineage, so a window-end note on an unrelated class
-                  // (however real) would never surface there, and tracking
-                  // it here would make the positive check below fail for a
-                  // reason unrelated to any regression.
-                  if (
-                    currentMembers.length >= 2 &&
-                    currentMembers.some(
-                      (member) =>
-                        member.kind === seed.kind && member.id === seed.id,
-                    )
-                  ) {
-                    pendingWindowEndCheck = true;
-                  }
-                  break;
-                }
-              }
-            } catch {
-              // Semantic refusals (contradictions, self-assertions, etc.) are
-              // expected noise from randomly generated operations — skip and
-              // continue the sequence, exactly as sibling property suites do.
-              continue;
-            }
-            await recordCheckpoint();
-            if (pendingWindowEndCheck) {
-              pendingWindowEndCheck = false;
-              const latestRevision = requireDefined(
-                [...recordedByRevision.keys()].toSorted(
-                  (left, right) => right - left,
-                )[0],
-              );
-              expectedWindowEndRevisions.push(latestRevision);
-            }
-          }
-
-          if (recordedByRevision.size === 0) return;
-
-          const ctx = storeRuntime(store).identityContext();
-          const revisions = [...recordedByRevision.keys()].toSorted(
-            (left, right) => left - right,
+          await store.identity.retractAssertion(
+            id as Parameters<typeof store.identity.retractAssertion>[0],
           );
-          const lastRevision = requireDefined(revisions.at(-1));
-
-          // Brute-force membership at ANY revision, via a read path the
-          // transition log never touches — memoized, and able to answer for a
-          // revision this run never checkpointed (a replay step's `before` is
-          // read at `boundary - 1`, which is not necessarily one of the
-          // revisions a write actually landed at). When a real captured
-          // instant exists for `revision` it is used; otherwise one is
-          // fabricated exactly as `reconstructAt` (replay.ts) fabricates its
-          // own reconstruction instant — the recorded filter is keyed on the
-          // revision integer alone, never on the paired wall clock.
-          const bruteForce = new Map<number, readonly string[]>([[0, []]]);
-          async function bruteForceMembersAt(
-            revision: number,
-          ): Promise<readonly string[]> {
-            const cached = bruteForce.get(revision);
-            if (cached !== undefined) return cached;
-            if (revision <= 0) {
-              bruteForce.set(revision, []);
-              return [];
-            }
-            const instant =
-              recordedByRevision.get(revision) ??
-              createRecordedInstant(revision, nowIso());
-            const members = await store
-              .asOfRecorded(instant)
-              .identity.membersOf(seed);
-            const normalized = members
-              .map((member) => `${member.kind} ${member.id}`)
-              .toSorted();
-            bruteForce.set(revision, normalized);
-            return normalized;
-          }
-          for (const revision of revisions) {
-            await bruteForceMembersAt(revision);
-          }
-
-          // A bare singleton coming into or out of existence (create/delete
-          // with no fold or assertion partner) is NOT an identity transition
-          // by design: the closure table carries no row for a
-          // singleton, so nothing changes there. `membersOf` still reports
-          // the node's own trivial self-membership, though, so "did
-          // membership change" is asked with the seed's OWN id excluded from
-          // both sides — isolating whether its CLASS (its relationship to
-          // OTHER members) changed, which is what a transition explains.
-          const seedKey = `${seed.kind} ${seed.id}`;
-          function withoutSeed(ids: readonly string[]): readonly string[] {
-            return ids.filter((id) => id !== seedKey);
-          }
-          const changedRevisions = revisions.filter((revision, index) => {
-            const previousRevision =
-              index === 0 ? 0 : requireDefined(revisions[index - 1]);
-            const previous = withoutSeed(
-              requireDefined(bruteForce.get(previousRevision)),
+          break;
+        }
+        case "softDelete": {
+          const ref = requireDefined(UNIVERSE[intent.refIndex]);
+          if (!live.has(refKeyOf(ref))) break;
+          await store.nodes[ref.kind].delete(ref.id as never);
+          live.delete(refKeyOf(ref));
+          break;
+        }
+        case "hardDelete": {
+          const ref = requireDefined(UNIVERSE[intent.refIndex]);
+          if (!live.has(refKeyOf(ref))) break;
+          await store.nodes[ref.kind].hardDelete(ref.id as never);
+          live.delete(refKeyOf(ref));
+          break;
+        }
+        case "windowEnd": {
+          const ref = requireDefined(UNIVERSE[intent.refIndex]);
+          if (!live.has(refKeyOf(ref))) break;
+          const currentMembers = await store.identity.membersOf(ref);
+          const validTo = new Date(
+            Date.now() + intent.daysFromNow * 86_400_000,
+          ).toISOString();
+          // A WIDENING update (a later end than one already applied) is
+          // refused by `requireNodeValidityEndCompatible` — a typed refusal.
+          await store.nodes[ref.kind].update(ref.id as never, {}, { validTo });
+          if (currentMembers.length >= 2) {
+            narrowedClass = currentMembers.map(
+              (member) => `${member.kind} ${member.id}`,
             );
-            const current = withoutSeed(
-              requireDefined(bruteForce.get(revision)),
-            );
-            return previous.join(",") !== current.join(",");
-          });
-
-          const changedRevisionSet = new Set(changedRevisions);
-
-          // Assertion 1: membership changed at r IFF the transition log
-          // (walked through `identityTransitionsOf` — the seed's own class
-          // lineage, not a hand-rolled scan of the whole universe) carries a
-          // row at r. Checked in BOTH directions, for every recorded revision
-          // the run produced, not only the ones already believed to have
-          // changed.
-          //
-          // ONE exception, by design, not by omission: `window-end` schedules
-          // a FUTURE valid-time boundary, so a row it notes is
-          // deliberately SELF-REFERENTIAL (`class === priorClass`) — the
-          // `asOfRecorded` diagonal read this test's brute force uses (same
-          // wall-time as the recorded revision) cannot see a change that has
-          // not happened yet. A revision touched ONLY by self-referential
-          // rows is therefore exempt from the "changed" requirement; a
-          // revision touched by any OTHER row is not, and the positive check
-          // below independently confirms `window-end` still fires when it
-          // must — closing the gap a blanket exemption would leave for L2.
-          const { transitions } = await identityTransitionsOf(ctx, seed, {
-            limit: 2000,
-          });
-          const selfReferentialRevisions = new Set(
-            transitions
-              .filter(
-                (transition) =>
-                  transition.priorClass !== undefined &&
-                  referencesEqual(transition.priorClass, transition.class),
-              )
-              .map((transition) =>
-                recordedInstantRevision(asRecordedInstant(transition.recorded)),
-              ),
-          );
-          const touchedRevisions = new Set(
-            transitions.map((transition) =>
-              recordedInstantRevision(asRecordedInstant(transition.recorded)),
-            ),
-          );
-          for (const revision of revisions) {
-            const changed = changedRevisionSet.has(revision);
-            const touched = touchedRevisions.has(revision);
-            // A changed revision must be touched; an untouched revision must
-            // be unchanged; a touched-but-unchanged revision must be
-            // self-referential-only (window-end's documented exception). A
-            // revision the seed sat out (deleted, or outside a class it has
-            // left) touches nothing: its lineage names classes it is no
-            // longer in, and their history is not its own.
-            expect(!changed || touched).toBe(true);
-            expect(
-              changed || !touched || selfReferentialRevisions.has(revision),
-            ).toBe(true);
           }
+          break;
+        }
+      }
+    } catch (error) {
+      if (!isSemanticRefusal(error)) throw error;
+      continue;
+    }
+    const revision = await recordCheckpoint();
+    if (revision === undefined) continue;
+    for (const member of narrowedClass) {
+      const revisions = windowEndRevisions.get(member) ?? [];
+      revisions.push(revision);
+      windowEndRevisions.set(member, revisions);
+    }
+  }
+  return { store, recordedByRevision, bornAt, windowEndRevisions };
+}
 
-          // The positive half `window-end`'s exemption above needs: every
-          // tracked `windowEnd` intent that narrowed a real class the seed
-          // belongs to (tracked independently, via `membersOf` — a read path
-          // the transition log never touches) must have produced a
-          // `window-end` row at the resulting revision. Reverting the note
-          // call in `requireNodeValidityEndCompatible` (L2) fails exactly
-          // this loop, not the diagonal checks above, since removing the
-          // note leaves `touched` false without ever touching `changed`.
-          for (const revision of expectedWindowEndRevisions) {
-            expect(
-              transitions.some(
-                (transition) =>
-                  transition.cause === "window-end" &&
-                  recordedInstantRevision(
-                    asRecordedInstant(transition.recorded),
-                  ) === revision,
-              ),
-            ).toBe(true);
-          }
+/**
+ * The exhaustiveness pins for ONE reference's lineage, from the revision the
+ * reference was first created at: membership changed at r IFF the log carries
+ * a row at r on that lineage; replay's boundaries are exactly the changed
+ * revisions; and every step's before/after match brute-force membership.
+ */
+async function expectExhaustiveLineage(
+  run: ExhaustiveRun,
+  ref: Ref,
+): Promise<void> {
+  const { store, recordedByRevision } = run;
+  const key = refKeyOf(ref);
+  const bornAt = run.bornAt.get(key);
+  if (bornAt === undefined) return;
+  const born: number = bornAt;
+  const ctx = storeRuntime(store).identityContext();
+  const revisions = [...recordedByRevision.keys()]
+    .filter((revision) => revision >= born)
+    .toSorted((left, right) => left - right);
 
-          const replay = await identityReplay(ctx, seed, { limit: 2000 });
+  // Brute-force membership at ANY revision, via a read path the transition
+  // log never touches — memoized, and able to answer for a revision this run
+  // never checkpointed (a replay step's `before` is read at `boundary - 1`).
+  // A missing captured instant is fabricated exactly as `reconstructAt`
+  // (replay.ts) fabricates its own: the recorded filter keys on the revision.
+  const bruteForce = new Map<number, readonly string[]>();
+  async function bruteForceMembersAt(
+    revision: number,
+  ): Promise<readonly string[]> {
+    const cached = bruteForce.get(revision);
+    if (cached !== undefined) return cached;
+    if (revision < born) {
+      bruteForce.set(revision, []);
+      return [];
+    }
+    const instant =
+      recordedByRevision.get(revision) ??
+      createRecordedInstant(revision, nowIso());
+    const members = await store.asOfRecorded(instant).identity.membersOf(ref);
+    const normalized = members
+      .map((member) => `${member.kind} ${member.id}`)
+      .toSorted();
+    bruteForce.set(revision, normalized);
+    return normalized;
+  }
 
-          // Assertion 2: `replay(seed)`'s step boundaries equal EXACTLY
-          // the revisions at which membership changed, UNION the
-          // self-referential `window-end` revisions above (each of which
-          // legitimately produces a step whose `before` and `after` are
-          // identical — see assertion 1's comment) — no missing boundary,
-          // and no phantom one beyond that documented exception.
-          const replayBoundaries = [
-            ...new Set(
-              replay.steps.map((step) =>
-                recordedInstantRevision(
-                  asRecordedInstant(step.transition.recorded),
-                ),
-              ),
-            ),
-          ].toSorted((left, right) => left - right);
-          const expectedBoundaries = [
-            ...new Set([...changedRevisions, ...selfReferentialRevisions]),
-          ].toSorted((left, right) => left - right);
-          expect(replayBoundaries).toEqual(expectedBoundaries);
+  // A bare singleton coming into or out of existence is NOT an identity
+  // transition by design (the closure carries no row for a singleton), so
+  // "did membership change" excludes the reference's own id on both sides.
+  function withoutSelf(ids: readonly string[]): string {
+    return ids.filter((id) => id !== key).join(",");
+  }
+  const changedRevisions: number[] = [];
+  for (const [index, revision] of revisions.entries()) {
+    const previousRevision =
+      index === 0 ? revision - 1 : requireDefined(revisions[index - 1]);
+    if (
+      withoutSelf(await bruteForceMembersAt(previousRevision)) !==
+      withoutSelf(await bruteForceMembersAt(revision))
+    ) {
+      changedRevisions.push(revision);
+    }
+  }
+  const changedRevisionSet = new Set(changedRevisions);
 
-          // Assertion 3: every step's `after` equals brute-force
-          // membership at that revision, and every step's `before` equals it
-          // at the PREVIOUS boundary — `boundary - 1` for the very first step
-          // (matching `before(b0) := reconstruct(ref, b0 - 1)`;
-          // NOT revision 0, which is only right when `b0` itself is 1), and
-          // the previous replay boundary's `after` for every step thereafter.
-          for (const step of replay.steps) {
-            const revision = recordedInstantRevision(
-              asRecordedInstant(step.transition.recorded),
-            );
-            const boundaryIndex = replayBoundaries.indexOf(revision);
-            const previousRevision =
-              boundaryIndex <= 0 ?
-                revision - 1
-              : requireDefined(replayBoundaries[boundaryIndex - 1]);
-            const expectedBefore = await bruteForceMembersAt(previousRevision);
-            const expectedAfter = await bruteForceMembersAt(revision);
-            expect(normalizeMembers(step.before)).toBe(
-              expectedBefore.join(","),
-            );
-            expect(normalizeMembers(step.after)).toBe(expectedAfter.join(","));
-          }
-
-          void lastRevision;
-        },
-      ),
-      // Pinned so the load-bearing mutation check (see this file's own
-      // header) is reproducible: the same seed must fail the same way every
-      // time `diffClosureTransitions` (or any other exhaustiveness-owning
-      // predicate) regresses, not fail on some invocations and pass on
-      // others. numRuns raised from 40 alongside the pin so the fixed
-      // exploration still covers a meaningful span of sequences.
-      { numRuns: 100, seed: 20_260_908 },
+  // `window-end` schedules a FUTURE valid-time boundary, so its row is
+  // SELF-REFERENTIAL (`class === priorClass`) and the diagonal `asOfRecorded`
+  // read cannot see the change yet: a revision touched ONLY by such rows is
+  // exempt from "changed", and the positive check below confirms the note
+  // still fires where it must.
+  const { transitions } = await identityTransitionsOf(ctx, ref, {
+    limit: 2000,
+  });
+  // `transitionsOf` and `replay` answer ascending by recorded revision.
+  const lineageRevisions = transitions.map((transition) =>
+    revisionOf(transition.recorded),
+  );
+  expect(lineageRevisions, `${key}: transitions in revision order`).toEqual(
+    lineageRevisions.toSorted((left, right) => left - right),
+  );
+  // Paging through the lineage yields the same transitions, in order.
+  const paged: string[] = [];
+  let cursor: TransitionPageCursor | undefined;
+  do {
+    const page = await store.identity.transitionsOf(ref, {
+      limit: PAGE_LIMIT,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    paged.push(
+      ...page.transitions.map((transition) => transition.transitionId),
     );
-  }, 60_000);
-});
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  expect(paged, `${key}: paged lineage`).toEqual(
+    transitions.map((transition) => transition.transitionId),
+  );
+  const ownTransitions = transitions.filter(
+    (transition) => revisionOf(transition.recorded) >= born,
+  );
+  const selfReferentialRevisions = new Set(
+    ownTransitions
+      .filter(
+        (transition) =>
+          transition.priorClass !== undefined &&
+          referencesEqual(transition.priorClass, transition.class),
+      )
+      .map((transition) => revisionOf(transition.recorded)),
+  );
+  const touchedRevisions = new Set(
+    ownTransitions.map((transition) => revisionOf(transition.recorded)),
+  );
+  for (const revision of revisions) {
+    const changed = changedRevisionSet.has(revision);
+    const touched = touchedRevisions.has(revision);
+    expect(
+      !changed || touched,
+      `${key}: membership changed at ${String(revision)} with no transition`,
+    ).toBe(true);
+    expect(
+      changed || !touched || selfReferentialRevisions.has(revision),
+      `${key}: a transition at ${String(revision)} changed nothing`,
+    ).toBe(true);
+  }
+
+  for (const revision of run.windowEndRevisions.get(key) ?? []) {
+    expect(
+      ownTransitions.some(
+        (transition) =>
+          transition.cause === "window-end" &&
+          revisionOf(transition.recorded) === revision,
+      ),
+      `${key}: no window-end transition at ${String(revision)}`,
+    ).toBe(true);
+  }
+
+  const replay = await identityReplay(ctx, ref, { limit: 2000 });
+  const stepRevisions = replay.steps.map((step) =>
+    revisionOf(step.transition.recorded),
+  );
+  expect(stepRevisions, `${key}: replay steps in revision order`).toEqual(
+    stepRevisions.toSorted((left, right) => left - right),
+  );
+  const ownSteps = replay.steps.filter(
+    (step) => revisionOf(step.transition.recorded) >= born,
+  );
+  const replayBoundaries = [
+    ...new Set(ownSteps.map((step) => revisionOf(step.transition.recorded))),
+  ].toSorted((left, right) => left - right);
+  const expectedBoundaries = [
+    ...new Set([...changedRevisions, ...selfReferentialRevisions]),
+  ].toSorted((left, right) => left - right);
+  expect(replayBoundaries, `${key}: replay boundaries`).toEqual(
+    expectedBoundaries,
+  );
+
+  // Each step's `before` is the same read one revision earlier — not the
+  // previous boundary, since an unnoted write (a bare singleton coming back)
+  // can change membership in between.
+  for (const step of ownSteps) {
+    const revision = revisionOf(step.transition.recorded);
+    const previousRevision = revision - 1;
+    const expectedBefore = await bruteForceMembersAt(previousRevision);
+    const expectedAfter = await bruteForceMembersAt(revision);
+    expect(
+      normalizeMembers(step.before),
+      `${key}: before at ${String(revision)}`,
+    ).toBe(expectedBefore.join(","));
+    expect(
+      normalizeMembers(step.after),
+      `${key}: after at ${String(revision)}`,
+    ).toBe(expectedAfter.join(","));
+  }
+}
+
+const scenarioArbitraries = [
+  fc.array(opIntentArbitrary, { minLength: 1, maxLength: 40 }),
+  fc.boolean(),
+] as const;
+
+describe.each(["fold", "ignore"] as const)(
+  "identity replay exhaustiveness property [%s]",
+  (profile) => {
+    const graph = defineExhaustiveGraph(profile);
+    const property = fc.asyncProperty(
+      ...scenarioArbitraries,
+      async (intents, seedLeavesAClass) => {
+        const run = await runExhaustiveScenario(
+          graph,
+          intents,
+          seedLeavesAClass,
+        );
+        for (const ref of UNIVERSE) await expectExhaustiveLineage(run, ref);
+      },
+    );
+
+    // A fixed corpus, so a mutation check fails the same way on every run.
+    it("membership changes iff the transition log carries a boundary, on every lineage of a fixed corpus", async () => {
+      await fc.assert(property, { numRuns: 100, seed: 20_260_908 });
+    }, 120_000);
+
+    it("membership changes iff the transition log carries a boundary, on every lineage of random histories", async () => {
+      await fc.assert(property, {
+        numRuns: propertyRuns({ ci: 50, local: 100 }),
+      });
+    }, 120_000);
+  },
+);

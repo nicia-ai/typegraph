@@ -40,7 +40,9 @@ import {
   pruneIdentityTransitions,
   pruneIdentityTransitionsForContext,
   readIdentityTransitions,
+  readTransitionRetentionDetails,
   transitionAssertionIds,
+  writeIdentityTransitionRetentionWatermark,
 } from "../src/identity/transition-log";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
@@ -621,6 +623,57 @@ describe("identity transition log", () => {
     const ctx = storeRuntime(store).identityContext();
     const afterPrune = await readTransitions(ctx);
     expect(afterPrune.length).toBe(0);
+  });
+
+  it("the retention watermark writer ignores a watermark at or below the stored one", async () => {
+    // Prune raises its own request to the stored watermark under the graph
+    // lock, so only this writer's guard stands between a lower write from any
+    // other caller (archival restore, a racing session) and a lowered cut.
+    const backend = createTestBackend();
+    const [store] = await createAdapterStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const ctx = storeRuntime(store).identityContext();
+    const stored = () =>
+      readTransitionRetentionDetails(backend, ctx.schema, ctx.graphId);
+
+    await writeIdentityTransitionRetentionWatermark(
+      backend,
+      ctx.schema,
+      ctx.graphId,
+      7,
+      "2026-01-01T00:00:00.000Z",
+    );
+    await writeIdentityTransitionRetentionWatermark(
+      backend,
+      ctx.schema,
+      ctx.graphId,
+      3,
+      "2026-02-01T00:00:00.000Z",
+    );
+    await writeIdentityTransitionRetentionWatermark(
+      backend,
+      ctx.schema,
+      ctx.graphId,
+      7,
+      "2026-03-01T00:00:00.000Z",
+    );
+    expect(await stored()).toEqual({
+      prunedBeforeRevision: 7,
+      prunedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await writeIdentityTransitionRetentionWatermark(
+      backend,
+      ctx.schema,
+      ctx.graphId,
+      9,
+      "2026-04-01T00:00:00.000Z",
+    );
+    expect(await stored()).toEqual({
+      prunedBeforeRevision: 9,
+      prunedAt: "2026-04-01T00:00:00.000Z",
+    });
   });
 
   it("notes a window-end transition when a class member's validity window is narrowed", async () => {

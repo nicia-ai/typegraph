@@ -135,6 +135,34 @@ describe("a retract/reassert race", () => {
     });
   });
 
+  it("is refused when one branch retracts and reasserts the pair while another only reasserts it", () => {
+    const reassertedByA: IdentityTransferAssertion = {
+      ...reasserted,
+      id: "a-3",
+    };
+    const caught = caughtFrom(() =>
+      planIdentityChanges(
+        stagingWithIdentityChanges(
+          [
+            { branchId: BRANCH_A, assertion: reassertedByA },
+            { branchId: BRANCH_B, assertion: reasserted },
+          ],
+          [{ branchId: BRANCH_A, assertion: inherited }],
+        ),
+        new Map(),
+      ),
+    );
+    expect(caught).toBeInstanceOf(IdentityMergeConflictError);
+    const error = caught as IdentityMergeConflictError;
+    console.info("one-sided reassertion race", error.details);
+    expect(error.details).toEqual({
+      retractedAssertion: inherited,
+      retractedBy: BRANCH_A,
+      reassertedAssertion: reasserted,
+      reassertedBy: BRANCH_B,
+    });
+  });
+
   it("is not a race when the reasserting branch retracted the pair itself: both writes are planned", () => {
     const ended: IdentityTransferAssertion = {
       ...inherited,
@@ -393,6 +421,33 @@ describe("a staged retraction whose base row is already ended", () => {
         reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
       },
     ]);
+  });
+
+  /**
+   * Only an OPEN row of other truth is truth the retraction could wrongly end.
+   * A row the target already ENDED under the reused id holds nothing now, so
+   * the retraction stays planned (ending no current row) rather than being
+   * reported as a mismatch against truth the target's ledger no longer holds.
+   */
+  it("stays planned when the target's row under that id is an ENDED different truth", () => {
+    const planned = planIdentityChanges(
+      orphanStaging(),
+      new Map([
+        [
+          "a-1",
+          {
+            id: "a-1",
+            relation: "same" as const,
+            a: { kind: "Person", id: "first" },
+            b: { kind: "Person", id: "third" },
+            validFrom: SAME_PAIR.validFrom,
+            validTo: "2024-06-01T00:00:00.000Z",
+          },
+        ],
+      ]),
+    );
+    expect(planned.retractions.map((entry) => entry.id)).toEqual(["a-1"]);
+    expect(planned.dropped).toEqual([]);
   });
 });
 

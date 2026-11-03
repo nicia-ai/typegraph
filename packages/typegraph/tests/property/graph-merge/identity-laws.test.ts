@@ -64,7 +64,7 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { asEdgeId, asNodeId } from "../../../src/core/types";
@@ -80,7 +80,12 @@ import {
   BaseVersionMismatchError,
   IdentityMergeConflictError,
 } from "../../../src/graph-merge/errors";
-import { merge, mergeIncremental } from "../../../src/graph-merge/merge";
+import {
+  merge,
+  mergeIncremental,
+  planMerge,
+  planMergeIncremental,
+} from "../../../src/graph-merge/merge";
 import {
   assertionTruthKey,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
@@ -98,6 +103,13 @@ import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
 import { createPgliteFixturePool } from "../../graph-merge/pglite-fixture-pool";
 import { backendMatrix } from "../../graph-merge/test-utils";
+import { propertyRuns } from "../run-budget";
+import {
+  modelIdentityThreeWay,
+  type ModelRefusalRule,
+  type ModelRow,
+  type ModelVerdict,
+} from "./identity-three-way-model";
 
 const Agent = defineNode("Agent", {
   schema: z.object({ name: z.string() }),
@@ -158,13 +170,26 @@ const BRANCH_B = asBranchId("identity-law-b");
 const TARGET_CLONE = asBranchId("identity-law-target");
 
 /**
- * fast-check iterations PER LANE. Each iteration builds a fork point plus two
- * branch stores (the incremental lane adds a target clone) and runs one
- * merge. NOTE: fast-check consumes pinned `examples` OUT OF this budget, so
- * the randomized count is `LAW_RUNS - examples.length`; the budget is sized
- * with that in mind (the full SQLite matrix runs in a few seconds).
+ * RANDOMIZED fast-check iterations PER LANE. Each iteration builds a fork point
+ * plus two branch stores (the incremental lane adds a target clone) and runs
+ * one merge. fast-check consumes pinned `examples` out of `numRuns`, so every
+ * lane passes {@link withExamples} to keep this many randomized runs on top of
+ * its pinned ones.
  */
-const LAW_RUNS = process.env["CI"] ? 12 : 24;
+const LAW_RUNS = propertyRuns({ ci: 12, local: 24 });
+/**
+ * PGlite is the parity lane, not the coverage lane: each run costs several
+ * times a SQLite run, so it draws fewer randomized runs and SQLite carries the
+ * randomized search. Pinned examples run on both.
+ */
+const PGLITE_LAW_RUNS = propertyRuns({ ci: 7, local: 24 });
+/** Randomized runs per reference-model lane; identity-only scenarios are cheap. */
+const MODEL_RUNS = propertyRuns({ ci: 30, local: 60 });
+const PGLITE_MODEL_RUNS = propertyRuns({ ci: 4, local: 20 });
+
+function withExamples<T>(examples: readonly T[], randomized: number) {
+  return { examples: [...examples], numRuns: randomized + examples.length };
+}
 
 type IdentityOp =
   | Readonly<{ op: "same"; left: number; right: number }>
@@ -227,7 +252,12 @@ interface WeightedOp {
   arbitrary: fc.Arbitrary<IdentityOp>;
 }
 
-const ASSERTION_OPS: readonly WeightedOp[] = [
+/**
+ * The identity-only alphabet: assertions, retractions and chosen-id imports.
+ * The reference-model lanes draw from this alone, because it is the scope the
+ * model in `identity-three-way-model.ts` decides.
+ */
+const IDENTITY_OPS: readonly WeightedOp[] = [
   {
     weight: 3,
     arbitrary: pairArb.map(
@@ -246,6 +276,29 @@ const ASSERTION_OPS: readonly WeightedOp[] = [
       .nat({ max: 7 })
       .map((pick) => ({ op: "retract", pick }) as const),
   },
+  {
+    weight: 3,
+    arbitrary: fc
+      .tuple(
+        fc.nat({ max: IMPORT_ID_POOL.length - 1 }),
+        pairArb,
+        fc.nat({ max: IMPORT_VALID_FROMS.length - 1 }),
+      )
+      .map(
+        ([idPick, [left, right], validFromPick]) =>
+          ({
+            op: "importAssertion",
+            idPick,
+            left,
+            right,
+            validFromPick,
+          }) as const,
+      ),
+  },
+];
+
+const ASSERTION_OPS: readonly WeightedOp[] = [
+  ...IDENTITY_OPS,
   {
     weight: 1,
     arbitrary: nodeIndexArb.map(
@@ -267,25 +320,6 @@ const ASSERTION_OPS: readonly WeightedOp[] = [
       .map(
         ([edge, endPick]) =>
           ({ op: "endEdgeValidity", edge, endPick }) as const,
-      ),
-  },
-  {
-    weight: 3,
-    arbitrary: fc
-      .tuple(
-        fc.nat({ max: IMPORT_ID_POOL.length - 1 }),
-        pairArb,
-        fc.nat({ max: IMPORT_VALID_FROMS.length - 1 }),
-      )
-      .map(
-        ([idPick, [left, right], validFromPick]) =>
-          ({
-            op: "importAssertion",
-            idPick,
-            left,
-            right,
-            validFromPick,
-          }) as const,
       ),
   },
 ];
@@ -1280,6 +1314,280 @@ async function expectLawfulOutcome(args: {
   }
 }
 
+/**
+ * A scenario the reference model decides: identity-only histories on every
+ * side. `targetOps` is empty on the snapshot lane, where the target IS the
+ * fork point.
+ */
+type ModelScenario = Readonly<{
+  baseOps: readonly IdentityOp[];
+  targetOps: readonly IdentityOp[];
+  branchAOps: readonly IdentityOp[];
+  branchBOps: readonly IdentityOp[];
+}>;
+
+const identityOpArb = fc.oneof(...IDENTITY_OPS);
+
+function modelScenarioArb(withTarget: boolean): fc.Arbitrary<ModelScenario> {
+  return fc.record({
+    baseOps: fc.array(identityOpArb, { maxLength: 2 }),
+    targetOps:
+      withTarget ? fc.array(identityOpArb, { maxLength: 2 }) : fc.constant([]),
+    branchAOps: fc.array(identityOpArb, { minLength: 1, maxLength: 3 }),
+    branchBOps: fc.array(identityOpArb, { minLength: 1, maxLength: 3 }),
+  });
+}
+
+const NO_MODEL_OPS: readonly IdentityOp[] = [];
+
+/**
+ * Two branches import different ids for one pair at one `validFrom`: only the
+ * id order picks the survivor, and it must be the smaller id.
+ */
+const SURVIVOR_ID_TIE_EXAMPLE: ModelScenario = {
+  baseOps: NO_MODEL_OPS,
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [
+    { op: "importAssertion", idPick: 1, left: 0, right: 1, validFromPick: 0 },
+  ],
+  branchBOps: [
+    { op: "importAssertion", idPick: 0, left: 0, right: 1, validFromPick: 0 },
+  ],
+};
+
+/** Both branches retract one inherited row; it ends at the earlier instant. */
+const EARLIEST_RETRACTION_EXAMPLE: ModelScenario = {
+  baseOps: [{ op: "same", left: 0, right: 1 }],
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [{ op: "retract", pick: 0 }],
+  branchBOps: [{ op: "retract", pick: 0 }],
+};
+
+/**
+ * A `same` one branch asserted and retracted, against a `different` the other
+ * branch asserted after it ended: the windows never overlap, so this merges.
+ */
+const DISJOINT_WINDOWS_EXAMPLE: ModelScenario = {
+  baseOps: NO_MODEL_OPS,
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [
+    { op: "same", left: 0, right: 1 },
+    { op: "retract", pick: 0 },
+  ],
+  branchBOps: [{ op: "different", left: 0, right: 1 }],
+};
+
+/** One branch retracts an inherited row and reasserts its pair: convergent. */
+const CONVERGENT_REASSERT_EXAMPLE: ModelScenario = {
+  baseOps: [{ op: "same", left: 0, right: 1 }],
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [
+    { op: "retract", pick: 0 },
+    { op: "same", left: 0, right: 1 },
+  ],
+  branchBOps: [{ op: "same", left: 2, right: 3 }],
+};
+
+/**
+ * Both branches retract an inherited row; one also reasserted the pair and
+ * retracted that too. Nobody holds the pair now, so this is no race.
+ */
+const ENDED_REASSERTION_EXAMPLE: ModelScenario = {
+  baseOps: [{ op: "same", left: 0, right: 1 }],
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [{ op: "retract", pick: 0 }],
+  branchBOps: [
+    { op: "retract", pick: 0 },
+    { op: "same", left: 0, right: 1 },
+    { op: "retract", pick: 1 },
+  ],
+};
+
+/**
+ * Both branches retract an inherited row and only one reasserts its pair: the
+ * branches disagree about whether the pair holds, a retract/reassert race.
+ */
+const RACE_EXAMPLE: ModelScenario = {
+  baseOps: [{ op: "same", left: 0, right: 1 }],
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [{ op: "retract", pick: 0 }],
+  branchBOps: [
+    { op: "retract", pick: 0 },
+    { op: "same", left: 0, right: 1 },
+  ],
+};
+
+/**
+ * The advanced target imported an id that one branch imports with the exact
+ * same truth while the other branch imports an EARLIER-valid id for the pair:
+ * the committed id survives regardless of the comparator.
+ */
+const COMMITTED_SURVIVOR_EXAMPLE: ModelScenario = {
+  baseOps: NO_MODEL_OPS,
+  targetOps: [
+    { op: "importAssertion", idPick: 1, left: 0, right: 1, validFromPick: 1 },
+  ],
+  branchAOps: [
+    { op: "importAssertion", idPick: 1, left: 0, right: 1, validFromPick: 1 },
+  ],
+  branchBOps: [
+    { op: "importAssertion", idPick: 0, left: 0, right: 1, validFromPick: 0 },
+  ],
+};
+
+async function modelRows(
+  store: Store<LawGraph>,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, ModelRow>> {
+  if (ids.length === 0) return new Map();
+  return storeRuntime(store).identityAssertionRowsByIds(ids);
+}
+
+function rowSummary(row: ModelRow): string {
+  return `${row.id} ${row.relation}(${row.a.id},${row.b.id}) from ${row.validFrom}${
+    row.validTo === undefined ? "" : ` to ${row.validTo}`
+  }`;
+}
+
+/** The identity part of a plan, for comparing two branch orders. */
+function identityPlanFingerprint(
+  planned: Awaited<ReturnType<typeof planMerge>>,
+): unknown {
+  if (isErr(planned)) {
+    return { refused: planned.error.constructor.name };
+  }
+  const writes = planned.data.writes;
+  const byId = (
+    left: Readonly<{ id: string }>,
+    right: Readonly<{ id: string }>,
+  ) => compareStrings(left.id, right.id);
+  return {
+    assertions: writes.identityAssertions.toSorted(byId),
+    retractions: writes.identityRetractions.toSorted(byId),
+    dropped: planned.data.review.dropped
+      .filter(
+        (item) =>
+          typeof item === "object" &&
+          item !== null &&
+          !Array.isArray(item) &&
+          (item as Readonly<Record<string, unknown>>)["kind"] === "identity",
+      )
+      .map((item) => JSON.stringify(item))
+      .toSorted(),
+  };
+}
+
+/** The refusal message each model rule must surface as. */
+const REFUSAL_MESSAGES: Readonly<Record<ModelRefusalRule, string>> = {
+  opposing:
+    "Branches asserted opposing identity relations for one endpoint pair.",
+  race: "Branches contain a retract/reassert race for one identity pair.",
+  "one-id-two-truths":
+    "One assertion id was staged for two different identity truths.",
+  contradiction:
+    "The merged identity ledger would assert one pair of nodes is both the same and different.",
+  "id-held-other-truth":
+    "A staged assertion id already identifies different truth in the target ledger.",
+};
+
+/**
+ * The model lanes' clock: faked, and moved forward before every operation,
+ * so every window is distinct and the outcome never depends on how many
+ * writes landed in one millisecond.
+ */
+const MODEL_CLOCK_START = Date.parse("2026-01-01T00:00:00.000Z");
+const MODEL_CLOCK_STEP_MS = 60_000;
+
+function tickModelClock(): void {
+  vi.setSystemTime(Date.now() + MODEL_CLOCK_STEP_MS);
+}
+
+interface ModelTally {
+  merged: number;
+  refused: number;
+  undetermined: number;
+}
+
+/**
+ * Compares a finished merge to the reference model's verdict: a refusal the
+ * model predicts must be a typed refusal planning already makes, and a merge
+ * the model accepts MUST
+ * succeed — the success floor a refuse-everything regression fails — and land
+ * exactly the ledger the model computed.
+ */
+async function expectModelOutcome(args: {
+  verdict: ModelVerdict;
+  planned: Awaited<ReturnType<typeof planMerge>>;
+  result: Awaited<ReturnType<typeof merge>>;
+  target: Store<LawGraph>;
+  trackedIds: readonly string[];
+  tally: ModelTally;
+}): Promise<void> {
+  const { verdict, planned, result, target, trackedIds, tally } = args;
+  if (verdict.kind === "undetermined") {
+    tally.undetermined += 1;
+    if (isErr(result)) expectTypedRefusal(result.error);
+    return;
+  }
+  if (verdict.kind === "refused") {
+    tally.refused += 1;
+    // Every refusal the model knows is a plan-time rule: review must already
+    // see it, never only the commit.
+    expect(
+      isErr(planned) && planned.error.message,
+      `the model refuses by ${verdict.rule} (${verdict.reason}); planning answered otherwise`,
+    ).toBe(REFUSAL_MESSAGES[verdict.rule]);
+    expect(
+      isErr(result) && result.error.message,
+      `the model refuses by ${verdict.rule} (${verdict.reason}); the merge answered otherwise`,
+    ).toBe(REFUSAL_MESSAGES[verdict.rule]);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    }
+    return;
+  }
+  tally.merged += 1;
+  if (isErr(result)) {
+    throw new Error(
+      `the model merges this scenario but the merge refused: ${result.error.constructor.name}: ${result.error.message}`,
+      { cause: result.error },
+    );
+  }
+  const after = await modelRows(target, trackedIds);
+  const currentAfter = [...after.values()]
+    .filter((row) => row.validTo === undefined)
+    .map((row) => rowSummary(row))
+    .toSorted();
+  expect(currentAfter, "current ledger after the merge").toEqual(
+    [...verdict.current.values()].map((row) => rowSummary(row)).toSorted(),
+  );
+  for (const [id, end] of verdict.ended) {
+    expect(
+      after.get(id)?.validTo,
+      `retracted ${id} ends at the earliest claim`,
+    ).toBe(end);
+  }
+  for (const [id, row] of verdict.history) {
+    expect(
+      after.get(id) === undefined ?
+        undefined
+      : rowSummary(requireDefined(after.get(id))),
+      `bounded survivor ${id} is carried as history`,
+    ).toBe(rowSummary(row));
+  }
+  const reportedDuplicates = result.data.dropped
+    .filter(
+      (item) =>
+        item.kind === "identity" &&
+        item.reason === DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+    )
+    .map((item) => item.id)
+    .toSorted();
+  expect(reportedDuplicates, "ids reported dropped as duplicates").toEqual(
+    [...verdict.duplicates].toSorted(),
+  );
+}
+
 // Each property iteration releases whole fixture schemas, including identity
 // ledgers. Live branches keep separate engines and independent transactions.
 const pglitePool = createPgliteFixturePool();
@@ -1288,6 +1596,7 @@ afterAll(async () => {
 });
 
 describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
+  const lawRuns = entry.name === "PGlite" ? PGLITE_LAW_RUNS : LAW_RUNS;
   type Fixture = Readonly<{
     forkPoint: Store<LawGraph>;
     branchA: Awaited<ReturnType<typeof makeBranches>>["branchA"];
@@ -1426,16 +1735,16 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             for (const cleanup of cleanups.reverse()) await cleanup();
           }
         }),
-        {
-          examples: [
+        withExamples(
+          [
             [VALIDITY_COLLISION_EXAMPLE],
             [TRUTH_REPLACEMENT_EXAMPLE],
             [REPEATED_RESURRECTION_WINDOW_EXAMPLE],
             [NODE_END_TIE_BREAK_EXAMPLE],
             [EDGE_END_TIE_BREAK_EXAMPLE],
           ],
-          numRuns: LAW_RUNS,
-        },
+          lawRuns,
+        ),
       );
       // Coverage instrumentation and property shrinking can multiply the
       // per-iteration workload even with pooled engines. Keep the extended
@@ -1542,14 +1851,179 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           for (const cleanup of cleanups.reverse()) await cleanup();
         }
       }),
-      {
-        examples: [
+      withExamples(
+        [
           [RETRACTION_MISMATCH_EXAMPLE],
           [TARGET_WINDOW_PRECEDENCE_EXAMPLE],
           [TARGET_EDGE_WINDOW_PRECEDENCE_EXAMPLE],
         ],
-        numRuns: LAW_RUNS,
-      },
+        lawRuns,
+      ),
     );
   }, 300_000);
+
+  /**
+   * The reference-model lanes: identity-only histories, the merged ledger
+   * compared to `modelIdentityThreeWay`, and the identity plan required to be
+   * the same under both branch orders.
+   */
+  const MODEL_LANES = [
+    {
+      name: "snapshot",
+      incremental: false,
+      graph: defineLawGraph("identity-law-model", "ignore"),
+      examples: [
+        SURVIVOR_ID_TIE_EXAMPLE,
+        EARLIEST_RETRACTION_EXAMPLE,
+        DISJOINT_WINDOWS_EXAMPLE,
+        CONVERGENT_REASSERT_EXAMPLE,
+        ENDED_REASSERTION_EXAMPLE,
+        RACE_EXAMPLE,
+      ],
+    },
+    {
+      name: "incremental",
+      incremental: true,
+      graph: defineLawGraph("identity-law-model-incremental", "ignore"),
+      examples: [COMMITTED_SURVIVOR_EXAMPLE, EARLIEST_RETRACTION_EXAMPLE],
+    },
+  ] as const;
+
+  for (const lane of MODEL_LANES) {
+    it(`merges random identity-only ${lane.name} histories as the reference model predicts, whatever the branch order`, async () => {
+      const tally: ModelTally = { merged: 0, refused: 0, undetermined: 0 };
+      await fc.assert(
+        fc.asyncProperty(
+          modelScenarioArb(lane.incremental),
+          async (scenario) => {
+            const cleanups: (() => Promise<void>)[] = [];
+            async function makeBackend(): Promise<GraphBackend> {
+              const fixture =
+                entry.name === "PGlite" ?
+                  await pglitePool.makeFixture()
+                : await entry.make();
+              cleanups.push(fixture.cleanup);
+              return fixture.backend;
+            }
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(MODEL_CLOCK_START);
+            try {
+              const [forkPoint] = await createStoreWithSchema(
+                lane.graph,
+                await makeBackend(),
+                { revisionTracking: true },
+              );
+              await seedUniverse(forkPoint);
+              const baseHistory = emptyHistory();
+              for (const op of scenario.baseOps) {
+                tickModelClock();
+                await applyOp(forkPoint, op, baseHistory);
+              }
+              const target =
+                lane.incremental ?
+                  unwrap(
+                    await branch(forkPoint, () => makeBackend(), {
+                      id: TARGET_CLONE,
+                    }),
+                  ).store
+                : forkPoint;
+              const targetHistory = copyHistory(baseHistory);
+              for (const op of scenario.targetOps) {
+                tickModelClock();
+                await applyOp(target, op, targetHistory);
+              }
+              const { branchA, branchB } = await makeBranches(
+                forkPoint,
+                makeBackend,
+              );
+              const branchAHistory = copyHistory(baseHistory);
+              const branchBHistory = copyHistory(baseHistory);
+              for (const op of scenario.branchAOps) {
+                tickModelClock();
+                await applyOp(branchA.store, op, branchAHistory);
+              }
+              for (const op of scenario.branchBOps) {
+                tickModelClock();
+                await applyOp(branchB.store, op, branchBHistory);
+              }
+              tickModelClock();
+              const trackedIds = [
+                ...new Set(
+                  [branchAHistory, branchBHistory, targetHistory].flatMap(
+                    (history) => history.assertionIds,
+                  ),
+                ),
+              ];
+              const verdict = modelIdentityThreeWay({
+                fork: await modelRows(forkPoint, trackedIds),
+                target: await modelRows(target, trackedIds),
+                sides: [
+                  {
+                    branchId: BRANCH_A,
+                    rows: await modelRows(branchA.store, trackedIds),
+                  },
+                  {
+                    branchId: BRANCH_B,
+                    rows: await modelRows(branchB.store, trackedIds),
+                  },
+                  ...(lane.incremental ?
+                    [
+                      {
+                        branchId: TARGET_CLONE,
+                        rows: await modelRows(target, trackedIds),
+                      },
+                    ]
+                  : []),
+                ],
+              });
+
+              const plan = (branchOrder: readonly BranchId[]) =>
+                lane.incremental ?
+                  planMergeIncremental({
+                    forkPoint,
+                    target,
+                    branches: [branchA, branchB],
+                    options: { branchOrder },
+                  })
+                : planMerge(forkPoint, [branchA, branchB], { branchOrder });
+              const planned = await plan([BRANCH_A, BRANCH_B]);
+              expect(
+                identityPlanFingerprint(await plan([BRANCH_B, BRANCH_A])),
+                "the identity plan depends on the branch order",
+              ).toEqual(identityPlanFingerprint(planned));
+
+              const result =
+                lane.incremental ?
+                  await mergeIncremental({
+                    forkPoint,
+                    target,
+                    branches: [branchA, branchB],
+                    options: { branchOrder: [BRANCH_A, BRANCH_B] },
+                  })
+                : await merge(forkPoint, [branchA, branchB], {
+                    branchOrder: [BRANCH_A, BRANCH_B],
+                  });
+              await expectModelOutcome({
+                verdict,
+                planned,
+                result,
+                target,
+                trackedIds,
+                tally,
+              });
+            } finally {
+              vi.useRealTimers();
+              for (const cleanup of cleanups.reverse()) await cleanup();
+            }
+          },
+        ),
+        withExamples(
+          lane.examples.map((example) => [example] as const),
+          entry.name === "PGlite" ? PGLITE_MODEL_RUNS : MODEL_RUNS,
+        ),
+      );
+      console.info(`identity model lane ${lane.name} [${entry.name}]`, tally);
+      expect(tally.merged, "no scenario merged").toBeGreaterThan(0);
+    }, 300_000);
+  }
 });
