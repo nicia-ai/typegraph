@@ -9,7 +9,10 @@
  * The fixture's kinds disagree on every other plausible order: the cascade
  * reports the leaf `alpha` before its whole `Zed` (leaf-first), and a
  * locale-aware sort puts `alpha` before `Zed`, while code-point order puts
- * `Zed` (U+005A) before `alpha` (U+0061).
+ * `Zed` (U+005A) before `alpha` (U+0061). The two `Zed` ids disagree the same
+ * way inside one kind: the cascade sorts siblings by UTF-16 code unit, which
+ * puts the emoji (a surrogate pair, U+D83D first) before the fullwidth `ｚ`
+ * (U+FF5A), while code-point order puts `ｚ` first.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -53,6 +56,8 @@ const graph = defineGraph({
 });
 
 const MEMBER_KINDS = ["Zed", "alpha"] as const;
+const ZED_FULLWIDTH = "zed-\uFF5A";
+const ZED_EMOJI = "zed-\u{1F600}";
 
 type RecordedStatement = Readonly<{ query: string; params: unknown[] }>;
 
@@ -94,12 +99,17 @@ describe.runIf(process.env["POSTGRES_URL"])(
   () => {
     // MUTATION CHECK: reverse the comparator of `lockOrder` in
     // `lockCascadeMembers` (src/store/operations/node-operations.ts), or drop
-    // the sort and lock in the cascade's own leaf-first order — the recorded
-    // kinds then read `["alpha", "Zed"]`.
-    it("locks one statement per member kind, kinds in code-point order", async () => {
+    // the sort and lock in the cascade's own leaf-first order — the
+    // statements then read `[["alpha"], ["Zed"]]`; lock each member in its
+    // own statement and they read `[["Zed"], ["Zed"], ["alpha"], ["alpha"]]`.
+    // Drop the code-point sort from the backend's `lockNodes`
+    // (src/backend/drizzle/operation-backend-core.ts) and the `Zed` ids arrive
+    // emoji first; drop `buildLockNodes`' `ORDER BY` and the statement no
+    // longer orders the rows it locks.
+    it("locks one statement per member kind, kinds and ids in code-point order", async () => {
       if (store === undefined) throw new Error("PostgreSQL store unavailable");
       const hub = await store.nodes.Hub.create({});
-      for (const id of ["zed-b", "zed-a"]) {
+      for (const id of [ZED_FULLWIDTH, ZED_EMOJI]) {
         const zed = await store.nodes.Zed.create(
           {},
           { id, partOf: { whole: hub } },
@@ -110,15 +120,26 @@ describe.runIf(process.env["POSTGRES_URL"])(
       statements.splice(0);
       await store.nodes.Hub.delete(hub.id);
 
-      const lockedKinds = statements
+      const memberLocks = statements
         .filter(
           ({ query }) =>
             query.includes("FOR UPDATE") && query.includes("typegraph_nodes"),
         )
-        .flatMap(({ params }) =>
-          MEMBER_KINDS.filter((kind) => params.includes(kind)),
-        );
-      expect(lockedKinds).toEqual(["Zed", "alpha"]);
+        .map(({ query, params }) => ({
+          kinds: MEMBER_KINDS.filter((kind) => params.includes(kind)),
+          zedIds: params.filter(
+            (parameter) =>
+              parameter === ZED_FULLWIDTH || parameter === ZED_EMOJI,
+          ),
+          ordersRows: query.includes("ORDER BY"),
+        }))
+        .filter((lock) => lock.kinds.length > 0);
+      expect(memberLocks.map((lock) => lock.kinds)).toEqual([
+        ["Zed"],
+        ["alpha"],
+      ]);
+      expect(memberLocks[0]?.zedIds).toEqual([ZED_FULLWIDTH, ZED_EMOJI]);
+      expect(memberLocks.every((lock) => lock.ordersRows)).toBe(true);
       expect(await store.nodes.Zed.count()).toBe(0);
       expect(await store.nodes.alpha.count()).toBe(0);
     });

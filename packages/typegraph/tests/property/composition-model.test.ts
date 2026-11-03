@@ -470,6 +470,10 @@ type DynamicNodeCollection = Readonly<{
     items: readonly Readonly<{ id: string; options: object }>[],
   ) => Promise<unknown>;
   planDelete: (id: string) => Promise<NodeDeletePlan | undefined>;
+  find: (
+    filter: object,
+    temporal: Readonly<{ temporalMode: "includeTombstones" }>,
+  ) => Promise<readonly object[]>;
 }>;
 type NodeRefInput = Readonly<{ kind: string; id: string }>;
 type DynamicEdgeCollection = Readonly<{
@@ -486,6 +490,10 @@ type DynamicEdgeCollection = Readonly<{
   delete: (id: string) => Promise<void>;
   hardDelete: (id: string) => Promise<void>;
   bulkDelete: (ids: readonly string[]) => Promise<void>;
+  find: (
+    filter: object,
+    temporal: Readonly<{ temporalMode: "includeTombstones" }>,
+  ) => Promise<readonly object[]>;
 }>;
 type Surface = Readonly<{
   nodes: Readonly<Record<NodeKind, DynamicNodeCollection>>;
@@ -1629,9 +1637,12 @@ class TransactionCommand implements fc.AsyncCommand<Model, Real> {
       for (const factory of this.factories) {
         const step = factory(model);
         if (step === undefined) continue;
+        const before =
+          step.refusals.length === 0 ? undefined : await rowsThrough(surface);
         const error = await outcomeOf(step.perform(surface, real));
         assertVerdict(step, error);
         if (error === undefined) step.apply?.(model);
+        else await assertNothingWrittenThrough(surface, step, before);
       }
     });
     await assertStoreMatchesModel(real, model);
@@ -1640,6 +1651,34 @@ class TransactionCommand implements fc.AsyncCommand<Model, Real> {
   toString(): string {
     return `${this.name} [tick ${this.tick}]`;
   }
+}
+
+/**
+ * Every node and edge row, read through `surface`: inside a transaction the
+ * raw backend is not reachable, so the collections' widest read stands in for
+ * the row snapshot. Claim rows are left to the constraint-fence audit that
+ * runs once the transaction commits.
+ */
+async function rowsThrough(surface: Surface): Promise<unknown> {
+  const tombstones = { temporalMode: "includeTombstones" } as const;
+  const nodes = await Promise.all(
+    NODE_KINDS.map((kind) => surface.nodes[kind].find({}, tombstones)),
+  );
+  const edges = await Promise.all(
+    EDGE_KINDS.map((kind) => surface.edges[kind].find({}, tombstones)),
+  );
+  return { nodes, edges };
+}
+
+async function assertNothingWrittenThrough(
+  surface: Surface,
+  step: Step,
+  before: unknown,
+): Promise<void> {
+  expect({ refused: step.label, rows: await rowsThrough(surface) }).toEqual({
+    refused: step.label,
+    rows: before,
+  });
 }
 
 function advanceClock(model: Model, tick: number): void {

@@ -18,7 +18,14 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { asEdgeId, defineEdge, defineGraph, defineNode, partOf } from "../src";
+import {
+  asEdgeId,
+  ConfigurationError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  partOf,
+} from "../src";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createStoreWithSchema } from "../src/store";
@@ -89,6 +96,7 @@ async function withTombstonedPart(
       store: GraphStore;
       edgeId: string;
       setIsolation: (setting: string) => Promise<void>;
+      edgeAndClaimRows: () => Promise<unknown>;
     }>,
   ) => Promise<void>,
 ): Promise<void> {
@@ -110,6 +118,17 @@ async function withTombstonedPart(
           `SET default_transaction_isolation = '${setting}'`,
         );
       },
+      edgeAndClaimRows: async () => {
+        const edges = await local.client.query(
+          "SELECT * FROM typegraph_edges WHERE graph_id = $1 ORDER BY id",
+          [graph.id],
+        );
+        const claims = await local.client.query(
+          "SELECT * FROM typegraph_edge_claims WHERE graph_id = $1 ORDER BY axis, key",
+          [graph.id],
+        );
+        return { edges: edges.rows, claims: claims.rows };
+      },
     });
   } finally {
     await local.backend.close();
@@ -124,24 +143,26 @@ describe("a required part's detach on a port whose fence advances no fence row",
   for (const { setting, isolation } of SNAPSHOT_ISOLATION_LEVELS) {
     for (const detach of DETACHES) {
       it(`${detach.name} refuses at ${isolation} and writes nothing`, async () => {
-        await withTombstonedPart(async ({ store, edgeId, setIsolation }) => {
-          await setIsolation(setting);
-          const refusal = await detach
-            .run(store, edgeId)
-            .catch((error: unknown) => error);
-          await setIsolation("read committed");
+        await withTombstonedPart(
+          async ({ store, edgeId, setIsolation, edgeAndClaimRows }) => {
+            const before = await edgeAndClaimRows();
+            await setIsolation(setting);
+            const refusal = await detach
+              .run(store, edgeId)
+              .catch((error: unknown) => error);
+            await setIsolation("read committed");
 
-          expect(refusal).toMatchObject({
-            details: {
-              code: "COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT",
-              isolation,
-              fenceRow: "none",
-            },
-          });
-          const [edge] = await store.edges.clipOf.find({});
-          expect(edge).toMatchObject({ id: edgeId });
-          expect(edge?.meta.validTo).toBeUndefined();
-        });
+            expect(refusal).toBeInstanceOf(ConfigurationError);
+            expect(refusal).toMatchObject({
+              details: {
+                code: "COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT",
+                isolation,
+                fenceRow: "none",
+              },
+            });
+            expect(await edgeAndClaimRows()).toEqual(before);
+          },
+        );
       });
     }
   }
