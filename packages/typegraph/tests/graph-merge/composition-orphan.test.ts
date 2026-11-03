@@ -491,6 +491,42 @@ describe.each(backendMatrix())(
       return result.data;
     }
 
+    it("carries a deeper part away with the intermediate part a branch moves off the whole it deletes", async () => {
+      cleanups = [];
+      // Fork point: w1 <- p1 <- l1, and a second whole w2.
+      const forkPoint = await makeStore();
+      const oldWhole = await forkPoint.nodes.Whole.create({}, { id: "w1" });
+      const newWhole = await forkPoint.nodes.Whole.create({}, { id: "w2" });
+      const part = await forkPoint.nodes.Part.create({}, { id: "p1" });
+      const leaf = await forkPoint.nodes.Leaf.create({}, { id: "l1" });
+      const binding = await forkPoint.edges.holds.create(part, oldWhole, {});
+      await forkPoint.edges.holdsLeaf.create(leaf, part, {});
+      const target = (await makeBranchOf(forkPoint, TARGET_CLONE)).store;
+
+      // The branch moves p1 (and so l1 beneath it) to w2, then deletes w1.
+      const branchA = await makeBranchOf(forkPoint, BRANCH_A);
+      await branchA.store.edges.holds.delete(binding.id);
+      await branchA.store.edges.holds.create(part, newWhole, {});
+      await branchA.store.nodes.Whole.delete(oldWhole.id);
+
+      const planResult = await planMergeIncremental<NestedG>({
+        forkPoint,
+        target,
+        branches: [branchA],
+      });
+      if (!isOk(planResult)) throw planResult.error;
+      expect(planResult.data.review.compositionOrphans).toEqual([]);
+
+      const applyResult = await applyMergePlan(target, planResult.data);
+      if (isErr(applyResult)) throw applyResult.error;
+      await expect(target.nodes.Whole.getById(oldWhole.id)).resolves.toBe(
+        undefined,
+      );
+      await expect(target.nodes.Leaf.getById(leaf.id)).resolves.toBeDefined();
+      const heldBy = await target.edges.holds.findFrom(part);
+      expect(heldBy.map((edge) => edge.toId)).toEqual([newWhole.id]);
+    });
+
     it("reports the orphan against its OWN immediate whole (Part), not the cascade root (Whole), for a part attached two levels deep", async () => {
       cleanups = [];
       // Fork point: Whole w1 with Part p1, no Leaf yet.
