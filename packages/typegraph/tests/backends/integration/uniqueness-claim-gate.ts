@@ -67,7 +67,7 @@ function accountGraph(
             [
               {
                 ...ACCOUNT_EMAIL_UNIQUE,
-                where: (fields) => fields.email.isNotNull(),
+                where: (fields) => requireDefined(fields["email"]).isNotNull(),
               },
             ]
           : [{ ...ACCOUNT_EMAIL_UNIQUE, collation: "caseInsensitive" }],
@@ -697,6 +697,36 @@ export function registerUniquenessClaimGateIntegrationTests(
     // declaration as given AND the gate's scope test back to
     // `scope === "kindWithSubClasses"`, the subClassOf removal commits over
     // the claim at the `GateEmployee` axis. Either one alone still refuses.
+
+    it("enforces a declaration that skipped defineGraph across the subclass component, with binary keys", async () => {
+      const store = await context.createStore(
+        withUndefaultedDeclarations(
+          defaultedScopeHierarchyGraph(
+            "uniqueness_gate_defaults_enforced",
+            true,
+          ),
+          "gate_person_email",
+          ["GatePerson", "GateEmployee"],
+        ),
+      );
+      await store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      // The omitted scope spans the component, so a subclass row collides.
+      await expect(
+        store.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      // The omitted collation is binary, so a value differing in case does not.
+      await expect(
+        store.nodes.GateEmployee.create({
+          email: DUPLICATE_EMAIL.toUpperCase(),
+        }),
+      ).resolves.toBeDefined();
+    });
+    // MUTATION CHECK (verified): dropping the omitted-scope fallback in
+    // `uniquenessScopeSpansSubclasses` (src/core/unique-constraint-options.ts)
+    // admits the subclass row; reading an omitted collation as
+    // `"caseInsensitive"` in `uniqueCollationFoldsCase` refuses the
+    // upper-cased one.
 
     it("migrates a graph whose declarations skipped defineGraph without a phantom unique-constraint change", async () => {
       const id = "uniqueness_gate_defaults_spread_diff";

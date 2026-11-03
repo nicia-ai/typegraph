@@ -114,7 +114,7 @@ const baseGraph = defineGraph({
           fields: ["isbn"],
           scope: "kindWithSubClasses",
           collation: "binary",
-          where: (fields) => fields.isbn.isNotNull(),
+          where: (fields) => requireDefined(fields["isbn"]).isNotNull(),
         },
       ],
     },

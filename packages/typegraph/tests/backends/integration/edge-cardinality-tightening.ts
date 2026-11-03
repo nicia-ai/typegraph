@@ -279,14 +279,12 @@ export function registerEdgeCardinalityTighteningIntegrationTests(
         expect(await activeVersion(context, id)).toBe(2);
 
         // The ended row no longer occupies the axis.
-        const other =
-          direction === "source" ?
-            await upgraded.nodes.TighteningTarget.create({})
-          : await upgraded.nodes.TighteningPerson.create({});
+        const otherTarget = await upgraded.nodes.TighteningTarget.create({});
+        const otherPerson = await upgraded.nodes.TighteningPerson.create({});
         await expect(
           direction === "source" ?
-            upgraded.edges.tighteningAssignedTo.create(alice, other, {})
-          : upgraded.edges.tighteningAssignedTo.create(other, target, {}),
+            upgraded.edges.tighteningAssignedTo.create(alice, otherTarget, {})
+          : upgraded.edges.tighteningAssignedTo.create(otherPerson, target, {}),
         ).resolves.toBeDefined();
       });
       // MUTATION CHECK (verified): make `cardinalityLoosens`
