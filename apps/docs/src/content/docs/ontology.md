@@ -108,6 +108,19 @@ the equivalence relation its class declares (`equivalentTo` whenever the class
 declares one). `details` also carries `childKind`, `parentKind`,
 `viaEquivalence`, `declared`, `reason`, `path` and every violation found.
 
+A child pinned to a finite set of values (`z.literal`, `z.enum`) narrows a
+bounded parent when every value satisfies the parent's constraints:
+`z.literal("x")` extends `z.string().min(1)`, `z.enum(["a", "b"])` extends
+`z.string().max(10)`, and `z.literal(5)` extends `z.int().min(0)`. A record
+narrows its parent's key set the same way, so `z.record(z.enum(["a", "b"]), V)`
+extends `z.record(z.string(), V)`. Each value is checked against length bounds,
+`regex()` patterns (and the patterns behind `startsWith()`, `endsWith()`,
+`includes()`, `lowercase()` and `uppercase()`), numeric bounds and
+`multipleOf()`. A value is accepted only when Zod and JSON Schema both accept
+it, so a length is judged in code points and in UTF-16 units, and a pattern
+with and without the `u` flag. Formats such as `z.email()` or `z.uuid()` are
+not checked value by value; a child under one must use the same format.
+
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:
 `z.set()`, `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, and any

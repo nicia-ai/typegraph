@@ -394,6 +394,59 @@ describe("records", () => {
     );
   });
 
+  it("record over an enum key set ⊑ record over string keys -> subtype", () => {
+    assertVerdict(
+      verdict(
+        z.record(z.enum(["a", "b"]), z.string()),
+        z.record(z.string(), z.string()),
+      ),
+      "subtype",
+    );
+    assertVerdict(
+      verdict(
+        z.partialRecord(z.enum(["a", "b"]), z.string()),
+        z.record(z.string().max(1), z.string()),
+      ),
+      "subtype",
+    );
+  });
+
+  it("record over tighter string keys ⊑ record over looser string keys -> subtype", () => {
+    assertVerdict(
+      verdict(
+        z.record(z.string().max(3), z.number()),
+        z.record(z.string().max(10), z.number()),
+      ),
+      "subtype",
+    );
+  });
+
+  it("record whose enum key set has one key the parent's key pattern refuses -> property-names-mismatch", () => {
+    expect(
+      verdict(
+        z.record(z.enum(["a", "Bad"]), z.string()),
+        z.record(z.string().regex(/^[a-z]+$/), z.string()),
+      ),
+    ).toEqual({
+      verdict: "not-subtype",
+      reason: "property-names-mismatch",
+      path: ["{propertyNames}"],
+    });
+  });
+
+  it("record over string keys ⊑ record over an enum key set -> property-names-mismatch", () => {
+    expect(
+      verdict(
+        z.record(z.string(), z.string()),
+        z.partialRecord(z.enum(["a", "b"]), z.string()),
+      ),
+    ).toEqual({
+      verdict: "not-subtype",
+      reason: "property-names-mismatch",
+      path: ["{propertyNames}"],
+    });
+  });
+
   it("record ⊑ an object requiring a specific field -> missing-required-property (the record does not guarantee it)", () => {
     const result = verdict(
       z.record(z.string(), z.number()),
@@ -609,6 +662,235 @@ describe("scalars", () => {
     // only the reverse direction is a subtype.
     expect(
       isStructuralSubtype(withEmailFormat, withSameFormatLooserPattern),
+    ).toEqual({ verdict: "subtype" });
+  });
+});
+
+// ============================================================
+// Finite value sets under bounded parents
+// ============================================================
+
+/** Every value a projected schema pins with `const`/`enum`, through unions. */
+function pinnedValuesOf(schema: JsonSchema): readonly unknown[] {
+  if (Object.hasOwn(schema, "const")) return [schema.const];
+  if (schema.enum !== undefined) return schema.enum;
+  return (schema.anyOf ?? []).flatMap((member) => pinnedValuesOf(member));
+}
+
+describe("finite value sets under bounded parents", () => {
+  const rows: readonly {
+    name: string;
+    child: z.ZodType;
+    parent: z.ZodType;
+    expected: ExpectedVerdict;
+  }[] = [
+    {
+      name: "z.literal('x') subtype z.string().min(1)",
+      child: z.literal("x"),
+      parent: z.string().min(1),
+      expected: "subtype",
+    },
+    {
+      name: "z.enum(['a','b']) subtype z.string().max(10)",
+      child: z.enum(["a", "b"]),
+      parent: z.string().max(10),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal(5) subtype z.number().min(0)",
+      child: z.literal(5),
+      parent: z.number().min(0),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal(5) subtype z.int() (an integer value satisfies the integer token)",
+      child: z.literal(5),
+      parent: z.int(),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal([1, 2]) subtype z.number().gt(0).lt(3)",
+      child: z.literal([1, 2]),
+      parent: z.number().gt(0).lt(3),
+      expected: "subtype",
+    },
+    {
+      name: "z.enum(['abc','abd']) subtype z.string().regex(/^ab/)",
+      child: z.enum(["abc", "abd"]),
+      parent: z.string().regex(/^ab/),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal('apple') subtype z.string().startsWith('a') (a pattern-stated format)",
+      child: z.literal("apple"),
+      parent: z.string().startsWith("a"),
+      expected: "subtype",
+    },
+    {
+      name: "z.enum(['ab','cd']) subtype z.string().lowercase()",
+      child: z.enum(["ab", "cd"]),
+      parent: z.string().lowercase(),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal([2, 4]) subtype z.number().multipleOf(2)",
+      child: z.literal([2, 4]),
+      parent: z.number().multipleOf(2),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal(0.3) subtype z.number().multipleOf(0.1) (decided on decimals, not floats)",
+      child: z.literal(0.3),
+      parent: z.number().multipleOf(0.1),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal('😀') subtype z.string().min(1).max(2) (one code point, two UTF-16 units)",
+      child: z.literal("😀"),
+      parent: z.string().min(1).max(2),
+      expected: "subtype",
+    },
+    {
+      name: "z.enum(['a','b']).nullable() subtype z.string().max(1).nullable()",
+      child: z.enum(["a", "b"]).nullable(),
+      parent: z.string().max(1).nullable(),
+      expected: "subtype",
+    },
+    {
+      name: "z.literal('') not subtype z.string().min(1)",
+      child: z.literal(""),
+      parent: z.string().min(1),
+      expected: { reason: "string-length-not-tighter" },
+    },
+    {
+      name: "z.enum(['a','toolong']) not subtype z.string().max(3) (one member out of bounds)",
+      child: z.enum(["a", "toolong"]),
+      parent: z.string().max(3),
+      expected: { reason: "string-length-not-tighter" },
+    },
+    {
+      name: "z.literal('😀') not subtype z.string().max(1) (Zod counts two UTF-16 units)",
+      child: z.literal("😀"),
+      parent: z.string().max(1),
+      expected: { reason: "string-length-not-tighter" },
+    },
+    {
+      name: "z.literal('😀') not subtype z.string().min(2) (JSON Schema counts one code point)",
+      child: z.literal("😀"),
+      parent: z.string().min(2),
+      expected: { reason: "string-length-not-tighter" },
+    },
+    {
+      name: "z.literal('ba') not subtype z.string().regex(/^a/)",
+      child: z.literal("ba"),
+      parent: z.string().regex(/^a/),
+      expected: { reason: "pattern-mismatch" },
+    },
+    {
+      name: "z.literal('A') not subtype z.string().lowercase()",
+      child: z.literal("A"),
+      parent: z.string().lowercase(),
+      expected: { reason: "pattern-mismatch" },
+    },
+    {
+      name: "z.literal('a@b.co') not subtype z.email() (a standard format is not evaluated)",
+      child: z.literal("a@b.co"),
+      parent: z.email(),
+      expected: { reason: "format-mismatch" },
+    },
+    {
+      name: "z.literal(-1) not subtype z.number().min(0)",
+      child: z.literal(-1),
+      parent: z.number().min(0),
+      expected: { reason: "numeric-bound-not-tighter" },
+    },
+    {
+      name: "z.literal(0) not subtype z.number().gt(0)",
+      child: z.literal(0),
+      parent: z.number().gt(0),
+      expected: { reason: "numeric-bound-not-tighter" },
+    },
+    {
+      name: "z.literal([2, 3]) not subtype z.number().multipleOf(2) (one member not a multiple)",
+      child: z.literal([2, 3]),
+      parent: z.number().multipleOf(2),
+      expected: { reason: "multiple-of-mismatch" },
+    },
+    {
+      name: "z.literal(0.1 + 0.2) not subtype z.number().multipleOf(0.1) (not a decimal multiple)",
+      child: z.literal(0.1 + 0.2),
+      parent: z.number().multipleOf(0.1),
+      expected: { reason: "multiple-of-mismatch" },
+    },
+    {
+      name: "z.literal(1.5) not subtype z.int()",
+      child: z.literal(1.5),
+      parent: z.int(),
+      expected: { reason: "type-token-mismatch" },
+    },
+    {
+      name: "z.literal('5') not subtype z.number()",
+      child: z.literal("5"),
+      parent: z.number(),
+      expected: { reason: "type-token-mismatch" },
+    },
+  ];
+
+  it.each(rows.map((row) => [row.name, row] as const))("%s", (_name, row) => {
+    const result = verdict(row.child, row.parent);
+    assertVerdict(result, row.expected);
+    if (row.expected !== "subtype") return;
+    // A positive row is only meaningful if Zod itself admits every value.
+    for (const value of pinnedValuesOf(projected(row.child))) {
+      expect(row.parent.safeParse(value).success).toBe(true);
+    }
+  });
+
+  it("judges an untyped const against the parent's type token", () => {
+    expect(
+      isStructuralSubtype({ const: "x" }, { type: "string", minLength: 1 }),
+    ).toEqual({ verdict: "subtype" });
+    expect(
+      isStructuralSubtype({ enum: ["a", 1] }, { type: "string" }),
+    ).toMatchObject({
+      verdict: "not-subtype",
+      reason: "unconstrained-where-parent-constrains",
+    });
+  });
+
+  it("refuses a pattern one reading cannot compile, even for a value the other reading accepts", () => {
+    // `\-` is an identity escape without `u` and a syntax error with it.
+    expect(new RegExp(String.raw`^\-$`).test("-")).toBe(true);
+    expect(
+      isStructuralSubtype(
+        { type: "string", const: "-" },
+        { type: "string", pattern: String.raw`^\-$` },
+      ),
+    ).toMatchObject({ verdict: "not-subtype", reason: "pattern-mismatch" });
+  });
+
+  it("requires a value to match the pattern with and without Unicode semantics", () => {
+    // Flagless, `.` is one UTF-16 unit and `😀` is two; with `u` it is one.
+    expect(
+      isStructuralSubtype(
+        { type: "string", const: "😀" },
+        { type: "string", pattern: "^.$" },
+      ),
+    ).toMatchObject({ verdict: "not-subtype", reason: "pattern-mismatch" });
+    expect(
+      isStructuralSubtype(
+        { type: "string", const: "😀" },
+        { type: "string", pattern: "^..$" },
+      ),
+    ).toMatchObject({ verdict: "not-subtype", reason: "pattern-mismatch" });
+  });
+
+  it("ignores a pinned value of another type than the child's own, which the child never admits", () => {
+    expect(
+      isStructuralSubtype(
+        { type: "string", enum: ["a", 99] },
+        { type: "string", maxLength: 1 },
+      ),
     ).toEqual({ verdict: "subtype" });
   });
 });
@@ -1514,9 +1796,10 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
   it("compares `propertyNames` by what its reference resolves to, not by its name", () => {
     expect(
       isStructuralSubtype(recordWithKeyLimit(10), recordWithKeyLimit(3)),
-    ).toMatchObject({
-      verdict: "not-subtype",
-      reason: "property-names-mismatch",
+    ).toEqual({
+      verdict: "incomparable",
+      reason: "schema-reference",
+      path: ["{propertyNames}"],
     });
     expect(
       isStructuralSubtype(recordWithKeyLimit(3), recordWithKeyLimit(3)),

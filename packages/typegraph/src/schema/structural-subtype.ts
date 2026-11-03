@@ -138,7 +138,19 @@
  *    length bounds, `pattern`, and `format` (a constraint, not an
  *    annotation — see {@link COMPARABLE_KEYWORDS}), and numbers compare
  *    bounds folding `exclusiveMinimum` /
- *    `exclusiveMaximum` in.
+ *    `exclusiveMaximum` in. A record's key set compares as a subtype too:
+ *    the child's `propertyNames` must narrow the parent's. Within these
+ *    leaf comparisons, a child pinned to a finite value set (`const` or
+ *    `enum`: `z.literal`, `z.enum`) is also judged value by value. A parent
+ *    `type`, length bound, `pattern`, numeric bound, or `multipleOf` the
+ *    child's own keywords do not imply is still satisfied when every value
+ *    the child admits satisfies it, so `z.literal("x")` narrows
+ *    `z.string().min(1)` and `z.literal(5)` narrows `z.int()`. Each value is
+ *    judged under every reading a validator applies — JSON Schema's and
+ *    Zod's, which differ on string length, `pattern` flags, and `multipleOf`
+ *    rounding — and a value a reading cannot judge faithfully (an
+ *    uncompilable pattern, a standard `format` such as `email`) leaves the
+ *    declared-keyword refusal standing.
  *
  * An unmodeled construct always yields `{ verdict: "incomparable" }` and is
  * never silently accepted as a match.
@@ -403,7 +415,8 @@ export const UNMODELED_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
  * Zod projection emits it with no accompanying `pattern` for `z.url()` and
  * `z.jwt()`, so ignoring it would accept a bare `z.string()` as a subtype of
  * either — it is compared exactly like `pattern` (present on the child,
- * absent or identical on the parent).
+ * absent or identical on the parent, or satisfied by every value a finite
+ * child admits — see `satisfiesFormat`).
  */
 export const COMPARABLE_KEYWORDS: ReadonlySet<string> = new Set([
   "type",
@@ -1006,14 +1019,25 @@ function compareLeaf(
   const childType = child.type;
   const parentType = parent.type;
 
-  if (parentType !== undefined && childType === undefined) {
+  // A child pinned to values of the parent's type satisfies that type
+  // whatever token, if any, the child states itself.
+  const pinnedToParentType =
+    typeof parentType === "string" &&
+    everyAdmittedValue(child, (value) => scalarHasTypeToken(value, parentType));
+
+  if (
+    parentType !== undefined &&
+    childType === undefined &&
+    !pinnedToParentType
+  ) {
     return notSubtype("unconstrained-where-parent-constrains", path);
   }
 
   if (
     childType !== undefined &&
     parentType !== undefined &&
-    !typeTokenNarrows(childType, parentType)
+    !typeTokenNarrows(childType, parentType) &&
+    !pinnedToParentType
   ) {
     return notSubtype("type-token-mismatch", path);
   }
@@ -1022,7 +1046,9 @@ function compareLeaf(
     return compareObject(child, parent, path, walk);
   }
 
-  switch (childType ?? parentType) {
+  // The parent's token picks the comparison: it is the type whose keywords
+  // the child must satisfy.
+  switch (parentType ?? childType) {
     case ARRAY_TYPE_TOKEN: {
       return compareArray(child, parent, path, walk);
     }
@@ -1060,14 +1086,16 @@ function compareLeaf(
   }
 }
 
+/** The values a schema's `const` or `enum` pins it to, as written. */
+function pinnedValues(schema: JsonSchema): readonly unknown[] | undefined {
+  if (hasOwnKey(schema, "const")) return [schema.const];
+  return schema.enum;
+}
+
 function allowedValues(schema: JsonSchema): ReadonlySet<string> | undefined {
-  if (hasOwnKey(schema, "const")) {
-    return new Set([canonicalJson(schema.const)]);
-  }
-  if (schema.enum !== undefined) {
-    return new Set(schema.enum.map((value) => canonicalJson(value)));
-  }
-  return undefined;
+  const values = pinnedValues(schema);
+  if (values === undefined) return undefined;
+  return new Set(values.map((value) => canonicalJson(value)));
 }
 
 function compareValueSets(
@@ -1088,6 +1116,107 @@ function compareValueSets(
     }
   }
   return SUBTYPE;
+}
+
+// ============================================================
+// Finite value sets
+// ============================================================
+
+/** A JSON value the value-by-value comparison judges. */
+type ScalarValue = string | number | boolean | null;
+
+function isScalarValue(value: unknown): value is ScalarValue {
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
+/**
+ * Whether `value` is a value of type `token`. A scalar is never an `object`
+ * or an `array`, and an unknown token is not judged, so both are `false`.
+ */
+function scalarHasTypeToken(value: ScalarValue, token: string): boolean {
+  switch (token) {
+    case STRING_TYPE_TOKEN: {
+      return typeof value === "string";
+    }
+    case NUMBER_TYPE_TOKEN: {
+      return typeof value === "number" && Number.isFinite(value);
+    }
+    case INTEGER_TYPE_TOKEN: {
+      return Number.isInteger(value);
+    }
+    case BOOLEAN_TYPE_TOKEN: {
+      return typeof value === "boolean";
+    }
+    case NULL_TYPE_TOKEN: {
+      return value === null;
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
+/**
+ * Every value `schema` can admit when it pins its values with `const` or
+ * `enum`: the pinned values of its own `type`, since a pinned value of another
+ * type is not admitted at all. `undefined` when the schema pins nothing, or
+ * pins an object or array, which this comparison does not judge.
+ */
+function admittedScalarValues(
+  schema: JsonSchema,
+): readonly ScalarValue[] | undefined {
+  const pinned = pinnedValues(schema);
+  if (pinned === undefined) return undefined;
+  if (!pinned.every((value) => isScalarValue(value))) return undefined;
+  const { type } = schema;
+  if (typeof type !== "string") return pinned;
+  return pinned.filter((value) => scalarHasTypeToken(value, type));
+}
+
+/**
+ * Whether `schema` pins a finite value set every admitted member of which
+ * passes `test`.
+ *
+ * A finite child satisfies a parent keyword it does not state itself when
+ * each of its values does: `z.literal("x")` satisfies `minLength: 1`, while
+ * `z.string()` does not. Each comparison asks this only after the child's
+ * own declared keyword failed to imply the parent's, so the two answers are
+ * alternatives: a value that does not pass `test` leaves the declared
+ * comparison's refusal standing, and a `test` that cannot judge a value
+ * faithfully returns `false` for it.
+ */
+function everyAdmittedValue(
+  schema: JsonSchema,
+  test: (value: ScalarValue) => boolean,
+): boolean {
+  const values = admittedScalarValues(schema);
+  return values?.every((value) => test(value)) === true;
+}
+
+function everyAdmittedString(
+  schema: JsonSchema,
+  test: (value: string) => boolean,
+): boolean {
+  return everyAdmittedValue(
+    schema,
+    (value) => typeof value === "string" && test(value),
+  );
+}
+
+function everyAdmittedNumber(
+  schema: JsonSchema,
+  test: (value: number) => boolean,
+): boolean {
+  return everyAdmittedValue(
+    schema,
+    (value) =>
+      typeof value === "number" && Number.isFinite(value) && test(value),
+  );
 }
 
 // ============================================================
@@ -1198,22 +1327,32 @@ function compareObject(
     }
   }
 
-  // A JSON object's keys are always strings, so a child with no explicit
-  // `propertyNames` (every construct but `z.record`) is exactly as tight as
-  // one declaring `{"type":"string"}` — defaulting to that avoids a spurious
-  // mismatch when comparing a plain object against a `z.record` parent.
-  const childPropertyNames = child.propertyNames ?? { type: STRING_TYPE_TOKEN };
-  if (
-    parent.propertyNames !== undefined &&
-    !sameSchema(childPropertyNames, parent.propertyNames, walk)
-  ) {
-    return notSubtype("property-names-mismatch", [
-      ...path,
-      PROPERTY_NAMES_SEGMENT,
-    ]);
-  }
+  return comparePropertyNames(child, parent, path, walk);
+}
 
-  return SUBTYPE;
+/**
+ * Every key the child admits must be a key the parent admits: the child's
+ * `propertyNames` is compared as a subtype of the parent's, so
+ * `z.record(z.enum(["a", "b"]), V)` narrows `z.record(z.string(), V)`. A
+ * JSON object's keys are always strings, so a child with no explicit
+ * `propertyNames` (every construct but `z.record`) is exactly as tight as one
+ * declaring `{"type":"string"}`.
+ */
+function comparePropertyNames(
+  child: JsonSchema,
+  parent: JsonSchema,
+  path: readonly string[],
+  walk: Walk,
+): StructuralSubtypeResult {
+  if (parent.propertyNames === undefined) return SUBTYPE;
+  const keyResult = compareSchemas(
+    child.propertyNames ?? { type: STRING_TYPE_TOKEN },
+    parent.propertyNames,
+    [...path, PROPERTY_NAMES_SEGMENT],
+    descend(walk),
+  );
+  if (keyResult.verdict !== "not-subtype") return keyResult;
+  return notSubtype("property-names-mismatch", keyResult.path);
 }
 
 // ============================================================
@@ -1333,29 +1472,116 @@ function compareArray(
 // Strings
 // ============================================================
 
+/**
+ * Length under each reading a validator applies: JSON Schema counts Unicode
+ * code points, Zod's `.min()`/`.max()`/`.length()` count UTF-16 code units. A
+ * string holding an astral character has more units than points, so a lower
+ * bound is judged on points and an upper bound on units — the reading that
+ * admits less, which both readings then agree to.
+ */
+function satisfiesMinLength(value: string, minLength: number): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-misused-spread -- code points are what JSON Schema counts
+  return [...value].length >= minLength;
+}
+
+function satisfiesMaxLength(value: string, maxLength: number): boolean {
+  return value.length <= maxLength;
+}
+
+/**
+ * The flags a projected `pattern` is read under. Zod tests the flagless
+ * `RegExp` it was given (a flagged one never reaches this comparison — the
+ * projection marks it {@link ZOD_ONLY_CONSTRAINT_KEYWORD}); a JSON Schema
+ * validator commonly compiles the pattern with Unicode semantics (`u`). A
+ * value satisfies the pattern only when it matches under both readings.
+ */
+const PATTERN_READING_FLAGS = ["", "u"] as const;
+
+function compilePattern(pattern: string, flags: string): RegExp | undefined {
+  try {
+    return new RegExp(pattern, flags);
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+
+/** A pattern either reading cannot compile is satisfied by nothing. */
+function satisfiesPattern(value: string, pattern: string): boolean {
+  return PATTERN_READING_FLAGS.every(
+    (flags) => compilePattern(pattern, flags)?.test(value) === true,
+  );
+}
+
+/**
+ * The `format` names Zod projects beside a `pattern` that states the whole
+ * check: `.startsWith()`, `.endsWith()`, `.includes()`, `.lowercase()`,
+ * `.uppercase()`. Zod enforces each through `startsWith`/`endsWith`/
+ * `includes` or that same pattern, which a matching value satisfies; to a
+ * JSON Schema validator each is an unknown format, which asserts nothing.
+ * Every other format — `email`, `uuid`, `date-time`, `uri`, a custom
+ * `z.stringFormat()` — states a check of its own that is not evaluated here,
+ * so a finite child satisfies it only by declaring the same format.
+ */
+const PATTERN_STATED_FORMATS: ReadonlySet<string> = new Set([
+  "starts_with",
+  "ends_with",
+  "includes",
+  "lowercase",
+  "uppercase",
+]);
+
+function satisfiesFormat(value: string, parent: JsonSchema): boolean {
+  return (
+    parent.format !== undefined &&
+    PATTERN_STATED_FORMATS.has(parent.format) &&
+    parent.pattern !== undefined &&
+    satisfiesPattern(value, parent.pattern)
+  );
+}
+
 function compareStringConstraints(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
 ): StructuralSubtypeResult {
-  const childMinLength = child.minLength ?? 0;
   const parentMinLength = parent.minLength ?? 0;
-  if (childMinLength < parentMinLength) {
+  if (
+    (child.minLength ?? 0) < parentMinLength &&
+    !everyAdmittedString(child, (value) =>
+      satisfiesMinLength(value, parentMinLength),
+    )
+  ) {
     return notSubtype("string-length-not-tighter", path);
   }
 
-  const childMaxLength = child.maxLength ?? Number.POSITIVE_INFINITY;
   const parentMaxLength = parent.maxLength ?? Number.POSITIVE_INFINITY;
-  if (childMaxLength > parentMaxLength) {
+  if (
+    (child.maxLength ?? Number.POSITIVE_INFINITY) > parentMaxLength &&
+    !everyAdmittedString(child, (value) =>
+      satisfiesMaxLength(value, parentMaxLength),
+    )
+  ) {
     return notSubtype("string-length-not-tighter", path);
   }
 
-  if (parent.pattern !== undefined && child.pattern !== parent.pattern) {
+  const parentPattern = parent.pattern;
+  if (
+    parentPattern !== undefined &&
+    child.pattern !== parentPattern &&
+    !everyAdmittedString(child, (value) =>
+      satisfiesPattern(value, parentPattern),
+    )
+  ) {
     return notSubtype("pattern-mismatch", path);
   }
 
   // `format` is a constraint, not an annotation — see COMPARABLE_KEYWORDS.
-  if (parent.format !== undefined && child.format !== parent.format) {
+  if (
+    parent.format !== undefined &&
+    child.format !== parent.format &&
+    !everyAdmittedString(child, (value) => satisfiesFormat(value, parent))
+  ) {
     return notSubtype("format-mismatch", path);
   }
 
@@ -1417,6 +1643,72 @@ function upperBoundTighterOrEqual(
   return child.exclusive || !parent.exclusive;
 }
 
+function satisfiesLowerBound(value: number, bound: NumericBound): boolean {
+  return bound.exclusive ? value > bound.value : value >= bound.value;
+}
+
+function satisfiesUpperBound(value: number, bound: NumericBound): boolean {
+  return bound.exclusive ? value < bound.value : value <= bound.value;
+}
+
+/** A finite number as `coefficient × 10^exponent`, exactly. */
+type ExactDecimal = Readonly<{ coefficient: bigint; exponent: number }>;
+
+const DECIMAL_NUMERAL = /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]\d+))?$/;
+
+/**
+ * `value` read as the shortest decimal numeral that round-trips it — the
+ * numeral its JSON form carries, and so the number a JSON Schema validator
+ * reading the stored document sees.
+ */
+function exactDecimal(value: number): ExactDecimal | undefined {
+  const match = DECIMAL_NUMERAL.exec(String(value));
+  if (match === null) return undefined;
+  const [, sign = "", integerDigits = "", fractionDigits = "", exponent = "0"] =
+    match;
+  return {
+    coefficient: BigInt(`${sign}${integerDigits}${fractionDigits}`),
+    exponent: Number(exponent) - fractionDigits.length,
+  };
+}
+
+const SMALLEST_NORMAL_DOUBLE = 2 ** -1022;
+
+function isNormalOrZero(value: number): boolean {
+  return value === 0 || Math.abs(value) >= SMALLEST_NORMAL_DOUBLE;
+}
+
+/**
+ * Whether `value` is a multiple of `divisor` under both readings of
+ * `multipleOf`.
+ *
+ * JSON Schema's: dividing the two decimals yields an integer, decided here
+ * with no rounding — `0.3` is a multiple of `0.1`, `0.30000000000000004` is
+ * not. Zod's (`floatSafeRemainder`, zod/v4/core): the floating-point quotient
+ * lies within `4 × Number.EPSILON` (relative) of an integer. An exact
+ * multiple's floating-point quotient is off its integer by at most about
+ * `1.5 × Number.EPSILON` relative, so Zod accepts it, provided both operands
+ * are normal doubles and the quotient is a safe integer; outside that range
+ * the value is not judged.
+ */
+function isDecimalMultiple(value: number, divisor: number): boolean {
+  if (!(divisor > 0) || !isNormalOrZero(divisor) || !isNormalOrZero(value)) {
+    return false;
+  }
+  const numerator = exactDecimal(value);
+  const denominator = exactDecimal(divisor);
+  if (numerator === undefined || denominator === undefined) return false;
+  const exponent = Math.min(numerator.exponent, denominator.exponent);
+  const scaledNumerator =
+    numerator.coefficient * 10n ** BigInt(numerator.exponent - exponent);
+  const scaledDenominator =
+    denominator.coefficient * 10n ** BigInt(denominator.exponent - exponent);
+  if (scaledNumerator % scaledDenominator !== 0n) return false;
+  const quotient = scaledNumerator / scaledDenominator;
+  const largestSafeQuotient = BigInt(Number.MAX_SAFE_INTEGER);
+  return quotient <= largestSafeQuotient && quotient >= -largestSafeQuotient;
+}
+
 function compareNumericConstraints(
   child: JsonSchema,
   parent: JsonSchema,
@@ -1425,9 +1717,14 @@ function compareNumericConstraints(
   const parentLower = lowerBound(parent);
   if (parentLower !== undefined) {
     const childLower = lowerBound(child);
+    const declaredTighter =
+      childLower !== undefined &&
+      lowerBoundTighterOrEqual(childLower, parentLower);
     if (
-      childLower === undefined ||
-      !lowerBoundTighterOrEqual(childLower, parentLower)
+      !declaredTighter &&
+      !everyAdmittedNumber(child, (value) =>
+        satisfiesLowerBound(value, parentLower),
+      )
     ) {
       return notSubtype("numeric-bound-not-tighter", path);
     }
@@ -1436,17 +1733,26 @@ function compareNumericConstraints(
   const parentUpper = upperBound(parent);
   if (parentUpper !== undefined) {
     const childUpper = upperBound(child);
+    const declaredTighter =
+      childUpper !== undefined &&
+      upperBoundTighterOrEqual(childUpper, parentUpper);
     if (
-      childUpper === undefined ||
-      !upperBoundTighterOrEqual(childUpper, parentUpper)
+      !declaredTighter &&
+      !everyAdmittedNumber(child, (value) =>
+        satisfiesUpperBound(value, parentUpper),
+      )
     ) {
       return notSubtype("numeric-bound-not-tighter", path);
     }
   }
 
+  const parentMultipleOf = parent.multipleOf;
   if (
-    parent.multipleOf !== undefined &&
-    child.multipleOf !== parent.multipleOf
+    parentMultipleOf !== undefined &&
+    child.multipleOf !== parentMultipleOf &&
+    !everyAdmittedNumber(child, (value) =>
+      isDecimalMultiple(value, parentMultipleOf),
+    )
   ) {
     return notSubtype("multiple-of-mismatch", path);
   }

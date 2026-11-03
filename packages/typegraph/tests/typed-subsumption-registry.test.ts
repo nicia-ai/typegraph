@@ -284,6 +284,82 @@ describe("registry check — subClassOf refused when the child is not a structur
   });
 });
 
+describe("registry check — a finite value set narrows a bounded parent", () => {
+  const Document = defineNode("Document", {
+    schema: z.object({
+      status: z.string().min(1).max(16),
+      priority: z.int().min(0).max(10),
+      labels: z.record(z.string(), z.string()),
+    }),
+  });
+
+  it("builds a hierarchy whose child pins literals, an enum and an enum-keyed record under bounded parent fields", () => {
+    const Invoice = defineNode("Invoice", {
+      schema: z.object({
+        status: z.enum(["draft", "sent", "paid"]),
+        priority: z.literal(5),
+        labels: z.partialRecord(z.enum(["currency", "region"]), z.string()),
+      }),
+    });
+    const PaidInvoice = defineNode("PaidInvoice", {
+      schema: z.object({
+        status: z.literal("paid"),
+        priority: z.literal(5),
+        labels: z.partialRecord(z.enum(["currency"]), z.string()),
+      }),
+    });
+
+    const registry = buildKindRegistry(
+      defineGraph({
+        id: "subclass_finite_values",
+        nodes: {
+          Document: { type: Document },
+          Invoice: { type: Invoice },
+          PaidInvoice: { type: PaidInvoice },
+        },
+        edges: {},
+        ontology: [
+          subClassOf(Invoice, Document),
+          subClassOf(PaidInvoice, Invoice),
+        ],
+      }),
+    );
+
+    expect(registry.isAssignableTo("Invoice", "Document")).toBe(true);
+    expect(registry.isAssignableTo("PaidInvoice", "Document")).toBe(true);
+  });
+
+  it("still refuses a child whose enum has one member outside the parent's bound", () => {
+    const Overlong = defineNode("Overlong", {
+      schema: z.object({
+        status: z.enum(["draft", "awaiting-countersignature"]),
+        priority: z.literal(5),
+        labels: z.record(z.string(), z.string()),
+      }),
+    });
+
+    let caught: unknown;
+    try {
+      buildKindRegistry(
+        defineGraph({
+          id: "subclass_finite_values_overlong",
+          nodes: { Document: { type: Document }, Overlong: { type: Overlong } },
+          edges: {},
+          ontology: [subClassOf(Overlong, Document)],
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    const details = (caught as ConfigurationError).details;
+    expect(details["code"]).toBe("ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE");
+    expect(details["reason"]).toBe("string-length-not-tighter");
+    expect(details["path"]).toEqual(["status"]);
+  });
+});
+
 describe("registry check — equivalentTo refused in the failing direction only", () => {
   it("refuses the direction whose schema is not a structural subtype, with the equivalence code", () => {
     // X requires a tighter constraint than Y; X -> Y holds (X asks more),

@@ -7,8 +7,10 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { isObjectSchema } from "../../src/schema/migration";
+import { serializeSchemaProperties } from "../../src/schema/serializer";
 import { isStructuralSubtype } from "../../src/schema/structural-subtype";
 import { type JsonSchema } from "../../src/schema/types";
 import { comparableSchemaArb, tightenArb } from "./arbitraries";
@@ -146,6 +148,249 @@ describe("structural subtyping properties", () => {
           expect(isWellShaped).toBe(true);
         },
       ),
+    );
+  });
+});
+
+// ============================================================
+// Finite value sets under bounded parents
+// ============================================================
+
+type StringCheck = (schema: z.ZodString) => z.ZodString;
+type NumberCheck = (schema: z.ZodNumber) => z.ZodNumber;
+
+function withChecks<S>(schema: S, checks: readonly ((schema: S) => S)[]): S {
+  let checked = schema;
+  for (const check of checks) checked = check(checked);
+  return checked;
+}
+
+/**
+ * Patterns whose flagless reading (how Zod tests them) and Unicode reading
+ * (how a JSON Schema validator compiles them) agree on every string in
+ * {@link AGREEING_STRING_POOL}.
+ */
+const AGREEING_PATTERN_POOL = [
+  "^a",
+  "b$",
+  "^[a-c]+$",
+  "^.{2}$",
+  String.raw`\d`,
+];
+
+/**
+ * Patterns whose two readings disagree on some string in
+ * {@link STRING_VALUE_POOL}, or whose Unicode reading does not compile.
+ */
+const DIVERGENT_PATTERN_POOL = [
+  "^.$",
+  String.raw`^\p{L}+$`,
+  String.raw`^[\w-.]+$`,
+  String.raw`^\-`,
+];
+
+/** Strings without an astral character, so code points equal UTF-16 units. */
+const AGREEING_STRING_POOL = ["", "a", "b", "ab", "abc", "ba", "A", "1", "é"];
+
+const STRING_VALUE_POOL = [
+  ...AGREEING_STRING_POOL,
+  "-",
+  "p{L}",
+  "😀",
+  "a😀",
+  "\n",
+  "aaaaa",
+];
+
+/** Numbers whose shortest decimal has at most two fraction digits. */
+const AGREEING_NUMBER_POOL = [
+  -3, -1, 0, 1, 2, 3, 4, 6, 10, 0.07, 0.1, 0.2, 0.25, 0.3, 0.5, 1.5, 2.03,
+];
+
+const NUMBER_VALUE_POOL = [
+  ...AGREEING_NUMBER_POOL,
+  -0,
+  0.1 + 0.2,
+  1e-7,
+  1e21,
+  5e-324,
+  Number.MAX_SAFE_INTEGER,
+  2 ** 53,
+];
+
+const MULTIPLE_OF_POOL = [2, 3, 0.01, 0.07, 0.1, 0.25];
+
+function stringParentArb(
+  patternPool: readonly string[],
+): fc.Arbitrary<z.ZodString> {
+  const boundArb = fc.oneof(
+    fc.nat({ max: 3 }).map(
+      (length): StringCheck =>
+        (s) =>
+          s.min(length),
+    ),
+    fc.integer({ min: 1, max: 4 }).map(
+      (length): StringCheck =>
+        (s) =>
+          s.max(length),
+    ),
+  );
+  // At most one pattern-bearing check: two project as `allOf`, which the
+  // predicate refuses as incomparable.
+  const patternCheckArb = fc.oneof(
+    fc.constantFrom(...patternPool).map(
+      (pattern): StringCheck =>
+        (s) =>
+          s.regex(new RegExp(pattern)),
+    ),
+    fc.constantFrom("a", "b").map(
+      (prefix): StringCheck =>
+        (s) =>
+          s.startsWith(prefix),
+    ),
+    fc.constant<StringCheck>((s) => s.lowercase()),
+    fc.constant<StringCheck>((s) => s.includes("a", { position: 1 })),
+  );
+  return fc
+    .tuple(
+      fc.array(boundArb, { maxLength: 2 }),
+      fc.option(patternCheckArb, { nil: undefined }),
+    )
+    .map(([bounds, patternCheck]) =>
+      withChecks(z.string(), [
+        ...bounds,
+        ...(patternCheck === undefined ? [] : [patternCheck]),
+      ]),
+    );
+}
+
+function numberParentArb(): fc.Arbitrary<z.ZodNumber> {
+  const boundArb = fc.oneof(
+    fc.integer({ min: -2, max: 5 }).map(
+      (bound): NumberCheck =>
+        (s) =>
+          s.min(bound),
+    ),
+    fc.integer({ min: -2, max: 5 }).map(
+      (bound): NumberCheck =>
+        (s) =>
+          s.max(bound),
+    ),
+    fc.integer({ min: -2, max: 5 }).map(
+      (bound): NumberCheck =>
+        (s) =>
+          s.gt(bound),
+    ),
+    fc.integer({ min: -2, max: 5 }).map(
+      (bound): NumberCheck =>
+        (s) =>
+          s.lt(bound),
+    ),
+    fc.constant<NumberCheck>((s) => s.int()),
+  );
+  // At most one `multipleOf`: two project as `allOf`, which the predicate
+  // refuses as incomparable.
+  const multipleOfArb = fc.constantFrom(...MULTIPLE_OF_POOL).map(
+    (step): NumberCheck =>
+      (s) =>
+        s.multipleOf(step),
+  );
+  return fc
+    .tuple(
+      fc.array(boundArb, { maxLength: 3 }),
+      fc.option(multipleOfArb, { nil: undefined }),
+    )
+    .map(([bounds, multipleOf]) =>
+      withChecks(z.number(), [
+        ...bounds,
+        ...(multipleOf === undefined ? [] : [multipleOf]),
+      ]),
+    );
+}
+
+function valueSubsetArb<T>(pool: readonly T[]): fc.Arbitrary<readonly T[]> {
+  return fc.uniqueArray(fc.constantFrom(...pool), {
+    minLength: 1,
+    maxLength: 4,
+  });
+}
+
+function pinnedStrings(values: readonly string[]): z.ZodType {
+  return z.enum(values as [string, ...string[]]);
+}
+
+function pinnedNumbers(values: readonly number[]): z.ZodType {
+  return z.literal(values);
+}
+
+function finiteVerdict(child: z.ZodType, parent: z.ZodType) {
+  return isStructuralSubtype(
+    serializeSchemaProperties(child),
+    serializeSchemaProperties(parent),
+  );
+}
+
+function admittedByParent(
+  parent: z.ZodType,
+  values: readonly unknown[],
+): readonly unknown[] {
+  return values.filter((value) => parent.safeParse(value).success);
+}
+
+describe("structural subtyping properties — finite value sets", () => {
+  it("P7: a finite child the parent admits in full is a subtype, wherever the readings agree", () => {
+    fc.assert(
+      fc.property(
+        stringParentArb(AGREEING_PATTERN_POOL),
+        valueSubsetArb(AGREEING_STRING_POOL),
+        (parent, candidates) => {
+          const values = admittedByParent(parent, candidates) as string[];
+          fc.pre(values.length > 0);
+          expect(finiteVerdict(pinnedStrings(values), parent)).toEqual({
+            verdict: "subtype",
+          });
+        },
+      ),
+    );
+    fc.assert(
+      fc.property(
+        numberParentArb(),
+        valueSubsetArb(AGREEING_NUMBER_POOL),
+        (parent, candidates) => {
+          const values = admittedByParent(parent, candidates) as number[];
+          fc.pre(values.length > 0);
+          expect(finiteVerdict(pinnedNumbers(values), parent)).toEqual({
+            verdict: "subtype",
+          });
+        },
+      ),
+    );
+  });
+
+  it("P8: an accepted finite child admits no value the parent's Zod schema refuses", () => {
+    fc.assert(
+      fc.property(
+        stringParentArb([...AGREEING_PATTERN_POOL, ...DIVERGENT_PATTERN_POOL]),
+        valueSubsetArb(STRING_VALUE_POOL),
+        (parent, values) => {
+          const result = finiteVerdict(pinnedStrings(values), parent);
+          if (result.verdict !== "subtype") return;
+          expect(admittedByParent(parent, values)).toEqual(values);
+        },
+      ),
+      { numRuns: 500 },
+    );
+    fc.assert(
+      fc.property(
+        numberParentArb(),
+        valueSubsetArb(NUMBER_VALUE_POOL),
+        (parent, values) => {
+          const result = finiteVerdict(pinnedNumbers(values), parent);
+          if (result.verdict !== "subtype") return;
+          expect(admittedByParent(parent, values)).toEqual(values);
+        },
+      ),
+      { numRuns: 500 },
     );
   });
 });
