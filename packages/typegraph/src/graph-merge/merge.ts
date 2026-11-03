@@ -4685,7 +4685,15 @@ async function resolveMerge<G extends GraphDef, Output>(
         // its assertions and SPLITS the class, so pre-linking the filtered
         // remainder would falsely reject a plan that deletes the bridge and
         // asserts the ends different.
-        built.ledger,
+        [
+          ...built.ledger,
+          ...(
+            await loadPlannedIdentityHistory(target, plan.identityAssertions)
+          ).filter(
+            (assertion) =>
+              !built.ledger.some((current) => current.id === assertion.id),
+          ),
+        ],
         new Set(plan.nodeDeletions.keys()),
         canonicalIdentityOf,
         plan.retypeMap,
@@ -4862,13 +4870,10 @@ async function assertPlannedIdentityClosureConsistent<G extends GraphDef>(
   identityContext: PlanIdentityContext,
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
 ): Promise<void> {
-  const history =
-    (
-      target.graph.identity === undefined ||
-      plan.identityAssertions.length === 0
-    ) ?
-      []
-    : await loadPlannedIdentityHistory(target, plan.identityAssertions);
+  const history = await loadPlannedIdentityHistory(
+    target,
+    plan.identityAssertions,
+  );
   const baseIds = new Set(
     staging.baseIdentityAssertions.map((assertion) => assertion.id),
   );
@@ -4920,6 +4925,7 @@ async function loadPlannedIdentityHistory<G extends GraphDef>(
   target: Store<G>,
   assertions: readonly IdentityTransferAssertion[],
 ): Promise<readonly IdentityTransferAssertion[]> {
+  if (target.graph.identity === undefined || assertions.length === 0) return [];
   const ctx = storeRuntime(target).identityContext();
   return loadIdentityWindowHistory(ctx, ctx.backend, assertions, nowIso());
 }
