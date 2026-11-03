@@ -77,6 +77,7 @@ export { registerOntologyTighteningIntegrationTests } from "./ontology-tightenin
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
+export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
