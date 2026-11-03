@@ -314,6 +314,12 @@ against the live population before the version is published:
   independently for each; either violation refuses the whole commit, and the
   thrown error reports every newly-constrained axis, not just the first one
   found.
+- Moving an axis from `one` to `oneActive` is a **loosening**: `one` counts
+  every edge for its whole life and `oneActive` only edges whose `validTo` is
+  open, so data that satisfies `one` already satisfies `oneActive`. That move
+  owes no check and commits on any backend. The reverse, `oneActive` to
+  `one`, is a tightening (an ended edge beside an open one from the same
+  endpoint violates it) and is probed.
 - A commit that declares a constrained `cardinality` or `targetCardinality`
   on a **brand-new edge kind** owes this exact same check: a stored schema
   with no entry for the kind reads as `many` on both axes, so any constrained

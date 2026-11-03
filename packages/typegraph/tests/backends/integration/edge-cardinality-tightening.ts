@@ -16,6 +16,7 @@ import {
   defineNode,
   MigrationError,
 } from "../../../src";
+import { projectBackendWithout } from "../../../src/backend/derive-backend";
 import {
   getActiveSchema,
   getSchemaChanges,
@@ -30,7 +31,10 @@ const assignedTo = defineEdge("tighteningAssignedTo", { schema: z.object({}) });
 
 function buildGraph(
   id: string,
-  options: Readonly<{ cardinality?: "one"; targetCardinality?: "one" }>,
+  options: Readonly<{
+    cardinality?: "one" | "oneActive";
+    targetCardinality?: "one" | "oneActive";
+  }>,
 ) {
   return defineGraph({
     id,
@@ -241,5 +245,95 @@ export function registerEdgeCardinalityTighteningIntegrationTests(
     // "source"` ref entirely (only ever push target refs). This case then
     // commits and `activeVersion` reads 2 instead of 1 — pinning that the
     // generalization covers axes the original tightening plan never touched.
+
+    for (const direction of ["source", "target"] as const) {
+      const declare = (cardinality: "one" | "oneActive") =>
+        direction === "source" ?
+          { cardinality }
+        : { targetCardinality: cardinality };
+
+      it(`commits ${direction} one -> oneActive over populated edges with no preflight, on a backend without the atomic primitive`, async () => {
+        const id = `edge_cardinality_loosening_${direction}`;
+        const store = await context.createStore(buildGraph(id, declare("one")));
+        const alice = await store.nodes.TighteningPerson.create({});
+        const target = await store.nodes.TighteningTarget.create({});
+        const edge = await store.edges.tighteningAssignedTo.create(
+          alice,
+          target,
+          {},
+        );
+        await store.edges.tighteningAssignedTo.update(
+          edge.id,
+          {},
+          { validTo: new Date().toISOString() },
+        );
+
+        // A backend with no atomic preflight primitive refuses every commit
+        // that owes a data check, so committing through it proves none is owed.
+        const [upgraded] = await createAdapterStoreWithSchema(
+          buildGraph(id, declare("oneActive")),
+          projectBackendWithout(context.getBackend(), [
+            "commitSchemaVersionWithPreflight",
+          ]),
+        );
+        expect(await activeVersion(context, id)).toBe(2);
+
+        // The ended row no longer occupies the axis.
+        const other =
+          direction === "source" ?
+            await upgraded.nodes.TighteningTarget.create({})
+          : await upgraded.nodes.TighteningPerson.create({});
+        await expect(
+          direction === "source" ?
+            upgraded.edges.tighteningAssignedTo.create(alice, other, {})
+          : upgraded.edges.tighteningAssignedTo.create(other, target, {}),
+        ).resolves.toBeDefined();
+      });
+      // MUTATION CHECK (verified): make `cardinalityLoosens`
+      // (`src/schema/edge-cardinality-change.ts`) return `false`. The axis is
+      // then probed, the restricted backend refuses with
+      // EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND, and the version
+      // stays 1.
+
+      it(`probes ${direction} oneActive -> one as a tightening and refuses an ended row beside an open one`, async () => {
+        const id = `edge_cardinality_tightening_active_${direction}`;
+        const store = await context.createStore(
+          buildGraph(id, declare("oneActive")),
+        );
+        const alice = await store.nodes.TighteningPerson.create({});
+        const bob = await store.nodes.TighteningPerson.create({});
+        const target = await store.nodes.TighteningTarget.create({});
+        const otherTarget = await store.nodes.TighteningTarget.create({});
+        const ended = await store.edges.tighteningAssignedTo.create(
+          alice,
+          target,
+          {},
+        );
+        await store.edges.tighteningAssignedTo.update(
+          ended.id,
+          {},
+          { validTo: new Date().toISOString() },
+        );
+        await (direction === "source" ?
+          store.edges.tighteningAssignedTo.create(alice, otherTarget, {})
+        : store.edges.tighteningAssignedTo.create(bob, target, {}));
+
+        const error = await createAdapterStoreWithSchema(
+          buildGraph(id, declare("one")),
+          context.getBackend(),
+        ).catch((error_: unknown) => error_);
+
+        expect(error).toBeInstanceOf(MigrationError);
+        expect((error as MigrationError).details).toMatchObject({
+          reason: "edge-cardinality-tightening-violated",
+          axes: [
+            { direction, cardinality: "one", edgeKind: "tighteningAssignedTo" },
+          ],
+        });
+        expect(await activeVersion(context, id)).toBe(1);
+      });
+      // MUTATION CHECK (verified): make `cardinalityLoosens` also accept
+      // `oneActive` -> `one`. The commit then succeeds and the version reads 2.
+    }
   });
 }
