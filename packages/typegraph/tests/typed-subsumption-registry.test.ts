@@ -797,12 +797,40 @@ describe("registry check — a field the projection cannot convert is judged on 
       );
 
       console.log(`dynamic .catch() on the ${side}:`, refusal?.details);
-      expect(refusal?.details["code"]).toBe(
+      // A child `.catch()` may also leave the key out of what it stores, a
+      // refusal of its own; either way the pair is refused at the field.
+      expect([
         "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
-      );
+        "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+      ]).toContain(refusal?.details["code"]);
       expect(refusal?.details["path"]).toEqual(["name"]);
     });
   }
+
+  it("accepts a subclass that extends a parent with defaulted format and date fields", () => {
+    // `.extend()` shares each field: the child stores exactly what the parent
+    // stores, defaults included, even where they cannot be judged by value.
+    const parentSchema = z.object({
+      contact: z.email().default("team@example.com"),
+      createdAt: z.date().default(() => new Date(0)),
+      label: z.string().min(1).default(""),
+    });
+    const Ticket = defineNode("Ticket", { schema: parentSchema });
+    const Escalation = defineNode("Escalation", {
+      schema: parentSchema.extend({ level: z.number() }),
+    });
+
+    expect(
+      registryRefusal(
+        defineGraph({
+          id: "subclass_extended_defaults",
+          nodes: { Ticket: { type: Ticket }, Escalation: { type: Escalation } },
+          edges: {},
+          ontology: [subClassOf(Escalation, Ticket)],
+        }),
+      ),
+    ).toBeUndefined();
+  });
 
   it("accepts a subclass that shares its parent's dynamic .catch() field schema", () => {
     const name = z.string().catch((error) => String(error.value));

@@ -27,13 +27,15 @@
  * - A pipe's input side (`.pipe()`, `z.preprocess()`, `z.codec()`): only the
  *   output side projects, so a bound on the input, or a function that
  *   rewrites the value first, is lost. Marked on the parent side unless the
- *   input is `z.unknown()`/`z.any()` or a check-free primitive of the
- *   output's own type, which the output then judges in full.
- * - A key an object does not store: Zod leaves a field out of its output, or
- *   sets it to `undefined`, for some field schemas the projection still lists
- *   as `required` (an exhaustive enum-keyed record whose values are
- *   optional, `z.preprocess(f, z.unknown())`), so `required` is restated as
- *   the keys always stored.
+ *   pipe carries no transform and its input is `z.unknown()`/`z.any()` or a
+ *   check-free primitive of the output's own type, which the output then
+ *   judges in full.
+ * - Which keys an object stores and which it requires: Zod decides both
+ *   from each property's `optin`/`optout`, which the projection's single
+ *   `required` does not follow in either direction (an exhaustive record
+ *   whose values are optional lists keys it may leave out;
+ *   `z.unknown().pipe(z.string().optional())` refuses a missing key it does
+ *   not list), so each property's are recorded.
  * - A `.default()` / `.catch()` value wrapped by another one: only the
  *   outermost reaches `default`, though each is stored unvalidated, so all
  *   are listed under {@link STORED_FALLBACKS_KEYWORD}.
@@ -77,6 +79,8 @@ import {
 } from "./serializer";
 import {
   COMPARABLE_KEYWORDS,
+  KEY_OPTIONALITY_KEYWORD,
+  type KeyOptionality,
   STORED_FALLBACKS_KEYWORD,
   UNMODELED_CONSTRAINING_KEYWORDS,
   UNPROJECTABLE_NODE_KEYWORD,
@@ -117,6 +121,7 @@ type ZodNodeDef = Readonly<{
   out?: z.core.$ZodTypes;
   valueType?: z.ZodType;
   shape?: Readonly<Record<string, z.ZodType>>;
+  transform?: unknown;
 }>;
 
 const CUSTOM_CHECK = "custom";
@@ -322,7 +327,10 @@ function markLossyPipe(
   if (def.type !== "pipe" || def.in === undefined || def.out === undefined) {
     return;
   }
-  if (passesInputThrough(def.in, def.out)) return;
+  // A codec's decode function rewrites the value between the two sides.
+  if (def.transform === undefined && passesInputThrough(def.in, def.out)) {
+    return;
+  }
   markOpaque(
     context.jsonSchema,
     ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
@@ -330,72 +338,153 @@ function markLossyPipe(
   );
 }
 
+type ZodOptionality = Readonly<{
+  optin?: "optional" | "defaulted";
+  optout?: "optional";
+}>;
+
+function zodOptionality(schema: z.core.$ZodType): ZodOptionality {
+  const { optin, optout } = schema._zod as unknown as ZodOptionality;
+  return {
+    ...(optin === undefined ? {} : { optin }),
+    ...(optout === undefined ? {} : { optout }),
+  };
+}
+
+/** Node types whose output may be `undefined` whatever their optionality. */
+const UNDEFINED_YIELDING_TYPES: ReadonlySet<string> = new Set([
+  "unknown",
+  "any",
+  "undefined",
+  "void",
+  "custom",
+  "transform",
+  "lazy",
+]);
+const INNER_DECIDED_TYPES: ReadonlySet<string> = new Set([
+  "nullable",
+  "readonly",
+  "prefault",
+]);
+
 /**
- * A record whose value schema admits `undefined` admits an object missing
- * any of its keys, but the projection still lists an exhaustive key set as
- * `required`. Dropping it states what the record admits; on a parent that
- * only loosens it.
+ * Whether a schema can output `undefined` for an `undefined` input or from a
+ * function: an `unknown`, a transform or custom function, or a pipe or codec
+ * whose output side can. Decided from the schema's structure; no schema code
+ * runs.
  */
-function unrequireOptionalRecordKeys(
+function mayYieldUndefined(schema: z.core.$ZodType): boolean {
+  const def = schema._zod.def as unknown as Readonly<{
+    type?: string;
+    transform?: unknown;
+    out?: z.core.$ZodType;
+    innerType?: z.core.$ZodType;
+    options?: readonly z.core.$ZodType[];
+  }>;
+  const type = def.type ?? "";
+  if (UNDEFINED_YIELDING_TYPES.has(type)) return true;
+  if (type === "pipe") {
+    return (
+      def.transform !== undefined ||
+      (def.out !== undefined && mayYieldUndefined(def.out))
+    );
+  }
+  if (INNER_DECIDED_TYPES.has(type) && def.innerType !== undefined) {
+    return mayYieldUndefined(def.innerType);
+  }
+  if (type === "union") {
+    return (def.options ?? []).some((option) => mayYieldUndefined(option));
+  }
+  return false;
+}
+
+/**
+ * Whether an object always stores a property, read off the same
+ * `optin`/`optout` Zod's object parser decides it from: a property whose
+ * input is required is always present, and a defaulted one is filled in
+ * unless its output may be absent or `undefined`. (A transform that returns `undefined`
+ * for a present value is the one case this does not see; such a node is
+ * unconvertible, so it narrows only a parent field that admits anything.)
+ */
+function objectStoresProperty(field: z.core.$ZodType): boolean {
+  const { optin, optout } = zodOptionality(field);
+  if (optin === undefined) return true;
+  // A defaulted union runs every member on the missing value, and one that
+  // admits `undefined` (`z.union([z.unknown(), x.default(v)])`) supplies it.
+  return (
+    optin === "defaulted" && optout !== "optional" && !mayYieldUndefined(field)
+  );
+}
+
+/**
+ * Whether an exhaustive record always stores a key. Zod runs the value
+ * schema on a missing key's `undefined` and stores what it returns, so the
+ * key is stored unless that may be `undefined`.
+ */
+function recordStoresKey(value: z.core.$ZodType): boolean {
+  return (
+    zodOptionality(value).optout !== "optional" && !mayYieldUndefined(value)
+  );
+}
+
+/**
+ * Records, for each property of an object or each key an exhaustive record
+ * lists, whether it is always stored and whether its absence is refused
+ * (see {@link KEY_OPTIONALITY_KEYWORD}). Read off Zod's own metadata and the
+ * schema's structure; no schema code runs. A record's absence reading is
+ * its `required`, which may only overstate what it refuses.
+ */
+function recordKeyOptionality(
   context: Readonly<{
     zodSchema: z.core.$ZodTypes;
     jsonSchema: Record<string, unknown>;
   }>,
 ): void {
   const def = context.zodSchema._zod.def as ZodNodeDef;
-  if (def.type !== "record" || def.valueType === undefined) return;
-  if (!def.valueType.safeParse(undefined).success) return;
-  Reflect.deleteProperty(context.jsonSchema, "required");
-}
-
-const PROBE_KEY = "probe";
-
-/**
- * Whether an object stores no value for `field` when the key is absent from
- * the input: it leaves the key out or sets it to `undefined`, which a stored
- * row cannot tell apart. Zod decides that from the field's own input and
- * output optionality, which the projection's `required` does not always
- * follow (`z.preprocess(f, z.unknown())`, `z.unknown().catch(v)`), so it is
- * asked directly. A field whose own code throws on an absent input is read
- * as omittable, the conservative answer for either side.
- */
-function omitsAbsentKey(field: z.ZodType): boolean {
-  try {
-    // An `undefined` member is as absent as a missing one once stored.
-    const result = z.object({ [PROBE_KEY]: field }).safeParse({});
-    return result.success && result.data[PROBE_KEY] === undefined;
-  } catch {
-    return true;
+  const { jsonSchema } = context;
+  const declared = new Set<unknown>(
+    Array.isArray(jsonSchema["required"]) ? jsonSchema["required"] : [],
+  );
+  if (def.type === "object" && def.shape !== undefined) {
+    jsonSchema[KEY_OPTIONALITY_KEYWORD] = Object.fromEntries(
+      Object.entries(def.shape).map(([key, field]) => [
+        key,
+        {
+          ...zodOptionality(field),
+          stored: objectStoresProperty(field),
+          required:
+            declared.has(key) || zodOptionality(field).optin === undefined,
+        } satisfies KeyOptionality,
+      ]),
+    );
+    return;
+  }
+  if (def.type === "record" && def.valueType !== undefined) {
+    const entry = {
+      ...zodOptionality(def.valueType),
+      stored: recordStoresKey(def.valueType),
+      required: true,
+    } satisfies KeyOptionality;
+    jsonSchema[KEY_OPTIONALITY_KEYWORD] = Object.fromEntries(
+      [...declared].map((key) => [String(key), entry]),
+    );
   }
 }
 
-/**
- * An object's `required` restated as the keys it always stores: a key Zod
- * may leave out of the stored value is not required, whatever the
- * projection says. On a parent this only loosens it.
- */
-function unrequireOmittableKeys(
-  context: Readonly<{
-    zodSchema: z.core.$ZodTypes;
-    jsonSchema: Record<string, unknown>;
-  }>,
-): void {
-  const def = context.zodSchema._zod.def as ZodNodeDef;
-  const { required } = context.jsonSchema;
-  if (def.type !== "object" || def.shape === undefined) return;
-  if (!Array.isArray(required)) return;
-  const shape = def.shape;
-  context.jsonSchema["required"] = required.filter((key) => {
-    const field = typeof key === "string" ? shape[key] : undefined;
-    return field === undefined || !omitsAbsentKey(field);
-  });
+function inheritedFallbacks(
+  jsonSchema: Record<string, unknown>,
+): readonly unknown[] {
+  const inherited = jsonSchema[STORED_FALLBACKS_KEYWORD] as
+    Readonly<{ values?: unknown }> | undefined;
+  return Array.isArray(inherited?.values) ? inherited.values : [];
 }
 
 /**
- * Lists every value a node stores unvalidated (see
+ * Lists every value a node stores unvalidated, with the outermost
+ * `.default()`/`.catch()` instance that stores them (see
  * {@link STORED_FALLBACKS_KEYWORD}). Zod visits a wrapper after the node it
- * wraps and copies the wrapped result, so each `.default()`/`.catch()` adds
- * its own value to the list it inherited.
+ * wraps and copies the wrapped result, so each one adds its own value to the
+ * list it inherited.
  */
 function listStoredFallbacks(
   context: Readonly<{
@@ -407,9 +496,10 @@ function listStoredFallbacks(
   if (type !== "default" && type !== "catch") return;
   const { jsonSchema } = context;
   if (!Object.hasOwn(jsonSchema, "default")) return;
-  const inherited: unknown = jsonSchema[STORED_FALLBACKS_KEYWORD];
-  const values: readonly unknown[] = Array.isArray(inherited) ? inherited : [];
-  jsonSchema[STORED_FALLBACKS_KEYWORD] = [...values, jsonSchema["default"]];
+  jsonSchema[STORED_FALLBACKS_KEYWORD] = {
+    instance: instanceToken(context.zodSchema),
+    values: [...inheritedFallbacks(jsonSchema), jsonSchema["default"]],
+  };
 }
 
 function markZodOnlyConstraints(
@@ -586,8 +676,7 @@ function projectForComparison(schema: z.ZodType): JsonSchema {
       override: (context) => {
         markZodOnlyConstraints(context);
         markLossyPipe(context);
-        unrequireOptionalRecordKeys(context);
-        unrequireOmittableKeys(context);
+        recordKeyOptionality(context);
         listStoredFallbacks(context);
         markPartlyConvertedNode(context);
         stampUnprojectableIdentity(context);

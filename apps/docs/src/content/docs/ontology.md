@@ -134,19 +134,32 @@ schema:
   value that check never saw;
 - either side holding `z.literal(NaN)` or `z.literal(Infinity)`, which JSON
   cannot carry.
-- a parent whose `.pipe()`, `z.preprocess()` or `z.codec()` input side states
-  a check or rewrites the value before the output side judges it
-  (`z.string().min(5).pipe(z.string())`): only the output side has a JSON
-  Schema form.
+- a parent `z.codec()` or `z.preprocess()`, whose function rewrites the value
+  before the output side judges it, and a parent `.pipe()` whose input side
+  states a check (`z.string().min(5).pipe(z.string())`): only the output side
+  has a JSON Schema form.
 
-A child field's `.default()` or `.catch()` value is stored without running the
-field's own checks, so each such value must satisfy the parent field the way a
-literal child would: `z.string().min(1).default("")` does not extend
-`z.string().min(1)`, even when both kinds share that field. A parent's default
-applies only to an absent value, so it does not widen what the parent accepts
-for a value the child stores. A key Zod may leave out of what it stores counts
-as optional, whatever its schema says: an exhaustive `z.record(z.enum([...]),
-V.optional())` does not extend the same record with required values.
+The check is sound in one precise sense: a child stores nothing its parent
+could not store itself. A field the child shares with its parent (the same Zod
+schema, as `.extend()` gives it) stores exactly what the parent's does, so it
+is accepted whatever its `.default()` or `.catch()` value — even one that fails
+the field's own checks, since both kinds store it. A field the child declares
+separately has each `.default()` or `.catch()` value, which is stored without
+the field's own checks, judged against the parent field the way a literal child
+would: `z.string().min(1).default("")` does not extend a separately declared
+`z.string().min(1)`. A value that cannot be judged by value, such as a default
+on `z.email()` or a `z.date()` factory, is refused unless the field is shared. A
+parent's default applies only to an absent value, so it does not widen what the
+parent accepts for a value the child stores.
+
+Which keys a kind stores and which it requires are read from Zod's own
+property metadata rather than from the JSON Schema's `required`, which follows
+neither: a key Zod may leave out of what the child stores counts as optional
+(an exhaustive `z.record(z.enum([...]), V.optional())` does not extend the
+same record with required values, and a `.catch()` field under a required
+parent field is refused unless shared), and a key whose input the parent
+requires counts as required even where its output may be absent
+(`z.unknown().pipe(z.string().optional())`).
 
 **Fields JSON Schema cannot express:** the registry check compares kinds'
 projected JSON Schema, and some Zod constructs have no JSON Schema form:

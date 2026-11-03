@@ -677,6 +677,18 @@ describe("structural subsumption over a field the projection cannot convert", ()
   });
 });
 
+/** A stored value as a row holds it: an `undefined` member is absent. */
+function asStoredRow(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || value instanceof Date) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, member]) => member !== undefined)
+      .map(([key, member]) => [key, asStoredRow(member)]),
+  );
+}
+
 function trim(value: unknown): unknown {
   return typeof value === "string" ? value.trim() : value;
 }
@@ -746,8 +758,30 @@ describe("structural subsumption over what a node stores beyond its projection",
       input: undefined,
     },
     {
-      name: "a shared schema whose default fails its own check",
-      child: () => sharedBadDefault,
+      name: "z.string().min(3) under a codec whose decode shortens the value",
+      child: () => z.string().min(3),
+      parent: () =>
+        z.codec(z.string(), z.string().min(3), {
+          decode: (value) => value.slice(1),
+          encode: (value) => value,
+        }),
+      input: "abc",
+    },
+    {
+      name: "an omitted field under a pipe that refuses a missing key it does not list as required",
+      child: () => z.string().optional(),
+      parent: () => z.unknown().pipe(z.string().optional()),
+      input: undefined,
+    },
+    {
+      name: "a defaulted union whose first member admits a missing value",
+      child: () => z.union([z.unknown(), z.boolean().default(true)]),
+      parent: () => z.unknown(),
+      input: undefined,
+    },
+    {
+      name: "a separately redeclared field whose default fails the parent",
+      child: () => z.string().min(1).default(""),
       parent: () => sharedBadDefault,
       input: undefined,
     },
@@ -766,6 +800,8 @@ describe("structural subsumption over what a node stores beyond its projection",
   ];
 
   const sharedBadDefault = z.string().min(1).default("");
+  const sharedEmailDefault = z.email().default("team@example.com");
+  const sharedDateDefault = z.date().default(() => new Date(0));
 
   it.each(refused)("refuses $name", ({ child, parent, input }) => {
     const childSchema = z.object({ field: child() });
@@ -774,7 +810,9 @@ describe("structural subsumption over what a node stores beyond its projection",
       input === undefined ? {} : { field: input },
     );
     expect(stored.success).toBe(true);
-    expect(parentSchema.safeParse(stored.data).success).toBe(false);
+    expect(parentSchema.safeParse(asStoredRow(stored.data)).success).toBe(
+      false,
+    );
     expect(
       isStructuralSubtype(
         structuralSubtypeProjection(childSchema),
@@ -814,8 +852,31 @@ describe("structural subsumption over what a node stores beyond its projection",
       child: () => z.bigint(),
       parent: () => z.bigint(),
     },
+    {
+      // Both sides store `""` for an absent input: the child stores nothing
+      // the parent could not store itself.
+      name: "a shared field whose default fails its own check",
+      child: () => sharedBadDefault,
+      parent: () => sharedBadDefault,
+    },
+    {
+      name: "a shared format field with a default",
+      child: () => sharedEmailDefault,
+      parent: () => sharedEmailDefault,
+    },
+    {
+      name: "a shared date field with a default factory",
+      child: () => sharedDateDefault,
+      parent: () => sharedDateDefault,
+    },
   ])("accepts $name", ({ child, parent }) => {
     expect(liveVerdict(child(), parent())).toEqual({ verdict: "subtype" });
+  });
+
+  it("refuses a separately redeclared format default it cannot judge by value", () => {
+    expect(
+      liveVerdict(z.email().default("a@b.co"), z.email()).verdict,
+    ).not.toBe("subtype");
   });
 
   it("refuses a parent whose present value its default does not widen", () => {

@@ -18,8 +18,12 @@
  * projection cannot convert at all, which rule 2 accepts only under an
  * unconstrained parent node or beside a node of the same identity, and
  * lists every value a node stores unvalidated (`.default()`, `.catch()`),
- * each of which must satisfy the parent the way a literal child would —
- * even between equal schemas, since a stored value is validated again.
+ * each of which must satisfy the parent the way a literal child would
+ * unless the field is the parent's own. Soundness throughout means the
+ * child stores nothing the parent could not store itself, so a field shared
+ * through `.extend()` is accepted as identical storage. It also records,
+ * per key, whether the node always stores it and whether it refuses to see
+ * it missing (`KEY_OPTIONALITY_KEYWORD`), read in place of `required`.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -513,6 +517,30 @@ export const ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD =
  */
 export const UNPROJECTABLE_NODE_KEYWORD = "x-typegraph-unprojectable";
 
+/**
+ * For each property of an object, or each key an exhaustive record lists,
+ * whether the node always stores it (read when it is the child) and whether
+ * it refuses to see it missing (read when it is the parent), with the Zod
+ * metadata both were read from. Zod decides
+ * both from each property's `optin`/`optout` and what its value schema can
+ * output, which the projection's one `required` follows in neither
+ * direction. Written only by `structuralSubtypeProjection`; a persisted
+ * document is read through `required`.
+ */
+export const KEY_OPTIONALITY_KEYWORD = "x-typegraph-key-optionality";
+
+/**
+ * One key's two readings, as {@link KEY_OPTIONALITY_KEYWORD} records them,
+ * beside the Zod `optin`/`optout` they were read from, so two equal entries
+ * mean the same parsing of that key.
+ */
+export type KeyOptionality = Readonly<{
+  stored: boolean;
+  required: boolean;
+  optin?: "optional" | "defaulted";
+  optout?: "optional";
+}>;
+
 const SUBTYPE: StructuralSubtypeResult = { verdict: "subtype" };
 
 // ============================================================
@@ -567,9 +595,51 @@ function comparableKeywords(
 ): Record<string, unknown> {
   const kept = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(stripped)) {
-    if (COMPARABLE_KEYWORDS.has(key)) kept[key] = value;
+    if (COMPARABLE_KEYWORDS.has(key) || key === KEY_OPTIONALITY_KEYWORD) {
+      kept[key] = value;
+    }
   }
   return kept;
+}
+
+function keyOptionality(
+  schema: JsonSchema,
+): Readonly<Record<string, KeyOptionality>> | undefined {
+  const recorded = schema[KEY_OPTIONALITY_KEYWORD];
+  return recorded !== null && typeof recorded === "object" ?
+      (recorded as Readonly<Record<string, KeyOptionality>>)
+    : undefined;
+}
+
+/**
+ * The keys `schema` always stores, as a child: those its properties'
+ * optionality guarantees, or `required` where none is recorded.
+ */
+function storedKeys(schema: JsonSchema): readonly string[] {
+  const recorded = keyOptionality(schema);
+  if (recorded === undefined) return schema.required ?? [];
+  return Object.entries(recorded)
+    .filter(([, optionality]) => optionality.stored)
+    .map(([key]) => key);
+}
+
+/**
+ * The keys `schema` refuses to see missing, as a parent: `required`, and
+ * every property whose input is required even where its output may be
+ * absent (`z.unknown().pipe(z.string().optional())`).
+ */
+function requiredKeys(schema: JsonSchema): readonly string[] {
+  const declared = schema.required ?? [];
+  const recorded = keyOptionality(schema);
+  if (recorded === undefined) return declared;
+  return [
+    ...new Set([
+      ...declared,
+      ...Object.entries(recorded)
+        .filter(([, optionality]) => optionality.required)
+        .map(([key]) => key),
+    ]),
+  ];
 }
 
 function hasKeywordOutsideValueSet(keywords: Record<string, unknown>): boolean {
@@ -800,33 +870,39 @@ function compareUnprojectable(
 const DEFAULT_KEYWORD = "default";
 
 /**
- * Every value a node stores without validating it: its `.default()` and
- * `.catch()` values, the outer one and each one it wraps. The projection
- * writes only the outermost as `default`, so the comparison projection
- * lists them all here. Written only by `structuralSubtypeProjection`, never
- * into a persisted document.
+ * Every value a node stores without validating it — its `.default()` and
+ * `.catch()` values, the outer one and each one it wraps — as `{ instance,
+ * values }`, `instance` naming the outermost such Zod instance. The
+ * projection writes only the outermost value as `default`, so the
+ * comparison projection lists them all here. Written only by
+ * `structuralSubtypeProjection`, never into a persisted document.
  */
 export const STORED_FALLBACKS_KEYWORD = "x-typegraph-stored-fallbacks";
 
 /** The values `schema` stores unvalidated, as the projection states them. */
 function storedFallbacks(schema: JsonSchema): readonly unknown[] {
-  const listed = schema[STORED_FALLBACKS_KEYWORD];
-  if (Array.isArray(listed)) return listed;
+  const listed = schema[STORED_FALLBACKS_KEYWORD] as
+    Readonly<{ values?: unknown }> | undefined;
+  if (Array.isArray(listed?.values)) return listed.values;
   return hasOwnKey(schema, DEFAULT_KEYWORD) ? [schema[DEFAULT_KEYWORD]] : [];
 }
 
 /**
  * The verdict for a child node that stores a value it never validates, or
- * `undefined` when it stores none or that value satisfies the parent.
+ * `undefined` when it stores none, the parent stores the same ones, or each
+ * one satisfies the parent.
  *
- * Zod's `.default(v)` stores `v` for an absent input and `.catch(v)` stores
- * it for an input that fails, both without running the node's own checks,
- * and both project as `default: v`. That value is a member of what the child
- * stores, so it must satisfy the parent the way a one-value child would,
- * judged under both readings by the finite-value comparison — even when the
- * two sides are the same schema, since the parent re-validates a stored
- * value and its own default applies only to an absent one. `.prefault(v)`
- * is parsed like any input and projects nothing.
+ * Soundness here means the child stores nothing the parent could not store
+ * itself. Zod's `.default(v)` stores `v` for an absent input and `.catch(v)`
+ * stores it for an input that fails, both without running the node's own
+ * checks. A child field that IS the parent's (the same Zod instance, shared
+ * through `.extend()`) stores exactly what the parent stores, fallbacks
+ * included, so it is accepted whatever they are: equal markers, or the
+ * identity rule's equal schemas, say so. A field the child declares
+ * separately has each fallback judged as a one-value child, under both
+ * readings of the finite-value comparison; one the comparison cannot judge
+ * by value (a format, a date) is refused. `.prefault(v)` is parsed like any
+ * input and projects nothing.
  */
 /**
  * The schema admitting exactly `value`: a scalar pinned with `const`, an
@@ -859,30 +935,19 @@ function singletonSchema(value: unknown): JsonSchema {
   return { const: value };
 }
 
-/** Whether any schema node nested in `value` carries a `default`. */
-function containsStoredFallback(value: unknown): boolean {
-  if (Array.isArray(value)) {
-    return value.some((entry) => containsStoredFallback(entry));
-  }
-  if (value === null || typeof value !== "object") return false;
-  return Object.entries(value).some(
-    ([key, entry]) =>
-      ((key === DEFAULT_KEYWORD || key === STORED_FALLBACKS_KEYWORD) &&
-        entry !== undefined) ||
-      (key !== DEFAULT_KEYWORD &&
-        key !== STORED_FALLBACKS_KEYWORD &&
-        key !== "const" &&
-        key !== "enum" &&
-        containsStoredFallback(entry)),
-  );
-}
-
 function compareStoredFallback(
   child: JsonSchema,
   parent: JsonSchema,
   path: readonly string[],
   walk: Walk,
 ): StructuralSubtypeResult | undefined {
+  if (
+    hasOwnKey(child, STORED_FALLBACKS_KEYWORD) &&
+    canonicalJson(child[STORED_FALLBACKS_KEYWORD]) ===
+      canonicalJson(parent[STORED_FALLBACKS_KEYWORD])
+  ) {
+    return undefined;
+  }
   for (const value of storedFallbacks(child)) {
     const result = compareSchemas(
       singletonSchema(value),
@@ -918,14 +983,7 @@ function compareSchemas(
   // trivially compatible, property.
   const strippedChild = stripSchemaMetadata(child);
   const strippedParent = stripSchemaMetadata(parent);
-  // A stored fallback nested anywhere below must still be judged, even
-  // between equal schemas: see `compareStoredFallback`.
-  if (
-    sameSchema(strippedChild, strippedParent, walk) &&
-    !containsStoredFallback(strippedChild)
-  ) {
-    return SUBTYPE;
-  }
+  if (sameSchema(strippedChild, strippedParent, walk)) return SUBTYPE;
 
   const unprojectableResult = compareUnprojectable(
     child,
@@ -960,8 +1018,7 @@ function compareSchemas(
       comparableKeywords(strippedChild),
       comparableKeywords(strippedParent),
       walk,
-    ) &&
-    !containsStoredFallback(strippedChild)
+    )
   ) {
     return SUBTYPE;
   }
@@ -1039,7 +1096,7 @@ function requiredPropertyValues(
   schema: JsonSchema,
   propertyName: string,
 ): ReadonlySet<string> | undefined {
-  if (!(schema.required ?? []).includes(propertyName)) return undefined;
+  if (!requiredKeys(schema).includes(propertyName)) return undefined;
   const properties = schema.properties;
   if (properties === undefined || !hasOwnKey(properties, propertyName)) {
     return undefined;
@@ -1471,22 +1528,41 @@ function compareObject(
 ): StructuralSubtypeResult {
   const childProps = child.properties ?? {};
   const parentProps = parent.properties ?? {};
-  const childRequired = new Set(child.required);
-  const parentRequired = new Set(parent.required);
-
-  for (const name of parentRequired) {
-    if (!hasOwnKey(childProps, name)) {
-      return notSubtype("missing-required-property", [...path, name]);
-    }
-    if (!childRequired.has(name)) {
-      return notSubtype("optional-in-child-required-in-parent", [
-        ...path,
-        name,
-      ]);
-    }
-  }
-
+  const childRequired = new Set(storedKeys(child));
+  const parentRequired = new Set(requiredKeys(parent));
   const childExtrasSchema = openExtrasSchema(child);
+
+  // A key the child does not name may still be one it always stores, under
+  // its additional properties (an exhaustive record), which the comparison
+  // below then holds to the parent's schema for it.
+  for (const name of parentRequired) {
+    if (childRequired.has(name)) continue;
+    // The same property schema with the same optionality on both sides
+    // stores, and omits, exactly what the parent's does: a field shared
+    // through `.extend()`.
+    const childOptionality = keyOptionality(child)?.[name];
+    const parentOptionality = keyOptionality(parent)?.[name];
+    if (
+      childOptionality !== undefined &&
+      parentOptionality !== undefined &&
+      canonicalJson(childOptionality) === canonicalJson(parentOptionality) &&
+      hasOwnKey(childProps, name) &&
+      hasOwnKey(parentProps, name) &&
+      sameSchema(
+        stripSchemaMetadata(requireDefined(childProps[name])),
+        stripSchemaMetadata(requireDefined(parentProps[name])),
+        walk,
+      )
+    ) {
+      continue;
+    }
+    return notSubtype(
+      hasOwnKey(childProps, name) ?
+        "optional-in-child-required-in-parent"
+      : "missing-required-property",
+      [...path, name],
+    );
+  }
 
   for (const [name, parentProperty] of Object.entries(parentProps)) {
     if (hasOwnKey(childProps, name)) {
