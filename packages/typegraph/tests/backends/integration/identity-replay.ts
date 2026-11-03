@@ -243,6 +243,63 @@ export function registerIdentityReplayIntegrationTests(
       ]);
     });
 
+    it("never lowers the watermark: a prune below it reports, keeps and exports the higher watermark", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const [first, second, third] = ["first", "second", "third"].map(
+        (name) =>
+          [
+            personRef(`monotone-${name}-a`),
+            personRef(`monotone-${name}-b`),
+          ] as const,
+      ) as [
+        readonly [ReturnType<typeof personRef>, ReturnType<typeof personRef>],
+        readonly [ReturnType<typeof personRef>, ReturnType<typeof personRef>],
+        readonly [ReturnType<typeof personRef>, ReturnType<typeof personRef>],
+      ];
+      for (const ref of [...first, ...second, ...third]) {
+        await store.nodes.Person.create({}, { id: ref.id });
+      }
+      await store.identity.assertSame(...first);
+      await store.identity.assertSame(...second);
+      const earlier = requireDefined(await store.recordedNow());
+      await store.identity.assertSame(...third);
+      const later = requireDefined(await store.recordedNow());
+      const earlierRevision = recordedInstantRevision(earlier);
+      const laterRevision = recordedInstantRevision(later);
+      expect(laterRevision).toBeGreaterThan(earlierRevision);
+
+      const high = await pruneIdentityTransitions(store, {
+        beforeRecorded: later,
+      });
+      expect(high).toEqual({ pruned: 2, prunedBeforeRevision: laterRevision });
+
+      const low = await pruneIdentityTransitions(store, {
+        beforeRecorded: earlier,
+      });
+      expect(low).toEqual({ pruned: 0, prunedBeforeRevision: laterRevision });
+
+      // The (earlier, later) range lost its rows to the first prune, so a
+      // read starting inside it must still name the higher cut.
+      const fromEarlier = await store.identity.transitionsOf(second[0], {
+        fromRecorded: earlier,
+      });
+      expect(fromEarlier.transitions).toEqual([]);
+      expect(
+        recordedInstantRevision(requireDefined(truncatedBeforeOf(fromEarlier))),
+      ).toBe(laterRevision);
+      const replay = await store.identity.replay(third[0], {
+        fromRecorded: earlier,
+      });
+      expect(
+        recordedInstantRevision(requireDefined(truncatedBeforeOf(replay))),
+      ).toBe(laterRevision);
+
+      const archive = await exportGraph(store, { identityMode: "archival" });
+      expect(archive.identity?.retention?.prunedBeforeRevision).toBe(
+        laterRevision,
+      );
+    });
+
     it("prunes restored transitions whose revisions sit above the destination clock, without raising the watermark past it", async () => {
       const source = await provisionDepartedLineageStore(
         context,
