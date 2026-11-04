@@ -18,6 +18,8 @@ export const PGLITE_TEST_FILES = [
   "tests/capability-bundle-dialect-honesty.test.ts",
   "tests/capability-declaration-validation.test.ts",
   "tests/composition-cascade-pglite.test.ts",
+  "tests/composition-edge-delete-pglite.test.ts",
+  "tests/composition-existence-fresh-snapshot-pglite.test.ts",
   "tests/constraint-claim-inventory.test.ts",
   "tests/constraint-write-fence.test.ts",
   "tests/contribution-rebuild-lock.test.ts",
