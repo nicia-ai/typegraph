@@ -728,10 +728,18 @@ export async function checkRoundTrip(
   const result = await importGraph(target, document, { onConflict: "error" });
   expect(result.errors).toEqual([]);
 
+  const dumpedAt = Date.now();
   expect(
-    liveSlice(await dumpRoundTripState(target, { transitions: "restored" })),
+    liveSlice(
+      await dumpRoundTripState(target, {
+        transitions: "restored",
+        at: dumpedAt,
+      }),
+    ),
   ).toEqual(
-    liveSlice(await dumpRoundTripState(source, { transitions: "all" })),
+    liveSlice(
+      await dumpRoundTripState(source, { transitions: "all", at: dumpedAt }),
+    ),
   );
 
   const coordinates = sampleCoordinates(history.length);

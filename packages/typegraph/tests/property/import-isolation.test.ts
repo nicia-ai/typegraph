@@ -278,11 +278,20 @@ describe("validating import isolates every refused row", () => {
           expect(fullResult.edges).toEqual(reducedResult.edges);
           expect(reducedResult.nodes.created).toBe(reducedData.nodes.length);
           expect(reducedResult.edges.created).toBe(reducedData.edges.length);
+          const dumpedAt = Date.now();
           expect(
-            liveSlice(await dumpRoundTripState(full, { transitions: "all" })),
+            liveSlice(
+              await dumpRoundTripState(full, {
+                transitions: "all",
+                at: dumpedAt,
+              }),
+            ),
           ).toEqual(
             liveSlice(
-              await dumpRoundTripState(reduced, { transitions: "all" }),
+              await dumpRoundTripState(reduced, {
+                transitions: "all",
+                at: dumpedAt,
+              }),
             ),
           );
           expect(await full.verifyConstraintFences()).toEqual([]);

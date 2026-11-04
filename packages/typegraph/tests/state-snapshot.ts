@@ -325,10 +325,11 @@ function claimStands(
   graph: GraphDef,
   edges: readonly WindowedEdge[],
   holderId: string,
+  atMs: number,
 ): boolean {
   const holder = edges.find((edge) => edge.id === holderId && !edge.deleted);
   if (holder === undefined) return false;
-  if (holder.validTo === undefined || Date.parse(holder.validTo) > Date.now()) {
+  if (holder.validTo === undefined || Date.parse(holder.validTo) > atMs) {
     return true;
   }
   const registration = graph.edges[holder.kind];
@@ -343,6 +344,10 @@ function claimStands(
  * every row's validity window and the ledgers derived from rows — edge claims
  * and the identity ledger. Compare two stores' answers with `toEqual`.
  *
+ * `at` is the instant (epoch ms) an active-only claim's holder window is
+ * judged at; pass the same value when comparing two stores, so a window that
+ * ends between the two dumps cannot make them disagree.
+ *
  * `transitions` selects which transition-log rows are the graph's history:
  * `"all"` on a store that recorded them itself, `"restored"` on an import
  * target, whose own import writes log transitions of their own (no
@@ -350,7 +355,7 @@ function claimStands(
  */
 export async function dumpRoundTripState<G extends GraphDef>(
   store: Store<G>,
-  options: Readonly<{ transitions: "all" | "restored" }>,
+  options: Readonly<{ transitions: "all" | "restored"; at: number }>,
 ): Promise<RoundTripState> {
   const backend: GraphBackend = storeBackend(store);
   const graphId = store.graphId;
@@ -369,7 +374,7 @@ export async function dumpRoundTripState<G extends GraphDef>(
     `),
   );
   const edgeClaims = claimRows
-    .filter((row) => claimStands(store.graph, edges, row.edge_id))
+    .filter((row) => claimStands(store.graph, edges, row.edge_id, options.at))
     .map((row): SnapshotEdgeClaim => ({
       axis: row.axis,
       key: row.key,
