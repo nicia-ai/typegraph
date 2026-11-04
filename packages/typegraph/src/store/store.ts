@@ -3841,7 +3841,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // pairing, echoed back as the result's reference.
     const sources = params.sources.flatMap((group) =>
       group.ids.map((id) => ({ kind: group.kind, id })),
-    ) as readonly GraphNodeReference<G>[];
+    ) as readonly GraphNodeReferenceInput<G>[];
 
     if (sources.length === 0 || params.edgeKinds.length === 0) {
       return sources.map((source) => ({ source, edges: [] }));
