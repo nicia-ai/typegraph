@@ -24,6 +24,7 @@ export { registerCompositionExistenceIntegrationTests } from "./composition-exis
 export { registerCompositionFenceIntegrationTests } from "./composition-fence";
 export { registerCompositionMembershipReadIntegrationTests } from "./composition-membership-reads";
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
+export { registerCompositionReadsModelIntegrationTests } from "./composition-reads-model";
 export { registerCompositionTighteningIntegrationTests } from "./composition-tightening";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";
 export { registerConstraintFenceTransactionHealthTests } from "./constraint-fence-transaction-health";
@@ -77,6 +78,7 @@ export { registerOntologyTighteningIntegrationTests } from "./ontology-tightenin
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
+export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerQueryHookIntegrationTests } from "./query-hooks";

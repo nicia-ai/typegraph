@@ -55,6 +55,7 @@ import {
   registerCompositionFenceIntegrationTests,
   registerCompositionMembershipReadIntegrationTests,
   registerCompositionNavigationIntegrationTests,
+  registerCompositionReadsModelIntegrationTests,
   registerCompositionTighteningIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
@@ -91,6 +92,7 @@ import {
   registerImportRequiredPartPurgeIntegrationTests,
   registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
+  registerKeysetPaginationPropertyTests,
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
   registerLineageConformanceIntegrationTests,
@@ -347,6 +349,7 @@ export function createIntegrationTestSuite<
     registerCompositionExistenceIntegrationTests(context);
     registerCompositionFenceIntegrationTests(context);
     registerCompositionMembershipReadIntegrationTests(context);
+    registerCompositionReadsModelIntegrationTests(context);
     registerCompositionNavigationIntegrationTests(context);
     registerGraphAnnotationsIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
@@ -395,6 +398,7 @@ export function createIntegrationTestSuite<
     registerRecursiveDelimiterIdIntegrationTests(context);
     registerRecursiveStopExpansionIntegrationTests(context);
     registerPaginationIntegrationTests(context);
+    registerKeysetPaginationPropertyTests(context);
     registerTraversalIntegrationTests(context);
     registerEdgePropertyIntegrationTests(context);
     registerAdvancedEdgePropertyIntegrationTests(context);

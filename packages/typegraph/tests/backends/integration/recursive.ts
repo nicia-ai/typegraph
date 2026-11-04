@@ -661,6 +661,44 @@ export function registerRecursiveIntegrationTests(
       }
     });
 
+    it("returns a self-loop of a symmetric edge kind once, though both orientations read it", async () => {
+      const store = await context.createStore(qualifiedInverseGraph);
+      const middle = await store.nodes.QpPerson.create({ name: "middle" });
+      const outgoing = await store.nodes.QpPerson.create({ name: "outgoing" });
+      await store.edges.qpSibling.create(middle, middle, { weight: 1 });
+      await store.edges.qpSibling.create(middle, outgoing, { weight: 1 });
+
+      // `qpSibling` is its own inverse, so it sits in both the direct and the
+      // inverse arm of the walk's directed-edge relation, and a self-loop
+      // reads identically through either. `cyclePolicy: "allow"` keeps the
+      // revisit of the start node, so a duplicate would surface as a row;
+      // `maxHops: 2` keeps the walk on the recursive CTE (one hop compiles to
+      // a plain join).
+      //
+      // Walks, one per physical edge and orientation: middle -loop-> middle,
+      // middle -> outgoing; then from middle again the same two, and from
+      // outgoing back to middle.
+      for (const withEdgePredicate of [false, true]) {
+        const traversal = store
+          .query()
+          .from("QpPerson", "root")
+          .whereNode("root", (person) => person.id.eq(middle.id))
+          .traverse("qpSibling", "edge", { expand: "inverse" });
+        const rows = await (
+          withEdgePredicate ?
+            traversal.whereEdge("edge", (edge) => edge.weight.eq(1))
+          : traversal)
+          .recursive({ minHops: 1, maxHops: 2, cyclePolicy: "allow" })
+          .to("QpPerson", "peer")
+          .select((row) => row.peer.name)
+          .execute();
+        expect(
+          rows.toSorted(),
+          `withEdgePredicate: ${withEdgePredicate}`,
+        ).toEqual(["middle", "middle", "middle", "outgoing", "outgoing"]);
+      }
+    });
+
     it("includes only the seed when expansion stops at depth zero", async () => {
       const store = context.getStore();
       const root = await store.nodes.Person.create({
