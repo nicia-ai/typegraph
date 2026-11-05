@@ -669,14 +669,18 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // GraphBackend/engine strategy surfaces. Internal query-builder aliases are
 // intentionally not re-exported from the backend barrel; the engine's exact
 // transitive forgotten-export set is recorded here.
+// Node-row lock clauses become caller-supplied on the engine strategy, so its
+// lock-bearing builders reach RowLockClause and the strategy's own
+// NodeRowLockClauses. Both are dialect SQL plumbing, not authoring contracts,
+// so the engine fingerprint books exactly those two names.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 500,
     sha256: "62e325f352ed2a6ff47081301d548aa1a7a0091d1282028a1aa4c9c3d71116a5",
   },
   "./adapters/drizzle/engine": {
-    count: 338,
-    sha256: "8a3135da686dc142f7a44c5007b0d4e33f9312aca060d16c3da852dc5f485c97",
+    count: 340,
+    sha256: "9a2275bc661deadab03f94d147e225c486cd22d5bf32b60fd8a52f211ae86d8c",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

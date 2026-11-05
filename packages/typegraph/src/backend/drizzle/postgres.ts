@@ -125,6 +125,7 @@ import {
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
+import { resolveNodeRowLockPlan } from "../capabilities/node-row-lock-plan";
 import {
   isOptimisticRetryTier,
   OPTIMISTIC_RETRY_ATTEMPTS,
@@ -136,7 +137,6 @@ import {
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
-  serializesWriters,
   type WriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
@@ -3480,7 +3480,7 @@ function createPostgresOperationBackend(
         toUniqueRow,
       },
       schemaFenceLockClause: schemaFenceInsertLockClause,
-      writersSerialize: serializesWriters(schemaFenceFusionPlan),
+      nodeRowLocks: resolveNodeRowLockPlan(schemaFenceFusionPlan),
       contributionMaterializer,
       fusion: {
         atomicProgramsAtTransactionScope: true,

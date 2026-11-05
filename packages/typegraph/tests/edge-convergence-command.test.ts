@@ -248,16 +248,19 @@ describe("PostgreSQL edge convergence command", () => {
       postgresTables,
       tsvectorStrategy,
     );
-    const query = requireDefined(strategy.buildConvergeEdgeCreate)({
-      params: convergenceCommand("edge-a", { label: "friend" }, ["label"]).plan
-        .params,
-      match: {
-        kind: "dynamic",
-        matchOn: ["label"],
-        props: { label: "friend" },
+    const query = requireDefined(strategy.buildConvergeEdgeCreate)(
+      {
+        params: convergenceCommand("edge-a", { label: "friend" }, ["label"])
+          .plan.params,
+        match: {
+          kind: "dynamic",
+          matchOn: ["label"],
+          props: { label: "friend" },
+        },
+        timestamp: "2026-08-23T00:00:00.000Z",
       },
-      timestamp: "2026-08-23T00:00:00.000Z",
-    });
+      strategy.nodeRowLockClauses.edgeEndpoint,
+    );
     const compiled = new PgDialect().sqlToQuery(query);
     const statement = compiled.sql.toLowerCase();
 

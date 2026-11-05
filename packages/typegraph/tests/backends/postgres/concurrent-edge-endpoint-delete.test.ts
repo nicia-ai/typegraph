@@ -33,6 +33,15 @@
  * describe block pins the SERIALIZABLE closure, so the documentation of both
  * stays true.
  *
+ * ## Backends with no row locks
+ *
+ * A backend that declares `writeFence.mechanism: "row"` takes a keyed fence
+ * row per node instead of the two row locks, as its own statement before the
+ * liveness or connected-edge read. The matrix runs once more under that
+ * declaration. A fence row is a write, so above READ COMMITTED a delete whose
+ * snapshot predates the edge write's commit fails with a serialization error
+ * instead of the residual above.
+ *
  * Outcomes only, never which connection PostgreSQL schedules first: each case
  * forces the order by holding the first writer's transaction open on a gate,
  * then observes whether the second writer settled or parked on a lock.
@@ -52,6 +61,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EdgeNotFoundError,
   EndpointNotFoundError,
   inspectGraphStorage,
   RestrictedDeleteError,
@@ -154,15 +164,19 @@ type Target = "Person" | "Tag";
 
 /**
  * One endpoint-guarded edge write, aimed at the node the delete removes.
- * `seed` runs before the race — a resurrection needs its tombstoned edge.
+ * `seed` runs before the race — a resurrection needs its tombstoned edge,
+ * and `resurrects` marks the writes that revive it.
  */
 type EdgeWrite = Readonly<{
   name: string;
   seed?: (surface: WriteSurface, target: Target) => Promise<unknown>;
+  resurrects?: true;
   run: (surface: WriteSurface, target: Target) => Promise<unknown>;
 }>;
 
 const REVIVED_ID = "revived";
+const BYSTANDER_ID = "bystander";
+const SPARE_TAG = "spare-tag";
 
 /** Creates the edge the resurrecting writes revive, then tombstones it. */
 async function seedTombstonedEdge(
@@ -208,6 +222,24 @@ async function seedTombstonedDurableEdge(
 const alice = { kind: "Person", id: ALICE } as const;
 const bob = { kind: "Person", id: BOB } as const;
 const tag = { kind: "Tag", id: TAG } as const;
+const spareTag = { kind: "Tag", id: SPARE_TAG } as const;
+
+/**
+ * Creates a live edge whose endpoints no delete in the matrix removes, so a
+ * `bulkUpsertById` that updates it and creates the raced edge is a mixed
+ * create-and-update set. `liveEdgeCount` leaves it out.
+ */
+async function seedBystanderEdge(
+  surface: WriteSurface,
+  target: Target,
+): Promise<void> {
+  if (target === "Person") {
+    await surface.edges.knows.create(alice, alice, {}, { id: BYSTANDER_ID });
+    return;
+  }
+  await surface.nodes.Tag.create({ label: "spare" }, { id: SPARE_TAG });
+  await surface.edges.tagged.create(alice, spareTag, {}, { id: BYSTANDER_ID });
+}
 
 const EDGE_WRITES: readonly EdgeWrite[] = [
   {
@@ -288,6 +320,7 @@ const EDGE_WRITES: readonly EdgeWrite[] = [
   {
     name: "getOrCreateByEndpoints (resurrect)",
     seed: seedTombstonedEdge,
+    resurrects: true,
     run: (surface, target) =>
       target === "Person" ?
         surface.edges.knows.getOrCreateByEndpoints(alice, bob, {})
@@ -296,6 +329,7 @@ const EDGE_WRITES: readonly EdgeWrite[] = [
   {
     name: "bulkUpsertById (resurrect)",
     seed: seedTombstonedEdge,
+    resurrects: true,
     run: (surface, target) =>
       target === "Person" ?
         surface.edges.knows.bulkUpsertById([
@@ -318,6 +352,7 @@ const EDGE_WRITES: readonly EdgeWrite[] = [
   {
     name: "getOrCreateByEndpoints (durable identity, resurrect)",
     seed: seedTombstonedDurableEdge,
+    resurrects: true,
     run: (surface, target) =>
       target === "Person" ?
         surface.edges.employs.getOrCreateByEndpoints(alice, bob, {
@@ -330,6 +365,7 @@ const EDGE_WRITES: readonly EdgeWrite[] = [
   {
     name: "bulkGetOrCreateByEndpoints (durable identity, resurrect)",
     seed: seedTombstonedDurableEdge,
+    resurrects: true,
     run: (surface, target) =>
       target === "Person" ?
         surface.edges.employs.bulkGetOrCreateByEndpoints([
@@ -337,6 +373,40 @@ const EDGE_WRITES: readonly EdgeWrite[] = [
         ])
       : surface.edges.labeledAs.bulkGetOrCreateByEndpoints([
           { from: alice, to: tag, props: { role: "lead" } },
+        ]),
+  },
+  {
+    name: "bulkUpsertById (create and update)",
+    seed: seedBystanderEdge,
+    run: (surface, target) =>
+      target === "Person" ?
+        surface.edges.knows.bulkUpsertById([
+          {
+            id: asEdgeId<typeof knows>(BYSTANDER_ID),
+            from: alice,
+            to: alice,
+            props: {},
+          },
+          {
+            id: asEdgeId<typeof knows>("upserted"),
+            from: alice,
+            to: bob,
+            props: {},
+          },
+        ])
+      : surface.edges.tagged.bulkUpsertById([
+          {
+            id: asEdgeId<typeof tagged>(BYSTANDER_ID),
+            from: alice,
+            to: spareTag,
+            props: {},
+          },
+          {
+            id: asEdgeId<typeof tagged>("upserted"),
+            from: alice,
+            to: tag,
+            props: {},
+          },
         ]),
   },
   {
@@ -412,9 +482,31 @@ let probePool: Pool | undefined;
 /**
  * Schema-managed stores take the schema-fenced fused statements and atomic
  * programs; unmanaged stores take the unfenced fused statements. Both must
- * hold the invariant.
+ * hold the invariant, on the bundled lock-based fence and under a declared
+ * `row` fence.
  */
-type StoreMode = "managed" | "unmanaged";
+type StoreMode =
+  "managed" | "unmanaged" | "managed, row fence" | "unmanaged, row fence";
+
+const STORE_MODES: readonly StoreMode[] = [
+  "managed",
+  "unmanaged",
+  "managed, row fence",
+  "unmanaged, row fence",
+];
+
+function isManaged(mode: StoreMode): boolean {
+  return mode === "managed" || mode === "managed, row fence";
+}
+
+function usesRowFence(mode: StoreMode): boolean {
+  return mode === "managed, row fence" || mode === "unmanaged, row fence";
+}
+
+/** The `row` declaration an engine with no advisory or row locks makes. */
+const ROW_FENCE_CAPABILITIES = {
+  writeFence: { mechanism: "row", drain: "table-lock", conflict: "wait" },
+} as const;
 
 type StorePair = Readonly<{ deleteStore: GraphStore; edgeStore: GraphStore }>;
 
@@ -451,22 +543,29 @@ beforeAll(async () => {
       deletePool = first;
       edgePool = second;
       probePool = probe;
-      const [managedDeleteStore] = await createStoreWithSchema(
-        graph,
-        createPostgresBackend(drizzle(first)),
-      );
-      const [managedEdgeStore] = await createStoreWithSchema(
-        graph,
-        createPostgresBackend(drizzle(second)),
-      );
-      storePairs.set("managed", {
-        deleteStore: managedDeleteStore,
-        edgeStore: managedEdgeStore,
-      });
-      storePairs.set("unmanaged", {
-        deleteStore: createStore(graph, createPostgresBackend(drizzle(first))),
-        edgeStore: createStore(graph, createPostgresBackend(drizzle(second))),
-      });
+      for (const rowFence of [false, true]) {
+        const backendOn = (pool: Pool) =>
+          createPostgresBackend(
+            drizzle(pool),
+            rowFence ? { capabilities: ROW_FENCE_CAPABILITIES } : {},
+          );
+        const [managedDeleteStore] = await createStoreWithSchema(
+          graph,
+          backendOn(first),
+        );
+        const [managedEdgeStore] = await createStoreWithSchema(
+          graph,
+          backendOn(second),
+        );
+        storePairs.set(rowFence ? "managed, row fence" : "managed", {
+          deleteStore: managedDeleteStore,
+          edgeStore: managedEdgeStore,
+        });
+        storePairs.set(rowFence ? "unmanaged, row fence" : "unmanaged", {
+          deleteStore: createStore(graph, backendOn(first)),
+          edgeStore: createStore(graph, backendOn(second)),
+        });
+      }
     },
   );
 });
@@ -677,9 +776,11 @@ async function liveEdgesOnDeletedEndpoints(probe: Pool): Promise<number> {
   return result.rows[0]?.dangling ?? 0;
 }
 
+/** Live edges the race wrote or removed; the bystander edge is neither. */
 async function liveEdgeCount(probe: Pool): Promise<number> {
   const result = await probe.query<{ live: number }>(
-    "SELECT count(*)::int AS live FROM typegraph_edges WHERE deleted_at IS NULL",
+    "SELECT count(*)::int AS live FROM typegraph_edges WHERE deleted_at IS NULL AND id <> $1",
+    [BYSTANDER_ID],
   );
   return result.rows[0]?.live ?? 0;
 }
@@ -859,6 +960,26 @@ const DELETE_FIRST_VERDICT: Verdict = {
 };
 
 /**
+ * {@link DELETE_FIRST_VERDICT}, except where a managed row-fence write waits
+ * earlier. It waits on the schema fence row before it re-reads the edge it
+ * revives, so after a hard delete purged that edge the update-only partition
+ * reports the edge gone rather than reaching the endpoint check.
+ */
+function deleteFirstVerdict(
+  nodeDelete: NodeDelete,
+  edgeWrite: EdgeWrite,
+  mode: StoreMode,
+): Verdict {
+  return (
+      mode === "managed, row fence" &&
+        nodeDelete.purgesTombstones === true &&
+        edgeWrite.name === "bulkUpsertById (resurrect)"
+    ) ?
+      { ...DELETE_FIRST_VERDICT, edge: EdgeNotFoundError.name }
+    : DELETE_FIRST_VERDICT;
+}
+
+/**
  * Insert first: the delete waits on the edge write's endpoint lock. At READ
  * COMMITTED its connected-edge read is a later statement whose snapshot sees
  * the committed edge, so `cascade` removes it and `restrict` refuses. Above
@@ -871,11 +992,24 @@ function insertFirstVerdict(
   nodeDelete: NodeDelete,
   edgeWrite: EdgeWrite,
   isolationLevel: IsolationLevel,
+  mode: StoreMode,
 ): Verdict {
+  if (isolationLevel !== "read_committed" && usesRowFence(mode)) {
+    // The delete's fence-row acquisition writes the row the edge write's
+    // committed acquisition wrote after the delete's snapshot.
+    return {
+      second: "blocked",
+      delete: TransactionConflictError.name,
+      edge: "ok",
+      dangling: 0,
+      liveEdges: 1,
+      targetLive: true,
+    };
+  }
   if (
     isolationLevel !== "read_committed" &&
     nodeDelete.purgesTombstones === true &&
-    edgeWrite.seed !== undefined
+    edgeWrite.resurrects === true
   ) {
     // The hard delete's tombstone purge writes the row the resurrection
     // updated, which above READ COMMITTED is a serialization failure.
@@ -920,7 +1054,7 @@ function insertFirstVerdict(
 describe.runIf(process.env["POSTGRES_URL"])(
   "edge writes racing an endpoint delete (PostgreSQL)",
   () => {
-    describe.each(["managed", "unmanaged"] as const)("%s store", (mode) => {
+    describe.each(STORE_MODES)("%s store", (mode) => {
       beforeEach(() => {
         activeMode = mode;
       });
@@ -928,7 +1062,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       // storage only a schema-managed store provisions.
       const nodeDeletes = NODE_DELETES.filter(
         (nodeDelete) =>
-          mode === "managed" || !nodeDelete.name.startsWith("hardDelete"),
+          isManaged(mode) || !nodeDelete.name.startsWith("hardDelete"),
       );
       describe.each(ISOLATION_LEVELS)("delete at %s", (isolationLevel) => {
         describe.each(nodeDeletes)("$name", (nodeDelete) => {
@@ -944,7 +1078,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
               console.log(
                 `[delete-first ${isolationLevel}] ${nodeDelete.name} vs ${edgeWrite.name}: ${describeRace(result)}`,
               );
-              expect(verdictOf(result)).toEqual(DELETE_FIRST_VERDICT);
+              expect(verdictOf(result)).toEqual(
+                deleteFirstVerdict(nodeDelete, edgeWrite, mode),
+              );
             },
           );
 
@@ -961,7 +1097,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
                 `[insert-first ${isolationLevel}] ${nodeDelete.name} vs ${edgeWrite.name}: ${describeRace(result)}`,
               );
               expect(verdictOf(result)).toEqual(
-                insertFirstVerdict(nodeDelete, edgeWrite, isolationLevel),
+                insertFirstVerdict(nodeDelete, edgeWrite, isolationLevel, mode),
               );
             },
           );
@@ -984,7 +1120,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
                 `[insert-first root] ${nodeDelete.name} vs ${edgeWrite.name}: ${describeRace(result)}`,
               );
               expect(verdictOf(result)).toEqual(
-                insertFirstVerdict(nodeDelete, edgeWrite, "read_committed"),
+                insertFirstVerdict(
+                  nodeDelete,
+                  edgeWrite,
+                  "read_committed",
+                  mode,
+                ),
               );
             },
           );
