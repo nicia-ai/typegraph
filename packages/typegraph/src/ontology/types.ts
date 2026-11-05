@@ -271,6 +271,13 @@ export type EquivalentToCheck<A extends NodeType, B extends NodeType> =
  * silently switched `fromDynamic`/`toDynamic` aliases from the dynamic
  * `.field()` accessor to the typed one. The intersection widens ONLY `kind`,
  * preserving every other property — brands included — unchanged.
+ *
+ * The declared kind survives in the compile-time `__nodeKind`, so the
+ * widened brand stays nominal: an exact `NodeId` of `N` is assignable to it,
+ * and the id of another kind with the same properties is not.
  */
-export type PolymorphicNodeType<N extends NodeType> = Omit<N, "kind"> &
-  Readonly<{ kind: string }>;
+export type PolymorphicNodeType<N extends NodeType> = Omit<
+  N,
+  "kind" | "__nodeKind"
+> &
+  Readonly<{ kind: string; __nodeKind?: N["kind"] }>;

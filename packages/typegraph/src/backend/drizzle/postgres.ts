@@ -202,6 +202,7 @@ import {
   type TrustedImportSession,
   type VectorSearchParams,
 } from "../types";
+import { assertBaseSchemaVersionCurrent } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -1783,9 +1784,15 @@ function buildPostgresEngineProfileInternal(
     }
   }
 
-  async function readBaseSchemaVersion(): Promise<number | undefined> {
+  /**
+   * Reads the base-schema marker on `session`: the root connection by
+   * default, or a caller-owned transaction a schema-write adoption checks on.
+   */
+  async function readBaseSchemaVersion(
+    session: Pick<AnyPgDatabase, "select"> = db,
+  ): Promise<number | undefined> {
     try {
-      const rows = await db
+      const rows = await session
         .select({ version: tables.baseSchemaVersions.version })
         .from(tables.baseSchemaVersions)
         .where(eq(tables.baseSchemaVersions.installation, 1));
@@ -2640,6 +2647,19 @@ function buildPostgresEngineProfileInternal(
                     { tableName: schemaVersionsTableName },
                   );
                 }
+                // The commit this adoption admits must not land on a database
+                // an earlier release still opens. The marker is read on the
+                // caller's session: a root read would wait for the connection
+                // this very transaction holds. A missing marker table is
+                // checked first, since a failed read would abort the caller's
+                // transaction rather than refuse it.
+                assertBaseSchemaVersionCurrent(
+                  (await privilegedBackend.tableExists(
+                    getTableName(tables.baseSchemaVersions),
+                  )) ?
+                    await readBaseSchemaVersion(externalTx)
+                  : undefined,
+                );
 
                 const settingAdapter = createPostgresExecutionAdapter(
                   externalTx,

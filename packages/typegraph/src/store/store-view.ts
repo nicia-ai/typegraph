@@ -98,7 +98,7 @@ import {
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
   type GraphNodeForKinds,
-  type GraphNodeReference,
+  type GraphNodeReferenceInput,
   type Node,
   type NodeCollection,
   type NodeCurrentReads,
@@ -1054,7 +1054,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: StoreViewSubgraphOptions<G, EK, NK, P, C>,
   ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const internalOptions = this.#pinned(

@@ -1709,6 +1709,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
   },
   {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
     "params": [],
     "sql": "-- BEGIN (native transaction) --",
   },
@@ -2980,6 +2986,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
   },
   {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
     "params": [],
     "sql": "-- BEGIN (native transaction) --",
   },
@@ -4146,6 +4158,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
     "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
   },
   {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
     "params": [],
     "sql": "BEGIN IMMEDIATE",
   },
@@ -5212,6 +5230,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
     WHERE "typegraph_schema_versions"."graph_id" = ?
       AND "typegraph_schema_versions"."is_active" = 1
   ",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
   },
   {
     "params": [

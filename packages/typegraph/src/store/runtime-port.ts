@@ -51,7 +51,7 @@ import {
 } from "./subgraph";
 import {
   type Edge,
-  type GraphNodeReference,
+  type GraphNodeReferenceInput,
   type Node,
   type RecordedScanOptions,
   type RecordedScanPage,
@@ -173,7 +173,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: InternalSubgraphOptions<G, EK, NK, P, C>,
   ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   algorithmsAtCoordinate: (

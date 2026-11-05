@@ -7404,7 +7404,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7412,7 +7412,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7420,7 +7420,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7428,7 +7428,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7436,7 +7436,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7444,7 +7444,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7452,7 +7452,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {
@@ -7460,7 +7460,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "`PolymorphicNodeType` is the node type a subsumption-affected reference is branded with (`SubsumedNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
+    "reason": "`PolymorphicNodeType` is the node type a polymorphic reference is branded with (`PolymorphicNodeReference`), so it is reached only as the type argument of a `NodeId` brand inside `GraphNodeReferenceInput`. `BulkFindEdgesFromResult.source` / `BulkFindEdgesToResult.target` now echo the caller's reference as that input type, which makes the checker reach it at input polarity; no consumer authors a `PolymorphicNodeType` value (they author `{ kind, id }` references whose brand the library computes), and `kind` is a member every `NodeType` already carries. Declared in .changeset/typed-subsumption.md.",
     "issue": "#637"
   },
   {

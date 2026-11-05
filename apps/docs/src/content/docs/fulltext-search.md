@@ -484,14 +484,17 @@ for (const hit of hits) {
 | `expansion` | `"exact" \| "subclasses"` | `"exact"` | `"subclasses"` also searches `subClassOf` descendant kinds and merges their scores into one ranking. |
 
 `search()`'s `expansion` stays **opt-in** and defaults to `"exact"` —
-this is a deliberate asymmetry with the query builder's `from()`/`to()`,
-which default to `expansion: "subclasses"`. `search()` is a facade with its
-own documented option rather than a `from()`/`to()` call, and flipping its
-default in the same release would also change which vector-metric union
-applies (search across multiple kinds must agree on one declared metric; see
-[Semantic Search](/semantic-search)) with no migration knob of its own. If
-this asymmetry surprises you, that's the intended signal that it's worth
-double-checking whether your search call should opt in explicitly.
+a deliberate asymmetry with the query builder's `from()`/`to()`, which
+default to `expansion: "subclasses"`, and `search()` does not follow
+`queryDefaults.expansion` either. An expanded search can be refused where an
+expanded query never is. A subclass that omits the searched field holds no
+value there and is skipped, but one that redeclares the field without
+`searchable()` (or, for a vector search, with an `embedding()` tag that
+differs from its parent's) is refused because its rows are not in the index
+the search reads, and a vector search across kinds refuses kinds that
+declare different metrics (see [Semantic Search](/semantic-search)). If the
+default expanded, adding such a subclass would turn a search call that works
+today into a refusal. Opting in keeps that a decision made at the call.
 [Scope at a glance](/queries/source#scope-at-a-glance) lists the default
 scope of every query, collection and search surface side by side. A subclass
 only a persisted [graph extension](/graph-extensions) declares is searched like

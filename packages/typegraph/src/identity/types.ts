@@ -10,6 +10,7 @@ import {
   type GraphNodeReference,
   type Node,
   type NodeRef,
+  type PolymorphicNodeReference,
 } from "../store/types";
 import {
   type IdentityReplay,
@@ -19,9 +20,11 @@ import {
 
 /**
  * The accepted *input* form for every identity facade method: a whole node or
- * a `{ kind, id }` pair for any compile-time graph kind, plus a proof-bearing
- * node or reference produced through the runtime collection lane. Runtime
- * values stay nominal so accepting them does not make an arbitrary
+ * a `{ kind, id }` pair for any compile-time graph kind, the
+ * {@link PolymorphicNodeReference} a polymorphic query row or widened edge
+ * endpoint carries, plus a proof-bearing node or reference produced through
+ * the runtime collection lane. Widened and runtime values stay nominal through
+ * their `NodeId` brand, so accepting them does not make an arbitrary
  * `{ kind: string, id: string }` object type-safe.
  *
  * Identity results use {@link IdentityNodeReference}, which honestly includes
@@ -29,7 +32,10 @@ import {
  * compile-time node.
  */
 export type IdentityNodeRefInput<G extends GraphDef> =
-  NodeRef<AllNodeTypes<G>> | DynamicNode | DynamicNodeReference;
+  | NodeRef<AllNodeTypes<G>>
+  | PolymorphicNodeReference<AllNodeTypes<G>>
+  | DynamicNode
+  | DynamicNodeReference;
 
 /**
  * A node reference returned by Operational Identity.

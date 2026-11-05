@@ -37,6 +37,7 @@ import {
   type TemporalMode,
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
+import type { PolymorphicNodeType } from "../ontology/types";
 import type { TraversalExpansion } from "../query/ast";
 import type {
   DynamicEdgeAccessor,
@@ -272,17 +273,32 @@ export type CompositionAttachmentProps<Via> =
   [Via] extends [AnyEdgeType] ? z.input<Via["schema"]>
   : Record<string, unknown>;
 
+/** The shape every composition `whole` takes: only `kind` and `id` are read. */
+export type CompositionWholeInput = Readonly<{ kind: string; id: string }>;
+
+/**
+ * What `partOf.whole` accepts for a part of kind `K` in graph `G`: a
+ * `{ kind, id }` reference (or node) of one of the
+ * {@link CompositionWholeKinds} the ontology declares for `K`, or the
+ * {@link PolymorphicNodeReference} a polymorphic query row or widened edge
+ * endpoint of one of those kinds carries, whose `kind` is the general
+ * `string`.
+ */
+export type CompositionWholeReference<G extends GraphDef, K extends string> =
+  | Readonly<{ kind: CompositionWholeKinds<G, K>; id: string }>
+  | PolymorphicNodeReference<KindNodeTypes<G, CompositionWholeKinds<G, K>>>;
+
 /**
  * Where a part attaches, and how — the value every attachment surface takes
  * (`create`, `bulkCreate`, `getOrCreateByConstraint`,
  * `bulkGetOrCreateByConstraint`, and `reparent`).
  *
- * `whole` names the whole: a node you already hold, or a `{ kind, id }`
- * reference. Only its `kind` and `id` are ever read, so a whole node whose
- * own schema has a property called `via` or `props` never leaks into the
- * attachment. On a typed collection `whole.kind` is limited at compile time
- * to the whole kinds the graph's ontology declares for this part kind (see
- * {@link CompositionWholeKinds}); the runtime refusal
+ * `whole` names the whole: a node you already hold, a `{ kind, id }`
+ * reference, or a polymorphic query row. Only its `kind` and `id` are ever
+ * read, so a whole node whose own schema has a property called `via` or
+ * `props` never leaks into the attachment. On a typed collection `whole` is
+ * limited at compile time by {@link CompositionWholeReference} to the whole
+ * kinds the graph's ontology declares for this part kind; the runtime refusal
  * (`COMPOSITION_WHOLE_NOT_DECLARED`) covers everything the type cannot see.
  *
  * `via` names the realizing edge, and is required only when the part kind
@@ -306,9 +322,9 @@ export type CompositionAttachmentProps<Via> =
  */
 export type CompositionAttachment<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
-  WholeKind extends string = string,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
 > = Readonly<{
-  whole: Readonly<{ kind: WholeKind; id: string }>;
+  whole: Whole;
   via?: Via;
   props?: CompositionAttachmentProps<Via>;
   /** The realizing edge's lower bound. `null` requests no lower bound. */
@@ -328,8 +344,8 @@ export type CompositionAttachment<
  */
 export type NodeReparentOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
-  WholeKind extends string = string,
-> = Omit<CompositionAttachment<Via, WholeKind>, "validFrom" | "validTo"> &
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Omit<CompositionAttachment<Via, Whole>, "validFrom" | "validTo"> &
   Readonly<{
     /**
      * The instant a `oneActive` incumbent window ends and the new edge's
@@ -372,7 +388,7 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
  */
 export type NodeCreateOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
-  WholeKind extends string = string,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
 > = Readonly<{
   id?: string;
   /** Omit to use the creation default; null explicitly requests no lower bound. */
@@ -388,7 +404,7 @@ export type NodeCreateOptions<
    * `partOf.whole.kind`. See {@link CompositionAttachment} for `via` and
    * `props`.
    */
-  partOf?: CompositionAttachment<Via, WholeKind>;
+  partOf?: CompositionAttachment<Via, Whole>;
 }>;
 
 /** One caller-identified member of the closed heterogeneous node upsert batch. */
@@ -1049,7 +1065,7 @@ export type NodeGetOrCreateByConstraintResult<N extends NodeType> = Readonly<{
  */
 export type NodeGetOrCreateByConstraintOptions<
   Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
-  WholeKind extends string = string,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
 > = Readonly<{
   /** Existing record behavior. Default: "return" */
   ifExists?: IfExistsMode;
@@ -1084,7 +1100,7 @@ export type NodeGetOrCreateByConstraintOptions<
    * batch. Use `reparent` to MOVE a part that already has a different whole
    * — this option never silently re-homes one.
    */
-  partOf?: CompositionAttachment<Via, WholeKind>;
+  partOf?: CompositionAttachment<Via, Whole>;
 }>;
 
 /**
@@ -1131,37 +1147,36 @@ export type GraphNodeReference<G extends GraphDef> = {
   }>;
 }[NodeKinds<G>];
 
-type BrandedNodeReference<N extends NodeType> =
-  N extends NodeType ? Readonly<{ kind: N["kind"]; id: NodeId<N> }> : never;
-
 /**
- * The widened `{ kind, id }` a node of type `N` carries when graph `G`'s
- * subsumption reads it back polymorphically ({@link SubsumedNodeType}): a
- * `string` kind and the widened `NodeId` brand, for each member of `N` whose
- * kind has `subClassOf` descendants or `equivalentTo` kinds. A kind the
- * ontology leaves exact contributes nothing, since its exact reference
- * already covers it.
+ * The widened `{ kind, id }` a polymorphic read carries for a node of type
+ * `N`: a `string` kind and the widened `NodeId` brand of
+ * {@link PolymorphicNodeType}, for each member of `N`. Both polymorphic
+ * producers emit it: a default read of a kind the ontology affects
+ * ({@link SubsumedNodeType}), and any alias stated
+ * `{ expansion: "subclasses" }`, whatever the static hierarchy says, since a
+ * runtime extension can add subclasses the compile-time graph never names.
  *
- * The one owner of the widened reference every endpoint input accepts, so an
- * endpoint read off a widened edge (`{ kind: edge.toKind, id: edge.toId }`),
+ * The one owner of the widened reference every node-reference input accepts,
+ * so an endpoint read off a widened edge (`{ kind: edge.toKind, id: edge.toId }`),
  * the same reference narrowed by `kind`, and a polymorphic query row all pass
  * back into the next read without a cast. The id brand is what ties the
- * reference to the declared kind; the runtime checks the `kind`.
+ * reference to the declared kind, so an unbranded `{ kind: string, id: string }`
+ * is still refused; the runtime checks the `kind`.
  */
-export type SubsumedNodeReference<
-  G extends GraphDef,
-  N extends NodeType,
-> = BrandedNodeReference<Exclude<SubsumedNodeType<G, N>, N>>;
+export type PolymorphicNodeReference<N extends NodeType> =
+  N extends NodeType ?
+    Readonly<{ kind: string; id: NodeId<PolymorphicNodeType<N>> }>
+  : never;
 
 /**
  * A node reference the graph-wide endpoint reads (`bulkFindEdgesFrom`,
  * `bulkFindEdgesTo`, `neighbors`, `countNeighbors`) accept: a
- * {@link GraphNodeReference}, or the {@link SubsumedNodeReference} a
+ * {@link GraphNodeReference}, or the {@link PolymorphicNodeReference} a
  * widened edge endpoint or polymorphic query row carries. A `kind` the
  * graph does not register is refused at runtime with `KindNotFoundError`.
  */
 export type GraphNodeReferenceInput<G extends GraphDef> =
-  GraphNodeReference<G> | SubsumedNodeReference<G, AllNodeTypes<G>>;
+  GraphNodeReference<G> | PolymorphicNodeReference<AllNodeTypes<G>>;
 
 type NodeReferenceGroup<R> =
   R extends Readonly<{ kind: infer K extends string; id: infer I }> ?
@@ -1347,11 +1362,19 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
  * A collection of nodes of a specific type.
  *
  * Provides ergonomic CRUD operations for a single node type.
+ *
+ * `Whole` is what `partOf.whole` accepts on this collection's attachment
+ * surfaces: `store.nodes.<K>` binds {@link CompositionWholeReference}, the
+ * runtime-kind collections bind {@link CompositionWholeInput}. It defaults to
+ * `never`, which every typed collection is assignable to, so naming a
+ * collection by its node type and constraint names alone still describes
+ * `store.nodes.<K>`; only an attachment made through such a type needs the
+ * whole reference spelled out.
  */
 export type NodeCollection<
   N extends NodeType,
   CN extends string = string,
-  WholeKind extends string = string,
+  Whole extends CompositionWholeInput = never,
 > = Readonly<{
   /**
    * Create a new node.
@@ -1367,7 +1390,7 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     props: z.input<N["schema"]>,
-    options?: NodeCreateOptions<Via, WholeKind>,
+    options?: NodeCreateOptions<Via, Whole>,
   ) => Promise<Node<N>>;
 
   /** Get a node by ID */
@@ -1480,7 +1503,7 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     id: NodeId<N>,
-    options: NodeReparentOptions<Via, WholeKind>,
+    options: NodeReparentOptions<Via, Whole>,
   ) => Promise<NodeReparentResult<Via>>;
 
   /**
@@ -1499,7 +1522,7 @@ export type NodeCollection<
   >(
     items: readonly Readonly<{
       id: NodeId<N>;
-      options: NodeReparentOptions<Via, WholeKind>;
+      options: NodeReparentOptions<Via, Whole>;
     }>[],
   ) => Promise<readonly NodeReparentResult<Via>[]>;
 
@@ -1728,7 +1751,7 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
-      NodeCreateOptions<Via, WholeKind>)[],
+      NodeCreateOptions<Via, Whole>)[],
   ) => Promise<Node<N>[]>;
 
   /**
@@ -1900,7 +1923,7 @@ export type NodeCollection<
   >(
     constraintName: CN,
     props: z.input<N["schema"]>,
-    options?: NodeGetOrCreateByConstraintOptions<Via, WholeKind>,
+    options?: NodeGetOrCreateByConstraintOptions<Via, Whole>,
   ) => Promise<NodeGetOrCreateByConstraintResult<N>>;
 
   /**
@@ -1917,7 +1940,7 @@ export type NodeCollection<
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
     }>[],
-    options?: NodeGetOrCreateByConstraintOptions<Via, WholeKind>,
+    options?: NodeGetOrCreateByConstraintOptions<Via, Whole>,
   ) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
@@ -1946,16 +1969,16 @@ type AssignableNodeTypes<G extends GraphDef, N extends NodeType> =
  * What a typed edge method accepts for an endpoint declared as `N` in graph
  * `G`: a {@link NodeRef} of `N` or of a kind the runtime admits in its place
  * ({@link AssignableNodeKinds}: a `subClassOf` descendant or an
- * `equivalentTo` kind), or the {@link SubsumedNodeReference} a widened edge
+ * `equivalentTo` kind), or the {@link PolymorphicNodeReference} a widened edge
  * endpoint or a polymorphic query row over one of those kinds carries, whose
- * `kind` is the general `string`. That arm is structural: a node or
- * reference of an unrelated kind whose properties include the declared
- * kind's also compiles. The runtime endpoint check stays authoritative and
- * refuses a kind the edge does not admit with `EndpointError`.
+ * `kind` is the general `string`. That arm's id brand names the declared
+ * kind, so an unrelated kind's id is refused even when its properties match;
+ * its `kind` is a `string`, so the runtime endpoint check stays authoritative
+ * and refuses a kind the edge does not admit with `EndpointError`.
  */
 export type EdgeEndpointRef<G extends GraphDef, N extends NodeType> =
   | NodeRef<N | AssignableNodeTypes<G, N>>
-  | SubsumedNodeReference<G, N | AssignableNodeTypes<G, N>>;
+  | PolymorphicNodeReference<N | AssignableNodeTypes<G, N>>;
 
 /**
  * An edge read in graph `G`: each declared endpoint typed by
@@ -2598,7 +2621,7 @@ export type GraphNodeCollections<G extends GraphDef> = {
   [K in keyof G["nodes"] & string]-?: NodeCollection<
     G["nodes"][K]["type"],
     ConstraintNames<G["nodes"][K]>,
-    CompositionWholeKinds<G, K>
+    CompositionWholeReference<G, K>
   >;
 };
 
@@ -2628,18 +2651,22 @@ export type NodeCurrentReads<
 > = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
 /** Node writes — never available on a read-only {@link StoreView}. */
-export type NodeWrites<N extends NodeType, CN extends string = string> = Pick<
-  NodeCollection<N, CN>,
-  (typeof NODE_WRITE_NAMES)[number]
->;
+export type NodeWrites<
+  N extends NodeType,
+  CN extends string = string,
+  Whole extends CompositionWholeInput = never,
+> = Pick<NodeCollection<N, CN, Whole>, (typeof NODE_WRITE_NAMES)[number]>;
 
 /** Temporal-aware edge reads — a {@link StoreView} pins these. */
 export type EdgeTemporalReads<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
 > = Pick<
-  EdgeCollection<E, From, To>,
+  EdgeCollection<E, From, To, Pairs, InputId, G>,
   (typeof EDGE_TEMPORAL_READ_NAMES)[number]
 >;
 
@@ -2651,14 +2678,26 @@ export type EdgeBatchReads<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_BATCH_READ_NAMES)[number]>;
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
+> = Pick<
+  EdgeCollection<E, From, To, Pairs, InputId, G>,
+  (typeof EDGE_BATCH_READ_NAMES)[number]
+>;
 
 /** Edge writes — never available on a read-only {@link StoreView}. */
 export type EdgeWrites<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_WRITE_NAMES)[number]>;
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
+> = Pick<
+  EdgeCollection<E, From, To, Pairs, InputId, G>,
+  (typeof EDGE_WRITE_NAMES)[number]
+>;
 
 /**
  * The read-only node surface a {@link StoreView} exposes for one node kind.
@@ -3014,7 +3053,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
       const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
       const C extends SubgraphCompositionSelection | undefined = undefined,
     >(
-      root: GraphNodeReference<G>,
+      root: GraphNodeReferenceInput<G>,
       options: SubgraphOptions<G, EK, NK, P, C>,
     ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   }>;
@@ -3180,7 +3219,7 @@ type UnbrandRecord<T extends Record<string, unknown>> = {
  * or external input where the brand is not available.
  */
 export type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<
-  NodeCollection<DynamicNodeType<K>, string>
+  NodeCollection<DynamicNodeType<K>, string, CompositionWholeInput>
 >;
 
 /**
@@ -3226,7 +3265,7 @@ export type DynamicStoreViewEdgeCollection<
 
 /** A node collection narrowed by Store-issued runtime-kind evidence. */
 export type RuntimeNodeCollection<T extends RuntimeNodeKind> = WidenBrandedIds<
-  NodeCollection<RuntimeNodeTypeFor<T>, string>
+  NodeCollection<RuntimeNodeTypeFor<T>, string, CompositionWholeInput>
 >;
 
 /** An edge collection narrowed by Store-issued runtime-kind evidence. */
@@ -3321,7 +3360,7 @@ export type StoreProjection<
     [K in N]-?: NodeCollection<
       G["nodes"][K]["type"],
       never,
-      CompositionWholeKinds<G, K>
+      CompositionWholeReference<G, K>
     >;
   };
   edges: Pick<GraphEdgeCollections<G>, E>;

@@ -30,6 +30,7 @@ import {
 import type { HistoryStore } from "../store/store";
 import {
   type DynamicNodeCollection,
+  type PolymorphicNodeReference,
   type TransactionContext,
 } from "../store/types";
 import { chunk } from "../utils/array";
@@ -61,6 +62,18 @@ export type ProvenanceNodeRef<
   kind: K;
   id: string;
 }>;
+
+/**
+ * What the retraction verbs accept for a source of kind `K`: a
+ * {@link ProvenanceNodeRef}, or the {@link PolymorphicNodeReference} a
+ * polymorphic query row over one of those kinds carries, whose `kind` is the
+ * general `string`. The runtime refuses a kind outside the configured source
+ * kinds with `ConfigurationError`.
+ */
+export type ProvenanceSourceInput<
+  G extends GraphDef = GraphDef,
+  K extends NodeKind<G> = NodeKind<G>,
+> = ProvenanceNodeRef<G, K> | PolymorphicNodeReference<G["nodes"][K]["type"]>;
 
 export type ProvenanceJustificationRef<
   G extends GraphDef = GraphDef,
@@ -143,16 +156,16 @@ export type RetractionCapability<
   JustificationKind extends NodeKind<G> = NodeKind<G>,
 > = Readonly<{
   retract: (
-    source: ProvenanceNodeRef<G, SourceKind>,
+    source: ProvenanceSourceInput<G, SourceKind>,
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
   retractMany: (
-    sources: readonly ProvenanceNodeRef<G, SourceKind>[],
+    sources: readonly ProvenanceSourceInput<G, SourceKind>[],
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
   unRetract: (
-    source: ProvenanceNodeRef<G, SourceKind>,
+    source: ProvenanceSourceInput<G, SourceKind>,
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
   unRetractMany: (
-    sources: readonly ProvenanceNodeRef<G, SourceKind>[],
+    sources: readonly ProvenanceSourceInput<G, SourceKind>[],
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
   holding: () => Promise<readonly ProvenanceFactRef<G, FactKind>[]>;
 }>;
@@ -226,8 +239,8 @@ type SupportSnapshot = Readonly<{
 
 type SourceRetractedState = "retracted" | "available";
 
-type SourceRow<G extends GraphDef> = Readonly<{
-  source: ProvenanceNodeRef<G>;
+type SourceRow = Readonly<{
+  source: ProvenanceNodeRef;
   row: NodeRow;
 }>;
 
@@ -1151,7 +1164,7 @@ async function runTransition<
 >(
   store: HistoryStore<G>,
   config: NormalizedConfig,
-  sources: readonly ProvenanceNodeRef<G, SourceKind>[],
+  sources: readonly ProvenanceSourceInput<G, SourceKind>[],
   retracted: boolean,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<RetractionReport<G, FactKind, JustificationKind>> {
@@ -1177,7 +1190,7 @@ async function runTransition<
         backend.getNode(store.graphId, source.kind, source.id),
       ),
     );
-    const sourceRows = uniqueSources.map((source, index): SourceRow<G> => {
+    const sourceRows = uniqueSources.map((source, index): SourceRow => {
       const sourceRow = rows[index];
       if (sourceRow === undefined || sourceRow.deleted_at !== undefined) {
         throw new NodeNotFoundError(source.kind, source.id);
@@ -1233,13 +1246,12 @@ async function runTransition<
   });
 }
 
-function uniqueNodeReferences<
-  G extends GraphDef,
-  K extends NodeKind<G> = NodeKind<G>,
->(references: readonly ProvenanceNodeRef<G, K>[]): ProvenanceNodeRef<G, K>[] {
-  const byKey = new Map<string, ProvenanceNodeRef<G, K>>();
+function uniqueNodeReferences(
+  references: readonly ProvenanceNodeRef[],
+): ProvenanceNodeRef[] {
+  const byKey = new Map<string, ProvenanceNodeRef>();
   for (const reference of references) {
-    byKey.set(refKey(reference), reference);
+    byKey.set(refKey(reference), { kind: reference.kind, id: reference.id });
   }
   return [...byKey.values()];
 }
@@ -1269,7 +1281,7 @@ export function createRetractionCapability<
   // The four retract verbs differ only in one/many source shape and the target
   // retracted flag; the generics are fixed by the config, so hoist one call.
   const transition = (
-    sources: readonly ProvenanceNodeRef<G, SourceKindsFromConfig<G, C>>[],
+    sources: readonly ProvenanceSourceInput<G, SourceKindsFromConfig<G, C>>[],
     retracted: boolean,
   ) =>
     runTransition<

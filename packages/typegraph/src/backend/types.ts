@@ -3798,6 +3798,9 @@ export type AdapterBackend<TNativeTransaction> = GraphBackend &
      * Adopt a caller-owned native transaction for a schema change. The adapter
      * proves the transaction is active and acquires its schema-write fence on
      * that literal session before returning the privileged CAS target. It
+     * refuses with `BaseSchemaMigrationError` unless the base-schema marker,
+     * read on that same session, is this release's: a root-connection read
+     * would wait for the connection the caller's transaction holds. It
      * never opens, commits, retries, or rolls back the caller's transaction.
      * Optional because drivers without active-session evidence must refuse.
      */

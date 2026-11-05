@@ -142,6 +142,21 @@ function migrationError(
 }
 
 /**
+ * Refuses with `BaseSchemaMigrationError` unless `installedVersion` is this
+ * release's base schema. The one verdict both the root backend's
+ * `assertBaseSchemaCurrent` and a schema-write adoption (which reads the
+ * marker on the caller's own transaction) apply.
+ */
+export function assertBaseSchemaVersionCurrent(
+  installedVersion: number | undefined,
+  currentVersion: number = CURRENT_BASE_SCHEMA_VERSION,
+): void {
+  const state = classifyVersion(installedVersion, currentVersion);
+  if (state === "current") return;
+  throw migrationError(installedVersion, currentVersion, state);
+}
+
+/**
  * One owner for deployment-wide physical schema adoption.
  *
  * The ordered registry is deliberately separate from per-graph schema
@@ -183,14 +198,8 @@ export function createBaseSchemaLifecycle(
     );
   }
 
-  function requireCurrent(installedVersion: number | undefined): void {
-    const state = classifyVersion(installedVersion, currentVersion);
-    if (state === "current") return;
-    throw migrationError(installedVersion, currentVersion, state);
-  }
-
   async function assertCurrent(): Promise<void> {
-    requireCurrent(await options.readVersion());
+    assertBaseSchemaVersionCurrent(await options.readVersion(), currentVersion);
   }
 
   async function writeVersion(version: number): Promise<number> {
@@ -226,7 +235,7 @@ export function createBaseSchemaLifecycle(
       await adoptStep(step);
       observedVersion = await writeVersion(step.version);
     }
-    requireCurrent(observedVersion);
+    assertBaseSchemaVersionCurrent(observedVersion, currentVersion);
   }
 
   async function adopt(): Promise<void> {

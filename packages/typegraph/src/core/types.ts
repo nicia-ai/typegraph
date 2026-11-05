@@ -134,6 +134,13 @@ export type NodeType<
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
 > = Readonly<{
   [NODE_TYPE_BRAND]: true;
+  /**
+   * Compile-time only, never present at runtime: the declared kind again,
+   * kept where `PolymorphicNodeType` widens `kind` to `string`. It keeps
+   * a widened `NodeId` brand nominal, so another kind's id with the same
+   * properties is not taken for this kind's.
+   */
+  __nodeKind?: K;
   kind: K;
   schema: S;
   description: string | undefined;

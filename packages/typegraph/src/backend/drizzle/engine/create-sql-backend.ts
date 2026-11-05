@@ -654,6 +654,13 @@ export function createSqlBackend<TTx>(
     >
   > = createSchemaVersionMembers({
     runSchemaWriteTransaction: late.fence.runSchemaWriteTransaction,
+    // Without interactive transactions the schema-write transaction refuses
+    // before any I/O, so the marker read would only put a network round trip
+    // and a different error ahead of that refusal.
+    assertBaseSchemaCurrent:
+      capabilities.execution.interactiveTransactions ?
+        baseSchemaMembers.assertBaseSchemaCurrent
+      : assertNothingBeforeTransactionRefusal,
   });
 
   const backend = {
@@ -789,4 +796,8 @@ export function createSqlBackend<TTx>(
   });
 
   return queuedBackend;
+}
+
+function assertNothingBeforeTransactionRefusal(): Promise<void> {
+  return Promise.resolve();
 }

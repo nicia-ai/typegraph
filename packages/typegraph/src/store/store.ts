@@ -503,7 +503,6 @@ import {
   type GraphEdgeForKinds,
   type GraphNodeCollections,
   type GraphNodeForKinds,
-  type GraphNodeReference,
   type GraphNodeReferenceInput,
   type HeterogeneousNodeUpsertInput,
   type HeterogeneousNodeUpsertResult,
@@ -945,7 +944,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P, C>,
   ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   clear: (
@@ -1033,7 +1032,7 @@ export type BatchReadBuilder<G extends GraphDef> = Readonly<{
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
 }>;
@@ -1062,7 +1061,7 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P, C>,
   ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
 }>;
@@ -3999,7 +3998,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P, C>,
   ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     // The public surface is valid-time only (`recordedAsOf` is typed `never`).
@@ -4017,7 +4016,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P>,
     backend: GraphBackend | TransactionBackend,
     attempt: number,
@@ -4034,7 +4033,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P, C>,
     txBackend: TransactionBackend,
     attempt: number,
@@ -4051,7 +4050,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
     const C extends SubgraphCompositionSelection | undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: InternalSubgraphOptions<G, EK, NK, P, C>,
     backend: GraphBackend | TransactionBackend,
     attempt?: number,
@@ -4093,7 +4092,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    root: GraphNodeReference<G>,
+    root: GraphNodeReferenceInput<G>,
     options: InternalSubgraphOptions<G, EK, NK, P, C>,
   ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const coordinate = resolveReadCoordinate(

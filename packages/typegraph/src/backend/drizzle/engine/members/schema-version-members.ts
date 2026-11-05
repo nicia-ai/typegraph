@@ -53,6 +53,14 @@ export type CreateSchemaVersionMembersDeps = Readonly<{
     graphId: string,
     fn: (target: InternalOperationBackend) => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Refuses with `BaseSchemaMigrationError` unless the database's base
+   * schema is this release's. Every commit below runs it first, so a schema
+   * document this release writes never lands on a database an earlier
+   * release still opens, whichever path (`ensureSchema`, `migrateSchema`,
+   * `evolve`, `removeKinds`) reached the commit.
+   */
+  assertBaseSchemaCurrent: () => Promise<void>;
 }>;
 
 export type SchemaVersionMembers = Readonly<{
@@ -86,12 +94,13 @@ export type SchemaVersionMembers = Readonly<{
 export function createSchemaVersionMembers(
   deps: CreateSchemaVersionMembersDeps,
 ): SchemaVersionMembers {
-  const { runSchemaWriteTransaction } = deps;
+  const { runSchemaWriteTransaction, assertBaseSchemaCurrent } = deps;
 
   return {
     async commitSchemaVersion(
       params: CommitSchemaVersionParams,
     ): Promise<SchemaVersionRow> {
+      await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, (target) =>
         target.commitSchemaVersion(params),
       );
@@ -101,6 +110,7 @@ export function createSchemaVersionMembers(
       params: CommitSchemaVersionParams,
       probes: readonly SchemaKindEmptinessProbe[],
     ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+      await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, (target) =>
         commitSchemaVersionIfKindsEmpty(target, params, probes),
       );
@@ -110,6 +120,7 @@ export function createSchemaVersionMembers(
       params: CommitSchemaVersionParams,
       preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<SchemaVersionRow> {
+      await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, async (target) => {
         await preflight(target);
         return target.commitSchemaVersion(params);

@@ -578,15 +578,18 @@ these keeps loading**, and reading `store.introspect()` on it still works:
   `isAssignableTo`, and every other equivalence-driven check are unaffected.
 - A relation naming `differentFrom` keeps being inert, as it always was.
 
-**This is a one-way door for rolling deploys and rollback.** The narrowed
-`SerializedMetaEdge` shape only appears once a document gets rewritten (see
-above), but from that point on it cannot be read by a `@nicia-ai/typegraph`
-release older than this one — the pre-change `serializedSchemaZod` required
-`transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry,
-so an older reader's `parseSerializedSchema` throws on the new shape instead
-of degrading. In a mixed-version fleet, upgrade every application instance
-sharing a database to this release or later before any of them commits a
-schema change, and do not roll back to an older release once one has.
+**Rolling deploys and rollback.** The upgrade is one-way at the database
+already: this release's first privileged open raises the base schema to
+version 6, and a release that knows only version 5 refuses a database stamped
+6 (see
+[Base-schema version 6](/backend-setup#base-schema-version-6-the-identity-transition-log)).
+The narrowed `SerializedMetaEdge` shape adds no constraint of its own,
+because a document is only rewritten into it on a database already stamped
+6, though an older release's `parseSerializedSchema` could not read it
+either: the pre-change `serializedSchemaZod` required
+`transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry. In a mixed-version fleet, upgrade every
+application instance sharing a database before any of them opens it with this
+release, and do not roll back afterwards.
 
 **Once your code moves a `sameAs(A, B)` to `equivalentTo(A, B)`, or deletes a
 `differentFrom(A, B)`, the next commit auto-migrates.** Both are classified

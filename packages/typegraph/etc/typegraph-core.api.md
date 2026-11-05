@@ -661,6 +661,7 @@ export type NodeRegistration<N extends NodeType = NodeType> = Readonly<{
 // @public
 export type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
     [NODE_TYPE_BRAND]: true;
+    __nodeKind?: K;
     kind: K;
     schema: S;
     description: string | undefined;

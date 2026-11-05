@@ -274,12 +274,12 @@ the store-wide migration knob.
   widened endpoint reference such as `{ kind: edge.toKind, id: edge.toId }`.
   A subclass row from a supertype query connects without a cast. The runtime
   endpoint check stays authoritative. The widened form is accepted at compile
-  time by its id brand, which is structural, so any node or reference whose
-  properties include the declared kind's compiles at an affected endpoint,
-  even of an unrelated kind, and the runtime refuses an unrelated kind with
-  `EndpointError`; and because an IRI is typed as a plain `string`, every kind
-  mapped to an IRI with `equivalentTo` is admitted wherever any one of them
-  is.
+  time by its id brand, which names the declared kind, so the id of an
+  unrelated kind is refused even when its properties match. Its `kind` is a
+  `string`, so a branded id under another kind name compiles and the runtime
+  refuses it with `EndpointError`. Because an IRI is typed as a plain
+  `string`, every kind mapped to an IRI with `equivalentTo` is admitted
+  wherever any one of them is.
 - **The next hop takes the same references.** The `sources` / `targets` of
   `bulkFindEdgesFrom` / `bulkFindEdgesTo` and the `source` of `neighbors()` /
   `countNeighbors()` accept the widened reference and the polymorphic row
@@ -609,12 +609,13 @@ are reached before the node row is written (for `bulkCreate`, before any row
 of the batch), so catching one inside an enclosing `store.transaction(...)`
 leaves nothing of the refused create behind.
 
-- **`whole`** names the whole: a node you already hold, or a
+- **`whole`** names the whole: a node you already hold, a
   `{ kind, id }` reference when you only have the id
-  (`whole: { kind: "Book", id: bookId }`). Only its `kind` and `id` are read,
-  so a whole node's own properties never bleed into the attachment. On
-  `store.nodes.<Kind>`, `whole.kind` is limited at compile time to the whole
-  kinds the ontology declares for that part kind, in either declaration
+  (`whole: { kind: "Book", id: bookId }`), or a row from a polymorphic query.
+  Only its `kind` and `id` are read, so a whole node's own properties never
+  bleed into the attachment. On `store.nodes.<Kind>`, `whole` is limited at
+  compile time to the whole kinds the ontology declares for that part kind
+  (`CompositionWholeReference<G, K>`), in either declaration
   direction (`partOf(Chapter, Book)` or `hasPart(Book, Chapter)`). When the
   ontology also declares a subclass or equivalence relation, or was built in
   a variable annotated `readonly OntologyRelation[]`, the type accepts any

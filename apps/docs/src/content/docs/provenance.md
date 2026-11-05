@@ -118,6 +118,11 @@ const previous = before ? store.asOfRecorded(before) : undefined;
 const current = after ? store.asOfRecorded(after) : undefined;
 ```
 
+Every retraction verb also takes a polymorphic query row, such as one a
+supertype query over the source kinds returns, whose `kind` is `string`. The
+row's actual kind must be one of the configured source kinds; any other is
+refused with `ConfigurationError`.
+
 The report partitions facts relative to the retracted source:
 
 - `died`: every fact whose currency this transition closed

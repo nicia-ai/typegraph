@@ -95,7 +95,7 @@ import {
 import type {
   Edge,
   EdgeMeta,
-  GraphNodeReference,
+  GraphNodeReferenceInput,
   Node,
   NodeMeta,
 } from "./types";
@@ -705,7 +705,7 @@ type SubgraphExecutionParams<
 > = Readonly<{
   graph: G;
   graphId: string;
-  root: GraphNodeReference<G>;
+  root: GraphNodeReferenceInput<G>;
   backend: GraphBackend;
   dialect: DialectAdapter;
   schema: SqlSchema | undefined;

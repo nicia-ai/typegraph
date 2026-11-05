@@ -27,10 +27,11 @@ import {
   type NodeId,
   type NodeReferenceLookup,
   type NodeType,
+  type PolymorphicNodeReference,
+  type PolymorphicNodeType,
   relatedTo,
   type Store,
   subClassOf,
-  type SubsumedNodeReference,
   type TransactionContext,
   type VectorSearchOptions,
 } from "../src";
@@ -1348,9 +1349,9 @@ describe("typed edge collections under subsumption", () => {
       GraphNodeReferenceInput<typeof affectedGraph>
     >();
     expectTypeOf<FromBucket["source"]["kind"]>().toEqualTypeOf<string>();
-    expectTypeOf<PlainBucket["source"]["kind"]>().toEqualTypeOf<
-      keyof typeof nodes
-    >();
+    // A plain graph's bucket echoes a polymorphic row too, since an
+    // `expansion: "subclasses"` read produces one on any graph.
+    expectTypeOf<PlainBucket["source"]["kind"]>().toEqualTypeOf<string>();
   });
 
   it("keeps declared endpoint literals when the graph declares no subsumption", () => {
@@ -1501,55 +1502,57 @@ describe("typed edge collections under subsumption", () => {
     expect(rows).toBeDefined();
   });
 
+  /** Type-checked only — never called. */
+  function assertReferencesRefused(): void {
+    const affected = undefined as unknown as AffectedStore;
+    const plain = undefined as unknown as PlainStore;
+    const plainEdge = undefined as unknown as PlainEdge;
+    const vendor = undefined as unknown as Node<typeof Vendor>;
+    const kind: string = affectedGraph.id;
+    const edgeKinds = ["endpointEmploys"] as const;
+    // @ts-expect-error - a bare string id carries no node brand
+    void affected.neighbors({ kind, id: "raw-id" }, { edges: edgeKinds });
+    // @ts-expect-error - a bare string id carries no node brand
+    void plain.neighbors({ kind, id: "raw-id" }, { edges: edgeKinds });
+    // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
+    void affected.edges.endpointEmploys.findTo({ kind, id: vendor.id });
+    // Graph-wide reads admit every graph kind, so a widened reference to
+    // any of them compiles on either graph.
+    void affected.neighbors({ kind, id: vendor.id }, { edges: edgeKinds });
+    void affected.bulkFindEdgesTo({
+      targets: [{ kind, ids: [vendor.id] }],
+      edgeKinds,
+    });
+    void plain.neighbors({ kind, id: plainEdge.toId }, { edges: edgeKinds });
+    void plain.neighbors(
+      { kind: plainEdge.toKind, id: plainEdge.toId },
+      { edges: edgeKinds },
+    );
+  }
+
   it("refuses a reference whose id brand no admitted kind carries", () => {
-    // Type-checked only — never called.
-    function assertReferencesRefused(): void {
-      const affected = undefined as unknown as AffectedStore;
-      const plain = undefined as unknown as PlainStore;
-      const plainEdge = undefined as unknown as PlainEdge;
-      const vendor = undefined as unknown as Node<typeof Vendor>;
-      const kind: string = affectedGraph.id;
-      const edgeKinds = ["endpointEmploys"] as const;
-      // @ts-expect-error - a bare string id carries no node brand
-      void affected.neighbors({ kind, id: "raw-id" }, { edges: edgeKinds });
-      // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
-      void affected.neighbors({ kind, id: vendor.id }, { edges: edgeKinds });
-      void affected.bulkFindEdgesTo({
-        // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
-        targets: [{ kind, ids: [vendor.id] }],
-        edgeKinds,
-      });
-      // @ts-expect-error - EndpointVendor's id is not an EndpointStaff id
-      void affected.edges.endpointEmploys.findTo({ kind, id: vendor.id });
-      // @ts-expect-error - without subsumption, the kind stays a literal
-      void plain.neighbors({ kind, id: plainEdge.toId }, { edges: edgeKinds });
-      void plain.neighbors(
-        { kind: plainEdge.toKind, id: plainEdge.toId },
-        { edges: edgeKinds },
-      );
-    }
     void assertReferencesRefused;
-    expectTypeOf<
-      SubsumedNodeReference<typeof plainGraph, typeof Staff>
-    >().toBeNever();
-    expectTypeOf<
-      SubsumedNodeReference<typeof affectedGraph, typeof Firm>
-    >().toBeNever();
+    expectTypeOf<PolymorphicNodeReference<typeof Staff>>().toEqualTypeOf<
+      Readonly<{ kind: string; id: NodeId<PolymorphicNodeType<typeof Staff>> }>
+    >();
   });
 
-  it("admits an unrelated kind whose properties include the declared kind's, structurally", () => {
-    // Type-checked only — never called. The id brand is structural, so an
-    // EndpointContractor (same properties as EndpointStaff, no ontology
-    // relation) compiles; the runtime endpoint check refuses it with
-    // EndpointError.
+  it("refuses an unrelated kind whose properties include the declared kind's", () => {
+    // Type-checked only — never called. The widened id brand keeps the
+    // declared kind, so an EndpointContractor (same properties as
+    // EndpointStaff, no ontology relation) is refused on either graph.
     type ContractorNode = Node<typeof Contractor>;
-    function assertStructuralAdmission(): void {
+    function assertSameShapeRefused(): void {
       const store = undefined as unknown as AffectedStore;
+      const plain = undefined as unknown as PlainStore;
       const firm = undefined as unknown as Node<typeof Firm>;
       const contractor = undefined as unknown as ContractorNode;
+      // @ts-expect-error - EndpointContractor is no EndpointStaff, whatever its properties
       void store.edges.endpointEmploys.create(firm, contractor);
+      // @ts-expect-error - EndpointContractor is no EndpointStaff, whatever its properties
+      void plain.edges.endpointEmploys.create(firm, contractor);
     }
-    void assertStructuralAdmission;
+    void assertSameShapeRefused;
     expect(
       buildKindRegistry(affectedGraph).isAssignableTo(
         "EndpointContractor",

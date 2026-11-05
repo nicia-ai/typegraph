@@ -908,15 +908,12 @@ expectType<
     edgeKinds: ["worksAt", "knows"],
   }),
 );
+// A source is a polymorphic reference too, whose `kind` is a `string`: a
+// branded id under another kind name compiles and the runtime checks the kind
+// (`KindNotFoundError` for an unregistered one). An unbranded id does not.
 expectError(
   store.bulkFindEdgesFrom({
-    sources: [{ kind: "Missing", ids: [personId] }],
-    edgeKinds: ["worksAt"],
-  }),
-);
-expectError(
-  store.bulkFindEdgesFrom({
-    sources: [{ kind: "Company", ids: [personId] }],
+    sources: [{ kind: "Company", ids: ["raw-company-id"] }],
     edgeKinds: ["worksAt"],
   }),
 );

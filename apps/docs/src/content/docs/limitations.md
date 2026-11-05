@@ -342,8 +342,9 @@ before the affected nodes can be deleted.
 ## Composition Existence (`existence: "required"`)
 
 - **Type-level narrowing of `partOf`'s whole kind is conservative.** On
-  `store.nodes.<Kind>`, `partOf.whole.kind` is limited to the whole kinds the
-  ontology declares for that part kind, but only when that can be proven from
+  `store.nodes.<Kind>`, `partOf.whole` is limited to references of the whole
+  kinds the ontology declares for that part kind (including a polymorphic
+  query row of one of them), but only when that can be proven from
   the ontology's declared tuple. A graph that also declares a `subClassOf`,
   `equivalentTo` or `sameAs` relation, or whose ontology was built in a
   variable annotated `readonly OntologyRelation[]`, accepts any node kind of

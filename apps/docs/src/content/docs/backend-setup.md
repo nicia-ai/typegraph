@@ -1130,7 +1130,11 @@ numbered privileged adoption lifecycle runs.
 
 `createVerifiedStore`, `assertSchemaCurrent`, and the DML-only graph-template
 APIs read this marker and throw `BaseSchemaMigrationError` when it is missing,
-stale, or newer than the running library. They never attempt repair. A plain
+stale, or newer than the running library. They never attempt repair. Every
+schema commit reads it too, so `store.evolve()`, `store.removeKinds()` and
+`withEvolvedTransaction()` on a store a plain `createStore` attached refuse
+the same way before writing, rather than committing a schema document onto a
+database an earlier release still opens. A plain
 `createStore` remains a synchronous zero-I/O attach; if it reaches an edge
 write on legacy storage, the write fails with `ConfigurationError` and
 `details.code === "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE"` rather than a raw

@@ -21,7 +21,7 @@ import {
   defineNode,
   defineSubgraphProject,
   type Edge,
-  type GraphNodeReference,
+  type GraphNodeReferenceInput,
   indexSubgraph,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   type Node,
@@ -1208,7 +1208,7 @@ describe("store.subgraph()", () => {
       expect(batched.root?.id).toBe(ids.runId);
       expect(pinned.root?.id).toBe(ids.runId);
       expectTypeOf<Parameters<typeof store.subgraph>[0]>().toEqualTypeOf<
-        GraphNodeReference<TestGraph>
+        GraphNodeReferenceInput<TestGraph>
       >();
     });
 
@@ -1266,17 +1266,23 @@ describe("store.subgraph()", () => {
       ).toBe(true);
     });
 
-    it("rejects a reference root whose kind and id disagree at compile time", async () => {
+    it("refuses an unbranded root at compile time and checks a branded root's kind at runtime", async () => {
       await expect(
         store.subgraph(
-          // @ts-expect-error - a Run id cannot be referenced as a Task
-          { kind: "Task", id: ids.runId },
+          // @ts-expect-error - a raw string id carries no node brand
+          { kind: "Task", id: "raw-task-id" },
           { edges: ["has_task"] },
         ),
       ).resolves.toBeDefined();
+      // A branded id with another `kind` is the shape a polymorphic row
+      // takes, so it compiles; the kind is matched exactly at runtime.
+      const mismatched = await store.subgraph(
+        { kind: "Task", id: ids.runId },
+        { edges: ["has_task"] },
+      );
+      expect(mismatched.root).toBeUndefined();
       await expect(
         store.subgraph(
-          // @ts-expect-error - "Episode" is not a node kind of this graph
           { kind: "Episode", id: ids.runId },
           { edges: ["has_task"] },
         ),

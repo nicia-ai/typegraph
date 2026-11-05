@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import {
   type CompositionWholeKinds,
+  type CompositionWholeReference,
   type CreateNodeInput,
   defineEdge,
   defineGraph,
@@ -298,15 +299,15 @@ expectError(
 );
 expectError(projection.nodes.Episode.reparent(episodeId, { whole: album }));
 
-// A collection named with the default whole kinds is not the graph's own: the
-// kinds sit in contravariant positions, so it must say which kinds it takes.
-expectError<NodeCollection<typeof Episode, "episode_title">>(
+// A collection named without its whole reference is still the graph's own: the
+// default leaves attachments out. Naming the reference keeps them available.
+expectAssignable<NodeCollection<typeof Episode, "episode_title">>(
   store.nodes.Episode,
 );
 expectAssignable<
   NodeCollection<
     typeof Episode,
     "episode_title",
-    CompositionWholeKinds<typeof graph, "Episode">
+    CompositionWholeReference<typeof graph, "Episode">
   >
 >(store.nodes.Episode);
