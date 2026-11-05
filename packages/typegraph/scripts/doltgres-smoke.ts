@@ -14,9 +14,9 @@
 //     accepts the violating row. #3634 at ad6e1d72 still rejects the later fence-row
 //     committer with 40001 and the typed retry stores 2. Unchanged: #2600 (row locks,
 //     LOCK TABLE, two-argument advisory lock), #3335, #3389, and the journal's `$1`
-//     inside format() (bind substitution is still an unrestricted ReplaceAll).
+//     inside format() (bind substitution is still an unrestricted ReplaceAll; filed as #3771).
 //   - Vector stays off. With CIC fixed, TypeGraph's ANN build now stops at the
-//     `ALTER TABLE ... RESET (parallel_workers)` it runs before every build (unfiled), and
+//     `ALTER TABLE ... RESET (parallel_workers)` it runs before every build (#3772), and
 //     every node create with an embedding fails earlier still: it writes the vector row
 //     through a data-modifying CTE (#3099). Both are pinned below.
 //   - TypeGraph: #797 keys subgraph roots on (kind, id); the walk passes the node. #796
@@ -25,8 +25,10 @@
 //     mechanism, so create edge, the multi-write transaction, soft delete, delete
 //     protection and the branch write fail on `locking clauses are not yet supported`.
 //     Under permit_unsupported_locking_statements they pass, because the clauses are
-//     accepted and ignored. Not pinned here: whether a `row` backend should take those
-//     clauses is a TypeGraph decision.
+//     accepted and ignored. TypeGraph #807 makes those locks follow the write fence: a
+//     `row` backend takes one keyed fence row per node instead. With #807 applied the
+//     battery scores 57 passed, 0 failed, 2 skipped on all three builds (#3634 with
+//     DOLTGRES_EXPECT_ROW_CONFLICT=commit-time); without it, 53 / 5 / 1.
 //   - Before the rebase the battery scored 54 passed, 0 failed, 2 skipped on 1.4.0 and
 //     PR #3634, and main 53 / 1 / 2, the failure being the CIC pin turning red.
 //
@@ -557,6 +559,7 @@ function report(): void {
  */
 const TG_ARGV_ISSUE = "doltgresql#3545";
 const FORMAT_ISSUE = "doltgresql#3546";
+const BIND_SUBSTITUTION_ISSUE = "doltgresql#3771";
 const TG_ARGV_UNRESOLVED = 'column "tg_argv" could not be found';
 /** What the journal's `EXECUTE format(...)` raises once TG_ARGV resolves: it runs `0`. */
 const FORMAT_RETURNS_ZERO = 'at or near "0": syntax error';
@@ -1049,7 +1052,7 @@ async function runDeviationBattery(): Promise<void> {
     "pgvector: ANN build's parallel_workers reset (ALTER TABLE ... RESET)",
     unsupported(
       "ALTER TABLE with unsupported command type *tree.AlterTableSetStorage",
-      "unfiled",
+      "doltgresql#3772",
     ),
     [...PROBE_SETUP, `ALTER TABLE "probe_rows" RESET (parallel_workers)`],
   );
@@ -1420,10 +1423,10 @@ const REVISION_JOURNAL_GAPS: readonly Readonly<{
   {
     message: FORMAT_BIND_SUBSTITUTION,
     reason:
-      "blocked at the first write on this build: evaluating " +
-      "format('SELECT ... $1 ... %I', TG_ARGV[1]) raises " +
-      "a syntax error at '{'. Removing $1 makes it work. The trigger-variable and format fixes " +
-      "are present, but the journal's dynamic SQL still cannot run.",
+      `blocked at the first write (${BIND_SUBSTITUTION_ISSUE}): evaluating ` +
+      "format('SELECT ... $1 ... %I', TG_ARGV[1]) raises a syntax error at '{', because " +
+      "PL/pgSQL substitutes the function's own $1 inside the string literal. The trigger-variable " +
+      "and format fixes are present, but the journal's dynamic SQL still cannot run.",
   },
 ];
 
