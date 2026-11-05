@@ -6,14 +6,14 @@ runner uses this backend; it no longer substitutes a better-sqlite3 shim.
 Public setup and capability details are in
 [Backend Setup](../../../../apps/docs/src/content/docs/backend-setup.md#doltlite).
 
-The published Node binding 0.51.6 drops extended SQLite errors and disables
+The published Node binding 0.51.8 drops extended SQLite errors and disables
 vec1/math functions
 ([doltlite-node#9](https://github.com/dolthub/doltlite-node/issues/9),
 [doltlite-node#10](https://github.com/dolthub/doltlite-node/issues/10)).
 The source-build workflow applies
-[the upstream patch](../../../../patches/doltlite-node-0.51.6.patch), pinned
-to binding commit `f94da902de8bd110f7125b0e079fcdc3a5c4117d` and the SHA-256
-verified 0.51.6 engine release. This remains a release prerequisite until
+[the upstream patch](../../../../patches/doltlite-node-0.51.8.patch), pinned
+to binding commit `40bfa95096cd55a258cd32af6c482fdc3582d793` and the SHA-256
+verified 0.51.8 engine release. This remains a release prerequisite until
 upstream publishes those fixes. The backend refuses the unpatched binding
 before opening user data; it never invents error codes from messages.
 
@@ -48,7 +48,7 @@ The shared graph-merge matrix has a DoltLite selector and runs all 40 existing
 matrix suites. Additional cases cover native branch allocation, semantic
 merge, cleanup, recorded reads after reopen, and writer contention.
 
-Validation on Node 24 with the patched 0.51.6 binding (macOS arm64): 1,297
+Validation on Node 24 with the patched 0.51.8 binding (macOS arm64): 1,297
 shared cases passed, with the shared suite's existing 28 skips; 432
 graph-merge cases passed; dedicated cases cover lifecycle, crash recovery,
 and vectors. CI runs Node 22 and 24 on Linux. Windows, ANN indexing, and

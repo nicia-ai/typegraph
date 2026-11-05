@@ -152,7 +152,7 @@ index 0000000..8e59041
 +    for (const method of ['run', 'get', 'all', 'iterate']) {
 +      const statement = db.prepare(sql);
 +      expectSqliteError(() => [...(method === 'iterate' ? statement.iterate() : [statement[method]()])], 1555, 'UNIQUE constraint failed: p.id');
-+      expectSqliteError(() => statement[method](), 1555, 'UNIQUE constraint failed: p.id');
++      expectSqliteError(() => method === 'iterate' ? statement.iterate().next() : statement[method](), 1555, 'UNIQUE constraint failed: p.id');
 +    }
 +    expectSqliteError(() => db.exec("INSERT INTO p VALUES ('two','one','yes')"), 2067, 'UNIQUE constraint failed: p.name');
 +    expectSqliteError(() => db.exec("INSERT INTO p VALUES ('two','two',NULL)"), 1299, 'NOT NULL constraint failed: p.required');

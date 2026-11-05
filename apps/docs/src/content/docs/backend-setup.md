@@ -17,8 +17,8 @@ DoltLite embeds a versioned SQLite-compatible database. TypeGraph reuses its SQL
 FTS5, schema lifecycle, identity, recorded history, and revision journal.
 
 The Node binding currently requires the upstream patch in
-`patches/doltlite-node-0.51.6.patch`: structured SQLite errors and builds with vec1 and math
-functions enabled. The published unpatched 0.51.6 binding is refused before opening user data.
+`patches/doltlite-node-0.51.8.patch`: structured SQLite errors and builds with vec1 and math
+functions enabled. The published unpatched 0.51.8 binding is refused before opening user data.
 From a development checkout, with Node 22 or 24, a C/C++ compiler, Python 3, Git, and curl:
 
 ```sh
