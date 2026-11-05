@@ -1603,5 +1603,88 @@ describe.runIf(process.env["POSTGRES_URL"])(
         },
       );
     });
+
+    /**
+     * Each transaction creates a self-edge on one node, waits until the other
+     * has done the same, then creates a self-edge on the other's node. The
+     * row-lock pairing locks endpoints FOR KEY SHARE, which never conflicts
+     * with itself, so both commit. A fence row has no shared mode: each
+     * transaction waits on the fence row the other holds, PostgreSQL aborts
+     * one with a deadlock, and `store.transaction` surfaces it as
+     * `TransactionConflictError`, which `retry` replays to success. A managed
+     * store under a `row` fence cannot reach this order, because its writers
+     * already serialize on the graph's schema fence row.
+     */
+    describe("edge-writing transactions that lock endpoints in opposite orders", () => {
+      it.each([
+        {
+          mode: "unmanaged",
+          retry: false,
+          outcomes: ["ok", "ok"],
+          liveEdges: 4,
+        },
+        {
+          mode: "unmanaged, row fence",
+          retry: false,
+          outcomes: [TransactionConflictError.name, "ok"],
+          liveEdges: 2,
+        },
+        {
+          mode: "unmanaged, row fence",
+          retry: true,
+          outcomes: ["ok", "ok"],
+          liveEdges: 4,
+        },
+      ] satisfies readonly Readonly<{
+        mode: StoreMode;
+        retry: boolean;
+        outcomes: readonly string[];
+        liveEdges: number;
+      }>[])(
+        "$mode store, retry: $retry",
+        { timeout: CASE_TIMEOUT_MS },
+        async ({ mode, retry, outcomes, liveEdges }) => {
+          activeMode = mode;
+          const live = requireLive();
+          const firstEdges = [deferred(), deferred()] as const;
+          const bothFirstEdges = Promise.all(
+            firstEdges.map((firstEdge) => firstEdge.promise),
+          );
+          const writer = (
+            store: GraphStore,
+            firstEdge: Deferred,
+            first: typeof alice | typeof bob,
+            second: typeof alice | typeof bob,
+          ) =>
+            settle(
+              store.transaction(
+                async (tx) => {
+                  await tx.edges.knows.create(first, first, {});
+                  firstEdge.resolve();
+                  await bothFirstEdges;
+                  await tx.edges.knows.create(second, second, {});
+                },
+                retry ? { retry: { attempts: 2 } } : {},
+              ),
+            );
+
+          const settled = await Promise.all([
+            writer(live.deleteStore, firstEdges[0], alice, bob),
+            writer(live.edgeStore, firstEdges[1], bob, alice),
+          ]);
+
+          const observed = {
+            outcomes: settled
+              .map((outcome) => describeOutcome(outcome))
+              .toSorted(),
+            liveEdges: await liveEdgeCount(live.probe),
+          };
+          console.log(
+            `[opposite-order edge writers] ${mode}, retry ${String(retry)}: ${JSON.stringify(observed)}`,
+          );
+          expect(observed).toEqual({ outcomes, liveEdges });
+        },
+      );
+    });
   },
 );
