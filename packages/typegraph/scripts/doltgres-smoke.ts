@@ -29,6 +29,13 @@
 //     `row` backend takes one keyed fence row per node instead. With #807 applied the
 //     battery scores 57 passed, 0 failed, 2 skipped on all three builds (#3634 with
 //     DOLTGRES_EXPECT_ROW_CONFLICT=commit-time); without it, 53 / 5 / 1.
+//   - 2026-11-05: added the typed endpoint race (edge create vs. delete of its endpoint
+//     on an unmanaged store, both writes done before either commits). With #807, #3634
+//     fails the later COMMIT on the shared node fence row and the replay leaves no
+//     dangling edge; main commits both and the edge dangles (pinned, as for the raw
+//     fence races; 1.4.0 behaves as main). Taking no node fence rows under #807 turns it
+//     red on #3634. The battery now scores 58 / 0 / 2 on all three builds with #807,
+//     53 / 6 / 1 without.
 //   - Before the rebase the battery scored 54 passed, 0 failed, 2 skipped on 1.4.0 and
 //     PR #3634, and main 53 / 1 / 2, the failure being the CIC pin turning red.
 //
@@ -280,9 +287,11 @@ import { z } from "zod";
 
 import {
   createAdapterStoreWithSchema,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
 } from "../src";
 import { type WriteFenceDeclaration } from "../src/backend";
 import { createPostgresBackend } from "../src/backend/postgres";
@@ -1654,6 +1663,150 @@ async function probeTypedCommitTimeRetry(pool: Pool): Promise<void> {
   );
 }
 
+/**
+ * The invariant TypeGraph #807 protects on a `row` backend, measured end to end: an
+ * edge create and a delete of its endpoint must not both commit and leave a live edge
+ * on a deleted node. The store is unmanaged, so the only fence row the two writers
+ * share is bob's node fence; a managed store would also serialize them on its schema
+ * fence row and hide whether the node fences work. Each transaction finishes its write
+ * and waits for the other before committing, so neither can see the other's commit.
+ *
+ * With #3634 the later COMMIT fails 40001 on bob's fence row and the loser replays: a
+ * replayed edge create is refused (EndpointNotFoundError), a replayed delete cascades
+ * the edge it now sees. On main both commit and the edge dangles; that is the same
+ * undetected conflict the raw fence races pin, so the default run accepts it.
+ */
+async function probeTypedEndpointRace(pool: Pool): Promise<void> {
+  await step(
+    "typed row/commit-time: edge create racing an endpoint delete",
+    async () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const knows = defineEdge("knows", { schema: z.object({}) });
+      const raceGraph = defineGraph({
+        id: `doltgres-smoke-endpoint-race-${String(Date.now())}`,
+        nodes: { Person: { type: Person, onDelete: "cascade" } },
+        edges: { knows: { type: knows, from: [Person], to: [Person] } },
+      });
+      const backend = createPostgresBackend(drizzle(pool), {
+        ...DOLTGRES_BACKEND_OPTIONS,
+        capabilities: {
+          writeFence: {
+            mechanism: "row",
+            drain: "none",
+            conflict: "commit-time",
+          },
+        },
+      });
+      const store = createStore(raceGraph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      let releaseBoth: (() => void) | undefined;
+      const bothWrote = new Promise<void>((resolve) => {
+        releaseBoth = resolve;
+      });
+      let writers = 0;
+      async function meetBeforeCommit(): Promise<void> {
+        writers += 1;
+        if (writers === 2) releaseBoth?.();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            bothWrote,
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(() => {
+                reject(new Error("the two writers did not rendezvous"));
+              }, 5000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      const attempts = { edge: 0, delete: 0 };
+      const [edgeOutcome, deleteOutcome] = await Promise.allSettled([
+        store.transaction(
+          async (tx) => {
+            attempts.edge += 1;
+            await tx.edges.knows.create(alice, bob, {});
+            if (attempts.edge === 1) await meetBeforeCommit();
+          },
+          { retry: { attempts: 3 } },
+        ),
+        store.transaction(
+          async (tx) => {
+            attempts.delete += 1;
+            await tx.nodes.Person.delete(bob.id);
+            if (attempts.delete === 1) await meetBeforeCommit();
+          },
+          { retry: { attempts: 3 } },
+        ),
+      ]);
+
+      const dangling = await pool.query<{ dangling: number }>(
+        `SELECT count(*)::int AS dangling
+         FROM typegraph_edges AS e
+         LEFT JOIN typegraph_nodes AS f
+           ON f.graph_id = e.graph_id AND f.kind = e.from_kind AND f.id = e.from_id
+         LEFT JOIN typegraph_nodes AS t
+           ON t.graph_id = e.graph_id AND t.kind = e.to_kind AND t.id = e.to_id
+         WHERE e.graph_id = $1 AND e.deleted_at IS NULL
+           AND (f.id IS NULL OR f.deleted_at IS NOT NULL
+             OR t.id IS NULL OR t.deleted_at IS NOT NULL)`,
+        [raceGraph.id],
+      );
+      const observed = {
+        edge:
+          edgeOutcome.status === "fulfilled" ?
+            "ok"
+          : describeError(edgeOutcome.reason),
+        delete:
+          deleteOutcome.status === "fulfilled" ?
+            "ok"
+          : describeError(deleteOutcome.reason),
+        attempts,
+        dangling: dangling.rows[0]?.dangling,
+        bobLive: (await store.nodes.Person.getById(bob.id)) !== undefined,
+      };
+      if (deleteOutcome.status === "rejected") {
+        throw new Error(`the delete failed: ${JSON.stringify(observed)}`);
+      }
+      const edgeRefusedOnReplay =
+        edgeOutcome.status === "rejected" &&
+        edgeOutcome.reason instanceof EndpointNotFoundError &&
+        attempts.edge === 2 &&
+        attempts.delete === 1;
+      const deleteCascadedOnReplay =
+        edgeOutcome.status === "fulfilled" &&
+        attempts.edge === 1 &&
+        attempts.delete === 2;
+      const sound =
+        observed.dangling === 0 &&
+        !observed.bobLive &&
+        (edgeRefusedOnReplay || deleteCascadedOnReplay);
+      const leaked =
+        edgeOutcome.status === "fulfilled" &&
+        attempts.edge === 1 &&
+        attempts.delete === 1 &&
+        observed.dangling === 1;
+      if (EXPECT_COMMIT_TIME_CONFLICT ? !sound : !sound && !leaked) {
+        throw new Error(
+          `unexpected endpoint race result: ${JSON.stringify(observed)}`,
+        );
+      }
+      if (!sound) {
+        return "both committed, one live edge on deleted bob: the declared optimistic tier cannot repair an undetected fence-row conflict";
+      }
+      return edgeRefusedOnReplay ?
+          "delete committed first; the edge create's COMMIT failed on bob's fence row and its replay was refused with EndpointNotFoundError; no dangling edge"
+        : "edge committed first; the delete's COMMIT failed on bob's fence row and its replay cascaded the edge; no dangling edge";
+    },
+  );
+}
+
 async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
   const backend = createPostgresBackend(
     drizzle(pool),
@@ -1869,6 +2022,7 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
 
   await runPostureGates(backend);
   await probeTypedCommitTimeRetry(pool);
+  await probeTypedEndpointRace(pool);
 
   // === Act 3: Dolt version control underneath TypeGraph ===
 
