@@ -1854,6 +1854,15 @@ acquire the SAME fence row:
 | `"wait"` | A lock-based engine — the second acquirer's statement blocks until the first commits, exactly like an advisory lock. |
 | `"commit-time"` | An optimistic-concurrency engine — both acquirers proceed and the loser's COMMIT fails. Correctness comes from the retry owner replaying the whole unit, never from waiting, so `conflict: "commit-time"` derives the `"optimistic-retry"` execution tier (see [Backend Capabilities](#backend-capabilities) above) and requires it: declaring it on a non-interactive backend is refused the same way an out-of-place `drain` is. |
 
+TypeGraph cannot check either value. A `row` fence is sound only on an engine that blocks the second
+acquirer of a fence row until the first ends, or fails one of two concurrent acquirers at COMMIT
+whatever value each wrote. An engine that accepts the fence UPSERT but lets both acquirers commit
+satisfies neither and must not declare `row`. Under `"wait"` the engine must also detect a deadlock
+between waiting acquirers and abort one of them. TypeGraph retries that abort only when it recognizes
+it as a serialization failure: PostgreSQL's `40001` and `40P01` are recognized, and an engine that
+reports a deadlock or commit conflict another way declares an `execution.serializationFailure`
+classifier (see [Backend authoring](/backend-authoring#declaring-a-serializationfailure-classifier)).
+
 `"engine-serialized"` and `"caller-serialized"` satisfy every drain site unconditionally — a writer
 slot and an in-process serialization promise are each already a stronger exclusion than any `drain`
 value could add, so attaching one to either mechanism is refused (see **Runtime validation** below)
@@ -2452,6 +2461,13 @@ clause is emitted. Two differences from the row-lock pairing follow:
 
 - A fence row has no shared mode, so concurrent edge writes to one node wait
   for each other, as an edge write and a delete do.
+- For the same reason, two transactions that each create several edges can
+  deadlock by fencing shared endpoints in opposite orders, where the row-lock
+  pairing's shared locks would not. The engine aborts one; inside
+  `store.transaction()` that surfaces as `TransactionConflictError`, retryable
+  with `store.transaction(fn, { retry })`. A schema-managed store does not
+  reach this order, because under a `row` fence its writers already serialize
+  on the graph's schema fence row.
 - The fence row is a write, so the open cell above closes: a delete above READ
   COMMITTED whose snapshot predates the edge write's commit fails with
   `TransactionConflictError` instead of missing the edge. Under

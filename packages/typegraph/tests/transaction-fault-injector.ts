@@ -95,12 +95,21 @@ export type TransactionFaultOptions = Readonly<{
    */
   failAtStatementCall?: number;
   /**
-   * Faults the first write statement (after arming) whose SQL text matches
-   * this predicate, regardless of its ordinal among every write statement
-   * issued. Fires at most once, independent of `failAtStatementCall`. Omit
-   * to never fail a statement this way.
+   * Faults the first write statement (after arming) whose SQL text and
+   * bound parameters match this predicate, regardless of its ordinal among
+   * every write statement issued. Fires at most once, independent of
+   * `failAtStatementCall`. Omit to never fail a statement this way.
    */
-  failAtStatementMatching?: (sqlText: string) => boolean;
+  failAtStatementMatching?: (
+    sqlText: string,
+    params: readonly unknown[],
+  ) => boolean;
+  /**
+   * Sees every write statement after arming, with its bound parameters,
+   * before either statement trigger evaluates it. A statement a trigger then
+   * faults is still reported, though the driver never runs it.
+   */
+  onWriteStatement?: (sqlText: string, params: readonly unknown[]) => void;
   /**
    * A `capabilities` override forwarded verbatim to the bundled factory —
    * the same option `createLoggedSqliteBackend`/`createLoggedPostgresBackend`
@@ -158,13 +167,17 @@ export async function createTransactionFaultInjector(
   }
 
   /** Called by the driver patch below before it runs a statement. */
-  function maybeFailStatement(sqlText: string): void {
+  function maybeFailStatement(
+    sqlText: string,
+    params: readonly unknown[],
+  ): void {
     if (!armed || !WRITE_STATEMENT_PATTERN.test(sqlText)) return;
     statementCalls += 1;
+    options.onWriteStatement?.(sqlText, params);
     if (statementCalls === options.failAtStatementCall) throwFault();
     if (
       !matchedStatementFaulted &&
-      options.failAtStatementMatching?.(sqlText) === true
+      options.failAtStatementMatching?.(sqlText, params) === true
     ) {
       matchedStatementFaulted = true;
       throwFault();
@@ -215,7 +228,7 @@ export async function createTransactionFaultInjector(
  */
 async function createPatchedTargetBackend(
   engine: FaultInjectableEngine,
-  onStatement: (sqlText: string) => void,
+  onStatement: (sqlText: string, params: readonly unknown[]) => void,
   capabilities?: Partial<BackendCapabilities>,
 ): Promise<Readonly<{ target: GraphBackend; close: () => Promise<void> }>> {
   if (engine === "sqlite") {
@@ -228,15 +241,15 @@ async function createPatchedTargetBackend(
       const originalRun = statement.run.bind(statement);
       const originalGet = statement.get.bind(statement);
       statement.all = (...params: unknown[]) => {
-        onStatement(sqlText);
+        onStatement(sqlText, params);
         return originalAll(...params);
       };
       statement.run = (...params: unknown[]) => {
-        onStatement(sqlText);
+        onStatement(sqlText, params);
         return originalRun(...params);
       };
       statement.get = (...params: unknown[]) => {
-        onStatement(sqlText);
+        onStatement(sqlText, params);
         return originalGet(...params);
       };
       return statement;
@@ -265,15 +278,15 @@ async function createPatchedTargetBackend(
     params?: unknown[],
     queryOptions?: Parameters<typeof client.query>[2],
   ) => {
-    onStatement(sqlText);
+    onStatement(sqlText, params ?? []);
     return originalQuery<T>(sqlText, params, queryOptions);
   }) as typeof client.query;
   return {
     target: createPostgresBackend(
       drizzlePglite(client, {
         logger: {
-          logQuery(sqlText: string): void {
-            onStatement(sqlText);
+          logQuery(sqlText: string, params: unknown[]): void {
+            onStatement(sqlText, params);
           },
         },
       }),
