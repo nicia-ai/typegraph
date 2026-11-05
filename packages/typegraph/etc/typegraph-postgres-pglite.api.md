@@ -4659,6 +4659,7 @@ type NodeDeletePolicy = Readonly<{
     enforceDeleteBehavior: boolean;
     consumedEdgeIds?: ReadonlySet<string>;
     cascadeComposition?: boolean;
+    identityAssertionEnds?: ReadonlyMap<string, string>;
 }>;
 
 // @public (undocumented)

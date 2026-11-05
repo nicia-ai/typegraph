@@ -608,12 +608,12 @@ export function assertNoContradictoryIdentityClosure(
   );
   // The one rule for how a planned deletion changes the ledger, applied
   // here for all three call sites, exactly as the commit's validator sees it:
-  // deleting a node ends the assertions still holding over it at the merge
-  // instant — the target held them until then, even where the branch ended
-  // them earlier, since the commit's delete ends them before any planned
-  // retraction runs — and never erases the history it already had. Applying
-  // it inside the checker also covers a retraction dropped as a target-truth
-  // mismatch, whose cascade id never reaches `retractions`.
+  // a branch that ended an assertion over the deleted node — by retracting it
+  // or by its own delete — ends it on the target when the branch did, as any
+  // retraction does, because the commit's delete ends them at the planned
+  // retraction's instant. Only an assertion still holding over the node with
+  // no planned retraction, such as one dropped as a target-truth mismatch,
+  // ends at the merge instant. The history it already had is never erased.
   const deletionInstant = nowIso();
   const touchesDeletedNode = (
     assertion: Readonly<{
@@ -629,9 +629,9 @@ export function assertNoContradictoryIdentityClosure(
       .flatMap((assertion) => {
         const retracted = retractionEndById.has(assertion.id);
         const validTo =
-          assertion.validTo === undefined && touchesDeletedNode(assertion) ?
+          retracted ? retractionEndById.get(assertion.id)
+          : assertion.validTo === undefined && touchesDeletedNode(assertion) ?
             deletionInstant
-          : retracted ? retractionEndById.get(assertion.id)
           : assertion.validTo;
         if (retracted && validTo === undefined) return [];
         if (validTo !== undefined && validTo <= assertion.validFrom) return [];

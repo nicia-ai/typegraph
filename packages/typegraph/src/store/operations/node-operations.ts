@@ -450,6 +450,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
+      assertionEnds: ReadonlyMap<string, string> | undefined,
     ) => Promise<void>;
     /**
      * Moves `ref`'s identity view along with its own window end: refuses a
@@ -678,7 +679,12 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
       policy,
     );
   }
-  await ctx.identity?.detachDeleted(target, { kind, id }, mode);
+  await ctx.identity?.detachDeleted(
+    target,
+    { kind, id },
+    mode,
+    policy?.identityAssertionEnds,
+  );
   return true;
 }
 

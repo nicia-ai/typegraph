@@ -620,11 +620,11 @@ describe.each(backendMatrix())(
     });
 
     for (const mode of ["snapshot", "incremental"] as const) {
-      // The target holds a deleted node's assertions until the merge deletes
-      // it, however early the branch deleted it: a branch claim over that
-      // span contradicts them and is refused at plan time, never inside the
-      // commit.
-      it(`refuses at plan time a claim over a deleted node's assertions the target held until the merge (${mode})`, async () => {
+      // A branch that deletes a node ends its assertions when the branch did,
+      // as a retraction does, so a later branch claim the node's assertions
+      // would have contradicted lands, and the target's history shows the
+      // deleted node's assertions ending at the branch's delete.
+      it(`lands a claim over a deleted node's assertions ended at the branch's delete (${mode})`, async () => {
         const cleanups: (() => Promise<void>)[] = [];
         async function makeBackend(): Promise<GraphBackend> {
           const fixture =
@@ -685,13 +685,7 @@ describe.each(backendMatrix())(
                 target,
                 branches: [branchA],
               });
-          expect(isErr(planned)).toBe(true);
-          if (!isErr(planned)) return;
-          expect(planned.error).toBeInstanceOf(IdentityMergeConflictError);
-          expect(planned.error.message).toBe(CONTRADICTION);
-          expect(planned.error.details).toMatchObject({
-            assertion: { id: separated.assertion.id },
-          });
+          if (isErr(planned)) throw planned.error;
           const merged =
             mode === "snapshot" ?
               await merge(base, [branchA])
@@ -700,13 +694,26 @@ describe.each(backendMatrix())(
                 target,
                 branches: [branchA],
               });
-          expect(isErr(merged) && merged.error.message).toBe(CONTRADICTION);
+          if (isErr(merged)) throw merged.error;
           const rows = await storeRuntime(target).identityAssertionRowsByIds([
             joined.assertion.id,
+            separated.assertion.id,
             asserted.assertion.id,
           ]);
-          expect(rows.get(joined.assertion.id)?.validTo).toBeUndefined();
-          expect(rows.has(asserted.assertion.id)).toBe(false);
+          console.info("deleted-node ledger after merge", [...rows.values()]);
+          const branchDelete = "2026-04-01T00:00:00.000Z";
+          expect(rows.get(joined.assertion.id)?.validTo).toBe(branchDelete);
+          expect(rows.get(separated.assertion.id)?.validTo).toBe(branchDelete);
+          expect(rows.get(asserted.assertion.id)?.validFrom).toBe(
+            "2026-04-02T00:00:00.000Z",
+          );
+          expect(rows.get(asserted.assertion.id)?.validTo).toBeUndefined();
+          expect(
+            await target.nodes.Agent.getById(asNodeId<typeof Agent>("n3")),
+          ).toBeUndefined();
+          expect(await target.identity.areSame(agent("n1"), agent("n2"))).toBe(
+            true,
+          );
         } finally {
           vi.useRealTimers();
           for (const cleanup of cleanups.reverse()) await cleanup();

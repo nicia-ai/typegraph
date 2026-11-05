@@ -19,7 +19,15 @@ import {
   disjointWith,
   subClassOf,
 } from "@nicia-ai/typegraph";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
@@ -919,48 +927,73 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     },
   );
 
-  it("refuses backdating a post-deletion relation before the target split", async () => {
-    // The branch's different(a,b) begins when its bridge was deleted, but the
-    // target retains that bridge and its same-class truth until merge time.
-    // Applying the branch timestamp verbatim would create contradictory target
-    // history; silently rebasing it would violate the accepted window.
-    const [forkPoint] = await createStoreWithSchema(
-      anchoredIgnoreGraph,
-      await makeBackend(),
-    );
-    const a = await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
-    const bridge = await forkPoint.nodes.Anchor.create(
-      { name: "Bridge" },
-      { id: "bridge" },
-    );
-    const b = await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
-    await forkPoint.identity.assertSame(a, bridge);
-    await forkPoint.identity.assertSame(bridge, b);
-    const target = unwrap(
-      await branch(forkPoint, () => makeBackend(), {
-        id: asBranchId("target-clone"),
-      }),
-    ).store;
+  it("lands a post-deletion relation with the bridge's assertions ended at the branch's delete", async () => {
+    // The branch deletes the bridge, which ends both of its same assertions,
+    // and then asserts a and b different. The target ends the bridge's
+    // assertions when the branch did, as a retraction would, so the branch's
+    // different(a, b) contradicts nothing in the merged history.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const [forkPoint] = await createStoreWithSchema(
+        anchoredIgnoreGraph,
+        await makeBackend(),
+      );
+      const a = await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+      const bridge = await forkPoint.nodes.Anchor.create(
+        { name: "Bridge" },
+        { id: "bridge" },
+      );
+      const b = await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+      const first = await forkPoint.identity.assertSame(a, bridge);
+      const second = await forkPoint.identity.assertSame(bridge, b);
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId("target-clone"),
+        }),
+      ).store;
 
-    const splitBranch = unwrap(
-      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
-    );
-    await splitBranch.store.nodes.Anchor.delete("bridge" as never);
-    await splitBranch.store.identity.assertDifferent(
-      { kind: "Anchor", id: "a" },
-      { kind: "Anchor", id: "b" },
-    );
+      const splitBranch = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      const branchDelete = "2026-02-01T00:00:00.000Z";
+      vi.setSystemTime(new Date(branchDelete));
+      await splitBranch.store.nodes.Anchor.delete("bridge" as never);
+      vi.setSystemTime(new Date("2026-02-02T00:00:00.000Z"));
+      const separated = await splitBranch.store.identity.assertDifferent(
+        { kind: "Anchor", id: "a" },
+        { kind: "Anchor", id: "b" },
+      );
 
-    const result = await mergeIncremental({
-      forkPoint,
-      target,
-      branches: [splitBranch],
-      options: { branchOrder: [BRANCH_A] },
-    });
-    expect(isErr(result)).toBe(true);
-    if (isOk(result)) throw new Error("Expected temporal identity conflict");
-    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
-    expect(await target.nodes.Anchor.getById("bridge" as never)).toBeDefined();
+      vi.setSystemTime(new Date("2026-03-01T00:00:00.000Z"));
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [splitBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      if (isErr(result)) throw result.error;
+      const rows = await storeRuntime(target).identityAssertionRowsByIds([
+        first.assertion.id,
+        second.assertion.id,
+        separated.assertion.id,
+      ]);
+      console.info("post-deletion ledger after merge", [...rows.values()]);
+      expect(rows.get(first.assertion.id)?.validTo).toBe(branchDelete);
+      expect(rows.get(second.assertion.id)?.validTo).toBe(branchDelete);
+      expect(rows.get(separated.assertion.id)?.validTo).toBeUndefined();
+      expect(
+        await target.nodes.Anchor.getById("bridge" as never),
+      ).toBeUndefined();
+      expect(
+        await target.identity.areDifferent(
+          { kind: "Anchor", id: "a" },
+          { kind: "Anchor", id: "b" },
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retracts identity before ending an assertion endpoint", async () => {
@@ -1066,16 +1099,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
         });
         expect(isErr(result)).toBe(true);
         if (isOk(result)) throw new Error("Expected typed replan refusal");
-        // Deleting the bridge leaves its assertions holding on the target
-        // until the merge (see "refuses backdating a post-deletion relation"),
-        // so planning already refuses that variant, before the window write
-        // could matter; only the retraction variant reaches the commit guard.
-        expect(result.error).toBeInstanceOf(
-          mode === "delete" ?
-            IdentityMergeConflictError
-          : BaseVersionMismatchError,
-        );
-        expect(injected).toBe(mode === "retract");
+        expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+        expect(injected).toBe(true);
       } finally {
         (target as { transaction: unknown }).transaction = original;
       }

@@ -2341,6 +2341,31 @@ function plannedNodeUpserts<G extends GraphDef>(
  * from `target` here would report success for a delete inside a merge that
  * later rolls back. See {@link transactionDeleteNodeWithPolicy}.
  */
+/**
+ * For each node the plan deletes, the instant each of its assertions the plan
+ * retracts ends at.
+ */
+function plannedAssertionEndsByNode(
+  deletions: readonly MergePlanEntityRef[],
+  identityRetractions: readonly IdentityTransferAssertion[],
+): ReadonlyMap<MergeKey, ReadonlyMap<string, string>> {
+  const deleted = new Set(
+    deletions.map((deletion) => mergeKey(deletion.kind, deletion.id)),
+  );
+  const endsByNode = new Map<MergeKey, Map<string, string>>();
+  for (const retraction of identityRetractions) {
+    if (retraction.validTo === undefined) continue;
+    for (const endpoint of [retraction.a, retraction.b]) {
+      const key = mergeKeyOf(endpoint);
+      if (!deleted.has(key)) continue;
+      const ends = endsByNode.get(key) ?? new Map<string, string>();
+      ends.set(retraction.id, retraction.validTo);
+      endsByNode.set(key, ends);
+    }
+  }
+  return endsByNode;
+}
+
 async function applyNodeRows<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
@@ -2348,6 +2373,7 @@ async function applyNodeRows<G extends GraphDef>(
   deletions: readonly MergePlanEntityRef[],
   upserts: readonly MechanicalNodeWrite[],
   edgeDeletions: readonly MergePlanEntityRef[],
+  identityRetractions: readonly IdentityTransferAssertion[],
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
 ): Promise<number> {
   const afterImages = new Map<MergeKey, Readonly<Record<string, unknown>>>();
@@ -2410,15 +2436,30 @@ async function applyNodeRows<G extends GraphDef>(
       // edge the plan also deletes — the order the branch itself had to take —
       // is not refused, and no `cascade` / `disconnect` removes an edge the
       // edge phase still owns.
+      //
+      // A deleted node's assertions the plan retracts end when the branch
+      // ended them, not at this delete: the delete's own identity cascade
+      // ends them at the retraction's instant and still stamps the node as
+      // their cause, so the target's history and transition log read as the
+      // branch's did.
       const deletePolicy: NodeDeletePolicy = {
         enforceDeleteBehavior: true,
         cascadeComposition: false,
         consumedEdgeIds: new Set(edgeDeletions.map((edge) => edge.id)),
       };
+      const assertionEndsByNode = plannedAssertionEndsByNode(
+        deletions,
+        identityRetractions,
+      );
       for (const deletion of deletions) {
+        const assertionEnds = assertionEndsByNode.get(
+          mergeKey(deletion.kind, deletion.id),
+        );
         await deleteNodeWithPolicy(
           { kind: deletion.kind, id: deletion.id },
-          deletePolicy,
+          assertionEnds === undefined ? deletePolicy : (
+            { ...deletePolicy, identityAssertionEnds: assertionEnds }
+          ),
         );
       }
       const committed = new Set<MergeKey>();
@@ -2638,6 +2679,7 @@ async function applyNodeWritePhase<G extends GraphDef>(
       phase.deletions,
       phase.upserts,
       edgeDeletions,
+      phase.identityRetractions,
       deleteNodeWithPolicy,
     );
   try {

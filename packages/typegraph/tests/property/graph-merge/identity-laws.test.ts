@@ -183,7 +183,7 @@ const LAW_RUNS = propertyRuns({ ci: 12, local: 24 });
  * randomized search. Pinned examples run on both.
  */
 const PGLITE_LAW_RUNS = propertyRuns({ ci: 7, local: 24 });
-/** Randomized runs per reference-model lane; identity-only scenarios are cheap. */
+/** Randomized runs per reference-model lane; its small scenarios are cheap. */
 const MODEL_RUNS = propertyRuns({ ci: 30, local: 60 });
 const PGLITE_MODEL_RUNS = propertyRuns({ ci: 4, local: 20 });
 
@@ -254,7 +254,7 @@ interface WeightedOp {
 
 /**
  * The identity-only alphabet: assertions, retractions and chosen-id imports.
- * The reference-model lanes draw from this alone, because it is the scope the
+ * The reference-model lanes draw from this plus node deletion, the scope the
  * model in `identity-three-way-model.ts` decides.
  */
 const IDENTITY_OPS: readonly WeightedOp[] = [
@@ -297,14 +297,14 @@ const IDENTITY_OPS: readonly WeightedOp[] = [
   },
 ];
 
+const DELETE_NODE_OP: WeightedOp = {
+  weight: 1,
+  arbitrary: nodeIndexArb.map((node) => ({ op: "deleteNode", node }) as const),
+};
+
 const ASSERTION_OPS: readonly WeightedOp[] = [
   ...IDENTITY_OPS,
-  {
-    weight: 1,
-    arbitrary: nodeIndexArb.map(
-      (node) => ({ op: "deleteNode", node }) as const,
-    ),
-  },
+  DELETE_NODE_OP,
   {
     weight: 2,
     arbitrary: fc
@@ -1315,9 +1315,10 @@ async function expectLawfulOutcome(args: {
 }
 
 /**
- * A scenario the reference model decides: identity-only histories on every
- * side. `targetOps` is empty on the snapshot lane, where the target IS the
- * fork point.
+ * A scenario the reference model decides: identity histories on every side,
+ * with node deletions after the fork on the branches and the advanced target.
+ * `targetOps` is empty on the snapshot lane, where the target IS the fork
+ * point.
  */
 type ModelScenario = Readonly<{
   baseOps: readonly IdentityOp[];
@@ -1327,14 +1328,15 @@ type ModelScenario = Readonly<{
 }>;
 
 const identityOpArb = fc.oneof(...IDENTITY_OPS);
+const sideOpArb = fc.oneof(...IDENTITY_OPS, DELETE_NODE_OP);
 
 function modelScenarioArb(withTarget: boolean): fc.Arbitrary<ModelScenario> {
   return fc.record({
     baseOps: fc.array(identityOpArb, { maxLength: 2 }),
     targetOps:
-      withTarget ? fc.array(identityOpArb, { maxLength: 2 }) : fc.constant([]),
-    branchAOps: fc.array(identityOpArb, { minLength: 1, maxLength: 3 }),
-    branchBOps: fc.array(identityOpArb, { minLength: 1, maxLength: 3 }),
+      withTarget ? fc.array(sideOpArb, { maxLength: 2 }) : fc.constant([]),
+    branchAOps: fc.array(sideOpArb, { minLength: 1, maxLength: 3 }),
+    branchBOps: fc.array(sideOpArb, { minLength: 1, maxLength: 3 }),
   });
 }
 
@@ -1435,6 +1437,33 @@ const COMMITTED_SURVIVOR_EXAMPLE: ModelScenario = {
   ],
 };
 
+/**
+ * A branch deletes a node, which ends the node's `same` and `different` on
+ * that branch, then asserts the pair those rows had kept apart. The merge ends
+ * the node's rows when the branch deleted it, so the later claim contradicts
+ * nothing.
+ */
+const DELETE_THEN_ASSERT_EXAMPLE: ModelScenario = {
+  baseOps: [
+    { op: "same", left: 0, right: 2 },
+    { op: "different", left: 2, right: 1 },
+  ],
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [
+    { op: "deleteNode", node: 2 },
+    { op: "same", left: 0, right: 1 },
+  ],
+  branchBOps: NO_MODEL_OPS,
+};
+
+/** One branch deletes a node another branch asserts a current relation over. */
+const DELETED_ENDPOINT_EXAMPLE: ModelScenario = {
+  baseOps: NO_MODEL_OPS,
+  targetOps: NO_MODEL_OPS,
+  branchAOps: [{ op: "deleteNode", node: 0 }],
+  branchBOps: [{ op: "same", left: 0, right: 1 }],
+};
+
 async function modelRows(
   store: Store<LawGraph>,
   ids: readonly string[],
@@ -1484,6 +1513,8 @@ const REFUSAL_MESSAGES: Readonly<Record<ModelRefusalRule, string>> = {
   race: "Branches contain a retract/reassert race for one identity pair.",
   "one-id-two-truths":
     "One assertion id was staged for two different identity truths.",
+  "deleted-endpoint":
+    "A branch asserted an identity relation over a node another branch deleted.",
   contradiction:
     "The merged identity ledger would assert one pair of nodes is both the same and different.",
   "id-held-other-truth":
@@ -1521,9 +1552,11 @@ async function expectModelOutcome(args: {
   result: Awaited<ReturnType<typeof merge>>;
   target: Store<LawGraph>;
   trackedIds: readonly string[];
+  deletedNodes: readonly string[];
   tally: ModelTally;
 }): Promise<void> {
-  const { verdict, planned, result, target, trackedIds, tally } = args;
+  const { verdict, planned, result, target, trackedIds, deletedNodes, tally } =
+    args;
   if (verdict.kind === "undetermined") {
     tally.undetermined += 1;
     if (isErr(result)) expectTypedRefusal(result.error);
@@ -1574,6 +1607,12 @@ async function expectModelOutcome(args: {
       : rowSummary(requireDefined(after.get(id))),
       `bounded survivor ${id} is carried as history`,
     ).toBe(rowSummary(row));
+  }
+  for (const id of deletedNodes) {
+    expect(
+      await target.nodes.Agent.getById(id as never),
+      `${id}, deleted on a side, is gone after the merge`,
+    ).toBeUndefined();
   }
   const reportedDuplicates = result.data.dropped
     .filter(
@@ -1863,7 +1902,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
   }, 300_000);
 
   /**
-   * The reference-model lanes: identity-only histories, the merged ledger
+   * The reference-model lanes: identity and node-deletion histories, the merged ledger
    * compared to `modelIdentityThreeWay`, and the identity plan required to be
    * the same under both branch orders.
    */
@@ -1879,18 +1918,24 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
         CONVERGENT_REASSERT_EXAMPLE,
         ENDED_REASSERTION_EXAMPLE,
         RACE_EXAMPLE,
+        DELETE_THEN_ASSERT_EXAMPLE,
+        DELETED_ENDPOINT_EXAMPLE,
       ],
     },
     {
       name: "incremental",
       incremental: true,
       graph: defineLawGraph("identity-law-model-incremental", "ignore"),
-      examples: [COMMITTED_SURVIVOR_EXAMPLE, EARLIEST_RETRACTION_EXAMPLE],
+      examples: [
+        COMMITTED_SURVIVOR_EXAMPLE,
+        EARLIEST_RETRACTION_EXAMPLE,
+        DELETE_THEN_ASSERT_EXAMPLE,
+      ],
     },
   ] as const;
 
   for (const lane of MODEL_LANES) {
-    it(`merges random identity-only ${lane.name} histories as the reference model predicts, whatever the branch order`, async () => {
+    it(`merges random identity and deletion ${lane.name} histories as the reference model predicts, whatever the branch order`, async () => {
       const tally: ModelTally = { merged: 0, refused: 0, undetermined: 0 };
       await fc.assert(
         fc.asyncProperty(
@@ -1954,6 +1999,8 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                   ),
                 ),
               ];
+              const deletedRefs = (history: AppliedHistory) =>
+                [...history.deletedNodes].map((id) => ({ kind: "Agent", id }));
               const verdict = modelIdentityThreeWay({
                 fork: await modelRows(forkPoint, trackedIds),
                 target: await modelRows(target, trackedIds),
@@ -1961,16 +2008,22 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                   {
                     branchId: BRANCH_A,
                     rows: await modelRows(branchA.store, trackedIds),
+                    deleted: deletedRefs(branchAHistory),
+                    isTarget: false,
                   },
                   {
                     branchId: BRANCH_B,
                     rows: await modelRows(branchB.store, trackedIds),
+                    deleted: deletedRefs(branchBHistory),
+                    isTarget: false,
                   },
                   ...(lane.incremental ?
                     [
                       {
                         branchId: TARGET_CLONE,
                         rows: await modelRows(target, trackedIds),
+                        deleted: deletedRefs(targetHistory),
+                        isTarget: true,
                       },
                     ]
                   : []),
@@ -2009,6 +2062,13 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
                 result,
                 target,
                 trackedIds,
+                deletedNodes: [
+                  ...new Set(
+                    [branchAHistory, branchBHistory, targetHistory].flatMap(
+                      (history) => [...history.deletedNodes],
+                    ),
+                  ),
+                ],
                 tally,
               });
             } finally {

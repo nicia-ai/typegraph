@@ -888,7 +888,9 @@ written. A node deletion cascades into ending the assertions touching it, at
 the node's own deletion instant, and records the deleted node on every row it
 ends — so the diff reads which endings that deletion caused and stages each
 one with its cause, however close in time the branch's own retractions
-fell. When a delete/modify
+fell. A merge that lands the deletion ends those rows on the target at the
+instant the branch's deletion ended them, as it does a branch's retraction,
+and records the same cause. When a delete/modify
 conflict resolution keeps the node, an ending is dropped along with the
 overruled deletion that caused it (reported as
 `identity:deletion-overruled`), while a retraction a branch made itself

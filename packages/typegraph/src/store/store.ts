@@ -7592,6 +7592,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               target: IdentityTarget,
               ref: Readonly<{ kind: string; id: string }>,
               mode: "soft" | "hard",
+              assertionEnds: ReadonlyMap<string, string> | undefined,
             ) =>
               detachIdentityForNode(
                 {
@@ -7602,6 +7603,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 target,
                 ref,
                 mode,
+                assertionEnds,
               ),
             requireValidityEndCompatible: this.#requireValidityEndCompatible,
           },

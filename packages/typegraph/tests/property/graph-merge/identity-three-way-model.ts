@@ -4,10 +4,13 @@
  * can compare the merged ledger to an independent expectation instead of only
  * checking that whatever happened was self-consistent.
  *
- * Scope: identity-only branch histories (assert same/different, retract,
- * import an assertion under a chosen id) over Agent-only endpoints, so no node
- * deletion, canonicalization or same-id fold enters the picture. Inside that
- * scope the model decides, from the ledgers each side holds at merge time:
+ * Scope: branch histories of identity writes (assert same/different, retract,
+ * import an assertion under a chosen id) and node deletions after the fork,
+ * over Agent-only endpoints, so no canonicalization, retyping or same-id fold
+ * enters the picture. A deletion reaches the ledger the way a retraction does:
+ * the deleting side's rows over the node end at its delete, and those ends
+ * are staged like any other. Inside that scope the model decides, from the
+ * ledgers each side holds at merge time:
  *
  *  - STAGING: each side's change since the fork — on an incremental merge the
  *    advanced target is a side too, so its own new rows meet the branches'.
@@ -17,6 +20,9 @@
  *    truths, or a surviving id the target holds with other truth; or a merged
  *    ledger — the target's own history included — that, at some instant,
  *    holds two nodes both same and different.
+ *  - DELETION: a surviving current assertion over a node the merge deletes is
+ *    refused; an ended one lands as history, unless the advanced target is
+ *    the side that deleted the node and does not already hold the row.
  *  - SURVIVOR: per dedupe group, an id the target already holds with the exact
  *    staged truth, else the earliest `validFrom`, ties to the smaller id.
  *  - RETRACTION: a target row several branches ended ends at the EARLIEST of
@@ -40,6 +46,10 @@ type ModelSide = Readonly<{
   branchId: string;
   /** Every tracked row the side holds, ended rows included. */
   rows: ReadonlyMap<string, ModelRow>;
+  /** The nodes the side deleted since the fork. */
+  deleted: readonly ModelRef[];
+  /** True for the advanced target of an incremental merge. */
+  isTarget: boolean;
 }>;
 
 export type ModelInput = Readonly<{
@@ -57,13 +67,14 @@ export type ModelInput = Readonly<{
 /**
  * The rule a refusal comes from, in the order the merge applies them: the
  * three-way classifier's opposing-relations, race and one-id-one-truth checks,
- * then the merged-ledger contradiction, then a surviving id the target already
- * holds with other truth.
+ * then a survivor over a deleted node, then the merged-ledger contradiction,
+ * then a surviving id the target already holds with other truth.
  */
 export type ModelRefusalRule =
   | "opposing"
   | "race"
   | "one-id-two-truths"
+  | "deleted-endpoint"
   | "contradiction"
   | "id-held-other-truth";
 
@@ -260,6 +271,34 @@ function oneIdOneTruthRefusal(staged: readonly Staged[]): Refusal | undefined {
   return undefined;
 }
 
+function deletedEndpointRefusal(
+  input: ModelInput,
+  survivors: readonly ModelRow[],
+  committed: (row: ModelRow) => boolean,
+): Refusal | undefined {
+  const deleted = new Set(
+    input.sides.flatMap((side) => side.deleted.map((ref) => refKey(ref))),
+  );
+  const targetDeleted = new Set(
+    input.sides
+      .filter((side) => side.isTarget)
+      .flatMap((side) => side.deleted.map((ref) => refKey(ref))),
+  );
+  for (const survivor of survivors) {
+    for (const endpoint of [survivor.a, survivor.b]) {
+      const key = refKey(endpoint);
+      if (!deleted.has(key)) continue;
+      if (!isCurrent(survivor) && !targetDeleted.has(key)) continue;
+      if (!isCurrent(survivor) && committed(survivor)) continue;
+      return {
+        rule: "deleted-endpoint",
+        reason: `survivor ${survivor.id} names deleted ${endpoint.id}`,
+      };
+    }
+  }
+  return undefined;
+}
+
 export function modelIdentityThreeWay(input: ModelInput): ModelVerdict {
   const { staged, ends } = stage(input);
   const refusal =
@@ -302,6 +341,9 @@ export function modelIdentityThreeWay(input: ModelInput): ModelVerdict {
       duplicates.add(loser.id);
     }
   }
+  const deletedRefusal = deletedEndpointRefusal(input, survivors, committed);
+  if (deletedRefusal !== undefined)
+    return { kind: "refused", ...deletedRefusal };
   const endedAt = new Map<string, string>();
   for (const entry of ends) {
     const held = input.target.get(entry.row.id);

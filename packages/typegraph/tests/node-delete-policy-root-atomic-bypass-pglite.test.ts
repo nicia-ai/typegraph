@@ -120,6 +120,43 @@ describe("NodeDeletePolicy bypasses the fused atomic delete on a root backend", 
     }
   });
 
+  it("honors a non-empty identityAssertionEnds via the portable path even though the fused delete is eligible", async () => {
+    // The fused command ends identity assertions only at the delete instant,
+    // so a policy naming earlier ends must take the path whose identity
+    // cascade reads them. MUTATION CHECK: drop the `identityAssertionEnds`
+    // arm of `nodeDeleteRequiresPortablePath` and this delete is fused.
+    const local = await createLocalPgliteBackend({ vector: false });
+    const backend = createPostgresBackend(local.db, { vector: false });
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const restrictNode = await store.nodes.RestrictNode.create({});
+
+      const dispatched: string[] = [];
+      await withAtomicMutationProgramDispatchObserver(
+        backend,
+        (variant) => dispatched.push(variant),
+        () =>
+          store[STORE_RUNTIME].deleteNodeWithPolicy(
+            backend,
+            { kind: "RestrictNode", id: restrictNode.id },
+            {
+              enforceDeleteBehavior: true,
+              identityAssertionEnds: new Map([
+                ["assertion-id", "2026-01-01T00:00:00.000Z"],
+              ]),
+            },
+          ),
+      );
+
+      expect(dispatched).not.toContain("deleteNodes");
+      await expect(
+        store.nodes.RestrictNode.getById(restrictNode.id),
+      ).resolves.toBeUndefined();
+    } finally {
+      await local.backend.close();
+    }
+  });
+
   it("without a policy the SAME shape takes the fused path", async () => {
     const local = await createLocalPgliteBackend({ vector: false });
     const backend = createPostgresBackend(local.db, { vector: false });

@@ -157,6 +157,15 @@ export type NodeDeletePolicy = Readonly<{
    * under its own lock.
    */
   cascadeComposition?: boolean;
+  /**
+   * The instant each named identity assertion over this node ends at, for
+   * assertions the caller has decided end before the delete does. Merge apply
+   * passes the instant the deleting branch ended each one, so the target's
+   * history agrees with the branch's. Read by the identity cascade
+   * (`detachIdentityForNode`), which still stamps the deleted node as the
+   * cause; an assertion not named ends at the node's own deletion instant.
+   */
+  identityAssertionEnds?: ReadonlyMap<string, string>;
 }>;
 
 /**
@@ -175,13 +184,14 @@ export type NodeDeleteRequest = Readonly<{
  * dimension the fused atomic delete command cannot honor.
  *
  * The fused command is a single, read-free SQL shape: it has no notion of
- * `consumedEdgeIds`, cannot skip its own delete-behavior enforcement, and
- * computes no plan to compare an `expect` plan against. A request stating
- * ANY of these — `policy.enforceDeleteBehavior: false`, a non-empty
- * `policy.consumedEdgeIds`, or an `expect` plan — must therefore route around
- * the fused command to the portable path, the only path that reads and
- * honors them (`enforceNodeDeleteBehavior` for the policy,
- * `assertNodeDeletePlanExpected` for the plan). This is the ONE place that
+ * `consumedEdgeIds`, cannot skip its own delete-behavior enforcement, ends
+ * identity assertions only at the delete instant, and computes no plan to
+ * compare an `expect` plan against. A request stating ANY of these —
+ * `policy.enforceDeleteBehavior: false`, a non-empty `policy.consumedEdgeIds`
+ * or `policy.identityAssertionEnds`, or an `expect` plan — must therefore
+ * route around the fused command to the portable path, the only path that
+ * reads and honors them (`enforceNodeDeleteBehavior` and the identity cascade
+ * for the policy, `assertNodeDeletePlanExpected` for the plan). This is the ONE place that
  * decision is made for these fields: a caller choosing between the fused and
  * portable delete must call this rather than re-deriving the answer from any
  * field directly.
@@ -208,7 +218,9 @@ export function nodeDeleteRequiresPortablePath(
   if (expect !== undefined) return true;
   return (
     policy !== undefined &&
-    (!policy.enforceDeleteBehavior || (policy.consumedEdgeIds?.size ?? 0) > 0)
+    (!policy.enforceDeleteBehavior ||
+      (policy.consumedEdgeIds?.size ?? 0) > 0 ||
+      (policy.identityAssertionEnds?.size ?? 0) > 0)
   );
 }
 

@@ -1209,6 +1209,7 @@ export async function detachIdentityForNode(
   target: Backend,
   ref: PlainNodeRef,
   mode: "soft" | "hard",
+  assertionEnds?: ReadonlyMap<string, string>,
 ): Promise<void> {
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(
@@ -1282,7 +1283,10 @@ export async function detachIdentityForNode(
           );
           touch(ctx.graphId, row.id);
         } else {
-          const validTo = clampValidTo(cascadeInstant, row.valid_from);
+          const validTo = clampValidTo(
+            assertionEnds?.get(row.id) ?? cascadeInstant,
+            row.valid_from,
+          );
           // Stamp the CAUSE of the ending alongside it, in the same statement:
           // this row stopped holding because `ref` was deleted, not because
           // anyone retracted it. Downstream (graph-merge's state-diff) reads the
