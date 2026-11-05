@@ -3,6 +3,32 @@
 //   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.4.0   (latest release)
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
+// DOLTGRES_PORT overrides the port, so several builds can be measured side by side.
+//
+// RE-MEASURED 2026-11-04 on TypeGraph main 0df38d8e against 1.4.0 (still the latest
+// release), doltgresql main 4841363d and PR #3634 at ad6e1d72.
+//   - Upstream: CREATE INDEX CONCURRENTLY landed on main (#3681, closes #3532) and builds
+//     an hnsw index the planner reads in vector order; inside a transaction block it
+//     refuses with 25001, as PostgreSQL does. `USING ivfflat` is still stored as hnsw.
+//     #3680 (CHECK never evaluated beside an expression index) is fixed on main; 1.4.0
+//     accepts the violating row. #3634 at ad6e1d72 still rejects the later fence-row
+//     committer with 40001 and the typed retry stores 2. Unchanged: #2600 (row locks,
+//     LOCK TABLE, two-argument advisory lock), #3335, #3389, and the journal's `$1`
+//     inside format() (bind substitution is still an unrestricted ReplaceAll).
+//   - Vector stays off. With CIC fixed, TypeGraph's ANN build now stops at the
+//     `ALTER TABLE ... RESET (parallel_workers)` it runs before every build (unfiled), and
+//     every node create with an embedding fails earlier still: it writes the vector row
+//     through a data-modifying CTE (#3099). Both are pinned below.
+//   - TypeGraph: #797 keys subgraph roots on (kind, id); the walk passes the node. #796
+//     now takes `FOR KEY SHARE` on edge endpoints and `FOR UPDATE` before deletes on every
+//     PostgreSQL-dialect backend that does not serialize writers, including the `row`
+//     mechanism, so create edge, the multi-write transaction, soft delete, delete
+//     protection and the branch write fail on `locking clauses are not yet supported`.
+//     Under permit_unsupported_locking_statements they pass, because the clauses are
+//     accepted and ignored. Not pinned here: whether a `row` backend should take those
+//     clauses is a TypeGraph decision.
+//   - Before the rebase the battery scored 54 passed, 0 failed, 2 skipped on 1.4.0 and
+//     PR #3634, and main 53 / 1 / 2, the failure being the CIC pin turning red.
 //
 // RE-MEASURED 2026-10-20: main 9f8ea4c1 versus unmerged PR #3634 at 66f71f5b.
 // Both builds: 54 passed, 0 failed, 2 skipped in default and permissive-locking modes.
@@ -261,7 +287,7 @@ import { createPostgresBackend } from "../src/backend/postgres";
 
 const DOLTGRES_CONNECTION = {
   host: "localhost",
-  port: 4132,
+  port: Number(process.env["DOLTGRES_PORT"] ?? 4132),
   user: "postgres",
   password: "password",
   database: "postgres",
@@ -1003,17 +1029,44 @@ async function runDeviationBattery(): Promise<void> {
     fixedUnreleased("SET LOCAL is not yet supported", "doltgresql#3099"),
     [`BEGIN`, `SET LOCAL hnsw.ef_search = 40`],
   );
-  // `materializeIndexes()` builds the ANN index CONCURRENTLY.
+  // `materializeIndexes()` builds the ANN index CONCURRENTLY. Main's index is a real
+  // one: EXPLAIN of `ORDER BY embedding <=> $1 LIMIT k` reads it in vector order.
   await probe(
-    "pgvector: ANN index materialization blocked (CREATE INDEX CONCURRENTLY)",
-    unsupported(
+    "pgvector: ANN index build (CREATE INDEX CONCURRENTLY)",
+    fixedUnreleased(
       "concurrent index creation is not yet supported",
-      "doltgresql#3099",
+      "doltgresql#3532",
     ),
     [
       ...PROBE_SETUP,
       `CREATE INDEX CONCURRENTLY IF NOT EXISTS "probe_ann"
          ON "probe_rows" USING hnsw ("embedding" vector_cosine_ops)`,
+    ],
+  );
+  // With CIC in place, TypeGraph's ANN build still stops one statement earlier: it resets
+  // the vector table's `parallel_workers` storage parameter before every build.
+  await probe(
+    "pgvector: ANN build's parallel_workers reset (ALTER TABLE ... RESET)",
+    unsupported(
+      "ALTER TABLE with unsupported command type *tree.AlterTableSetStorage",
+      "unfiled",
+    ),
+    [...PROBE_SETUP, `ALTER TABLE "probe_rows" RESET (parallel_workers)`],
+  );
+  // A node create with an embedding writes the node and its vector row in one statement,
+  // the second INSERT reading the first through a data-modifying CTE.
+  await probe(
+    "pgvector: fused node + embedding write (data-modifying CTE)",
+    unsupported(
+      "unsupported CTE statement type: *tree.Insert",
+      "doltgresql#3099",
+    ),
+    [
+      ...PROBE_SETUP,
+      `WITH "inserted" AS (
+         INSERT INTO "probe_rows" ("id", "version") VALUES ('c', 1) RETURNING *
+       )
+       SELECT "id" FROM "inserted"`,
     ],
   );
 
@@ -1147,6 +1200,70 @@ async function runDeviationBattery(): Promise<void> {
 
   // The blocker for the typed walk on 1.3.3, and the build divergence. Fixed on main.
   await probeMatchIdentityCheck();
+  await probeCheckBesideExpressionIndex();
+}
+
+/**
+ * A fixed-unreleased pin whose 1.4.0 symptom is a SUCCESS: with an expression index on
+ * the table, 1.4.0 never evaluates its CHECK constraints (doltgresql#3680), so a
+ * violating row is accepted. TypeGraph's edge table carries the match-identity CHECK,
+ * and declared indexes are expression indexes over `props`.
+ */
+async function probeCheckBesideExpressionIndex(): Promise<void> {
+  const name = "managed writes: CHECK enforced beside an expression index";
+  const client = new Client(DOLTGRES_CONNECTION);
+  try {
+    await client.connect();
+    await client.query(`DROP TABLE IF EXISTS "probe_check_expr"`);
+    await client.query(
+      `CREATE TABLE "probe_check_expr" (
+         "id" TEXT PRIMARY KEY,
+         "a" TEXT,
+         "b" TEXT,
+         "props" JSONB,
+         CONSTRAINT "probe_check_expr_pair" CHECK (("a" IS NULL) = ("b" IS NULL))
+       )`,
+    );
+    await client.query(
+      `CREATE INDEX "probe_check_expr_props" ON "probe_check_expr" (("props" ->> 'k'))`,
+    );
+    try {
+      await client.query(
+        `INSERT INTO "probe_check_expr" VALUES ('violating', 'x', NULL, '{}')`,
+      );
+    } catch (error) {
+      const detail = describeError(error);
+      results.push(
+        detail.includes("Check constraint") ?
+          {
+            step: name,
+            outcome: "pass",
+            detail:
+              "violating row refused (doltgresql#3680 fixed on main, unreleased)",
+          }
+        : {
+            step: name,
+            outcome: "fail",
+            detail: `refused for a DIFFERENT reason than doltgresql#3680: ${detail}`,
+          },
+      );
+      return;
+    }
+    results.push({
+      step: name,
+      outcome: "pass",
+      detail:
+        "violating row ACCEPTED as pinned (doltgresql#3680, fixed on main, unreleased)",
+    });
+  } catch (error) {
+    results.push({ step: name, outcome: "fail", detail: describeError(error) });
+  } finally {
+    try {
+      await client.end();
+    } catch {
+      // Intentionally ignored: see probeMatchIdentityCheck.
+    }
+  }
 }
 
 /**
@@ -1695,11 +1812,11 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
 
   await step("subgraph extraction (WITH RECURSIVE)", async () => {
     if (!alice) throw new Error("prerequisite create failed");
-    const sub = await store.subgraph(alice.id, {
+    const sub = await store.subgraph(alice, {
       edges: ["knows"],
       maxDepth: 2,
     });
-    return `nodes: ${String(sub.nodes.size)}, adjacency roots: ${String(sub.adjacency.size)}`;
+    return `nodes: ${String(sub.nodes.length)}, edges: ${String(sub.edges.length)}`;
   });
 
   await step("soft delete + visibility", async () => {
