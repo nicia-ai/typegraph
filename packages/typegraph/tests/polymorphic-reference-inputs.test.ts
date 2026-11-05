@@ -104,6 +104,20 @@ const exactGraph = defineGraph({
   identity: { sameIdAcrossKinds: "ignore" },
 });
 
+const Run = defineNode("Run", { schema: z.object({ name: z.string() }) });
+const Task = defineNode("Task", { schema: z.object({ title: z.string() }) });
+const Agent = defineNode("Agent", { schema: z.object({ name: z.string() }) });
+const assigned = defineEdge("assigned", { schema: z.object({}) });
+
+/** Same id under two kinds: a reference's `(kind, id)` pair picks one. */
+const collisionGraph = defineGraph({
+  id: "polymorphic-reference-inputs-collision",
+  nodes: { Run: { type: Run }, Task: { type: Task }, Agent: { type: Agent } },
+  edges: { assigned: { type: assigned, from: [Agent], to: [Run, Task] } },
+});
+
+const SHARED_ID = "shared-id";
+
 const crateExtension = defineGraphExtension({
   nodes: { Crate: { properties: { name: { type: "string" } } } },
   ontology: [{ metaEdge: "subClassOf", from: "Crate", to: "Box" }],
@@ -384,5 +398,40 @@ describe("an explicitly polymorphic row is accepted on a graph without subclasse
 
   it("still refuses a same-shaped unrelated kind at compile time", () => {
     expect(refusesSameShapeKinds).toBeTypeOf("function");
+  });
+});
+
+describe("a polymorphic reference is read as the (kind, id) pair it states", () => {
+  it("resolves a Run's branded id under kind Task to the Task that shares the id", async () => {
+    const [store] = await createStoreWithSchema(
+      collisionGraph,
+      createTestBackend(),
+    );
+    const run = await store.nodes.Run.create(
+      { name: "run" },
+      { id: SHARED_ID },
+    );
+    const task = await store.nodes.Task.create(
+      { title: "task" },
+      { id: SHARED_ID },
+    );
+    const agent = await store.nodes.Agent.create({ name: "agent" });
+    // The widened reference's `kind` is a `string`, so a Run id under another
+    // kind name compiles. Nothing ties the erased brand to the kind at
+    // runtime: the pair names the Task.
+    const kind = "Task";
+    const mislabelled = { kind, id: run.id };
+
+    const resolved = await store.getNodeByRef(mislabelled);
+    console.info("mislabelled reference resolved to", resolved);
+    expect(resolved?.kind).toBe("Task");
+    expect(resolved?.id).toBe(task.id);
+
+    const edge = await store.edges.assigned.create(agent, mislabelled, {});
+    expect(edge.toKind).toBe("Task");
+    expect(edge.toId).toBe(SHARED_ID);
+    const [taskEdge] = await store.edges.assigned.findTo(task);
+    expect(taskEdge?.id).toBe(edge.id);
+    expect(await store.edges.assigned.findTo(run)).toEqual([]);
   });
 });

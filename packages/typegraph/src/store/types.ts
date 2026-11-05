@@ -1159,9 +1159,12 @@ export type GraphNodeReference<G extends GraphDef> = {
  * The one owner of the widened reference every node-reference input accepts,
  * so an endpoint read off a widened edge (`{ kind: edge.toKind, id: edge.toId }`),
  * the same reference narrowed by `kind`, and a polymorphic query row all pass
- * back into the next read without a cast. The id brand is what ties the
- * reference to the declared kind, so an unbranded `{ kind: string, id: string }`
- * is still refused; the runtime checks the `kind`.
+ * back into the next read without a cast. It requires a branded id, so an
+ * unbranded `{ kind: string, id: string }` or an unrelated kind's id is
+ * refused, but its `kind` is a `string`, so it cannot guarantee that the kind
+ * and the id belong together. The runtime reads the `(kind, id)` pair as
+ * stated: when the same id exists under two kinds, a mislabelled reference
+ * names the other kind's node.
  */
 export type PolymorphicNodeReference<N extends NodeType> =
   N extends NodeType ?
@@ -1972,9 +1975,10 @@ type AssignableNodeTypes<G extends GraphDef, N extends NodeType> =
  * `equivalentTo` kind), or the {@link PolymorphicNodeReference} a widened edge
  * endpoint or a polymorphic query row over one of those kinds carries, whose
  * `kind` is the general `string`. That arm's id brand names the declared
- * kind, so an unrelated kind's id is refused even when its properties match;
- * its `kind` is a `string`, so the runtime endpoint check stays authoritative
- * and refuses a kind the edge does not admit with `EndpointError`.
+ * kind, so an unrelated kind's id is refused even when its properties match,
+ * but it cannot tie the id to the stated `kind`. The runtime endpoint check
+ * reads the `(kind, id)` pair as stated and refuses a kind the edge does not
+ * admit with `EndpointError`.
  */
 export type EdgeEndpointRef<G extends GraphDef, N extends NodeType> =
   | NodeRef<N | AssignableNodeTypes<G, N>>

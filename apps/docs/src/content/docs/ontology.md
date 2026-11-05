@@ -276,10 +276,13 @@ the store-wide migration knob.
   endpoint check stays authoritative. The widened form is accepted at compile
   time by its id brand, which names the declared kind, so the id of an
   unrelated kind is refused even when its properties match. Its `kind` is a
-  `string`, so a branded id under another kind name compiles and the runtime
-  refuses it with `EndpointError`. Because an IRI is typed as a plain
-  `string`, every kind mapped to an IRI with `equivalentTo` is admitted
-  wherever any one of them is.
+  `string`, so a branded id under another kind name compiles, and the runtime
+  reads the `(kind, id)` pair as stated: it refuses a kind the edge does not
+  admit with `EndpointError`, and where the id also exists under the stated
+  kind the write lands on that node (see
+  [`PolymorphicNodeReference`](/types#polymorphicnodereferencen)). Because an
+  IRI is typed as a plain `string`, every kind mapped to an IRI with
+  `equivalentTo` is admitted wherever any one of them is.
 - **The next hop takes the same references.** The `sources` / `targets` of
   `bulkFindEdgesFrom` / `bulkFindEdgesTo` and the `source` of `neighbors()` /
   `countNeighbors()` accept the widened reference and the polymorphic row

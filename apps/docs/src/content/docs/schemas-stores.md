@@ -2909,7 +2909,7 @@ though it uses more round trips.
 
 ```typescript
 store.subgraph<EK, NK>(
-  root: GraphNodeReference<G>, // { kind, id } with a matching branded id
+  root: GraphNodeReferenceInput<G>, // an exact reference, or a polymorphic row
   options: SubgraphOptions<G, EK, NK>,
 ): Promise<SubgraphResult<G, NK, EK>>;
 ```

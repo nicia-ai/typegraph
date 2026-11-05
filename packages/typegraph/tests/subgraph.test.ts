@@ -1275,7 +1275,8 @@ describe("store.subgraph()", () => {
         ),
       ).resolves.toBeDefined();
       // A branded id with another `kind` is the shape a polymorphic row
-      // takes, so it compiles; the kind is matched exactly at runtime.
+      // takes, so it compiles. The runtime reads the pair as stated: no Task
+      // has this id, so there is no root.
       const mismatched = await store.subgraph(
         { kind: "Task", id: ids.runId },
         { edges: ["has_task"] },
