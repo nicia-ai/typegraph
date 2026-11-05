@@ -425,7 +425,8 @@ type CommonOperationStrategy = Readonly<{
     }>, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildGetNode: (graphId: string, kind: string, id: string) => SQL;
     buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
-    buildLockNodes: (graphId: string, kind: string, ids: readonly string[], lock: NodeRowLock) => SQL;
+    nodeRowLockClauses: NodeRowLockClauses;
+    buildLockNodes: (graphId: string, kind: string, ids: readonly string[], rowLock: RowLockClause) => SQL;
     buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
     buildAtomicNodeResolvedUpdateBatch: (entries: readonly AtomicNodeResolvedUpdateEntry[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildAssertAtomicNodeMutationPostimages: (creates: readonly AtomicNodePostimageEntry[], updates: readonly AtomicNodeResolvedUpdateEntry[], timestamp: string, schemaFence: SchemaWriteFenceParams) => SQL;
@@ -435,24 +436,24 @@ type CommonOperationStrategy = Readonly<{
     buildResolvedNodeUpdateBatch: (params: ResolvedNodeUpdateBatchParams, timestamp: string) => SQL;
     buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
     buildAtomicNodeDeleteBatchWithSchemaFence: (input: AtomicNodeDeleteBatchInput, timestamp: string, schemaLockClause: SQL) => SQL;
-    buildLockNodesForAtomicDeleteWithSchemaFence: (input: AtomicNodeDeleteBatchInput, schemaLockClause: SQL) => SQL;
+    buildLockNodesForAtomicDeleteWithSchemaFence: (input: AtomicNodeDeleteBatchInput, schemaLockClause: SQL, rowLock: RowLockClause) => SQL;
     buildSchemaFenceProbe: (params: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
     buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
-    buildInsertEdgeIfEndpointsLive: (params: InsertEdgeParams, timestamp: string) => SQL;
-    buildInsertEdgeIfEndpointsLiveWithSchemaFence: (params: InsertEdgeParams, timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
-    buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
-    buildAtomicConvergeEdges?: (params: AtomicConvergeEdgesParams) => SQL;
+    buildInsertEdgeIfEndpointsLive: (params: InsertEdgeParams, timestamp: string, endpointLock: RowLockClause) => SQL;
+    buildInsertEdgeIfEndpointsLiveWithSchemaFence: (params: InsertEdgeParams, timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL, endpointLock: RowLockClause) => SQL;
+    buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams, endpointLock: RowLockClause) => SQL;
+    buildAtomicConvergeEdges?: (params: AtomicConvergeEdgesParams, endpointLock: RowLockClause) => SQL;
     buildAtomicConvergeEdgesTombstoneRefusal?: (params: Omit<AtomicConvergeEdgesParams, "timestamp">) => SQL;
-    buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
+    buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams, timestamp: string, endpointLock: RowLockClause) => SQL;
     buildDeleteStaleAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => readonly SQL[];
     buildAcquireAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => readonly SQL[];
     buildAssertAtomicEdgeClaimsOwned: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => readonly SQL[];
     buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
     buildInsertEdgesBatch: (params: readonly InsertEdgeParams[], timestamp: string) => SQL;
     buildInsertEdgesBatchReturning: (params: readonly InsertEdgeParams[], timestamp: string) => SQL;
-    buildInsertEdgesBatchWithSchemaFence: (params: readonly InsertEdgeParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
-    buildInsertEdgesBatchReturningWithSchemaFence: (params: readonly InsertEdgeParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
+    buildInsertEdgesBatchWithSchemaFence: (params: readonly InsertEdgeParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL, endpointLock: RowLockClause) => SQL;
+    buildInsertEdgesBatchReturningWithSchemaFence: (params: readonly InsertEdgeParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL, endpointLock: RowLockClause) => SQL;
     buildInsertEdgesDurableBatchReturning: (params: readonly InsertEdgeParams[], timestamp: string) => SQL;
     buildGetEdge: (graphId: string, id: string) => SQL;
     buildGetEdges: (graphId: string, ids: readonly string[]) => SQL;
@@ -9194,6 +9195,9 @@ type NodeRow = Readonly<{
 type NodeRowLock = "edgeEndpoint" | "delete";
 
 // @public
+type NodeRowLockClauses = Readonly<Record<NodeRowLock, RowLockClause>>;
+
+// @public
 type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
@@ -9474,6 +9478,9 @@ type ResolvedSqlTableNames = Readonly<{
     kindRemovals?: string;
     reconciliationMarkers?: string;
 }>;
+
+// @public
+type RowLockClause = (of?: readonly string[]) => SQL;
 
 // @public
 type RowProps = string | Readonly<Record<string, unknown>>;
