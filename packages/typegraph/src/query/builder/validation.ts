@@ -446,11 +446,56 @@ export function validateTraversalOptions(
     });
 }
 
+/** The surfaces that page a query with a keyset cursor. */
+export type CursorPaginationSurface = "paginate" | "page" | "stream";
+
+/**
+ * Refuses keyset pagination over a query with a recursive traversal.
+ *
+ * A keyset cursor must identify the row it follows. A recursive traversal
+ * fans one start node out into rows that have no single edge to extend the
+ * start node's keys with, so the cursor can only name the start node. The next
+ * page then resumes strictly after that node and loses every row of it not yet
+ * returned. A `recursive({ maxHops: 1 })` step is refused too: the compiler's
+ * lowering of that shape to a fixed hop is an engine detail the cursor does
+ * not see. `parts()` / `wholes()` with `maxHops: 1` and neither `depth` nor
+ * `path` are different: the builder emits a fixed step, never a recursive one,
+ * so this refusal does not apply and the cursor carries that step's edge key
+ * like any `traverse()`.
+ *
+ * Every pagination surface calls this before building or executing anything, so
+ * the refusal is the same on every backend and costs no statement.
+ */
+export function refuseRecursivePagination(
+  state: QueryBuilderState,
+  surface: CursorPaginationSurface,
+): void {
+  if (
+    !state.traversals.some(
+      (traversal) => traversal.variableLength !== undefined,
+    )
+  )
+    return;
+  throw new ConfigurationError(
+    `${surface}() cannot page a query with a recursive traversal (recursive(), parts() or wholes()): ` +
+      "a cursor cannot position itself inside the rows one start node fans out into, " +
+      "so the rows past a page boundary would be silently dropped.",
+    { code: "RECURSIVE_PAGINATION_UNSUPPORTED", operation: surface },
+    {
+      suggestion:
+        "Read the walk with execute() and an explicit limit() or recursive({ maxHops }), " +
+        "or page the start nodes in a query without the recursive traversal and run the recursive walk for each page.",
+    },
+  );
+}
+
 /** Cursor pagination owns its bounds; conflicting or invalid options must not be ignored. */
 export function validatePaginationOptions(
   state: QueryBuilderState,
   options: PaginateOptions,
+  surface: Exclude<CursorPaginationSurface, "stream">,
 ): void {
+  refuseRecursivePagination(state, surface);
   if (state.limit !== undefined || state.offset !== undefined) {
     throw new ValidationError(
       "Cursor pagination cannot honor query limit/offset; use first/after or last/before instead.",

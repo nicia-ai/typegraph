@@ -1,0 +1,217 @@
+/**
+ * Composition claims — what a `partOf`/`hasPart` realizing edge write
+ * reserves, on top of whatever ordinary cardinality axis it already
+ * reserves.
+ *
+ * "A part holds exactly one whole" is one invariant, relation-wide: across
+ * EVERY declared composition pair, not one whole per realizing edge kind. It
+ * therefore cannot be an ordinary per-edge-kind cardinality claim — two
+ * different edge kinds attaching the same part must collide on one row. This
+ * module is the ONE owner of that extra reservation: `compositionClaim`
+ * decides whether one edge kind owes it, {@link edgeInsertClaims} folds it
+ * into the claim SET every edge insert (or re-entry) issues, and
+ * `compositionClaimRefusal` (`./edge-claims`, its physical home — see that
+ * file's docblock) is the one typed error a lost claim raises.
+ */
+import {
+  type ClaimEdgeCardinalityParams,
+  type CompositionClaimScope,
+  type EdgeCardinalityDeclaration,
+} from "../../backend/types";
+import { type CompositionPartSide } from "../../registry/composition-relation";
+import { type KindRegistry } from "../../registry/kind-registry";
+import { requireDefined } from "../../utils/presence";
+import {
+  axisCountsRow,
+  axisRowMembership,
+  type EdgeCardinalityAxisRef,
+  edgeCardinalityAxisReferences,
+  edgeCardinalityClaims,
+  type EdgeCardinalityDeclarations,
+  type EdgeClaimSubject,
+  sortedByClaimTarget,
+} from "./edge-claims";
+
+type CompositionHolders = readonly Readonly<{
+  edgeKind: string;
+  partSide: CompositionPartSide;
+}>[];
+
+const compositionHoldersCache = new WeakMap<KindRegistry, CompositionHolders>();
+
+/**
+ * THE oriented holder list every composition claim on this graph carries as
+ * its `scope.holders` — one entry per realizing edge kind, tagged with which
+ * endpoint of that kind is the part. Memoized per registry: a registry is
+ * immutable once built, and every composition claim reads the same list.
+ */
+function compositionHolders(registry: KindRegistry): CompositionHolders {
+  const cached = compositionHoldersCache.get(registry);
+  if (cached !== undefined) return cached;
+  const holders = registry.compositionEdgeKinds().map((edgeKind) => ({
+    edgeKind,
+    partSide: requireDefined(
+      registry.compositionPartSide(edgeKind),
+      `"${edgeKind}" is in compositionEdgeKinds() but has no recorded partSide`,
+    ),
+  }));
+  compositionHoldersCache.set(registry, holders);
+  return holders;
+}
+
+/**
+ * THE translation of composition orientation into the vocabulary an ordinary
+ * edge cardinality claim already understands: the part's side is the
+ * DIRECTION (`"source"` when the part is `from`, `"target"` when it is
+ * `to`), and the whole-side population is the CARDINALITY. This is what lets
+ * a composition claim reuse {@link edgeCardinalitySpec}'s `keyShape` and
+ * `holderLiveness` with no new table: `edgeCardinalitySpec` already answers
+ * both for every `(direction, cardinality)` pair, composition or not.
+ *
+ * Its `holderLiveness` is the composition rule `compositionPopulationMembership`
+ * (`src/registry/composition-relation.ts`) states for every other reader;
+ * `tests/composition-row-membership.test.ts` pins the two together.
+ */
+function compositionAxisRef(
+  partSide: CompositionPartSide,
+  population: "one" | "oneActive",
+): EdgeCardinalityAxisRef {
+  return partSide === "from" ?
+      { direction: "source", cardinality: population }
+    : { direction: "target", cardinality: population };
+}
+
+/**
+ * THE composition claim an edge insert owes, or `undefined` when it owes
+ * none (an ordinary, non-composition edge kind).
+ *
+ * Not exported beyond this module: {@link edgeInsertClaims} and
+ * {@link compositionReentryClaim} are the only two callers, both here.
+ */
+function compositionClaim(
+  registry: KindRegistry,
+  subject: EdgeClaimSubject,
+): ClaimEdgeCardinalityParams | undefined {
+  const partSide = registry.compositionPartSide(subject.kind);
+  if (partSide === undefined) return undefined;
+  const population = requireDefined(
+    registry.compositionEdgePopulation(subject.kind),
+    `"${subject.kind}" is a composition edge kind but has no recorded composition population`,
+  );
+  return {
+    ...compositionAxisRef(partSide, population),
+    graphId: subject.graphId,
+    edgeKind: subject.kind,
+    edgeId: subject.id,
+    fromKind: subject.fromKind,
+    fromId: subject.fromId,
+    toKind: subject.toKind,
+    toId: subject.toId,
+    scope: { kind: "composition", holders: compositionHolders(registry) },
+  };
+}
+
+/**
+ * THE claims one edge insert owes: every declared cardinality axis, plus the
+ * composition claim when the edge kind realizes one, in claim order
+ * ({@link compareClaimTargets}) — not declaration order and not insertion
+ * order, so a peer taking the same two rows can never take them in the
+ * opposite order and deadlock.
+ *
+ * The ONE owner every insert path calls: the store's `edgeInsertWork`
+ * (`src/store/operations/edge-operations.ts`) and import's
+ * `importEdgeInsertWork` (`src/interchange/import.ts`), which before this
+ * both called {@link edgeCardinalityClaims} directly for the same reason.
+ */
+export function edgeInsertClaims(
+  registry: KindRegistry,
+  declarations: EdgeCardinalityDeclarations,
+  subject: EdgeClaimSubject,
+): readonly ClaimEdgeCardinalityParams[] {
+  const ordinary = edgeCardinalityClaims(
+    edgeCardinalityAxisReferences(declarations),
+    subject,
+  );
+  const composition = compositionClaim(registry, subject);
+  if (composition === undefined || !axisCountsRow(composition, subject)) {
+    return ordinary;
+  }
+  return sortedByClaimTarget([...ordinary, composition]);
+}
+
+/**
+ * Whether an edge of this kind takes ANY claim row — the release side's
+ * question, answered by the same module that decides what an insert
+ * acquires, so a hard delete can never stop purging a row kind
+ * {@link edgeInsertClaims} still takes.
+ */
+export function edgeKindOwesAnyClaim(
+  registry: KindRegistry,
+  declarations: EdgeCardinalityDeclarations,
+  edgeKind: string,
+): boolean {
+  return (
+    edgeCardinalityAxisReferences(declarations).length > 0 ||
+    registry.isCompositionEdge(edgeKind)
+  );
+}
+
+/**
+ * THE composition claim a RE-ENTRY (a resurrect, or a bare active-only
+ * window reopen) owes, mirroring the same gate the caller already applies to
+ * its own ordinary axes (`reentryAxisReferences` in
+ * `src/store/operations/edge-operations.ts`): a full resurrect re-takes
+ * every reservation the soft delete vacated, composition included; a window
+ * reopen with no delete transition never vacated a `claimsWhenBornEnded:
+ * true` (`one`) axis in the first place and must not re-probe it, so it
+ * re-takes composition only when composition's OWN population is
+ * `oneActive`.
+ *
+ * Either way the row must be one composition counts ({@link axisCountsRow}):
+ * resurrecting an ENDED `oneActive` history row attaches nothing, so it owes
+ * no claim and is not refused because the part holds another whole — the
+ * same exemption {@link edgeInsertClaims} gives the identical row born ended.
+ */
+export function compositionReentryClaim(
+  registry: KindRegistry,
+  subject: EdgeClaimSubject,
+  reentersLivePopulation: boolean,
+): ClaimEdgeCardinalityParams | undefined {
+  const claim = compositionClaim(registry, subject);
+  if (claim === undefined || !axisCountsRow(claim, subject)) return undefined;
+  if (reentersLivePopulation) return claim;
+  return axisRowMembership(claim) === "openRows" ? claim : undefined;
+}
+
+/**
+ * The per-edge-kind composition declaration the constraint-fence audit reads
+ * (`src/store/claims/verify.ts`'s `fenceDeclarations`): one entry per
+ * realizing edge kind, carrying the same oriented `scope` every write-path
+ * claim for that kind carries, so the audit and the fence read the identical
+ * axis and holder set.
+ *
+ * One entry per edge kind, not per declared pair: `CompositionPair.population`
+ * is a property of the realizing edge kind's own declaration (its
+ * `cardinality`/`targetCardinality`), so every pair sharing one `viaEdgeKind`
+ * already agrees on it — `buildCompositionRelation` refuses the graph
+ * otherwise (`ONTOLOGY_COMPOSITION_VIA_MIXED`).
+ */
+export function compositionEdgeCardinalityDeclarations(
+  registry: KindRegistry,
+): readonly EdgeCardinalityDeclaration[] {
+  const holders = compositionHolders(registry);
+  if (holders.length === 0) return [];
+  const scope: CompositionClaimScope = { kind: "composition", holders };
+  const seenEdgeKinds = new Set<string>();
+  const declarations: EdgeCardinalityDeclaration[] = [];
+  for (const pair of registry.compositionRelation().pairs) {
+    if (seenEdgeKinds.has(pair.viaEdgeKind)) continue;
+    seenEdgeKinds.add(pair.viaEdgeKind);
+    declarations.push({
+      ...compositionAxisRef(pair.partSide, pair.population),
+      edgeKind: pair.viaEdgeKind,
+      scope,
+    });
+  }
+  return declarations;
+}

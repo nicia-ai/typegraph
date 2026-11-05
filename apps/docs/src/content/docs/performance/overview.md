@@ -376,8 +376,8 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 
 ### Transaction wrapping
 
-On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
-chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
+On a transaction-capable backend, each bulk method call made on the store is atomic across all of
+its bind-budget chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
 eligible plain node `bulkDelete()` calls, and direct edge
 `bulkInsert()` / `bulkCreate()` / `bulkDelete()` calls also provide
 whole-call atomicity on bundled transactionless roots through one native
@@ -403,6 +403,62 @@ await store.transaction(async (tx) => {
 ```
 
 Without the wrapping transaction, a failure in a later bulk call leaves earlier calls committed.
+
+#### Catching a bulk refusal inside a transaction
+
+A bulk call's atomicity comes from the transaction it runs in, and that
+decides what a refused batch leaves behind:
+
+- **Called on the store**, the bulk method owns its transaction. A refusal
+  from any item rolls the whole call back: nothing of the batch is written.
+- **Called on `tx` inside `store.transaction(...)`**, the bulk method runs on
+  your transaction and opens none of its own. The write layer has no
+  savepoint to roll one bulk call back to, so the bulk methods reach every
+  verdict their items can raise by reading before their first write: a
+  refusal you catch inside the callback leaves none of the batch written,
+  and the transaction can commit.
+
+```typescript
+await store.transaction(async (tx) => {
+  try {
+    await tx.nodes.Person.bulkUpsertById(items);
+  } catch (error) {
+    // Nothing of `items` was written on `tx` by the refused call, unless a
+    // concurrent writer raced it: rethrow to roll the transaction back
+    // when that must not be left to chance.
+    throw error;
+  }
+});
+```
+
+That covers `bulkUpsertById` and `bulkReplaceById`, whose updates are
+judged together with the creates they write first; `bulkGetOrCreateByConstraint`
+and `bulkGetOrCreateByEndpoints`, whose matched items are judged together
+with the rows they create; the composition batches (`bulkCreate` /
+`bulkInsert` with `partOf`, `bulkReparent`); and, on an identity graph,
+every node create, whose identity fold on a caller-chosen id is read before
+the insert. A batch is judged as the state it produces, in the order it
+writes, so a later item may take a unique key or a cardinality allowance an
+earlier item gives up and is refused one an earlier item takes. A concurrent
+writer that the per-graph write fence does not exclude can still claim a key
+or remove a row between a batch's reads and its writes; that refusal comes
+from the write, after earlier items wrote. See
+[A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
+for what stays outside the guarantee.
+
+Deciding a batch before writing costs reads. A batch that writes its rows one
+at a time (an update half, resurrections, the matched items of a
+get-or-create) prepares every row before the first write, against the rows
+read inside the transaction, and probes the batch's unique keys and
+cardinality claims once more as a set. A `bulkGetOrCreateByConstraint` batch
+with more than one item that owes a write (an update, a resurrection, or an
+attachment not already held), or one such item next to a new row, runs one
+extra fenced pass that reads each item once more before the per-item writes;
+a batch whose matched items all need nothing stays read-only. A
+`bulkUpsertById`, `bulkReplaceById` or `bulkGetOrCreateByEndpoints` batch
+that both creates and updates, and does not run as one native statement,
+writes its creates through the portable create path rather than the native
+batch create program, so they are decided together with the updates.
 
 ### Choosing the right pattern
 
@@ -811,7 +867,7 @@ SQLite always operates at `serializable` isolation.
 
 When you define an ontology (e.g., `subClassOf`, `implies`), TypeGraph precomputes the full
 transitive closure at store initialization. Queries like
-`.from("Parent", "p", { includeSubClasses: true })` use a pre-calculated list of kinds rather than
+`.from("Parent", "p", { expansion: "subclasses" })` use a pre-calculated list of kinds rather than
 recursive lookups at runtime.
 
 ### Smart Select
@@ -1002,8 +1058,11 @@ described above.
 
 ### Use specific kinds
 
-Unless you specifically need to query across a hierarchy, avoid `includeSubClasses: true`. Being
-specific about the node kind allows the SQL engine to use more restrictive index scans.
+A query against a kind with `subClassOf` descendants returns their rows too
+by default. Unless you specifically need to query across the hierarchy, pass
+`{ expansion: "exact" }` (or set `queryDefaults.expansion: "exact"` on the
+store). Being specific about the node kind allows the SQL
+engine to use more restrictive index scans.
 
 ### Use cursor pagination
 

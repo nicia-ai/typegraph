@@ -1,10 +1,7 @@
 import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
 import { type TemporalMode } from "../../../core/types";
-import {
-  EDGE_CARDINALITY_SPECS,
-  type EdgeCardinalitySpec,
-} from "../../../store/claims/edge-claims";
+import { edgeCardinalitySpec } from "../../../store/claims/edge-claims";
 import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
@@ -135,6 +132,31 @@ export function buildFindNodesAcrossKinds(
 }
 
 /**
+ * `COUNT(*)` over `table` filtered by `whereClause`. With `limit`, the count
+ * stops at that many rows, so a caller that only needs "is there one" reads a
+ * single row instead of the whole population.
+ */
+function buildCountQuery(
+  table: SQLWrapper,
+  whereClause: SQL,
+  limit: number | undefined,
+): SQL {
+  if (limit === undefined) {
+    return sql`
+      SELECT COUNT(*) as count FROM ${table}
+      WHERE ${whereClause}
+    `;
+  }
+  return sql`
+    SELECT COUNT(*) as count FROM (
+      SELECT 1 FROM ${table}
+      WHERE ${whereClause}
+      LIMIT ${limit}
+    ) AS bounded
+  `;
+}
+
+/**
  * Builds a query to count nodes by kind.
  */
 export function buildCountNodesByKind(
@@ -149,12 +171,11 @@ export function buildCountNodesByKind(
     ...buildTemporalConditions(nodes, params),
   ];
 
-  const whereClause = sql.join(conditions, sql` AND `);
-
-  return sql`
-    SELECT COUNT(*) as count FROM ${nodes}
-    WHERE ${whereClause}
-  `;
+  return buildCountQuery(
+    nodes,
+    sql.join(conditions, sql` AND `),
+    params.limit,
+  );
 }
 
 /** Builds an `IN (...)` membership predicate over a non-empty id list. */
@@ -270,7 +291,10 @@ export function buildFindActiveEdgesBySourceV1(
   params: FindActiveEdgesBySourceV1Params,
 ): SQL {
   const { edges } = tables;
-  const spec: EdgeCardinalitySpec = EDGE_CARDINALITY_SPECS.oneActive;
+  const spec = edgeCardinalitySpec({
+    direction: "source",
+    cardinality: "oneActive",
+  });
   const activeCondition =
     spec.holderLiveness === "liveAndActive" ?
       sql`AND ${edges.validTo} IS NULL`
@@ -507,10 +531,9 @@ export function buildCountEdgesByKind(
     conditions.push(sql`${edges.toId} = ${params.toId}`);
   }
 
-  const whereClause = sql.join(conditions, sql` AND `);
-
-  return sql`
-    SELECT COUNT(*) as count FROM ${edges}
-    WHERE ${whereClause}
-  `;
+  return buildCountQuery(
+    edges,
+    sql.join(conditions, sql` AND `),
+    params.limit,
+  );
 }

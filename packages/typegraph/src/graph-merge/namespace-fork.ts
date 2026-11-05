@@ -6,6 +6,7 @@
 import { backendDerivationRoot } from "../backend/derive-backend";
 import { defaultPostgresTableNames } from "../backend/drizzle/schema/postgres-table-names";
 import {
+  type GraphRelationKey,
   graphRelationsProvisionedBy,
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
@@ -80,6 +81,45 @@ function forkRelationTables(backend: GraphBackend): readonly string[] {
   }).map((relation) => FORK_RELATION_NAMES[relation.key]);
 }
 const FORK_LEDGER = "typegraph_namespace_fork_operations";
+
+/**
+ * The relations a fork's content digest names whether or not they hold rows:
+ * the graph-scoped inventory as the first release that recorded a fork proof
+ * knew it. FROZEN. A recorded proof hashed one entry per relation here, so
+ * adding to or removing from this list changes the digest of every proof
+ * already in a ledger.
+ *
+ * A relation that joined the inventory later is named in the digest only when
+ * it holds rows for the graph ({@link forkContentDigest}). A fork taken before
+ * it existed holds none, so its recorded digest keeps verifying across the
+ * upgrade that adds the relation, and the relation is covered from the first
+ * row it holds.
+ */
+const DIGEST_BASELINE_RELATION_KEYS = [
+  "nodes",
+  "edges",
+  "recordedNodes",
+  "recordedEdges",
+  "recordedClock",
+  "revisionOrigins",
+  "revisionChanges",
+  "identityAssertions",
+  "recordedIdentityAssertions",
+  "identityClosure",
+  "identitySeparation",
+  "uniques",
+  "edgeClaims",
+  "schemaVersions",
+  "fulltext",
+  "indexMaterializations",
+  "contributionMaterializations",
+  "kindRemovals",
+  "reconciliationMarkers",
+] as const satisfies readonly GraphRelationKey[];
+
+const DIGEST_BASELINE_TABLES: ReadonlySet<string> = new Set(
+  DIGEST_BASELINE_RELATION_KEYS.map((key) => FORK_RELATION_NAMES[key]),
+);
 
 type QuerySession = Pick<GraphBackend, "execute" | "getActiveSchema">;
 type JsonRow = Readonly<Record<string, unknown>>;
@@ -208,6 +248,25 @@ async function presentRelations(
   return new Set(rows.map((row) => row.name));
 }
 
+/**
+ * `relationTables` as `session`'s database provisions them. Every baseline
+ * relation is required and kept as stated, so a missing one still fails
+ * loudly; a relation that joined the inventory later is kept only where it
+ * exists, since a target prepared before it did holds no rows in it.
+ */
+async function provisionedRelationTables(
+  session: QuerySession,
+  relationTables: readonly string[],
+): Promise<readonly string[]> {
+  const present = await presentRelations(
+    session,
+    relationTables.filter((table) => !DIGEST_BASELINE_TABLES.has(table)),
+  );
+  return relationTables.filter(
+    (table) => DIGEST_BASELINE_TABLES.has(table) || present.has(table),
+  );
+}
+
 /** A relation that does not exist yet holds no rows for any graph. */
 async function vectorGraphRows(
   session: QuerySession,
@@ -271,24 +330,67 @@ async function digestRows(rows: readonly JsonRow[]): Promise<string> {
   );
 }
 
+/** One relation's rows for the forked graph, as the content digest reads them. */
+type DigestedRelation = readonly [table: string, rows: readonly JsonRow[]];
+
+/**
+ * THE content digest of a forked graph: one `[table, rowDigest]` entry per
+ * graph-scoped relation in copy order, then one per vector table. The copy
+ * (hashing the source snapshot) and every verification (hashing the target)
+ * assemble it here, so they cannot disagree about which relations it names.
+ *
+ * A graph-scoped relation outside {@link DIGEST_BASELINE_RELATION_KEYS} is
+ * left out while it holds no rows; see that constant for why.
+ */
+async function forkContentDigest(
+  relations: readonly DigestedRelation[],
+  vectors: readonly DigestedRelation[],
+): Promise<string> {
+  const digests: [string, string][] = [];
+  for (const [table, rows] of relations) {
+    if (rows.length === 0 && !DIGEST_BASELINE_TABLES.has(table)) continue;
+    digests.push([table, await digestRows(rows)]);
+  }
+  for (const [table, rows] of vectors) {
+    digests.push([table, await digestRows(rows)]);
+  }
+  return sha256Hex(JSON.stringify(digests), 32);
+}
+
+/**
+ * The graph-scoped relations' forked rows on `session`, in copy order. A
+ * relation that joined the inventory after the digest baseline may not exist
+ * on a target prepared before it did; it then holds no rows.
+ */
+async function forkedGraphRows(
+  session: QuerySession,
+  graph: GraphDef,
+  relationTables: readonly string[],
+): Promise<readonly DigestedRelation[]> {
+  const provisioned = new Set(
+    await provisionedRelationTables(session, relationTables),
+  );
+  const relations: DigestedRelation[] = [];
+  for (const table of relationTables) {
+    relations.push([
+      table,
+      provisioned.has(table) ?
+        forkedRows(graph, table, await graphRows(session, table, graph.id))
+      : [],
+    ]);
+  }
+  return relations;
+}
+
 async function digestGraph(
   session: QuerySession,
   graph: GraphDef,
   relationTables: readonly string[],
 ): Promise<string> {
-  const digests: [string, string][] = [];
-  for (const table of relationTables) {
-    const rows = await graphRows(session, table, graph.id);
-    digests.push([table, await digestRows(forkedRows(graph, table, rows))]);
-  }
-  for (const [table, rows] of await vectorGraphRows(
-    session,
-    vectorRelations(graph),
-    graph.id,
-  )) {
-    digests.push([table, await digestRows(rows)]);
-  }
-  return sha256Hex(JSON.stringify(digests), 32);
+  return forkContentDigest(
+    await forkedGraphRows(session, graph, relationTables),
+    await vectorGraphRows(session, vectorRelations(graph), graph.id),
+  );
 }
 
 /**
@@ -449,7 +551,10 @@ async function assertEmpty(
     session,
     vectorRelations(graph),
   );
-  for (const table of [...relationTables, ...presentVectorTables]) {
+  for (const table of [
+    ...(await provisionedRelationTables(session, relationTables)),
+    ...presentVectorTables,
+  ]) {
     const rows = await queryRows<ExistsRow>(
       session,
       sql`SELECT EXISTS(SELECT 1 FROM ${sql.identifier(table)} WHERE graph_id = ${graph.id}) AS present`,
@@ -581,7 +686,10 @@ function namespaceForkResult<G extends GraphDef>(
           );
         }
         const journal = REVISION_CHANGES_TABLE;
-        for (const table of relationTables) {
+        for (const table of await provisionedRelationTables(
+          targetTx,
+          relationTables,
+        )) {
           if (table === journal) continue;
           await queryRows(
             targetTx,
@@ -827,7 +935,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
       await assertIndependentDatabase(sourceTx, targetBackend, source.graphId);
       return targetBackend.transaction(async (targetTx) => {
         await assertEmpty(targetTx, source.graph, relationTables);
-        const sourceDigests: [string, string][] = [];
+        const copiedRows = new Map<string, readonly JsonRow[]>();
         for (const table of relationTables) {
           if (table === REVISION_CHANGES_TABLE) continue;
           const rows = forkedRows(
@@ -839,7 +947,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
             await assertSupportedContributions(targetTx, source.graph, rows);
           if (table === INDEX_MATERIALIZATIONS_TABLE)
             await assertPhysicalIndexes(targetTx, source.graph, rows);
-          sourceDigests.push([table, await digestRows(rows)]);
+          copiedRows.set(table, rows);
           await insertRows(targetTx, table, rows);
         }
         // The destination triggers may have journaled the copied node, edge,
@@ -854,23 +962,19 @@ export async function forkGraphNamespace<G extends GraphDef>(
           REVISION_CHANGES_TABLE,
           source.graphId,
         );
-        sourceDigests.splice(
-          relationTables.indexOf(REVISION_CHANGES_TABLE),
-          0,
-          [REVISION_CHANGES_TABLE, await digestRows(sourceJournalRows)],
-        );
+        copiedRows.set(REVISION_CHANGES_TABLE, sourceJournalRows);
         await insertRows(targetTx, REVISION_CHANGES_TABLE, sourceJournalRows);
-        for (const [table, rows] of await vectorGraphRows(
+        const copiedVectors = await vectorGraphRows(
           sourceTx,
           vectorRelations(source.graph),
           source.graphId,
-        )) {
-          sourceDigests.push([table, await digestRows(rows)]);
+        );
+        for (const [table, rows] of copiedVectors) {
           await insertRows(targetTx, table, rows);
         }
-        const snapshotDigest = await sha256Hex(
-          JSON.stringify(sourceDigests),
-          32,
+        const snapshotDigest = await forkContentDigest(
+          relationTables.map((table) => [table, copiedRows.get(table) ?? []]),
+          copiedVectors,
         );
         const targetDigest = await digestGraph(
           targetTx,

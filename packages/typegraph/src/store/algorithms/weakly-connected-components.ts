@@ -5,6 +5,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  assertNodeKindScope,
   assertPositiveSafeIntegerOption,
   type InternalTraversalOptions,
   pickTemporalOptions,
@@ -43,7 +44,8 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
   ctx: AlgorithmContext,
   options: InternalWeaklyConnectedComponentsOptions<G>,
 ): Promise<readonly WeaklyConnectedComponentMembership[]> {
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
+  assertNodeKindScope(ctx, options.nodeKinds);
   assertGraphAnalyticsSupported(ctx, "weaklyConnectedComponents", {
     requiresWindowFunctions: true,
   });

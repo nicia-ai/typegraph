@@ -185,6 +185,18 @@ const INVENTORY: readonly InventoryEntry[] = [
       "In-batch cardinality accounting reads through the caller's write target, so the reads it issues must see that target's uncommitted rows.",
   },
   {
+    file: "store/operations/edge-batch-validation.ts",
+    line: "return deriveBackend(target, {",
+    reason:
+      "A reparent prepares its replacement edge before retiring the incumbent, so its cardinality reads go through the frame's own target with the retiring row already subtracted from the counts it holds.",
+  },
+  {
+    file: "store/operations/edge-batch-validation.ts",
+    line: "const backend = deriveBackend(target, {",
+    reason:
+      "A batch decides every update, resurrection and window reopen before its first write, so each later item's cardinality and existence reads go through the frame's own target with the earlier items' transitions already applied to the counts.",
+  },
+  {
     file: "store/operations/node-operations.ts",
     line: "reader: deriveBackend(backend, reads),",
     reason:

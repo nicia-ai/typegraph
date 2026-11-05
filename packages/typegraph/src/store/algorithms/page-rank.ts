@@ -6,6 +6,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  assertNodeKindScope,
   assertPositiveSafeIntegerOption,
   type InternalTraversalOptions,
   pickTemporalOptions,
@@ -93,7 +94,8 @@ function executePageRankOperation<G extends GraphDef>(
 ): Promise<readonly PageRankScore[]> {
   const algorithm: PageRankAlgorithm =
     seeds === undefined ? "pageRank" : "personalizedPageRank";
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
+  assertNodeKindScope(ctx, options.nodeKinds);
   assertGraphAnalyticsSupported(ctx, algorithm);
   const resolved = resolvePageRankOptions(options, algorithm);
   const traversalOptions: InternalTraversalOptions = {

@@ -224,6 +224,22 @@ function sqliteErrorCode(link: unknown): unknown {
 }
 
 /**
+ * Whether the link carries a SQLite result code in either spelling a driver
+ * reports it: better-sqlite3's symbolic `code`, or libSQL's numeric
+ * `rawCode`/`extendedCode`.
+ */
+function hasSqliteResultCode(
+  link: object,
+  symbolic: string,
+  extended: number,
+): boolean {
+  if (Reflect.get(link, "code") === symbolic) return true;
+  return SQLITE_EXTENDED_CODE_FIELDS.some(
+    (field) => Reflect.get(link, field) === extended,
+  );
+}
+
+/**
  * SQLite driver messages normalized independently of transport decoration.
  * Native SQLite usually returns the engine text alone, while libSQL prefixes
  * that same text with its symbolic result code. Classifiers compare the
@@ -439,17 +455,14 @@ function isSqlitePrimaryKeyViolation(
   link: object,
   relation: PrimaryKeyRelation,
 ): boolean {
-  if (Reflect.get(link, "code") === SQLITE_PRIMARY_KEY_VIOLATION_CODE) {
+  if (
+    hasSqliteResultCode(
+      link,
+      SQLITE_PRIMARY_KEY_VIOLATION_CODE,
+      SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE,
+    )
+  ) {
     return true;
-  }
-  for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
-    const value: unknown = Reflect.get(link, field);
-    if (
-      typeof value === "number" &&
-      value === SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE
-    ) {
-      return true;
-    }
   }
   if (Reflect.get(link, "code") !== "SQLITE_CONSTRAINT") return false;
   const message = sqliteErrorMessage(link);
@@ -519,11 +532,11 @@ export function isNotNullColumnViolation(
     }
     const code: unknown = Reflect.get(link, "code");
     const isSqliteNotNullViolation =
-      code === SQLITE_NOT_NULL_VIOLATION_CODE ||
       code === "SQLITE_CONSTRAINT" ||
-      SQLITE_EXTENDED_CODE_FIELDS.some(
-        (field) =>
-          Reflect.get(link, field) === SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE,
+      hasSqliteResultCode(
+        link,
+        SQLITE_NOT_NULL_VIOLATION_CODE,
+        SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE,
       );
     if (
       sqliteErrorMessage(link) === expectedSqliteMessage &&
@@ -560,11 +573,11 @@ export function isDuplicateUniqueIndexError(
       return true;
     }
     const isSqliteUniqueViolation =
-      Reflect.get(link, "code") === SQLITE_UNIQUE_VIOLATION_CODE ||
       Reflect.get(link, "code") === "SQLITE_CONSTRAINT" ||
-      SQLITE_EXTENDED_CODE_FIELDS.some(
-        (field) =>
-          Reflect.get(link, field) === SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE,
+      hasSqliteResultCode(
+        link,
+        SQLITE_UNIQUE_VIOLATION_CODE,
+        SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE,
       );
     const message = sqliteErrorMessage(link);
     const expectedColumns = relation.sqliteColumns
@@ -601,18 +614,28 @@ export function isSqliteMissingEdgeMatchIdentityColumnError(
   return false;
 }
 
-/** Whether a concurrent SQLite adopter already added the column we planned. */
-export function isSqliteDuplicateEdgeMatchIdentityColumnError(
+/**
+ * Whether a concurrent SQLite adopter already added one of the columns we
+ * planned to `ADD`.
+ *
+ * `columnNames` is the adoption's own column list, so one predicate serves
+ * every additive column rather than one hand-written predicate per column.
+ * Deliberately narrow — an exact `duplicate column name: <column>` message on
+ * a `SQLITE_ERROR` — because provisioning treats a match as "the post-state I
+ * wanted is already there" and must not swallow any other DDL failure.
+ */
+export function isSqliteDuplicateColumnError(
   error: unknown,
+  columnNames: readonly string[],
 ): boolean {
+  const duplicateMessages = new Set(
+    columnNames.map((column) => `duplicate column name: ${column}`),
+  );
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
     const message = sqliteErrorMessage(link);
-    if (
-      message === "duplicate column name: match_identity_name" ||
-      message === "duplicate column name: match_identity_key"
-    ) {
+    if (typeof message === "string" && duplicateMessages.has(message)) {
       return true;
     }
   }
@@ -744,12 +767,82 @@ export function isSqliteNotAuthorizedError(error: unknown): boolean {
  */
 export function isSqliteStaleSnapshotError(error: unknown): boolean {
   for (const link of errorChain(error)) {
-    if (sqliteErrorCode(link) === SQLITE_STALE_SNAPSHOT_CODE) return true;
     if (!canReadProperty(link)) continue;
-    for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
-      if (Reflect.get(link, field) === SQLITE_STALE_SNAPSHOT_EXTENDED_CODE) {
-        return true;
-      }
+    if (
+      hasSqliteResultCode(
+        link,
+        SQLITE_STALE_SNAPSHOT_CODE,
+        SQLITE_STALE_SNAPSHOT_EXTENDED_CODE,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * PostgreSQL SQLSTATE for `query_canceled` — raised by `statement_timeout`
+ * expiring or by `pg_cancel_backend` — and `program_limit_exceeded`, raised
+ * when the planner or executor hits a compiled-in resource ceiling.
+ */
+const POSTGRES_QUERY_CANCELED_CODE = "57014";
+const POSTGRES_PROGRAM_LIMIT_EXCEEDED_CODE = "54000";
+
+/**
+ * SQLite's base result codes for a statement the engine stopped before it
+ * finished: `SQLITE_INTERRUPT` (a call to `sqlite3_interrupt()`, which is how
+ * a statement timeout is implemented on this engine) and `SQLITE_TOOBIG`
+ * (a string/blob or a whole statement exceeded a compiled-in limit). Neither
+ * needs an extended-code variant — unlike the constraint-violation codes
+ * above, these carry no finer bucket to disambiguate.
+ */
+const SQLITE_INTERRUPT_CODE = "SQLITE_INTERRUPT";
+const SQLITE_INTERRUPT_EXTENDED_CODE = 9;
+const SQLITE_TOOBIG_CODE = "SQLITE_TOOBIG";
+const SQLITE_TOOBIG_EXTENDED_CODE = 18;
+
+/**
+ * Whether `error` (or anything in its `.cause` chain) reports that the
+ * ENGINE cut a statement short rather than completing it — a cancelled or
+ * resource-exhausted search, never a business-rule refusal. Classified by
+ * code only, on both dialects, so it needs no dialect literal and adds no
+ * `DIALECT_LITERAL_EXEMPTIONS` entry.
+ *
+ * This is the one predicate the edge-acyclicity probe
+ * (`src/store/acyclicity.ts`) consults to decide "indeterminate" versus "no
+ * cycle": an unbounded reachability search that the engine could not finish
+ * must never be reported as a clean result, and only a structural code check
+ * — never a driver message, which is locale-dependent — can tell "the
+ * search ran out of budget" apart from "the search found nothing".
+ *
+ * PostgreSQL: `query_canceled` (57014) and `program_limit_exceeded` (54000),
+ * plus the shared "insufficient resources" class (SQLSTATE prefix `53`,
+ * {@link isInsufficientResourcesError}) rather than a second copy of it.
+ * SQLite: extended result codes `SQLITE_INTERRUPT` (9) and `SQLITE_TOOBIG`
+ * (18), in both spellings a driver reports them (better-sqlite3's symbolic
+ * `code`, libSQL's numeric `rawCode`/`extendedCode`).
+ *
+ * An error this function does not recognize propagates unchanged — a plain
+ * driver error is not silently reinterpreted as "indeterminate" either.
+ */
+export function isStatementCutShortError(error: unknown): boolean {
+  if (isInsufficientResourcesError(error)) return true;
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    if (
+      isSqlStateIn(Reflect.get(link, "code"), [
+        POSTGRES_QUERY_CANCELED_CODE,
+        POSTGRES_PROGRAM_LIMIT_EXCEEDED_CODE,
+      ]) ||
+      hasSqliteResultCode(
+        link,
+        SQLITE_INTERRUPT_CODE,
+        SQLITE_INTERRUPT_EXTENDED_CODE,
+      ) ||
+      hasSqliteResultCode(link, SQLITE_TOOBIG_CODE, SQLITE_TOOBIG_EXTENDED_CODE)
+    ) {
+      return true;
     }
   }
   return false;
@@ -920,6 +1013,49 @@ function historyMissingRecordedRelationsError(
   );
 }
 
+const IDENTITY_TRANSITION_RELATIONS_MISSING_CODE =
+  "IDENTITY_TRANSITION_RELATIONS_MISSING";
+
+/**
+ * Converts a missing-relation failure of a write to the identity transition
+ * log into an error that names the transition-log relations and the
+ * base-schema adoption that creates them. They are base-schema version 6
+ * relations, so a database adopted only through version 5 lacks them while
+ * every recorded-time relation exists; the generic recorded-relations error
+ * would send its reader after tables that are already there.
+ */
+export async function withIdentityTransitionRelationsPrecondition<T>(
+  promise: Promise<T>,
+  relations: readonly string[],
+  details: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await promise;
+  } catch (error) {
+    if (!isMissingTableError(error)) throw error;
+    throw new ConfigurationError(
+      `history: true on an identity graph requires the identity transition-log relations (${relations.join(", ")}), but one is missing.`,
+      {
+        ...details,
+        code: IDENTITY_TRANSITION_RELATIONS_MISSING_CODE,
+        relations,
+      },
+      {
+        cause: error,
+        suggestion:
+          "They are base-schema version 6 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker writes. Externally managed DDL applies the version-6 statements and advances the base-schema marker to 6.",
+      },
+    );
+  }
+}
+
+function isIdentityTransitionRelationsMissing(error: unknown): boolean {
+  return (
+    error instanceof ConfigurationError &&
+    error.details["code"] === IDENTITY_TRANSITION_RELATIONS_MISSING_CODE
+  );
+}
+
 /**
  * Converts missing recorded-relation failures into the actionable precondition
  * error used by construction-time history checks. Capture paths use this after
@@ -934,7 +1070,11 @@ export async function withRecordedRelationsPrecondition<T>(
   try {
     return await promise;
   } catch (error) {
-    if (!isMissingTableError(error)) throw error;
+    if (
+      isIdentityTransitionRelationsMissing(error) ||
+      !isMissingTableError(error)
+    )
+      throw error;
     throw historyMissingRecordedRelationsError(
       { ...details, code: "RECORDED_RELATIONS_MISSING" },
       error,

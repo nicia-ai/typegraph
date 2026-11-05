@@ -766,6 +766,8 @@ describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
     const options = ImportOptionsSchema.parse({ onConflict: "skip" });
     const attemptInputs: ImportAttemptInputs<typeof RETRY_ACCEPTANCE_GRAPH> = {
       graphId,
+      graph: store.graph,
+      schema: store.revisionSchema,
       registry,
       data,
       nodeSchemas: buildNodeSchemaMap(store.graph),
@@ -800,13 +802,14 @@ describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
           },
           mixedWritePlan(undefined, true),
           backend,
-          (session, target, overlaidSession, _lock, transactionMode) =>
+          (session, target, overlaidSession, lock, transactionMode) =>
             runImportWritePlanAttempt(
               attemptInputs,
               session,
               target,
               overlaidSession,
               transactionMode,
+              lock,
             ),
         ),
     );

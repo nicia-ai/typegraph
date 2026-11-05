@@ -174,8 +174,8 @@ describe("degree() direction filter index alignment", () => {
       // stored from_kind is "Employee" — a filter derived from the declaration
       // alone must expand subclasses or these edges silently vanish from the
       // count. Deriving it from the node's own kind is exact by construction.
-      await store.edges.knows.create(employee as never, person);
-      await store.edges.memberOf.create(employee as never, team);
+      await store.edges.knows.create(employee, person);
+      await store.edges.memberOf.create(employee, team);
 
       expect(
         await store.algorithms.degree(employee.id, { direction: "out" }),
@@ -215,8 +215,8 @@ describe("degree() direction filter index alignment", () => {
       const wide = createStore(buildGraph(), backend);
       const employee = await wide.nodes.Employee.create({ name: "emp" });
       const person = await wide.nodes.Person.create({ name: "per" });
-      await wide.edges.knows.create(person, employee as never);
-      await wide.edges.knows.create(employee as never, person);
+      await wide.edges.knows.create(person, employee);
+      await wide.edges.knows.create(employee, person);
 
       // The declaration then narrows to Employee-only endpoints. The rows on
       // disk still carry from_kind/to_kind = "Person" for `person`, which no

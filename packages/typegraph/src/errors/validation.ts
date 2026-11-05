@@ -43,7 +43,9 @@ export type ValidationContext = Readonly<{
 /**
  * Converts Zod issues to ValidationIssue format.
  */
-function zodIssuesToValidationIssues(error: ZodError): ValidationIssue[] {
+export function zodIssuesToValidationIssues(
+  error: ZodError,
+): ValidationIssue[] {
   return error.issues.map((issue) => ({
     path: issue.path.join("."),
     message: issue.message,

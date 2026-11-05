@@ -223,7 +223,14 @@ export function mergeGraphExtension<G extends GraphDef>(
             to: to as Record<string, readonly [NodeType, ...NodeType[]]>,
           }),
         );
-    mergedEdges[edge.kindName] = { type, from, to };
+    mergedEdges[edge.kindName] = compactUndefined<EdgeRegistration>({
+      type,
+      from,
+      to,
+      cardinality: edge.cardinality,
+      targetCardinality: edge.targetCardinality,
+      ...(edge.acyclic === true ? { acyclic: true } : {}),
+    });
   }
 
   // Drop ontology relations that came from the previous graph-extension

@@ -1,0 +1,1376 @@
+/**
+ * Cross-backend contract for schema commits that would leave a uniqueness
+ * constraint unenforced over existing rows.
+ *
+ * A schema commit validates no existing row against a unique constraint and
+ * rebuilds no claim, so every path that publishes a version refuses to add or
+ * reshape a unique constraint on a populated kind, and to move a
+ * `kindWithSubClasses` claim axis away from where a populated kind's claims
+ * sit. Each case states the mutation that must make it fail.
+ */
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  ConfigurationError,
+  createAdapterStoreWithSchema,
+  defineGraph,
+  defineGraphExtension,
+  defineNode,
+  IncompatibleChangeError,
+  MigrationError,
+  type MigrationErrorDetails,
+  subClassOf,
+  type UniquenessClaimGate,
+  UniquenessError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src";
+import { projectBackendWithout } from "../../../src/backend/derive-backend";
+import {
+  getActiveSchema,
+  migrateSchema,
+  rollbackSchema,
+  type SchemaDiff,
+} from "../../../src/schema";
+import { requireDefined } from "../../../src/utils/presence";
+import { type IntegrationTestContext } from "./test-context";
+
+const DUPLICATE_EMAIL = "dup@example.com";
+
+const Account = defineNode("GateAccount", {
+  schema: z.object({ email: z.string() }),
+});
+const ACCOUNT_EMAIL_UNIQUE = {
+  name: "gate_account_email",
+  fields: ["email"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
+/**
+ * One kind, with or without its unique constraint (optionally widened, or
+ * narrowed to the rows a `where` predicate selects).
+ */
+function accountGraph(
+  id: string,
+  unique: "none" | "kind" | "caseInsensitive" | "partial",
+) {
+  return defineGraph({
+    id,
+    nodes: {
+      GateAccount: {
+        type: Account,
+        unique:
+          unique === "none" ? []
+          : unique === "kind" ? [ACCOUNT_EMAIL_UNIQUE]
+          : unique === "partial" ?
+            [
+              {
+                ...ACCOUNT_EMAIL_UNIQUE,
+                where: (fields) => requireDefined(fields["email"]).isNotNull(),
+              },
+            ]
+          : [{ ...ACCOUNT_EMAIL_UNIQUE, collation: "caseInsensitive" }],
+      },
+    },
+    edges: {},
+  });
+}
+
+/**
+ * `GateEmployee` sorts before `GatePerson`, so while the two share a subclass
+ * component the `kindWithSubClasses` claim axis is `GateEmployee` — including
+ * for claims a `GatePerson` row writes.
+ */
+const Person = defineNode("GatePerson", {
+  schema: z.object({ email: z.string() }),
+});
+const Employee = defineNode("GateEmployee", {
+  schema: z.object({ email: z.string() }),
+});
+const HIERARCHY_EMAIL_UNIQUE = {
+  name: "gate_hierarchy_email",
+  fields: ["email"],
+  scope: "kindWithSubClasses",
+  collation: "binary",
+} as const;
+
+/**
+ * Keeps the `subClassOf` meta-edge alive on both sides of every transition:
+ * removing the only relation naming a meta-edge removes the meta-edge too,
+ * an unrelated `breaking` change that would mask the one under test.
+ */
+const Bystander = defineNode("GateBystander", { schema: z.object({}) });
+const OtherBystander = defineNode("GateOtherBystander", {
+  schema: z.object({}),
+});
+
+function hierarchyGraph(id: string, related: boolean) {
+  return defineGraph({
+    id,
+    nodes: {
+      GatePerson: { type: Person, unique: [HIERARCHY_EMAIL_UNIQUE] },
+      GateEmployee: { type: Employee, unique: [HIERARCHY_EMAIL_UNIQUE] },
+      GateBystander: { type: Bystander },
+      GateOtherBystander: { type: OtherBystander },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(Bystander, OtherBystander),
+      ...(related ? [subClassOf(Employee, Person)] : []),
+    ],
+  });
+}
+
+const PERSON_AXIS_MOVED: UniquenessClaimGate = {
+  cause: "claim-axis-moved",
+  kind: "GatePerson",
+  constraintName: "gate_hierarchy_email",
+  axis: "GatePerson",
+  lostKinds: ["GateEmployee"],
+};
+
+/** A host kind an extension subclass can pull the claim axis away from. */
+const Whole = defineNode("GateWhole", {
+  schema: z.object({ email: z.string() }),
+});
+function wholeGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      GateWhole: {
+        type: Whole,
+        unique: [
+          { ...HIERARCHY_EMAIL_UNIQUE, name: "gate_whole_email" } as const,
+        ],
+      },
+    },
+    edges: {},
+  });
+}
+/** `GateAardvark` sorts before `GateWhole`, so it becomes the claim axis. */
+const AARDVARK_EXTENSION = defineGraphExtension({
+  nodes: { GateAardvark: { properties: { email: { type: "string" } } } },
+  ontology: [{ metaEdge: "subClassOf", from: "GateAardvark", to: "GateWhole" }],
+});
+
+/**
+ * `GateAlpha` < `GateMiddle` < `GateSubject`: whichever relations are
+ * declared, the claim axis is the smallest member of the subject's component.
+ */
+const Alpha = defineNode("GateAlpha", {
+  schema: z.object({ email: z.string() }),
+});
+const Middle = defineNode("GateMiddle", {
+  schema: z.object({ email: z.string() }),
+});
+const Subject = defineNode("GateSubject", {
+  schema: z.object({ email: z.string() }),
+});
+const CHAIN_EMAIL_UNIQUE = {
+  ...HIERARCHY_EMAIL_UNIQUE,
+  name: "gate_chain_email",
+} as const;
+
+function chainGraph(
+  id: string,
+  relations: Readonly<{ middle: boolean; alpha: boolean }>,
+) {
+  return defineGraph({
+    id,
+    nodes: {
+      GateAlpha: { type: Alpha, unique: [CHAIN_EMAIL_UNIQUE] },
+      GateMiddle: { type: Middle, unique: [CHAIN_EMAIL_UNIQUE] },
+      GateSubject: { type: Subject, unique: [CHAIN_EMAIL_UNIQUE] },
+      GateBystander: { type: Bystander },
+      GateOtherBystander: { type: OtherBystander },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(Bystander, OtherBystander),
+      ...(relations.middle ? [subClassOf(Middle, Subject)] : []),
+      ...(relations.alpha ? [subClassOf(Alpha, Subject)] : []),
+    ],
+  });
+}
+
+/**
+ * Two kinds whose names order differently by UTF-16 code unit and by code
+ * point: the astral `U+1F600` is stored as the surrogate pair `D83D DE00`,
+ * which sorts below `U+FF22` by code unit and above it by code point. The
+ * claim axis is the code-point minimum, so it is `GATE_BMP_KIND`.
+ */
+const GATE_ASTRAL_KIND = "\u{1F600}GateAstral";
+const GATE_BMP_KIND = "\uFF22GateBmp";
+const AstralKind = defineNode(GATE_ASTRAL_KIND, {
+  schema: z.object({ email: z.string() }),
+});
+const BmpKind = defineNode(GATE_BMP_KIND, {
+  schema: z.object({ email: z.string() }),
+});
+function codePointOrderGraph(id: string, related: boolean) {
+  return defineGraph({
+    id,
+    nodes: {
+      [GATE_ASTRAL_KIND]: {
+        type: AstralKind,
+        unique: [HIERARCHY_EMAIL_UNIQUE],
+      },
+      [GATE_BMP_KIND]: { type: BmpKind, unique: [HIERARCHY_EMAIL_UNIQUE] },
+      GateBystander: { type: Bystander },
+      GateOtherBystander: { type: OtherBystander },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(Bystander, OtherBystander),
+      ...(related ? [subClassOf(BmpKind, AstralKind)] : []),
+    ],
+  });
+}
+/**
+ * `GateAccount` declared the way a JavaScript caller can write it: the typed
+ * API requires `scope` and `collation`, so leaving them at their defaults is
+ * spelled through a cast. `nickname` adds an optional property, the smallest
+ * change that makes a redeploy publish a new version.
+ */
+const NicknamedAccount = defineNode("GateAccount", {
+  schema: z.object({ email: z.string(), nickname: z.string().optional() }),
+});
+type DefaultedAccountDeclaration = Readonly<{
+  scope?: "kind" | "kindWithSubClasses";
+  collation?: "binary" | "caseInsensitive";
+}>;
+function defaultedAccountGraph(
+  id: string,
+  declaration: DefaultedAccountDeclaration,
+  nickname: boolean,
+) {
+  return defineGraph({
+    id,
+    nodes: {
+      GateAccount: {
+        type: nickname ? NicknamedAccount : Account,
+        unique: [
+          {
+            name: ACCOUNT_EMAIL_UNIQUE.name,
+            fields: ["email"],
+            ...declaration,
+          },
+        ] as unknown as readonly (typeof ACCOUNT_EMAIL_UNIQUE)[],
+      },
+    },
+    edges: {},
+  });
+}
+
+/**
+ * The hierarchy `hierarchyGraph` builds, with a constraint whose scope is
+ * left out — read as `"kindWithSubClasses"`, what the store has always
+ * enforced for it.
+ */
+function defaultedScopeHierarchyGraph(id: string, related: boolean) {
+  const unique = [
+    { name: "gate_person_email", fields: ["email"] },
+  ] as unknown as readonly (typeof ACCOUNT_EMAIL_UNIQUE)[];
+  return defineGraph({
+    id,
+    nodes: {
+      GatePerson: { type: Person, unique },
+      GateEmployee: { type: Employee, unique },
+      GateBystander: { type: Bystander },
+      GateOtherBystander: { type: OtherBystander },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(Bystander, OtherBystander),
+      ...(related ? [subClassOf(Employee, Person)] : []),
+    ],
+  });
+}
+
+/**
+ * `graph` with its unique declarations replaced after `defineGraph` ran, the
+ * way a `{ ...graph, nodes }` spread builds one: the scope and collation the
+ * caller left out are never written into the registrations.
+ */
+function withUndefaultedDeclarations<G extends ReturnType<typeof defineGraph>>(
+  graph: G,
+  constraintName: string,
+  kinds: readonly string[],
+): G {
+  const unique = [{ name: constraintName, fields: ["email"] }];
+  const nodes = Object.fromEntries(
+    Object.entries(graph.nodes).map(([kind, registration]) => [
+      kind,
+      kinds.includes(kind) ? { ...registration, unique } : registration,
+    ]),
+  );
+  return { ...graph, nodes };
+}
+
+function uniqueConstraintChanges(diff: SchemaDiff): readonly string[] {
+  return diff.nodes
+    .map((change) => change.details)
+    .filter((details) => details.startsWith("Unique constraints changed"));
+}
+
+type EmailCollections = Record<
+  string,
+  Readonly<{ create: (props: { email: string }) => Promise<unknown> }>
+>;
+
+/** A kind a graph can drop with its rows left in the table, then re-add. */
+const Revenant = defineNode("GateRevenant", {
+  schema: z.object({ email: z.string() }),
+});
+const REVENANT_EMAIL_UNIQUE = {
+  name: "gate_revenant_email",
+  fields: ["email"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+function revenantGraph(id: string, state: "plain" | "dropped" | "unique") {
+  return defineGraph({
+    id,
+    nodes: {
+      GateBystander: { type: Bystander },
+      ...(state === "dropped" ?
+        {}
+      : {
+          GateRevenant: {
+            type: Revenant,
+            unique: state === "unique" ? [REVENANT_EMAIL_UNIQUE] : [],
+          },
+        }),
+    },
+    edges: {},
+  });
+}
+const REVENANT_EXTENSION = defineGraphExtension({
+  nodes: {
+    GateRevenant: {
+      properties: { email: { type: "string" } },
+      unique: [{ name: "gate_revenant_email", fields: ["email"] }],
+    },
+  },
+});
+
+const Host = defineNode("GateHost", { schema: z.object({}) });
+function hostGraph(id: string) {
+  return defineGraph({ id, nodes: { GateHost: { type: Host } }, edges: {} });
+}
+/**
+ * `"explicitDefaults"` states the `scope` and `collation` the plain
+ * declaration leaves implied; `"caseInsensitive"` reshapes it.
+ */
+function taggedExtension(
+  unique: boolean | "explicitDefaults" | "caseInsensitive",
+) {
+  const constraint = { name: "gate_tag_label", fields: ["label"] };
+  const declared = {
+    explicitDefaults: { ...constraint, scope: "kind", collation: "binary" },
+    caseInsensitive: { ...constraint, collation: "caseInsensitive" },
+  } as const;
+  return defineGraphExtension({
+    nodes: {
+      GateTag: {
+        properties: { label: { type: "string" } },
+        ...(unique === false ? {}
+        : unique === true ? { unique: [constraint] }
+        : { unique: [declared[unique]] }),
+      },
+    },
+  });
+}
+
+async function activeVersion(
+  context: IntegrationTestContext,
+  id: string,
+): Promise<number> {
+  const active = await getActiveSchema(context.getBackend(), id);
+  return requireDefined(active, "active schema").version;
+}
+
+function gatedConstraints(error: unknown): readonly UniquenessClaimGate[] {
+  expect(error).toBeInstanceOf(MigrationError);
+  const details: MigrationErrorDetails = (error as MigrationError).details;
+  if (details.reason !== "unique-constraint-requires-empty-kind") {
+    throw new Error(
+      `expected unique-constraint-requires-empty-kind, got ${details.reason}`,
+    );
+  }
+  return details.constraints;
+}
+
+const ACCOUNT_CONSTRAINT_ADDED: UniquenessClaimGate = {
+  cause: "constraint-added",
+  kind: "GateAccount",
+  constraintName: "gate_account_email",
+  axis: "GateAccount",
+};
+
+export function registerUniquenessClaimGateIntegrationTests(
+  context: IntegrationTestContext,
+): void {
+  describe("schema commits that would strand uniqueness enforcement", () => {
+    it("refuses adding a unique constraint to a populated kind through createStoreWithSchema", async () => {
+      const id = "uniqueness_gate_add_ensure";
+      const store = await context.createStore(accountGraph(id, "none"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "kind"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([ACCOUNT_CONSTRAINT_ADDED]);
+      expect((error as MigrationError).details).toMatchObject({
+        graphId: id,
+        fromVersion: 1,
+        toVersion: 2,
+      });
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: dropping `assertUniquenessClaimGatesOpen` from the
+    // tightening preflight's `run` commits version 2 over two rows that
+    // violate the constraint, and this case fails.
+
+    it("refuses the same addition when the existing rows hold no duplicate", async () => {
+      const id = "uniqueness_gate_add_clean_rows";
+      const store = await context.createStore(accountGraph(id, "none"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "kind"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      // No claim row is backfilled, so a later duplicate of the OLD value
+      // would be accepted: duplicate-free rows are refused all the same.
+      expect(gatedConstraints(error)).toEqual([ACCOUNT_CONSTRAINT_ADDED]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("refuses the same addition through migrateSchema", async () => {
+      const id = "uniqueness_gate_add_migrate";
+      const store = await context.createStore(accountGraph(id, "none"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await migrateSchema(
+        context.getBackend(),
+        accountGraph(id, "kind"),
+        1,
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([ACCOUNT_CONSTRAINT_ADDED]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: same as above; `migrateSchema` reaches the gate through
+    // the one tightening preflight every commit path composes.
+
+    it("refuses reshaping a unique constraint on a populated kind", async () => {
+      const id = "uniqueness_gate_reshape";
+      const store = await context.createStore(accountGraph(id, "kind"));
+      await store.nodes.GateAccount.create({ email: "Case@example.com" });
+      await store.nodes.GateAccount.create({ email: "case@example.com" });
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "caseInsensitive"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        { ...ACCOUNT_CONSTRAINT_ADDED, cause: "constraint-reshaped" },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: making `uniqueConstraintEnforcementChange` return
+    // `undefined` for a same-named constraint of a different shape commits
+    // the reshape, and this case fails.
+
+    it("refuses a reshape that changes only the constraint's where predicate on a populated kind", async () => {
+      const id = "uniqueness_gate_reshape_where";
+      const store = await context.createStore(accountGraph(id, "kind"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "partial"),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        { ...ACCOUNT_CONSTRAINT_ADDED, cause: "constraint-reshaped" },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK (verified): leaving `where` out of `enforcedShape`
+    // (src/schema/unique-constraint-change.ts) reads the reshape as
+    // unchanged, the commit succeeds, and this case fails.
+
+    it("redeploys a populated kind whose unique constraint leaves scope and collation at their defaults", async () => {
+      const declarations: readonly DefaultedAccountDeclaration[] = [
+        {},
+        { collation: "caseInsensitive" },
+        { scope: "kind" },
+      ];
+      for (const [index, declaration] of declarations.entries()) {
+        const id = `uniqueness_gate_defaults_ensure_${index}`;
+        const before = await context.createStore(
+          defaultedAccountGraph(id, declaration, false),
+        );
+        await before.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+        const [store, result] = await createAdapterStoreWithSchema(
+          defaultedAccountGraph(id, declaration, true),
+          context.getBackend(),
+        );
+
+        if (result.status !== "migrated") {
+          throw new Error(`expected migrated, got ${result.status}`);
+        }
+        expect(uniqueConstraintChanges(result.diff)).toEqual([]);
+        expect(await activeVersion(context, id)).toBe(2);
+        await expect(
+          store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL }),
+        ).rejects.toBeInstanceOf(UniquenessError);
+
+        const [, redeployed] = await createAdapterStoreWithSchema(
+          defaultedAccountGraph(id, declaration, true),
+          context.getBackend(),
+        );
+        expect(redeployed.status).toBe("unchanged");
+      }
+    });
+    // MUTATION CHECK: returning the registrations as given from
+    // `withUniqueConstraintDefaultsWritten` serializes the omitted members
+    // away while the parser fills them into the stored side, and the diff
+    // reports a unique-constraint change that did not happen.
+
+    it("redeploys a defaulted unique constraint with its defaults written out", async () => {
+      const id = "uniqueness_gate_defaults_explicit";
+      const before = await context.createStore(
+        defaultedAccountGraph(id, {}, false),
+      );
+      await before.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const [, result] = await createAdapterStoreWithSchema(
+        defaultedAccountGraph(
+          id,
+          { scope: "kindWithSubClasses", collation: "binary" },
+          true,
+        ),
+        context.getBackend(),
+      );
+
+      expect(result.status).toBe("migrated");
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+
+    it("redeploys a defaulted unique constraint through migrateSchema", async () => {
+      const id = "uniqueness_gate_defaults_migrate";
+      const before = await context.createStore(
+        defaultedAccountGraph(id, {}, false),
+      );
+      await before.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const version = await migrateSchema(
+        context.getBackend(),
+        defaultedAccountGraph(id, {}, true),
+        1,
+      );
+
+      expect(version).toBe(2);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+
+    it("evolves a graph whose populated kind leaves its unique constraint's defaults unwritten", async () => {
+      const id = "uniqueness_gate_defaults_evolve";
+      const store = await context.createStore(
+        defaultedAccountGraph(id, {}, false),
+      );
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const evolved = await store.evolve(taggedExtension(false));
+
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        evolved.nodes.GateAccount.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("refuses a reshape of a defaulted unique constraint on a populated kind", async () => {
+      const id = "uniqueness_gate_defaults_reshape";
+      const before = await context.createStore(
+        defaultedAccountGraph(id, {}, false),
+      );
+      await before.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        defaultedAccountGraph(id, { collation: "caseInsensitive" }, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        { ...ACCOUNT_CONSTRAINT_ADDED, cause: "constraint-reshaped" },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("refuses stating scope kind over an omitted scope on a populated kind", async () => {
+      const id = "uniqueness_gate_defaults_kind_restated";
+      const before = await context.createStore(
+        defaultedAccountGraph(id, {}, false),
+      );
+      await before.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        defaultedAccountGraph(id, { scope: "kind" }, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        { ...ACCOUNT_CONSTRAINT_ADDED, cause: "constraint-reshaped" },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("enforces an omitted scope across the subclass component and gates the axis move a subClassOf removal makes", async () => {
+      const id = "uniqueness_gate_defaults_component_scope";
+      const before = await context.createStore(
+        defaultedScopeHierarchyGraph(id, true),
+      );
+      await before.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+      await expect(
+        before.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+
+      const error = await createAdapterStoreWithSchema(
+        defaultedScopeHierarchyGraph(id, false),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        {
+          cause: "claim-axis-moved",
+          kind: "GatePerson",
+          constraintName: "gate_person_email",
+          axis: "GatePerson",
+          lostKinds: ["GateEmployee"],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: reading an omitted node scope as `"kind"` in
+    // `NODE_UNIQUE_CONSTRAINT_DEFAULTS` accepts the `GateEmployee` duplicate,
+    // and lets the removal commit with the `GatePerson` claim still at the
+    // `GateEmployee` axis.
+
+    it("gates the axis move and reports no phantom change for a graph whose declarations skipped defineGraph", async () => {
+      const id = "uniqueness_gate_defaults_spread";
+      const spread = (related: boolean) =>
+        withUndefaultedDeclarations(
+          defaultedScopeHierarchyGraph(id, related),
+          "gate_person_email",
+          ["GatePerson", "GateEmployee"],
+        );
+      const before = await context.createStore(spread(true));
+      await before.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        spread(false),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        {
+          cause: "claim-axis-moved",
+          kind: "GatePerson",
+          constraintName: "gate_person_email",
+          axis: "GatePerson",
+          lostKinds: ["GateEmployee"],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: with `serializeUniqueConstraints` serializing a
+    // declaration as given AND the gate's scope test back to
+    // `scope === "kindWithSubClasses"`, the subClassOf removal commits over
+    // the claim at the `GateEmployee` axis. Either one alone still refuses.
+
+    it("enforces a declaration that skipped defineGraph across the subclass component, with binary keys", async () => {
+      const store = await context.createStore(
+        withUndefaultedDeclarations(
+          defaultedScopeHierarchyGraph(
+            "uniqueness_gate_defaults_enforced",
+            true,
+          ),
+          "gate_person_email",
+          ["GatePerson", "GateEmployee"],
+        ),
+      );
+      await store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      // The omitted scope spans the component, so a subclass row collides.
+      await expect(
+        store.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      // The omitted collation is binary, so a value differing in case does not.
+      await expect(
+        store.nodes.GateEmployee.create({
+          email: DUPLICATE_EMAIL.toUpperCase(),
+        }),
+      ).resolves.toBeDefined();
+    });
+    // MUTATION CHECK (verified): dropping the omitted-scope fallback in
+    // `uniquenessScopeSpansSubclasses` (src/core/unique-constraint-options.ts)
+    // admits the subclass row; reading an omitted collation as
+    // `"caseInsensitive"` in `uniqueCollationFoldsCase` refuses the
+    // upper-cased one.
+
+    it("migrates a graph whose declarations skipped defineGraph without a phantom unique-constraint change", async () => {
+      const id = "uniqueness_gate_defaults_spread_diff";
+      const spread = (nickname: boolean) =>
+        withUndefaultedDeclarations(
+          defaultedAccountGraph(id, {}, nickname),
+          ACCOUNT_EMAIL_UNIQUE.name,
+          ["GateAccount"],
+        );
+      const before = await context.createStore(spread(false));
+      await before.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const [, result] = await createAdapterStoreWithSchema(
+        spread(true),
+        context.getBackend(),
+      );
+
+      if (result.status !== "migrated") {
+        throw new Error(`expected migrated, got ${result.status}`);
+      }
+      expect(uniqueConstraintChanges(result.diff)).toEqual([]);
+    });
+    // MUTATION CHECK: serializing a declaration as given in
+    // `serializeUniqueConstraints` diffs the absent scope against the
+    // parser-filled stored one and reports "Unique constraints changed".
+
+    it("adds a unique constraint to an unpopulated kind and enforces it", async () => {
+      const id = "uniqueness_gate_add_empty";
+      await context.createStore(accountGraph(id, "none"));
+
+      const [store] = await createAdapterStoreWithSchema(
+        accountGraph(id, "kind"),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+      await expect(
+        store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("adds a unique constraint once the kind's rows are deleted", async () => {
+      const id = "uniqueness_gate_add_emptied";
+      const before = await context.createStore(accountGraph(id, "none"));
+      const first = await before.nodes.GateAccount.create({
+        email: DUPLICATE_EMAIL,
+      });
+      const second = await before.nodes.GateAccount.create({
+        email: DUPLICATE_EMAIL,
+      });
+      await before.nodes.GateAccount.delete(first.id);
+      await before.nodes.GateAccount.delete(second.id);
+
+      const [store] = await createAdapterStoreWithSchema(
+        accountGraph(id, "kind"),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+      await expect(
+        store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("drops a unique constraint from a populated kind", async () => {
+      const id = "uniqueness_gate_drop";
+      const store = await context.createStore(accountGraph(id, "kind"));
+      await store.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      await createAdapterStoreWithSchema(
+        accountGraph(id, "none"),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+
+    it("refuses rolling back to a version that declares a unique constraint the populated kind lacks", async () => {
+      const id = "uniqueness_gate_rollback";
+      await context.createStore(accountGraph(id, "kind"));
+      const [relaxed] = await createAdapterStoreWithSchema(
+        accountGraph(id, "none"),
+        context.getBackend(),
+      );
+      await relaxed.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+      await relaxed.nodes.GateAccount.create({ email: DUPLICATE_EMAIL });
+
+      const error = await rollbackSchema(context.getBackend(), id, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(gatedConstraints(error)).toEqual([ACCOUNT_CONSTRAINT_ADDED]);
+      expect((error as MigrationError).details).toMatchObject({
+        fromVersion: 2,
+        toVersion: 1,
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: dropping the gate from the tightening preflight
+    // reactivates version 1 over two duplicate rows, and this case fails.
+
+    it("rolls back to a version that declares a unique constraint while the kind is empty", async () => {
+      const id = "uniqueness_gate_rollback_empty";
+      await context.createStore(accountGraph(id, "kind"));
+      await createAdapterStoreWithSchema(
+        accountGraph(id, "none"),
+        context.getBackend(),
+      );
+
+      await rollbackSchema(context.getBackend(), id, 1);
+
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("refuses removing a subClassOf relation that moves a populated kind's claim axis", async () => {
+      const id = "uniqueness_gate_axis_split";
+      const store = await context.createStore(hierarchyGraph(id, true));
+      await store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      const error = await createAdapterStoreWithSchema(
+        hierarchyGraph(id, false),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([PERSON_AXIS_MOVED]);
+      expect(await activeVersion(context, id)).toBe(1);
+      // Still fenced under the version that stayed active.
+      await expect(
+        store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+    // MUTATION CHECK: returning no gate for an unchanged constraint in
+    // `uniquenessClaimGates` commits the split; `GatePerson` then probes only
+    // its own axis, misses the claim at `GateEmployee`, and accepts a second
+    // row with the same email.
+
+    it("refuses the same axis move through migrateSchema", async () => {
+      const id = "uniqueness_gate_axis_split_migrate";
+      const store = await context.createStore(hierarchyGraph(id, true));
+      await store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      const error = await migrateSchema(
+        context.getBackend(),
+        hierarchyGraph(id, false),
+        1,
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([PERSON_AXIS_MOVED]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("refuses rolling back to a version whose hierarchy moves a populated kind's claim axis", async () => {
+      const id = "uniqueness_gate_axis_split_rollback";
+      await context.createStore(hierarchyGraph(id, false));
+      const [merged] = await createAdapterStoreWithSchema(
+        hierarchyGraph(id, true),
+        context.getBackend(),
+      );
+      await merged.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      const error = await rollbackSchema(context.getBackend(), id, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(gatedConstraints(error)).toEqual([PERSON_AXIS_MOVED]);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+
+    it("removes a subClassOf relation while only the kind that keeps its axis is populated", async () => {
+      const id = "uniqueness_gate_axis_split_kept";
+      const before = await context.createStore(hierarchyGraph(id, true));
+      await before.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL });
+
+      const [store] = await createAdapterStoreWithSchema(
+        hierarchyGraph(id, false),
+        context.getBackend(),
+      );
+
+      // `GateEmployee` wrote at `GateEmployee` and still probes it. The lost
+      // member, `GatePerson`, sorts after it, so no claim of its can sit there.
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        store.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("orders the claim axis and the split gate by the same code-point order", async () => {
+      const id = "uniqueness_gate_axis_code_point_order";
+      const before = await context.createStore(codePointOrderGraph(id, true));
+      const beforeNodes = before.nodes as unknown as EmailCollections;
+      await requireDefined(beforeNodes[GATE_BMP_KIND]).create({
+        email: DUPLICATE_EMAIL,
+      });
+
+      const [store] = await createAdapterStoreWithSchema(
+        codePointOrderGraph(id, false),
+        context.getBackend(),
+      );
+      const nodes = store.nodes as unknown as EmailCollections;
+
+      // The BMP kind wrote at its own axis and keeps probing it; the lost
+      // member sorts after it by code point, so the split commits ungated.
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        requireDefined(nodes[GATE_BMP_KIND]).create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      await expect(
+        requireDefined(nodes[GATE_ASTRAL_KIND]).create({
+          email: DUPLICATE_EMAIL,
+        }),
+      ).resolves.toBeDefined();
+    });
+    // MUTATION CHECK: folding `uniquenessAxisOfKinds` by UTF-16 code unit
+    // writes the BMP row at the astral axis, so after the split the BMP
+    // duplicate is accepted and the astral row is refused.
+
+    it("removes a subClassOf relation while the hierarchy holds no rows", async () => {
+      const id = "uniqueness_gate_axis_split_empty";
+      await context.createStore(hierarchyGraph(id, true));
+
+      const [store] = await createAdapterStoreWithSchema(
+        hierarchyGraph(id, false),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+      await store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+      await expect(
+        store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("refuses a split that drops the older axis after a merge moved the claim axis", async () => {
+      const id = "uniqueness_gate_merge_then_split";
+      const first = await context.createStore(
+        chainGraph(id, { middle: true, alpha: false }),
+      );
+      // The claim is written at `GateMiddle`, the smallest member.
+      await first.nodes.GateSubject.create({ email: DUPLICATE_EMAIL });
+      const [merged] = await createAdapterStoreWithSchema(
+        chainGraph(id, { middle: true, alpha: true }),
+        context.getBackend(),
+      );
+      // The merge moves the axis to `GateAlpha` without hiding the old claim.
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        merged.nodes.GateSubject.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+
+      // The split removes `GateMiddle`, where the claim sits, while the
+      // previous schema's own axis (`GateAlpha`) stays in the component.
+      const error = await createAdapterStoreWithSchema(
+        chainGraph(id, { middle: false, alpha: true }),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        {
+          cause: "claim-axis-moved",
+          kind: "GateSubject",
+          constraintName: "gate_chain_email",
+          axis: "GateAlpha",
+          lostKinds: ["GateMiddle"],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        merged.nodes.GateSubject.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+    // MUTATION CHECK: gating only when the previous schema's own axis leaves
+    // the proposed component commits version 3 here; `GateSubject` then probes
+    // `{GateAlpha, GateSubject}`, misses the claim at `GateMiddle`, and accepts
+    // a second row with the same email.
+
+    it("keeps existing claims fencing after a subClassOf addition merges the axis", async () => {
+      const id = "uniqueness_gate_axis_merge";
+      const before = await context.createStore(hierarchyGraph(id, false));
+      await before.nodes.GatePerson.create({ email: DUPLICATE_EMAIL });
+
+      const [store] = await createAdapterStoreWithSchema(
+        hierarchyGraph(id, true),
+        context.getBackend(),
+      );
+
+      // The axis moved from `GatePerson` to `GateEmployee`, but the merged
+      // component still probes `GatePerson`, where the old claim sits.
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(
+        store.nodes.GatePerson.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      await expect(
+        store.nodes.GateEmployee.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses removeKinds of the kind a populated hierarchy's claims sit under", async () => {
+      const id = "uniqueness_gate_remove_kinds";
+      const store = await context.createStore(wholeGraph(id));
+      const evolved = await store.evolve(AARDVARK_EXTENSION);
+      await evolved.nodes.GateWhole.create({ email: DUPLICATE_EMAIL });
+
+      const error = await evolved
+        .removeKinds(["GateAardvark"])
+        .catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        {
+          cause: "claim-axis-moved",
+          kind: "GateWhole",
+          constraintName: "gate_whole_email",
+          axis: "GateWhole",
+          lostKinds: ["GateAardvark"],
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: dropping the gate lets the removal commit; `GateWhole`
+    // then probes only itself and accepts a duplicate of the claimed email.
+
+    it("removes that kind while the hierarchy is empty", async () => {
+      const id = "uniqueness_gate_remove_kinds_empty";
+      const store = await context.createStore(wholeGraph(id));
+      const evolved = await store.evolve(AARDVARK_EXTENSION);
+
+      await evolved.removeKinds(["GateAardvark"]);
+
+      expect(await activeVersion(context, id)).toBe(3);
+    });
+
+    it("refuses adding a unique constraint to a populated extension kind through evolve and an adopted plan", async () => {
+      const id = "uniqueness_gate_evolve";
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        hostGraph(id),
+        backend,
+      );
+      const evolved = await store.evolve(taggedExtension(false));
+      const tags = evolved.getNodeCollectionOrThrow("GateTag");
+      await tags.create({ label: "same" });
+      await tags.create({ label: "same" });
+
+      const evolveError = await evolved
+        .evolve(taggedExtension(true))
+        .catch((error_: unknown) => error_);
+      expect(evolveError).toBeInstanceOf(IncompatibleChangeError);
+      expect((evolveError as IncompatibleChangeError).changes).toMatchObject([
+        { kind: "GateTag", type: "ADD_UNIQUE_ON_POPULATED" },
+      ]);
+
+      // The gate and the extension classifier name the same kind, so the plan
+      // lists it once, and not as an ontology tightening.
+      const plan = await evolved.planEvolution(taggedExtension(true));
+      if (plan.status !== "change") throw new Error("Expected a change plan.");
+      expect(
+        plan.requirements.filter(
+          (requirement) =>
+            requirement.kind === "require-empty" ||
+            requirement.kind === "ontology-tightening",
+        ),
+      ).toEqual([
+        { kind: "require-empty", entity: "node", kindName: "GateTag" },
+      ]);
+      // A lane that cannot adopt a schema-write transaction refuses the apply
+      // before reaching the plan's checks.
+      const adoptedRefusal =
+        backend.adoptSchemaWriteTransaction === undefined ?
+          UnsupportedBackendCapabilityError
+        : IncompatibleChangeError;
+      const adoptedError = await backend
+        .transactionWithNative(async (_target, nativeTx) =>
+          evolved.withEvolvedTransaction(nativeTx, plan, async () => {
+            await Promise.resolve();
+          }),
+        )
+        .catch((error_: unknown) => error_);
+      expect(adoptedError).toBeInstanceOf(adoptedRefusal);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: dropping the `ADD_UNIQUE_ON_POPULATED` record from
+    // `classifyUnique` changes both refusals to the gate's `MigrationError`
+    // (the commit is still refused), and this case fails.
+
+    it("evolves an extension kind's unique constraint to the same declaration with its defaults stated", async () => {
+      const id = "uniqueness_gate_extension_defaults";
+      const [store] = await createAdapterStoreWithSchema(
+        hostGraph(id),
+        context.getBackend(),
+      );
+      const evolved = await store.evolve(taggedExtension(true));
+      const tags = evolved.getNodeCollectionOrThrow("GateTag");
+      await tags.create({ label: "same" });
+
+      const restated = await evolved.evolve(
+        taggedExtension("explicitDefaults"),
+      );
+
+      expect(await activeVersion(context, id)).toBe(3);
+      await expect(
+        restated.getNodeCollectionOrThrow("GateTag").create({ label: "same" }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+    // MUTATION CHECK: comparing the declarations as written in
+    // `uniqueConstraintEnforcementChange` reads the stated defaults as a
+    // reshape, `classifyUnique` records `ADD_UNIQUE_ON_POPULATED`, and this
+    // case fails.
+
+    it("refuses reshaping an extension kind's unique constraint on a populated kind", async () => {
+      const id = "uniqueness_gate_extension_reshape";
+      const [store] = await createAdapterStoreWithSchema(
+        hostGraph(id),
+        context.getBackend(),
+      );
+      const evolved = await store.evolve(taggedExtension(true));
+      await evolved
+        .getNodeCollectionOrThrow("GateTag")
+        .create({ label: "same" });
+
+      const error = await evolved
+        .evolve(taggedExtension("caseInsensitive"))
+        .catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(IncompatibleChangeError);
+      expect((error as IncompatibleChangeError).changes).toMatchObject([
+        {
+          kind: "GateTag",
+          type: "ADD_UNIQUE_ON_POPULATED",
+          detail: 'unique constraint "gate_tag_label" reshaped',
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+
+    it("refuses re-adding a kind with a unique constraint over rows a discarded drop left behind", async () => {
+      const id = "uniqueness_gate_readd_discarded";
+      const backend = context.getBackend();
+      const original = await context.createStore(revenantGraph(id, "plain"));
+      await original.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL });
+      await migrateSchema(backend, revenantGraph(id, "dropped"), 1, {
+        discardDroppedKindRows: true,
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+
+      const error = await createAdapterStoreWithSchema(
+        revenantGraph(id, "unique"),
+        backend,
+      ).catch((error_: unknown) => error_);
+
+      expect(gatedConstraints(error)).toEqual([
+        {
+          cause: "constraint-added",
+          kind: "GateRevenant",
+          constraintName: "gate_revenant_email",
+          axis: "GateRevenant",
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: skipping kinds absent from the before-document in
+    // `declaredKindUniqueConstraints` commits version 3, and the old row, live
+    // again with no claim, lets `GateRevenant.create` accept a duplicate.
+
+    it("re-adds that kind with a unique constraint once the discarded rows are reclaimed", async () => {
+      const id = "uniqueness_gate_readd_reclaimed";
+      const backend = context.getBackend();
+      const original = await context.createStore(revenantGraph(id, "plain"));
+      await original.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL });
+      await migrateSchema(backend, revenantGraph(id, "dropped"), 1, {
+        discardDroppedKindRows: true,
+      });
+      const [dropped] = await createAdapterStoreWithSchema(
+        revenantGraph(id, "dropped"),
+        backend,
+      );
+      await dropped.materializeRemovals();
+
+      const [store] = await createAdapterStoreWithSchema(
+        revenantGraph(id, "unique"),
+        backend,
+      );
+
+      expect(await activeVersion(context, id)).toBe(3);
+      await store.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL });
+      await expect(
+        store.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("adds a kind with a unique constraint when no rows exist for it", async () => {
+      const id = "uniqueness_gate_add_new_kind";
+      await context.createStore(
+        defineGraph({
+          id,
+          nodes: { GateBystander: { type: Bystander } },
+          edges: {},
+        }),
+      );
+
+      const [store] = await createAdapterStoreWithSchema(
+        revenantGraph(id, "unique"),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+      await store.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL });
+      await expect(
+        store.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL }),
+      ).rejects.toBeInstanceOf(UniquenessError);
+    });
+
+    it("refuses an extension kind that re-adds discarded rows under a unique constraint, through evolve and an adopted plan", async () => {
+      const id = "uniqueness_gate_readd_extension";
+      const backend = context.getBackend();
+      const original = await context.createStore(revenantGraph(id, "plain"));
+      await original.nodes.GateRevenant.create({ email: DUPLICATE_EMAIL });
+      await migrateSchema(backend, revenantGraph(id, "dropped"), 1, {
+        discardDroppedKindRows: true,
+      });
+      const [store] = await createAdapterStoreWithSchema(
+        revenantGraph(id, "dropped"),
+        backend,
+      );
+
+      const evolveError = await store
+        .evolve(REVENANT_EXTENSION)
+        .catch((error_: unknown) => error_);
+      expect(gatedConstraints(evolveError)).toMatchObject([
+        { cause: "constraint-added", kind: "GateRevenant" },
+      ]);
+
+      // The kind is new in the plan, so it is listed as new and not twice.
+      const plan = await store.planEvolution(REVENANT_EXTENSION);
+      if (plan.status !== "change") throw new Error("Expected a change plan.");
+      expect(
+        plan.requirements.filter(
+          (requirement) => requirement.kind === "require-empty",
+        ),
+      ).toEqual([]);
+      const adoptedRefusal =
+        backend.adoptSchemaWriteTransaction === undefined ?
+          UnsupportedBackendCapabilityError
+        : MigrationError;
+      const adoptedError = await backend
+        .transactionWithNative(async (_target, nativeTx) =>
+          store.withEvolvedTransaction(nativeTx, plan, async () => {
+            await Promise.resolve();
+          }),
+        )
+        .catch((error_: unknown) => error_);
+      expect(adoptedError).toBeInstanceOf(adoptedRefusal);
+      expect(adoptedError).toMatchObject(
+        backend.adoptSchemaWriteTransaction === undefined ?
+          {}
+        : {
+            details: {
+              reason: "unique-constraint-requires-empty-kind",
+              constraints: [
+                { cause: "constraint-added", kind: "GateRevenant" },
+              ],
+            },
+          },
+      );
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: replacing `assertUniquenessClaimGatesOpen` in the
+    // tightening preflight with a no-op fails this case (the adopted plan
+    // commits) along with every other gate case.
+
+    it("counts at most `limit` rows when asked", async () => {
+      const id = "uniqueness_gate_bounded_count";
+      const store = await context.createStore(accountGraph(id, "none"));
+      for (const email of ["a", "b", "c"]) {
+        await store.nodes.GateAccount.create({ email });
+      }
+      const backend = context.getBackend();
+
+      expect(
+        await backend.countNodesByKind({ graphId: id, kind: "GateAccount" }),
+      ).toBe(3);
+      expect(
+        await backend.countNodesByKind({
+          graphId: id,
+          kind: "GateAccount",
+          limit: 1,
+        }),
+      ).toBe(1);
+      expect(
+        await backend.countNodesByKind({
+          graphId: id,
+          kind: "GateAccount",
+          limit: 10,
+        }),
+      ).toBe(3);
+    });
+    // MUTATION CHECK: ignoring `limit` in `buildCountQuery` makes the bounded
+    // count 3 and this case fails.
+
+    it("refuses with UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND when the backend cannot commit a preflight atomically", async () => {
+      const id = "uniqueness_gate_capability";
+      await context.createStore(accountGraph(id, "none"));
+      const restrictedBackend = projectBackendWithout(context.getBackend(), [
+        "commitSchemaVersionWithPreflight",
+      ]);
+
+      const error = await createAdapterStoreWithSchema(
+        accountGraph(id, "kind"),
+        restrictedBackend,
+      ).catch((error_: unknown) => error_);
+
+      // Refused even though the kind is empty: without the atomic primitive
+      // the emptiness probe cannot be bound to the commit it decides.
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toMatchObject({
+        code: "UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND",
+      });
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: returning `undefined` from
+    // `prepareSchemaTighteningPreflight` for a gate-only transition commits
+    // through the plain primitive with no probe, and this case fails.
+
+    it("refuses a gated rollback on a backend without setActiveVersionWithPreflight", async () => {
+      const id = "uniqueness_gate_rollback_capability";
+      await context.createStore(accountGraph(id, "kind"));
+      await createAdapterStoreWithSchema(
+        accountGraph(id, "none"),
+        context.getBackend(),
+      );
+      const restrictedBackend = projectBackendWithout(context.getBackend(), [
+        "setActiveVersionWithPreflight",
+      ]);
+
+      const error = await rollbackSchema(restrictedBackend, id, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toMatchObject({
+        code: "UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND",
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+  });
+}

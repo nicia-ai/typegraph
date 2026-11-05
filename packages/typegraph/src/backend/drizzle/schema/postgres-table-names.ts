@@ -11,6 +11,8 @@ export const defaultPostgresTableNames = {
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
   identitySeparation: "typegraph_identity_separation",
+  identityTransitions: "typegraph_identity_transitions",
+  identityTransitionRetention: "typegraph_identity_transition_retention",
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   baseSchemaVersions: "typegraph_base_schema_versions",

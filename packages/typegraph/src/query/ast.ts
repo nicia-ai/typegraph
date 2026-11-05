@@ -10,6 +10,9 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
+import { type RowMembership } from "../registry/row-membership";
+import { type Assert, type Equal } from "../utils/type-assert";
+import { type AliasExpansionAxis } from "./builder/alias-expansion";
 import { type DatabaseExpression } from "./expressions";
 import { type JsonPointer } from "./json-pointer";
 
@@ -398,8 +401,15 @@ export type PredicateExpression =
  */
 type QueryStart = Readonly<{
   alias: string;
-  kinds: readonly string[]; // Expanded via ontology if includeSubClasses
-  includeSubClasses: boolean;
+  kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
+  /**
+   * Which expansion axis produced `kinds` — see
+   * `src/query/builder/alias-expansion.ts`. Diagnostic only: error details and
+   * suggestions report it, but no compilation or execution decision may read
+   * it. `kinds` is the resolved decision; a later recursive stage re-roots on a
+   * traversal alias and labels it `"exact"` whatever axis resolved that alias.
+   */
+  expansion: AliasExpansionAxis;
 }>;
 
 // ============================================================
@@ -434,6 +444,12 @@ export type VariableLengthSpec = Readonly<{
   minDepth: number;
   /** Maximum number of hops (-1 = unlimited, default: -1) */
   maxDepth: number;
+  /**
+   * Walk to the end of every path with no hop ceiling: termination rests on
+   * cycle prevention, so it requires `cyclePolicy: "prevent"`, and it is
+   * mutually exclusive with a stated `maxDepth` (leave it at -1).
+   */
+  exhaustive?: boolean;
   /**
    * Cycle handling mode.
    *
@@ -477,7 +493,28 @@ export type Traversal = Readonly<{
   includeIdentityMembers?: boolean;
   /** Variable-length traversal configuration (for recursive CTEs) */
   variableLength?: VariableLengthSpec;
+  /**
+   * Present on a composition navigation (`parts()` / `wholes()`): each walked
+   * edge kind's composition membership rule. The traversal's edges are then
+   * read by ownership — a `"openRows"` kind's row binds only while open, an
+   * `"allRows"` kind's for its whole life — at the read's instant, rather
+   * than by the read's validity window.
+   */
+  compositionMembership?: readonly Readonly<{
+    edgeKind: string;
+    membership: "allRows" | "openRows";
+  }>[];
 }>;
+
+// Spelled inline above so the public `Traversal` type names no unexported
+// symbol; pinned here so it cannot drift from the rule's own type.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _compositionMembershipMatchesRowMembership = Assert<
+  Equal<
+    NonNullable<Traversal["compositionMembership"]>[number]["membership"],
+    RowMembership
+  >
+>;
 
 /**
  * Returns the full set of edge kind names for a traversal, merging

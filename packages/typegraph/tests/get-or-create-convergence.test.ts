@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CardinalityError,
   DatabaseOperationError,
   defineEdge,
   defineGraph,
@@ -92,6 +93,28 @@ const uniqueGraph = defineGraph({
       unique: [
         {
           name: "email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+const Member = defineNode("Member", {
+  schema: z.object({ email: z.string(), note: z.string().optional() }),
+});
+
+const noteGraph = defineGraph({
+  id: "get_or_create_convergence_note",
+  nodes: {
+    Member: {
+      type: Member,
+      unique: [
+        {
+          name: "member_email",
           fields: ["email"],
           scope: "kind",
           collation: "binary",
@@ -420,8 +443,8 @@ describe("getOrCreateByEndpoints convergence", () => {
             (target) =>
               fn({
                 ...target,
-                countEdgesFrom: async (params) => {
-                  if (reported) return target.countEdgesFrom(params);
+                countEdgesAtEndpoint: async (params) => {
+                  if (reported) return target.countEdgesAtEndpoint(params);
                   reported = true;
                   return 1;
                 },
@@ -481,6 +504,278 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.action).toBe("created");
     expect(reported).toBe(true);
+  });
+
+  it("does not re-run the node bulk constraint path over a matched update it already wrote", async () => {
+    // The convergence retry re-runs the batch on the SAME transaction. A
+    // reservation lost after a matched item's update landed (a racing peer
+    // the fence does not exclude) must therefore surface, not be retried:
+    // the retry would write the update a second time inside the caller's
+    // transaction, which keeps the first.
+    //
+    // MUTATION CHECK: drop the `progress.wrote` condition from the retry in
+    // `executeNodeBulkGetOrCreateByConstraint`
+    // (src/store/operations/node-operations.ts) — the batch then succeeds on
+    // its second attempt and the matched row is updated twice.
+    const setup = createStore(noteGraph, raw);
+    const member = await setup.nodes.Member.create({
+      email: "a@example.com",
+      note: "before",
+    });
+
+    let reported = false;
+    let matchedUpdates = 0;
+    const store = createStore(
+      noteGraph,
+      deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  updateNode: async (params) => {
+                    if (params.id === member.id) matchedUpdates += 1;
+                    return target.updateNode(params);
+                  },
+                  insertUniqueBatch: async (entries) => {
+                    const claimsNewRow = entries.some((entry) =>
+                      entry.key.includes("new@example.com"),
+                    );
+                    if (reported || !claimsNewRow) {
+                      return target.insertUniqueBatch?.(entries);
+                    }
+                    reported = true;
+                    throw new UniquenessError({
+                      constraintName: "member_email",
+                      kind: "Member",
+                      existingId: "winner",
+                      newId: "loser",
+                      fields: ["email"],
+                    });
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    let caught: unknown;
+    await store.transaction(async (tx) => {
+      try {
+        await tx.nodes.Member.bulkGetOrCreateByConstraint(
+          "member_email",
+          [
+            { props: { email: "a@example.com", note: "after" } },
+            { props: { email: "new@example.com" } },
+          ],
+          { ifExists: "update" },
+        );
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(reported).toBe(true);
+    expect(caught).toBeInstanceOf(UniquenessError);
+    expect(matchedUpdates).toBe(1);
+    const after = requireDefined(await setup.nodes.Member.getById(member.id));
+    expect(after.meta.version).toBe(member.meta.version + 1);
+  });
+
+  it("re-runs the node bulk constraint path in a transaction of its own after a matched update wrote", async () => {
+    // The same lost reservation on a batch that opened its own transaction:
+    // the refusal rolled the matched update back, so the retry starts from
+    // nothing and writes it once.
+    //
+    // MUTATION CHECK: drop the `transactionMode !== "opened"` condition from
+    // the retry in `executeNodeBulkGetOrCreateByConstraint`
+    // (src/store/operations/node-operations.ts) — the refusal then reaches
+    // the caller instead of converging.
+    const setup = createStore(noteGraph, raw);
+    const member = await setup.nodes.Member.create({
+      email: "a@example.com",
+      note: "before",
+    });
+
+    let reported = false;
+    const store = createStore(
+      noteGraph,
+      deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  insertUniqueBatch: async (entries) => {
+                    const claimsNewRow = entries.some((entry) =>
+                      entry.key.includes("new@example.com"),
+                    );
+                    if (reported || !claimsNewRow) {
+                      return target.insertUniqueBatch?.(entries);
+                    }
+                    reported = true;
+                    throw new UniquenessError({
+                      constraintName: "member_email",
+                      kind: "Member",
+                      existingId: "winner",
+                      newId: "loser",
+                      fields: ["email"],
+                    });
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const results = await store.nodes.Member.bulkGetOrCreateByConstraint(
+      "member_email",
+      [
+        { props: { email: "a@example.com", note: "after" } },
+        { props: { email: "new@example.com" } },
+      ],
+      { ifExists: "update" },
+    );
+
+    expect(reported).toBe(true);
+    expect(results.map((result) => result.action)).toEqual([
+      "updated",
+      "created",
+    ]);
+    const after = requireDefined(await setup.nodes.Member.getById(member.id));
+    expect(after.note).toBe("after");
+    expect(after.meta.version).toBe(member.meta.version + 1);
+  });
+
+  it("does not re-run the bulk endpoint path inside a caller's transaction once a leg wrote", async () => {
+    // The edge analogue. The create batch lands, then the resurrection loses
+    // a cardinality verdict at its write; re-running the batch on the
+    // caller's transaction would find the edge it just created and report a
+    // batch that threw as one that succeeded.
+    //
+    // MUTATION CHECK: drop the `progress.wrote` condition from the retry in
+    // `executeEdgeBulkGetOrCreateByEndpoints`
+    // (src/store/operations/edge-operations.ts) — the batch then succeeds on
+    // its second attempt and no refusal reaches the caller.
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const carol = await setup.nodes.Person.create({ name: "Carol" });
+    const ended = await setup.edges.knows.create(alice, carol, {
+      since: "2020",
+    });
+    await setup.edges.knows.delete(ended.id);
+
+    let reported = false;
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  updateEdge: async (params) => {
+                    if (reported || params.id !== ended.id) {
+                      return target.updateEdge(params);
+                    }
+                    reported = true;
+                    throw new CardinalityError({
+                      edgeKind: "knows",
+                      direction: "source",
+                      fromKind: "Person",
+                      fromId: alice.id,
+                      toKind: "Person",
+                      toId: carol.id,
+                      cardinality: "one",
+                      existingCount: 1,
+                    });
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    let caught: unknown;
+    await store.transaction(async (tx) => {
+      try {
+        await tx.edges.knows.bulkGetOrCreateByEndpoints([
+          { from: alice, to: bob, props: { since: "2024" } },
+          { from: alice, to: carol, props: { since: "2020" } },
+        ]);
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(reported).toBe(true);
+    expect(caught).toBeInstanceOf(CardinalityError);
+  });
+
+  it("re-runs the bulk endpoint path in a transaction of its own after a leg wrote", async () => {
+    // The same refusal on a batch whose frame opened the transaction: the
+    // refusal rolled the create back, so the retry starts from nothing.
+    //
+    // MUTATION CHECK: drop the `transactionMode !== "opened"` condition from
+    // the retry in `executeEdgeBulkGetOrCreateByEndpoints`
+    // (src/store/operations/edge-operations.ts) — the refusal then reaches
+    // the caller instead of converging.
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const carol = await setup.nodes.Person.create({ name: "Carol" });
+    const ended = await setup.edges.knows.create(alice, carol, {
+      since: "2020",
+    });
+    await setup.edges.knows.delete(ended.id);
+
+    let reported = false;
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  updateEdge: async (params) => {
+                    if (reported || params.id !== ended.id) {
+                      return target.updateEdge(params);
+                    }
+                    reported = true;
+                    throw new CardinalityError({
+                      edgeKind: "knows",
+                      direction: "source",
+                      fromKind: "Person",
+                      fromId: alice.id,
+                      toKind: "Person",
+                      toId: carol.id,
+                      cardinality: "one",
+                      existingCount: 1,
+                    });
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const results = await store.edges.knows.bulkGetOrCreateByEndpoints([
+      { from: alice, to: bob, props: { since: "2024" } },
+      { from: alice, to: carol, props: { since: "2020" } },
+    ]);
+
+    expect(reported).toBe(true);
+    expect(results.map((result) => result.action)).toEqual([
+      "created",
+      "resurrected",
+    ]);
+    expect(await setup.edges.knows.findFrom(alice)).toHaveLength(2);
   });
 
   it("reports a raced attempt as an unchanged completion, not an error", async () => {
@@ -780,9 +1075,9 @@ describe("getOrCreateByEndpoints convergence", () => {
                     endpointProbes += 1;
                     return target.getNode(graphId, nodeKind, id);
                   },
-                  countEdgesFrom: async (params) => {
+                  countEdgesAtEndpoint: async (params) => {
                     cardinalityProbes += 1;
-                    return target.countEdgesFrom(params);
+                    return target.countEdgesAtEndpoint(params);
                   },
                 }),
               ),

@@ -250,7 +250,7 @@ const IDENTITY_ADVISORY_LOCK_NAMESPACE = "typegraph:identity";
  * `executeIdentityStatement` (#447).
  *
  * The dialect check above is now the `resolveWriteFencePlan`/
- * `requireWriteFence` pair (§5.3): the `lock` arm takes the advisory lock,
+ * `requireWriteFence` pair: the `lock` arm takes the advisory lock,
  * and the `engine-serialized` arm is the SQLite writer-slot case this doc
  * already describes.
  */

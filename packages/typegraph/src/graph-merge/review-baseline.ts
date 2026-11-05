@@ -84,7 +84,7 @@ export async function captureReviewBaseline<G extends GraphDef>(
 }
 
 /**
- * Captures a V2 review baseline over candidate references and their exact
+ * Captures a candidate-scoped review baseline over candidate references and their exact
  * archival identity closure. The retained scope is re-read during approval
  * revalidation; newly connected peers/assertions therefore change the evidence.
  */

@@ -775,20 +775,35 @@ export type FulltextAccessor = Readonly<{
 
 /**
  * Creates a node-level fulltext accessor. The runtime check throws for
- * aliases whose node kind has no `searchable()` content, catching the
- * case where the field tag was dropped (e.g. by a schema refactor)
- * after the query was written.
+ * aliases with no `searchable()` content, catching the case where the field
+ * tag was dropped (e.g. by a schema refactor) after the query was written.
+ *
+ * `kindsWithoutSearchableField` names the kinds that leave the alias without
+ * searchable content; empty means `$fulltext` is available. It is absent for
+ * an alias that resolves to no node kind.
  */
 export function createFulltextAccessor(
   alias: string,
-  hasSearchableField: () => boolean,
+  kindsWithoutSearchableField: (() => readonly string[]) | undefined,
 ): FulltextAccessor {
   return {
     matches: (query, k, options) => {
-      if (!hasSearchableField()) {
+      if (kindsWithoutSearchableField === undefined) {
         throw new UnsupportedPredicateError(
-          `Cannot call .$fulltext.matches() on alias "${alias}" — its ` +
-            `node kind has no fields declared with searchable(). Add at ` +
+          `Cannot call .$fulltext.matches() on alias "${alias}" — the alias ` +
+            `resolves to no node kind in this query.`,
+        );
+      }
+      const lackingKinds = kindsWithoutSearchableField();
+      if (lackingKinds.length > 0) {
+        const kindList = lackingKinds
+          .map((kindName) => `"${kindName}"`)
+          .join(", ");
+        throw new UnsupportedPredicateError(
+          `Cannot call .$fulltext.matches() on alias "${alias}" — ` +
+            `${lackingKinds.length === 1 ? "kind" : "kinds"} ${kindList} ` +
+            `${lackingKinds.length === 1 ? "has" : "have"} no fields ` +
+            `declared with searchable(). Add at ` +
             `least one: \`title: searchable({ language: "english" })\`.`,
         );
       }

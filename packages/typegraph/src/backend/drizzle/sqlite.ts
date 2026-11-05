@@ -77,7 +77,7 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
@@ -181,6 +181,7 @@ import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
+import { assertBaseSchemaVersionCurrent } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -190,6 +191,7 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
@@ -1388,6 +1390,10 @@ export function buildSqliteEngineProfile(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1628,7 +1634,10 @@ export function buildSqliteEngineProfile(
       } catch (error) {
         if (
           attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
+          !isSqliteDuplicateColumnError(
+            error,
+            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+          )
         ) {
           throw error;
         }
@@ -1639,9 +1648,15 @@ export function buildSqliteEngineProfile(
     );
   }
 
-  async function readBaseSchemaVersion(): Promise<number | undefined> {
+  /**
+   * Reads the base-schema marker on `session`: the root connection by
+   * default, or a caller-owned transaction a schema-write adoption checks on.
+   */
+  async function readBaseSchemaVersion(
+    session: Pick<AnySqliteDatabase, "select"> = db,
+  ): Promise<number | undefined> {
     try {
-      const rows = await db
+      const rows = await session
         .select({ version: tables.baseSchemaVersions.version })
         .from(tables.baseSchemaVersions)
         .where(eq(tables.baseSchemaVersions.installation, 1));
@@ -1771,6 +1786,13 @@ export function buildSqliteEngineProfile(
         ),
       }),
     ],
+    identityTransitionsTableDdl: [
+      generateSqliteCreateTableSQL(tables.identityTransitions),
+      ...generateSqliteCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
     revisionChangesTableDdl: generateSqliteCreateTableSQL(
       tables.revisionChanges,
     ),
@@ -2356,6 +2378,12 @@ export function buildSqliteEngineProfile(
                     { tableName: tableNames.nodes },
                   );
                 }
+                // The commit this adoption admits must not land on a database
+                // an earlier release still opens; the marker is read on the
+                // caller's transaction, as everything this adoption decides is.
+                assertBaseSchemaVersionCurrent(
+                  await readBaseSchemaVersion(externalTx),
+                );
                 const [busyTimeout] = await externalTx.all<{ timeout: number }>(
                   sql`PRAGMA busy_timeout`,
                 );

@@ -80,3 +80,14 @@ export function identityValidityWindowsOverlap(
     (left.validTo === undefined || right.validFrom < left.validTo)
   );
 }
+
+/**
+ * Whether an identity assertion holds NOW. A window can never end in the
+ * future, so the ledger's current state is exactly its open rows: an assertion
+ * written bounded, retracted, or ended by deleting an endpoint is history.
+ */
+export function isCurrentIdentityAssertion(
+  assertion: Readonly<{ validTo?: string | undefined }>,
+): boolean {
+  return assertion.validTo === undefined;
+}

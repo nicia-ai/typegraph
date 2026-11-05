@@ -17,7 +17,10 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { requireCatalog } from "./capabilities/catalog";
 import { resolveRecursiveTraversal } from "./capabilities/recursive-traversal";
-import { normalizeGraphCommandIsolation } from "./command-contract";
+import {
+  FENCE_ISOLATION_COLUMN,
+  normalizeGraphCommandIsolation,
+} from "./command-contract";
 import {
   GRAPH_ID_COLUMN,
   GRAPH_PRESENCE_ANCHOR_KEYS,
@@ -52,8 +55,6 @@ const STORAGE_COUNT_TRANSACTION = {
   isolationLevel: "repeatable_read",
   accessMode: "read_only",
 } as const satisfies TransactionOptions;
-
-const SESSION_ISOLATION_COLUMN = "transaction_isolation";
 
 /** Options for {@link listGraphIds}. */
 export type ListGraphIdsOptions = Readonly<{
@@ -589,7 +590,7 @@ async function countRows(
   const isolationColumn =
     isolationExpression === undefined ?
       sql``
-    : sql`, ${isolationExpression} AS ${sql.identifier(SESSION_ISOLATION_COLUMN)}`;
+    : sql`, ${isolationExpression} AS ${sql.identifier(FENCE_ISOLATION_COLUMN)}`;
   const [row] = await target.execute<CountRow>(
     asCompiledRowsSql(
       sql`SELECT COUNT(*) AS cnt${isolationColumn} FROM ${sql.identifier(table)} WHERE ${sql.identifier(GRAPH_ID_COLUMN)} = ${graphId}`,
@@ -599,7 +600,7 @@ async function countRows(
     rows: safeCount(row?.cnt, table),
     isolation:
       isolationExpression === undefined ? undefined : (
-        normalizeGraphCommandIsolation(row?.[SESSION_ISOLATION_COLUMN])
+        normalizeGraphCommandIsolation(row?.[FENCE_ISOLATION_COLUMN])
       ),
   };
 }

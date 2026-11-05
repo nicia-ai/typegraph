@@ -38,6 +38,7 @@ import {
   getActiveSchema,
   initializeSchema,
   migrateSchema,
+  rollbackSchema,
 } from "../src/schema/manager";
 
 const Person = defineNode("Person", {
@@ -1171,6 +1172,74 @@ describe("durable edge match identity", () => {
     }
   });
 
+  it("probes an acyclic durable batch whole before its first row on the sequential fallback", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const graph = defineGraph({
+        id: "durable_identity_acyclic_sequential_fallback",
+        nodes: { Person: { type: Person } },
+        edges: {
+          knows: {
+            type: knows,
+            from: [Person],
+            to: [Person],
+            acyclic: true,
+            matchIdentity: { name: "knows-label", fields: ["label"] },
+          },
+        },
+      });
+      const [setup] = await createStoreWithSchema(graph, backend);
+      const alice = await setup.nodes.Person.create({ name: "Alice" });
+      const bob = await setup.nodes.Person.create({ name: "Bob" });
+
+      function withoutDurableBatch(target: GraphBackend): GraphBackend;
+      function withoutDurableBatch(
+        target: TransactionBackend,
+      ): TransactionBackend;
+      function withoutDurableBatch(
+        target: GraphBackend | TransactionBackend,
+      ): GraphBackend | TransactionBackend {
+        return deriveBackend(
+          projectBackendWithout(target, ["insertEdgesDurableBatchReturning"]),
+          { commands: target.commands },
+        );
+      }
+      const fallback = deriveBackend(withoutDurableBatch(backend), {
+        transaction: (run, options) =>
+          backend.transaction(
+            (target) => run(withoutDurableBatch(target)),
+            options,
+          ),
+      });
+      const store = createStore(graph, fallback);
+
+      const closingBatch = [
+        { from: alice, to: bob, props: { label: "forward" } },
+        { from: bob, to: alice, props: { label: "back" } },
+      ];
+      const writes = {
+        bulkCreate: (edges: typeof store.edges.knows) =>
+          edges.bulkCreate(closingBatch),
+        bulkInsert: (edges: typeof store.edges.knows) =>
+          edges.bulkInsert(closingBatch),
+      };
+      for (const write of Object.values(writes)) {
+        const refusals: unknown[] = [];
+        await store.transaction(async (tx) => {
+          await write(tx.edges.knows).catch((error: unknown) =>
+            refusals.push(error),
+          );
+        });
+        expect(refusals).toEqual([
+          expect.objectContaining({ name: "EdgeAcyclicityError" }),
+        ]);
+        expect(await setup.edges.knows.find({})).toEqual([]);
+      }
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("does not relabel an unrelated unique-index violation", async () => {
     const uniqueNote = defineEdgeIndex(knows, {
       fields: ["note"],
@@ -1270,6 +1339,36 @@ describe("durable edge match identity", () => {
     }
   });
 
+  it("refuses a rollback that re-keys a populated edge kind, leaving the active version", async () => {
+    const graphId = "durable_identity_rollback_rekey";
+    const { backend } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(durableGraph(graphId), backend);
+      await migrateSchema(backend, legacyGraph(graphId), 1);
+      const store = createStore(legacyGraph(graphId), backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      await store.edges.knows.create(alice, bob, { label: "friend" });
+
+      await expect(rollbackSchema(backend, graphId, 1)).rejects.toMatchObject({
+        details: {
+          reason: "edge-match-identity-rekey",
+          edgeKinds: ["knows"],
+          fromVersion: 2,
+          toVersion: 1,
+        },
+      });
+      const active = await backend.getActiveSchema(graphId);
+      expect(active?.version).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
+  // MUTATION CHECK: passing `edgeMatchIdentity: undefined` to the composed
+  // rollback preflight (`prepareRollbackPreflight`, src/schema/manager.ts)
+  // reactivates the durable key declaration over edges that carry no key;
+  // reporting `active + 1` instead of the rollback target fails `toVersion`.
+
   it("refuses first-schema identity adoption over populated unmanaged kinds", async () => {
     const { backend } = createLocalSqliteBackend({
       tables: createSqliteTables({ edges: "legacy_app_edges" }),
@@ -1315,6 +1414,67 @@ describe("durable edge match identity", () => {
       await expect(
         migrateSchema(backend, legacyGraph(graphId), 1),
       ).resolves.toBe(2);
+      await expect(backend.getActiveSchema(graphId)).resolves.toMatchObject({
+        version: 2,
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("refuses a re-key on a backend without the atomic preflight by naming edge match identity", async () => {
+    const graphId = "durable_identity_rekey_without_preflight";
+    const { backend } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(legacyGraph(graphId), backend);
+      const narrowed = projectBackendWithout(backend, [
+        "commitSchemaVersionWithPreflight",
+      ]);
+
+      const error = await migrateSchema(
+        narrowed,
+        durableGraph(graphId),
+        1,
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toEqual({
+        code: "EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId,
+        edgeKinds: ["knows"],
+      });
+      await expect(backend.getActiveSchema(graphId)).resolves.toMatchObject({
+        version: 1,
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+  // MUTATION CHECK: dropping the `edgeMatchIdentity` arm from
+  // `planSchemaCommitPreflight` commits the re-key through the plain
+  // primitive with no emptiness probe; answering it with identity's bag
+  // refuses with IDENTITY_REQUIRES_ATOMIC_BACKEND on a graph with no identity.
+
+  it("refuses a re-keying rollback on a backend without the atomic preflight by naming edge match identity", async () => {
+    const graphId = "durable_identity_rollback_without_preflight";
+    const { backend } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(durableGraph(graphId), backend);
+      await migrateSchema(backend, legacyGraph(graphId), 1);
+      const narrowed = projectBackendWithout(backend, [
+        "setActiveVersionWithPreflight",
+      ]);
+
+      const error = await rollbackSchema(narrowed, graphId, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toEqual({
+        code: "EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId,
+        edgeKinds: ["knows"],
+      });
       await expect(backend.getActiveSchema(graphId)).resolves.toMatchObject({
         version: 2,
       });

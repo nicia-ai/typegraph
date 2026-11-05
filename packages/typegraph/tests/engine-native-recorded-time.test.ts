@@ -31,7 +31,10 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  hasPart,
   migrateLegacyRecordedTime,
+  partOf,
+  pruneIdentityTransitions,
   recordedRelation,
   UnsupportedBackendCapabilityError,
 } from "../src";
@@ -56,9 +59,11 @@ import {
   createEngineRecordedInstant,
   createRecordedInstant,
 } from "../src/core/temporal";
-import { ConfigurationError } from "../src/errors";
+import { ConfigurationError, IdentityReplayError } from "../src/errors";
 import { MergePlanCapabilityError } from "../src/graph-merge/errors";
 import { planMerge } from "../src/graph-merge/merge";
+import { exportGraphStream, importGraphStream } from "../src/interchange";
+import { type GraphInterchangeChunk } from "../src/interchange/types";
 import { createQueryBuilder } from "../src/query/builder";
 import { compileQuery } from "../src/query/compiler";
 import {
@@ -753,6 +758,84 @@ describe("engine-native recorded time: transaction receipts", () => {
   });
 });
 
+// Engine-native `history: true` gets none of TypeGraph's recorded capture, so
+// no identity transition log exists to replay. The refusal must name THAT
+// state: "open with history: true" is wrong advice to a store that already did.
+describe("engine-native recorded time: identity replay", () => {
+  const engineNativeReplayRefusal = {
+    details: {
+      code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED",
+      graphId: identityGraph.id,
+    },
+  };
+
+  it("refuses transitionsOf, replay and prune with the engine-native code, on the store and inside a transaction", async () => {
+    const { backend } = createEngineNativeBackend([]);
+    const [store] = await createStoreWithSchema(identityGraph, backend, {
+      history: true,
+    });
+    const person = await store.nodes.PersonRecord.create({ name: "Ada" });
+    const ref = { kind: "PersonRecord", id: person.id } as const;
+
+    await expect(store.identity.transitionsOf(ref)).rejects.toBeInstanceOf(
+      IdentityReplayError,
+    );
+    await expect(store.identity.transitionsOf(ref)).rejects.toMatchObject(
+      engineNativeReplayRefusal,
+    );
+    await expect(store.identity.replay(ref)).rejects.toMatchObject(
+      engineNativeReplayRefusal,
+    );
+    await expect(
+      pruneIdentityTransitions(store, {
+        beforeRecorded: "2026-01-01T00:00:00.000Z",
+      }),
+    ).rejects.toMatchObject(engineNativeReplayRefusal);
+    await expect(
+      store.transaction((tx) => tx.identity.transitionsOf(ref)),
+    ).rejects.toMatchObject(engineNativeReplayRefusal);
+  });
+
+  // Load-bearing: the upfront archival-restore guard must gate on TypeGraph
+  // capture, as the store's own backstop does. Revert check: gate it on the
+  // public `store.historyEnabled` again (true for engine-native history) and
+  // the guard passes, so the stream writes its nodes before the backstop
+  // refuses at the final section.
+  it("refuses an archival-transitions restore before writing any node", async () => {
+    const [source] = await createStoreWithSchema(
+      identityGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    const person = await source.nodes.PersonRecord.create({ name: "Ada" });
+    const author = await source.nodes.AuthorRecord.create({
+      penName: "A. Lovelace",
+    });
+    await source.identity.assertSame(person, author);
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(chunk);
+    }
+
+    const { backend } = createEngineNativeBackend([]);
+    const [target] = await createStoreWithSchema(identityGraph, backend, {
+      history: true,
+    });
+    async function* replayChunks(): AsyncIterable<GraphInterchangeChunk> {
+      for (const chunk of chunks) {
+        await Promise.resolve();
+        yield chunk;
+      }
+    }
+    await expect(
+      importGraphStream(target, replayChunks(), { onConflict: "skip" }),
+    ).rejects.toMatchObject(engineNativeReplayRefusal);
+    expect(await target.nodes.PersonRecord.count()).toBe(0);
+  });
+});
+
 describe("engine-native recorded time: revisionNow", () => {
   /**
    * `revisionNow()` is another consumer of `#engineRecordedInstant`,
@@ -990,6 +1073,103 @@ describe("engine-native recorded time: live point read and scan", () => {
 
     const scanned = await view.nodes.Widget.scan();
     expect(scanned.data.map((node) => node.id)).toEqual([widget.id]);
+  });
+
+  /**
+   * A composition relation mixing `part -> whole` (`engineOf`) and
+   * `whole -> part` (`carHasWheel`) realizing edges makes `parts()` compile
+   * the recursive walk's narrowed `<alias>_directed_edges` CTE, and makes the
+   * `subgraph` closure walk both orientations at once. MUTATION-PROOF: make
+   * `createTemporalFilterPass` (src/query/compiler/passes/temporal.ts) report
+   * `RECORDED_TEMPORAL_COLUMNS` for every recorded-pinned read again,
+   * ignoring `carriesInterval`, and the `parts()` read fails with SQLite "no
+   * such column: e.recorded_from" — the narrowed CTE projects a column the
+   * engine-native source does not have — and the windowed `subgraph` read
+   * below fails the same way on its windowed edge source.
+   */
+  it("walks a mixed-orientation composition through the engine-native source", async () => {
+    const Car = defineNode("EnCar", { schema: z.object({}) });
+    const Engine = defineNode("EnEngine", { schema: z.object({}) });
+    const Wheel = defineNode("EnWheel", { schema: z.object({}) });
+    const engineOf = defineEdge("enEngineOf", { schema: z.object({}) });
+    const carHasWheel = defineEdge("enCarHasWheel", { schema: z.object({}) });
+    const carGraph = defineGraph({
+      id: "engine_native_recorded_time_composition",
+      nodes: {
+        EnCar: { type: Car },
+        EnEngine: { type: Engine },
+        EnWheel: { type: Wheel },
+      },
+      edges: {
+        enEngineOf: {
+          type: engineOf,
+          from: [Engine],
+          to: [Car],
+          cardinality: "one",
+        },
+        enCarHasWheel: {
+          type: carHasWheel,
+          from: [Car],
+          to: [Wheel],
+          targetCardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(Engine, Car, { via: engineOf }),
+        hasPart(Car, Wheel, { via: carHasWheel }),
+      ],
+    });
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+    });
+    const profile = buildSqliteEngineProfile(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+    });
+    attachEngineNativeRecordedTime(
+      profile.provisioning,
+      liveTableDressedRecordedTime(),
+      scriptedLineage(),
+    );
+    const [store] = await createStoreWithSchema(
+      carGraph,
+      createSqlBackend(profile),
+      { history: true },
+    );
+    const car = await store.nodes.EnCar.create({});
+    const engine = await store.nodes.EnEngine.create({});
+    const wheel = await store.nodes.EnWheel.create({});
+    await store.edges.enEngineOf.create(engine, car, {});
+    await store.edges.enCarHasWheel.create(car, wheel, {});
+    const view = store.asOfRecorded(
+      createEngineRecordedInstant(
+        LIVE_REVISION.revision,
+        LIVE_REVISION.recordedAt,
+      ),
+    );
+
+    const parts = await view
+      .query()
+      .from("EnCar", "c")
+      .whereNode("c", (node) => node.id.eq(car.id))
+      .parts("p")
+      .select((ctx) => ctx.p.id)
+      .execute();
+    expect(parts.toSorted()).toEqual([engine.id, wheel.id].toSorted());
+
+    const unit = await view.subgraph(car, { edges: [], composition: true });
+    expect(unit.nodes.map((node) => node.id).toSorted()).toEqual(
+      [car.id, engine.id, wheel.id].toSorted(),
+    );
+    expect(unit.edges).toHaveLength(2);
+
+    // A windowed edge source keeps the recorded columns its row filter reads;
+    // an engine-native source has none to keep.
+    const windowed = await view.subgraph(car, {
+      edges: ["enCarHasWheel"],
+      edgeWindows: { enCarHasWheel: { limit: 5 } },
+    });
+    expect(windowed.edges.map((edge) => edge.kind)).toEqual(["enCarHasWheel"]);
   });
 });
 

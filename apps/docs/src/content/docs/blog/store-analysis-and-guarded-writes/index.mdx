@@ -207,7 +207,7 @@ and edges, stages it on a throwaway copy, and hands back an ordinary merge plan
 without ever writing to the target.
 
 ```typescript
-const plan = unwrap(
+const { plan } = unwrap(
   await planCandidateWriteSet({
     target: store,
     makeBackend,

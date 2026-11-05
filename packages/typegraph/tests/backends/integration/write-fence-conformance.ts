@@ -96,7 +96,7 @@ import {
 } from "../../../src/backend/capabilities/write-fence";
 import {
   assertGraphCommandConvergenceIsolation,
-  graphCommandCoordinationIsolation,
+  graphCommandCoordinationAcquisition,
   mintGraphCommandCoordination,
 } from "../../../src/backend/command-contract";
 import { deriveBackend } from "../../../src/backend/derive-backend";
@@ -510,11 +510,11 @@ export function registerWriteFenceConformanceIntegrationTests(
               "an advisory-mechanism lock always mints coordination",
             );
             expect(
-              graphCommandCoordinationIsolation(
+              graphCommandCoordinationAcquisition(
                 tx.commands,
-                graphId,
                 coordination,
-              ),
+                graphId,
+              ).isolation,
             ).toBe("read_committed");
           });
         } finally {
@@ -589,7 +589,7 @@ export function registerWriteFenceConformanceIntegrationTests(
         const uncertified = mintGraphCommandCoordination(
           backend.commands,
           "write-fence-conformance-uncertified",
-          "unknown",
+          { isolation: "unknown", fenceRow: "advanced" },
         );
         expect(() => {
           assertGraphCommandConvergenceIsolation(
@@ -855,11 +855,11 @@ export function registerWriteFenceConformanceIntegrationTests(
               "a row-mechanism lock always mints coordination",
             );
             expect(
-              graphCommandCoordinationIsolation(
+              graphCommandCoordinationAcquisition(
                 tx.commands,
-                graphId,
                 coordination,
-              ),
+                graphId,
+              ).isolation,
             ).toBe("read_committed");
           });
         } finally {
@@ -928,11 +928,11 @@ export function registerWriteFenceConformanceIntegrationTests(
               "a row-mechanism lock always mints coordination",
             );
             expect(
-              graphCommandCoordinationIsolation(
+              graphCommandCoordinationAcquisition(
                 tx.commands,
-                graphId,
                 coordination,
-              ),
+                graphId,
+              ).isolation,
             ).toBe("read_committed");
           });
         } finally {

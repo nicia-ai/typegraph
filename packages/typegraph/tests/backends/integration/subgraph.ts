@@ -5,9 +5,15 @@
  * Runs against both SQLite and PostgreSQL via the integration test suite.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { indexSubgraph } from "../../../src";
-import { ValidationError } from "../../../src/errors";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  indexSubgraph,
+} from "../../../src";
+import { KindNotFoundError, ValidationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -77,6 +83,16 @@ async function seedSubgraphData(store: SubgraphTestStore): Promise<{
   return { alice, bob, charlie, acme };
 }
 
+const RwPerson = defineNode("RwPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const rwKnows = defineEdge("rwKnows", { schema: z.object({}) });
+const recordedWindowGraph = defineGraph({
+  id: "subgraph_recorded_edge_windows",
+  nodes: { RwPerson: { type: RwPerson } },
+  edges: { rwKnows: { type: rwKnows, from: [RwPerson], to: [RwPerson] } },
+});
+
 export function registerSubgraphIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -141,6 +157,36 @@ export function registerSubgraphIntegrationTests(
       expect(index.node(dave)).toBeDefined();
       expect(index.node(seeded.bob)).toBeUndefined();
       expect(index.outgoing(seeded.alice, "knows")).toHaveLength(1);
+    });
+
+    it("applies edge windows under a recorded-pinned read", async () => {
+      const history = await context.createHistoryStore(recordedWindowGraph);
+      const root = await history.nodes.RwPerson.create({ name: "root" });
+      const first = await history.nodes.RwPerson.create({ name: "first" });
+      const second = await history.nodes.RwPerson.create({ name: "second" });
+      await history.edges.rwKnows.create(root, first, {}, { id: "rw-a" });
+      await history.edges.rwKnows.create(root, second, {}, { id: "rw-b" });
+      const pin = requireDefined(await history.recordedNow());
+      await history.edges.rwKnows.create(second, first, {}, { id: "rw-late" });
+
+      // MUTATION CHECK: drop `recordedIntervalColumns(...)` from the windowed
+      // edge source's column list in `buildSubgraphEdgeSource`
+      // (src/store/subgraph.ts) and this read fails with "no such column:
+      // e.recorded_from" (an undefined-column error on PostgreSQL): the row
+      // filter over that source narrows by the recorded interval — verified
+      // and reverted.
+      const result = await history.asOfRecorded(pin).subgraph(root, {
+        edges: ["rwKnows"],
+        maxDepth: 2,
+        edgeWindows: {
+          rwKnows: { limit: 1, orderBy: { field: "id", direction: "asc" } },
+        },
+      });
+
+      expect(result.nodes.map((node) => node.id).toSorted()).toEqual(
+        [root.id, first.id].toSorted(),
+      );
+      expect(result.edges.map((edge) => edge.id)).toEqual(["rw-a"]);
     });
 
     it("partitions edge windows independently at later hops", async () => {
@@ -542,6 +588,52 @@ export function registerSubgraphIntegrationTests(
       expect(results[3]?.root).toBeUndefined();
       expect(results[3]?.nodes.length).toBe(0);
       expect(results[3]?.edges).toHaveLength(0);
+    });
+
+    it("refuses an unregistered edge or node kind on every subgraph surface", async () => {
+      const store = context.getStore();
+      const root = seeded.alice;
+      const unknownEdge = { edges: ["knowz"] } as never;
+      const unknownNode = {
+        edges: ["knows"],
+        includeKinds: ["Persn"],
+      } as never;
+      const surfaces: Record<string, (options: never) => Promise<unknown>> = {
+        "store.subgraph": (options) => store.subgraph(root, options),
+        "tx.subgraph": (options) =>
+          store.transaction((tx) => tx.subgraph(root, options)),
+        "batchOnce.subgraph": (options) =>
+          store.batchOnce((read) => [read.subgraph(root, options)] as const),
+        "view.subgraph": (options) =>
+          store.view({ mode: "current" }).subgraph(root, options),
+      };
+
+      const refusals: Record<string, unknown> = {};
+      for (const [surface, read] of Object.entries(surfaces)) {
+        for (const [label, options] of [
+          ["edges", unknownEdge],
+          ["includeKinds", unknownNode],
+        ] as const) {
+          refusals[`${surface} ${label}`] = await Promise.resolve()
+            .then(() => read(options))
+            .then(
+              () => "answered",
+              (error: unknown) =>
+                error instanceof KindNotFoundError ?
+                  `${error.entity}:${error.kindName}`
+                : error,
+            );
+        }
+      }
+
+      expect(refusals).toEqual(
+        Object.fromEntries(
+          Object.keys(surfaces).flatMap((surface) => [
+            [`${surface} edges`, "edge:knowz"],
+            [`${surface} includeKinds`, "node:Persn"],
+          ]),
+        ),
+      );
     });
   });
 }

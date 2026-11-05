@@ -13,7 +13,7 @@ import {
   createPostgresTables,
 } from "../../../src/backend/postgres";
 import { type RecordedTableNames } from "../../../src/backend/types";
-import { shortHash } from "../../../src/query/dialect/vector-strategy";
+import { shortHash } from "../../../src/utils/hash";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 

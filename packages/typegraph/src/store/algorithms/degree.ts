@@ -1,6 +1,7 @@
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
+import { assertRegisteredEdgeKinds } from "../registered-kinds";
 import {
   type AlgorithmContext,
   type InternalTemporalOptions,
@@ -21,6 +22,7 @@ export async function executeDegree(
   options: InternalDegreeOptions = {},
 ): Promise<number> {
   const direction = options.direction ?? "both";
+  assertRegisteredEdgeKinds(ctx.graph, options.edges ?? []);
   const edgeKinds = options.edges ?? Object.keys(ctx.graph.edges);
   // A graph that declares no edge kinds has no edges to count — provably zero
   // without a round trip.

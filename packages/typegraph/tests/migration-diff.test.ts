@@ -770,6 +770,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -798,6 +799,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -827,6 +829,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -841,6 +844,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -869,6 +873,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -883,6 +888,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person", "Organization"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -909,6 +915,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -923,6 +930,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
             cardinality: "one",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -976,6 +984,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -993,6 +1002,7 @@ describe("computeSchemaDiff", () => {
               properties: { role: { type: "string" } },
             },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1019,6 +1029,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
@@ -1036,6 +1047,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
@@ -1068,6 +1080,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1082,6 +1095,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person", "Organization"], // toKinds changed
             properties: { type: "object", properties: {} },
             cardinality: "one", // cardinality changed
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1103,23 +1117,18 @@ describe("computeSchemaDiff", () => {
   // ============================================================
 
   describe("ontology changes", () => {
-    it("detects added meta-edge as safe change", () => {
+    // `SerializedOntology.metaEdges` is derived 1:1 from `relations` by the
+    // serializer (see its docblock in `src/schema/types.ts`) — the classifier
+    // has exactly one owner for ontology-change severity, the relation-level
+    // diff below, so these two cases exercise that diff directly rather than
+    // a synthetic catalog-only change a real serializer never produces.
+    it("detects an added relation with an inert meta-edge as a safe change", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "broader", from: "Employee", to: "Person" }],
         },
       });
 
@@ -1130,28 +1139,18 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology).toHaveLength(1);
       expect(diff.ontology[0]).toMatchObject({
         type: "added",
-        entity: "metaEdge",
-        name: "subClassOf",
+        entity: "relation",
         severity: "safe",
       });
+      expect(requireDefined(diff.ontology[0]).details).toContain("broader");
     });
 
-    it("detects removed meta-edge as breaking change", () => {
+    it("detects a removed inverseOf relation as a breaking change", () => {
       const before = createSchema({
         version: 1,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "inverseOf", from: "likes", to: "likedBy" }],
         },
       });
       const after = createSchema({ version: 2 });
@@ -1163,13 +1162,12 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology).toHaveLength(1);
       expect(diff.ontology[0]).toMatchObject({
         type: "removed",
-        entity: "metaEdge",
-        name: "subClassOf",
+        entity: "relation",
         severity: "breaking",
       });
     });
 
-    it("detects added relation as safe change", () => {
+    it("detects added relation as data-validated warning", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
@@ -1189,11 +1187,76 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology[0]).toMatchObject({
         type: "added",
         entity: "relation",
-        severity: "safe",
+        severity: "warning",
       });
       expect(requireDefined(diff.ontology[0]).details).toContain("subClassOf");
       expect(requireDefined(diff.ontology[0]).details).toContain("Employee");
       expect(requireDefined(diff.ontology[0]).details).toContain("Person");
+    });
+
+    it("classifies an added equivalentTo relation exactly like an added subClassOf relation", () => {
+      // `equivalentTo` is mutual subsumption, but `diffOntology` is
+      // meta-edge-agnostic — it keys relations as `${metaEdge}:${from}:${to}`
+      // and assigns `severity: "safe"` to every addition regardless of which
+      // meta-edge it is. Pin that this stays true after the fold: an
+      // `equivalentTo` addition must produce the identical shape (module its
+      // own metaEdge/from/to text) a `subClassOf` addition does.
+      const before = createSchema({ version: 1 });
+      const afterSubClassOf = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [
+            { metaEdge: "subClassOf", from: "Company", to: "Corporation" },
+          ],
+        },
+      });
+      const afterEquivalentTo = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [
+            { metaEdge: "equivalentTo", from: "Company", to: "Corporation" },
+          ],
+        },
+      });
+
+      const subClassOfDiff = computeSchemaDiff(before, afterSubClassOf);
+      const equivalentToDiff = computeSchemaDiff(before, afterEquivalentTo);
+
+      const shapeOf = (
+        diff: ReturnType<typeof computeSchemaDiff>,
+      ): Readonly<{
+        hasChanges: boolean;
+        hasBreakingChanges: boolean;
+        isBackwardsCompatible: boolean;
+        entityCount: number;
+        type: string;
+        entity: string;
+        severity: string;
+      }> => ({
+        hasChanges: diff.hasChanges,
+        hasBreakingChanges: diff.hasBreakingChanges,
+        isBackwardsCompatible: isBackwardsCompatible(diff),
+        entityCount: diff.ontology.length,
+        type: requireDefined(diff.ontology[0]).type,
+        entity: requireDefined(diff.ontology[0]).entity,
+        severity: requireDefined(diff.ontology[0]).severity,
+      });
+
+      expect(shapeOf(equivalentToDiff)).toEqual(shapeOf(subClassOfDiff));
+      // Both are tightenings: they widen a subsumption component, so the
+      // classifier marks them `warning` and attaches the data probes a
+      // commit must run (see ontology-change.ts).
+      expect(shapeOf(equivalentToDiff)).toEqual({
+        hasChanges: true,
+        hasBreakingChanges: false,
+        isBackwardsCompatible: true,
+        entityCount: 1,
+        type: "added",
+        entity: "relation",
+        severity: "warning",
+      });
     });
 
     it("detects removed relation as warning", () => {
@@ -1218,6 +1281,28 @@ describe("computeSchemaDiff", () => {
         entity: "relation",
         severity: "warning",
       });
+    });
+
+    it("classifies an added inverseOf relation as breaking", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [{ metaEdge: "inverseOf", from: "likes", to: "likedBy" }],
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.ontology).toHaveLength(1);
+      expect(diff.ontology[0]).toMatchObject({
+        type: "added",
+        entity: "relation",
+        severity: "breaking",
+      });
+      expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(false);
     });
   });
 
@@ -1331,6 +1416,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1349,17 +1435,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "broader", from: "Employee", to: "Person" }],
         },
       });
 
@@ -1367,6 +1443,33 @@ describe("computeSchemaDiff", () => {
 
       expect(diff.summary).toContain("Ontology:");
       expect(diff.summary).toContain("1 added");
+    });
+
+    // LOAD-BEARING CHECK: counting only `added`/`removed` ontology changes
+    // again makes this summary "No changes" beside `hasChanges: true`.
+    it("summarizes a diff whose only change is a modified ontology entry", () => {
+      const follows = {
+        kind: "follows",
+        fromKinds: ["Person"],
+        toKinds: ["Person"],
+        properties: { type: "object", properties: {} },
+        cardinality: "many",
+        targetCardinality: "many",
+        endpointExistence: "notDeleted",
+        description: undefined,
+      } as const;
+      const before = createSchema({ version: 1, edges: { follows } });
+      const after = createSchema({
+        version: 2,
+        edges: { follows: { ...follows, acyclic: true } },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      console.log("modified-only ontology diff:", diff.summary, diff.ontology);
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.ontology.map((change) => change.type)).toEqual(["modified"]);
+      expect(diff.summary).toBe("Ontology: 0 added, 0 removed, 1 modified");
     });
 
     it("generates combined summary for multiple change types", () => {
@@ -1400,6 +1503,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["NewNode"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1730,6 +1834,7 @@ describe("getMigrationActions", () => {
           toKinds: ["Person"],
           properties: { type: "object", properties: {} },
           cardinality: "many",
+          targetCardinality: "many",
           endpointExistence: "notDeleted",
           description: undefined,
         },
@@ -1816,6 +1921,7 @@ describe("getMigrationActions", () => {
           toKinds: ["Company"],
           properties: { type: "object", properties: {} },
           cardinality: "many",
+          targetCardinality: "many",
           endpointExistence: "notDeleted",
           description: undefined,
         },

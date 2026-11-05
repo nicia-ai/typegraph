@@ -25,7 +25,11 @@ export {
 export { ExecutableQuery } from "./executable-query";
 export { executeOneStatementBatch } from "./one-statement-batch";
 export { PreparedQuery } from "./prepared-query";
-export { type IdentityTraversalOption, QueryBuilder } from "./query-builder";
+export {
+  type CompositionNavigationOptions,
+  type IdentityTraversalOption,
+  QueryBuilder,
+} from "./query-builder";
 export {
   createExecutableRelation,
   createProjectionRelation,
@@ -79,12 +83,14 @@ export { buildQueryAst } from "./ast-builder";
 export {
   type AliasMap,
   type ArrayFieldAccessor,
+  type AssignableNodeKinds,
   type BaseFieldAccessor,
   type BatchableQuery,
   type BatchResults,
   type BooleanFieldAccessor,
   type CommonPropertyKeys,
   type CompiledOneStatementRead,
+  type CompositionWholeKinds,
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,
@@ -127,6 +133,7 @@ export {
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
+  type SubsumedNodeType,
   type TraversalExpansion,
   type UniqueAlias,
   type ValidEdgeTargets,

@@ -9,12 +9,19 @@ import {
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { IDENTITY_ASSERTION_COLUMNS } from "../../identity/historical-sql";
 import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
+import {
+  encodeIdentityTransitionRow,
+  IDENTITY_TRANSITION_COLUMNS,
+  type IdentityTransitionNote,
+} from "../../identity/transition-log";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
+import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
+import { withIdentityTransitionRelationsPrecondition } from "../../utils/sql-errors";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
 import { allocateRecordedCommit } from "./clock";
@@ -25,6 +32,7 @@ import {
   insertRecordedNodeRows,
   recordedEdgeChunkSize,
   recordedIdentityAssertionChunkSize,
+  recordedIdentityTransitionChunkSize,
   type RecordedInsert,
   recordedNodeChunkSize,
   type RecordedOperation,
@@ -265,6 +273,43 @@ export async function flushIdentityAssertions(
       schema.recordedIdentityAssertionsTable,
       recordedInsertsFor(afterById, closed),
       recordedRevision,
+    );
+  }
+}
+
+/**
+ * Flushes buffered identity-transition notes to the append-only transition
+ * log. Unlike the node/edge/identity-assertion relations, this relation has
+ * no prior open row to close and no `op` classification — a transition is
+ * pure history from the moment it exists, so this is a plain chunked INSERT.
+ */
+export async function flushIdentityTransitions(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  notes: readonly IdentityTransitionNote[],
+  revision: number,
+  recordedAt: string,
+): Promise<void> {
+  if (notes.length === 0) return;
+  const chunkSize = recordedIdentityTransitionChunkSize(target);
+  for (const noteChunk of chunk(notes, chunkSize)) {
+    const values = noteChunk.map((note) =>
+      encodeIdentityTransitionRow(note, revision, recordedAt, generateId()),
+    );
+    await withIdentityTransitionRelationsPrecondition(
+      executeStatement(
+        target,
+        sql`
+          INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
+          VALUES ${sql.join(values, sql`, `)}
+        `,
+      ),
+      [
+        schema.tables.identityTransitions,
+        schema.tables.identityTransitionRetention,
+      ],
+      { dialect: target.dialect, surface: "capture-flush" },
     );
   }
 }

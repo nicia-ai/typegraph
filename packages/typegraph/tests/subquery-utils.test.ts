@@ -32,7 +32,7 @@ function makeSubqueryAst(
   }[],
 ): QueryAst {
   return {
-    start: { alias: "q", kinds: ["Item"], includeSubClasses: false },
+    start: { alias: "q", kinds: ["Item"], expansion: "exact" as const },
     traversals: [],
     predicates: [],
     projection: {
@@ -56,7 +56,7 @@ function makeAggregateSubqueryAst(
   fieldValueType?: ValueType,
 ): QueryAst {
   return {
-    start: { alias: "q", kinds: ["Item"], includeSubClasses: false },
+    start: { alias: "q", kinds: ["Item"], expansion: "exact" as const },
     traversals: [],
     predicates: [],
     projection: {

@@ -10,12 +10,22 @@ import {
   type Store,
 } from "../../src";
 import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
+import { defaultPostgresTableNames } from "../../src/backend/drizzle/schema/postgres-table-names";
+import {
+  GRAPH_RELATION_KEYS,
+  type GraphRelationKey,
+  resolveGraphRelationNames,
+} from "../../src/backend/graph-relations";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
 import { installRevisionChangesJournal } from "../../src/backend/revision-journal";
+import type { GraphBackend } from "../../src/backend/types";
 import {
   forkGraphNamespace,
   prepareNamespaceForkTarget,
 } from "../../src/graph-merge/namespace-fork";
+import { sql } from "../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../src/query/sql-intent";
+import { sha256Hex } from "../../src/utils/hash";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
 const graph = defineGraph({
@@ -51,6 +61,59 @@ const clusteredGraph = defineGraph({
   edges: {},
 });
 const QUERY = [1, 0, 0];
+
+/**
+ * The graph-scoped relations as the first release that shipped namespace forks
+ * knew them. A proof that release recorded hashes one entry per relation
+ * here, empty or not, so this list is a fixture, never derived from the
+ * current inventory.
+ */
+const RELEASED_FORK_RELATION_KEYS = [
+  "nodes",
+  "edges",
+  "recordedNodes",
+  "recordedEdges",
+  "recordedClock",
+  "revisionOrigins",
+  "revisionChanges",
+  "identityAssertions",
+  "recordedIdentityAssertions",
+  "identityClosure",
+  "identitySeparation",
+  "uniques",
+  "edgeClaims",
+  "schemaVersions",
+  "fulltext",
+  "indexMaterializations",
+  "contributionMaterializations",
+  "kindRemovals",
+  "reconciliationMarkers",
+] as const satisfies readonly GraphRelationKey[];
+
+const RELATION_NAMES = resolveGraphRelationNames(defaultPostgresTableNames);
+
+/** The content digest exactly as the released library computed it. */
+async function releasedForkDigest(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<string> {
+  const digests: [string, string][] = [];
+  for (const key of RELEASED_FORK_RELATION_KEYS) {
+    if (key === "fulltext" && backend.fulltextStrategy === undefined) continue;
+    const table = RELATION_NAMES[key];
+    const rows = await backend.execute<Readonly<{ row: unknown }>>(
+      asCompiledRowsSql(
+        sql`SELECT to_jsonb(row) AS row FROM ${sql.identifier(table)} AS row WHERE graph_id = ${graphId}`,
+      ),
+    );
+    const rowDigest = await sha256Hex(
+      JSON.stringify(rows.map((entry) => JSON.stringify(entry.row)).sort()),
+      32,
+    );
+    digests.push([table, rowDigest]);
+  }
+  return sha256Hex(JSON.stringify(digests), 32);
+}
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -171,6 +234,108 @@ describe("forkGraphNamespace", () => {
     );
     expect(await fork.store.identity.assertionsOf(first)).toHaveLength(1);
     expect(fork.proof.contentDigest).toMatch(/^[a-f\d]{64}$/);
+  });
+
+  it("verifies a proof recorded before later relations joined the inventory", async () => {
+    // A relation added to the graph-scoped inventory after a fork was taken
+    // holds no rows for that fork. Its arrival must not change the digest a
+    // retry or an abort verifies, or every unpublished fork is stranded by
+    // the upgrade that adds it.
+    expect(GRAPH_RELATION_KEYS.slice(0, 19)).toEqual(
+      RELEASED_FORK_RELATION_KEYS,
+    );
+    expect(GRAPH_RELATION_KEYS.length).toBeGreaterThan(
+      RELEASED_FORK_RELATION_KEYS.length,
+    );
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
+      history: true,
+    });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    await source.nodes.Item.create({ name: "kept" });
+
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "pre-upgrade-fork",
+    );
+    const released = await releasedForkDigest(targetFixture.backend, graph.id);
+    console.info("fork digests", {
+      recorded: fork.proof.contentDigest,
+      released,
+    });
+    expect(fork.proof.contentDigest).toBe(released);
+
+    // The ledger row as the released library left it.
+    await targetFixture.client.query(
+      "UPDATE typegraph_namespace_fork_operations SET content_digest = $1 WHERE operation_key = $2",
+      [released, "pre-upgrade-fork"],
+    );
+    const retried = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "pre-upgrade-fork",
+    );
+    expect(retried.proof).toEqual(fork.proof);
+
+    // A target the released library prepared has no table for a relation
+    // that did not exist yet. Retry and abort treat it as holding no rows.
+    for (const key of GRAPH_RELATION_KEYS.slice(
+      RELEASED_FORK_RELATION_KEYS.length,
+    )) {
+      await targetFixture.client.query(
+        `DROP TABLE ${RELATION_NAMES[key]} CASCADE`,
+      );
+    }
+    const retriedWithoutLaterTables = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "pre-upgrade-fork",
+    );
+    expect(retriedWithoutLaterTables.proof).toEqual(fork.proof);
+    await retriedWithoutLaterTables.abort();
+    const remaining = await targetFixture.client.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM ${RELATION_NAMES.nodes} WHERE graph_id = $1`,
+      [graph.id],
+    );
+    expect(remaining.rows[0]?.count).toBe(0);
+  });
+
+  it("covers a later relation in the digest once it holds rows", async () => {
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
+      history: true,
+    });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    const first = await source.nodes.Item.create({ name: "first" });
+    const second = await source.nodes.Item.create({ name: "second" });
+    await source.identity.assertSame(first, second);
+
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "transition-fork",
+    );
+    const transitions = await targetFixture.client.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM ${RELATION_NAMES.identityTransitions} WHERE graph_id = $1`,
+      [graph.id],
+    );
+    expect(transitions.rows[0]?.count).toBeGreaterThan(0);
+    expect(fork.proof.contentDigest).not.toBe(
+      await releasedForkDigest(targetFixture.backend, graph.id),
+    );
+
+    await targetFixture.client.query(
+      `DELETE FROM ${RELATION_NAMES.identityTransitions} WHERE graph_id = $1`,
+      [graph.id],
+    );
+    await expect(
+      forkGraphNamespace(source, targetFixture.backend, "transition-fork"),
+    ).rejects.toThrow("changed target namespace");
   });
 
   it("refuses strategy-owned contributions before copying any target rows", async () => {

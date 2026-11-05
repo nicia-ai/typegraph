@@ -24,9 +24,9 @@ const results = await store
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `kind` | `string` | The node kind to query (must exist in your graph definition) |
+| `kind` | `string \| readonly string[]` | The node kind to query (must exist in your graph definition), or a nonempty list of kinds |
 | `alias` | `string` | A unique identifier for referencing this node in the query |
-| `options.includeSubClasses` | `boolean` | Include nodes of subclass kinds (default: `false`) |
+| `options.expansion` | `"exact" \| "subclasses" \| "narrower"` | The alias's expansion axis. `"subclasses"` (the default) includes nodes of subclass kinds; `"exact"` is the named kind alone; `"narrower"` follows `broader`/`narrower` descendants instead |
 
 ## Multiple kinds in one query
 
@@ -43,13 +43,29 @@ const page = await store
   .paginate({ first: 20 });
 ```
 
-The source scans exactly these kinds. Repeated kinds are normalized, an empty list is rejected,
-and unknown kinds throw `KindNotFoundError`. List sources do not accept an options bag or expand
-subclasses. For a reusable list, preserve its nonempty tuple type with `as const`.
+A list source follows the same expansion rule as `from(kind)`: each listed kind expands through
+its subclasses and `equivalentTo` kinds unless the call or the store says otherwise, and the
+source scans the union. `from(["Media", "Company"], "entity")` therefore also returns `Podcast`
+rows when `Podcast` is a subclass of `Media`. Pass the same `expansion` option a single kind
+takes, or rely on [`queryDefaults.expansion`](/schemas-stores#createstoregraph-backend-options):
 
-Predicates and database expressions expose compatible properties shared by every selected kind,
+```typescript
+// Only rows whose kind is exactly Media or Company.
+store.query().from(["Media", "Company"], "entity", { expansion: "exact" });
+```
+
+The alias is typed kind by kind, the way `from(kind)` would type each listed kind: a listed kind
+the ontology affects has its `kind` and `NodeId` widened, while the other listed kinds keep their
+literal types. `{ expansion: "exact" }` keeps the exact union. Repeated kinds, including a kind
+that is both listed and reached through another listed kind's expansion, are normalized; an empty
+list is rejected, and unknown kinds throw `KindNotFoundError`. For a reusable list, preserve its
+nonempty tuple type with `as const`.
+
+Predicates and database expressions expose compatible properties shared by every listed kind,
 plus system fields such as `id` and `kind`. A property present on only one kind, or declared with
-incompatible types across kinds, cannot be used as a shared query field. Full-node selections
+incompatible types across kinds, cannot be used as a shared query field. A subclass reached
+through a listed kind reads each shared property as that listed kind declares it, the same way a
+single polymorphic alias does (see [Subclass Expansion](#subclass-expansion)). Full-node selections
 retain each kind's properties as a discriminated union; check the returned node's `kind` before
 reading kind-specific properties.
 
@@ -98,7 +114,12 @@ store
 
 ## Subclass Expansion
 
-If your ontology defines subclass relationships, you can query a parent kind and include all subclasses:
+A query against a kind that other kinds declare `subClassOf` (or that
+participates in a registered-kind `equivalentTo`/`sameAs`) is **polymorphic by
+default**: `subClassOf` carries a structural contract (the child's schema
+extends the parent's, checked at compile time and at registry build), so a
+supertype query that silently excluded its subtypes would be a partial answer
+presented as complete.
 
 ```typescript
 // Graph definition with subclass relationships:
@@ -106,29 +127,173 @@ If your ontology defines subclass relationships, you can query a parent kind and
 // subClassOf(Article, Media)
 // subClassOf(Video, Media)
 
-// Query only exact Media nodes (default behavior)
-const exactMedia = await store
-  .query()
-  .from("Media", "m")
-  .select((ctx) => ctx.m)
-  .execute();
-
-// Query Media and all subclasses
+// Query Media and all subclasses (default behavior)
 const allMedia = await store
   .query()
-  .from("Media", "m", { includeSubClasses: true })
+  .from("Media", "m")
   .select((ctx) => ({
-    kind: ctx.m.kind,   // "Media" | "Podcast" | "Article" | "Video"
+    // Runtime values: "Media", "Podcast", "Article", or "Video" — the row's
+    // actual kind. Static type: `string`, because the alias is widened for a
+    // kind the ontology can affect (see below).
+    kind: ctx.m.kind,
     title: ctx.m.title,
   }))
   .execute();
+
+// Query only exact Media nodes
+const exactMedia = await store
+  .query()
+  .from("Media", "m", { expansion: "exact" })
+  .select((ctx) => ctx.m)
+  .execute();
 ```
 
-When `includeSubClasses: true`:
+By default (`expansion` absent, or explicitly `"subclasses"`):
 
-- Results include nodes of the specified kind AND all subclass kinds
-- The `kind` field in results reflects the actual node kind
-- All properties common to the parent kind are accessible
+- Results include nodes of the specified kind AND all subclass kinds — AND any
+  kind declared `equivalentTo` the specified kind (or one of its subclasses),
+  since equivalence is mutual subsumption and folds into the same closure
+- The `kind` field in results reflects the actual node kind, so its type is
+  widened to `string` (and the row's id brand widened correspondingly) for a
+  kind the ontology can actually affect — a graph declaring no subsumption
+  relations keeps its exact literal types
+- Only the properties the structural contract guarantees — the PARENT kind's
+  own properties — are statically accessible; a subclass-only field needs
+  `fromDynamic()` or a cast, the same way a graph-extension kind's field does
+- Each of those properties is read as the parent kind declares it, in
+  `select()`, `whereNode()`, `orderBy()` and `groupBy()` alike. A subclass that
+  omits a parent-optional property, or narrows its type, does not change that:
+  its rows read as absent or as the parent's type. `$fulltext.matches()` is
+  likewise available when the parent kind declares a `searchable()` field, and
+  matches only the rows that have searchable content. A subclass that
+  redeclares that field as a plain string (or an `embedding()` field as a plain
+  number array) is still a valid subtype, but its rows would never reach the
+  index, so `$fulltext.matches()` refuses and names the kind, and the embedding
+  accessor is not offered
+
+**Annotating a relation as `OntologyRelation` widens every alias in the
+graph.** Every relation factory returns a typed relation carrying its
+meta-edge name and endpoint kinds, which is what lets the alias type tell
+"this relation does not touch my kind" from "this relation was never typed".
+Storing one in a variable annotated `OntologyRelation` (or the whole array in
+a `readonly OntologyRelation[]`) erases those literals, and the alias type
+then widens every kind in the graph conservatively rather than risk typing a
+polymorphic alias as exact. Let the relation types be inferred, or annotate
+with `typeof` the factory call, if you want the narrow types back.
+
+**An endpoint declared as a union of kinds widens every kind the union can
+hold.** A helper that declares a subclass of either media root —
+`(root: typeof Audio | typeof Video) => subClassOf(Episode, root)`, or the
+same helper annotated `NodeType<"Audio" | "Video">` — keeps its meta-edge name
+and its endpoint kind literals, so nothing is erased, but its declared type no
+longer says which root the call passed. Both `Audio` and `Video` therefore get
+the polymorphic alias type, while a kind the union cannot hold stays exact.
+Pass the root directly (`subClassOf(Episode, Audio)`) if you want only the
+root you named to widen.
+
+**A subclass only an extension declares is refused, not mistyped.** The
+`kind`/`NodeId` widening above is computed from your compile-time graph
+definition. A `subClassOf` an [extension](/graph-extensions) adds through
+`store.evolve(...)` changes what the live registry returns, and it stays
+live: `createStoreWithSchema(graph, backend)` folds the persisted extension
+back in on every later boot. Neither changes the compile-time `G`, so
+`from("Media", "m")` would type `m` as exact `Media` while a row could come
+back as the extension's `Podcast`. An alias that states no `expansion` over
+such a kind is therefore refused with `ConfigurationError`
+(`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`, naming the kind and the extra
+kinds) on `from()`, a list source, and `to()`. A list source is refused only
+for an extra kind no member of its type admits: a kind the list itself names
+is typed exactly by the list, and so is a kind in the expansion of a listed
+kind the compile-time graph already types polymorphically. State the axis to
+choose:
+
+```typescript
+// Typed polymorphically: kind is string, the id is not Media's own NodeId.
+store.query().from("Media", "m", { expansion: "subclasses" });
+// Media rows only, typed exactly.
+store.query().from("Media", "m", { expansion: "exact" });
+// Or reach the kind as a runtime kind.
+store.query().fromDynamic("Media", "m");
+```
+
+A kind the compile-time graph's ontology affects (it has a compile-time
+subclass, say) is not refused when an extension adds another one.
+`store.search()` is never refused: its `expansion: "subclasses"` hit is typed
+polymorphically whatever the compile-time graph declares, as a stated
+`"subclasses"` alias is.
+
+The refusal is decided from the **values** of the graph's ontology at run time,
+because the store cannot see the type it was declared with. So it also fires
+where the static type already widened: for a store typed over a wide graph
+type (`Store<GraphDef>` in generic tooling or a wrapper), and for an ontology
+whose literals an `OntologyRelation` annotation erased. Such code reads its
+aliases as `string`-kinded anyway, so state `expansion` on the call or use
+`fromDynamic()`.
+
+### Scope at a glance
+
+| Surface | Default scope | How to change it | Follows `queryDefaults.expansion`? | Static `kind` type |
+|---------|---------------|------------------|------------------------------------|--------------------|
+| `from(kind, alias)` | The kind, its subclasses and its `equivalentTo` kinds | `expansion: "exact" \| "subclasses" \| "narrower"` | Yes | `string` for a kind the compile-time ontology affects, else the literal; `"exact"` keeps the literal, a stated `"subclasses"` widens |
+| `from([kinds], alias)` | Each listed kind expanded as `from(kind)` would, deduplicated | The same `expansion` option | Yes | Per listed kind, as `from(kind)` types it |
+| `traverse(...).to(kind, alias)` | Same as `from(kind)` | The same `expansion` option | Yes | Same as `from(kind)` |
+| `fromDynamic()` / `toDynamic()` | Same as `from(kind)` | The same `expansion` option | Yes | `string` (untyped for `"narrower"`); the token's literal for a `RuntimeNodeKind` under `"exact"` |
+| [`parts()` / `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes) | Every kind the composition relation reaches | `maxHops`, `via` | No | Untyped |
+| Node collection reads (`find`, `count`, `updateWhere`, `compareAndSet`) | The exact kind | No option; query instead | No | The literal |
+| [`store.search`](/fulltext-search) (`fulltext`, `vector`, `hybrid`) | The exact kind | `expansion: "exact" \| "subclasses"` | No | The literal; `"subclasses"` widens, as a stated `from(kind, alias, { expansion: "subclasses" })` does |
+| [`subgraph({ includeKinds })`](/schemas-stores#storesubgraphroot-options) | Exactly the listed kinds | List every kind to include | No | Not applicable |
+
+An omitted `expansion` means the store default everywhere in the query
+builder, and nowhere else. A kind whose subclasses only a persisted extension
+declares is refused when the axis is left to the default (see above).
+
+Pass `{ expansion: "exact" }` to narrow one alias back to the exact
+kind, or set `queryDefaults.expansion: "exact"` on `createStore(...)` to
+restore the exact-kind rows everywhere. The store default changes which rows
+come back, not how an alias is typed: an alias over an affected kind keeps the
+widened `kind` and `NodeId` types whatever the default, so state
+`{ expansion: "exact" }` on the call to keep the literal alias type. `search()`, the collection
+APIs (`find`, `count`, `updateWhere`, `compareAndSet`), and
+`subgraph({ includeKinds })` are unaffected by this default and stay
+exact-kind. An `updateWhere()` `candidates` query is an ordinary query, though:
+it follows this default, and it must resolve to exactly one kind, so pass
+`{ expansion: "exact" }` when the candidate kind has subclasses or equivalents
+(see [`updateWhere`](/schemas-stores#updatewhereparams)).
+
+### `expansion: "narrower"` — kind-level taxonomies
+
+`broader`/`narrower` model a hierarchy that is **not** a subtype relationship
+— no schema contract is claimed, so the alias type stays untyped (`NodeAlias`,
+no static property access). Use it for a small, fixed vocabulary known at
+schema-authoring time; for a vocabulary that grows at runtime, prefer an
+instance-level concept kind with a `broader` **edge** traversed
+with `.recursive()` (see [Ontology](/ontology)).
+
+```typescript
+// ontology: [broader(Podcast, Media), broader(Video, Media)]
+const rows = await store
+  .query()
+  .from("Media", "m", { expansion: "narrower" })
+  .select((ctx) => ctx.m)
+  .execute();
+```
+
+One alias carries exactly one axis, because `expansion` is one option with
+one value — a contradiction like "subclasses and narrower" is not
+expressible. An expansion naming a kind that is not registered, or (on
+`to()`/`toDynamic()`) that the traversed edge does not admit as an endpoint,
+is refused rather than silently narrowed; so is an `expansion` value outside
+the three axes (`QUERY_ALIAS_EXPANSION_INVALID`), which only a JavaScript
+caller can reach.
+
+Omitting `options` entirely, passing `{}`, or passing an explicit `undefined`
+all mean the same thing — take the store default — so an options bag can be
+forwarded through your own helper without special-casing the empty case. A bag
+whose `expansion` is not one literal — `{ expansion?: "exact" }` from a
+wrapper that only ever narrows, say — forwards too; since the axis is not
+known at compile time, that alias is typed conservatively (untyped, the same
+way `"narrower"` is). State a literal axis at the call site to keep the
+precise alias type.
 
 ## Runtime-declared kinds
 
@@ -171,6 +336,9 @@ available. String inputs retain the discriminator-based dynamic surface.
 
 - [Filter](/queries/filter) - `whereNode()`, `whereEdge()`
 - [Traverse](/queries/traverse) - `traverse()`, `optionalTraverse()`
+- [Recursive](/queries/recursive) - `.recursive()`, and the composition
+  shortcuts [`parts()` /
+  `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes)
 - [Shape](/queries/shape) - `select()`, `aggregate()`
 - [Order](/queries/order) - `orderBy()`, `limit()`, `offset()`
 - [Aggregate](/queries/aggregate) - `groupBy()`, `groupByNode()`

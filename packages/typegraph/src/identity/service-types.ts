@@ -1,3 +1,4 @@
+import { type RecordedTimeOwnership } from "../backend/capabilities/recorded-time-ownership";
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
@@ -21,7 +22,10 @@ export type IdentityServiceContext<G extends GraphDef> = Readonly<{
    */
   backend: GraphBackend | TransactionBackend;
   schema: SqlSchema;
+  /** Whether TypeGraph itself captures recorded history — and so keeps the identity transition log. */
   historyEnabled: boolean;
+  /** Who owns recorded time; names the reason a replay-family refusal gives when {@link historyEnabled} is false. */
+  recordedTimeOwnership: RecordedTimeOwnership;
   revisionTrackingEnabled: boolean;
   sameIdAcrossKinds: "fold" | "ignore";
   coordinate?: ReadCoordinate;

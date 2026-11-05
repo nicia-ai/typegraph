@@ -4,7 +4,6 @@
  * Captures query patterns from the AST and generates index recommendations.
  * Uses Proxy to wrap Store and QueryBuilder for transparent interception.
  */
-import { type z } from "zod";
 
 import { type GraphDef } from "../core/define-graph";
 import { type QueryAst } from "../query/ast";
@@ -15,8 +14,8 @@ import {
   parseJsonPointer,
 } from "../query/json-pointer";
 import {
-  createSchemaIntrospector,
   type SchemaIntrospector,
+  schemaIntrospectorFor,
 } from "../query/schema-introspector";
 import { type Store } from "../store/store";
 import { requireDefined } from "../utils/presence";
@@ -144,10 +143,7 @@ export class QueryProfiler {
       );
     }
     this.#attached = true;
-    this.#schemaIntrospector = createSchemaIntrospector(
-      buildNodeSchemaMap(store.graph),
-      buildEdgeSchemaMap(store.graph),
-    );
+    this.#schemaIntrospector = schemaIntrospectorFor(store.registry);
     return createProfiledStore(store, this);
   }
 
@@ -237,28 +233,6 @@ export class QueryProfiler {
   }
 }
 
-function buildNodeSchemaMap(
-  graph: GraphDef,
-): ReadonlyMap<string, Readonly<{ schema: z.ZodType }>> {
-  const entries = Object.values(graph.nodes).map(
-    (n) => [n.type.kind, { schema: n.type.schema }] as const,
-  );
-  return new Map(entries);
-}
-
-function buildEdgeSchemaMap(
-  graph: GraphDef,
-): ReadonlyMap<string, Readonly<{ schema: z.ZodType }>> {
-  const entries = Object.values(graph.edges).map(
-    (edgeRegistration) =>
-      [
-        edgeRegistration.type.kind,
-        { schema: edgeRegistration.type.schema },
-      ] as const,
-  );
-  return new Map(entries);
-}
-
 function resolveAccessPaths(
   access: ReturnType<typeof extractPropertyAccesses>[number],
   schemaIntrospector: SchemaIntrospector | undefined,
@@ -339,8 +313,9 @@ function getNodeEnv(): string | undefined {
 /**
  * Checks whether a JSON pointer exists in the schema for the given kind.
  *
- * This is used to attribute multi-kind aliases (includeSubClasses) to the most
- * relevant concrete kinds by verifying that the accessed pointer exists.
+ * This is used to attribute multi-kind aliases (`expansion: "subclasses"`) to
+ * the most relevant concrete kinds by verifying that the accessed pointer
+ * exists.
  *
  * Returns false on missing fields or invalid pointers.
  */
