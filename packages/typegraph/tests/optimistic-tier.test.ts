@@ -249,7 +249,8 @@ function nodeFenceKey(id: string): string {
 function nodeFenceKeyIn(params: readonly unknown[]): string | undefined {
   return params.find(
     (parameter): parameter is string =>
-      typeof parameter === "string" && parameter.startsWith(NODE_FENCE_KEY_PREFIX),
+      typeof parameter === "string" &&
+      parameter.startsWith(NODE_FENCE_KEY_PREFIX),
   );
 }
 
