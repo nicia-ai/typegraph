@@ -95,13 +95,13 @@ import {
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
+import { resolveNodeRowLockPlan } from "../capabilities/node-row-lock-plan";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
-  serializesWriters,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -925,7 +925,7 @@ function createSqliteOperationBackend(
         toUniqueRow,
       },
       schemaFenceLockClause: sql.raw(""),
-      writersSerialize: serializesWriters(resolveWriteFencePlan(fenceTarget)),
+      nodeRowLocks: resolveNodeRowLockPlan(resolveWriteFencePlan(fenceTarget)),
       contributionMaterializer,
       fusion: { atomicProgramsAtTransactionScope: false },
     }),

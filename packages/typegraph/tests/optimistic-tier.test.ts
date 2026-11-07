@@ -23,13 +23,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   type BackendCapabilities,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   searchable,
   TransactionConflictError,
 } from "../src";
+import { NODE_ROW_FENCE_NAMESPACE } from "../src/backend/capabilities/node-row-lock-plan";
 import {
   isOptimisticRetryTier,
   runRetriedUnit,
@@ -60,6 +63,7 @@ import {
   createTransactionFaultInjector,
   type FaultInjectableEngine,
   type TransactionFaultInjector,
+  type TransactionFaultOptions,
 } from "./transaction-fault-injector";
 
 /**
@@ -224,6 +228,231 @@ describe.each(ENGINES)("optimistic-retry tier (%s)", (engine) => {
     expect(await store.nodes.Person.count()).toBe(2);
   });
 });
+
+const knows = defineEdge("knows", { schema: z.object({}) });
+
+const NODE_FENCE_GRAPH = defineGraph({
+  id: "optimistic-retry-node-fences",
+  nodes: { Person: { type: Person, onDelete: "cascade" } },
+  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+});
+
+const alice = { kind: "Person", id: "alice" } as const;
+const bob = { kind: "Person", id: "bob" } as const;
+
+const NODE_FENCE_KEY_PREFIX = `${NODE_ROW_FENCE_NAMESPACE}:`;
+
+function nodeFenceKey(id: string): string {
+  return `${NODE_FENCE_KEY_PREFIX}${JSON.stringify([NODE_FENCE_GRAPH.id, "Person", id])}`;
+}
+
+function nodeFenceKeyIn(params: readonly unknown[]): string | undefined {
+  return params.find(
+    (parameter): parameter is string =>
+      typeof parameter === "string" &&
+      parameter.startsWith(NODE_FENCE_KEY_PREFIX),
+  );
+}
+
+/**
+ * A managed store on a `row` / `commit-time` backend with alice and bob
+ * already created, armed afterward, recording every node fence-row key the
+ * unit under test acquires — across every attempt, in order.
+ */
+async function buildNodeFenceStore(
+  engine: FaultInjectableEngine,
+  faults: Pick<TransactionFaultOptions, "shape" | "failCommits"> &
+    Readonly<{ faultFirstNodeFence?: boolean }>,
+) {
+  const nodeFences: string[] = [];
+  const injector = await createTransactionFaultInjector(engine, {
+    shape: faults.shape,
+    ...(faults.failCommits === undefined ?
+      {}
+    : { failCommits: faults.failCommits }),
+    ...(faults.faultFirstNodeFence === true ?
+      {
+        failAtStatementMatching: (
+          _sqlText: string,
+          params: readonly unknown[],
+        ) => nodeFenceKeyIn(params) !== undefined,
+      }
+    : {}),
+    onWriteStatement: (_sqlText, params) => {
+      const key = nodeFenceKeyIn(params);
+      if (key !== undefined) nodeFences.push(key);
+    },
+    capabilities: OPTIMISTIC_RETRY_CAPABILITIES,
+  });
+  injectorsToClose.push(injector);
+  expect(injector.backend.capabilities.execution.unitOfWork).toBe(
+    "optimistic-retry",
+  );
+  const [store] = await createStoreWithSchema(
+    NODE_FENCE_GRAPH,
+    injector.backend,
+  );
+  await store.nodes.Person.create({ name: "Alice" }, { id: alice.id });
+  await store.nodes.Person.create({ name: "Bob" }, { id: bob.id });
+  return { injector, store, nodeFences };
+}
+
+/**
+ * Under `conflict: "commit-time"` a node fence row admits both acquirers and
+ * the loser's COMMIT fails after every statement returned. The fence
+ * acquisitions are statements of the unit the retry owner replays, so a
+ * replay takes them again before its own endpoint or connected-edge read;
+ * nothing returns a first attempt's result as final.
+ *
+ * *Mutation*: make `resolveNodeRowLockPlan` return `{ kind: "none" }` for a
+ * `row` plan, and every `nodeFences` expectation below fails. Make
+ * `requiresOptimisticRetryUnit` return `false`, and the three direct writes
+ * reject with the injected fault. Restore afterward.
+ */
+describe.each(ENGINES)(
+  "optimistic-retry tier — node fence rows (%s)",
+  (engine) => {
+    it("an edge create whose first commit fails replays whole: each attempt fences both endpoints, and the edge commits once", async () => {
+      const { injector, store, nodeFences } = await buildNodeFenceStore(
+        engine,
+        {
+          shape: "40001",
+          failCommits: 1,
+        },
+      );
+      injector.arm();
+
+      await store.edges.knows.create(alice, bob, {});
+
+      const observed = {
+        commitAttempts: injector.commitAttempts(),
+        nodeFences,
+        edges: await store.edges.knows.count(),
+      };
+      console.log(
+        `[${engine}] edge create, commit faulted once: ${JSON.stringify(observed)}`,
+      );
+      expect(observed).toEqual({
+        commitAttempts: 2,
+        nodeFences: [
+          nodeFenceKey(alice.id),
+          nodeFenceKey(bob.id),
+          nodeFenceKey(alice.id),
+          nodeFenceKey(bob.id),
+        ],
+        edges: 1,
+      });
+    });
+
+    it("a node delete whose first commit fails replays whole: each attempt fences the node before its cascade", async () => {
+      const { injector, store, nodeFences } = await buildNodeFenceStore(
+        engine,
+        {
+          shape: "40001",
+          failCommits: 1,
+        },
+      );
+      await store.edges.knows.create(alice, bob, {});
+      nodeFences.length = 0;
+      injector.arm();
+
+      await store.nodes.Person.delete(asNodeId<typeof Person>(bob.id));
+
+      const observed = {
+        commitAttempts: injector.commitAttempts(),
+        nodeFences,
+        edges: await store.edges.knows.count(),
+        bobLive:
+          (await store.nodes.Person.getById(
+            asNodeId<typeof Person>(bob.id),
+          )) !== undefined,
+      };
+      console.log(
+        `[${engine}] node delete, commit faulted once: ${JSON.stringify(observed)}`,
+      );
+      expect(observed).toEqual({
+        commitAttempts: 2,
+        nodeFences: [nodeFenceKey(bob.id), nodeFenceKey(bob.id)],
+        edges: 0,
+        bobLive: false,
+      });
+    });
+
+    it("a conflict on a node fence acquisition itself replays the edge create from the top", async () => {
+      const { injector, store, nodeFences } = await buildNodeFenceStore(
+        engine,
+        {
+          shape: "40001",
+          faultFirstNodeFence: true,
+        },
+      );
+      injector.arm();
+
+      await store.edges.knows.create(alice, bob, {});
+
+      const observed = {
+        faulted: injector.lastFault() !== undefined,
+        commitAttempts: injector.commitAttempts(),
+        nodeFences,
+        edges: await store.edges.knows.count(),
+      };
+      console.log(
+        `[${engine}] edge create, first node fence faulted: ${JSON.stringify(observed)}`,
+      );
+      expect(observed).toEqual({
+        faulted: true,
+        commitAttempts: 2,
+        // The first attempt's alice acquisition is the faulted statement.
+        nodeFences: [
+          nodeFenceKey(alice.id),
+          nodeFenceKey(alice.id),
+          nodeFenceKey(bob.id),
+        ],
+        edges: 1,
+      });
+    });
+
+    it("an edge create inside store.transaction that exhausts its retry budget surfaces TransactionConflictError and leaves no edge", async () => {
+      const { injector, store, nodeFences } = await buildNodeFenceStore(
+        engine,
+        {
+          shape: "40001",
+          failCommits: 2,
+        },
+      );
+      injector.arm();
+
+      let caught: unknown;
+      try {
+        await store.transaction((tx) => tx.edges.knows.create(alice, bob, {}), {
+          retry: { attempts: 2 },
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      const observed = {
+        error:
+          caught instanceof TransactionConflictError ? caught.details : caught,
+        nodeFences,
+        edges: await store.edges.knows.count(),
+      };
+      console.log(
+        `[${engine}] store.transaction, both commits faulted: ${JSON.stringify(observed)}`,
+      );
+      expect(observed).toEqual({
+        error: { operation: "store.transaction()", attempts: 2 },
+        nodeFences: [
+          nodeFenceKey(alice.id),
+          nodeFenceKey(bob.id),
+          nodeFenceKey(alice.id),
+          nodeFenceKey(bob.id),
+        ],
+        edges: 0,
+      });
+    });
+  },
+);
 
 describe("requiresOptimisticRetryUnit — the mode gate", () => {
   it('is true only for an opened transaction under the optimistic-retry tier; a nested unit\'s mode is always "existing"', async () => {
