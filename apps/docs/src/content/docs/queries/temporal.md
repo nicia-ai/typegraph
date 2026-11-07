@@ -221,7 +221,7 @@ let after: string | undefined;
 do {
   const page = await recorded.adjacency(
     { kind: "Document", id: docId },
-    { direction: "out", edgeKinds: ["cites"], limit: 100, ...(after === undefined ? {} : { after }) },
+    { direction: "out", edgeKinds: ["cites"], candidateLimit: 100, ...(after === undefined ? {} : { after }) },
   );
   for (const { edge, neighbor } of page.data) {
     console.log(edge.id, neighbor.kind, neighbor.id);
@@ -232,29 +232,36 @@ do {
 
 Each entry contains an incident edge and the opposite kind-qualified node reference. Parallel edges remain
 separate. A self-loop appears once with `direction: "both"` (the default). Ordering is outgoing before
-incoming, then recorded revision, edge kind, edge id, and historical row id ascending. Existing `neighbors()`
+incoming, then edge kind, recorded revision, edge id, and historical row id ascending. Existing `neighbors()`
 continues to return its materialized, deduplicated k-hop result.
 
-`limit` bounds **historical candidates examined**, including superseded versions, deleted edges, and excluded
-edge kinds; it defaults to 100 and accepts integers from 1 through 1,000. A page can be empty and still have
-`nextCursor`: always follow the cursor until it is absent. Each page issues at most two indexed edge-window
-queries, returning at most `limit + 1` candidates in total, plus constant-size origin checks (the first call
-can initialize the durable origin). Each candidate performs at most two indexed endpoint-version probes, each
-limited to one row. Visibility is checked after those bounds at the pinned valid and recorded coordinates.
-Unrelated graph growth does not increase that row or statement budget. Index seeks still have the database's
-normal index lookup cost.
+`candidateLimit` bounds **historical candidates examined** from the selected edge kinds, including superseded
+versions and deleted edges; it defaults to 100 and accepts integers from 1 through 1,000. A page can be empty and
+still have `nextCursor`: always follow the cursor until it is absent. An empty `edgeKinds` filter returns an empty
+page without a continuation. Each page checks the root's visible version once; an invisible root returns an empty
+page without a continuation. Each page issues at most one indexed edge-window query per selected kind per
+direction, returning at most `candidateLimit + 1` candidates in total, plus constant-size origin checks. The first
+call can initialize the durable origin. Each candidate performs at most one indexed neighbor-version probe, limited
+to one row. Visibility is checked after
+those bounds at the pinned valid and recorded coordinates. Growth in excluded kinds or unrelated endpoints does not
+increase that row or statement budget. Index seeks still have the database's normal index lookup cost.
 
-Adjacency cursors bind the durable graph origin, root kind/id, normalized edge-kind filter, direction,
-valid-time mode/instant, and recorded anchor. Changing these dimensions or reusing a cursor after `clear()`
-raises `ConfigurationError` with `details.code: "RECORDED_ADJACENCY_CURSOR_MISMATCH"`; changing the page limit
-is allowed. The candidate range ends at the recorded anchor, so live writes cannot change the visible answer,
-page boundaries, or the remaining number of pages.
+Adjacency cursors bind the durable graph origin, root kind/id, normalized edge-kind filter, direction, valid-time
+mode/instant, and recorded anchor through a SHA-256 scope digest. Changing these dimensions or reusing a cursor
+after `clear()` raises `ValidationError` identifying `after`; changing `candidateLimit` is allowed. An origin
+change during a page read raises `ConfigurationError` with `details.code: "RECORDED_ADJACENCY_ORIGIN_CHANGED"`.
+Within one graph origin, the candidate range ends at the recorded anchor, so later live writes cannot change the
+visible answer, page boundaries, or the remaining number of pages. `clear()` retires that origin and its cursors. A
+`RecordedInstant` alone does not carry the origin: discard old anchors and views after `clear()`, including views
+that have not issued a cursor yet.
 
-This API currently requires TypeGraph-managed capture (`history: true`) on SQLite or PostgreSQL. Engine-native
-and externally populated recorded sources refuse with `details.code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE"`,
-because their cursor-origin and indexed candidate contracts are not declared. Base-schema version 6 installs
-the two endpoint paging indexes on fresh and adopted databases. Deployments using deferred system-index
-provisioning must provision these indexes before serving adjacency reads.
+This API currently requires TypeGraph-managed capture (`history: true`) on SQLite or PostgreSQL. Engine-native and
+externally populated recorded sources refuse with `details.code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE"`, because
+their cursor-origin and indexed candidate contracts are not declared. Base-schema version 6 installs the two
+endpoint paging indexes on fresh and adopted databases. Adoption builds them inline even with `systemIndexes:
+"skip"`; that option only defers lazy index materialization. For large PostgreSQL histories, prebuild the indexes
+concurrently before upgrading. See [version 6 upgrade
+guidance](/backend-setup#base-schema-version-6-recorded-adjacency-indexes).
 
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
 **not** type-check, by design. Wall time does not identify which commit to read
@@ -422,6 +429,8 @@ Under engine-native ownership:
   requested — there is no TypeGraph clock for it to advance; the engine's
   own revision is the only tracking engine-native has, and it is available
   only under `history: true`.
+- `RecordedStoreView.adjacency()` is refused with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`: engine-native sources do
+  not declare the required origin and bounded candidate indexes.
 - Reconstructing identity at a recorded coordinate — `store.identityAtCoordinate`
   at a past instant, and any query that reaches the historical identity
   traversal — is refused: identity history reads TypeGraph's own recorded

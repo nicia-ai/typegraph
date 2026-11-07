@@ -7200,7 +7200,7 @@ export type RecordedAdjacencyEntry<G extends GraphDef, K extends EdgeKinds<G> = 
 
 // @public
 export type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
-    limit?: number;
+    candidateLimit?: number;
     after?: string;
     direction?: "out" | "in" | "both";
     edgeKinds?: readonly K[];
@@ -7305,7 +7305,7 @@ export type RecordedScanPage<T> = Readonly<{
 export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
 
 // @public
-export type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & Required<Pick<RecordedStoreViewImplementation<G>, "adjacency">> & ViewIdentityAccess<G>;
+export type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
 
 // @public (undocumented)
 export const RecordedStoreView: new <G extends GraphDef>(store: Store<G>, coordinate: ReadCoordinate) => RecordedStoreView<G>;
@@ -7326,7 +7326,7 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 // @public
 class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
-    readonly adjacency?: <const K extends EdgeKinds<G> = EdgeKinds<G>>(root: GraphNodeReference<G>, options?: RecordedAdjacencyOptions<K>) => Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
+    adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(root: GraphNodeReference<G>, options?: RecordedAdjacencyOptions<K>): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
     get asOfRecorded(): RecordedInstant;
     get edges(): RecordedStoreViewEdgeCollections<G>;
     get nodes(): RecordedStoreViewNodeCollections<G>;

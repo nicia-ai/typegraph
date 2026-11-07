@@ -141,6 +141,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ) => Promise<readonly (Edge<E> | undefined)[]>;
+  /** Optional for structurally authored runtime ports from older versions; recorded views refuse a missing reader with a typed error. */
   recordedAdjacency?: (
     root: Readonly<{ kind: string; id: string }>,
     coordinate: ReadCoordinate,

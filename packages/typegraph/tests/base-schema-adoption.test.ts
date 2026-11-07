@@ -1367,9 +1367,9 @@ describe("version 6: recorded adjacency indexes", () => {
         await executeDdl(
           "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
         );
-        await requireDefined(backend.adoptBaseSchema)();
+        await createStoreWithSchema(graph, backend, { systemIndexes: "skip" });
         // A second adoption must remain idempotent.
-        await requireDefined(backend.adoptBaseSchema)();
+        await createStoreWithSchema(graph, backend, { systemIndexes: "skip" });
         const indexes =
           lane === "sqlite" ?
             await executeRaw<{ name: string; definition: string }>(

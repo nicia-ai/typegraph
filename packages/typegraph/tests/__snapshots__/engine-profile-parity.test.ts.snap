@@ -1059,11 +1059,11 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "recorded_from", "kind" COLLATE "C", "id" COLLATE "C", "history_id" COLLATE "C");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");",
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "recorded_from", "kind" COLLATE "C", "id" COLLATE "C", "history_id" COLLATE "C");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");",
   },
   {
     "params": [],
@@ -2485,11 +2485,11 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "recorded_from", "kind" COLLATE "C", "id" COLLATE "C", "history_id" COLLATE "C");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");",
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "recorded_from", "kind" COLLATE "C", "id" COLLATE "C", "history_id" COLLATE "C");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");",
   },
   {
     "params": [],
@@ -3465,11 +3465,11 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "recorded_from", "kind", "id", "history_id");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind", "recorded_from", "id", "history_id");",
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "recorded_from", "kind", "id", "history_id");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind", "recorded_from", "id", "history_id");",
   },
   {
     "params": [],
@@ -4679,11 +4679,11 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "recorded_from", "kind", "id", "history_id");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind", "recorded_from", "id", "history_id");",
   },
   {
     "params": [],
-    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "recorded_from", "kind", "id", "history_id");",
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind", "recorded_from", "id", "history_id");",
   },
   {
     "params": [],

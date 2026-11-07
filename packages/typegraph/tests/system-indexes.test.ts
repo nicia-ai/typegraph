@@ -31,6 +31,7 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import {
   generateGraphIdOrderIndexDDL,
+  generateSystemIndexDDL,
   graphIdOrderIndexName,
   systemIndexName,
 } from "../src/indexes/system";
@@ -520,5 +521,42 @@ describe("materializeSystemIndexes", () => {
     } finally {
       await backend.close();
     }
+  });
+});
+
+describe("collation-sensitive runtime system index DDL", () => {
+  it("requires an explicit dialect for byte ordering and preserves plain-index callers", () => {
+    const adjacency = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (declaration) => declaration.suffix === "adjacency_from_idx",
+      ),
+    );
+    expect(() =>
+      generateSystemIndexDDL(adjacency, "history", { concurrent: false }),
+    ).toThrow(
+      expect.objectContaining({
+        details: { code: "SYSTEM_INDEX_DIALECT_REQUIRED" },
+      }),
+    );
+    expect(
+      generateSystemIndexDDL(adjacency, "history", {
+        concurrent: false,
+        dialect: "postgres",
+      }),
+    ).toContain('"kind" COLLATE "C", "recorded_from"');
+    expect(
+      generateSystemIndexDDL(adjacency, "history", {
+        concurrent: false,
+        dialect: "sqlite",
+      }),
+    ).not.toContain('COLLATE "C"');
+    const plain = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (declaration) => declaration.suffix === "since_idx",
+      ),
+    );
+    expect(
+      generateSystemIndexDDL(plain, "history", { concurrent: false }),
+    ).toContain('"graph_id", "recorded_from"');
   });
 });

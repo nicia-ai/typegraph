@@ -26,6 +26,7 @@ import {
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createEngineRecordedInstant } from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { storeRuntime } from "../src/store/runtime-port";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -123,6 +124,20 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded.mode).not.toBeFunction();
 
     expect(recorded).toBeInstanceOf(RecordedStoreView);
+  });
+  it("refuses a runtime port without the optional adjacency reader", async () => {
+    const store = createStore(graph, createTestBackend(), { history: true });
+    Object.defineProperty(storeRuntime(store), "recordedAdjacency", {
+      value: undefined,
+    });
+    await expect(
+      store
+        .asOfRecorded(RECORDED_AT)
+        .adjacency({ kind: "Person", id: asNodeId<typeof Person>("root") }),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "RECORDED_ADJACENCY_UNSUPPORTED_RUNTIME" },
+    });
   });
   it("refuses external and engine-native sources before executing adjacency SQL", async () => {
     const root = {

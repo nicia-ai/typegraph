@@ -1163,11 +1163,6 @@ export const StoreView = StoreViewImplementation as unknown as new <
 class RecordedStoreViewImplementation<
   G extends GraphDef,
 > extends CoordinatePinnedView<G> {
-  /** Optional at the structural implementation boundary; constructed recorded views resolve it below. */
-  readonly adjacency?: <const K extends EdgeKinds<G> = EdgeKinds<G>>(
-    root: GraphNodeReference<G>,
-    options?: RecordedAdjacencyOptions<K>,
-  ) => Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
   #nodes: RecordedStoreViewNodeCollections<G> | undefined;
   #edges: RecordedStoreViewEdgeCollections<G> | undefined;
 
@@ -1199,8 +1194,6 @@ class RecordedStoreViewImplementation<
       "asOfRecorded",
     );
 
-    this.adjacency = (root, options) => this.#readAdjacency(root, options);
-
     // `search` is intentionally absent from the typed recorded surface (a TS
     // caller gets a compile error). It is installed here as a runtime-only
     // backstop — invisible to the class type — so a JS caller reaching past the
@@ -1220,11 +1213,11 @@ class RecordedStoreViewImplementation<
 
   /**
    * Pages incident edge/neighbor pairs, outgoing before incoming and then by
-   * revision/kind/id/history id. The limit bounds historical candidates examined;
+   * kind/revision/id/history id. The candidateLimit bounds historical candidates examined;
    * invisible versions can produce an empty page with a continuation.
    * Self-loops occur once in both-direction mode; parallel edges stay distinct.
    */
-  async #readAdjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(
+  async adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(
     root: GraphNodeReference<G>,
     options?: RecordedAdjacencyOptions<K>,
   ): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>> {
@@ -1238,7 +1231,14 @@ class RecordedStoreViewImplementation<
         { issues: [{ path: "kind", message: "Unknown graph kind." }] },
       );
     }
-    const read = requireDefined(storeRuntime(this.store).recordedAdjacency);
+    const read = storeRuntime(this.store).recordedAdjacency;
+    if (read === undefined)
+      throw new ConfigurationError(
+        "This store runtime does not support recorded adjacency.",
+        {
+          code: "RECORDED_ADJACENCY_UNSUPPORTED_RUNTIME",
+        },
+      );
     return (await read(
       root,
       this.coordinate,
@@ -1296,9 +1296,7 @@ class RecordedStoreViewImplementation<
  * is present only for identity-enabled graphs.
  */
 export type RecordedStoreView<G extends GraphDef> =
-  RecordedStoreViewImplementation<G> &
-    Required<Pick<RecordedStoreViewImplementation<G>, "adjacency">> &
-    ViewIdentityAccess<G>;
+  RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
 
 export const RecordedStoreView =
   RecordedStoreViewImplementation as unknown as new <G extends GraphDef>(

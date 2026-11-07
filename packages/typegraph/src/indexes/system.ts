@@ -33,6 +33,7 @@ import {
   type GraphRelationNameSource,
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
+import { ConfigurationError } from "../errors";
 import { getDialect, type SqlDialect } from "../query/dialect";
 import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
 import { renderSqlInline, sql } from "../query/sql-fragment";
@@ -270,8 +271,8 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
       "graph_id",
       "from_kind",
       "from_id",
-      "recorded_from",
       "kind",
+      "recorded_from",
       "id",
       "history_id",
     ],
@@ -284,8 +285,8 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
       "graph_id",
       "to_kind",
       "to_id",
-      "recorded_from",
       "kind",
+      "recorded_from",
       "id",
       "history_id",
     ],
@@ -464,6 +465,13 @@ export function generateSystemIndexDDL(
   physicalTableName: string,
   options: Readonly<{ concurrent: boolean; dialect?: SqlDialect }>,
 ): string {
+  if (declaration.binaryOrderColumns?.length && options.dialect === undefined)
+    throw new ConfigurationError(
+      "An explicit dialect is required for byte-ordered system indexes.",
+      {
+        code: "SYSTEM_INDEX_DIALECT_REQUIRED",
+      },
+    );
   const name = quoteIdentifier(
     systemIndexName(physicalTableName, declaration.suffix),
   );

@@ -14,6 +14,7 @@ import {
   type RecordedStoreView,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { decodeCursor } from "../../../src/query/cursor";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
@@ -46,7 +47,7 @@ async function collect(
   do {
     const page = await view.adjacency(root, {
       ...options,
-      limit: 1,
+      candidateLimit: 1,
       ...(after === undefined ? {} : { after }),
     });
     onPage?.(page);
@@ -88,6 +89,8 @@ export function registerRecordedAdjacencyIntegrationTests(
         { label: "group" },
         { id: "same" },
       );
+      // Kind order precedes revision order, even when the other kind was captured first.
+      await store.edges.other.create(root, peer, {}, { id: "z" });
       const first = await store.edges.links.create(
         root,
         peer,
@@ -119,7 +122,6 @@ export function registerRecordedAdjacencyIntegrationTests(
         { label: "cycle" },
         { id: "e" },
       );
-      await store.edges.other.create(root, peer, {}, { id: "z" });
       const anchor = requireDefined(await store.recordedNow());
       const view = store.asOfRecorded(anchor);
       const beforePages: RecordedAdjacencyPage<
@@ -128,7 +130,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       await collect(view, root, undefined, (page) => {
         beforePages.push(page);
       });
-      const firstPage = await view.adjacency(root, { limit: 1 });
+      const firstPage = await view.adjacency(root, { candidateLimit: 1 });
       await store.edges.links.delete(first.id);
       await store.nodes.Item.update(peer.id, { label: "changed" });
       await store.edges.links.create(
@@ -143,7 +145,9 @@ export function registerRecordedAdjacencyIntegrationTests(
         { label: "later before ids" },
         { id: "0-later" },
       );
-      expect(await view.adjacency(root, { limit: 1 })).toEqual(firstPage);
+      expect(await view.adjacency(root, { candidateLimit: 1 })).toEqual(
+        firstPage,
+      );
       const afterPages: RecordedAdjacencyPage<
         RecordedAdjacencyEntry<typeof graph>
       >[] = [];
@@ -170,7 +174,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       // Continue a cursor minted before those writes; it must reconstruct the
       // same suffix, even when its first candidate was an invisible version.
       const suffix = await view.adjacency(root, {
-        limit: 100,
+        candidateLimit: 100,
         after: requireDefined(firstPage.nextCursor),
       });
       expect([...firstPage.data, ...suffix.data]).toEqual(entries);
@@ -231,10 +235,11 @@ export function registerRecordedAdjacencyIntegrationTests(
         await projectAdjacency(({ edge: value }) => value.id, view, root),
       ).toEqual(["b"]);
       const page = await view.adjacency(root, {
-        limit: 1,
+        candidateLimit: 1,
         edgeKinds: ["links", "other"],
       });
       const cursor = requireDefined(page.nextCursor);
+      expect(decodeCursor(cursor).cols[0]).toMatch(/^[a-f0-9]{64}$/);
       // Filter order/duplication is immaterial, while every read dimension is bound.
       await expect(
         view.adjacency(root, {
@@ -254,9 +259,10 @@ export function registerRecordedAdjacencyIntegrationTests(
             .adjacency(root, { after: cursor }),
       ])
         await expect(read()).rejects.toMatchObject({
-          details: { code: "RECORDED_ADJACENCY_CURSOR_MISMATCH" },
+          name: "ValidationError",
+          details: { issues: [{ path: "after" }] },
         });
-      await expect(view.adjacency(root, { limit: 0 })).rejects.toThrow(
+      await expect(view.adjacency(root, { candidateLimit: 0 })).rejects.toThrow(
         "between 1 and 1000",
       );
       await expect(
@@ -269,13 +275,15 @@ export function registerRecordedAdjacencyIntegrationTests(
           .asOfRecorded(requireDefined(await store.recordedNow()))
           .adjacency(root, { after: cursor }),
       ).rejects.toMatchObject({
-        details: { code: "RECORDED_ADJACENCY_CURSOR_MISMATCH" },
+        name: "ValidationError",
+        details: { issues: [{ path: "after" }] },
       });
       await store.clear();
       await expect(
         view.adjacency(root, { after: cursor }),
       ).rejects.toMatchObject({
-        details: { code: "RECORDED_ADJACENCY_CURSOR_MISMATCH" },
+        name: "ValidationError",
+        details: { issues: [{ path: "after" }] },
       });
     });
 
@@ -354,6 +362,37 @@ export function registerRecordedAdjacencyIntegrationTests(
       ).toEqual([]);
     });
 
+    it("refuses origin rotation during a first page without calling it a cursor mismatch", async () => {
+      const store = await context.createHistoryStore(graph);
+      const root = await store.nodes.Item.create({ label: "root" });
+      const peer = await store.nodes.Item.create({ label: "peer" });
+      await store.edges.links.create(root, peer, { label: "edge" });
+      const anchor = requireDefined(await store.recordedNow());
+      const base = context.getBackend();
+      const observed = createStore(
+        graph,
+        deriveBackend(base, {
+          async execute<T>(query: CompiledRowsSql) {
+            const rows = await base.execute<T>(query);
+            if (
+              requireDefined(base.compileSql)(query).sql.includes(
+                "adjacency_visible",
+              )
+            )
+              await store.clear();
+            return rows;
+          },
+        }),
+        { history: true },
+      );
+      await expect(
+        observed.asOfRecorded(anchor).adjacency(root),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: { code: "RECORDED_ADJACENCY_ORIGIN_CHANGED" },
+      });
+    });
+
     it("bounds historical candidates and statement work despite invisible history and unrelated growth", async () => {
       const store = await context.createHistoryStore(graph);
       const root = await store.nodes.Item.create({ label: "root" });
@@ -378,13 +417,18 @@ export function registerRecordedAdjacencyIntegrationTests(
         }),
         { history: true },
       );
+      for (let index = 0; index < 12; index += 1)
+        await store.nodes.Item.update(peer.id, { label: `peer-${index}` });
       const view = observed.asOfRecorded(
         requireDefined(await store.recordedNow()),
       );
       await observed.revisionOriginNow();
       async function measure() {
         reads.length = 0;
-        const page = await view.adjacency(root, { limit: 2, direction: "out" });
+        const page = await view.adjacency(root, {
+          candidateLimit: 2,
+          direction: "out",
+        });
         const candidateCalls = reads.filter((read) =>
           read.sql.includes("adjacency_visible"),
         );
@@ -392,7 +436,7 @@ export function registerRecordedAdjacencyIntegrationTests(
         expect(candidateCalls[0]?.rows).toBe(3);
         expect(page.data.length).toBeLessThanOrEqual(1);
         expect(page.hasNextPage).toBe(true);
-        expect(reads.length).toBeLessThanOrEqual(4);
+        expect(reads.length).toBeLessThanOrEqual(5);
         return reads.length;
       }
       const before = await measure();
@@ -403,6 +447,54 @@ export function registerRecordedAdjacencyIntegrationTests(
         await store.edges.links.create(unrelated, peer, { label: "unrelated" });
       }
       expect(await measure()).toBeLessThanOrEqual(before);
+      const filteredView = observed.asOfRecorded(
+        requireDefined(await store.recordedNow()),
+      );
+      reads.length = 0;
+      const empty = await filteredView.adjacency(root, { edgeKinds: [] });
+      expect(empty).toEqual({
+        data: [],
+        hasNextPage: false,
+        nextCursor: undefined,
+      });
+      expect(reads.some((read) => read.sql.includes("adjacency_visible"))).toBe(
+        false,
+      );
+      reads.length = 0;
+      expect(
+        await filteredView.adjacency(
+          { ...root, id: "absent" as typeof root.id },
+          { candidateLimit: 1 },
+        ),
+      ).toEqual(empty);
+      expect(reads.some((read) => read.sql.includes("adjacency_visible"))).toBe(
+        false,
+      );
+      await store.edges.other.create(root, peer, {}, { id: "selected" });
+      // Excluded incident history cannot consume the selected kind's window.
+      const selectedView = observed.asOfRecorded(
+        requireDefined(await store.recordedNow()),
+      );
+      reads.length = 0;
+      const selected = await selectedView.adjacency(root, {
+        edgeKinds: ["other"],
+        candidateLimit: 1,
+        direction: "out",
+      });
+      expect(selected.data.map((entry) => entry.edge.id)).toEqual(["selected"]);
+      expect(selected.hasNextPage).toBe(false);
+      expect(
+        reads
+          .filter((read) => read.sql.includes("adjacency_visible"))
+          .map((read) => read.rows),
+      ).toEqual([1]);
+      reads.length = 0;
+      // Include the visible version so PostgreSQL executes the neighbor subplan.
+      await view.adjacency(root, {
+        candidateLimit: 100,
+        direction: "out",
+        edgeKinds: ["links"],
+      });
       const candidate = requireDefined(
         reads.find((read) => read.sql.includes("adjacency_visible")),
       );
@@ -418,6 +510,36 @@ export function registerRecordedAdjacencyIntegrationTests(
           typeof value === "bigint" ? value.toString() : value,
         ),
       ).toContain("adjacency_from_idx");
+      async function endpointPlanIsBounded(): Promise<boolean> {
+        if (base.dialect === "sqlite") {
+          const bytecode = await base.execute<{ opcode: string }>(
+            asCompiledRowsSql(sql`EXPLAIN ${candidate.query}`),
+          );
+          // Candidate cap, EXISTS cap, and latest-version cap each have a counter.
+          return (
+            bytecode.filter((row) => row.opcode === "DecrJumpZero").length >= 3
+          );
+        } else {
+          const limits: Record<string, unknown>[] = [];
+          function visit(value: unknown): void {
+            if (Array.isArray(value)) {
+              for (const child of value) visit(child);
+            } else if (typeof value === "object" && value !== null) {
+              const record = value as Record<string, unknown>;
+              if (record["Node Type"] === "Limit") limits.push(record);
+              for (const child of Object.values(record)) visit(child);
+            }
+          }
+          visit(plan);
+          // The peer reconstruction has its own one-row Limit, below the window.
+          return limits.some(
+            (node) =>
+              Number(node["Actual Rows"]) <= 1 &&
+              Number(node["Actual Loops"]) > 0,
+          );
+        }
+      }
+      expect(await endpointPlanIsBounded()).toBe(true);
       expect(
         await projectAdjacency(({ edge: value }) => value.label, view, root),
       ).toEqual(["v8"]);

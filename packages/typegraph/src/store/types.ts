@@ -2155,8 +2155,8 @@ export type StoreViewEdgeCollections<G extends GraphDef> = {
 
 /** Options for bounded incident-edge paging at a recorded coordinate. */
 export type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
-  /** Historical edge rows examined per page (1–1,000, default 100). */
-  limit?: number;
+  /** Historical edge rows of selected kinds examined per page (1–1,000, default 100). */
+  candidateLimit?: number;
   after?: string;
   direction?: "out" | "in" | "both";
   edgeKinds?: readonly K[];

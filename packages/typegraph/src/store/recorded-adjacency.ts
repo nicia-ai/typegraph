@@ -10,6 +10,8 @@ import { decodeCursor, encodeCursor } from "../query/cursor";
 import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { compareCodePoints } from "../utils/compare";
+import { sha256Hex } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import {
@@ -30,10 +32,18 @@ type Position = Readonly<{
 }>;
 type Candidate = Readonly<{ row: Record<string, unknown>; position: Position }>;
 
-function cursorMismatch(): ConfigurationError {
-  return new ConfigurationError(
+function cursorMismatch(): ValidationError {
+  return new ValidationError(
     "Recorded adjacency cursor does not match this read or its graph origin.",
-    { code: "RECORDED_ADJACENCY_CURSOR_MISMATCH" },
+    {
+      issues: [
+        {
+          path: "after",
+          message:
+            "Use a cursor from the same recorded adjacency read and graph origin.",
+        },
+      ],
+    },
   );
 }
 
@@ -80,10 +90,10 @@ function adjacencyDirection(value: unknown): "out" | "in" | "both" {
 }
 
 /**
- * One indexed historical candidate window per direction, followed by visibility
+ * One indexed historical candidate window per selected kind and direction, followed by visibility
  * checks inside the bounded window. LIMIT must stay INSIDE the derived table:
- * moving temporal/kind filtering before it makes a small page scan arbitrarily
- * many tombstones, old versions or excluded kinds. The revision-leading seek
+ * moving temporal filtering before it makes a small page scan arbitrarily
+ * many tombstones or old versions. Kind equality precedes the revision seek, which
  * also bounds the candidate set to the anchor, so future captures cannot
  * repartition pages or extend a traversal pinned to that anchor.
  */
@@ -108,13 +118,20 @@ export async function readRecordedAdjacency(
       { code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE" },
     );
   }
-  const limit = options?.limit ?? 100;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 1000)
+  const candidateLimit = options?.candidateLimit ?? 100;
+  if (
+    !Number.isInteger(candidateLimit) ||
+    candidateLimit < 1 ||
+    candidateLimit > 1000
+  )
     throw new ValidationError(
-      "Recorded adjacency limit must be an integer between 1 and 1000.",
+      "Recorded adjacency candidateLimit must be an integer between 1 and 1000.",
       {
         issues: [
-          { path: "limit", message: "Must be an integer between 1 and 1000." },
+          {
+            path: "candidateLimit",
+            message: "Must be an integer between 1 and 1000.",
+          },
         ],
       },
     );
@@ -128,11 +145,13 @@ export async function readRecordedAdjacency(
       "Recorded adjacency requires a TypeGraph revision.",
       { code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE" },
     );
-  const kinds = [...new Set(params.edgeKinds)].toSorted();
+  const kinds = [...new Set(params.edgeKinds)].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  );
   const origin = await params.origin();
-  const scope = encodeURIComponent(
+  const scope = await sha256Hex(
     JSON.stringify([
-      "recorded-adjacency-v1",
+      "recorded-adjacency-v2",
       graphId,
       origin,
       root.kind,
@@ -143,12 +162,17 @@ export async function readRecordedAdjacency(
       coordinate.valid.asOf,
       coordinate.recorded?.asOf,
     ]),
+    32,
   );
   const after =
     options?.after === undefined ?
       undefined
     : decodePosition(options.after, scope);
-  if (after !== undefined && direction !== "both" && after.phase !== direction)
+  if (
+    after !== undefined &&
+    (!kinds.includes(after.kind) ||
+      (direction !== "both" && after.phase !== direction))
+  )
     throw cursorMismatch();
   const phases: readonly Phase[] =
     direction === "both" ?
@@ -166,84 +190,115 @@ export async function readRecordedAdjacency(
       tableAlias: alias,
       recordedReadBinding: binding,
     });
-  function endpointVisible(alias: string, endpoint: "from" | "to") {
-    const name = sql.raw(alias);
-    const prefix = sql.raw(endpoint);
+  function nodeVisible(
+    kind: ReturnType<typeof sql>,
+    id: ReturnType<typeof sql>,
+  ) {
     return sql`
       EXISTS (
             SELECT 1 FROM (
               SELECT * FROM ${schema.nodesTable}
-              WHERE graph_id = ${graphId} AND kind = e.${prefix}_kind AND id = e.${prefix}_id
+              WHERE graph_id = ${graphId} AND kind = ${kind} AND id = ${id}
                 AND recorded_from <= ${revision.revision}
-              ORDER BY recorded_from DESC
-              LIMIT 1
-            ) ${name} WHERE ${temporal(alias)}
+              ORDER BY recorded_from DESC LIMIT 1
+            ) n WHERE ${temporal("n")}
           )
     `;
   }
-  for (const phase of phases) {
-    const endpoint = phase === "out" ? sql.raw("from") : sql.raw("to");
-    const key = after?.phase === phase ? after : undefined;
-    const remaining = limit + 1 - candidates.length;
-    const rows = await withRecordedRelationsPrecondition(
-      backend.execute<Record<string, unknown>>(
-        asCompiledRowsSql(sql`
-          SELECT e.*,
-            CASE WHEN ${temporal("e")}
-              ${direction === "both" && phase === "in" ? sql`AND NOT (e.from_kind = ${root.kind} AND e.from_id = ${root.id})` : sql.raw("")}
-              AND ${endpointVisible("n", "from")}
-              AND ${endpointVisible("m", "to")}
-            THEN 1 ELSE 0 END AS adjacency_visible
-          FROM (
-            SELECT * FROM ${schema.edgesTable}
-            WHERE graph_id = ${graphId} AND ${endpoint}_kind = ${root.kind} AND ${endpoint}_id = ${root.id}
-          AND recorded_from <= ${revision.revision}
-              ${key === undefined ? sql.raw("") : sql`AND (recorded_from, ${binaryText(sql`kind`)}, ${binaryText(sql`id`)}, ${binaryText(sql`history_id`)}) > (${key.recordedFrom}, ${key.kind}, ${key.id}, ${key.historyId})`}
-            ORDER BY recorded_from ASC, ${binaryText(sql`kind`)} ASC, ${binaryText(sql`id`)} ASC, ${binaryText(sql`history_id`)} ASC
-            LIMIT ${remaining}
-          ) e
-          ORDER BY e.recorded_from ASC, ${binaryText(sql`e.kind`)} ASC, ${binaryText(sql`e.id`)} ASC, ${binaryText(sql`e.history_id`)} ASC
-        `),
-      ),
-      { graphId, surface: "recorded-adjacency" },
-    );
-    for (const row of rows) {
-      const recordedFrom = Number(row["recorded_from"]);
-      if (
-        !Number.isSafeInteger(recordedFrom) ||
-        recordedFrom < 0 ||
-        typeof row["kind"] !== "string" ||
-        typeof row["id"] !== "string" ||
-        typeof row["history_id"] !== "string"
-      )
-        throw new ConfigurationError(
-          "Invalid recorded adjacency candidate key.",
-          { code: "RECORDED_RELATION_INVARIANT_VIOLATION" },
-        );
-      candidates.push({
-        row,
-        position: {
-          phase,
-          recordedFrom,
-          kind: row["kind"],
-          id: row["id"],
-          historyId: row["history_id"],
+  async function finishOriginCheck() {
+    if ((await params.origin()) !== origin)
+      throw new ConfigurationError(
+        "Graph origin changed during recorded adjacency read.",
+        {
+          code: "RECORDED_ADJACENCY_ORIGIN_CHANGED",
         },
-      });
+      );
+  }
+  const empty = {
+    data: [],
+    hasNextPage: false,
+    nextCursor: undefined,
+  } as const;
+  if (kinds.length === 0) {
+    await finishOriginCheck();
+    return empty;
+  }
+  const roots = await withRecordedRelationsPrecondition(
+    backend.execute(
+      asCompiledRowsSql(
+        sql`SELECT 1 WHERE ${nodeVisible(sql`${root.kind}`, sql`${root.id}`)}`,
+      ),
+    ),
+    { graphId, surface: "recorded-adjacency" },
+  );
+  if (roots.length === 0) {
+    await finishOriginCheck();
+    return empty;
+  }
+  windows: for (const phase of phases) {
+    for (const kind of kinds) {
+      if (after?.phase === phase && compareCodePoints(kind, after.kind) < 0)
+        continue;
+      const endpoint = phase === "out" ? sql.raw("from") : sql.raw("to");
+      const key =
+        after?.phase === phase && after.kind === kind ? after : undefined;
+      const remaining = candidateLimit + 1 - candidates.length;
+      const rows = await withRecordedRelationsPrecondition(
+        backend.execute<Record<string, unknown>>(
+          asCompiledRowsSql(sql`
+            SELECT e.*,
+              CASE WHEN ${temporal("e")}
+                ${direction === "both" && phase === "in" ? sql`AND NOT (e.from_kind = ${root.kind} AND e.from_id = ${root.id})` : sql.raw("")}
+                AND ${phase === "out" ? nodeVisible(sql`e.to_kind`, sql`e.to_id`) : nodeVisible(sql`e.from_kind`, sql`e.from_id`)}
+              THEN 1 ELSE 0 END AS adjacency_visible
+            FROM (
+              SELECT * FROM ${schema.edgesTable}
+              WHERE graph_id = ${graphId} AND ${endpoint}_kind = ${root.kind} AND ${endpoint}_id = ${root.id}
+            AND ${binaryText(sql`kind`)} = ${kind}
+            AND recorded_from <= ${revision.revision}
+                ${key === undefined ? sql.raw("") : sql`AND (recorded_from, ${binaryText(sql`id`)}, ${binaryText(sql`history_id`)}) > (${key.recordedFrom}, ${key.id}, ${key.historyId})`}
+              ORDER BY recorded_from ASC, ${binaryText(sql`id`)} ASC, ${binaryText(sql`history_id`)} ASC
+              LIMIT ${remaining}
+            ) e
+            ORDER BY e.recorded_from ASC, ${binaryText(sql`e.id`)} ASC, ${binaryText(sql`e.history_id`)} ASC
+          `),
+        ),
+        { graphId, surface: "recorded-adjacency" },
+      );
+      for (const row of rows) {
+        const recordedFrom = Number(row["recorded_from"]);
+        if (
+          !Number.isSafeInteger(recordedFrom) ||
+          recordedFrom < 0 ||
+          typeof row["kind"] !== "string" ||
+          typeof row["id"] !== "string" ||
+          typeof row["history_id"] !== "string"
+        )
+          throw new ConfigurationError(
+            "Invalid recorded adjacency candidate key.",
+            { code: "RECORDED_RELATION_INVARIANT_VIOLATION" },
+          );
+        candidates.push({
+          row,
+          position: {
+            phase,
+            recordedFrom,
+            kind: row["kind"],
+            id: row["id"],
+            historyId: row["history_id"],
+          },
+        });
+      }
+      if (candidates.length > candidateLimit) break windows;
     }
-    if (candidates.length > limit) break;
   }
   // Detect origin rotation during the read as well as between pages.
-  if ((await params.origin()) !== origin) throw cursorMismatch();
-  const hasNextPage = candidates.length > limit;
-  const window = candidates.slice(0, limit);
+  await finishOriginCheck();
+  const hasNextPage = candidates.length > candidateLimit;
+  const window = candidates.slice(0, candidateLimit);
   const data: Entry[] = [];
   for (const candidate of window) {
-    if (
-      !kinds.includes(candidate.position.kind) ||
-      Number(candidate.row["adjacency_visible"]) !== 1
-    )
-      continue;
+    if (Number(candidate.row["adjacency_visible"]) !== 1) continue;
     const edge = toEdge(candidate.row);
     data.push({
       edge,
