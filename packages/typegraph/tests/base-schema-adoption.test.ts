@@ -1346,3 +1346,57 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 });
+
+describe("version 6: recorded adjacency indexes", () => {
+  it.each(["sqlite", "pglite"] as const)(
+    "adopts missing endpoint paging indexes from version 5 on %s",
+    async (lane) => {
+      const handle =
+        lane === "sqlite" ?
+          createLocalSqliteBackend()
+        : await createLocalPgliteBackend({ vector: false });
+      const { backend } = handle;
+      try {
+        await createStoreWithSchema(graph, backend);
+        const executeDdl = requireDefined(backend.executeDdl);
+        const executeRaw = requireDefined(backend.executeRaw);
+        for (const suffix of ["from", "to"])
+          await executeDdl(
+            `DROP INDEX "typegraph_recorded_edges_adjacency_${suffix}_idx"`,
+          );
+        await executeDdl(
+          "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
+        );
+        await requireDefined(backend.adoptBaseSchema)();
+        // A second adoption must remain idempotent.
+        await requireDefined(backend.adoptBaseSchema)();
+        const indexes =
+          lane === "sqlite" ?
+            await executeRaw<{ name: string; definition: string }>(
+              "SELECT name, sql AS definition FROM sqlite_master WHERE type = 'index' AND name LIKE '%adjacency_%_idx'",
+              [],
+            )
+          : await executeRaw<{ name: string; definition: string }>(
+              "SELECT indexname AS name, indexdef AS definition FROM pg_indexes WHERE indexname LIKE '%adjacency_%_idx' AND schemaname = current_schema()",
+              [],
+            );
+        expect(indexes.map((index) => index.name).toSorted()).toEqual([
+          "typegraph_recorded_edges_adjacency_from_idx",
+          "typegraph_recorded_edges_adjacency_to_idx",
+        ]);
+        expect(
+          indexes.map(
+            (index) => index.definition.match(/COLLATE "C"/g)?.length ?? 0,
+          ),
+        ).toEqual(lane === "pglite" ? [3, 3] : [0, 0]);
+        const marker = await executeRaw<{ version: number }>(
+          "SELECT version FROM typegraph_base_schema_versions WHERE installation = 1",
+          [],
+        );
+        expect(marker[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      } finally {
+        await backend.close();
+      }
+    },
+  );
+});

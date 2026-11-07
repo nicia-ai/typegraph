@@ -1529,6 +1529,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId: graph.id,
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
+      revisionOrigin: () => this.revisionOriginNow(),
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
     });
@@ -1560,6 +1561,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.recordedEdgeGetById(kind, id, coordinate),
       recordedEdgeGetByIds: (kind, ids, coordinate) =>
         this.recordedEdgeGetByIds(kind, ids, coordinate),
+      recordedAdjacency: (root, coordinate, edgeKinds, options) =>
+        this.#recordedReads.adjacency(root, coordinate, edgeKinds, options),
       recordedEdgeScan: (kind, coordinate, options) =>
         this.recordedEdgeScan(kind, coordinate, options),
       subgraphAtCoordinate: (root, subgraphOptions) =>

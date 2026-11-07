@@ -106,7 +106,7 @@ describe("system-index dialect parity", () => {
         .filter((index) => index.table !== fulltextTable)
         .map(
           (index) =>
-            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.columns})`,
+            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.name.includes("_adjacency_") ? index.columns.replaceAll(' COLLATE "C"', "") : index.columns})`,
         )
         .toSorted((a, b) => a.localeCompare(b));
 
@@ -130,10 +130,13 @@ describe("system-index dialect parity", () => {
       generateSqliteDDL(createSqliteTables()).join("\n"),
       generatePostgresDDL(createPostgresTables()).join("\n"),
     ];
-    for (const script of scripts) {
+    for (const [scriptIndex, script] of scripts.entries()) {
       for (const declaration of SYSTEM_INDEX_DECLARATIONS) {
         const columns = declaration.columns
-          .map((column) => `"${column}"`)
+          .map(
+            (column) =>
+              `"${column}"${scriptIndex === 1 && declaration.binaryOrderColumns?.includes(column) === true ? ' COLLATE "C"' : ""}`,
+          )
           .join(", ");
         expect(script).toContain(`(${columns})`);
       }

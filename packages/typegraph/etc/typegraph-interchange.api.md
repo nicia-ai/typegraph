@@ -5413,6 +5413,27 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 const RECORDED_POINT_READ_NAMES: readonly ["getById", "getByIds"];
 
 // @public
+type RecordedAdjacencyEntry<G extends GraphDef, K extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
+    edge: GraphEdgeForKinds<G, K>;
+    neighbor: GraphNodeReference<G>;
+}>;
+
+// @public
+type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
+    limit?: number;
+    after?: string;
+    direction?: "out" | "in" | "both";
+    edgeKinds?: readonly K[];
+}>;
+
+// @public
+type RecordedAdjacencyPage<T> = Readonly<{
+    data: readonly T[];
+    nextCursor: string | undefined;
+    hasNextPage: boolean;
+}>;
+
+// @public
 type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
@@ -5454,7 +5475,7 @@ type RecordedScanPage<T> = Readonly<{
 type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
 
 // @public
-type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
+type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & Required<Pick<RecordedStoreViewImplementation<G>, "adjacency">> & ViewIdentityAccess<G>;
 
 // @public (undocumented)
 const RecordedStoreView: new <G extends GraphDef>(store: Store<G>, coordinate: ReadCoordinate) => RecordedStoreView<G>;
@@ -5475,6 +5496,7 @@ type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 // @public
 class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
+    readonly adjacency?: <const K extends EdgeKinds<G> = EdgeKinds<G>>(root: GraphNodeReference<G>, options?: RecordedAdjacencyOptions<K>) => Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
     get asOfRecorded(): RecordedInstant;
     get edges(): RecordedStoreViewEdgeCollections<G>;
     get nodes(): RecordedStoreViewNodeCollections<G>;
@@ -6406,6 +6428,16 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedNodeScan: <N extends NodeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Node<N>>>;
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
+    recordedAdjacency?: (root: Readonly<{
+        kind: string;
+        id: string;
+    }>, coordinate: ReadCoordinate, edgeKinds: readonly string[], options?: RecordedAdjacencyOptions) => Promise<RecordedAdjacencyPage<Readonly<{
+        edge: Edge;
+        neighbor: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+    }>>>;
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: GraphNodeReference<G>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;

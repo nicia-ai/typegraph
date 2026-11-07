@@ -33,7 +33,9 @@ import {
   type GraphRelationNameSource,
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
+import { getDialect, type SqlDialect } from "../query/dialect";
 import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
+import { renderSqlInline, sql } from "../query/sql-fragment";
 import { requireDefined } from "../utils/presence";
 
 /** The TypeGraph relations that carry system indexes. */
@@ -53,6 +55,7 @@ type LiveEdgeColumn =
   LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
 type RecordedColumn =
+  | "history_id"
   | "graph_id"
   | "kind"
   | "id"
@@ -74,6 +77,8 @@ type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
   table: T;
   /** Physical index name is `${physicalTableName}_${suffix}`. */
   suffix: string;
+  /** Text keys whose ordering must be independent of database locale. */
+  binaryOrderColumns?: readonly string[];
   columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
 }>;
 
@@ -254,6 +259,37 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     suffix: "valid_idx",
     columns: ["graph_id", "valid_from", "valid_to"],
   },
+  // Candidate-bounded adjacency walks seek through historical rows before
+  // applying visibility filters. The history id makes the key total even
+  // across multiple versions of one edge.
+  {
+    table: "recordedEdges",
+    suffix: "adjacency_from_idx",
+    binaryOrderColumns: ["kind", "id", "history_id"],
+    columns: [
+      "graph_id",
+      "from_kind",
+      "from_id",
+      "recorded_from",
+      "kind",
+      "id",
+      "history_id",
+    ],
+  },
+  {
+    table: "recordedEdges",
+    suffix: "adjacency_to_idx",
+    binaryOrderColumns: ["kind", "id", "history_id"],
+    columns: [
+      "graph_id",
+      "to_kind",
+      "to_id",
+      "recorded_from",
+      "kind",
+      "id",
+      "history_id",
+    ],
+  },
   // `recorded_from`-led lookup, same rationale as recordedNodes' since_idx:
   // the directional indexes above lead with an endpoint, not `recorded_from`
   // alone, so they cannot serve the lineage capability's changed-since scan.
@@ -426,14 +462,23 @@ export function assertNoSystemIndexNameCollision(
 export function generateSystemIndexDDL(
   declaration: SystemIndexDeclaration,
   physicalTableName: string,
-  options: Readonly<{ concurrent: boolean }>,
+  options: Readonly<{ concurrent: boolean; dialect?: SqlDialect }>,
 ): string {
   const name = quoteIdentifier(
     systemIndexName(physicalTableName, declaration.suffix),
   );
   const table = quoteIdentifier(physicalTableName);
   const columns = declaration.columns
-    .map((column) => quoteIdentifier(column))
+    .map((column) =>
+      declaration.binaryOrderColumns?.includes(column) === true ?
+        renderSqlInline(
+          getDialect(options.dialect ?? "sqlite").binaryText(
+            sql.identifier(column),
+          ),
+          options.dialect ?? "sqlite",
+        )
+      : quoteIdentifier(column),
+    )
     .join(", ");
   const concurrently = options.concurrent ? "CONCURRENTLY " : "";
   return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns});`;
@@ -505,4 +550,22 @@ export function sinceIndexAdoptionDdl(
     sinceIndexDdlFor("recordedEdges"),
     identityAssertionsSinceIndexDdl(),
   ];
+}
+
+/** Idempotent version-6 adoption DDL, sharing bootstrap's declarations. */
+export function adjacencyIndexAdoptionDdl(
+  recordedEdges: string,
+  dialect: SqlDialect,
+): readonly string[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) =>
+      declaration.table === "recordedEdges" &&
+      (declaration.suffix === "adjacency_from_idx" ||
+        declaration.suffix === "adjacency_to_idx"),
+  ).map((declaration) =>
+    generateSystemIndexDDL(declaration, recordedEdges, {
+      concurrent: false,
+      dialect,
+    }),
+  );
 }

@@ -37,7 +37,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
-import { ConfigurationError } from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { requireDefined } from "../utils/presence";
@@ -93,6 +93,9 @@ import {
   type GraphNodeReference,
   type NodeCollection,
   type NodeCurrentReads,
+  type RecordedAdjacencyEntry,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedStoreViewEdgeCollection,
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
@@ -1160,6 +1163,11 @@ export const StoreView = StoreViewImplementation as unknown as new <
 class RecordedStoreViewImplementation<
   G extends GraphDef,
 > extends CoordinatePinnedView<G> {
+  /** Optional at the structural implementation boundary; constructed recorded views resolve it below. */
+  readonly adjacency?: <const K extends EdgeKinds<G> = EdgeKinds<G>>(
+    root: GraphNodeReference<G>,
+    options?: RecordedAdjacencyOptions<K>,
+  ) => Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
   #nodes: RecordedStoreViewNodeCollections<G> | undefined;
   #edges: RecordedStoreViewEdgeCollections<G> | undefined;
 
@@ -1191,6 +1199,8 @@ class RecordedStoreViewImplementation<
       "asOfRecorded",
     );
 
+    this.adjacency = (root, options) => this.#readAdjacency(root, options);
+
     // `search` is intentionally absent from the typed recorded surface (a TS
     // caller gets a compile error). It is installed here as a runtime-only
     // backstop — invisible to the class type — so a JS caller reaching past the
@@ -1206,6 +1216,35 @@ class RecordedStoreViewImplementation<
         return searchBackstop;
       },
     });
+  }
+
+  /**
+   * Pages incident edge/neighbor pairs, outgoing before incoming and then by
+   * revision/kind/id/history id. The limit bounds historical candidates examined;
+   * invisible versions can produce an empty page with a continuation.
+   * Self-loops occur once in both-direction mode; parallel edges stay distinct.
+   */
+  async #readAdjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(
+    root: GraphNodeReference<G>,
+    options?: RecordedAdjacencyOptions<K>,
+  ): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>> {
+    const edgeKinds = options?.edgeKinds ?? Object.keys(this.store.graph.edges);
+    if (
+      !Object.hasOwn(this.store.graph.nodes, root.kind) ||
+      edgeKinds.some((kind) => !Object.hasOwn(this.store.graph.edges, kind))
+    ) {
+      throw new ValidationError(
+        "Recorded adjacency requires registered node and edge kinds.",
+        { issues: [{ path: "kind", message: "Unknown graph kind." }] },
+      );
+    }
+    const read = requireDefined(storeRuntime(this.store).recordedAdjacency);
+    return (await read(
+      root,
+      this.coordinate,
+      edgeKinds,
+      options,
+    )) as RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>;
   }
 
   /** The recorded/system-time anchor this view reconstructs. */
@@ -1257,7 +1296,9 @@ class RecordedStoreViewImplementation<
  * is present only for identity-enabled graphs.
  */
 export type RecordedStoreView<G extends GraphDef> =
-  RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
+  RecordedStoreViewImplementation<G> &
+    Required<Pick<RecordedStoreViewImplementation<G>, "adjacency">> &
+    ViewIdentityAccess<G>;
 
 export const RecordedStoreView =
   RecordedStoreViewImplementation as unknown as new <G extends GraphDef>(

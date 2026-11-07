@@ -2953,3 +2953,12 @@ const [store] = await createStoreWithSchema(graph, backend);
 - [Schemas & Types](/core-concepts) - Define your graph schema
 - [Semantic Search](/semantic-search) - Vector embeddings and similarity search
 - [Limitations](/limitations) - Backend-specific constraints
+
+### Recorded adjacency paging
+
+`RecordedStoreView.adjacency()` supports the same candidate-bounded, cursor-paginated incident edge/neighbor
+contract on bundled SQLite and PostgreSQL backends with `history: true`. Base-schema version 6 adds endpoint
+paging indexes and adopts them on existing databases. Engine-native recorded-time sources and external
+`recordedRelation` sources refuse with `ConfigurationError` code `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`; they
+do not yet declare the origin and indexed candidate guarantees needed by this API. See [temporal
+queries](/queries/temporal) for empty-page handling and cursor scope.
