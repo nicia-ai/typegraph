@@ -90,6 +90,7 @@ import {
   registerQueryTerminalIntegrationTests,
   registerReadEfficiencyIntegrationTests,
   registerReconciledSchemaIntegrationTests,
+  registerRecordedAdjacencyIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveDelimiterIdIntegrationTests,
@@ -338,6 +339,7 @@ export function createIntegrationTestSuite<
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
+    registerRecordedAdjacencyIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);

@@ -327,10 +327,10 @@ export type SchemaManagerOptions = Readonly<{
   /**
    * Whether `createStoreWithSchema` brings the base-relation system
    * indexes up to the running library version at boot. Default:
-   * `"materialize"`. Pass `"skip"` when a boot must not run potentially
-   * long index builds inline (e.g. a large PostgreSQL deployment behind a
-   * readiness probe) — then run `store.materializeSystemIndexes()`
-   * out-of-band after upgrading.
+   * `"materialize"`. Pass `"skip"` to defer lazy system-index materialization, then run
+   * `store.materializeSystemIndexes()` out of band. Base-schema adoption
+   * still runs inline, including required index builds. Large PostgreSQL
+   * deployments should prebuild adoption indexes concurrently before upgrading.
    */
   systemIndexes?: "materialize" | "skip";
   /** Called before a safe auto-migration is applied. For observability only. */

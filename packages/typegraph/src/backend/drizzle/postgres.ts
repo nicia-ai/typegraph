@@ -65,6 +65,7 @@ import {
   StaleVersionError,
 } from "../../errors";
 import {
+  adjacencyIndexAdoptionDdl,
   generateGraphIdOrderIndexDDL,
   graphIdOrderIndexTables,
   sinceIndexAdoptionDdl,
@@ -1918,6 +1919,10 @@ function buildPostgresEngineProfileInternal(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    adjacencyIndexDdl: adjacencyIndexAdoptionDdl(
+      getTableName(tables.recordedEdges),
+      "postgres",
+    ),
     sinceIndexDdl: [
       generatePgCreateTableSQL(tables.recordedNodes),
       ...generatePgCreateIndexSQL(tables.recordedNodes),

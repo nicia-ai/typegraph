@@ -62,6 +62,16 @@ export const BASE_SCHEMA_RELEASES = [
         "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
     },
   },
+  {
+    version: 6,
+    id: "recorded-adjacency-indexes",
+    orderedShapeDigests: {
+      postgres:
+        "bd58d4009d8b443c35cd8296526dda69e7494cda6917b7f096ae6acd3faa45e6",
+      sqlite:
+        "a4bd95aa94fb0b522538739e1f3b8d2f61a577bc651b75e48889d4c64e8c7aa5",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {

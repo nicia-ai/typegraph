@@ -1129,6 +1129,28 @@ including tombstones. Export the affected edges, hard-delete them, publish the
 new schema, and import them again so every row receives a key under the new
 declaration.
 
+### Base-schema version 6: recorded adjacency indexes
+
+Version 6 adds two seven-column indexes to the recorded edges relation, ordered by graph, endpoint kind/id, edge
+kind, recorded revision, edge id, and history id. Privileged open adopts them with plain `CREATE INDEX IF NOT
+EXISTS`, which blocks history-recording edge writes while each build runs. This runs inline even with
+`systemIndexes: "skip"`; base-schema adoption is independent of lazy system-index materialization.
+
+For a large PostgreSQL history, prebuild both indexes before upgrading. Run each statement outside a transaction,
+substituting your adapter's table and index names if customized:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx"
+  ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx"
+  ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");
+```
+
+Verify that both indexes are valid and have exactly these definitions before opening the upgraded store. An
+interrupted concurrent build can leave an invalid index; drop that index and rerun its build. `IF NOT EXISTS`
+trusts an existing name and does not repair a wrong definition. SQLite adopts the same column order with its
+default binary text ordering.
+
 ### Base-schema version 5: byte-ordered `graph_id` indexes (PostgreSQL)
 
 Version 5 adds one index to each relation `listGraphIds` seeks (`nodes`, `edges` and
@@ -2481,6 +2503,7 @@ TypeGraph choosing separate query semantics per backend:
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 | Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |
 | Engine-native recorded time (`backend.recordedTime`)    | ✗ (TypeGraph-owned recorded relations via `history`) | ✗ (TypeGraph-owned recorded relations via `history`) | Neither bundled profile declares `recordedTime`, so `resolveRecordedTimeOwnership` derives `"typegraph-relations"` for both — `history: true` captures into TypeGraph's own recorded relations and clock, identically on both dialects, and every recorded-time integration suite and the parity snapshot run unchanged. A backend that supplies `recordedTime` (and the co-required `lineage`) reads and writes recorded time through its own engine instead: no TypeGraph capture, clock, or recorded relations, `RecordedInstant` anchors in the `e1:` form, and several TypeGraph-relation-specific surfaces refused — see [Engine-native recorded time](/queries/temporal#engine-native-recorded-time) and [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime). No bundled backend implements this today; the capability is proven by a PostgreSQL-family simulation (shared by the always-running `tests/backends/postgres/pglite-engine-native-recorded-time.test.ts` and the `POSTGRES_URL`-gated `tests/backends/postgres/engine-native-recorded-time.test.ts`, both built on `engine-native-recorded-time-simulation.ts`) that dresses TypeGraph's own recorded relations as a temporal-table expression, labeled as a simulation rather than a real third engine |
+| Recorded adjacency paging | ✓ (`history: true`) | ✓ (`history: true`) | Candidate-bounded incident edge/neighbor pages. Engine-native and external recorded sources refuse with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`. See [temporal queries](/queries/temporal). |
 
 Identity support also has a **driver** dimension inside each dialect:
 
@@ -2713,9 +2736,10 @@ least-privilege, DML-only database role.
   Deployments that never run `createStoreWithSchema` (manual-DDL boot with
   a plain `createStore` attach) adopt new system indexes by calling
   `store.materializeSystemIndexes()` once under a DDL-capable role after
-  upgrading; deployments that must not run index builds inline at boot
-  (large tables behind a readiness probe) pass `systemIndexes: "skip"` to
-  `createStoreWithSchema` and materialize out-of-band the same way.
+  upgrading. To defer lazy materialization, pass `systemIndexes: "skip"` to
+  `createStoreWithSchema` and materialize out of band the same way. This does
+  not defer base-schema adoption: prebuild required version 5 and version 6
+  indexes concurrently before upgrading a large PostgreSQL installation.
 
 - **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
   It does not create tables, repair DDL, or record that runtime storage

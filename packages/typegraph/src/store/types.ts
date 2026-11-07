@@ -2153,6 +2153,32 @@ export type StoreViewEdgeCollections<G extends GraphDef> = {
   >;
 };
 
+/** Options for bounded incident-edge paging at a recorded coordinate. */
+export type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
+  /** Historical edge rows of selected kinds examined per page (1–1,000, default 100). */
+  candidateLimit?: number;
+  after?: string;
+  direction?: "out" | "in" | "both";
+  edgeKinds?: readonly K[];
+}>;
+
+/** An incident edge and its opposite, kind-qualified endpoint. */
+export type RecordedAdjacencyEntry<
+  G extends GraphDef,
+  K extends EdgeKinds<G> = EdgeKinds<G>,
+> = Readonly<{
+  edge: GraphEdgeForKinds<G, K>;
+  neighbor: GraphNodeReference<G>;
+}>;
+
+/** A candidate-bounded page; empty data can still have a continuation. */
+export type RecordedAdjacencyPage<T> = Readonly<{
+  data: readonly T[];
+  nextCursor: string | undefined;
+  /** More historical candidates remain; they may all be invisible. */
+  hasNextPage: boolean;
+}>;
+
 /** Options for one bounded, forward-only recorded-time collection scan. */
 export type RecordedScanOptions = Readonly<{
   /** Maximum entities to return. Defaults to 1,000 and cannot exceed 1,000. */

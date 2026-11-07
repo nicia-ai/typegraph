@@ -334,5 +334,69 @@
     "kind": "member-removed",
     "reason": "Intentional breaking change: SubgraphResult is keyed by (kind, id) instead of node id, so two same-id nodes of different kinds can both be returned. The id-keyed nodes/adjacency/reverseAdjacency maps are replaced by plain nodes and edges arrays, with (kind, id) lookups in the indexSubgraph() helper. SubgraphResult is produced by TypeGraph, not authored by consumers; listed under Breaking in the changeset.",
     "issue": "#791"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedStoreViewImplementation",
+    "member": "adjacency",
+    "kind": "required-member-added",
+    "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
+    "issue": "#810"
   }
 ]
