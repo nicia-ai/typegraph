@@ -1981,14 +1981,19 @@ async function applyNodeRows<G extends GraphDef>(
   );
 }
 
-async function applyEdgeRows(
+async function applyEdgeDeletes(
   edgesApi: TxEdges,
   deletions: readonly MergePlanEntityRef[],
-  upserts: readonly MechanicalEdgeWrite[],
-): Promise<number> {
+): Promise<void> {
   for (const deletion of deletions) {
     await edgeCollection(edgesApi, deletion.kind).delete(deletion.id);
   }
+}
+
+async function applyEdgeUpserts(
+  edgesApi: TxEdges,
+  upserts: readonly MechanicalEdgeWrite[],
+): Promise<number> {
   const byKind = new Map<string, EdgeUpsert[]>();
   for (const upsert of upserts) {
     const items = byKind.get(upsert.kind);
@@ -2001,6 +2006,19 @@ async function applyEdgeRows(
     committed += items.length;
   }
   return committed;
+}
+
+/** Owns the row dependency order shared by both merge executors. */
+async function applyMergeRowWrites(
+  edgesApi: TxEdges,
+  edgeDeletions: readonly MergePlanEntityRef[],
+  writeNodes: () => Promise<number>,
+  edgeUpserts: readonly MechanicalEdgeWrite[],
+): Promise<Pick<MergedCounts, "nodes" | "edges">> {
+  await applyEdgeDeletes(edgesApi, edgeDeletions);
+  const nodes = await writeNodes();
+  const edges = await applyEdgeUpserts(edgesApi, edgeUpserts);
+  return { nodes, edges };
 }
 
 async function applyIdentityRows<G extends GraphDef>(
@@ -2050,37 +2068,6 @@ async function applyInternalMergePlan<G extends GraphDef>(
     : write.validTo === undefined ? {}
     : { validTo: write.validTo }),
   }));
-  const validityEndedNodes = new Set(
-    nodeUpserts
-      .filter((write) => "validTo" in write)
-      .map((write) => mergeKey(write.kind, write.id)),
-  );
-  const earlyIdentityRetractions = plan.identityRetractions.filter(
-    (retraction) =>
-      validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
-      validityEndedNodes.has(mergeKeyOf(retraction.b)),
-  );
-  const earlyIdentity = await applyIdentityRows(
-    target,
-    txBackend,
-    [],
-    earlyIdentityRetractions,
-  );
-  let committedNodes: number;
-  try {
-    committedNodes = await applyNodeRows(
-      target,
-      txBackend,
-      nodesApi,
-      nodeDeletions,
-      nodeUpserts,
-    );
-  } catch (error) {
-    throw error instanceof IdentityEndpointValidityError ?
-        translateIdentityCommitError(error)
-      : error;
-  }
-
   const edgeDeletions = [...plan.edgeDeletions].map(([identity, kind]) => ({
     kind,
     id: idOf(identity),
@@ -2115,9 +2102,40 @@ async function applyInternalMergePlan<G extends GraphDef>(
       },
     });
   }
-  const committedEdges = await applyEdgeRows(
+  const validityEndedNodes = new Set(
+    nodeUpserts
+      .filter((write) => "validTo" in write)
+      .map((write) => mergeKey(write.kind, write.id)),
+  );
+  const earlyIdentityRetractions = plan.identityRetractions.filter(
+    (retraction) =>
+      validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
+      validityEndedNodes.has(mergeKeyOf(retraction.b)),
+  );
+  const earlyIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    [],
+    earlyIdentityRetractions,
+  );
+  const committed = await applyMergeRowWrites(
     edgesApi,
     edgeDeletions,
+    async () => {
+      try {
+        return await applyNodeRows(
+          target,
+          txBackend,
+          nodesApi,
+          nodeDeletions,
+          nodeUpserts,
+        );
+      } catch (error) {
+        throw error instanceof IdentityEndpointValidityError ?
+            translateIdentityCommitError(error)
+          : error;
+      }
+    },
     edgeUpserts,
   );
 
@@ -2141,8 +2159,8 @@ async function applyInternalMergePlan<G extends GraphDef>(
   );
 
   return {
-    nodes: committedNodes,
-    edges: committedEdges,
+    nodes: committed.nodes,
+    edges: committed.edges,
     // ACTUAL ledger effects from the applier: rows created (idempotent
     // exact/pair matches the target already held are excluded — the normal
     // incremental case, where the target's own additions are staged back at
@@ -4104,24 +4122,25 @@ async function applyWireMergeWrites<G extends GraphDef>(
   txBackend: TransactionBackend,
   artifact: MergePlanArtifactV1,
 ): Promise<MergedCounts> {
-  const committedNodes = await applyNodeRows(
-    target,
-    txBackend,
-    nodesApi,
-    artifact.writes.nodeDeletes,
-    artifact.writes.nodeUpserts.map((upsert) => ({
-      kind: upsert.kind,
-      id: upsert.id,
-      props: wireWriteProps(upsert.setProps, upsert.unsetProps),
-      ...(upsert.validFrom === undefined ?
-        {}
-      : { validFrom: upsert.validFrom }),
-      ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
-    })),
-  );
-  const committedEdges = await applyEdgeRows(
+  const committed = await applyMergeRowWrites(
     edgesApi,
     artifact.writes.edgeDeletes,
+    () =>
+      applyNodeRows(
+        target,
+        txBackend,
+        nodesApi,
+        artifact.writes.nodeDeletes,
+        artifact.writes.nodeUpserts.map((upsert) => ({
+          kind: upsert.kind,
+          id: upsert.id,
+          props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+          ...(upsert.validFrom === undefined ?
+            {}
+          : { validFrom: upsert.validFrom }),
+          ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+        })),
+      ),
     artifact.writes.edgeUpserts.map((upsert) => ({
       kind: upsert.kind,
       item: {
@@ -4166,8 +4185,8 @@ async function applyWireMergeWrites<G extends GraphDef>(
     );
   }
   return {
-    nodes: committedNodes,
-    edges: committedEdges,
+    nodes: committed.nodes,
+    edges: committed.edges,
     identity: {
       asserted: appliedIdentity.asserted,
       retracted: appliedIdentity.retracted,
