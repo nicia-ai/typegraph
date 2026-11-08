@@ -28,7 +28,7 @@ import {
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
-import { resolvePlanningScope } from "./planning-scope";
+import { type PlanningScope, resolvePlanningScope } from "./planning-scope";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
 import {
@@ -113,17 +113,19 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
   writeSet: unknown;
   options?: Omit<MergeOptions<G>, "target">;
   /** Candidate planning refuses unsupported bounded reads; full cloning requires opt-in. */
-  planningScope?: "candidate" | "full";
+  planningScope?: PlanningScope;
 }>;
 
 /** Object-form arguments for candidate planning against a planned evolution. */
 export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<
   PlanCandidateWriteSetArgs<G>,
-  "target"
+  "target" | "planningScope"
 > &
   Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
+    /** Evolution staging currently requires a complete copy. */
+    planningScope: "full";
   }>;
 
 /** Captures the schema identity a candidate write set must name. */
@@ -269,6 +271,12 @@ export async function planCandidateWriteSet<G extends GraphDef>(
     return err(
       new MergePlanCapabilityError(
         "This candidate cannot be planned with bounded reads. Explicitly select full planning to permit a complete clone.",
+        {
+          details: {
+            capability: "boundedCandidatePlanning",
+            planningScope: "full",
+          },
+        },
       ),
     );
   const sparse =
@@ -398,6 +406,12 @@ export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
     return err(
       new MergePlanCapabilityError(
         "Candidate evolution planning requires explicit full planning.",
+        {
+          details: {
+            capability: "boundedEvolutionPlanning",
+            planningScope: "full",
+          },
+        },
       ),
     );
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);

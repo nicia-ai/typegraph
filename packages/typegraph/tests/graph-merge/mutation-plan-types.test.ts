@@ -5,6 +5,7 @@ import { defineEdge, defineGraph, defineNode } from "../../src";
 import {
   type MutationOperation,
   type MutationPlanBuilder,
+  type PlanCandidateWriteSetForEvolutionArgs,
 } from "../../src/graph-merge";
 
 const Item = defineNode("Item", {
@@ -81,3 +82,19 @@ describe("mutation plan types", () => {
       .toEqualTypeOf<MutationPlanBuilder<typeof graph>>();
   });
 });
+
+function checkEvolutionScope(
+  args: Omit<
+    PlanCandidateWriteSetForEvolutionArgs<typeof graph>,
+    "planningScope"
+  >,
+): void {
+  // @ts-expect-error Evolution planning requires explicit permission for full cloning.
+  const missing: PlanCandidateWriteSetForEvolutionArgs<typeof graph> = args;
+  const accepted: PlanCandidateWriteSetForEvolutionArgs<typeof graph> = {
+    ...args,
+    planningScope: "full",
+  };
+  void [missing, accepted];
+}
+void checkEvolutionScope;

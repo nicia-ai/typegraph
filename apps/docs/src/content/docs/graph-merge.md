@@ -453,8 +453,9 @@ still fences the target revision before and after these reads. With edge
 match-identity constraints, a backend offering `findEdgesByMatchIdentity`
 seeds the exact durable owners named by the candidate. A missing keyed read,
 an owner excluded from the clone projection, or a target without revision
-tracking uses the complete clone path. A custom backend lacking the optional
-`findActiveEdgesBySourceV1` read also uses that path for `oneActive` graphs.
+tracking refuses bounded planning. A custom backend lacking the optional
+`findActiveEdgesBySourceV1` read also refuses for `oneActive` graphs. Select
+`planningScope: "full"` explicitly to permit a complete clone.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
@@ -2423,11 +2424,12 @@ The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
 properties are refused. A custom backend without the active-only source read
-uses the complete clone path for `oneActive` graphs. A custom backend without
+refuses bounded planning for `oneActive` graphs. A custom backend without
 the keyed match-identity owner read, or a candidate whose owner is excluded
-from the clone projection, also uses that path. Other ineligible graphs use
-the complete clone path so staging
-still checks constraints that can depend on rows beyond the candidate's ids.
+from the clone projection, also refuses bounded planning. Select
+`planningScope: "full"` explicitly for these graphs, including evolution planning,
+so staging can check constraints beyond the candidate's ids. Refusals identify
+`details.capability` and the required `details.planningScope`.
 
 ```typescript
 import {

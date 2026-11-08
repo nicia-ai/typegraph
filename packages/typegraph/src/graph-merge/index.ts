@@ -142,7 +142,12 @@ export type {
   MutationPlanBuilder,
   MutationPlanningOptions,
 } from "./mutation-plan";
-export { createMutationPlanBuilder, planMutations } from "./mutation-plan";
+export {
+  createMutationPlanBuilder,
+  MUTATION_DOCUMENT_FORMAT_VERSION,
+  MutationDocumentSchema,
+  planMutations,
+} from "./mutation-plan";
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
 export {
   forkGraphNamespace,
@@ -188,6 +193,7 @@ export {
   MERGE_PLAN_DIGEST_ALGORITHM,
   MERGE_PLAN_FORMAT_VERSION,
 } from "./plan-schema";
+export type { PlanningScope } from "./planning-scope";
 export type {
   ProvenanceGraph,
   ProvenanceNode,

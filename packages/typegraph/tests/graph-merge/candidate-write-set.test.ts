@@ -24,6 +24,8 @@ import {
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
+  planCandidateWriteSetForEvolution,
+  type PlanCandidateWriteSetForEvolutionArgs,
   planCandidateWriteSetReview,
   planMergeIncremental,
   revalidateCandidateWriteSetReview,
@@ -2044,5 +2046,24 @@ describe("candidate write-set planning", () => {
       ]);
     }
     expect(backend.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("candidate evolution planning scope", () => {
+  it("refuses missing and candidate scope before touching a target", async () => {
+    for (const planningScope of [undefined, "candidate"]) {
+      const result = await planCandidateWriteSetForEvolution({
+        planningScope,
+      } as unknown as PlanCandidateWriteSetForEvolutionArgs<typeof graph>);
+      expect(result).toMatchObject({
+        success: false,
+        error: {
+          details: {
+            capability: "boundedEvolutionPlanning",
+            planningScope: "full",
+          },
+        },
+      });
+    }
   });
 });

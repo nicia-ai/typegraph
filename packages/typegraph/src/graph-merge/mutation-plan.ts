@@ -48,7 +48,7 @@ import {
   type MergePlanTargetFence,
   mergePlanTargetFenceSchema,
 } from "./plan-schema";
-import { resolvePlanningScope } from "./planning-scope";
+import { type PlanningScope, resolvePlanningScope } from "./planning-scope";
 import { err, isErr, type Result } from "./result";
 import {
   canUseSparseCandidatePlanning,
@@ -161,7 +161,7 @@ export type MutationAuthoringOptions = Readonly<{
 /** Full cloning is opt-in; candidate mode refuses instead of hiding a scan. */
 export type MutationPlanningOptions = Readonly<{
   makeBackend: MakeBackend;
-  planningScope?: "candidate" | "full";
+  planningScope?: PlanningScope;
 }>;
 
 type Observation = Readonly<{
@@ -258,8 +258,11 @@ export type MutationOperation = Readonly<{
         to?: never;
       }>
   );
+/** Current JSON mutation document version. */
+export const MUTATION_DOCUMENT_FORMAT_VERSION = 1 as const;
+
 export type MutationDocument = Readonly<{
-  formatVersion: 1;
+  formatVersion: typeof MUTATION_DOCUMENT_FORMAT_VERSION;
   sourceId: string;
   target: MergePlanTargetFence;
   operations: readonly MutationOperation[];
@@ -317,9 +320,9 @@ const mutationOperationSchema = z.discriminatedUnion("op", [
   mutationBaseSchema.extend({ op: z.literal("node.delete") }),
   mutationBaseSchema.extend({ op: z.literal("edge.delete") }),
 ]);
-const mutationDocumentSchema = z
+export const MutationDocumentSchema = z
   .object({
-    formatVersion: z.literal(1),
+    formatVersion: z.literal(MUTATION_DOCUMENT_FORMAT_VERSION),
     sourceId: z.string().min(1),
     target: mergePlanTargetFenceSchema,
     operations: z.array(mutationOperationSchema),
@@ -464,7 +467,7 @@ function mutationBuilder<G extends GraphDef>(
   }
   function document(): MutationDocument {
     return structuredClone({
-      formatVersion: 1,
+      formatVersion: MUTATION_DOCUMENT_FORMAT_VERSION,
       sourceId,
       target: fence,
       operations: steps.map((step) => step.operation),
@@ -540,7 +543,7 @@ export async function planMutations<G extends GraphDef>(
     Readonly<{ target: Store<G>; mutations: unknown }>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
   try {
-    const document = mutationDocumentSchema.parse(
+    const document = MutationDocumentSchema.parse(
       structuredClone(args.mutations),
     );
     for (const [index, operation] of document.operations.entries()) {
@@ -736,6 +739,12 @@ async function planMutationSteps<G extends GraphDef>(
     if (bounded && !canUseSparseCandidatePlanning(target))
       throw new MergePlanCapabilityError(
         "This graph cannot be mutation-planned with bounded candidate reads. Explicitly select full planning to permit a complete clone.",
+        {
+          details: {
+            capability: "boundedCandidatePlanning",
+            planningScope: "full",
+          },
+        },
       );
     const backend = storeBackend(target);
     const edgeRows: EdgeRow[] = [];

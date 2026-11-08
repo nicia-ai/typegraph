@@ -9,3 +9,5 @@ Reviewed batches can supply a persisted `expectedTarget` fence when authoring re
 Persist authoring with the versioned JSON mutation document returned by `builder.document`, and resume through `planMutations`. New merge artifacts use format 2 to represent validity clearing and delete/recreate semantics; existing format 1 artifacts remain readable. Recreation resets the complete validity window, and staged collection refusals retain the operation index and original cause.
 
 Upgrade candidate write-set callers that require full cloning to pass `planningScope: "full"`; implicit full-copy fallback is removed. Candidate evolution planning currently requires this explicit scope.
+
+Evolution candidate planning now requires `planningScope: "full"` in both its type and runtime contract. Bounded-capability refusals expose `details.capability` and the required planning scope. `PlanningScope`, `MUTATION_DOCUMENT_FORMAT_VERSION`, and `MutationDocumentSchema` are public contracts for authoring and validating persisted documents.

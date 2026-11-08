@@ -5333,6 +5333,9 @@ type MetaEdgeProperties = Readonly<{
 }>;
 
 // @public
+export const MUTATION_DOCUMENT_FORMAT_VERSION: 1;
+
+// @public
 export type MutationAuthoringOptions = Readonly<{
     expectedTarget?: MergePlanTargetFence;
 }>;
@@ -5345,11 +5348,103 @@ export type MutationCreateOptions = Readonly<{
 
 // @public (undocumented)
 export type MutationDocument = Readonly<{
-    formatVersion: 1;
+    formatVersion: typeof MUTATION_DOCUMENT_FORMAT_VERSION;
     sourceId: string;
     target: MergePlanTargetFence;
     operations: readonly MutationOperation[];
 }>;
+
+// @public (undocumented)
+export const MutationDocumentSchema: z.ZodObject<{
+    formatVersion: z.ZodLiteral<1>;
+    sourceId: z.ZodString;
+    target: z.ZodObject<{
+        graphId: z.ZodString;
+        schema: z.ZodObject<{
+            managed: z.ZodBoolean;
+            version: z.ZodNumber;
+            hash: z.ZodString;
+        }, z.core.$strict>;
+        revision: z.ZodObject<{
+            origin: z.ZodString;
+            revision: z.ZodNullable<z.ZodString>;
+        }, z.core.$strict>;
+    }, z.core.$strict>;
+    operations: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.create">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        options: z.ZodOptional<z.ZodObject<{
+            validFrom: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.create">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        options: z.ZodOptional<z.ZodObject<{
+            validFrom: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+        from: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strict>;
+        to: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.update">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        unsetProps: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        options: z.ZodOptional<z.ZodUnion<readonly [z.ZodPipe<z.ZodObject<{
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>, z.ZodTransform<{
+            validTo?: never;
+        } | {
+            validTo: string;
+        }, {
+            validTo?: string | undefined;
+        }>>, z.ZodObject<{
+            clearValidTo: z.ZodLiteral<true>;
+        }, z.core.$strict>]>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.update">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        unsetProps: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        options: z.ZodOptional<z.ZodUnion<readonly [z.ZodPipe<z.ZodObject<{
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>, z.ZodTransform<{
+            validTo?: never;
+        } | {
+            validTo: string;
+        }, {
+            validTo?: string | undefined;
+        }>>, z.ZodObject<{
+            clearValidTo: z.ZodLiteral<true>;
+        }, z.core.$strict>]>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.replace">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.delete">;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.delete">;
+    }, z.core.$strict>], "op">>;
+}, z.core.$strict>;
 
 // @public
 export type MutationOperation = Readonly<{
@@ -5410,7 +5505,7 @@ export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
 // @public
 export type MutationPlanningOptions = Readonly<{
     makeBackend: MakeBackend;
-    planningScope?: "candidate" | "full";
+    planningScope?: PlanningScope;
 }>;
 
 // @public
@@ -6110,16 +6205,17 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
-    planningScope?: "candidate" | "full";
+    planningScope?: PlanningScope;
 }>;
 
 // @public
 export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
 
 // @public
-export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target"> & Readonly<{
+export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target" | "planningScope"> & Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
+    planningScope: "full";
 }>;
 
 // @public
@@ -6150,6 +6246,9 @@ export function planMutations<G extends GraphDef>(args: MutationPlanningOptions 
     target: Store<G>;
     mutations: unknown;
 }>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export type PlanningScope = "candidate" | "full";
 
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
