@@ -878,8 +878,9 @@ while retiring old anchors and merge fences in the copy.
 The allocation log is rebound to the fork's new owner. Table-name namespace
 hashes distinguish managed prefixed allocations, but cannot detect Neon branches,
 template clones, or file copies with unchanged names. Their provisioning lifecycle
-must call this explicit rotation API. `forkedWorkingCopyStrategy()` verifies its
-copied base and rotates automatically before returning a writable fork. Rotation
+must call this explicit rotation API. `forkedWorkingCopyStrategy()` and
+physical copies allocated by `branchDurable()` verify the copied base and rotate
+automatically before returning a writable fork. Rotation
 is not required when restoring a backup as the continuation of its original allocation.
 
 External recorded relations can supply an owner reader with
@@ -892,8 +893,10 @@ retained origin evidence; fetching today's nonce does not prove a legacy checkpo
 origin. Migration rejects coordinates beyond the current clock and checks already-bound
 instants rather than silently passing them through as verified.
 
-Construct external checkpoints with `recordedInstant({ revision, recordedAt, owner })`,
+Construct external checkpoints with `recordedInstant({ revision, wallTime, owner })`,
 which validates the public owner-bound token format. The owner reader attests the
 source allocation; the factory itself does not establish that the source exists.
-`allocationOwner()` uses that same external reader. Missing metadata is a typed
-configuration refusal, and TypeGraph cannot rotate externally owned allocations.
+`recordedReadOwner()` uses that same external reader; missing metadata is a typed
+configuration refusal. `allocationOwner()` always identifies native writes and merge
+fences. A store with external reads and revision tracking has both owners. Rotation
+changes only its native allocation; external retirement remains the provider's responsibility.

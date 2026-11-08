@@ -711,7 +711,7 @@ export type RecordedInstant = string & {
 // @public
 export function recordedInstant(coordinate: Readonly<{
     revision: number;
-    recordedAt: string;
+    wallTime: string;
     owner: GraphAllocationOwner;
 }>): RecordedInstant;
 

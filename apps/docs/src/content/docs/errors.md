@@ -1499,3 +1499,8 @@ try {
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
 | `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
+
+External recorded sources without an owner refuse with `ConfigurationError` and
+`details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Configure the source owner reader
+for `recordedReadOwner()` and historical reads. Native allocation ownership and
+rotation require revision tracking and otherwise raise `UnsupportedBackendCapabilityError`.

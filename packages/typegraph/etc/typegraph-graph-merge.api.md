@@ -24,6 +24,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
     resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
@@ -5381,6 +5382,10 @@ export const MutationDocumentSchema: z.ZodObject<{
         revision: z.ZodObject<{
             origin: z.ZodString;
             revision: z.ZodNullable<z.ZodString>;
+            owner: z.ZodObject<{
+                origin: z.ZodString;
+                namespace: z.ZodString;
+            }, z.core.$strict>;
         }, z.core.$strict>;
     }, z.core.$strict>;
     operations: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
@@ -7762,6 +7767,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
     allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
     rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;

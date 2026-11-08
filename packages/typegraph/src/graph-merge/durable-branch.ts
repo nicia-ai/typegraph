@@ -64,6 +64,7 @@
  * Backend-specific mechanics remain entirely within the strategy.
  */
 
+import { sameGraphAllocationOwner } from "../core/allocation-owner";
 import { asRecordedInstant } from "../core/temporal";
 import { computeBaseVersion, schemaComponentOf } from "./base-version";
 import { readBranchForkState } from "./branch";
@@ -424,8 +425,27 @@ export async function branchDurable<
   let definitionHash: string;
   try {
     await assertDurableWorkingCopyMatchesBase(baseStore, created.store, base);
+    // Verify the copied base before rotating: the O(1) physical-fork proof
+    // intentionally compares the parent's owner. Seal only the final owner.
+    const inheritedOwner =
+      baseStore.revisionTrackingEnabled &&
+      created.store.revisionTrackingEnabled &&
+      sameGraphAllocationOwner(
+        await baseStore.allocationOwner(),
+        await created.store.allocationOwner(),
+      );
+    if (inheritedOwner)
+      await created.store.rotateAllocationOwner(
+        await created.store.allocationOwner(),
+      );
     const captured = await readBranchForkState(created.store, false);
-    forkState = { ...captured, forkRevision: created.forkRevision };
+    forkState = {
+      ...captured,
+      forkRevision:
+        inheritedOwner ?
+          await created.store.lineageRevisionNow()
+        : created.forkRevision,
+    };
     definitionHash = await getGraphDefinitionHash(created.store.graph);
   } catch (error) {
     return err(await abandonAllocation(strategy, created, id, error));

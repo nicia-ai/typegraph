@@ -14,7 +14,7 @@ Expose the complete owner through `store.allocationOwner()` and `recordedInstant
 
 Update reset handling to match `GRAPH_ALLOCATION_ORIGIN_MISMATCH`, shared by recorded reads, comparisons, and merge origin refusals. This replaces the earlier adjacency/merge-specific reset codes. Recorded transaction sessions and iterative algorithms enforce the same ownership check. Migration verifies bound inputs and refuses revisions beyond the retained clock.
 
-Known writable forks created by `forkedWorkingCopyStrategy()` rotate their owner automatically after base verification; parent checkpoints must be reacquired under the fork owner. External writers can construct owner-bound checkpoints with `recordedInstant({ revision, recordedAt, owner })`; external `allocationOwner()` uses the configured source owner reader, and TypeGraph rotation refuses external ownership.
+Known writable forks created by `forkedWorkingCopyStrategy()` and physical copies allocated by `branchDurable()` rotate their owner automatically after base verification; parent checkpoints must be reacquired under the fork owner. External writers can construct owner-bound checkpoints with `recordedInstant({ revision, wallTime, owner })`; `recordedReadOwner()` uses the configured source owner reader. `allocationOwner()` and rotation refer only to native writes, independently of external reads.
 
 Replace `revisionOriginNow()` callers with `allocationOwner()`. Retain the complete owner for checkpoints and fences rather than comparing only its origin component; raw origin minting is now private.
 

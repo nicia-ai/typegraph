@@ -41,6 +41,13 @@ import {
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
 import {
+  applyMergePlan,
+  branch,
+  merge,
+  planMerge,
+  unwrap,
+} from "../../../src/graph-merge";
+import {
   type GraphData,
   importGraph,
   ImportOptionsSchema,
@@ -1203,6 +1210,58 @@ export function registerRecordedTimeIntegrationTests(
       ).rejects.toMatchObject({ name: "ValidationError" });
     });
 
+    it("keeps native merge fences and lineage separate from external read ownership", async () => {
+      const writer = await createHistoryStore(context);
+      const node = await writer.nodes.Person.create({
+        name: "original",
+        age: 1,
+      });
+      const nativeOwner = await writer.allocationOwner();
+      const externalOwner = { ...nativeOwner, origin: "external-origin" };
+      const [target] = await createStoreWithSchema(
+        integrationTestGraph,
+        context.getBackend(),
+        {
+          revisionTracking: true,
+          recordedRead: recordedRelation({
+            schema: writer.revisionSchema,
+            owner: () => Promise.resolve(externalOwner),
+          }),
+        },
+      );
+      expect(await target.allocationOwner()).toEqual(nativeOwner);
+      expect(await target.recordedReadOwner()).toEqual(externalOwner);
+      const revision = requireDefined(await target.lineageRevisionNow());
+      const delta = await target.changesSince(revision);
+      expect(delta.kind).not.toBe("unbounded");
+      const first = unwrap(
+        await branch(target, () => context.createIsolatedBackend()),
+      );
+      try {
+        await first.store.nodes.Person.update(node.id, { name: "merged" });
+        unwrap(await merge(target, [first], {}));
+      } finally {
+        await first.close();
+      }
+      const second = unwrap(
+        await branch(target, () => context.createIsolatedBackend()),
+      );
+      try {
+        await second.store.nodes.Person.update(node.id, { name: "planned" });
+        const plan = unwrap(await planMerge(target, [second], {}));
+        expect(plan.target.revision.owner).toEqual(nativeOwner);
+        unwrap(await applyMergePlan(target, plan));
+      } finally {
+        await second.close();
+      }
+      expect(await target.nodes.Person.getById(node.id)).toMatchObject({
+        name: "planned",
+      });
+      const rotated = await target.rotateAllocationOwner(nativeOwner);
+      expect(rotated).not.toEqual(nativeOwner);
+      expect(await target.recordedReadOwner()).toEqual(externalOwner);
+    });
+
     it("reads externally owned recorded relations without local origin metadata", async () => {
       const writer = await createHistoryStore(context);
       const node = await writer.nodes.Person.create({
@@ -1213,7 +1272,7 @@ export function registerRecordedTimeIntegrationTests(
       let owner = await writer.allocationOwner();
       const anchor = recordedInstant({
         revision: recordedInstantRevision(original),
-        recordedAt: recordedInstantWallTime(original),
+        wallTime: recordedInstantWallTime(original),
         owner,
       });
       const backend = context.getBackend();
@@ -1230,11 +1289,11 @@ export function registerRecordedTimeIntegrationTests(
         ),
       );
       try {
-        expect(await external.allocationOwner()).toEqual(owner);
+        expect(await external.recordedReadOwner()).toEqual(owner);
         const unconfigured = createStore(integrationTestGraph, backend, {
           recordedRead: recordedRelation({ schema: writer.revisionSchema }),
         });
-        await expect(unconfigured.allocationOwner()).rejects.toMatchObject({
+        await expect(unconfigured.recordedReadOwner()).rejects.toMatchObject({
           name: "ConfigurationError",
           details: { code: "RECORDED_RELATIONS_MISSING" },
         });

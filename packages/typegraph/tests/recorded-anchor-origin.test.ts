@@ -16,6 +16,13 @@ import {
 } from "../src";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import {
+  branchDurable,
+  type DurableBranchOrigin,
+  type DurableWorkingCopyStrategy,
+  reopenDurableBranch,
+  unwrap,
+} from "../src/graph-merge";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
@@ -93,6 +100,82 @@ describe("recorded anchor namespace ownership", () => {
       expect(await fork.nodes.Item.getById(node.id)).toMatchObject({
         label: "fork",
       });
+    } finally {
+      for (const handle of handles) await handle.backend.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rotates durable physical forks before sealing and preserves the owner on reopen", async () => {
+    const directory = await mkdtemp(
+      path.join(tmpdir(), "typegraph-durable-owner-"),
+    );
+    const sourcePath = path.join(directory, "source.db");
+    const forkPath = path.join(directory, "fork.db");
+    const handles: ReturnType<typeof createLocalSqliteBackend>[] = [];
+    async function open(file: string) {
+      const handle = createLocalSqliteBackend({ path: file, pragmas: false });
+      handles.push(handle);
+      const [store] = await createStoreWithSchema(graph, handle.backend, {
+        history: true,
+      });
+      return store;
+    }
+    let origin: DurableBranchOrigin | undefined;
+    const strategy: DurableWorkingCopyStrategy<typeof graph, { path: string }> =
+      {
+        type: "physical-test-copy",
+        version: 1,
+        create: async () => {
+          await copyFile(sourcePath, forkPath);
+          return {
+            store: await open(forkPath),
+            descriptor: { path: forkPath },
+            access: { kind: "engine-fenced" },
+          };
+        },
+        seal: (_descriptor, value) => {
+          origin = value;
+          return Promise.resolve();
+        },
+        abort: async () => {
+          await rm(forkPath, { force: true });
+        },
+        reopen: async (_graph, descriptor) => ({
+          store: await open(descriptor.path),
+          origin: requireDefined(origin),
+          access: { kind: "engine-fenced" },
+        }),
+        destroy: async (descriptor) => {
+          await rm(descriptor.path, { force: true });
+        },
+      };
+    try {
+      const source = await open(sourcePath);
+      await source.nodes.Item.create(
+        { label: "original" },
+        { id: "item", validFrom: null },
+      );
+      const owner = await source.allocationOwner();
+      const parentCut = requireDefined(await source.recordedNow());
+      const result = unwrap(await branchDurable(source, strategy));
+      const rotated = await result.branch.store.allocationOwner();
+      expect(rotated).not.toEqual(owner);
+      expect(await source.allocationOwner()).toEqual(owner);
+      expect(result.descriptor.forkRevision).toBe(
+        await result.branch.store.lineageRevisionNow(),
+      );
+      await expect(
+        result.branch.store
+          .asOfRecorded(parentCut)
+          .nodes.Item.getById(asNodeId("item")),
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      await result.branch.close();
+      const reopened = unwrap(
+        await reopenDurableBranch(graph, result.descriptor, strategy),
+      );
+      expect(await reopened.store.allocationOwner()).toEqual(rotated);
+      await reopened.close();
     } finally {
       for (const handle of handles) await handle.backend.close();
       await rm(directory, { recursive: true, force: true });

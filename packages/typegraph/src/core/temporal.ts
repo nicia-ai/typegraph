@@ -176,7 +176,7 @@ export function optionalRecordedInstantParts(
 export function recordedInstant(
   coordinate: Readonly<{
     revision: number;
-    recordedAt: string;
+    wallTime: string;
     owner: GraphAllocationOwner;
   }>,
 ): RecordedInstant {
@@ -189,7 +189,7 @@ export function recordedInstant(
     );
   return createRecordedInstant(
     coordinate.revision,
-    coordinate.recordedAt,
+    coordinate.wallTime,
     coordinate.owner,
   );
 }

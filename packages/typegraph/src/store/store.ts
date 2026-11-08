@@ -825,8 +825,9 @@ type StoreCore<G extends GraphDef> = Readonly<{
   asOf: (asOf: string) => StoreView<G>;
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
-  /** Latest retained allocation anchor at or before the canonical UTC timestamp. */
+  /** Native write allocation, independent of external historical reads. */
   allocationOwner?: () => Promise<GraphAllocationOwner>;
+  recordedReadOwner?: () => Promise<GraphAllocationOwner>;
   rotateAllocationOwner?: (
     expectedOwner: GraphAllocationOwner,
   ) => Promise<GraphAllocationOwner>;
@@ -1000,6 +1001,7 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
 
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
   allocationOwner?: () => Promise<GraphAllocationOwner>;
+  recordedReadOwner?: () => Promise<GraphAllocationOwner>;
   resolveRecordedInstant?: (
     wallTime: string,
   ) => Promise<RecordedInstant | undefined>;
@@ -1555,7 +1557,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
       revisionOrigin: async (target = this.#backend) => {
-        return this.#readAllocationOwner(target);
+        return this.#readRecordedReadOwner(target);
       },
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
@@ -3200,9 +3202,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async #ensureAllocationOrigin(): Promise<string> {
     if (!this.#revisionTrackingEnabled) {
-      throw new ConfigurationError(
-        "allocationOwner() requires revisionTracking: true or history: true.",
-        { code: "REVISION_ORIGIN_REQUIRES_TRACKING" },
+      throw new UnsupportedBackendCapabilityError(
+        "allocationOwner",
+        "revisionTracking",
+        { graphId: this.graphId, dialect: this.#backend.dialect },
       );
     }
     return ensureRevisionOrigin(
@@ -3213,7 +3216,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
-  async #readAllocationOwner(
+  async #readRecordedReadOwner(
     target: Pick<GraphBackend, "execute">,
   ): Promise<GraphAllocationOwner | undefined> {
     const binding = this.#recordedReadBinding;
@@ -3229,10 +3232,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
-  /** Captures the full allocation identity, including on an empty tracked graph. */
-  async allocationOwner(): Promise<GraphAllocationOwner> {
+  /** Captures the owner of recorded reads, including externally managed relations. */
+  async recordedReadOwner(): Promise<GraphAllocationOwner> {
     if (this.#recordedReadBinding?.kind === "external") {
-      const owner = await this.#readAllocationOwner(this.#backend);
+      const owner = await this.#readRecordedReadOwner(this.#backend);
       if (owner === undefined)
         throw new ConfigurationError(
           "External recorded relations have no allocation owner.",
@@ -3240,6 +3243,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         );
       return owner;
     }
+    return this.allocationOwner();
+  }
+
+  /** Captures the native write allocation, including on an empty tracked graph. */
+  async allocationOwner(): Promise<GraphAllocationOwner> {
     return recordedAnchorOwner(
       this.#sqlSchema(),
       await this.#ensureAllocationOrigin(),
@@ -3252,12 +3260,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   ): Promise<GraphAllocationOwner> {
     if (
       !this.revisionTrackingEnabled ||
-      this.#recordedTimeOwnership === "engine-native" ||
-      this.#recordedReadBinding?.kind === "external"
+      this.#recordedTimeOwnership === "engine-native"
     )
       throw new UnsupportedBackendCapabilityError(
         "rotateAllocationOwner",
-        "recordedRevisionOrigins",
+        "revisionTracking",
         { graphId: this.graphId, dialect: this.#backend.dialect },
       );
     return rotateGraphAllocationOwner(

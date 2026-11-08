@@ -489,7 +489,7 @@ describe("forkedWorkingCopyStrategy", () => {
       const forkView = forkBranch.store.asOfRecorded(
         recordedInstant({
           revision: recordedInstantRevision(beforeUpdate),
-          recordedAt: recordedInstantWallTime(beforeUpdate),
+          wallTime: recordedInstantWallTime(beforeUpdate),
           owner: forkOwner,
         }),
       );
