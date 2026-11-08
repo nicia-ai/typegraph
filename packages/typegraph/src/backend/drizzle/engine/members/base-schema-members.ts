@@ -104,6 +104,8 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * index and reads every anchor row without it.
    */
   graphIdOrderIndexDdl?: readonly string[];
+  /** Version-6 candidate-bounded recorded adjacency indexes. */
+  adjacencyIndexDdl?: readonly string[];
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -140,6 +142,7 @@ export function createBaseSchemaMembers(
     revisionChangesTableDdl,
     revisionChangesIndexDdl,
     graphIdOrderIndexDdl = [],
+    adjacencyIndexDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -214,6 +217,18 @@ export function createBaseSchemaMembers(
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
+      {
+        version: 6,
+        async adopt(): Promise<void> {
+          if (adjacencyIndexDdl === undefined)
+            throw new ConfigurationError(
+              "Base-schema version 6 adoption requires recorded adjacency index DDL.",
+              { missingDependencies: ["adjacencyIndexDdl"] },
+            );
+          for (const ddl of adjacencyIndexDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
     ],
   });
 
@@ -224,9 +239,7 @@ export function createBaseSchemaMembers(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateDdl();
       for (const statement of statements) {
         await ensureTable(statement);

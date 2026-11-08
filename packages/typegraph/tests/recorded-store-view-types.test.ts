@@ -8,6 +8,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   asRecordedInstant,
   createStore,
   defineEdge,
@@ -15,9 +16,17 @@ import {
   defineNode,
   type Edge,
   type Node,
+  type RecordedAdjacencyEntry,
+  type RecordedAdjacencyPage,
+  recordedRelation,
   type RecordedScanPage,
   RecordedStoreView,
+  sql,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { createEngineRecordedInstant } from "../src/core/temporal";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { storeRuntime } from "../src/store/runtime-port";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -62,6 +71,16 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded).toHaveProperty("degree");
     expectTypeOf(recorded).toHaveProperty("nodes");
     expectTypeOf(recorded).toHaveProperty("edges");
+    expectTypeOf<
+      ReturnType<typeof recorded.adjacency<"knows">>
+    >().toEqualTypeOf<
+      Promise<
+        RecordedAdjacencyPage<RecordedAdjacencyEntry<typeof graph, "knows">>
+      >
+    >();
+    // @ts-expect-error Edge filters must name graph-declared edge kinds.
+    type UnknownEdges = Parameters<typeof recorded.adjacency<"missing">>;
+    expectTypeOf<UnknownEdges>().toBeArray();
     // ...but the live-state search facade is intentionally absent.
     expectTypeOf(recorded).not.toHaveProperty("search");
 
@@ -105,5 +124,51 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded.mode).not.toBeFunction();
 
     expect(recorded).toBeInstanceOf(RecordedStoreView);
+  });
+  it("refuses a runtime port without the optional adjacency reader", async () => {
+    const store = createStore(graph, createTestBackend(), { history: true });
+    Object.defineProperty(storeRuntime(store), "recordedAdjacency", {
+      value: undefined,
+    });
+    await expect(
+      store
+        .asOfRecorded(RECORDED_AT)
+        .adjacency({ kind: "Person", id: asNodeId<typeof Person>("root") }),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "RECORDED_ADJACENCY_UNSUPPORTED_RUNTIME" },
+    });
+  });
+  it("refuses external and engine-native sources before executing adjacency SQL", async () => {
+    const root = {
+      kind: "Person" as const,
+      id: asNodeId<typeof Person>("root"),
+    };
+    const external = createStore(graph, createTestBackend(), {
+      recordedRead: recordedRelation({ schema: createSqlSchema() }),
+    });
+    await expect(
+      external.asOfRecorded(RECORDED_AT).adjacency(root),
+    ).rejects.toMatchObject({
+      details: { code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE" },
+    });
+    const native = createStore(
+      graph,
+      deriveBackend(createTestBackend(), {
+        recordedTime: {
+          source: (table) => sql.identifier(`native_${table}`),
+          revisionNow: () =>
+            Promise.resolve({ revision: "r1", recordedAt: VALID_AT }),
+        },
+      }),
+      { history: true },
+    );
+    await expect(
+      native
+        .asOfRecorded(createEngineRecordedInstant("r1", VALID_AT))
+        .adjacency(root),
+    ).rejects.toMatchObject({
+      details: { code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE" },
+    });
   });
 });

@@ -33,11 +33,14 @@ import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
+import { readRecordedAdjacency } from "./recorded-adjacency";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
   type Edge,
   type Node,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedScanOptions,
   type RecordedScanPage,
 } from "./types";
@@ -49,6 +52,7 @@ type RecordedReadServiceParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
+  revisionOrigin: () => Promise<string>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
   mapRecordedEdgeRow: (row: Record<string, unknown>) => EdgeRow;
 }>;
@@ -74,6 +78,16 @@ type RecordedScanParams<T extends Readonly<{ id: string }>> = Readonly<{
 }>;
 
 export type RecordedReadService = Readonly<{
+  adjacency: (
+    root: Readonly<{ kind: string; id: string }>,
+    coordinate: ReadCoordinate,
+    edgeKinds: readonly string[],
+    options?: RecordedAdjacencyOptions,
+  ) => Promise<
+    RecordedAdjacencyPage<
+      Readonly<{ edge: Edge; neighbor: Readonly<{ kind: string; id: string }> }>
+    >
+  >;
   backendForCoordinate: (
     coordinate: ReadCoordinate,
     surface: string,
@@ -556,6 +570,18 @@ export function createRecordedReadService(
   }
 
   return {
+    adjacency: (root, coordinate, edgeKinds, options) =>
+      readRecordedAdjacency({
+        graphId,
+        backend,
+        binding: recordedReadBinding,
+        origin: params.revisionOrigin,
+        root,
+        coordinate,
+        edgeKinds,
+        options,
+        toEdge: (row) => rowToEdge(mapRecordedEdgeRow(row)),
+      }),
     backendForCoordinate(
       coordinate: ReadCoordinate,
       surface: string,

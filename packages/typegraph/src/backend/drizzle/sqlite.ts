@@ -55,7 +55,10 @@ import {
   ConfigurationError,
   SchemaFenceTimeoutError,
 } from "../../errors";
-import { sinceIndexAdoptionDdl } from "../../indexes/system";
+import {
+  adjacencyIndexAdoptionDdl,
+  sinceIndexAdoptionDdl,
+} from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -1756,6 +1759,10 @@ export function buildSqliteEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
+    adjacencyIndexDdl: adjacencyIndexAdoptionDdl(
+      getTableName(tables.recordedEdges),
+      "sqlite",
+    ),
     sinceIndexDdl: [
       generateSqliteCreateTableSQL(tables.recordedNodes),
       ...generateSqliteCreateIndexSQL(tables.recordedNodes),

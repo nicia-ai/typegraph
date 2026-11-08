@@ -1504,7 +1504,7 @@ export async function materializeSystemIndexes(
     const ddl = generateSystemIndexDDL(
       candidate.declaration,
       candidate.physicalTable,
-      { concurrent },
+      { concurrent, dialect: backend.dialect },
     );
     return materializeOne(identity, backend, catalog, graphId, schemaVersion, {
       statusKey: candidate.name,
