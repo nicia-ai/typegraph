@@ -566,5 +566,13 @@
     "kind": "member-removed",
     "reason": "Intentional owner-vocabulary rename documented in origin-bound-recorded-anchors.md: replace the old class with MergePlanOwnerMismatchError and MERGE_ERROR_CODES.planOriginMismatch with planOwnerMismatch. The refusal compares both allocation origin and namespace.",
     "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "PostgresTableNames",
+    "member": "storeOperations",
+    "kind": "required-member-added",
+    "reason": "Intentional storage upgrade: complete physical namespace maps must include the base-schema version 8 durable operation outcome relation. A shared-table default would let an isolated working copy address another allocation's evidence. Partial constructor overrides remain supported; custom connectors and complete maps must include storeOperations, as documented in the changeset.",
+    "issue": "#813"
   }
 ]

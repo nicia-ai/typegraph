@@ -19,6 +19,7 @@ export type { GraphAllocationOwner } from "../core/allocation-owner";
 export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export type { CompiledOneStatementRead } from "../query";
 export type { BatchReadBuilder } from "../store";
+export type { TransactionReceipt } from "../store/types";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export type {
@@ -227,8 +228,20 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
+export {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  type StoreOperationApply,
+  type StoreOperationEvidence,
+  type StoreOperationLookup,
+  type StoreOperationOutcome,
+  type StoreOperationRequest,
+  type StoreOperationTarget,
+} from "./store-operation";
 export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
 export type {
+  AppliedMergeReport,
   BaseAmbiguity,
   BaseVersion,
   BranchId,

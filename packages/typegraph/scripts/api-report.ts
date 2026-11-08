@@ -733,9 +733,11 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
+  // Exact apply receipts expose TransactionReceipt as a named export here:
+  // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 874,
-    sha256: "39ddbf4f7f9ea804c5c28f314b72978f2d740cc307ce05da15288077044d7945",
+    count: 873,
+    sha256: "603e70b572498badb6079e928e8e6eefd6940d51e325949d66e3f6aaa5547ca4",
   },
   "./indexes": {
     count: 46,

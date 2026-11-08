@@ -115,6 +115,7 @@ export function finalizeEngineCapabilities(
   return assertBundledCapabilityDeclarations({
     ...declaredWithoutStrategyCapabilities,
     recordedAnchorLookup: declared.recordedAnchorLookup ?? true,
+    durableStoreOperations: declared.durableStoreOperations ?? declared.execution.interactiveTransactions,
     execution: {
       ...declared.execution,
       atomicBatch,

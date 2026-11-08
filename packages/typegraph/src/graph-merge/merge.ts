@@ -231,6 +231,7 @@ import {
   TypeGraphError,
 } from "./typegraph-internal";
 import type {
+  AppliedMergeReport,
   BaseAmbiguity,
   BaseVersion,
   BranchId,
@@ -4400,7 +4401,7 @@ export async function applyMergePlan<G extends GraphDef>(
   target: Store<G>,
   input: MergePlanArtifact,
   options: MergePlanApplyOptions<NoInfer<G>> = {},
-): Promise<Result<MergeReport<G>, MergeError>> {
+): Promise<Result<AppliedMergeReport<G>, MergeError>> {
   let artifact: MergePlanArtifact;
   try {
     artifact = await validateMergePlanForTarget(target, input);
@@ -4429,14 +4430,14 @@ export async function applyMergePlan<G extends GraphDef>(
     if (provenanceStore !== undefined && isErr(provenanceStore)) {
       return err(provenanceStore.error);
     }
-    const merged = await runRetriedUnit(
+    const outcome = await runRetriedUnit(
       {
         operation: "applyMergePlan",
         attempts: MERGE_COMMIT_ATTEMPTS,
         target: storeBackend(target),
       },
       () =>
-        target.transaction(
+        target.transactionWithReceipt(
           (tx) =>
             applyValidatedMergePlanInTransaction(
               target,
@@ -4470,9 +4471,15 @@ export async function applyMergePlan<G extends GraphDef>(
         );
       }
     }
-    return ok(
-      reportFromArtifact(artifact, merged, warnings, provenancePersisted),
-    );
+    return ok({
+      ...reportFromArtifact<G>(
+        artifact,
+        outcome.result,
+        warnings,
+        provenancePersisted,
+      ),
+      receipt: outcome.receipt,
+    });
   } catch (error) {
     const translated = translateMergeCommitError(error);
     return err(

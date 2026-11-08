@@ -1386,6 +1386,7 @@ export function buildSqliteEngineProfile(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     recordedAnchors: getTableName(tables.recordedAnchors),
+    storeOperations: getTableName(tables.storeOperations),
     revisionOrigins: getTableName(tables.revisionOrigins),
     revisionChanges: getTableName(tables.revisionChanges),
     identityAssertions: getTableName(tables.identityAssertions),
@@ -1760,6 +1761,7 @@ export function buildSqliteEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
+    storeOperationsDdl: [generateSqliteCreateTableSQL(tables.storeOperations)],
     recordedAnchorsDdl: [
       generateSqliteCreateTableSQL(tables.recordedAnchors),
       ...generateSqliteCreateIndexSQL(tables.recordedAnchors),

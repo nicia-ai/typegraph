@@ -90,7 +90,7 @@ function installLocalSqliteBaseSchema(
   // identity-assertions relation's `since_idx` indexes), v4 (the revision
   // changes relation) and v5 (PostgreSQL's byte-ordered `graph_id` indexes,
   // which SQLite has no counterpart for), and v6 (the recorded adjacency
-  // indexes), and v7 (the retained allocation-anchor log) need no adoption
+  // indexes), v7 (the retained allocation-anchor log), and v8 (durable Store outcomes) need no adoption
   // logic beyond what `generateSqliteMigrationSQL` already emits: a
   // brand-new relation or index is fully covered by its own `CREATE TABLE
   // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, on both a fresh database
@@ -98,9 +98,9 @@ function installLocalSqliteBaseSchema(
   // edge-match-identity `ADD COLUMN` migration — handled by the catch block
   // below — needed runtime introspection this synchronous path writes by
   // hand instead of running `BaseSchemaLifecycle`'s async state machine.
-  if (CURRENT_BASE_SCHEMA_VERSION !== 7) {
+  if (CURRENT_BASE_SCHEMA_VERSION !== 8) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 through v7 adoption.",
+      "The synchronous managed SQLite installation path only implements base-schema v1 through v8 adoption.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }

@@ -2411,6 +2411,139 @@ remained 9 at 100, 1,000, and 10,000 existing nodes. Explicit full planning read
 105, 1,005, and 10,005 rows respectively. These are instrumented row counts,
 including snapshot-export transactions, rather than latency guarantees.
 
+### Durable ordinary mutation outcomes
+
+Use `operateStore` when a caller must recover whether an ordinary graph mutation
+committed after a lost response or process restart. It uses the native Store
+transaction and the existing durable-operation digest and evidence vocabulary.
+It does not require a durable branch or branch reopening.
+
+| Contract | Durable branch operations | Ordinary Store operations |
+| --- | --- | --- |
+| Allocation binding | Sealed host allocation origin | Revision origin plus outcome-storage namespace |
+| Payload binding | Canonical `mutation` and `metadata` digest | The same digest owner and payload contract |
+| Atomic owner | Host's mutation/evidence transaction | Store's protected transaction and pre-commit hook |
+| Retry result | `applied` or `replayed` evidence | `applied` or `replayed` evidence, JSON result, and terminal receipt |
+| Lifecycle | Delivery acknowledgement and fenced destruction | Retained until explicit graph `clear()`; no eviction or implicit key reuse |
+
+```typescript
+import {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+import { z } from "zod";
+
+const commandSchema = z.object({ id: z.string(), name: z.string() }).strict();
+const request = {
+  target: await captureStoreOperationTarget(store),
+  idempotencyKey: "request-42",
+  metadata: { commandVersion: 1 },
+  mutation: { id: "item-42", name: "New item" },
+};
+await requests.persist(request); // application-owned storage, before first attempt
+
+const outcome = unwrap(await operateStore(store, request, async (tx, mutation) => {
+  const command = commandSchema.parse(mutation);
+  const node = await tx.nodes.Item.create({ name: command.name }, { id: command.id });
+  return { id: node.id };
+}));
+
+// Reuse the persisted request after a lost response or restart.
+const evidence = unwrap(await getStoreOperation(store, request));
+// undefined means that key has no committed outcome in this allocation.
+```
+
+The target is captured once and persisted with the request. Do not recapture it
+while retrying: `clear()` retires the allocation, and an old request must refuse
+instead of writing into the replacement graph. The namespace binding also keeps
+a physical working copy with a distinct outcome-table namespace from replaying the source allocation's caller
+keys. Independently diverging copies must use distinct namespaces or origins; a backup restored with both
+unchanged retains its evidence.
+Keys are opaque strings of 1 through 256 characters and are shared by callers
+within one allocation; applications can include their own caller prefix.
+
+An identical key and canonical payload returns the stored evidence without
+invoking the callback. A changed mutation or metadata value raises
+`DurableOperationConflictError`. Concurrent identical requests serialize through
+the existing graph-write fence, and only one callback applies. Lookup is one
+indexed read of committed evidence; it does not depend on process memory or
+require the original callback. Pass the original request to `operateStore` when
+recovery must also verify its payload digest.
+
+The callback receives a measured view of the same native transaction. Use that
+context for all graph writes, and validate the supplied JSON command with your
+application schema. The mutation and metadata snapshots cannot be changed by
+mutating caller-owned objects during execution. The callback's JSON result is
+stored with the receipt; an unserializable result or failed evidence insert
+rolls back graph rows, constraint sidecars, recorded history, and evidence.
+External actions are outside the database transaction and must not be performed
+as though this callback makes them atomic or immune to transaction retries.
+
+For a serialized merge, include the approved artifact in `request.mutation`.
+Read the plan from the callback's supplied `mutation` snapshot, then apply it
+with `applyMergePlanInTransaction(store, tx, plan)`. The native applier validates
+the artifact and its digest before applying it.
+Return a JSON projection such as `{ merged: report.merged }`; the ordinary
+`MergeReport` contains function-backed provenance and is not a JSON outcome.
+Replay checks the committed key before invoking that callback, so retrying an
+already-applied artifact succeeds even though its revision fence is now stale.
+A first application still enforces all native schema, origin, revision, and
+constraint checks.
+
+The evidence receipt includes the exact captured cut when the transaction
+allocated one. Read-only/no-op operations and history-disabled stores do not
+manufacture a recorded anchor. Evidence is immutable and retained until
+`clear()`, which is an explicit destructive retirement of the allocation and
+its outcomes. There is no background expiry, prune API, or delivery-acknowledgement
+workflow for ordinary Store evidence. Archive any outcomes you need before
+clearing; durable branch hosts retain their separate delivery/destruction rules.
+
+Bundled SQLite and PostgreSQL backends support this after base-schema version 8
+is installed. Custom backends must declare and honor
+`capabilities.durableStoreOperations`, including atomic evidence storage and the
+observed transaction/fence guarantees. Unsupported backends refuse before the
+callback. Engine-native stores retain their existing revision-origin refusal;
+this API does not invent a TypeGraph origin for an opaque engine allocation.
+
+### Exact application receipts
+
+`applyMergePlan` returns an `AppliedMergeReport` with the terminal receipt from
+its protected transaction:
+
+```typescript
+const report = unwrap(await applyMergePlan(store, approvedPlan, {
+  async afterApply(tx) {
+    // Any writes here belong to the same receipt and recorded cut.
+  },
+}));
+const recorded = report.receipt.recorded;
+if (recorded !== undefined) {
+  const appliedView = store.asOfRecorded(recorded);
+}
+```
+
+A later writer cannot change that receipt, even if it commits before the apply
+response reaches the caller. Calling `recordedNow()` after application instead
+observes the graph's high-water mark and may identify another writer's cut.
+Receipt counts follow ordinary transaction collection-intent semantics, rather
+than rows affected. A failed or rolled-back application returns no successful
+report. Best-effort provenance persistence runs after the merge commit and has
+no effect on its receipt or recorded anchor.
+
+`receipt.recorded` is absent when history is disabled. Applying an empty plan
+under TypeGraph capture still allocates the revision already requested by the
+merge executor, even with zero collection write intents. Engine-native targets
+keep their existing public merge-plan capability refusal; this addition does
+not synthesize a TypeGraph revision for an opaque engine commit.
+
+For `applyMergePlanInTransaction`, obtain the terminal receipt from the enclosing
+`store.transactionWithReceipt` call. Its in-transaction report cannot promise a
+terminal anchor before the outer capture flush and COMMIT. A receipt returned
+by `applyMergePlan` is an exact outcome for that call; persistence and lookup by
+a caller-supplied retry key are a separate durable-operation contract.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient

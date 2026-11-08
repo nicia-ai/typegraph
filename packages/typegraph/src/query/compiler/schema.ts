@@ -50,6 +50,8 @@ export type SqlTableNames = Readonly<{
   recordedClock?: string | undefined;
   /** Retained origin-bound recorded allocation anchors. */
   recordedAnchors?: string | undefined;
+  /** Durable caller-key ordinary Store mutation outcomes. */
+  storeOperations?: string | undefined;
   /** Durable per-graph revision-origin table name (default: "typegraph_revision_origins") */
   revisionOrigins?: string | undefined;
   /** Per-revision entity-key journal used when revision tracking runs without history. */
@@ -99,6 +101,7 @@ export type ResolvedSqlTableNames = Readonly<{
   /** Recorded-time commit clock table name */
   recordedClock: string;
   recordedAnchors?: string;
+  storeOperations?: string;
   /** Durable per-graph revision-origin table name */
   revisionOrigins: string;
   revisionChanges?: string;
@@ -225,6 +228,7 @@ const DEFAULT_TABLE_NAMES = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   recordedAnchors: "typegraph_recorded_anchors",
+  storeOperations: "typegraph_store_operations",
   revisionOrigins: "typegraph_revision_origins",
   revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
@@ -259,6 +263,8 @@ function resolveTableNames(
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
     recordedAnchors:
       names.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
+    storeOperations:
+      names.storeOperations ?? DEFAULT_TABLE_NAMES.storeOperations,
     revisionOrigins:
       names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
     revisionChanges: resolveRevisionChangesTableName(names),
@@ -393,6 +399,10 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.recordedNodes, "recordedNodes");
   validateTableName(tables.recordedEdges, "recordedEdges");
   validateTableName(tables.recordedClock, "recordedClock");
+  validateTableName(
+    tables.storeOperations ?? DEFAULT_TABLE_NAMES.storeOperations,
+    "storeOperations",
+  );
   validateTableName(
     tables.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
     "recordedAnchors",
@@ -890,4 +900,9 @@ export function recordedAnchorsTable(schema: SqlSchema): SqlFragment {
   return sql.identifier(
     schema.tables.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
   );
+}
+
+/** Physical outcome-relation name, shared by storage and allocation-scope binding. */
+export function storeOperationsTableName(schema: SqlSchema): string {
+  return schema.tables.storeOperations ?? DEFAULT_TABLE_NAMES.storeOperations;
 }

@@ -135,6 +135,11 @@ type AndPredicate = Readonly<{
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
+export type AppliedMergeReport<G extends GraphDef = GraphDef> = MergeReport<G> & Readonly<{
+    receipt: TransactionReceipt;
+}>;
+
+// @public
 export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>): Promise<Result<MergeReport<G>, MergeError>>;
 
 // @public
@@ -148,7 +153,7 @@ export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor exten
 }>;
 
 // @public
-export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<MergeReport<G>, MergeError>>;
+export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<AppliedMergeReport<G>, MergeError>>;
 
 // @public
 export function applyMergePlanInTransaction<G extends GraphDef>(target: Store<G>, tx: TransactionContext<NoInfer<G>>, input: MergePlanArtifact): Promise<MergeReport<G>>;
@@ -210,6 +215,7 @@ export function asBranchId(value: string): BranchId;
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -866,6 +872,9 @@ export function captureCandidateWriteSetTarget<G extends GraphDef>(target: Store
 
 // @public
 export function captureCandidateWriteSetTargetForEvolution<G extends GraphDef>(target: Store<G>, evolutionPlan: EvolutionPlan): CandidateWriteSetTarget;
+
+// @public
+export function captureStoreOperationTarget<G extends GraphDef>(store: Store<G>): Promise<StoreOperationTarget>;
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -3334,6 +3343,9 @@ type GetNodeType<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K]["ty
 type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
 
 // @public
+export function getStoreOperation<G extends GraphDef>(store: Store<G>, input: StoreOperationLookup): Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>;
+
+// @public
 type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
     kind: "graduated";
     extras: readonly CapabilityBundleExtra<XId, MExtra>[];
@@ -5241,8 +5253,9 @@ export type MergePlanWrites = Readonly<{
     identityRetractions: readonly MergePlanIdentityAssertion[];
 }>;
 
-// @public
+// @public (undocumented)
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
+    receipt?: TransactionReceipt;
     merged: MergedCounts;
     resolutions: readonly EntityResolution[];
     conflicts: readonly PropertyConflict<G>[];
@@ -6099,6 +6112,9 @@ export function openProvenanceStore(backend: GraphBackend, targetGraphId: string
 
 // @public
 export function operateDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, request: DurableBranchOperationRequest): Promise<Result<DurableOperationOutcome, DurableOperationError>>;
+
+// @public
+export function operateStore<G extends GraphDef>(store: Store<G>, input: StoreOperationRequest, apply: StoreOperationApply<NoInfer<G>>): Promise<Result<StoreOperationOutcome, DurableOperationError>>;
 
 // @public
 type OperationHookContext = HookContext & Readonly<{
@@ -7116,6 +7132,7 @@ type ResolvedSqlTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     recordedAnchors?: string;
+    storeOperations?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -7686,6 +7703,7 @@ type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     recordedAnchors?: string | undefined;
+    storeOperations?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
@@ -7851,6 +7869,41 @@ type StoreHooks = Readonly<{
 type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     identity: IdentityFacade<G>;
 }> : Readonly<Record<never, never>>;
+
+// @public (undocumented)
+export type StoreOperationApply<G extends GraphDef> = (tx: MeasurableTransactionContext<G>, mutation: JsonValue) => Promise<JsonValue>;
+
+// @public
+export type StoreOperationEvidence = StoreOperationRequest & Readonly<{
+    formatVersion: 1;
+    operationDigest: string;
+    result: JsonValue;
+    receipt: TransactionReceipt;
+}>;
+
+// @public (undocumented)
+export type StoreOperationLookup = Readonly<{
+    target: StoreOperationTarget;
+    idempotencyKey: string;
+}>;
+
+// @public (undocumented)
+export type StoreOperationOutcome = Readonly<{
+    outcome: "applied" | "replayed";
+    evidence: StoreOperationEvidence;
+}>;
+
+// @public (undocumented)
+export type StoreOperationRequest = DurableBranchOperationRequest & Readonly<{
+    target: StoreOperationTarget;
+}>;
+
+// @public
+export type StoreOperationTarget = Readonly<{
+    graphId: string;
+    origin: string;
+    scope: string;
+}>;
 
 // @public (undocumented)
 type StorePopulationStatistics = Readonly<{
@@ -8514,7 +8567,7 @@ type TransactionOutcome<T> = Readonly<{
 type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend>;
 
 // @public
-type TransactionReceipt = Readonly<{
+export type TransactionReceipt = Readonly<{
     writes: Readonly<{
         nodes: Readonly<Record<string, number>>;
         edges: Readonly<Record<string, number>>;

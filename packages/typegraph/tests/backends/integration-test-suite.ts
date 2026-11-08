@@ -108,6 +108,7 @@ import {
   registerSetNodeMutationIntegrationTests,
   registerSetOperationIntegrationTests,
   registerStoreAnalysisIntegrationTests,
+  registerStoreOperationIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerSubgraphSharedIdIntegrationTests,
@@ -342,6 +343,7 @@ export function createIntegrationTestSuite<
     registerRecordedTimeIntegrationTests(context);
     registerRecordedAdjacencyIntegrationTests(context);
     registerMutationPlanningIntegrationTests(context);
+    registerStoreOperationIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);

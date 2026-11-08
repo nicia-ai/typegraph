@@ -185,6 +185,7 @@ type ArrayPredicate = Readonly<{
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -5429,6 +5430,7 @@ type ResolvedSqlTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     recordedAnchors?: string;
+    storeOperations?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -5933,6 +5935,7 @@ type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     recordedAnchors?: string | undefined;
+    storeOperations?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
