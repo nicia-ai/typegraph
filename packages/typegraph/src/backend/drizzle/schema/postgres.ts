@@ -754,7 +754,6 @@ export const {
   recordedNodes,
   recordedEdges,
   recordedClock,
-  recordedAnchors,
   uniques,
   edgeClaims,
   schemaVersions,

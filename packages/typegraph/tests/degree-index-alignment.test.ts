@@ -156,7 +156,12 @@ describe("degree() direction filter index alignment", () => {
           .asOfRecorded(pin)
           .degree(alice.id, { direction: "out" });
         expect(outDegree).toBe(3);
-        const plan = explainQueryPlan(client, requireDefined(captured.at(-1)));
+        const dataQuery = requireDefined(
+          captured.find((statement) =>
+            statement.sql.includes("typegraph_recorded_nodes"),
+          ),
+        );
+        const plan = explainQueryPlan(client, dataQuery);
         expect(plan).toContain("typegraph_recorded_nodes_id_idx");
         expect(plan).not.toContain("SCAN typegraph_recorded_nodes");
       },

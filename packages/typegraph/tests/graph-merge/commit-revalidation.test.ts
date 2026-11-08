@@ -27,6 +27,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { parseRecordedInstant } from "../../src/core/temporal";
 import {
   computeBaseVersion,
   revisionAnchorOf,
@@ -44,6 +45,7 @@ import type {
   MergeOptions,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, fakeEmbedder, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -261,7 +263,20 @@ describe.each(backendMatrix())(
         });
 
         const targetVersion = await computeBaseVersion(target);
-        expect(revisionAnchorOf(targetVersion)).toBe(
+        const targetAnchor = parseRecordedInstant(
+          requireDefined(revisionAnchorOf(targetVersion)),
+        );
+        const sourceAnchor = parseRecordedInstant(
+          requireDefined(revisionAnchorOf(foreignBranch.base)),
+        );
+        expect({
+          revision: targetAnchor.revision,
+          recordedAt: targetAnchor.recordedAt,
+        }).toEqual({
+          revision: sourceAnchor.revision,
+          recordedAt: sourceAnchor.recordedAt,
+        });
+        expect(revisionAnchorOf(targetVersion)).not.toBe(
           revisionAnchorOf(foreignBranch.base),
         );
         expect(revisionOriginOf(targetVersion)).not.toBe(
