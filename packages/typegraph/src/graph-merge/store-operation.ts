@@ -539,12 +539,9 @@ export async function operateStore<G extends GraphDef>(
     )
       return err(operationFailure(error));
     const conflict = error instanceof TransactionConflictError;
-    const rollbackUncertain = error instanceof AggregateError;
     return err(
       new StoreOperationError(
-        (attemptState.commitBoundary && !conflict) || rollbackUncertain ?
-          "unknown"
-        : "not-committed",
+        attemptState.commitBoundary && !conflict ? "unknown" : "not-committed",
         attemptState.phase,
         conflict,
         error,

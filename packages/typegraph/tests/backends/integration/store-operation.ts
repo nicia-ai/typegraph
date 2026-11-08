@@ -231,22 +231,33 @@ export function registerStoreOperationIntegrationTests(
     it("reports deterministic callback failures as rolled back and non-retryable", async () => {
       const store = await context.createHistoryStore(graph);
       const input = request(await captureStoreOperationTarget(store));
-      const cause = new Error("deterministic failure");
-      const result = await operateStore(store, input, async (tx, mutation) => {
-        await applyCreate(tx, mutation);
-        throw cause;
-      });
-      expect(isErr(result)).toBe(true);
-      if (!isErr(result)) throw new Error("Expected callback failure.");
-      expect(result.error).toMatchObject({
-        name: "StoreOperationError",
-        outcome: "not-committed",
-        phase: "callback",
-        retryable: false,
-        cause,
-      });
-      expect(await store.nodes.Item.count()).toBe(0);
-      expect(unwrap(await getStoreOperation(store, input))).toBeUndefined();
+      for (const cause of [
+        new Error("deterministic failure"),
+        new AggregateError(
+          [new Error("nested failure")],
+          "deterministic aggregate failure",
+        ),
+      ]) {
+        const result = await operateStore(
+          store,
+          input,
+          async (tx, mutation) => {
+            await applyCreate(tx, mutation);
+            throw cause;
+          },
+        );
+        expect(isErr(result)).toBe(true);
+        if (!isErr(result)) throw new Error("Expected callback failure.");
+        expect(result.error).toMatchObject({
+          name: "StoreOperationError",
+          outcome: "not-committed",
+          phase: "callback",
+          retryable: false,
+          cause,
+        });
+        expect(await store.nodes.Item.count()).toBe(0);
+        expect(unwrap(await getStoreOperation(store, input))).toBeUndefined();
+      }
     });
 
     it("serializes concurrent identical requests to one mutation", async () => {
