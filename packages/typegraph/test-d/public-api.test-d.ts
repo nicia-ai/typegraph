@@ -7,15 +7,6 @@ import {
 import { z } from "zod";
 
 import {
-  captureStoreOperationTarget,
-  getStoreOperation,
-  operateStore,
-  type StoreOperationTarget,
-  type StoreOperationRequest,
-  type StoreOperationOutcome,
-  type StoreOperationEvidence,
-  type DurableOperationError,
-  type Result,
   type AdapterBackend,
   type BackendCapabilities,
   type BatchableQuery,
@@ -80,6 +71,17 @@ import {
   type TransactionReceipt,
   type TransactionReadBackend,
 } from "..";
+import {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  type StoreOperationTarget,
+  type StoreOperationRequest,
+  type StoreOperationOutcome,
+  type StoreOperationEvidence,
+  type DurableOperationError,
+  type Result,
+} from "../dist/graph-merge";
 
 const Person = defineNode("Person", {
   schema: z.object({
