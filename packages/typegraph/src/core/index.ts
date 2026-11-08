@@ -43,6 +43,7 @@ export {
   asRecordedInstant,
   compareRecordedInstants,
   type RecordedInstant,
+  recordedInstantOrigin,
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "./temporal";

@@ -493,6 +493,7 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
 
 // @public
 export type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -3311,6 +3312,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
     backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
     graphId: string;
     anchor: string;
+    origin?: string;
     tableNames?: Partial<SqlTableNames> | undefined;
     mappingTableName?: string | undefined;
 }>;
@@ -3758,6 +3760,7 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -4022,6 +4025,7 @@ export type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;

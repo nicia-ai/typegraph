@@ -46,6 +46,8 @@ export type SqlTableNames = Readonly<{
   recordedEdges?: string | undefined;
   /** Recorded-time commit clock table name (default: "typegraph_recorded_clock") */
   recordedClock?: string | undefined;
+  /** Retained origin-bound recorded allocation anchors. */
+  recordedAnchors?: string | undefined;
   /** Durable per-graph revision-origin table name (default: "typegraph_revision_origins") */
   revisionOrigins?: string | undefined;
   /** Per-revision entity-key journal used when revision tracking runs without history. */
@@ -94,6 +96,7 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedEdges: string;
   /** Recorded-time commit clock table name */
   recordedClock: string;
+  recordedAnchors?: string;
   /** Durable per-graph revision-origin table name */
   revisionOrigins: string;
   revisionChanges?: string;
@@ -219,6 +222,7 @@ const DEFAULT_TABLE_NAMES = {
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  recordedAnchors: "typegraph_recorded_anchors",
   revisionOrigins: "typegraph_revision_origins",
   revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
@@ -251,6 +255,8 @@ function resolveTableNames(
     recordedNodes: names.recordedNodes ?? DEFAULT_TABLE_NAMES.recordedNodes,
     recordedEdges: names.recordedEdges ?? DEFAULT_TABLE_NAMES.recordedEdges,
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
+    recordedAnchors:
+      names.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
     revisionOrigins:
       names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
     revisionChanges: resolveRevisionChangesTableName(names),
@@ -385,6 +391,10 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.recordedNodes, "recordedNodes");
   validateTableName(tables.recordedEdges, "recordedEdges");
   validateTableName(tables.recordedClock, "recordedClock");
+  validateTableName(
+    tables.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
+    "recordedAnchors",
+  );
   validateTableName(tables.revisionOrigins, "revisionOrigins");
   validateTableName(tables.revisionChanges, "revisionChanges");
   validateTableName(tables.identityAssertions, "identityAssertions");
@@ -854,3 +864,10 @@ export const ALIAS_CTE_PREFIX = "cte_" as const;
 export const EMBEDDINGS_CTE_ALIAS = "cte_embeddings" as const;
 export const FULLTEXT_CTE_ALIAS = "cte_fulltext" as const;
 export const HYBRID_CANDIDATES_CTE_ALIAS = "cte_relevance_candidates" as const;
+
+/** Retained anchor storage under the same physical-name configuration as capture. */
+export function recordedAnchorsTable(schema: SqlSchema): SqlFragment {
+  return sql.identifier(
+    schema.tables.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
+  );
+}

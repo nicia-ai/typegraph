@@ -372,11 +372,12 @@ export function registerGraphStorageIntegrationTests(
       await store.clear({ preserveContributionMaterializations: false });
 
       const after = await inspectGraphStorage(store);
-      // Live revision tracking reseeds its clock in the clear transaction, so
-      // the clock row is rebuilt rather than left over.
+      // Live revision tracking reseeds its clock and durable owner in the clear
+      // transaction; these rows belong to the replacement allocation.
       const retained = new Set<string>([
         ...retainedAfterClear(false),
         "recordedClock",
+        "revisionOrigins",
       ]);
       expect(
         after.relations.filter(

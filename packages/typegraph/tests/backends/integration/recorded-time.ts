@@ -43,7 +43,10 @@ import {
   ImportOptionsSchema,
 } from "../../../src/interchange";
 import { compileQuery } from "../../../src/query/compiler/index";
-import { createSqlSchema } from "../../../src/query/compiler/schema";
+import {
+  createSqlSchema,
+  recordedAnchorsTable,
+} from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
@@ -53,9 +56,11 @@ import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
 } from "../../../src/store/collection-surface";
+import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
 import {
   advanceRevisionClock,
   readRecordedClock as readGraphRecordedClock,
+  readRevisionOrigin,
 } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../../../src/store/types";
@@ -495,7 +500,20 @@ async function readRecordedClock(
   if (row === undefined) {
     throw new Error("Recorded clock row was not written");
   }
-  return recordedInstantFromDriver(row.revision, row.recorded_at);
+  return recordedInstantFromDriver(
+    row.revision,
+    row.recorded_at,
+    await recordedAnchorOwner(
+      schema,
+      requireDefined(
+        await readRevisionOrigin(
+          store[STORE_RUNTIME].backend,
+          schema,
+          store.graphId,
+        ),
+      ),
+    ),
+  );
 }
 
 async function countRecordedNodeRows(
@@ -854,10 +872,24 @@ export function registerRecordedTimeIntegrationTests(
 
         // Same physical wall instant, distinct logical revisions.
         expect(firstCommit).toBe(
-          "r1:0000000000000001:2026-06-01T12:00:00.000Z",
+          createRecordedInstant(
+            1,
+            "2026-06-01T12:00:00.000Z",
+            await recordedAnchorOwner(
+              store.revisionSchema,
+              await store.revisionOriginNow(),
+            ),
+          ),
         );
         expect(secondCommit).toBe(
-          "r1:0000000000000002:2026-06-01T12:00:00.000Z",
+          createRecordedInstant(
+            2,
+            "2026-06-01T12:00:00.000Z",
+            await recordedAnchorOwner(
+              store.revisionSchema,
+              await store.revisionOriginNow(),
+            ),
+          ),
         );
 
         // Both instants are observable and isolate their own commit.
@@ -1104,6 +1136,162 @@ export function registerRecordedTimeIntegrationTests(
       await expect(recorded.nodes.Person.scan({ limit: 1001 })).rejects.toThrow(
         "between 1 and 1000",
       );
+    });
+
+    it("resolves retained allocation timestamps with revision ties, backward clocks, absence, and future bounds", async () => {
+      const store = await createHistoryStore(context);
+      const time = "2026-06-01T12:00:00.000Z";
+      expect(await store.resolveRecordedAnchor(time)).toBeUndefined();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(time));
+        const node = await store.nodes.Person.create({ name: "first", age: 1 });
+        const first = requireDefined(await store.recordedNow());
+        expect(await store.resolveRecordedAnchor(time)).toBe(first);
+        await store.nodes.Person.update(node.id, { name: "second" });
+        const second = requireDefined(await store.recordedNow());
+        expect(first).not.toBe(second);
+        expect(await store.resolveRecordedAnchor(time)).toBe(second);
+        vi.setSystemTime(new Date("2025-01-01T00:00:00.000Z"));
+        await store.nodes.Person.update(node.id, { name: "third" });
+        const third = requireDefined(await store.recordedNow());
+        expect(recordedInstantWallTime(third)).toBe(time);
+        expect(await store.resolveRecordedAnchor(time)).toBe(third);
+        expect(
+          await store.resolveRecordedAnchor("2026-06-01T11:59:59.999Z"),
+        ).toBeUndefined();
+        expect(
+          await store.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+        ).toBe(third);
+        await expect(
+          store.transaction(async (tx) => {
+            await tx.nodes.Person.update(node.id, { name: "rolled back" });
+            throw new Error("rollback allocation");
+          }),
+        ).rejects.toThrow("rollback allocation");
+        expect(await store.resolveRecordedAnchor(time)).toBe(third);
+        expect(
+          await store.asOfRecorded(first).nodes.Person.getById(node.id),
+        ).toMatchObject({ name: "first" });
+        await store.clear();
+        expect(await store.resolveRecordedAnchor(time)).toBeUndefined();
+        await store.nodes.Person.create({ name: "replacement", age: 1 });
+        expect(await store.resolveRecordedAnchor(time)).not.toBe(third);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("refuses wall-clock resolution without a declared retained-anchor capability", async () => {
+      const base = context.getBackend();
+      const [unsupported] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          capabilities: { ...base.capabilities, recordedAnchorLookup: false },
+        }),
+        { history: true },
+      );
+      await expect(
+        unsupported.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      const store = await createHistoryStore(context);
+      await expect(
+        store.resolveRecordedAnchor("2026-01-01"),
+      ).rejects.toMatchObject({ name: "ValidationError" });
+    });
+
+    it("resolves a large retained anchor log with an indexed one-row range lookup", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "seed", age: 1 });
+      const base = context.getBackend();
+      const origin = await store.revisionOriginNow();
+      const rows = Array.from(
+        { length: 2048 },
+        (_, index) =>
+          sql`(${store.graphId}, ${origin}, ${index + 2}, ${new Date(Date.UTC(2025, 0, 1) + index).toISOString()})`,
+      );
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(sql`
+          INSERT INTO ${recordedAnchorsTable(store.revisionSchema)} (graph_id, origin, revision, recorded_at)
+          VALUES ${sql.join(rows, sql`, `)}
+        `),
+      );
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(
+          sql`ANALYZE ${recordedAnchorsTable(store.revisionSchema)}`,
+        ),
+      );
+      const reads: CompiledRowsSql[] = [];
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          execute<T>(query: CompiledRowsSql) {
+            reads.push(query);
+            return base.execute<T>(query);
+          },
+        }),
+        { history: true },
+      );
+      reads.length = 0;
+      const resolved = requireDefined(
+        await observed.resolveRecordedAnchor("2025-01-01T00:00:01.000Z"),
+      );
+      expect(recordedInstantRevision(resolved)).toBe(1002);
+      expect(reads).toHaveLength(1);
+      const query = requireDefined(reads[0]);
+      const explain =
+        base.dialect === "sqlite" ?
+          "EXPLAIN QUERY PLAN "
+        : "EXPLAIN (ANALYZE, FORMAT JSON) ";
+      const plan = await base.execute(
+        asCompiledRowsSql(sql`${sql.raw(explain)}${query}`),
+      );
+      const serialized = JSON.stringify(plan, (_key, value: unknown) =>
+        typeof value === "bigint" ? value.toString() : value,
+      );
+      expect(serialized).toContain("recorded_anchors_time_idx");
+      expect(serialized).not.toContain("USE TEMP B-TREE");
+      expect(serialized).not.toContain('"Node Type":"Sort"');
+      const oneRowLimit =
+        base.dialect === "sqlite" ||
+        (serialized.includes('"Node Type":"Limit"') &&
+          serialized.includes('"Actual Rows":1'));
+      expect(oneRowLimit).toBe(true);
+    });
+
+    it("keeps a resolved cut stable when another writer advances after its lookup", async () => {
+      const store = await createHistoryStore(context);
+      const node = await store.nodes.Person.create({ name: "before", age: 1 });
+      const before = requireDefined(await store.recordedNow());
+      const base = context.getBackend();
+      let lookupReads = 0;
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          async execute<T>(query: CompiledRowsSql) {
+            const rows = await base.execute<T>(query);
+            if (
+              requireDefined(base.compileSql)(query).sql.includes(
+                "anchors.recorded_at <=",
+              )
+            ) {
+              lookupReads += 1;
+              await store.nodes.Person.update(node.id, { name: "after" });
+            }
+            return rows;
+          },
+        }),
+        { history: true },
+      );
+      const resolved = requireDefined(
+        await observed.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+      );
+      expect(resolved).toBe(before);
+      expect(lookupReads).toBe(1);
+      expect(await store.recordedNow()).not.toBe(resolved);
+      expect(
+        await store.asOfRecorded(resolved).nodes.Person.getById(node.id),
+      ).toMatchObject({ name: "before" });
     });
 
     it("supports chained valid-time and recorded-time coordinates", async () => {

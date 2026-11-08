@@ -406,5 +406,13 @@
     "kind": "required-member-added",
     "reason": "Intentional pre-release correction: evolution planning already refuses without explicit full scope. Require planningScope: full in the authoring type so accepted calls match the runtime cost contract. Upgrade callers as documented in bounded-mutation-plans.md.",
     "issue": "#811"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "PostgresTableNames",
+    "member": "recordedAnchors",
+    "kind": "required-member-added",
+    "reason": "Intentional storage upgrade: a complete physical namespace map must include the base-schema version 7 retained anchor relation. Defaulting a missing relation to a shared table would violate working-copy isolation. Partial constructor overrides remain supported; custom connectors and complete maps must include recordedAnchors, as documented in the changeset.",
+    "issue": "#814"
   }
 ]

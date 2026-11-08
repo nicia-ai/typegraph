@@ -94,6 +94,7 @@ export {
   metaEdge,
   type NodeKinds,
   type RecordedInstant,
+  recordedInstantOrigin,
   recordedInstantRevision,
   recordedInstantWallTime,
   // Vector-slot enumeration for manual provisioning (the boot step

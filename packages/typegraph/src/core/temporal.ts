@@ -5,7 +5,9 @@ import { ValidationError } from "../errors";
 import { validateCanonicalIsoDate } from "../utils/date";
 import { type TemporalMode } from "./types";
 
-const RECORDED_INSTANT_VERSION = "r1";
+const RECORDED_INSTANT_VERSION = "r2";
+const ORIGIN_RECORDED_INSTANT_PATTERN =
+  /^r2:([A-Za-z0-9._~-]+):([a-f0-9]{32}):(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
 const ENGINE_INSTANT_VERSION = "e1";
 const RECORDED_REVISION_WIDTH = 16;
 /** Open interval ceiling for numeric recorded-revision columns. */
@@ -25,9 +27,10 @@ declare const RECORDED_INSTANT_BRAND: unique symbol;
 
 /**
  * A versioned recorded-time anchor, in one of two forms sharing one grammar:
- * `<version>:<revision>:<recordedAt>`.
+ * TypeGraph: `r2:<graph origin>:<namespace digest>:<revision>:<recordedAt>`; engine: `e1:<revision>:<recordedAt>`.
+ * Legacy `r1:` strings remain parseable for migration, but cannot authorize reads.
  *
- * - `r1:0000000000000001:YYYY-MM-DDTHH:mm:ss.sssZ` — TypeGraph's own form. The
+ * - `r2:<graph origin>:<namespace digest>:0000000000000001:YYYY-MM-DDTHH:mm:ss.sssZ` — TypeGraph's own form. The
  *   fixed-width logical revision is strictly monotonic per graph and makes
  *   every commit addressable even when many commits share one wall-clock
  *   millisecond.
@@ -48,12 +51,15 @@ export type RecordedInstant = string & {
 };
 
 /**
- * The parsed halves of a TypeGraph-owned (`r1:`) recorded instant. Not
+ * The parsed halves of a TypeGraph-owned (`r2:` or legacy `r1:`) recorded instant. Not
  * exported on its own — callers narrow {@link RecordedInstantParts} by
  * `kind` rather than naming either variant directly.
  */
 type TypeGraphRecordedInstantParts = Readonly<{
   kind: "typegraph";
+  /** Absent only on legacy r1 anchors, which cannot authorize a recorded read. */
+  origin?: string;
+  namespace?: string;
   revision: number;
   recordedAt: string;
 }>;
@@ -85,7 +91,7 @@ function invalidRecordedInstant(value: string, path: string): ValidationError {
       issues: [
         {
           path,
-          message: `Expected ${RECORDED_INSTANT_VERSION}:<${RECORDED_REVISION_WIDTH}-digit revision>:YYYY-MM-DDTHH:mm:ss.sssZ or ${ENGINE_INSTANT_VERSION}:<engine revision>:YYYY-MM-DDTHH:mm:ss.sssZ, got "${value}"`,
+          message: `Expected ${RECORDED_INSTANT_VERSION}:<origin>:<namespace>:<${RECORDED_REVISION_WIDTH}-digit revision>:YYYY-MM-DDTHH:mm:ss.sssZ or ${ENGINE_INSTANT_VERSION}:<engine revision>:YYYY-MM-DDTHH:mm:ss.sssZ, got "${value}"`,
         },
       ],
     },
@@ -100,7 +106,11 @@ export function parseRecordedInstant(
   value: string,
   path = "RecordedInstant",
 ): RecordedInstantParts {
-  const typeGraphMatch = RECORDED_INSTANT_PATTERN.exec(value);
+  const boundMatch = ORIGIN_RECORDED_INSTANT_PATTERN.exec(value);
+  const typeGraphMatch =
+    boundMatch === null ?
+      RECORDED_INSTANT_PATTERN.exec(value)
+    : [boundMatch[0], boundMatch[3], boundMatch[4]];
   if (typeGraphMatch !== null) {
     const revisionText = typeGraphMatch[1];
     const recordedAt = typeGraphMatch[2];
@@ -116,7 +126,16 @@ export function parseRecordedInstant(
       throw invalidRecordedInstant(value, path);
     }
     validateCanonicalIsoDate(recordedAt, path);
-    return { kind: "typegraph", revision, recordedAt };
+    const origin = boundMatch?.[1];
+    const namespace = boundMatch?.[2];
+    return {
+      kind: "typegraph",
+      revision,
+      recordedAt,
+      ...(origin === undefined || namespace === undefined ?
+        {}
+      : { origin, namespace }),
+    };
   }
   const engineMatch = ENGINE_INSTANT_PATTERN.exec(value);
   if (engineMatch !== null) {
@@ -149,10 +168,11 @@ export function optionalRecordedInstantParts(
   return value === undefined ? undefined : parseRecordedInstant(value, path);
 }
 
-/** Mints TypeGraph's own (`r1:`) form of a recorded instant. */
+/** Mints an origin-bound TypeGraph anchor, or an unbound legacy anchor for migration. */
 export function createRecordedInstant(
   revision: number,
   recordedAt: string,
+  owner?: Readonly<{ origin: string; namespace: string }>,
 ): RecordedInstant {
   if (
     !Number.isSafeInteger(revision) ||
@@ -175,7 +195,9 @@ export function createRecordedInstant(
     .toString()
     .padStart(RECORDED_REVISION_WIDTH, "0");
   return asRecordedInstant(
-    `${RECORDED_INSTANT_VERSION}:${revisionText}:${recordedAt}`,
+    owner === undefined ?
+      `r1:${revisionText}:${recordedAt}`
+    : `${RECORDED_INSTANT_VERSION}:${owner.origin}:${owner.namespace}:${revisionText}:${recordedAt}`,
   );
 }
 
@@ -220,9 +242,17 @@ export function recordedInstantWallTime(instant: RecordedInstant): string {
   return parseRecordedInstant(instant).recordedAt;
 }
 
+/** Durable TypeGraph graph origin; undefined for legacy and engine-native anchors. */
+export function recordedInstantOrigin(
+  instant: RecordedInstant,
+): string | undefined {
+  const parts = parseRecordedInstant(instant);
+  return parts.kind === "typegraph" ? parts.origin : undefined;
+}
+
 /**
  * Returns the strict per-graph logical revision carried by a TypeGraph-owned
- * (`r1:`) anchor. TypeGraph's numeric revision is meaningless for an
+ * (`r2:` or legacy `r1:`) anchor. TypeGraph's numeric revision is meaningless for an
  * engine-native (`e1:`) anchor, so this refuses one rather than returning a
  * number parsed from an opaque token.
  *
@@ -232,12 +262,12 @@ export function recordedInstantRevision(instant: RecordedInstant): number {
   const parts = parseRecordedInstant(instant);
   if (parts.kind !== "typegraph") {
     throw new ValidationError(
-      "recordedInstantRevision requires a TypeGraph-owned (r1) recorded instant.",
+      "recordedInstantRevision requires a TypeGraph-owned recorded instant.",
       {
         issues: [
           {
             path: "recordedInstantRevision.instant",
-            message: `Expected an r1 anchor, got an engine-native (e1) anchor with opaque revision "${parts.revision}"`,
+            message: `Expected a TypeGraph anchor, got an engine-native (e1) anchor with opaque revision "${parts.revision}"`,
           },
         ],
       },
@@ -253,7 +283,7 @@ export function recordedInstantRevision(instant: RecordedInstant): number {
 /**
  * Compares two recorded anchors of the SAME ownership form.
  *
- * For TypeGraph-owned (`r1:`) anchors, comparison is by logical revision:
+ * For TypeGraph-owned (`r2:` or legacy `r1:`) anchors, comparison is by logical revision:
  * revisions are local to a graph, so only compare anchors produced by the
  * same graph, and the physical wall-time component deliberately does not
  * participate. For engine-native (`e1:`) anchors there is no shared numeric
@@ -269,8 +299,8 @@ export function recordedInstantRevision(instant: RecordedInstant): number {
  * timestamp-only fallback, not a general property of recorded-instant
  * comparison.
  *
- * @throws {ValidationError} when the two anchors were minted by different
- *   ownership forms — there is no shared axis to compare them on.
+ * @throws {ValidationError} when ownership forms, graph origins, or recording
+ *   namespaces differ — there is no shared axis to compare them on.
  */
 export function compareRecordedInstants(
   left: RecordedInstant,
@@ -292,6 +322,22 @@ export function compareRecordedInstants(
     );
   }
   if (leftParts.kind === "typegraph" && rightParts.kind === "typegraph") {
+    if (
+      leftParts.origin !== rightParts.origin ||
+      leftParts.namespace !== rightParts.namespace
+    ) {
+      throw new ValidationError(
+        "Recorded anchors belong to different graph origins or recording namespaces.",
+        {
+          issues: [
+            {
+              path: "compareRecordedInstants",
+              message: "Compare anchors from the same durable graph origin.",
+            },
+          ],
+        },
+      );
+    }
     if (leftParts.revision < rightParts.revision) return -1;
     if (leftParts.revision > rightParts.revision) return 1;
     return 0;

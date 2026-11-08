@@ -25,11 +25,15 @@ import {
   type RecordedInstant,
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
-import { type SqlSchema } from "../../query/compiler/schema";
+import {
+  recordedAnchorsTable,
+  type SqlSchema,
+} from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { recordedAnchorOwner } from "../recorded-anchor-origin";
 import { executeStatement } from "./guards";
 
 type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
@@ -351,10 +355,28 @@ export async function readRecordedClock(
   schema: SqlSchema,
   graphId: string,
 ): Promise<RecordedInstant | undefined> {
-  const parts = await readRecordedClockParts(target, schema, graphId);
-  return parts === undefined ? undefined : (
-      createRecordedInstant(parts.revision, parts.recordedAt)
+  const rows = await target.execute<ClockRow & RevisionOriginRow>(
+    asCompiledRowsSql(sql`
+      SELECT clock.revision, clock.recorded_at, origins.origin
+      FROM ${schema.recordedClockTable} clock
+      JOIN ${schema.revisionOriginsTable} origins ON origins.graph_id = clock.graph_id
+      WHERE clock.graph_id = ${graphId}
+    `),
+  );
+  const row = rows[0];
+  if (row === undefined) return undefined;
+  const parts = recordedClockParts(row);
+  if (parts === undefined) return undefined;
+  if (typeof row.origin !== "string")
+    throw new ConfigurationError(
+      "Recorded clock has no durable graph origin.",
+      { graphId },
     );
+  return createRecordedInstant(
+    parts.revision,
+    parts.recordedAt,
+    await recordedAnchorOwner(schema, row.origin),
+  );
 }
 
 async function readRecordedClockParts(
@@ -667,7 +689,7 @@ function requireTypeGraphClockParts(
 ): RecordedClockParts {
   if (parts.kind !== "typegraph") {
     throw new ConfigurationError(
-      "allocateRecordedCommit's previousRevision must be a TypeGraph-owned (r1) recorded instant.",
+      "allocateRecordedCommit's previousRevision must be a TypeGraph-owned recorded instant.",
       { revisionKind: parts.kind },
     );
   }
@@ -680,6 +702,7 @@ export async function allocateRecordedCommit(
   graphId: string,
   ownsWriteLock: boolean,
   previousRevision?: string,
+  retainAnchor = false,
 ): Promise<AllocatedRecordedCommit> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
   const previous =
@@ -699,8 +722,22 @@ export async function allocateRecordedCommit(
       },
     );
   }
-  const instant = createRecordedInstant(revision, recordedAt);
+  const origin = await ensureRevisionOriginRow(target, schema, graphId);
+  const instant = createRecordedInstant(
+    revision,
+    recordedAt,
+    await recordedAnchorOwner(schema, origin),
+  );
   await writeRecordedClock(target, schema, graphId, { revision, recordedAt });
+  if (retainAnchor && target.capabilities.recordedAnchorLookup === true) {
+    await executeStatement(
+      target,
+      sql`
+        INSERT INTO ${recordedAnchorsTable(schema)} (graph_id, origin, revision, recorded_at)
+        VALUES (${graphId}, ${origin}, ${revision}, ${recordedAt})
+      `,
+    );
+  }
   if (previousRevision !== undefined) {
     await assertRecordedClockAdvanced(target, schema, graphId, revision);
   }

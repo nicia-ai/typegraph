@@ -320,6 +320,8 @@ export type {
  * Backend capabilities that vary by dialect.
  */
 export type BackendCapabilities = Readonly<{
+  /** Retains TypeGraph allocation anchors atomically, with an indexed time lookup. */
+  recordedAnchorLookup?: boolean;
   /** How this backend executes work and establishes atomicity. */
   execution: Readonly<{
     /** Whether the backend can hold an interactive callback/session transaction. */

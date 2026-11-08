@@ -38,6 +38,7 @@ export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 // @public
 type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -1552,6 +1553,87 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
         columns: {
             graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            revision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly recordedAnchors: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            origin: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "origin";
                 tableName: string;
                 dataType: "string";
                 columnType: "SQLiteText";
@@ -5328,6 +5410,7 @@ type SqliteTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors: string;
     revisionOrigins: string;
     revisionChanges: string;
     identityAssertions: string;
@@ -5370,6 +5453,7 @@ type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;

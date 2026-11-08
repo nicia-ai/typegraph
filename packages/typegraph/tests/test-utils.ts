@@ -75,10 +75,12 @@ export function recordedWallTimeFromDriver(value: unknown): string {
 export function recordedInstantFromDriver(
   revision: unknown,
   recordedAt: unknown,
+  owner?: Readonly<{ origin: string; namespace: string }>,
 ): RecordedInstant {
   return createRecordedInstant(
     recordedRevisionFromDriver(revision),
     recordedWallTimeFromDriver(recordedAt),
+    owner,
   );
 }
 

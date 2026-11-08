@@ -23,6 +23,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -206,6 +207,7 @@ export function asBranchId(value: string): BranchId;
 
 // @public
 type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -7097,6 +7099,7 @@ type ResolvedSqlTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -7664,6 +7667,7 @@ type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
@@ -7744,6 +7748,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
     revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
@@ -8598,6 +8603,8 @@ type TypeGraphErrorOptions = Readonly<{
 // @public
 type TypeGraphRecordedInstantParts = Readonly<{
     kind: "typegraph";
+    origin?: string;
+    namespace?: string;
     revision: number;
     recordedAt: string;
 }>;

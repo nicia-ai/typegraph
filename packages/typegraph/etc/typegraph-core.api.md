@@ -703,6 +703,9 @@ export type RecordedInstant = string & {
 };
 
 // @public
+export function recordedInstantOrigin(instant: RecordedInstant): string | undefined;
+
+// @public
 export function recordedInstantRevision(instant: RecordedInstant): number;
 
 // @public

@@ -363,6 +363,8 @@ import {
   withWriteTransactionSession,
   type WriteTransactionContext,
 } from "./operations/write-transaction";
+import { lookupRecordedAnchor } from "./recorded-anchor-log";
+import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
   advanceRevisionClock,
   assertCurrentRecordedSchema,
@@ -378,6 +380,7 @@ import {
   lockRecordedGraphWrite,
   mintsOriginNamespacedAnchor,
   readRecordedClock,
+  readRevisionOrigin,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
   registerRecordedIdentityMutationWitness,
@@ -818,6 +821,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
   asOf: (asOf: string) => StoreView<G>;
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
+  /** Latest retained allocation anchor at or before the canonical UTC timestamp. */
+  resolveRecordedAnchor?: (
+    wallTime: string,
+  ) => Promise<RecordedInstant | undefined>;
   revisionNow: () => Promise<RecordedInstant | undefined>;
   revisionOriginNow: () => Promise<string>;
   view: (coordinate: StoreViewCoordinate) => StoreView<G>;
@@ -985,6 +992,9 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
 }>;
 
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+  resolveRecordedAnchor?: (
+    wallTime: string,
+  ) => Promise<RecordedInstant | undefined>;
   withCheckedReads?: <T>(
     expectedSchemaVersion: number | undefined,
     fn: (reads: CheckedReadScope<G>) => Promise<T>,
@@ -1529,7 +1539,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId: graph.id,
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
-      revisionOrigin: () => this.revisionOriginNow(),
+      revisionOrigin: async () => {
+        const schema = this.#recordedReadBinding?.schema ?? this.#sqlSchema();
+        const origin = await readRevisionOrigin(
+          this.#backend,
+          schema,
+          this.graphId,
+        );
+        return origin === undefined ? undefined : (
+            recordedAnchorOwner(schema, origin)
+          );
+      },
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
     });
@@ -3031,6 +3051,32 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Resolves recorded allocation time with one indexed lookup. Equal timestamps
+   * choose the highest revision. A future time returns the latest retained cut;
+   * no retained allocation at or before the input returns undefined. The log
+   * begins when this capability is installed; earlier unlogged cuts are absent.
+   */
+  async resolveRecordedAnchor(
+    wallTime: string,
+  ): Promise<RecordedInstant | undefined> {
+    if (
+      !this.#captureEnabled ||
+      this.#recordedTimeOwnership !== "typegraph-relations"
+    )
+      throw new UnsupportedBackendCapabilityError(
+        "resolveRecordedAnchor",
+        "recordedAnchorLookup",
+        { graphId: this.graphId, dialect: this.#backend.dialect },
+      );
+    return lookupRecordedAnchor(
+      this.#backend,
+      this.#sqlSchema(),
+      this.graphId,
+      wallTime,
+    );
+  }
+
+  /**
    * Returns the latest recorded-time instant captured for this graph — the
    * recorded high-water mark. After guarding the `undefined` case,
    * `store.asOfRecorded(checkpoint)` reconstructs everything committed so far, a
@@ -3068,6 +3114,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
+    await this.revisionOriginNow();
     const recordedAt = await withRecordedRelationsPrecondition(
       readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId),
       { dialect: this.#backend.dialect, surface: "recorded-now" },

@@ -6,6 +6,7 @@
 import {
   asRecordedInstant,
   createRecordedInstant,
+  parseRecordedInstant,
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
@@ -22,6 +23,7 @@ import {
 import { shortHash } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { requireCatalog } from "./capabilities/catalog";
 import { resolveRecordedTimeOwnership } from "./capabilities/recorded-time-ownership";
@@ -118,6 +120,8 @@ export type MigrateRecordedAnchorOptions = Readonly<{
   backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
   graphId: string;
   anchor: string;
+  /** Independently retained origin evidence required to bind a legacy anchor. Never infer this from the current graph after a reset. */
+  origin?: string;
   /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   mappingTableName?: string | undefined;
@@ -802,14 +806,49 @@ export async function migrateLegacyRecordedTime(
   });
 }
 
-/** Remaps one timestamp-only checkpoint after {@link migrateLegacyRecordedTime}. */
+async function bindLegacyAnchor(
+  options: MigrateRecordedAnchorOptions,
+  revision: number,
+  recordedAt: string,
+): Promise<RecordedInstant> {
+  if (options.origin === undefined)
+    throw new ConfigurationError(
+      "Migrating an unbound recorded anchor requires independently retained graph-origin evidence.",
+      { code: "RECORDED_ANCHOR_UNBOUND", graphId: options.graphId },
+    );
+  const tables = resolvedTableNames(options.backend, options.tableNames);
+  const rows = await options.backend.execute<Readonly<{ origin: unknown }>>(
+    asCompiledRowsSql(
+      sql`SELECT origin FROM ${sql.identifier(tables.revisionOrigins)} WHERE graph_id = ${options.graphId}`,
+    ),
+  );
+  const storedOrigin = rows[0]?.origin;
+  const boundOrigin =
+    typeof storedOrigin === "string" ?
+      await recordedAnchorOwner(createSqlSchema(tables), storedOrigin)
+    : undefined;
+  if (boundOrigin === undefined || options.origin !== storedOrigin)
+    throw new ConfigurationError(
+      "The legacy checkpoint's attested origin is different or retired.",
+      { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH", graphId: options.graphId },
+    );
+  return createRecordedInstant(revision, recordedAt, boundOrigin);
+}
+
+/** Remaps a legacy checkpoint using independently retained origin evidence. */
 export async function migrateRecordedAnchor(
   options: MigrateRecordedAnchorOptions,
 ): Promise<RecordedInstant> {
+  let parsed: RecordedInstant | undefined;
   try {
-    return asRecordedInstant(options.anchor);
+    parsed = asRecordedInstant(options.anchor);
   } catch (error) {
     if (!(error instanceof ValidationError)) throw error;
+  }
+  if (parsed !== undefined) {
+    const parts = parseRecordedInstant(parsed);
+    if (parts.kind === "engine" || parts.origin !== undefined) return parsed;
+    return bindLegacyAnchor(options, parts.revision, parts.recordedAt);
   }
   const legacyRecordedAt = canonicalLegacyInstant(options.anchor);
   const tables = resolvedTableNames(options.backend, options.tableNames);
@@ -833,7 +872,8 @@ export async function migrateRecordedAnchor(
       },
     );
   }
-  return createRecordedInstant(
+  return bindLegacyAnchor(
+    options,
     safeRevision(row.revision),
     canonicalLegacyInstant(row.recorded_at),
   );

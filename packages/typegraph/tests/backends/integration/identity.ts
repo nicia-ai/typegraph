@@ -1571,11 +1571,13 @@ export function registerIdentityIntegrationTests(
       expect(await store.nodes.Person.getById(person.id)).toBeUndefined();
       expect(await store.identity.assertionsOf(person)).toEqual([]);
       expect(await store.identity.membersOf(person)).toEqual([]);
-      expect(
-        await store
+      await expect(
+        store
           .asOfRecorded(requireDefined(beforeClear))
           .identity.membersOf(person),
-      ).toEqual([]);
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+      });
 
       const recreatedPerson = await store.nodes.Person.create(
         { name: "Recreated Alice" },
