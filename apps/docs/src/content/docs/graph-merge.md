@@ -2382,6 +2382,22 @@ change invalidates authoring, planning, or application instead of silently
 rebasing. Failed application rolls back graph rows and constraint sidecars
 together.
 
+Persist `builder.document`, rather than the builder itself. The document is JSON-safe,
+versioned, and contains the original target fence. Resume validation with
+`planMutations({ target: store, mutations: savedDocument, makeBackend, planningScope: "candidate" })`.
+The builder is a typed authoring convenience over this same boundary. Patch operations
+encode removed properties in `unsetProps`; dates supplied to the builder become ISO strings.
+Edge endpoints in the document are kind/id references, even when authoring passes full nodes.
+Only native collection operations are exposed: node replacement uses the existing
+`bulkReplaceById` semantics; edge collections currently provide patch updates.
+
+New plans use wire format 2. It carries explicit `clearValidTo` and node recreation
+intent, including reset validity windows when deleting and recreating an existing id.
+Version 1 artifacts remain readable with their original contract. A failed staged
+operation reports its zero-based `operationIndex`, operation, and original collection
+error as its cause. Candidate review scope still controls review evidence; it is
+separate from permission to clone a complete graph during planning.
+
 A reproducible SQLite measurement is available with
 `node --import tsx packages/typegraph/scripts/measure-mutation-planning.ts` from
 the repository root. For one patch, create, and delete, target node rows read

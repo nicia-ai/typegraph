@@ -1,8 +1,10 @@
+/* eslint-disable unicorn/no-null -- Explicit null is the public unbounded validFrom sentinel. */
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
   asEdgeId,
+  asNodeId,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -14,6 +16,7 @@ import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
   applyMergePlan,
   createMutationPlanBuilder,
+  planMutations,
 } from "../../../src/graph-merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
 import { requireDefined } from "../../../src/utils/presence";
@@ -40,10 +43,159 @@ function makeBackend(): Promise<GraphBackend> {
   return Promise.resolve(createLocalSqliteBackend().backend);
 }
 
+/** Exercises transport encoding, rather than only cloning the in-memory builder. */
+function mutationJsonRoundTrip(value: unknown): unknown {
+  const serialized = JSON.stringify(value);
+  return JSON.parse(serialized) as unknown;
+}
+
 export function registerMutationPlanningIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("bounded mutation planning", () => {
+    it("matches collections when deleting and recreating an expired node, including unchanged properties", async () => {
+      for (const sameProps of [false, true]) {
+        const native = await context.createHistoryStore({
+          ...graph,
+          id: `mutation_native_${sameProps}`,
+        });
+        const planned = await context.createHistoryStore({
+          ...graph,
+          id: `mutation_planned_${sameProps}`,
+        });
+        for (const store of [native, planned])
+          await store.nodes.Item.create(
+            { name: "original", note: "discard" },
+            {
+              id: "reused",
+              validFrom: "2000-01-01T00:00:00.000Z",
+              validTo: "2001-01-01T00:00:00.000Z",
+            },
+          );
+        const props =
+          sameProps ?
+            { name: "original", note: "discard" }
+          : { name: "replacement" };
+        await native.nodes.Item.delete(asNodeId<typeof Item>("reused"));
+        const direct = await native.nodes.Item.create(props, {
+          id: "reused",
+          validFrom: null,
+        });
+        const builder = await createMutationPlanBuilder(planned, "recreate");
+        const mutations = mutationJsonRoundTrip(
+          builder
+            .deleteNode("Item", "reused")
+            .createNode("Item", "reused", props, { validFrom: null }).document,
+        );
+        const artifact = unwrap(
+          await planMutations({ target: planned, makeBackend, mutations }),
+        );
+        expect(artifact.formatVersion).toBe(2);
+        unwrap(await applyMergePlan(planned, artifact));
+        const actual = await planned.nodes.Item.getById(direct.id);
+        expect(actual).toMatchObject({ name: direct.name });
+        expect(actual?.note).toBe(direct.note);
+        expect(actual?.meta.validFrom).toBe(direct.meta.validFrom);
+        expect(actual?.meta.validTo).toBe(direct.meta.validTo);
+      }
+    });
+
+    it("round-trips clearing node and edge validity through the mutation document and artifact", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "mutation_clear_ends",
+      });
+      const a = await store.nodes.Item.create(
+        { name: "a" },
+        { id: "a", validTo: "2100-01-01T00:00:00.000Z" },
+      );
+      const b = await store.nodes.Item.create({ name: "b" }, { id: "b" });
+      const edge = await store.edges.links.create(
+        a,
+        b,
+        { label: "edge" },
+        { id: "edge", validTo: "2100-01-01T00:00:00.000Z" },
+      );
+      const builder = await createMutationPlanBuilder(store, "clear");
+      const mutations = mutationJsonRoundTrip(
+        builder
+          .updateNode("Item", a.id, {}, { clearValidTo: true })
+          .updateEdge("links", edge.id, {}, { clearValidTo: true }).document,
+      );
+      const artifact = unwrap(
+        await planMutations({ target: store, makeBackend, mutations }),
+      );
+      expect(artifact.writes.nodeUpserts[0]).toHaveProperty(
+        "clearValidTo",
+        true,
+      );
+      expect(artifact.writes.edgeUpserts[0]).toHaveProperty(
+        "clearValidTo",
+        true,
+      );
+      unwrap(
+        await applyMergePlan(
+          store,
+          mutationJsonRoundTrip(artifact) as typeof artifact,
+        ),
+      );
+      const nodeAfter = await store.nodes.Item.getById(a.id);
+      expect(nodeAfter?.meta.validTo).toBeUndefined();
+      const edgeAfter = await store.edges.links.getById(edge.id);
+      expect(edgeAfter?.meta.validTo).toBeUndefined();
+    });
+
+    it("reports the failing operation and preserves its native collection refusal", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "mutation_error_step",
+      });
+      const builder = await createMutationPlanBuilder(store, "invalid");
+      const result = await builder
+        .createNode("Item", "new", { name: "new" })
+        .updateNode("Item", "missing", { name: "missing" })
+        .plan({ makeBackend });
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) throw new Error("Expected operation refusal.");
+      {
+        expect(result.error.details).toMatchObject({
+          operationIndex: 1,
+          operation: { op: "node.update", id: "missing" },
+        });
+        expect(result.error.cause).toBeInstanceOf(Error);
+      }
+      expect(await store.nodes.Item.count()).toBe(0);
+    });
+
+    it("derives resurrection guards only from final live writes", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "mutation_final_guards",
+      });
+      const node = await store.nodes.Item.create(
+        { name: "original" },
+        { id: "reused" },
+      );
+      await store.nodes.Item.delete(node.id);
+      const builder = await createMutationPlanBuilder(store, "guard");
+      const one = unwrap(
+        await builder
+          .createNode("Item", node.id, { name: "replacement" })
+          .updateNode("Item", node.id, { note: "patched" })
+          .plan({ makeBackend }),
+      );
+      expect(one.guards.nodeResurrections).toEqual([
+        { kind: "Item", id: node.id },
+      ]);
+      const none = unwrap(
+        await builder
+          .createNode("Item", node.id, { name: "replacement" })
+          .deleteNode("Item", node.id)
+          .plan({ makeBackend }),
+      );
+      expect(none.guards.nodeResurrections).toBeUndefined();
+    });
+
     it("plans ordered creates, patches, property removal, and explicit edge-before-node deletion without target writes", async () => {
       const store = await context.createHistoryStore(graph);
       const root = await store.nodes.Item.create(
@@ -205,6 +357,36 @@ export function registerMutationPlanningIntegrationTests(
       expect(await store.nodes.Item.getById(original.id)).not.toHaveProperty(
         "note",
       );
+    });
+
+    it("replaces a tombstone with a fresh native validity window", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "mutation_replace_tombstone",
+      });
+      const original = await store.nodes.Item.create(
+        { name: "old", note: "remove" },
+        {
+          id: "replaced",
+          validFrom: "2000-01-01T00:00:00.000Z",
+          validTo: "2001-01-01T00:00:00.000Z",
+        },
+      );
+      await store.nodes.Item.delete(original.id);
+      const builder = await createMutationPlanBuilder(store, "replace");
+      const artifact = unwrap(
+        await builder
+          .replaceNode("Item", original.id, { name: "new" })
+          .plan({ makeBackend }),
+      );
+      expect(artifact.guards.nodeResurrections).toEqual([
+        { kind: "Item", id: original.id },
+      ]);
+      unwrap(await applyMergePlan(store, artifact));
+      const actual = await store.nodes.Item.getById(original.id);
+      expect(actual).toMatchObject({ name: "new" });
+      expect(actual).not.toHaveProperty("note");
+      expect(actual?.meta.validTo).toBeUndefined();
     });
 
     it("refuses reusing a deleted edge id and observes cardinality peers", async () => {

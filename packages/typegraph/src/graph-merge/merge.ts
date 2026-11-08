@@ -151,8 +151,7 @@ import { normalizeMergeOptions } from "./options";
 import type {
   MergePlanAnchors,
   MergePlanArtifact,
-  MergePlanArtifactV1,
-  MergePlanArtifactV1Input,
+  MergePlanArtifactInput,
   MergePlanEdgeUpsert,
   MergePlanEntityRef,
   MergePlanNodeUpsert,
@@ -1898,6 +1897,7 @@ function nodeWriteWindowOptions(
 }
 
 type MechanicalNodeWrite = Readonly<{
+  recreate?: true;
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
@@ -1966,6 +1966,10 @@ async function applyNodeRows<G extends GraphDef>(
     async () => {
       for (const deletion of deletions) {
         await nodeCollection(nodesApi, deletion.kind).delete(deletion.id);
+      }
+      for (const upsert of upserts) {
+        if (upsert.recreate === true)
+          await nodeCollection(nodesApi, upsert.kind).delete(upsert.id);
       }
       const committed = new Set<MergeKey>();
       for (const upsert of upserts) {
@@ -2742,7 +2746,9 @@ function resolvedNodeUpserts<G extends GraphDef>(
       ),
     ),
     ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
-    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
+    ...(write.clearValidTo === true ? { clearValidTo: true as const }
+    : write.validTo === undefined ? {}
+    : { validTo: write.validTo }),
   }));
 }
 
@@ -2751,7 +2757,7 @@ async function resolvedMergeArtifact<G extends GraphDef>(
   mode: "snapshot" | "incremental",
   targetFence: MergePlanTargetFence,
   anchors: MergePlanAnchors,
-): Promise<MergePlanArtifactV1> {
+): Promise<MergePlanArtifact> {
   const { plan, options } = resolved;
   const nodeUpserts = resolvedNodeUpserts(plan);
   const edgeUpserts = plan.mergedEdges.map((edge) => {
@@ -2767,11 +2773,13 @@ async function resolvedMergeArtifact<G extends GraphDef>(
       to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
       ...splitWireProps(props),
       ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
+      ...(edge.clearValidTo === true ? { clearValidTo: true as const }
+      : edge.validTo === undefined ? {}
+      : { validTo: edge.validTo }),
     };
   });
-  const input: MergePlanArtifactV1Input = {
-    formatVersion: 1,
+  const input: MergePlanArtifactInput = {
+    formatVersion: 2,
     mode,
     target: targetFence,
     anchors,
@@ -3735,7 +3743,7 @@ function invalidPlanForTarget(
 }
 
 function permitsExplicitNodeResurrection(
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
   reference: MergePlanEntityRef,
 ): boolean {
   return (
@@ -3751,7 +3759,7 @@ async function preflightWireMergeWrites<G extends GraphDef>(
   target: Store<G>,
   nodesApi: TxNodes,
   edgesApi: TxEdges,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
 ): Promise<void> {
   const graphNodes = target.graph.nodes as Record<string, unknown>;
   const graphEdges = target.graph.edges as Record<
@@ -3851,6 +3859,14 @@ async function preflightWireMergeWrites<G extends GraphDef>(
     const current = currentNodesByIdentity.get(
       mergeKey(upsert.kind, upsert.id),
     );
+    if (
+      upsert.recreate === true &&
+      (current === undefined || current.meta.deletedAt !== undefined)
+    )
+      throw invalidPlanForTarget(
+        "Recreation requires a live node at the reviewed target fence.",
+        { kind: upsert.kind, id: upsert.id },
+      );
     if (
       artifact.guards.incremental !== undefined &&
       current?.meta.deletedAt !== undefined &&
@@ -4032,7 +4048,7 @@ async function preflightWireMergeWrites<G extends GraphDef>(
 async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
   requireFreshSnapshot: boolean,
 ): Promise<void> {
   await lockMergeTargetWrite(txBackend, {
@@ -4101,7 +4117,7 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
 }
 
 function identityConsistencySeeds(
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
   profile: "fold" | "ignore" | undefined,
 ): readonly MergePlanEntityRef[] {
   const deleted = new Set(
@@ -4134,7 +4150,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   nodesApi: TxNodes,
   edgesApi: TxEdges,
   txBackend: TransactionBackend,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
 ): Promise<MergedCounts> {
   const committed = await applyMergeRowWrites(
     edgesApi,
@@ -4149,10 +4165,13 @@ async function applyWireMergeWrites<G extends GraphDef>(
           kind: upsert.kind,
           id: upsert.id,
           props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+          ...(upsert.recreate === true ? { recreate: true as const } : {}),
           ...(upsert.validFrom === undefined ?
             {}
           : { validFrom: upsert.validFrom }),
-          ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+          ...(upsert.clearValidTo === true ? { clearValidTo: true as const }
+          : upsert.validTo === undefined ? {}
+          : { validTo: upsert.validTo }),
         })),
       ),
     artifact.writes.edgeUpserts.map((upsert) => ({
@@ -4165,7 +4184,9 @@ async function applyWireMergeWrites<G extends GraphDef>(
         ...(upsert.validFrom === undefined ?
           {}
         : { validFrom: upsert.validFrom }),
-        ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+        ...(upsert.clearValidTo === true ? { clearValidTo: true as const }
+        : upsert.validTo === undefined ? {}
+        : { validTo: upsert.validTo }),
       },
     })),
   );
@@ -4209,7 +4230,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
 }
 
 function reportFromArtifact<G extends GraphDef>(
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
   merged: MergedCounts,
   warnings: readonly string[],
   provenancePersisted?: MergeReport<G>["provenancePersisted"],
@@ -4250,7 +4271,7 @@ function reportFromArtifact<G extends GraphDef>(
 export async function validateMergePlanForTarget<G extends GraphDef>(
   target: Store<G>,
   input: MergePlanArtifact,
-): Promise<MergePlanArtifactV1> {
+): Promise<MergePlanArtifact> {
   let validation: Awaited<ReturnType<typeof validateMergePlanArtifact>>;
   try {
     validation = await validateMergePlanArtifact(input);
@@ -4279,7 +4300,7 @@ export async function validateMergePlanForTarget<G extends GraphDef>(
 async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
   target: Store<G>,
   tx: TransactionContext<G>,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifact,
   options: MergePlanApplyOptions<G>,
   requireFreshSnapshot: boolean,
 ): Promise<MergedCounts> {
@@ -4329,7 +4350,7 @@ export async function applyMergePlan<G extends GraphDef>(
   input: MergePlanArtifact,
   options: MergePlanApplyOptions<NoInfer<G>> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
-  let artifact: MergePlanArtifactV1;
+  let artifact: MergePlanArtifact;
   try {
     artifact = await validateMergePlanForTarget(target, input);
   } catch (error) {

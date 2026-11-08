@@ -10,6 +10,8 @@ import {
   type GraphDef,
   type NodeKinds,
 } from "../core/define-graph";
+import { assertJsonValue } from "../core/json-value";
+import { type JsonValue } from "../core/types";
 import { ValidationError } from "../errors";
 import {
   groupNodeUniquenessProbes,
@@ -20,6 +22,7 @@ import {
   edgeIdentityFromRow,
 } from "../store/operations/edge-identity";
 import { type ValidityEndMutation } from "../store/types";
+import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { branch } from "./branch";
 import {
@@ -57,17 +60,17 @@ import { asBranchId, type GraphBranch } from "./types";
 import { cloneWorkingCopyStrategy, type MakeBackend } from "./working-copy";
 
 export type MutationCreateOptions = Readonly<{
-  validFrom?: string | null;
-  validTo?: string;
+  validFrom?: string | null | undefined;
+  validTo?: string | undefined;
 }>;
-type Step<G extends GraphDef> = Readonly<{
+type Step = Readonly<{
   entity: "node" | "edge";
   kind: string;
   id: string;
   deletion: boolean;
   creation?: boolean;
   endpoints?: Readonly<{ from: MergePlanEntityRef; to: MergePlanEntityRef }>;
-  run: (store: Store<G>) => Promise<unknown>;
+  operation: MutationOperation;
 }>;
 type NodeWriter = Readonly<{
   create: (
@@ -103,6 +106,8 @@ type EdgeWriter = Readonly<{
 export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
   target: MergePlanTargetFence;
   operationCount: number;
+  /** JSON-safe authoring input, including its original target fence. */
+  document: MutationDocument;
   createNode: <K extends NodeKinds<G>>(
     kind: K,
     id: string,
@@ -205,118 +210,342 @@ export async function createMutationPlanBuilder<G extends GraphDef>(
   return mutationBuilder(target, sourceId, fence, []);
 }
 
+/** Serializable operations use explicit property removal rather than JSON's missing undefined. */
+export type MutationOperation = Readonly<{
+  op:
+    | "node.create"
+    | "node.update"
+    | "node.replace"
+    | "node.delete"
+    | "edge.create"
+    | "edge.update"
+    | "edge.delete";
+  kind: string;
+  id: string;
+  props?: Readonly<Record<string, JsonValue>> | undefined;
+  unsetProps?: readonly string[] | undefined;
+  from?: MergePlanEntityRef | undefined;
+  to?: MergePlanEntityRef | undefined;
+  options?: MutationCreateOptions | ValidityEndMutation | undefined;
+}>;
+export type MutationDocument = Readonly<{
+  formatVersion: 1;
+  sourceId: string;
+  target: MergePlanTargetFence;
+  operations: readonly MutationOperation[];
+}>;
+
+const mutationReferenceSchema = z
+  .object({ kind: z.string().min(1), id: z.string().min(1) })
+  .strict();
+const mutationPropsSchema = z.record(z.string(), z.json());
+const mutationCreateSchema = z
+  .object({
+    validFrom: z.string().nullable().optional(),
+    validTo: z.string().optional(),
+  })
+  .strict();
+const mutationUpdateSchema = z.union([
+  z.object({ validTo: z.string().optional() }).strict(),
+  z.object({ clearValidTo: z.literal(true) }).strict(),
+]);
+const mutationBaseSchema = z
+  .object({ kind: z.string().min(1), id: z.string().min(1) })
+  .strict();
+const mutationOperationSchema = z.discriminatedUnion("op", [
+  mutationBaseSchema.extend({
+    op: z.literal("node.create"),
+    props: mutationPropsSchema,
+    options: mutationCreateSchema.optional(),
+  }),
+  mutationBaseSchema.extend({
+    op: z.literal("edge.create"),
+    props: mutationPropsSchema,
+    options: mutationCreateSchema.optional(),
+    from: mutationReferenceSchema,
+    to: mutationReferenceSchema,
+  }),
+  mutationBaseSchema.extend({
+    op: z.literal("node.update"),
+    props: mutationPropsSchema,
+    unsetProps: z.array(z.string()).optional(),
+    options: mutationUpdateSchema.optional(),
+  }),
+  mutationBaseSchema.extend({
+    op: z.literal("edge.update"),
+    props: mutationPropsSchema,
+    unsetProps: z.array(z.string()).optional(),
+    options: mutationUpdateSchema.optional(),
+  }),
+  mutationBaseSchema.extend({
+    op: z.literal("node.replace"),
+    props: mutationPropsSchema,
+  }),
+  mutationBaseSchema.extend({ op: z.literal("node.delete") }),
+  mutationBaseSchema.extend({ op: z.literal("edge.delete") }),
+]);
+const mutationDocumentSchema = z
+  .object({
+    formatVersion: z.literal(1),
+    sourceId: z.string().min(1),
+    target: mergePlanTargetFenceSchema,
+    operations: z.array(mutationOperationSchema),
+  })
+  .strict();
+
+function jsonMutationProps(props: unknown): Record<string, JsonValue> {
+  // Match persisted JSON: Dates become ISO strings, optional object properties disappear.
+  // Reject other non-JSON values rather than allowing stringify to silently discard them.
+  const seen = new WeakSet<object>();
+  function convert(value: unknown): JsonValue {
+    if (value instanceof Date) return value.toISOString();
+    if (value !== null && typeof value === "object") {
+      if (seen.has(value))
+        throw new ValidationError(
+          "Mutation properties must not contain cycles.",
+          { issues: [] },
+        );
+      seen.add(value);
+      try {
+        if (Array.isArray(value)) return value.map((item) => convert(item));
+        if (
+          Object.getPrototypeOf(value) !== Object.prototype &&
+          Object.getPrototypeOf(value) !== null
+        )
+          throw new ValidationError("Mutation properties must be JSON data.", {
+            issues: [],
+          });
+        return Object.fromEntries(
+          Object.entries(value)
+            .filter(([, entry]) => entry !== undefined)
+            .map(([key, entry]) => [key, convert(entry)]),
+        );
+      } finally {
+        seen.delete(value);
+      }
+    }
+    assertJsonValue(value, "props", "Mutation document");
+    return value as JsonValue;
+  }
+  const converted = convert(props);
+  if (
+    converted === null ||
+    typeof converted !== "object" ||
+    Array.isArray(converted)
+  )
+    throw new ValidationError("Mutation properties must be an object.", {
+      issues: [],
+    });
+  return mutationPropsSchema.parse(converted);
+}
+
+function operationStep(operation: MutationOperation): Step {
+  return {
+    entity: operation.op.startsWith("node.") ? "node" : "edge",
+    kind: operation.kind,
+    id: operation.id,
+    deletion: operation.op.endsWith(".delete"),
+    creation: operation.op.endsWith(".create"),
+    ...(operation.from === undefined || operation.to === undefined ?
+      {}
+    : { endpoints: { from: operation.from, to: operation.to } }),
+    operation,
+  };
+}
+
+async function executeMutation<G extends GraphDef>(
+  store: Store<G>,
+  operation: MutationOperation,
+): Promise<void> {
+  const props = createDataKeyedBag<unknown>();
+  for (const [key, value] of Object.entries(operation.props ?? {}))
+    props[key] = value;
+  for (const key of operation.unsetProps ?? []) props[key] = undefined;
+  const writer =
+    operation.op.startsWith("node.") ?
+      nodeWriter(store, operation.kind)
+    : edgeWriter(store, operation.kind);
+  switch (operation.op) {
+    case "node.create": {
+      await nodeWriter(store, operation.kind).create(props, {
+        ...operation.options,
+        id: operation.id,
+      });
+      break;
+    }
+    case "edge.create": {
+      await edgeWriter(store, operation.kind).create(
+        requireDefined(operation.from),
+        requireDefined(operation.to),
+        props,
+        { ...operation.options, id: operation.id },
+      );
+      break;
+    }
+    case "node.update":
+    case "edge.update": {
+      const window = mutationUpdateSchema.parse(operation.options ?? {});
+      await writer.update(
+        operation.id,
+        props,
+        "clearValidTo" in window ? { clearValidTo: true }
+        : window.validTo === undefined ? {}
+        : { validTo: window.validTo },
+      );
+      break;
+    }
+    case "node.replace": {
+      await nodeWriter(store, operation.kind).bulkReplaceById([
+        { id: operation.id, props },
+      ]);
+      break;
+    }
+    case "node.delete":
+    case "edge.delete": {
+      await writer.delete(operation.id);
+      break;
+    }
+  }
+}
+
 function mutationBuilder<G extends GraphDef>(
   target: Store<G>,
   sourceId: string,
   fence: MergePlanTargetFence,
-  steps: readonly Step<G>[],
+  steps: readonly Step[],
 ): MutationPlanBuilder<G> {
-  function append(step: Step<G>): MutationPlanBuilder<G> {
+  function append(operation: MutationOperation): MutationPlanBuilder<G> {
     const kinds =
-      step.entity === "node" ? target.graph.nodes : target.graph.edges;
-    if (
-      !Object.hasOwn(kinds, step.kind) ||
-      typeof step.id !== "string" ||
-      step.id.length === 0
-    )
+      operation.op.startsWith("node.") ?
+        target.graph.nodes
+      : target.graph.edges;
+    if (!Object.hasOwn(kinds, operation.kind) || operation.id.length === 0)
       throw new ValidationError(
         "Mutation requires a registered kind and nonempty id.",
-        {
-          issues: [{ path: "mutation", message: "Unknown kind or empty id." }],
-        },
+        { issues: [] },
       );
-    return mutationBuilder(target, sourceId, fence, [...steps, step]);
+    return mutationBuilder(target, sourceId, fence, [
+      ...steps,
+      operationStep(structuredClone(operation)),
+    ]);
+  }
+  function document(): MutationDocument {
+    return structuredClone({
+      formatVersion: 1,
+      sourceId,
+      target: fence,
+      operations: steps.map((step) => step.operation),
+    });
+  }
+  function patch(
+    op: "node.update" | "edge.update",
+    kind: string,
+    id: string,
+    props: unknown,
+    options?: ValidityEndMutation,
+  ) {
+    return append({
+      op,
+      kind,
+      id,
+      props: jsonMutationProps(props),
+      unsetProps: Object.entries(props as Record<string, unknown>)
+        .filter(([, value]) => value === undefined)
+        .map(([key]) => key),
+      ...(options === undefined ? {} : { options }),
+    });
   }
   return Object.freeze({
     get target() {
       return structuredClone(fence);
     },
+    get document() {
+      return document();
+    },
     operationCount: steps.length,
-    createNode(kind, id, props, options) {
-      const copy = structuredClone({ props, options });
-      return append({
-        entity: "node",
+    createNode: (kind, id, props, options) =>
+      append({
+        op: "node.create",
         kind,
         id,
-        deletion: false,
-        run: (store) =>
-          nodeWriter(store, kind).create(copy.props, { ...copy.options, id }),
-      });
-    },
-    updateNode(kind, id, props, options) {
-      const copy = structuredClone({ props, options });
-      return append({
-        entity: "node",
+        props: jsonMutationProps(props),
+        ...(options === undefined ? {} : { options }),
+      }),
+    updateNode: (kind, id, props, options) =>
+      patch("node.update", kind, id, props, options),
+    replaceNode: (kind, id, props) =>
+      append({ op: "node.replace", kind, id, props: jsonMutationProps(props) }),
+    deleteNode: (kind, id) => append({ op: "node.delete", kind, id }),
+    createEdge: (kind, id, from, to, props, options) =>
+      append({
+        op: "edge.create",
         kind,
         id,
-        deletion: false,
-        run: (store) =>
-          nodeWriter(store, kind).update(id, copy.props, copy.options),
-      });
-    },
-    replaceNode(kind, id, props) {
-      const copy = structuredClone(props);
-      return append({
-        entity: "node",
-        kind,
-        id,
-        deletion: false,
-        run: (store) =>
-          nodeWriter(store, kind).bulkReplaceById([{ id, props: copy }]),
-      });
-    },
-    deleteNode(kind, id) {
-      return append({
-        entity: "node",
-        kind,
-        id,
-        deletion: true,
-        run: (store) => nodeWriter(store, kind).delete(id),
-      });
-    },
-    createEdge(kind, id, from, to, props, options) {
-      const copy = structuredClone({ from, to, props, options });
-      return append({
-        entity: "edge",
-        kind,
-        id,
-        deletion: false,
-        creation: true,
-        endpoints: { from: copy.from, to: copy.to },
-        run: (store) =>
-          edgeWriter(store, kind).create(copy.from, copy.to, copy.props, {
-            ...copy.options,
-            id,
-          }),
-      });
-    },
-    updateEdge(kind, id, props, options) {
-      const copy = structuredClone({ props, options });
-      return append({
-        entity: "edge",
-        kind,
-        id,
-        deletion: false,
-        run: (store) =>
-          edgeWriter(store, kind).update(id, copy.props, copy.options),
-      });
-    },
-    deleteEdge(kind, id) {
-      return append({
-        entity: "edge",
-        kind,
-        id,
-        deletion: true,
-        run: (store) => edgeWriter(store, kind).delete(id),
-      });
-    },
-    plan: (options) => planMutations(target, sourceId, fence, steps, options),
+        from: { kind: from.kind, id: from.id },
+        to: { kind: to.kind, id: to.id },
+        props: jsonMutationProps(props),
+        ...(options === undefined ? {} : { options }),
+      }),
+    updateEdge: (kind, id, props, options) =>
+      patch("edge.update", kind, id, props, options),
+    deleteEdge: (kind, id) => append({ op: "edge.delete", kind, id }),
+    plan: (options) =>
+      planMutations({ target, mutations: document(), ...options }),
   } satisfies MutationPlanBuilder<G>);
+}
+
+/** Validate persisted mutation input and reuse the native planner and applier. */
+export async function planMutations<G extends GraphDef>(
+  args: MutationPlanningOptions &
+    Readonly<{ target: Store<G>; mutations: unknown }>,
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  try {
+    const document = mutationDocumentSchema.parse(
+      structuredClone(args.mutations),
+    );
+    for (const [index, operation] of document.operations.entries()) {
+      const kinds =
+        operation.op.startsWith("node.") ?
+          args.target.graph.nodes
+        : args.target.graph.edges;
+      const unset =
+        "unsetProps" in operation ? (operation.unsetProps ?? []) : [];
+      if (
+        new Set(unset).size !== unset.length ||
+        unset.some((key) =>
+          Object.hasOwn("props" in operation ? operation.props : {}, key),
+        )
+      )
+        throw new CandidateWriteSetError(
+          "Mutation property sets and removals must be disjoint and duplicate-free.",
+          { details: { operationIndex: index, operation } },
+        );
+      if (!Object.hasOwn(kinds, operation.kind))
+        throw new CandidateWriteSetError("Unknown mutation kind.", {
+          details: { operationIndex: index, operation },
+        });
+    }
+    return await planMutationSteps(
+      args.target,
+      document.sourceId,
+      document.target,
+      document.operations.map((operation) => operationStep(operation)),
+      args,
+    );
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new CandidateWriteSetError("Invalid mutation document.", {
+          cause: error,
+        })
+      ),
+    );
+  }
 }
 
 async function observe<G extends GraphDef>(
   candidate: GraphBranch<G>,
-  steps: readonly Step<G>[],
+  steps: readonly Step[],
 ): Promise<Observation> {
   const backend = storeBackend(candidate.store);
   const baseline = requireDefined(
@@ -326,8 +555,23 @@ async function observe<G extends GraphDef>(
   const nodes: NodeRow[] = [];
   const edges: EdgeRow[] = [];
   let previous = baseline;
-  for (const step of steps) {
-    await step.run(candidate.store);
+  for (const [index, step] of steps.entries()) {
+    try {
+      await executeMutation(candidate.store, step.operation);
+    } catch (error) {
+      throw new CandidateWriteSetError(
+        `Mutation operation ${index} (${step.operation.op}) failed.`,
+        {
+          cause: error,
+          details: {
+            operationIndex: index,
+            operation: step.operation,
+            collectionErrorName:
+              error instanceof Error ? error.name : undefined,
+          },
+        },
+      );
+    }
     const delta = await candidate.store.changesSince(previous);
     if (delta.kind !== "keys")
       throw new MergePlanCapabilityError(
@@ -430,11 +674,11 @@ function uniquenessProbes<G extends GraphDef>(
   );
 }
 
-async function planMutations<G extends GraphDef>(
+async function planMutationSteps<G extends GraphDef>(
   target: Store<G>,
   sourceId: string,
   fence: MergePlanTargetFence,
-  steps: readonly Step<G>[],
+  steps: readonly Step[],
   options: MutationPlanningOptions,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
   try {
@@ -666,21 +910,66 @@ async function planMutations<G extends GraphDef>(
       );
       await assertPlanningFenceUnchanged(target, fence);
       if (isErr(planned)) return planned;
-      const nodeResurrections: MergePlanEntityRef[] = [];
-      const replacementUnsets = new Map<string, readonly string[]>();
+      // A delete/create sequence is a replacement, even when the original was live
+      // and its properties happen to be unchanged. Derive guards from final writes.
+      const created = new Map<string, MergePlanEntityRef>();
+      const recreated = new Set<string>();
+      const deletedDuring = new Set<string>();
       for (const step of steps) {
-        if (step.deletion || step.entity !== "node") continue;
+        if (step.entity !== "node") continue;
+        const key = JSON.stringify([step.kind, step.id]);
+        if (step.creation || step.operation.op === "node.replace") {
+          created.set(key, { kind: step.kind, id: step.id });
+          if (step.creation || deletedDuring.has(key)) recreated.add(key);
+        }
+        if (step.deletion) {
+          created.delete(key);
+          recreated.delete(key);
+          deletedDuring.add(key);
+        }
+      }
+      const nodeUpserts = new Map(
+        planned.data.writes.nodeUpserts.map((upsert) => [
+          JSON.stringify([upsert.kind, upsert.id]),
+          upsert,
+        ]),
+      );
+      const nodeResurrections: MergePlanEntityRef[] = [];
+      for (const [key, ref] of created) {
         const original = await backend.getNode(
           target.graphId,
-          step.kind,
-          step.id,
+          ref.kind,
+          ref.id,
         );
-        if (original?.deleted_at === undefined) continue;
-        nodeResurrections.push({ kind: step.kind, id: step.id });
-        replacementUnsets.set(
-          JSON.stringify([step.kind, step.id]),
-          Object.keys(parseRowProps(original.props)),
+        const final = await storeBackend(strict.candidate.store).getNode(
+          strict.candidate.store.graphId,
+          ref.kind,
+          ref.id,
         );
+        if (
+          original === undefined ||
+          final === undefined ||
+          final.deleted_at !== undefined
+        )
+          continue;
+        if (original.deleted_at === undefined && !recreated.has(key)) continue;
+        const props = parseRowProps(final.props);
+        nodeUpserts.set(key, {
+          kind: ref.kind,
+          id: ref.id,
+          setProps: props as Readonly<Record<string, JsonValue>>,
+          unsetProps: Object.keys(parseRowProps(original.props)).filter(
+            (name) => !Object.hasOwn(props, name),
+          ),
+          validFrom: final.valid_from ?? null,
+          ...(original.deleted_at === undefined ?
+            { recreate: true as const }
+          : {}),
+          ...(final.valid_to === undefined ?
+            { clearValidTo: true as const }
+          : { validTo: final.valid_to }),
+        });
+        if (original.deleted_at !== undefined) nodeResurrections.push(ref);
       }
       await assertPlanningFenceUnchanged(target, fence);
       const { digest: _digest, ...artifact } = planned.data;
@@ -688,21 +977,14 @@ async function planMutations<G extends GraphDef>(
         success: true,
         data: await finalizeMergePlanArtifact({
           ...artifact,
+          formatVersion: 2,
+          proposed: {
+            ...artifact.proposed,
+            nodes: { ...artifact.proposed.nodes, upserts: nodeUpserts.size },
+          },
           writes: {
             ...artifact.writes,
-            nodeUpserts: artifact.writes.nodeUpserts.map((upsert) => ({
-              ...upsert,
-              unsetProps: [
-                ...new Set([
-                  ...upsert.unsetProps,
-                  ...(
-                    replacementUnsets.get(
-                      JSON.stringify([upsert.kind, upsert.id]),
-                    ) ?? []
-                  ).filter((key) => !Object.hasOwn(upsert.setProps, key)),
-                ]),
-              ],
-            })),
+            nodeUpserts: [...nodeUpserts.values()],
           },
           guards: {
             ...artifact.guards,

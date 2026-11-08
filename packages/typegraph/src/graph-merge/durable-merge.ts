@@ -17,7 +17,7 @@ import {
 } from "./durable-branch";
 import { describeCause, MergeError } from "./errors";
 import { applyMergePlan, validateMergePlanForTarget } from "./merge";
-import type { MergePlanArtifact, MergePlanArtifactV1 } from "./plan-schema";
+import type { MergePlanArtifact } from "./plan-schema";
 import type { Result } from "./result";
 import { err } from "./result";
 import type { GraphDef, Store } from "./typegraph-internal";
@@ -66,7 +66,7 @@ export async function applyDurableMergePlan<
     );
   }
 
-  let artifact: MergePlanArtifactV1;
+  let artifact: MergePlanArtifact;
   const descriptorOrigin = durableOriginOfDescriptor(descriptor);
   try {
     artifact = await validateMergePlanForTarget(target, plan);

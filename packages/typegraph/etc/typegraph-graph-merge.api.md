@@ -4750,7 +4750,7 @@ export const MERGE_OPTION_DEFAULTS: {
 export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
-export const MERGE_PLAN_FORMAT_VERSION: 1;
+export const MERGE_PLAN_FORMAT_VERSION: 2;
 
 // @public
 export const MERGE_REVIEW_FORMAT_VERSION: 1;
@@ -4884,11 +4884,16 @@ export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-export type MergePlanArtifact = MergePlanArtifactV1;
+export type MergePlanArtifact = MergePlanArtifactV1 | MergePlanArtifactV2;
 
 // @public (undocumented)
+export type MergePlanArtifactInput = Omit<MergePlanArtifactV2, "digest" | "formatVersion"> & Readonly<{
+    formatVersion: 1 | 2;
+}>;
+
+// @public
 export type MergePlanArtifactV1 = Readonly<{
-    formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
+    formatVersion: 1;
     digest: MergePlanDigest;
     mode: "snapshot" | "incremental";
     target: MergePlanTargetFence;
@@ -4902,6 +4907,23 @@ export type MergePlanArtifactV1 = Readonly<{
 
 // @public (undocumented)
 export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+
+// @public (undocumented)
+export type MergePlanArtifactV2 = Readonly<{
+    formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
+    digest: MergePlanDigest;
+    mode: "snapshot" | "incremental";
+    target: MergePlanTargetFence;
+    anchors: MergePlanAnchors;
+    proposed: MergePlanProposedSummary;
+    writes: MergePlanWrites;
+    guards: MergePlanGuards;
+    review: MergePlanReview;
+    provenance: MergePlanProvenanceOptions;
+}>;
+
+// @public (undocumented)
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
 
 // @public (undocumented)
 export type MergePlanBranchAnchor = Readonly<{
@@ -4969,6 +4991,7 @@ export type MergePlanEdgeUpsert = Readonly<{
     unsetProps: readonly string[];
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
+    clearValidTo?: true;
 }>;
 
 // @public (undocumented)
@@ -5072,6 +5095,8 @@ export type MergePlanNodeUpsert = Readonly<{
     unsetProps: readonly string[];
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
+    clearValidTo?: true;
+    recreate?: true;
 }>;
 
 // @public
@@ -5314,14 +5339,35 @@ export type MutationAuthoringOptions = Readonly<{
 
 // @public (undocumented)
 export type MutationCreateOptions = Readonly<{
-    validFrom?: string | null;
-    validTo?: string;
+    validFrom?: string | null | undefined;
+    validTo?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MutationDocument = Readonly<{
+    formatVersion: 1;
+    sourceId: string;
+    target: MergePlanTargetFence;
+    operations: readonly MutationOperation[];
+}>;
+
+// @public
+export type MutationOperation = Readonly<{
+    op: "node.create" | "node.update" | "node.replace" | "node.delete" | "edge.create" | "edge.update" | "edge.delete";
+    kind: string;
+    id: string;
+    props?: Readonly<Record<string, JsonValue>> | undefined;
+    unsetProps?: readonly string[] | undefined;
+    from?: MergePlanEntityRef | undefined;
+    to?: MergePlanEntityRef | undefined;
+    options?: MutationCreateOptions | ValidityEndMutation | undefined;
 }>;
 
 // @public
 export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
     target: MergePlanTargetFence;
     operationCount: number;
+    document: MutationDocument;
     createNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
     updateNode: <K extends NodeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["nodes"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
     replaceNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>) => MutationPlanBuilder<G>;
@@ -6068,6 +6114,12 @@ export function planMergeForEvolution<G extends GraphDef>(store: Store<G>, evolu
 
 // @public
 export function planMergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export function planMutations<G extends GraphDef>(args: MutationPlanningOptions & Readonly<{
+    target: Store<G>;
+    mutations: unknown;
+}>): Promise<Result<MergePlanArtifact, MergeError>>;
 
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);

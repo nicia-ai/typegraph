@@ -3,7 +3,7 @@ import { z } from "zod";
 import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_PLAN_FORMAT_VERSION = 1 as const;
+export const MERGE_PLAN_FORMAT_VERSION = 2 as const;
 export const MERGE_PLAN_DIGEST_ALGORITHM = "sha256" as const;
 
 export type MergePlanEntityRef = Readonly<{ kind: string; id: string }>;
@@ -55,6 +55,9 @@ export type MergePlanNodeUpsert = Readonly<{
   unsetProps: readonly string[];
   validFrom?: string | null | undefined;
   validTo?: string | undefined;
+  clearValidTo?: true;
+  /** Delete then recreate through native collections, resetting the validity window. */
+  recreate?: true;
 }>;
 
 export type MergePlanEdgeDelete = MergePlanEntityRef;
@@ -68,6 +71,7 @@ export type MergePlanEdgeUpsert = Readonly<{
   unsetProps: readonly string[];
   validFrom?: string | null | undefined;
   validTo?: string | undefined;
+  clearValidTo?: true;
 }>;
 
 export type MergePlanIdentityAssertion = Readonly<{
@@ -228,7 +232,7 @@ export type MergePlanDigest = Readonly<{
   value: string;
 }>;
 
-export type MergePlanArtifactV1 = Readonly<{
+export type MergePlanArtifactV2 = Readonly<{
   formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
   digest: MergePlanDigest;
   mode: "snapshot" | "incremental";
@@ -241,10 +245,28 @@ export type MergePlanArtifactV1 = Readonly<{
   provenance: MergePlanProvenanceOptions;
 }>;
 
-/** Current public merge-plan artifact type. */
-export type MergePlanArtifact = MergePlanArtifactV1;
-
+/** Legacy wire contract. New write intent is never encoded under version 1. */
+export type MergePlanArtifactV1 = Readonly<{
+  formatVersion: 1;
+  digest: MergePlanDigest;
+  mode: "snapshot" | "incremental";
+  target: MergePlanTargetFence;
+  anchors: MergePlanAnchors;
+  proposed: MergePlanProposedSummary;
+  writes: MergePlanWrites;
+  guards: MergePlanGuards;
+  review: MergePlanReview;
+  provenance: MergePlanProvenanceOptions;
+}>;
+/** Accepted wire formats. Writers emit V2; existing V1 artifacts retain their grammar. */
+export type MergePlanArtifact = MergePlanArtifactV1 | MergePlanArtifactV2;
 export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
+export type MergePlanArtifactInput = Omit<
+  MergePlanArtifactV2,
+  "digest" | "formatVersion"
+> &
+  Readonly<{ formatVersion: 1 | 2 }>;
 
 const nonEmptyStringSchema = z.string().min(1);
 // Zod 4's number schema rejects NaN and infinities by default.
@@ -326,6 +348,8 @@ const nodeUpsertSchema = z
     unsetProps: z.array(nonEmptyStringSchema),
     validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
+    recreate: z.literal(true).optional(),
   })
   .strict();
 
@@ -339,6 +363,7 @@ const edgeUpsertSchema = z
     unsetProps: z.array(nonEmptyStringSchema),
     validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
   })
   .strict();
 
@@ -615,7 +640,8 @@ const mergePlanReviewSchema = z
           entity: z.enum(["node", "edge"]),
           kind: nonEmptyStringSchema,
           id: nonEmptyStringSchema,
-          validTo: nonEmptyStringSchema,
+          validTo: nonEmptyStringSchema.optional(),
+          clearValidTo: z.literal(true).optional(),
           claimedBy: z.array(nonEmptyStringSchema),
           precedence: z.literal("target").optional(),
         })
@@ -654,7 +680,10 @@ const mergePlanDigestSchema = z
 
 const mergePlanArtifactV1BaseSchema = z
   .object({
-    formatVersion: z.literal(MERGE_PLAN_FORMAT_VERSION),
+    formatVersion: z.union([
+      z.literal(1),
+      z.literal(MERGE_PLAN_FORMAT_VERSION),
+    ]),
     digest: mergePlanDigestSchema,
     mode: z.enum(["snapshot", "incremental"]),
     target: mergePlanTargetFenceSchema,
@@ -680,6 +709,64 @@ function addSemanticIssues(
   artifact: ParsedMergePlanArtifactV1Input,
   ctx: z.RefinementCtx,
 ): void {
+  for (const [role, entries] of Object.entries({
+    nodeUpserts: artifact.writes.nodeUpserts,
+    edgeUpserts: artifact.writes.edgeUpserts,
+    validityEnds: artifact.review.validityEnds,
+  })) {
+    for (const [index, entry] of entries.entries()) {
+      if (
+        (entry.clearValidTo === true && entry.validTo !== undefined) ||
+        (role === "validityEnds" &&
+          entry.validTo === undefined &&
+          entry.clearValidTo !== true)
+      )
+        ctx.addIssue({
+          code: "custom",
+          path: [role, index],
+          message: "A validity change must set or clear its end, never both.",
+        });
+      if (artifact.formatVersion === 1 && entry.clearValidTo !== undefined)
+        ctx.addIssue({
+          code: "custom",
+          path: [role, index],
+          message: "Clearing validity requires merge plan format 2.",
+        });
+    }
+  }
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.guards.nodeResurrections !== undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["guards", "nodeResurrections"],
+      message: "Explicit resurrection requires merge plan format 2.",
+    });
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.writes.nodeUpserts.some((upsert) => upsert.recreate !== undefined)
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["writes", "nodeUpserts"],
+      message: "Recreation requires merge plan format 2.",
+    });
+  const resurrectionKeys = new Set<string>();
+  for (const ref of artifact.guards.nodeResurrections ?? []) {
+    const key = entityKey(ref);
+    if (
+      resurrectionKeys.has(key) ||
+      !artifact.writes.nodeUpserts.some((upsert) => entityKey(upsert) === key)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["guards", "nodeResurrections"],
+        message:
+          "Resurrection guards must name each written node exactly once.",
+      });
+    resurrectionKeys.add(key);
+  }
   if (artifact.mode !== artifact.anchors.kind) {
     ctx.addIssue({
       code: "custom",
@@ -1016,12 +1103,12 @@ function entityKey(entity: MergePlanEntityRef): string {
   return JSON.stringify([entity.kind, entity.id]);
 }
 
-export const mergePlanArtifactV1InputSchema =
+export const mergePlanArtifactInputSchema =
   mergePlanArtifactV1InputBaseSchema.superRefine((artifact, ctx) =>
     addSemanticIssues(artifact, ctx),
   );
 
-export const mergePlanArtifactV1Schema =
+export const mergePlanArtifactSchema =
   mergePlanArtifactV1BaseSchema.superRefine((artifact, ctx) =>
     addSemanticIssues(artifact, ctx),
   );

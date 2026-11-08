@@ -137,10 +137,12 @@ export {
 export type {
   MutationAuthoringOptions,
   MutationCreateOptions,
+  MutationDocument,
+  MutationOperation,
   MutationPlanBuilder,
   MutationPlanningOptions,
 } from "./mutation-plan";
-export { createMutationPlanBuilder } from "./mutation-plan";
+export { createMutationPlanBuilder, planMutations } from "./mutation-plan";
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
 export {
   forkGraphNamespace,
@@ -151,8 +153,11 @@ export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
   MergePlanAnchors,
   MergePlanArtifact,
+  MergePlanArtifactInput,
   MergePlanArtifactV1,
   MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
