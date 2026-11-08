@@ -2461,7 +2461,8 @@ instead of writing into the replacement graph. The namespace binding also keeps
 a physical working copy with a distinct outcome-table namespace from replaying the source allocation's caller
 keys. Independently diverging copies must use distinct namespaces or origins; a backup restored with both
 unchanged retains its evidence.
-Keys are opaque nonempty strings and are shared by callers
+Keys are opaque strings containing 1–256 UTF-8 bytes; oversized keys refuse before invoking the mutation callback.
+Keys are shared by callers
 within one allocation; applications can include their own caller prefix.
 
 An identical key and canonical payload returns the stored evidence without
@@ -2481,12 +2482,17 @@ accepting writes; old requests and copied outcomes then refuse with
 `GRAPH_ALLOCATION_ORIGIN_MISMATCH`. Backup restoration of the same allocation retains its identity
 and evidence. Earlier evidence formats refuse explicitly rather than silently reapplying their keys.
 
-`StoreOperationError` exposes `outcome`, `phase`, and `retryable`. A deterministic callback failure
-is `not-committed` at `callback`, preserves its cause, and is not automatically retryable. A lost
-commit response is `unknown` at `commit`: recover using the same persisted request before making
-another mutation. Typed request, payload-conflict, allocation, and support refusals remain distinct.
-Lookup failures do not imply a possibly committed write. Optimistic retry profiles refuse this
-capability; branch-host support negotiation retains its existing result envelope and host lifecycle.
+`StoreOperationError` exposes `attemptOutcome`, `phase`, and `retryable`, describing only the current
+transaction attempt. A deterministic callback failure is `not-committed` at `callback`, preserves its
+cause, and is not automatically retryable. Lost commit or replay responses report `unknown` at `commit`;
+transient writer-busy failures are retryable. A failed attempt never proves that the caller key has no
+committed outcome from an earlier attempt.
+
+When retrying, always reuse the same persisted target, idempotency key, mutation, and metadata. Never
+choose a new key based on these fields. `retryable` identifies failures suitable for same-request retry,
+not permission to replace the key. Typed request, payload-conflict, allocation, and support refusals
+remain distinct. Optimistic retry profiles refuse this capability; branch-host support negotiation
+retains its existing result envelope and host lifecycle.
 
 The callback receives a measured view of the same native transaction. Use that
 context for all graph writes, and validate the supplied JSON command with your

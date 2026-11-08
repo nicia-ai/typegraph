@@ -27,6 +27,10 @@ import {
 } from "../store/types";
 import { requireDefined } from "../utils/presence";
 import {
+  isSerializationFailure,
+  isSqliteWriterSlotBusy,
+} from "../utils/sql-errors";
+import {
   computeDurableOperationDigest,
   type DurableOperationRequest,
   isDurableOperationKey,
@@ -263,7 +267,7 @@ async function validateLookup(
     .safeParse(input);
   if (!bare.success)
     throw new DurableOperationRequestError(
-      "A durable lookup needs its persisted allocation target and nonempty caller key.",
+      "A durable lookup needs its persisted allocation target and a caller key containing 1–256 UTF-8 bytes.",
       { details: { issues: bare.error.issues } },
     );
   return bare.data;
@@ -501,6 +505,8 @@ export async function operateStore<G extends GraphDef>(
           previous.operationDigest,
           request.idempotencyKey,
         );
+        attemptState.phase = "commit";
+        attemptState.commitBoundary = true;
         return { outcome: "replayed" as const, evidence: previous };
       }
       const before =
@@ -538,12 +544,16 @@ export async function operateStore<G extends GraphDef>(
         error instanceof MergePlanCapabilityError)
     )
       return err(operationFailure(error));
-    const conflict = error instanceof TransactionConflictError;
+    const conflict =
+      error instanceof TransactionConflictError ||
+      isSerializationFailure(error, storeBackend(store));
+    const unknown = attemptState.commitBoundary && !conflict;
+    const retryable = unknown || conflict || isSqliteWriterSlotBusy(error);
     return err(
       new StoreOperationError(
-        attemptState.commitBoundary && !conflict ? "unknown" : "not-committed",
+        unknown ? "unknown" : "not-committed",
         attemptState.phase,
-        conflict,
+        retryable,
         error,
       ),
     );

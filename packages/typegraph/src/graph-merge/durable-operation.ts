@@ -90,18 +90,23 @@ export type DurableOperationUnsupportedDimension =
  * `mutation` is the host's opaque, JSON-safe description of the graph change;
  * `metadata` is opaque, JSON-safe host evidence TypeGraph never interprets.
  */
-export type DurableBranchOperationRequest = Readonly<{
+export type DurableOperationRequest = Readonly<{
   idempotencyKey: string;
   metadata: JsonValue;
   mutation: JsonValue;
 }>;
 
 /** Request contract shared by branch hosts and ordinary Stores. */
-export type DurableOperationRequest = DurableBranchOperationRequest;
+export type DurableBranchOperationRequest = DurableOperationRequest;
 
-/** One caller-key predicate for request, lookup, and retained evidence validation. */
+/** One caller-key predicate for request, lookup, and retained evidence validation: 1–256 UTF-8 bytes. */
 export function isDurableOperationKey(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    new TextEncoder().encode(value).byteLength <= 256
+  );
 }
 
 /**
@@ -339,7 +344,7 @@ export async function normalizeDurableOperationRequest(
   if (!isDurableOperationKey(request.idempotencyKey)) {
     return err(
       new DurableOperationRequestError(
-        "Durable operation request is malformed: idempotencyKey must be a non-empty string.",
+        "Durable operation request is malformed: idempotencyKey must contain 1–256 UTF-8 bytes.",
         { details: { idempotencyKey: request.idempotencyKey } },
       ),
     );
@@ -389,7 +394,7 @@ async function normalizeStoredEvidence(
   if (!isDurableOperationKey(record["idempotencyKey"])) {
     return err(
       new DurableOperationEvidenceError(
-        "Durable operation evidence needs a non-empty idempotency key.",
+        "Durable operation evidence needs an idempotency key containing 1–256 UTF-8 bytes.",
         { details: { expectedKey: expectedIdempotencyKey } },
       ),
     );
@@ -726,7 +731,7 @@ export async function getDurableOperation<
   if (!isDurableOperationKey(idempotencyKey))
     return err(
       new DurableOperationRequestError(
-        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
+        "A durable operation lookup or acknowledgement requires a caller key containing 1–256 UTF-8 bytes.",
       ),
     );
   const owner = requireDescriptorOwner(descriptor, strategy);
@@ -881,7 +886,7 @@ export async function markDurableOperationDelivered<
   if (!isDurableOperationKey(idempotencyKey))
     return err(
       new DurableOperationRequestError(
-        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
+        "A durable operation lookup or acknowledgement requires a caller key containing 1–256 UTF-8 bytes.",
       ),
     );
   const owner = requireDescriptorOwner(descriptor, strategy);

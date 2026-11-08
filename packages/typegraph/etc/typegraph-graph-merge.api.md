@@ -1630,11 +1630,7 @@ export type DurableBranchOperationEvidence = Readonly<{
 }>;
 
 // @public
-export type DurableBranchOperationRequest = Readonly<{
-    idempotencyKey: string;
-    metadata: JsonValue;
-    mutation: JsonValue;
-}>;
+export type DurableBranchOperationRequest = DurableOperationRequest;
 
 // @public
 export type DurableBranchOptions = BranchOptions & Readonly<{
@@ -1759,7 +1755,11 @@ export type DurableOperationOutcome = Readonly<{
 }>;
 
 // @public
-export type DurableOperationRequest = DurableBranchOperationRequest;
+export type DurableOperationRequest = Readonly<{
+    idempotencyKey: string;
+    metadata: JsonValue;
+    mutation: JsonValue;
+}>;
 
 // @public
 export class DurableOperationRequestError extends DurableOperationError {
@@ -7886,9 +7886,9 @@ export type StoreOperationApply<G extends GraphDef> = (tx: MeasurableTransaction
 
 // @public
 export class StoreOperationError extends DurableOperationError {
-    constructor(outcome: StoreOperationError["outcome"], phase: StoreOperationError["phase"], retryable: boolean, cause: unknown);
+    constructor(attemptOutcome: StoreOperationError["attemptOutcome"], phase: StoreOperationError["phase"], retryable: boolean, cause: unknown);
     // (undocumented)
-    readonly outcome: "not-committed" | "unknown";
+    readonly attemptOutcome: "not-committed" | "unknown";
     // (undocumented)
     readonly phase: "preflight" | "callback" | "evidence" | "commit";
     // (undocumented)

@@ -413,25 +413,25 @@ export class DurableOperationOriginMismatchError extends DurableOperationError {
   }
 }
 
-/** Failure of an ordinary Store operation, with commit certainty suitable for retry decisions. */
+/** Failure of an ordinary Store operation, with certainty scoped to this transaction attempt, never to the caller key. */
 export class StoreOperationError extends DurableOperationError {
-  readonly outcome: "not-committed" | "unknown";
+  readonly attemptOutcome: "not-committed" | "unknown";
   readonly phase: "preflight" | "callback" | "evidence" | "commit";
   readonly retryable: boolean;
   constructor(
-    outcome: StoreOperationError["outcome"],
+    attemptOutcome: StoreOperationError["attemptOutcome"],
     phase: StoreOperationError["phase"],
     retryable: boolean,
     cause: unknown,
   ) {
     super(
-      outcome === "unknown" ?
-        "The commit outcome is unknown; look up or replay the same persisted request before attempting another mutation."
-      : "The operation did not commit; inspect its cause before deciding whether to retry.",
-      { cause, details: { outcome, phase, retryable } },
+      attemptOutcome === "unknown" ?
+        "This attempt's commit outcome is unknown; look up or replay the same persisted request before attempting another mutation."
+      : "This attempt did not commit; an earlier outcome may exist. Any retry must preserve the same key and payload.",
+      { cause, details: { attemptOutcome, phase, retryable } },
     );
     this.name = "StoreOperationError";
-    this.outcome = outcome;
+    this.attemptOutcome = attemptOutcome;
     this.phase = phase;
     this.retryable = retryable;
   }

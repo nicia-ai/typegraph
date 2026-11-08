@@ -418,13 +418,16 @@ describe("durable branch operations", () => {
     expect(host.appliedMutations()).toHaveLength(0);
   });
 
-  it("uses the shared nonempty key contract for apply, lookup, and acknowledgement", async () => {
+  it("uses the shared UTF-8 key limit for apply, lookup, and acknowledgement", async () => {
     const host = createRecordingHost();
-    const results = [
-      await operateDurableBranch(descriptor, host.strategy, request("")),
-      await getDurableOperation(descriptor, host.strategy, ""),
-      await markDurableOperationDelivered(descriptor, host.strategy, ""),
-    ];
+    const results = [];
+    for (const key of ["", "x".repeat(6000), "é".repeat(129)]) {
+      results.push(
+        await operateDurableBranch(descriptor, host.strategy, request(key)),
+        await getDurableOperation(descriptor, host.strategy, key),
+        await markDurableOperationDelivered(descriptor, host.strategy, key),
+      );
+    }
     for (const result of results) {
       expect(result.success).toBe(false);
       if (!result.success) {

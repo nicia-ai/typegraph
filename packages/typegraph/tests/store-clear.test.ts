@@ -303,7 +303,7 @@ describe("store.clear() rotates the durable revision origin", () => {
     backend = createTestBackend();
   });
 
-  it("mints a different revisionOriginNow() after clear(), under history", async () => {
+  it("mints a different allocationOwner() after clear(), under history", async () => {
     const store = createStore(graph, backend, { history: true });
     await store.nodes.Person.create({
       email: "alice@example.com",
@@ -327,7 +327,7 @@ describe("store.clear() rotates the durable revision origin", () => {
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
 
-  it("mints a different revisionOriginNow() after clear(), under plain revisionTracking (no history)", async () => {
+  it("mints a different allocationOwner() after clear(), under plain revisionTracking (no history)", async () => {
     const store = createStore(graph, backend, { revisionTracking: true });
     await store.nodes.Person.create({
       email: "alice@example.com",
@@ -345,8 +345,8 @@ describe("store.clear() rotates the durable revision origin", () => {
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
 
-  it("rotates the origin even when revisionOriginNow() was never called before the first clear()", async () => {
-    // Proves rotation does not depend on a prior `revisionOriginNow()` call
+  it("rotates the origin even when allocationOwner() was never called before the first clear()", async () => {
+    // Proves rotation does not depend on a prior `allocationOwner()` call
     // having minted the row. It does NOT exercise `ensureRevisionOriginsRelation`'s
     // own lazy-bootstrap path on this fixture: `createTestBackend()`'s local
     // SQLite backend installs the FULL base schema — `typegraph_revision_origins`

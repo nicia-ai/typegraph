@@ -1052,32 +1052,3 @@ export {
   type IdConfig,
   type IdGenerator,
 } from "./utils";
-
-// Durable outcomes for ordinary Store transactions; no branch lifecycle is required.
-export type {
-  DurableBranchOperationRequest,
-  DurableOperationRequest,
-} from "./graph-merge/durable-operation";
-export {
-  DurableOperationConflictError,
-  DurableOperationError,
-  DurableOperationEvidenceError,
-  DurableOperationOriginMismatchError,
-  DurableOperationRequestError,
-  DurableOperationUnsupportedError,
-  MergeError,
-  type MergeErrorOptions,
-  StoreOperationError,
-} from "./graph-merge/errors";
-export {
-  captureStoreOperationTarget,
-  getStoreOperation,
-  operateStore,
-  type StoreOperationApply,
-  type StoreOperationEvidence,
-  type StoreOperationLookup,
-  type StoreOperationOutcome,
-  type StoreOperationRequest,
-  type StoreOperationTarget,
-} from "./graph-merge/store-operation";
-export type { Result } from "./utils/result";

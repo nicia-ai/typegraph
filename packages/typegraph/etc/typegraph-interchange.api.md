@@ -813,8 +813,8 @@ export type ConflictStrategy = z.infer<typeof ConflictStrategySchema>;
 // @public
 export const ConflictStrategySchema: z.ZodEnum<{
     error: "error";
-    skip: "skip";
     update: "update";
+    skip: "skip";
 }>;
 
 // @public
@@ -3626,12 +3626,12 @@ export type ImportOptions = z.input<typeof ImportOptionsSchema>;
 export const ImportOptionsSchema: z.ZodObject<{
     onConflict: z.ZodEnum<{
         error: "error";
-        skip: "skip";
         update: "update";
+        skip: "skip";
     }>;
     onUnknownProperty: z.ZodDefault<z.ZodEnum<{
-        error: "error";
         allow: "allow";
+        error: "error";
         strip: "strip";
     }>>;
     validateReferences: z.ZodDefault<z.ZodBoolean>;
@@ -7442,8 +7442,8 @@ export type UnknownPropertyStrategy = z.infer<typeof UnknownPropertyStrategySche
 
 // @public
 export const UnknownPropertyStrategySchema: z.ZodEnum<{
-    error: "error";
     allow: "allow";
+    error: "error";
     strip: "strip";
 }>;
 

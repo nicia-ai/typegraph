@@ -8,4 +8,8 @@ Base-schema version 8 installs the operation-evidence relation. Upgrade storage 
 
 Complete `PostgresTableNames` / `SqliteTableNames` maps must include `storeOperations`. Custom PostgreSQL working-copy connectors must bind outcome storage to the allocated namespace; partial table-name overrides continue to use defaults.
 
-Ordinary Store operations share durable request validation, expose verified full-request lookup as well as explicit key-only lookup, and distinguish rolled-back failures from uncertain commit outcomes. Evidence format 2 binds the complete allocation owner; divergent physical forks must explicitly rotate it before writes. The helpers are available from the root package.
+Ordinary Store operations share durable request validation, expose verified full-request lookup as well as explicit key-only lookup, and expose attempt-scoped `StoreOperationError.attemptOutcome` separately from durable key evidence. Evidence format 2 binds the complete allocation owner; divergent physical forks must explicitly rotate it before writes. The Result-based helpers and their errors/types are exported from `/graph-merge`. `DurableOperationRequest` is the canonical request shape; the branch-specific name is an alias.
+
+Caller keys must contain 1–256 UTF-8 bytes; invalid keys refuse before invoking a mutation callback. Always retry using the same persisted target, key, mutation, and metadata. A failed attempt never proves that a key has no earlier committed outcome. Lost replay responses report uncertainty and support same-request recovery, and transient writer-busy failures are retryable.
+
+Before upgrading durable branch integrations, recover or finish outstanding requests whose keys exceed 256 UTF-8 bytes using the previous version. The limit also applies to lookup and retained evidence validation. Do not resubmit an earlier request under a replacement key; its original binding remains authoritative.
