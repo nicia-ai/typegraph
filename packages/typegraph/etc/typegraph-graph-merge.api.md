@@ -5353,15 +5353,44 @@ export type MutationDocument = Readonly<{
 
 // @public
 export type MutationOperation = Readonly<{
-    op: "node.create" | "node.update" | "node.replace" | "node.delete" | "edge.create" | "edge.update" | "edge.delete";
     kind: string;
     id: string;
-    props?: Readonly<Record<string, JsonValue>> | undefined;
+}> & (Readonly<{
+    op: "node.create";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: MutationCreateOptions | undefined;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "edge.create";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: MutationCreateOptions | undefined;
+    from: MergePlanEntityRef;
+    to: MergePlanEntityRef;
+    unsetProps?: never;
+}> | Readonly<{
+    op: "node.update" | "edge.update";
+    props: Readonly<Record<string, JsonValue>>;
     unsetProps?: readonly string[] | undefined;
-    from?: MergePlanEntityRef | undefined;
-    to?: MergePlanEntityRef | undefined;
-    options?: MutationCreateOptions | ValidityEndMutation | undefined;
-}>;
+    options?: ValidityEndMutation | undefined;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "node.replace";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: never;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "node.delete" | "edge.delete";
+    props?: never;
+    options?: never;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}>);
 
 // @public
 export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
@@ -6081,6 +6110,7 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
+    planningScope?: "candidate" | "full";
 }>;
 
 // @public

@@ -419,6 +419,7 @@ describe("candidate write-set planning", () => {
       expect(canUseSparseCandidatePlanning(target)).toBe(false);
       unwrap(
         await planCandidateWriteSet({
+          planningScope: "full",
           target,
           makeBackend: candidateBackend().makeBackend,
           writeSet,
@@ -824,6 +825,7 @@ describe("candidate write-set planning", () => {
       try {
         const actual = unwrap(
           await planCandidateWriteSet({
+            planningScope: "full",
             target,
             makeBackend: candidateBackend().makeBackend,
             writeSet,
@@ -851,6 +853,7 @@ describe("candidate write-set planning", () => {
           makeBackend: candidateBackend().makeBackend,
           writeSet,
           policy: { id: "legacy-runtime-review", context: {} },
+          planningScope: "full",
         });
         expect(isErr(legacyReview)).toBe(false);
       } finally {
@@ -1490,7 +1493,7 @@ describe("candidate write-set planning", () => {
     expect(after.revisionUnchanged).toBe(true);
   });
 
-  it("falls back to full clone when a durable identity owner is tombstoned", async () => {
+  it("refuses bounded planning for a tombstoned identity owner unless full planning is selected", async () => {
     const [target] = await createStoreWithSchema(
       edgeIdentityGraph,
       baseBackend,
@@ -1546,9 +1549,19 @@ describe("candidate write-set planning", () => {
       writeSet,
     });
     expect(canUseSparseCandidatePlanning(target)).toBe(true);
-    // The capability sees the durable tombstone, so planning must use the
-    // same state projection as the full clone rather than seed the tombstone.
-    expect(isErr(bounded)).toBe(false);
+    expect(isErr(bounded)).toBe(true);
+    if (isErr(bounded))
+      expect(bounded.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
+    expect(
+      isErr(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+          planningScope: "full",
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("returns a deterministic serialized property-conflict plan with source attribution", async () => {

@@ -335,6 +335,7 @@ const writeSet = {
   edges: [],
 };
 const mergePlan = unwrap(await planCandidateWriteSetForEvolution({
+          planningScope: "full",
   target,
   evolutionPlan,
   makeBackend: makeIsolatedBackend,
@@ -2818,3 +2819,8 @@ See [FHIR Graph Merge](/examples/fhir-graph-merge) for a complete runnable
 snapshot merge that reconciles two independently-extracted patient-care branches,
 and [Incremental Merge](/examples/incremental-merge) for live-target ingestion
 against an advancing base with persisted, queryable provenance.
+
+Candidate write-set planning also defaults to `planningScope: "candidate"`. Unsupported bounded reads,
+including retained identity tombstones that require a complete clone, refuse before staging.
+Select `planningScope: "full"` explicitly for full-copy planning. `planCandidateWriteSetForEvolution()`
+currently requires this explicit full scope. Review helpers inherit the selected planning scope.

@@ -145,6 +145,33 @@ export function registerMutationPlanningIntegrationTests(
       expect(edgeAfter?.meta.validTo).toBeUndefined();
     });
 
+    it("keeps the builder target and document when runtime options contain extra fields", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "builder_owned",
+      });
+      const other = await context.createHistoryStore({
+        ...graph,
+        id: "builder_other",
+      });
+      const empty = await createMutationPlanBuilder(store, "owned");
+      const builder = empty.createNode("Item", "owned", { name: "owned" });
+      const options = {
+        makeBackend,
+        target: other,
+        mutations: { invalid: true },
+      };
+      const artifact = unwrap(await builder.plan(options));
+      expect(artifact.target.graphId).toBe(store.graphId);
+      unwrap(await applyMergePlan(store, artifact));
+      expect(
+        await store.nodes.Item.getById(asNodeId<typeof Item>("owned")),
+      ).toMatchObject({ name: "owned" });
+      expect(
+        await other.nodes.Item.getById(asNodeId<typeof Item>("owned")),
+      ).toBeUndefined();
+    });
+
     it("reports the failing operation and preserves its native collection refusal", async () => {
       const store = await context.createHistoryStore({
         ...graph,
@@ -421,13 +448,15 @@ export function registerMutationPlanningIntegrationTests(
       );
       unwrap(await applyMergePlan(store, plan));
       const next = await createMutationPlanBuilder(store, "edge-refusal");
-      expect(
-        isErr(
-          await next
-            .createEdge("links", edge.id, root, peer, { label: "reused" })
-            .plan({ makeBackend }),
-        ),
-      ).toBe(true);
+      const reused = await next
+        .createEdge("links", edge.id, root, peer, { label: "reused" })
+        .plan({ makeBackend });
+      expect(isErr(reused)).toBe(true);
+      if (!isErr(reused)) throw new Error("Expected edge create refusal.");
+      expect(reused.error.details).toMatchObject({
+        operationIndex: 0,
+        operation: { op: "edge.create" },
+      });
     });
 
     it("retains edge-kind ownership checks for tombstoned deletes", async () => {
@@ -454,11 +483,15 @@ export function registerMutationPlanningIntegrationTests(
       ).rejects.toThrow(/belongs to links/u);
       const before = await store.recordedNow();
       const builder = await createMutationPlanBuilder(store, "edge-kind");
-      expect(
-        isErr(
-          await builder.deleteEdge("otherLinks", edge.id).plan({ makeBackend }),
-        ),
-      ).toBe(true);
+      const wrongKind = await builder
+        .deleteEdge("otherLinks", edge.id)
+        .plan({ makeBackend });
+      expect(isErr(wrongKind)).toBe(true);
+      if (!isErr(wrongKind)) throw new Error("Expected edge kind refusal.");
+      expect(wrongKind.error.details).toMatchObject({
+        operationIndex: 0,
+        operation: { op: "edge.delete" },
+      });
       expect(
         isErr(await builder.deleteEdge("links", edge.id).plan({ makeBackend })),
       ).toBe(false);

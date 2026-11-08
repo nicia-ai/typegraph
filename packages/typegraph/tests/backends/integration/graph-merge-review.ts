@@ -758,6 +758,24 @@ export function registerGraphMergeReviewIntegrationTests(
             writeSet,
             makeBackend,
           });
+          expect(bounded).toMatchObject({
+            success: false,
+            error: {
+              code:
+                ownerState === "deleted" ?
+                  "GRAPH_MERGE_PLAN_CAPABILITY"
+                : "GRAPH_MERGE_CANDIDATE_WRITE_SET",
+            },
+          });
+          const planned =
+            ownerState === "deleted" ?
+              await planCandidateWriteSet({
+                target,
+                writeSet,
+                makeBackend,
+                planningScope: "full",
+              })
+            : bounded;
           const expectedJson =
             imported.success ?
               canonicalMergePlanJson(
@@ -771,7 +789,7 @@ export function registerGraphMergeReviewIntegrationTests(
               )
             : undefined;
           const actualJson =
-            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+            isErr(planned) ? undefined : canonicalMergePlanJson(planned.data);
           expect(actualJson).toBe(expectedJson);
         } finally {
           await full.close();

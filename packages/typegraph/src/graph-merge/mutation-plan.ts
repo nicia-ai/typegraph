@@ -48,6 +48,7 @@ import {
   type MergePlanTargetFence,
   mergePlanTargetFenceSchema,
 } from "./plan-schema";
+import { resolvePlanningScope } from "./planning-scope";
 import { err, isErr, type Result } from "./result";
 import {
   canUseSparseCandidatePlanning,
@@ -212,22 +213,51 @@ export async function createMutationPlanBuilder<G extends GraphDef>(
 
 /** Serializable operations use explicit property removal rather than JSON's missing undefined. */
 export type MutationOperation = Readonly<{
-  op:
-    | "node.create"
-    | "node.update"
-    | "node.replace"
-    | "node.delete"
-    | "edge.create"
-    | "edge.update"
-    | "edge.delete";
   kind: string;
   id: string;
-  props?: Readonly<Record<string, JsonValue>> | undefined;
-  unsetProps?: readonly string[] | undefined;
-  from?: MergePlanEntityRef | undefined;
-  to?: MergePlanEntityRef | undefined;
-  options?: MutationCreateOptions | ValidityEndMutation | undefined;
-}>;
+}> &
+  (
+    | Readonly<{
+        op: "node.create";
+        props: Readonly<Record<string, JsonValue>>;
+        options?: MutationCreateOptions | undefined;
+        unsetProps?: never;
+        from?: never;
+        to?: never;
+      }>
+    | Readonly<{
+        op: "edge.create";
+        props: Readonly<Record<string, JsonValue>>;
+        options?: MutationCreateOptions | undefined;
+        from: MergePlanEntityRef;
+        to: MergePlanEntityRef;
+        unsetProps?: never;
+      }>
+    | Readonly<{
+        op: "node.update" | "edge.update";
+        props: Readonly<Record<string, JsonValue>>;
+        unsetProps?: readonly string[] | undefined;
+        options?: ValidityEndMutation | undefined;
+        from?: never;
+        to?: never;
+      }>
+    | Readonly<{
+        op: "node.replace";
+        props: Readonly<Record<string, JsonValue>>;
+        options?: never;
+        unsetProps?: never;
+        from?: never;
+        to?: never;
+      }>
+    | Readonly<{
+        op: "node.delete" | "edge.delete";
+        props?: never;
+        options?: never;
+        unsetProps?: never;
+        from?: never;
+        to?: never;
+      }>
+  );
 export type MutationDocument = Readonly<{
   formatVersion: 1;
   sourceId: string;
@@ -246,7 +276,10 @@ const mutationCreateSchema = z
   })
   .strict();
 const mutationUpdateSchema = z.union([
-  z.object({ validTo: z.string().optional() }).strict(),
+  z
+    .object({ validTo: z.string().optional() })
+    .strict()
+    .transform(({ validTo }) => (validTo === undefined ? {} : { validTo })),
   z.object({ clearValidTo: z.literal(true) }).strict(),
 ]);
 const mutationBaseSchema = z
@@ -346,7 +379,7 @@ function operationStep(operation: MutationOperation): Step {
     id: operation.id,
     deletion: operation.op.endsWith(".delete"),
     creation: operation.op.endsWith(".create"),
-    ...(operation.from === undefined || operation.to === undefined ?
+    ...(operation.from === undefined ?
       {}
     : { endpoints: { from: operation.from, to: operation.to } }),
     operation,
@@ -490,7 +523,14 @@ function mutationBuilder<G extends GraphDef>(
       patch("edge.update", kind, id, props, options),
     deleteEdge: (kind, id) => append({ op: "edge.delete", kind, id }),
     plan: (options) =>
-      planMutations({ target, mutations: document(), ...options }),
+      planMutations({
+        makeBackend: options.makeBackend,
+        ...(options.planningScope === undefined ?
+          {}
+        : { planningScope: options.planningScope }),
+        target,
+        mutations: document(),
+      }),
   } satisfies MutationPlanBuilder<G>);
 }
 
@@ -543,6 +583,24 @@ export async function planMutations<G extends GraphDef>(
   }
 }
 
+function mutationOperationFailure(
+  index: number,
+  operation: MutationOperation,
+  cause: unknown,
+): CandidateWriteSetError {
+  return new CandidateWriteSetError(
+    `Mutation operation ${index} (${operation.op}) failed.`,
+    {
+      cause,
+      details: {
+        operationIndex: index,
+        operation,
+        collectionErrorName: cause instanceof Error ? cause.name : undefined,
+      },
+    },
+  );
+}
+
 async function observe<G extends GraphDef>(
   candidate: GraphBranch<G>,
   steps: readonly Step[],
@@ -559,18 +617,7 @@ async function observe<G extends GraphDef>(
     try {
       await executeMutation(candidate.store, step.operation);
     } catch (error) {
-      throw new CandidateWriteSetError(
-        `Mutation operation ${index} (${step.operation.op}) failed.`,
-        {
-          cause: error,
-          details: {
-            operationIndex: index,
-            operation: step.operation,
-            collectionErrorName:
-              error instanceof Error ? error.name : undefined,
-          },
-        },
-      );
+      throw mutationOperationFailure(index, step.operation, error);
     }
     const delta = await candidate.store.changesSince(previous);
     if (delta.kind !== "keys")
@@ -682,10 +729,10 @@ async function planMutationSteps<G extends GraphDef>(
   options: MutationPlanningOptions,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
   try {
-    if (![undefined, "candidate", "full"].includes(options.planningScope))
-      throw new MergePlanCapabilityError("Unknown mutation planning scope.");
+    const scope = resolvePlanningScope(options.planningScope);
+    if (isErr(scope)) throw scope.error;
     await assertPlanningFenceUnchanged(target, fence);
-    const bounded = options.planningScope !== "full";
+    const bounded = scope.data === "candidate";
     if (bounded && !canUseSparseCandidatePlanning(target))
       throw new MergePlanCapabilityError(
         "This graph cannot be mutation-planned with bounded candidate reads. Explicitly select full planning to permit a complete clone.",
@@ -699,54 +746,58 @@ async function planMutationSteps<G extends GraphDef>(
       nodes: [],
       edges: [],
     };
-    for (const step of steps) {
-      if (step.entity === "node") {
-        writeSet.nodes.push({
-          kind: step.kind,
-          id: step.id,
-          properties: {},
-          validFrom: null,
-        });
-        if (step.deletion)
-          edgeRows.push(
-            ...(await backend.findEdgesConnectedTo({
-              graphId: target.graphId,
-              nodeKind: step.kind,
-              nodeId: step.id,
-            })),
-          );
-      } else {
-        const existing = await backend.getEdge(target.graphId, step.id);
-        // Tombstones are absent from staging but still own their edge kind.
-        if (step.deletion && existing !== undefined)
-          assertEdgeIdentityMatches(
-            step.id,
-            { kind: step.kind },
-            edgeIdentityFromRow(existing),
-            "delete",
-          );
-        if (step.creation === true && existing?.deleted_at !== undefined) {
-          throw new CandidateWriteSetError(
-            "An edge create cannot reuse a soft-deleted edge identifier.",
-            { details: { kind: step.kind, id: step.id } },
-          );
-        }
-        const endpoints =
-          step.endpoints ??
-          (existing === undefined ? undefined : (
-            {
-              from: { kind: existing.from_kind, id: existing.from_id },
-              to: { kind: existing.to_kind, id: existing.to_id },
-            }
-          ));
-        if (endpoints !== undefined)
-          writeSet.edges.push({
+    for (const [index, step] of steps.entries()) {
+      try {
+        if (step.entity === "node") {
+          writeSet.nodes.push({
             kind: step.kind,
             id: step.id,
             properties: {},
             validFrom: null,
-            ...endpoints,
           });
+          if (step.deletion)
+            edgeRows.push(
+              ...(await backend.findEdgesConnectedTo({
+                graphId: target.graphId,
+                nodeKind: step.kind,
+                nodeId: step.id,
+              })),
+            );
+        } else {
+          const existing = await backend.getEdge(target.graphId, step.id);
+          // Tombstones are absent from staging but still own their edge kind.
+          if (step.deletion && existing !== undefined)
+            assertEdgeIdentityMatches(
+              step.id,
+              { kind: step.kind },
+              edgeIdentityFromRow(existing),
+              "delete",
+            );
+          if (step.creation === true && existing?.deleted_at !== undefined) {
+            throw new CandidateWriteSetError(
+              "An edge create cannot reuse a soft-deleted edge identifier.",
+              { details: { kind: step.kind, id: step.id } },
+            );
+          }
+          const endpoints =
+            step.endpoints ??
+            (existing === undefined ? undefined : (
+              {
+                from: { kind: existing.from_kind, id: existing.from_id },
+                to: { kind: existing.to_kind, id: existing.to_id },
+              }
+            ));
+          if (endpoints !== undefined)
+            writeSet.edges.push({
+              kind: step.kind,
+              id: step.id,
+              properties: {},
+              validFrom: null,
+              ...endpoints,
+            });
+        }
+      } catch (error) {
+        throw mutationOperationFailure(index, step.operation, error);
       }
     }
     async function createStaging(

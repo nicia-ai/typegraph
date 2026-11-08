@@ -9,7 +9,11 @@ import {
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { isCanonicalIsoDate } from "../utils/date";
 import { computeSchemaComponent } from "./base-version";
-import { CandidateWriteSetError, MergeError } from "./errors";
+import {
+  CandidateWriteSetError,
+  MergeError,
+  MergePlanCapabilityError,
+} from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
 import {
   ingestionBranch,
@@ -24,6 +28,7 @@ import {
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
+import { resolvePlanningScope } from "./planning-scope";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
 import {
@@ -107,6 +112,8 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
   makeBackend: MakeBackend;
   writeSet: unknown;
   options?: Omit<MergeOptions<G>, "target">;
+  /** Candidate planning refuses unsupported bounded reads; full cloning requires opt-in. */
+  planningScope?: "candidate" | "full";
 }>;
 
 /** Object-form arguments for candidate planning against a planned evolution. */
@@ -228,7 +235,10 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
-  let bounded = canUseSparseCandidatePlanning(args.target);
+  const scope = resolvePlanningScope(args.planningScope);
+  if (isErr(scope)) return scope;
+  let bounded =
+    scope.data === "candidate" && canUseSparseCandidatePlanning(args.target);
   let boundedFence:
     Awaited<ReturnType<typeof captureMergePlanTargetFence>> | undefined;
   let matchIdentityOwners: readonly EdgeRow[] = [];
@@ -255,6 +265,12 @@ export async function planCandidateWriteSet<G extends GraphDef>(
       );
     }
   }
+  if (!bounded && scope.data !== "full")
+    return err(
+      new MergePlanCapabilityError(
+        "This candidate cannot be planned with bounded reads. Explicitly select full planning to permit a complete clone.",
+      ),
+    );
   const sparse =
     bounded ?
       sparseCandidateWorkingCopyStrategy<G>(
@@ -376,6 +392,14 @@ export async function planCandidateWriteSet<G extends GraphDef>(
 export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
   args: PlanCandidateWriteSetForEvolutionArgs<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
+  const scope = resolvePlanningScope(args.planningScope);
+  if (isErr(scope)) return scope;
+  if (scope.data !== "full")
+    return err(
+      new MergePlanCapabilityError(
+        "Candidate evolution planning requires explicit full planning.",
+      ),
+    );
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
   if (!parsed.success) {
     return err(

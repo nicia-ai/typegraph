@@ -2,7 +2,10 @@ import { describe, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../../src";
-import { type MutationPlanBuilder } from "../../src/graph-merge";
+import {
+  type MutationOperation,
+  type MutationPlanBuilder,
+} from "../../src/graph-merge";
 
 const Item = defineNode("Item", {
   schema: z.object({ name: z.string(), note: z.string().optional() }),
@@ -45,8 +48,33 @@ function checkOperationTypes(builder: MutationPlanBuilder<typeof graph>): void {
   builder.updateEdge("owns", "edge", { weight: "invalid" });
 }
 
+function checkDocumentTypes(): void {
+  // @ts-expect-error Creates require properties.
+  const missingProps: MutationOperation = {
+    op: "node.create",
+    kind: "Item",
+    id: "id",
+  };
+  // @ts-expect-error Edge creates require both endpoints.
+  const missingEndpoints: MutationOperation = {
+    op: "edge.create",
+    kind: "owns",
+    id: "id",
+    props: {},
+  };
+  // @ts-expect-error Delete operations cannot carry properties.
+  const deleteProps: MutationOperation = {
+    op: "node.delete",
+    kind: "Item",
+    id: "id",
+    props: {},
+  };
+  void [missingProps, missingEndpoints, deleteProps];
+}
+
 describe("mutation plan types", () => {
   it("retains graph-specific kinds, properties, and endpoints", () => {
+    expectTypeOf(checkDocumentTypes).returns.toBeVoid();
     expectTypeOf(graph.nodes.Item.type.kind).toEqualTypeOf<"Item">();
     expectTypeOf(checkOperationTypes)
       .parameter(0)
