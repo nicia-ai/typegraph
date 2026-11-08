@@ -107,4 +107,4 @@ function readFormatVersion(input: unknown): unknown {
   return Reflect.get(input, "formatVersion") as unknown;
 }
 
-export type { MergePlanArtifact, MergePlanArtifactInput } from "./plan-schema";
+export type { MergePlanArtifact } from "./plan-schema";

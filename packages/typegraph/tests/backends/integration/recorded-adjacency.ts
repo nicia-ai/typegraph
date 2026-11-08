@@ -632,9 +632,21 @@ export function registerRecordedAdjacencyIntegrationTests(
         base.dialect === "sqlite" ?
           "EXPLAIN QUERY PLAN "
         : "EXPLAIN (ANALYZE, FORMAT JSON) ";
-      const plan = await base.execute(
-        asCompiledRowsSql(sql`${sql.raw(explain)}${candidate.query}`),
+      const explainQuery = asCompiledRowsSql(
+        sql`${sql.raw(explain)}${candidate.query}`,
       );
+      // Tiny fixtures can favor a sequential scan after auto-analyze. Check that
+      // the bounded access path exists independently of that cost estimate.
+      // SET LOCAL stays on this transaction's connection and cannot leak.
+      const plan =
+        base.dialect === "sqlite" ?
+          await base.execute(explainQuery)
+        : await base.transaction(async (transaction) => {
+            await transaction.execute(
+              asCompiledRowsSql(sql`SET LOCAL enable_seqscan = off`),
+            );
+            return transaction.execute(explainQuery);
+          });
       expect(
         JSON.stringify(plan, (_key, value: unknown) =>
           typeof value === "bigint" ? value.toString() : value,
