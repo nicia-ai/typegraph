@@ -30,6 +30,7 @@ import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
+import { recordedAnchorOwner } from "../src/store/recorded-anchor-origin";
 import {
   advanceRevisionClock,
   readRecordedClock,
@@ -168,9 +169,19 @@ describe("recorded commit clock", () => {
       "expected third recorded clock commit",
     );
 
-    expect(firstCommit).toBe("r1:0000000000000001:2026-06-01T12:00:00.000Z");
-    expect(secondCommit).toBe("r1:0000000000000002:2026-06-01T12:00:00.000Z");
-    expect(thirdCommit).toBe("r1:0000000000000003:2026-06-01T12:00:00.000Z");
+    const owner = await recordedAnchorOwner(
+      store.revisionSchema,
+      await store.revisionOriginNow(),
+    );
+    expect(firstCommit).toBe(
+      createRecordedInstant(1, "2026-06-01T12:00:00.000Z", owner),
+    );
+    expect(secondCommit).toBe(
+      createRecordedInstant(2, "2026-06-01T12:00:00.000Z", owner),
+    );
+    expect(thirdCommit).toBe(
+      createRecordedInstant(3, "2026-06-01T12:00:00.000Z", owner),
+    );
     expect(parseRecordedInstant(secondCommit).revision).toBe(2);
     expect(recordedInstantRevision(thirdCommit)).toBe(3);
     expect(compareRecordedInstants(firstCommit, secondCommit)).toBe(-1);
@@ -230,6 +241,10 @@ describe("recorded commit clock", () => {
     expect(secondCommit > firstCommit).toBe(true);
     expect(parseRecordedInstant(secondCommit)).toEqual({
       kind: "typegraph",
+      ...(await recordedAnchorOwner(
+        store.revisionSchema,
+        await store.revisionOriginNow(),
+      )),
       revision: 2,
       recordedAt: "2026-06-01T12:00:00.000Z",
     });
