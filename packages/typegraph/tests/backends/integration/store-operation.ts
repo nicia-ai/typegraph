@@ -7,6 +7,7 @@ import {
   defineGraph,
   defineNode,
   type JsonValue,
+  sql,
 } from "../../../src";
 import {
   deriveBackend,
@@ -24,6 +25,8 @@ import {
   type StoreOperationTarget,
 } from "../../../src/graph-merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
+import { storeOperationsTableName } from "../../../src/query/compiler/schema";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -104,6 +107,31 @@ export function registerStoreOperationIntegrationTests(
       expect(await store.recordedNow()).toBe(recorded);
     });
 
+    it("retires copied outcome authorization when a fork rotates its owner", async () => {
+      const store = await context.createHistoryStore(graph);
+      const input = request(await captureStoreOperationTarget(store));
+      unwrap(await operateStore(store, input, applyCreate));
+      await store.rotateAllocationOwner(input.target.owner);
+      for (const result of [
+        await getStoreOperation(store, input),
+        await operateStore(store, input, applyCreate),
+      ]) {
+        expect(result).toMatchObject({
+          success: false,
+          error: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+        });
+      }
+      const next = {
+        ...request(await captureStoreOperationTarget(store)),
+        mutation: { id: "fork-created", name: "fork-created" },
+      };
+      expect(unwrap(await getStoreOperation(store, next))).toBeUndefined();
+      expect(unwrap(await operateStore(store, next, applyCreate)).outcome).toBe(
+        "applied",
+      );
+      expect(await store.nodes.Item.getById(asNodeId("created"))).toBeDefined();
+    });
+
     it("refuses reuse of a caller key with changed mutation or metadata", async () => {
       const store = await context.createHistoryStore(graph);
       const input = request(await captureStoreOperationTarget(store));
@@ -121,6 +149,104 @@ export function registerStoreOperationIntegrationTests(
         });
       }
       expect(await store.nodes.Item.getById(asNodeId("other"))).toBeUndefined();
+    });
+
+    it("checks payload binding when lookup receives a full request", async () => {
+      const store = await context.createHistoryStore(graph);
+      const input = request(
+        await captureStoreOperationTarget(store),
+        "x".repeat(300),
+      );
+      const applied = unwrap(await operateStore(store, input, applyCreate));
+      expect(
+        unwrap(
+          await getStoreOperation(store, {
+            target: input.target,
+            idempotencyKey: input.idempotencyKey,
+          }),
+        ),
+      ).toEqual(applied.evidence);
+      const changed = await getStoreOperation(store, {
+        ...input,
+        mutation: { id: "created", name: "edited" },
+      });
+      expect(isErr(changed)).toBe(true);
+      if (!isErr(changed)) throw new Error("Expected payload conflict.");
+      expect(changed.error).toMatchObject({
+        code: "GRAPH_MERGE_OPERATION_CONFLICT",
+      });
+      const partial = await getStoreOperation(store, {
+        target: input.target,
+        idempotencyKey: input.idempotencyKey,
+        mutation: input.mutation,
+      });
+      expect(isErr(partial)).toBe(true);
+    });
+
+    it("refuses older evidence formats without applying their caller keys again", async () => {
+      const store = await context.createHistoryStore(graph);
+      const input = request(await captureStoreOperationTarget(store));
+      const applied = unwrap(await operateStore(store, input, applyCreate));
+      const legacy = JSON.stringify({ ...applied.evidence, formatVersion: 1 });
+      await requireDefined(context.getBackend().executeStatement)(
+        asCompiledStatementSql(sql`
+          UPDATE ${sql.identifier(storeOperationsTableName(store.revisionSchema))}
+          SET evidence = ${legacy} WHERE graph_id = ${store.graphId}
+        `),
+      );
+      let calls = 0;
+      for (const result of [
+        await getStoreOperation(store, input),
+        await operateStore(store, input, () => {
+          calls += 1;
+          return Promise.resolve({});
+        }),
+      ]) {
+        expect(result).toMatchObject({
+          success: false,
+          error: { name: "DurableOperationEvidenceError" },
+        });
+      }
+      expect(calls).toBe(0);
+      expect(await store.nodes.Item.count()).toBe(1);
+    });
+
+    it("shares the strict JSON payload refusal with durable branch operations", async () => {
+      const store = await context.createHistoryStore(graph);
+      class Metadata {
+        readonly version = 1;
+      }
+      const input = {
+        ...request(await captureStoreOperationTarget(store)),
+        metadata: new Metadata(),
+      } as unknown as StoreOperationRequest;
+      const result = await operateStore(store, input, applyCreate);
+      expect(result).toMatchObject({
+        success: false,
+        error: { name: "DurableOperationRequestError" },
+      });
+      expect(await store.nodes.Item.count()).toBe(0);
+    });
+
+    it("reports deterministic callback failures as rolled back and non-retryable", async () => {
+      const store = await context.createHistoryStore(graph);
+      const input = request(await captureStoreOperationTarget(store));
+      const cause = new Error("deterministic failure");
+      const result = await operateStore(store, input, async (tx, mutation) => {
+        await applyCreate(tx, mutation);
+        throw cause;
+      });
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) throw new Error("Expected callback failure.");
+      expect(result.error).toMatchObject({
+        name: "StoreOperationError",
+        outcome: "not-committed",
+        phase: "callback",
+        retryable: false,
+        cause,
+      });
+      expect(await store.nodes.Item.count()).toBe(0);
+      expect(unwrap(await getStoreOperation(store, input))).toBeUndefined();
     });
 
     it("serializes concurrent identical requests to one mutation", async () => {
@@ -160,7 +286,15 @@ export function registerStoreOperationIntegrationTests(
       );
       const input = request(await captureStoreOperationTarget(store));
       armed = true;
-      expect(isErr(await operateStore(store, input, applyCreate))).toBe(true);
+      const lost = await operateStore(store, input, applyCreate);
+      expect(isErr(lost)).toBe(true);
+      if (!isErr(lost)) throw new Error("Expected lost-response failure.");
+      expect(lost.error).toMatchObject({
+        name: "StoreOperationError",
+        outcome: "unknown",
+        phase: "commit",
+        retryable: false,
+      });
       const [reopened] = await createStoreWithSchema(
         graph,
         deriveBackend(backend, {}),
@@ -237,11 +371,13 @@ export function registerStoreOperationIntegrationTests(
       ]) {
         expect(result).toMatchObject({
           success: false,
-          error: { details: { reason: "origin-mismatch" } },
+          error: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
         });
       }
       const replacement = request(await captureStoreOperationTarget(store));
-      expect(replacement.target.origin).not.toBe(input.target.origin);
+      expect(replacement.target.owner.origin).not.toBe(
+        input.target.owner.origin,
+      );
       expect(
         unwrap(await operateStore(store, replacement, applyCreate)).outcome,
       ).toBe("applied");
@@ -265,11 +401,20 @@ export function registerStoreOperationIntegrationTests(
         throw new Error("unsupported mutation ran");
       });
       expect(isErr(refused)).toBe(true);
-      const invalid = await operateStore(store, input, async (tx, mutation) => {
-        await applyCreate(tx, mutation);
-        return new Date() as unknown as JsonValue;
-      });
-      expect(isErr(invalid)).toBe(true);
+      class Outcome {
+        readonly value = 1;
+      }
+      for (const value of [new Date(), new Outcome()]) {
+        const invalid = await operateStore(
+          store,
+          input,
+          async (tx, mutation) => {
+            await applyCreate(tx, mutation);
+            return value as unknown as JsonValue;
+          },
+        );
+        expect(isErr(invalid)).toBe(true);
+      }
       expect(
         await store.nodes.Item.getById(asNodeId("created")),
       ).toBeUndefined();

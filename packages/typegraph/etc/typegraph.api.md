@@ -726,6 +726,9 @@ type CapabilityCrossCheck =
 type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMember>>;
 
 // @public
+export function captureStoreOperationTarget<G extends GraphDef>(store: Store<G>): Promise<StoreOperationTarget>;
+
+// @public
 export type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
@@ -1942,9 +1945,69 @@ type DropVectorIndexParams = Readonly<{
 }>;
 
 // @public
+export type DurableBranchOperationRequest = Readonly<{
+    idempotencyKey: string;
+    metadata: JsonValue;
+    mutation: JsonValue;
+}>;
+
+// @public
 export type DurableEdgeBatchMembers = Readonly<{
     insertEdgesDurableBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
 }>;
+
+// @public
+export class DurableOperationConflictError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_CONFLICT";
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
+
+// @public
+export class DurableOperationError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: string;
+}
+
+// @public
+export class DurableOperationEvidenceError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_EVIDENCE";
+}
+
+// @public
+export class DurableOperationOriginMismatchError extends DurableOperationError {
+    constructor(cause: unknown);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export type DurableOperationRequest = DurableBranchOperationRequest;
+
+// @public
+export class DurableOperationRequestError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_REQUEST";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export class DurableOperationUnsupportedError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_UNSUPPORTED";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
 
 // @public (undocumented)
 const DYNAMIC_EDGE_BRAND: unique symbol;
@@ -3967,6 +4030,9 @@ export type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
 export function getSearchableMetadata(schema: z.ZodType): SearchableMetadata | undefined;
 
 // @public
+export function getStoreOperation<G extends GraphDef>(store: Store<G>, input: StoreOperationLookup | StoreOperationRequest): Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>;
+
+// @public
 type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
     kind: "graduated";
     extras: readonly CapabilityBundleExtra<XId, MExtra>[];
@@ -5819,6 +5885,20 @@ type MergeAliasMaps<Existing extends AliasMap, Added extends AliasMap> = keyof A
 type MergeEdgeAliasMaps<Existing extends EdgeAliasMap, Added extends EdgeAliasMap> = keyof Added extends never ? Existing : Existing & Added;
 
 // @public
+export class MergeError extends TypeGraphError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    protected static readonly errorCategory: TypeGraphErrorOptions["category"];
+}
+
+// @public
+export type MergeErrorOptions = Readonly<{
+    details?: Record<string, unknown>;
+    suggestion?: string;
+    cause?: unknown;
+}>;
+
+// @public
 const META_EDGE_BRAND: "__metaEdge";
 
 // @public
@@ -6642,6 +6722,9 @@ export type OntologyRelation = Readonly<{
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
 }>;
+
+// @public
+export function operateStore<G extends GraphDef>(store: Store<G>, input: StoreOperationRequest, apply: StoreOperationApply<NoInfer<G>>): Promise<Result<StoreOperationOutcome, DurableOperationError>>;
 
 // @public
 export type OperationHookContext = HookContext & Readonly<{
@@ -7753,7 +7836,7 @@ export type RestrictedDeleteErrorDetails = Readonly<{
 }>;
 
 // @public
-type Result<T, E = Error> = Readonly<{
+export type Result<T, E = Error> = Readonly<{
     success: true;
     data: T;
 }> | Readonly<{
@@ -8601,6 +8684,52 @@ export type StoreNotInitializedErrorDetails = Readonly<{
 
 // @public
 export type StoreNotInitializedReason = "missing" | "stale" | "failed";
+
+// @public (undocumented)
+export type StoreOperationApply<G extends GraphDef> = (tx: MeasurableTransactionContext<G>, mutation: JsonValue) => Promise<JsonValue>;
+
+// @public
+export class StoreOperationError extends DurableOperationError {
+    constructor(outcome: StoreOperationError["outcome"], phase: StoreOperationError["phase"], retryable: boolean, cause: unknown);
+    // (undocumented)
+    readonly outcome: "not-committed" | "unknown";
+    // (undocumented)
+    readonly phase: "preflight" | "callback" | "evidence" | "commit";
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public
+export type StoreOperationEvidence = StoreOperationRequest & Readonly<{
+    formatVersion: 2;
+    operationDigest: string;
+    result: JsonValue;
+    receipt: TransactionReceipt;
+}>;
+
+// @public (undocumented)
+export type StoreOperationLookup = Readonly<{
+    target: StoreOperationTarget;
+    idempotencyKey: string;
+}>;
+
+// @public (undocumented)
+export type StoreOperationOutcome = Readonly<{
+    outcome: "applied" | "replayed";
+    evidence: StoreOperationEvidence;
+}>;
+
+// @public (undocumented)
+export type StoreOperationRequest = DurableOperationRequest & Readonly<{
+    target: StoreOperationTarget;
+}>;
+
+// @public
+export type StoreOperationTarget = Readonly<{
+    graphId: string;
+    owner: GraphAllocationOwner;
+    scope: string;
+}>;
 
 // @public
 export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;

@@ -674,17 +674,12 @@ export type MergedCounts = Readonly<{
   identity: Readonly<{ asserted: number; retracted: number }>;
 }>;
 
-/**
- * The full result of a {@link merge}: counts, every resolution/conflict/
- * reconciliation/drop, and the report-only provenance index.
- */
 /** Successful application through an owned transaction, with its terminal receipt. */
 export type AppliedMergeReport<G extends GraphDef = GraphDef> = MergeReport<G> &
   Readonly<{ receipt: TransactionReceipt }>;
 
+/** Counts, resolutions, conflicts, and provenance for a merge; in-transaction reports do not claim a terminal receipt. */
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
-  /** Present when applyMergePlan owns and commits the complete transaction. */
-  receipt?: TransactionReceipt;
   merged: MergedCounts;
   resolutions: readonly EntityResolution[];
   conflicts: readonly PropertyConflict<G>[];

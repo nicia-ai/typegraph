@@ -3,13 +3,20 @@ import { z } from "zod";
 
 import { statementExecutionMembers } from "../backend/capabilities/bind";
 import { statementExecutionVerdict } from "../backend/capabilities/resolve";
+import { isOptimisticRetryTier } from "../backend/capabilities/retried-unit";
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  assertGraphAllocationOwner,
+  type GraphAllocationOwner,
+  sameGraphAllocationOwner,
+} from "../core/allocation-owner";
 import { assertJsonValue } from "../core/json-value";
 import { asRecordedInstant } from "../core/temporal";
 import { type JsonValue } from "../core/types";
 import { storeOperationsTableName } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import {
   readRecordedClock,
   withTransactionPreCommitHook,
@@ -21,15 +28,19 @@ import {
 import { requireDefined } from "../utils/presence";
 import {
   computeDurableOperationDigest,
-  type DurableBranchOperationRequest,
+  type DurableOperationRequest,
+  isDurableOperationKey,
+  normalizeDurableOperationRequest,
 } from "./durable-operation";
 import {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
+  DurableOperationOriginMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
   MergePlanCapabilityError,
+  StoreOperationError,
 } from "./errors";
 import { err, ok, type Result } from "./result";
 import {
@@ -38,24 +49,25 @@ import {
   type Store,
   storeBackend,
   transactionBackend,
+  TransactionConflictError,
 } from "./typegraph-internal";
 import { lockMergeTargetWrite } from "./write-fence";
 
 /** Persist this allocation target with the request, before the first attempt. */
 export type StoreOperationTarget = Readonly<{
   graphId: string;
-  origin: string;
+  owner: GraphAllocationOwner;
   /** Opaque namespace binding for the configured outcome relation. */
   scope: string;
 }>;
 
-export type StoreOperationRequest = DurableBranchOperationRequest &
+export type StoreOperationRequest = DurableOperationRequest &
   Readonly<{ target: StoreOperationTarget }>;
 
 /** Immutable, JSON-safe outcome retained until the graph allocation is cleared. */
 export type StoreOperationEvidence = StoreOperationRequest &
   Readonly<{
-    formatVersion: 1;
+    formatVersion: 2;
     operationDigest: string;
     result: JsonValue;
     receipt: TransactionReceipt;
@@ -85,26 +97,33 @@ function jsonValueIsValid(value: unknown): value is JsonValue {
   }
 }
 const jsonValueSchema = z.custom<JsonValue>((value) => jsonValueIsValid(value));
-const callerKeySchema = z.string().min(1).max(256);
+const callerKeySchema = z.custom<string>((value) =>
+  isDurableOperationKey(value),
+);
 const countSchema = z.number().int().nonnegative();
 const targetSchema = z
   .object({
     graphId: z.string().min(1),
-    origin: z.string().min(1),
+    owner: z
+      .object({
+        origin: z.string().min(1),
+        namespace: z.string().regex(/^[a-f0-9]{32}$/u),
+      })
+      .strict(),
     scope: z.string().regex(/^[a-f0-9]{32}$/u),
   })
   .strict();
 const requestSchema = z
   .object({
     target: targetSchema,
-    idempotencyKey: callerKeySchema,
-    metadata: jsonValueSchema,
-    mutation: jsonValueSchema,
+    idempotencyKey: z.unknown(),
+    metadata: z.unknown(),
+    mutation: z.unknown(),
   })
   .strict();
 const evidenceSchema = z
   .object({
-    formatVersion: z.literal(1),
+    formatVersion: z.literal(2),
     target: targetSchema,
     idempotencyKey: callerKeySchema,
     operationDigest: z.string().regex(/^[a-f0-9]{32}$/u),
@@ -151,7 +170,7 @@ function operationFailure(error: unknown): DurableOperationError {
     });
   return error instanceof DurableOperationError ? error : (
       new DurableOperationError(
-        "Durable Store operation failed; retry or look up the same persisted request to recover a possibly committed outcome.",
+        "Unable to read durable Store operation evidence.",
         { cause: error },
       )
     );
@@ -177,6 +196,7 @@ function assertStoreOperationSupport<G extends GraphDef>(
   const backend = storeBackend(store);
   if (
     backend.capabilities.durableStoreOperations !== true ||
+    isOptimisticRetryTier(backend) ||
     !backend.capabilities.execution.interactiveTransactions ||
     !store.revisionTrackingEnabled
   ) {
@@ -206,27 +226,70 @@ export async function captureStoreOperationTarget<G extends GraphDef>(
   assertStoreOperationSupport(store);
   return {
     graphId: store.graphId,
-    origin: await store.revisionOriginNow(),
+    owner: await store.allocationOwner(),
     scope: await operationScope(store),
   };
 }
 
-function validateLookup(input: StoreOperationLookup): StoreOperationLookup {
-  const parsed = z
-    .object({ target: targetSchema, idempotencyKey: callerKeySchema })
-    .safeParse(input);
-  if (!parsed.success)
+async function validateLookup(
+  input: StoreOperationLookup | StoreOperationRequest,
+): Promise<StoreOperationLookup & Readonly<{ expectedDigest?: string }>> {
+  const record = z.record(z.string(), z.unknown()).safeParse(input);
+  if (!record.success)
     throw new DurableOperationRequestError(
-      "A durable Store operation needs its persisted allocation target and a caller key of 1 through 256 characters.",
-      { details: { issues: parsed.error.issues } },
+      "A durable lookup must be an object.",
     );
-  return parsed.data;
+  const full =
+    Object.hasOwn(record.data, "mutation") ||
+    Object.hasOwn(record.data, "metadata");
+  if (full) {
+    const envelope = requestSchema.safeParse(input);
+    if (!envelope.success)
+      throw new DurableOperationRequestError(
+        "A verified lookup needs the complete original request.",
+        { details: { issues: envelope.error.issues } },
+      );
+    const normalized = await normalizeDurableOperationRequest(envelope.data);
+    if (!normalized.success) throw normalized.error;
+    return {
+      target: envelope.data.target,
+      idempotencyKey: normalized.data.idempotencyKey,
+      expectedDigest: normalized.data.operationDigest,
+    };
+  }
+  const bare = z
+    .object({ target: targetSchema, idempotencyKey: callerKeySchema })
+    .strict()
+    .safeParse(input);
+  if (!bare.success)
+    throw new DurableOperationRequestError(
+      "A durable lookup needs its persisted allocation target and nonempty caller key.",
+      { details: { issues: bare.error.issues } },
+    );
+  return bare.data;
+}
+
+function assertOperationPayload(
+  expectedDigest: string,
+  actualDigest: string,
+  idempotencyKey: string,
+): void {
+  if (expectedDigest !== actualDigest)
+    throw new DurableOperationConflictError(
+      "The caller key is already bound to a different mutation or metadata payload.",
+      { details: { idempotencyKey } },
+    );
 }
 
 async function assertTargetScope<G extends GraphDef>(
   store: Store<G>,
   target: StoreOperationTarget,
 ): Promise<void> {
+  const configuredOwner = await recordedAnchorOwner(
+    store.revisionSchema,
+    target.owner.origin,
+  );
+  assertTargetOwner(target.owner, configuredOwner);
   if (
     target.graphId !== store.graphId ||
     target.scope !== (await operationScope(store))
@@ -237,28 +300,21 @@ async function assertTargetScope<G extends GraphDef>(
     );
 }
 
-function assertTargetOrigin(
-  expected: StoreOperationTarget,
-  actual: unknown,
+function assertTargetOwner(
+  expected: GraphAllocationOwner,
+  actual: GraphAllocationOwner | undefined,
 ): void {
-  if (expected.origin !== actual)
-    throw new DurableOperationRequestError(
-      "The durable operation belongs to a different or retired graph origin.",
-      {
-        details: {
-          reason: "origin-mismatch",
-          expectedOrigin: expected.origin,
-          actualOrigin: actual,
-        },
-      },
-    );
+  try {
+    assertGraphAllocationOwner(expected, actual);
+  } catch (error) {
+    throw new DurableOperationOriginMismatchError(error);
+  }
 }
 
 async function decodeEvidence(
   row: StoredOperationRow,
   lookup: StoreOperationLookup,
 ): Promise<StoreOperationEvidence | undefined> {
-  assertTargetOrigin(lookup.target, row.origin);
   // SQL LEFT JOIN uses NULL for a key with no evidence row.
 
   if (row.evidence === undefined || row.evidence === null) return undefined;
@@ -268,7 +324,7 @@ async function decodeEvidence(
     const evidence = evidenceSchema.parse(JSON.parse(row.evidence));
     if (
       evidence.target.graphId !== lookup.target.graphId ||
-      evidence.target.origin !== lookup.target.origin ||
+      !sameGraphAllocationOwner(evidence.target.owner, lookup.target.owner) ||
       evidence.target.scope !== lookup.target.scope ||
       evidence.idempotencyKey !== lookup.idempotencyKey ||
       row.operation_digest !== evidence.operationDigest ||
@@ -313,22 +369,35 @@ async function readOperation<G extends GraphDef>(
   );
   const row = rows[0];
   if (row === undefined) {
-    assertTargetOrigin(lookup.target, undefined);
+    assertTargetOwner(lookup.target.owner, undefined);
     return undefined;
   }
+  assertTargetOwner(
+    lookup.target.owner,
+    typeof row.origin === "string" ?
+      await recordedAnchorOwner(store.revisionSchema, row.origin)
+    : undefined,
+  );
   return decodeEvidence(row, lookup);
 }
 
 /** Reads committed evidence with one indexed lookup, including after restart. */
 export async function getStoreOperation<G extends GraphDef>(
   store: Store<G>,
-  input: StoreOperationLookup,
+  input: StoreOperationLookup | StoreOperationRequest,
 ): Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>> {
   try {
     assertStoreOperationSupport(store);
-    const lookup = validateLookup(input);
+    const lookup = await validateLookup(input);
     await assertTargetScope(store, lookup.target);
-    return ok(await readOperation(store, storeBackend(store), lookup));
+    const evidence = await readOperation(store, storeBackend(store), lookup);
+    if (evidence !== undefined && lookup.expectedDigest !== undefined)
+      assertOperationPayload(
+        lookup.expectedDigest,
+        evidence.operationDigest,
+        lookup.idempotencyKey,
+      );
+    return ok(evidence);
   } catch (error) {
     return err(operationFailure(error));
   }
@@ -343,26 +412,23 @@ export async function operateStore<G extends GraphDef>(
   input: StoreOperationRequest,
   apply: StoreOperationApply<NoInfer<G>>,
 ): Promise<Result<StoreOperationOutcome, DurableOperationError>> {
+  const attemptState: {
+    phase: StoreOperationError["phase"];
+    commitBoundary: boolean;
+  } = { phase: "preflight", commitBoundary: false };
   try {
     assertStoreOperationSupport(store);
-    let snapshot: unknown;
-    try {
-      snapshot = structuredClone(input);
-    } catch (error) {
-      throw new DurableOperationRequestError(
-        "A durable Store-operation request must be serializable data.",
-        { cause: error },
-      );
-    }
-    const validated = requestSchema.safeParse(snapshot);
+    const validated = requestSchema.safeParse(input);
     if (!validated.success)
       throw new DurableOperationRequestError(
         "Invalid durable Store-operation request.",
         { details: { issues: validated.error.issues } },
       );
-    const request = validated.data;
+    const normalized = await normalizeDurableOperationRequest(validated.data);
+    if (!normalized.success) throw normalized.error;
+    const { operationDigest, ...payload } = normalized.data;
+    const request = { ...payload, target: validated.data.target };
     await assertTargetScope(store, request.target);
-    const operationDigest = await computeDurableOperationDigest(request);
     const activeSchema = await storeBackend(store).getActiveSchema(
       store.graphId,
     );
@@ -386,7 +452,7 @@ export async function operateStore<G extends GraphDef>(
           : undefined;
         const evidence: StoreOperationEvidence = {
           ...request,
-          formatVersion: 1,
+          formatVersion: 2,
           operationDigest,
           result: pending.result,
           receipt: {
@@ -403,14 +469,18 @@ export async function operateStore<G extends GraphDef>(
           asCompiledStatementSql(sql`
             INSERT INTO ${sql.identifier(storeOperationsTableName(store.revisionSchema))}
               (graph_id, origin, scope, idempotency_key, operation_digest, evidence)
-            VALUES (${store.graphId}, ${request.target.origin}, ${request.target.scope}, ${request.idempotencyKey}, ${operationDigest}, ${serialized})
+            VALUES (${store.graphId}, ${request.target.owner.origin}, ${request.target.scope}, ${request.idempotencyKey}, ${operationDigest}, ${serialized})
           `),
         );
         pending.evidence = evidence;
+        attemptState.phase = "commit";
+        attemptState.commitBoundary = true;
       },
     );
     const outcome = await store.transactionWithReceipt(async (tx) => {
       pending = undefined;
+      attemptState.phase = "preflight";
+      attemptState.commitBoundary = false;
       const backend: TransactionBackend = transactionBackend(tx);
       requireOperationStatementMembers(backend);
       await lockMergeTargetWrite(backend, {
@@ -426,24 +496,27 @@ export async function operateStore<G extends GraphDef>(
       });
       const previous = await readOperation(store, backend, request);
       if (previous !== undefined) {
-        if (previous.operationDigest !== operationDigest)
-          throw new DurableOperationConflictError(
-            "The caller key is already bound to a different mutation or metadata payload.",
-            { details: { idempotencyKey: request.idempotencyKey } },
-          );
+        assertOperationPayload(
+          operationDigest,
+          previous.operationDigest,
+          request.idempotencyKey,
+        );
         return { outcome: "replayed" as const, evidence: previous };
       }
       const before =
         store.historyEnabled ?
           await readRecordedClock(backend, store.revisionSchema, store.graphId)
         : undefined;
+      attemptState.phase = "callback";
       const measured = await tx.measure(async (scoped) =>
         apply(scoped, structuredClone(request.mutation)),
       );
+      assertJsonValue(measured.result, "result", "Durable Store operation");
       const result = structuredClone(measured.result);
       assertJsonValue(result, "result", "Durable Store operation");
       const attempt: Pending = { result, receipt: measured.receipt, before };
       pending = attempt;
+      attemptState.phase = "evidence";
       return { outcome: "applied" as const, attempt };
     }, options);
     return ok(
@@ -458,6 +531,24 @@ export async function operateStore<G extends GraphDef>(
         },
     );
   } catch (error) {
-    return err(operationFailure(error));
+    if (
+      attemptState.phase === "preflight" &&
+      !attemptState.commitBoundary &&
+      (error instanceof DurableOperationError ||
+        error instanceof MergePlanCapabilityError)
+    )
+      return err(operationFailure(error));
+    const conflict = error instanceof TransactionConflictError;
+    const rollbackUncertain = error instanceof AggregateError;
+    return err(
+      new StoreOperationError(
+        (attemptState.commitBoundary && !conflict) || rollbackUncertain ?
+          "unknown"
+        : "not-committed",
+        attemptState.phase,
+        conflict,
+        error,
+      ),
+    );
   }
 }

@@ -388,7 +388,7 @@ export class MatchEvidenceError extends MergeError {
 }
 
 /**
- * Generic operational failure raised while orchestrating a durable-branch
+ * Generic operational failure raised while orchestrating a durable
  * operation, such as a strategy transport or host failure.
  */
 export class DurableOperationError extends MergeError {
@@ -397,6 +397,43 @@ export class DurableOperationError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "DurableOperationError";
+  }
+}
+
+/** Refusal of evidence or mutation authorization from a retired or foreign allocation. */
+export class DurableOperationOriginMismatchError extends DurableOperationError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+  constructor(cause: unknown) {
+    super(
+      "The durable operation belongs to a different or retired allocation.",
+      { cause, details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" } },
+    );
+    this.name = "DurableOperationOriginMismatchError";
+  }
+}
+
+/** Failure of an ordinary Store operation, with commit certainty suitable for retry decisions. */
+export class StoreOperationError extends DurableOperationError {
+  readonly outcome: "not-committed" | "unknown";
+  readonly phase: "preflight" | "callback" | "evidence" | "commit";
+  readonly retryable: boolean;
+  constructor(
+    outcome: StoreOperationError["outcome"],
+    phase: StoreOperationError["phase"],
+    retryable: boolean,
+    cause: unknown,
+  ) {
+    super(
+      outcome === "unknown" ?
+        "The commit outcome is unknown; look up or replay the same persisted request before attempting another mutation."
+      : "The operation did not commit; inspect its cause before deciding whether to retry.",
+      { cause, details: { outcome, phase, retryable } },
+    );
+    this.name = "StoreOperationError";
+    this.outcome = outcome;
+    this.phase = phase;
+    this.retryable = retryable;
   }
 }
 

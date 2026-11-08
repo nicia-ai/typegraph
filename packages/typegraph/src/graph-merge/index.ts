@@ -72,6 +72,7 @@ export type {
   DurableBranchOperationRequest,
   DurableOperationCapability,
   DurableOperationOutcome,
+  DurableOperationRequest,
   DurableOperationScan,
   DurableOperationUnsupportedDimension,
 } from "./durable-operation";
@@ -95,6 +96,7 @@ export {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
+  DurableOperationOriginMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
   IdentityMergeConflictError,
@@ -114,6 +116,7 @@ export {
   MergeReviewError,
   SimilarityUnavailableError,
   StaleMergePlanError,
+  StoreOperationError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
 export type {

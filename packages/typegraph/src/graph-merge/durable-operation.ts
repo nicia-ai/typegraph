@@ -96,6 +96,14 @@ export type DurableBranchOperationRequest = Readonly<{
   mutation: JsonValue;
 }>;
 
+/** Request contract shared by branch hosts and ordinary Stores. */
+export type DurableOperationRequest = DurableBranchOperationRequest;
+
+/** One caller-key predicate for request, lookup, and retained evidence validation. */
+export function isDurableOperationKey(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 /**
  * The canonical operation handed to the strategy: the request plus the
  * TypeGraph-derived digest the strategy must use for idempotency.
@@ -286,11 +294,36 @@ function requireDescriptorOwner<
   return { ok: true, origin: durableOriginOfDescriptor(descriptor) };
 }
 
+function assertDurableOperationPayload(
+  request: Readonly<{ metadata: unknown; mutation: unknown }>,
+): void {
+  assertJsonValue(request.metadata, "metadata", "Durable operation");
+  assertJsonValue(request.mutation, "mutation", "Durable operation");
+}
+
 /** Validates JSON safety and shape of a caller-supplied operation request. */
-async function normalizeOperationRequest(
-  request: DurableBranchOperationRequest,
+export async function normalizeDurableOperationRequest(
+  input: unknown,
 ): Promise<Result<DurableBranchOperation, DurableOperationRequestError>> {
-  const rawRequest: unknown = request;
+  let rawRequest: unknown;
+  try {
+    // Validate before cloning: structuredClone erases user-defined class prototypes.
+    if (typeof input === "object" && input !== null && !Array.isArray(input)) {
+      const original = input as Readonly<Record<string, unknown>>;
+      assertDurableOperationPayload({
+        metadata: original["metadata"],
+        mutation: original["mutation"],
+      });
+    }
+    rawRequest = structuredClone(input);
+  } catch (error) {
+    return err(
+      new DurableOperationRequestError(
+        "Durable operation request must be serializable data.",
+        { cause: error },
+      ),
+    );
+  }
   if (
     typeof rawRequest !== "object" ||
     rawRequest === null ||
@@ -302,10 +335,8 @@ async function normalizeOperationRequest(
       ),
     );
   }
-  if (
-    typeof request.idempotencyKey !== "string" ||
-    request.idempotencyKey.length === 0
-  ) {
+  const request = rawRequest as DurableOperationRequest;
+  if (!isDurableOperationKey(request.idempotencyKey)) {
     return err(
       new DurableOperationRequestError(
         "Durable operation request is malformed: idempotencyKey must be a non-empty string.",
@@ -314,8 +345,7 @@ async function normalizeOperationRequest(
     );
   }
   try {
-    assertJsonValue(request.metadata, "metadata", "Durable operation");
-    assertJsonValue(request.mutation, "mutation", "Durable operation");
+    assertDurableOperationPayload(request);
   } catch (error) {
     return err(
       new DurableOperationRequestError(
@@ -356,10 +386,7 @@ async function normalizeStoredEvidence(
     );
   }
   const record = evidence as Readonly<Record<string, unknown>>;
-  if (
-    typeof record["idempotencyKey"] !== "string" ||
-    record["idempotencyKey"].length === 0
-  ) {
+  if (!isDurableOperationKey(record["idempotencyKey"])) {
     return err(
       new DurableOperationEvidenceError(
         "Durable operation evidence needs a non-empty idempotency key.",
@@ -648,7 +675,7 @@ export async function operateDurableBranch<
 ): Promise<Result<DurableOperationOutcome, DurableOperationError>> {
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
-  const normalized = await normalizeOperationRequest(request);
+  const normalized = await normalizeDurableOperationRequest(request);
   if (isErr(normalized)) return normalized;
 
   if (strategy.operations === undefined) {
@@ -696,6 +723,12 @@ export async function getDurableOperation<
 ): Promise<
   Result<DurableBranchOperationEvidence | undefined, DurableOperationError>
 > {
+  if (!isDurableOperationKey(idempotencyKey))
+    return err(
+      new DurableOperationRequestError(
+        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
+      ),
+    );
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
   if (strategy.operations === undefined) {
@@ -845,6 +878,12 @@ export async function markDurableOperationDelivered<
 ): Promise<
   Result<DurableBranchOperationEvidence | undefined, DurableOperationError>
 > {
+  if (!isDurableOperationKey(idempotencyKey))
+    return err(
+      new DurableOperationRequestError(
+        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
+      ),
+    );
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
   if (strategy.operations === undefined) {

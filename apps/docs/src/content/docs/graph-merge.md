@@ -2420,7 +2420,7 @@ It does not require a durable branch or branch reopening.
 
 | Contract | Durable branch operations | Ordinary Store operations |
 | --- | --- | --- |
-| Allocation binding | Sealed host allocation origin | Revision origin plus outcome-storage namespace |
+| Allocation binding | Sealed host allocation origin | Shared allocation owner plus outcome-storage namespace |
 | Payload binding | Canonical `mutation` and `metadata` digest | The same digest owner and payload contract |
 | Atomic owner | Host's mutation/evidence transaction | Store's protected transaction and pre-commit hook |
 | Retry result | `applied` or `replayed` evidence | `applied` or `replayed` evidence, JSON result, and terminal receipt |
@@ -2431,8 +2431,8 @@ import {
   captureStoreOperationTarget,
   getStoreOperation,
   operateStore,
-  unwrap,
-} from "@nicia-ai/typegraph/graph-merge";
+} from "@nicia-ai/typegraph";
+import { unwrap } from "@nicia-ai/typegraph/graph-merge";
 import { z } from "zod";
 
 const commandSchema = z.object({ id: z.string(), name: z.string() }).strict();
@@ -2461,7 +2461,7 @@ instead of writing into the replacement graph. The namespace binding also keeps
 a physical working copy with a distinct outcome-table namespace from replaying the source allocation's caller
 keys. Independently diverging copies must use distinct namespaces or origins; a backup restored with both
 unchanged retains its evidence.
-Keys are opaque strings of 1 through 256 characters and are shared by callers
+Keys are opaque nonempty strings and are shared by callers
 within one allocation; applications can include their own caller prefix.
 
 An identical key and canonical payload returns the stored evidence without
@@ -2469,8 +2469,24 @@ invoking the callback. A changed mutation or metadata value raises
 `DurableOperationConflictError`. Concurrent identical requests serialize through
 the existing graph-write fence, and only one callback applies. Lookup is one
 indexed read of committed evidence; it does not depend on process memory or
-require the original callback. Pass the original request to `operateStore` when
-recovery must also verify its payload digest.
+require the original callback. Pass the full original request to `getStoreOperation` to verify its
+payload digest; changed metadata or mutation refuses. An explicit `{ target, idempotencyKey }`
+lookup retrieves evidence by key without asserting a payload. Partial payloads refuse.
+`operateStore` always verifies the payload on replay.
+
+`StoreOperationEvidence.formatVersion` is 2 and contains the complete allocation owner, including
+its namespace. Capture and persist that owner before attempting a mutation. After completing the
+copy/restore phase, independently diverging forks call `rotateAllocationOwner(expectedOwner)` before
+accepting writes; old requests and copied outcomes then refuse with
+`GRAPH_ALLOCATION_ORIGIN_MISMATCH`. Backup restoration of the same allocation retains its identity
+and evidence. Earlier evidence formats refuse explicitly rather than silently reapplying their keys.
+
+`StoreOperationError` exposes `outcome`, `phase`, and `retryable`. A deterministic callback failure
+is `not-committed` at `callback`, preserves its cause, and is not automatically retryable. A lost
+commit response is `unknown` at `commit`: recover using the same persisted request before making
+another mutation. Typed request, payload-conflict, allocation, and support refusals remain distinct.
+Lookup failures do not imply a possibly committed write. Optimistic retry profiles refuse this
+capability; branch-host support negotiation retains its existing result envelope and host lifecycle.
 
 The callback receives a measured view of the same native transaction. Use that
 context for all graph writes, and validate the supplied JSON command with your

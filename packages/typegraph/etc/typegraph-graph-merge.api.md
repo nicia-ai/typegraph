@@ -140,7 +140,7 @@ export type AppliedMergeReport<G extends GraphDef = GraphDef> = MergeReport<G> &
 }>;
 
 // @public
-export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>): Promise<Result<MergeReport<G>, MergeError>>;
+export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>): Promise<Result<AppliedMergeReport<G>, MergeError>>;
 
 // @public
 export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
@@ -1738,6 +1738,15 @@ export class DurableOperationEvidenceError extends DurableOperationError {
 }
 
 // @public
+export class DurableOperationOriginMismatchError extends DurableOperationError {
+    constructor(cause: unknown);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
 export type DurableOperationOutcome = Readonly<{
     outcome: "applied" | "replayed";
     evidence: DurableBranchOperationEvidence;
@@ -1748,6 +1757,9 @@ export type DurableOperationOutcome = Readonly<{
     ...DurableOperationUnsupportedDimension[]
     ];
 }>;
+
+// @public
+export type DurableOperationRequest = DurableBranchOperationRequest;
 
 // @public
 export class DurableOperationRequestError extends DurableOperationError {
@@ -3343,7 +3355,7 @@ type GetNodeType<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K]["ty
 type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
 
 // @public
-export function getStoreOperation<G extends GraphDef>(store: Store<G>, input: StoreOperationLookup): Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>;
+export function getStoreOperation<G extends GraphDef>(store: Store<G>, input: StoreOperationLookup | StoreOperationRequest): Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>;
 
 // @public
 type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
@@ -5253,9 +5265,8 @@ export type MergePlanWrites = Readonly<{
     identityRetractions: readonly MergePlanIdentityAssertion[];
 }>;
 
-// @public (undocumented)
+// @public
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
-    receipt?: TransactionReceipt;
     merged: MergedCounts;
     resolutions: readonly EntityResolution[];
     conflicts: readonly PropertyConflict<G>[];
@@ -7874,8 +7885,19 @@ type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdenti
 export type StoreOperationApply<G extends GraphDef> = (tx: MeasurableTransactionContext<G>, mutation: JsonValue) => Promise<JsonValue>;
 
 // @public
+export class StoreOperationError extends DurableOperationError {
+    constructor(outcome: StoreOperationError["outcome"], phase: StoreOperationError["phase"], retryable: boolean, cause: unknown);
+    // (undocumented)
+    readonly outcome: "not-committed" | "unknown";
+    // (undocumented)
+    readonly phase: "preflight" | "callback" | "evidence" | "commit";
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public
 export type StoreOperationEvidence = StoreOperationRequest & Readonly<{
-    formatVersion: 1;
+    formatVersion: 2;
     operationDigest: string;
     result: JsonValue;
     receipt: TransactionReceipt;
@@ -7894,14 +7916,14 @@ export type StoreOperationOutcome = Readonly<{
 }>;
 
 // @public (undocumented)
-export type StoreOperationRequest = DurableBranchOperationRequest & Readonly<{
+export type StoreOperationRequest = DurableOperationRequest & Readonly<{
     target: StoreOperationTarget;
 }>;
 
 // @public
 export type StoreOperationTarget = Readonly<{
     graphId: string;
-    origin: string;
+    owner: GraphAllocationOwner;
     scope: string;
 }>;
 

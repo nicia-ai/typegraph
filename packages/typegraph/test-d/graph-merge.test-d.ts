@@ -155,7 +155,7 @@ declare const mergePlan: MergePlanArtifact;
 expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyMergePlan(store, mergePlan),
 );
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyDurableMergePlan({
     target: store,
     branch: durableBranch,

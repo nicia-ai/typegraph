@@ -403,17 +403,34 @@ describe("durable branch operations", () => {
     expect(host.appliedMutations()).toHaveLength(0);
   });
 
-  it("refuses a non-empty idempotency key requirement before touching the host", async () => {
+  it("refuses class payloads before cloning can erase their prototypes", async () => {
     const host = createRecordingHost();
-    const result = await operateDurableBranch(
-      descriptor,
-      host.strategy,
-      request(""),
-    );
+    class Payload {
+      readonly value = "plain-looking";
+    }
+    const result = await operateDurableBranch(descriptor, host.strategy, {
+      ...request("class-payload"),
+      mutation: new Payload(),
+    } as unknown as DurableBranchOperationRequest);
     expect(isErr(result)).toBe(true);
-    if (isErr(result)) {
+    if (isErr(result))
       expect(result.error).toBeInstanceOf(DurableOperationRequestError);
-      expect(result.error.category).toBe("user");
+    expect(host.appliedMutations()).toHaveLength(0);
+  });
+
+  it("uses the shared nonempty key contract for apply, lookup, and acknowledgement", async () => {
+    const host = createRecordingHost();
+    const results = [
+      await operateDurableBranch(descriptor, host.strategy, request("")),
+      await getDurableOperation(descriptor, host.strategy, ""),
+      await markDurableOperationDelivered(descriptor, host.strategy, ""),
+    ];
+    for (const result of results) {
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toBeInstanceOf(DurableOperationRequestError);
+        expect(result.error.category).toBe("user");
+      }
     }
     expect(host.appliedMutations()).toHaveLength(0);
   });

@@ -676,10 +676,12 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // Allocation ownership adds GraphAllocationOwner to six Store-bearing secondary
 // entrypoints. Removing that single measured symbol reproduces each preceding
 // fingerprint; the root and graph-merge export it directly.
+// Root Store-operation exports now name Result directly, removing exactly that
+// previously forgotten symbol from the root fingerprint.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 500,
-    sha256: "62e325f352ed2a6ff47081301d548aa1a7a0091d1282028a1aa4c9c3d71116a5",
+    count: 499,
+    sha256: "6d0c8081c8cc898a99d8cac68d177440faf68899f1321777d579e8974d86837b",
   },
   "./adapters/drizzle/engine": {
     count: 338,
