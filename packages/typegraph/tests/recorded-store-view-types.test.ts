@@ -89,7 +89,7 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded.nodes.Person).toHaveProperty("getById");
     expectTypeOf(recorded.nodes.Person).toHaveProperty("getByIds");
     expectTypeOf(recorded.nodes.Person).toHaveProperty("scan");
-    expectTypeOf(recorded.nodes.Person.scan()).toEqualTypeOf<
+    expectTypeOf<ReturnType<typeof recorded.nodes.Person.scan>>().toEqualTypeOf<
       Promise<RecordedScanPage<Node<typeof Person>>>
     >();
     expectTypeOf(recorded.nodes.Person).not.toHaveProperty("find");
@@ -104,7 +104,7 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded.edges.knows).toHaveProperty("getById");
     expectTypeOf(recorded.edges.knows).toHaveProperty("getByIds");
     expectTypeOf(recorded.edges.knows).toHaveProperty("scan");
-    expectTypeOf(recorded.edges.knows.scan()).toEqualTypeOf<
+    expectTypeOf<ReturnType<typeof recorded.edges.knows.scan>>().toEqualTypeOf<
       Promise<
         RecordedScanPage<Edge<typeof knows, typeof Person, typeof Person>>
       >
