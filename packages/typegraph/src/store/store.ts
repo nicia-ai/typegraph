@@ -262,7 +262,10 @@ import {
   type GraphAlgorithms,
   type InternalGraphAlgorithms,
 } from "./algorithms";
-import { rotateGraphAllocationOwner } from "./allocation-owner";
+import {
+  readGraphAllocationOwner,
+  rotateGraphAllocationOwner,
+} from "./allocation-owner";
 import { applyResolvedNodeClaims } from "./claims/resolved-node-claims";
 import {
   type ConstraintFenceViolation,
@@ -382,7 +385,6 @@ import {
   lockRecordedGraphWrite,
   mintsOriginNamespacedAnchor,
   readRecordedClock,
-  readRevisionOrigin,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
   registerRecordedIdentityMutationWitness,
@@ -1556,10 +1558,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         )
           return this.#recordedReadBinding.owner(target);
         const schema = this.#recordedReadBinding?.schema ?? this.#sqlSchema();
-        const origin = await readRevisionOrigin(target, schema, this.graphId);
-        return origin === undefined ? undefined : (
-            recordedAnchorOwner(schema, origin)
-          );
+        return readGraphAllocationOwner(target, schema, this.graphId);
       },
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),

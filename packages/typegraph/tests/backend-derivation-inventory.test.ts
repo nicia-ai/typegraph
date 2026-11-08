@@ -228,6 +228,12 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "store/recorded-read-service.ts",
+    line: "const guarded = deriveBackend(",
+    reason:
+      "Recorded algorithms inherit the actual transaction resource while checking allocation ownership around every session read.",
+  },
+  {
+    file: "store/recorded-read-service.ts",
     line: "return deriveBackend(projectedBackend, {",
     reason:
       "Recorded reads rewrite the read members to target the recorded relation at a coordinate; the write members forward untouched.",
