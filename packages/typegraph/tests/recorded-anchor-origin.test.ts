@@ -117,7 +117,9 @@ describe("recorded anchor namespace ownership", () => {
       });
       await source.nodes.Item.create({ label: "source" }, { id: "item" });
       await fork.nodes.Item.create({ label: "fork" }, { id: "item" });
-      const origin = await source.revisionOriginNow();
+      const origin = await source
+        .allocationOwner()
+        .then((owner) => owner.origin);
       // Physical copy strategies preserve this row. Revisions overlap after a fork.
       await requireDefined(forkHandle.backend.executeStatement)(
         asCompiledStatementSql(sql`
@@ -125,7 +127,9 @@ describe("recorded anchor namespace ownership", () => {
           SET origin = ${origin} WHERE graph_id = ${graph.id}
         `),
       );
-      expect(await fork.revisionOriginNow()).toBe(origin);
+      expect(await fork.allocationOwner().then((owner) => owner.origin)).toBe(
+        origin,
+      );
       const anchor = requireDefined(await source.recordedNow());
       await expect(
         fork.asOfRecorded(anchor).nodes.Item.getById(asNodeId("item")),

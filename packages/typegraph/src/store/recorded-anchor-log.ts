@@ -21,7 +21,7 @@ export async function lookupRecordedAnchor(
   validateCanonicalIsoDate(wallTime, "wallTime");
   if (target.capabilities.recordedAnchorLookup !== true)
     throw new UnsupportedBackendCapabilityError(
-      "resolveRecordedAnchor",
+      "resolveRecordedInstant",
       "recordedAnchorLookup",
       { graphId, dialect: target.dialect },
     );
@@ -49,11 +49,11 @@ export async function lookupRecordedAnchor(
           ORDER BY anchors.recorded_at ASC, anchors.revision ASC LIMIT 1
         )
         SELECT origins.origin,candidate.revision,candidate.recorded_at,first_retained.revision AS first_revision
-        FROM ${schema.revisionOriginsTable} origins
-        JOIN ${schema.recordedClockTable} clock ON clock.graph_id=origins.graph_id
+        FROM ${schema.recordedClockTable} clock
+        LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
         LEFT JOIN candidate ON candidate.origin=origins.origin
         LEFT JOIN first_retained ON 1=1
-        WHERE origins.graph_id=${graphId}
+        WHERE clock.graph_id=${graphId}
       `),
     ),
     { dialect: target.dialect, surface: "resolve-recorded-anchor" },

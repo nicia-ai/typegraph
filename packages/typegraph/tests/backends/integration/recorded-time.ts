@@ -20,6 +20,7 @@ import {
   type NodeType,
   param as parameter,
   type RecordedInstant,
+  recordedInstant,
   recordedInstantRevision,
   recordedRelation,
   searchable,
@@ -879,7 +880,7 @@ export function registerRecordedTimeIntegrationTests(
             "2026-06-01T12:00:00.000Z",
             await recordedAnchorOwner(
               store.revisionSchema,
-              await store.revisionOriginNow(),
+              await store.allocationOwner().then((owner) => owner.origin),
             ),
           ),
         );
@@ -889,7 +890,7 @@ export function registerRecordedTimeIntegrationTests(
             "2026-06-01T12:00:00.000Z",
             await recordedAnchorOwner(
               store.revisionSchema,
-              await store.revisionOriginNow(),
+              await store.allocationOwner().then((owner) => owner.origin),
             ),
           ),
         );
@@ -1143,27 +1144,27 @@ export function registerRecordedTimeIntegrationTests(
     it("resolves retained allocation timestamps with revision ties, backward clocks, absence, and future bounds", async () => {
       const store = await createHistoryStore(context);
       const time = "2026-06-01T12:00:00.000Z";
-      expect(await store.resolveRecordedAnchor(time)).toBeUndefined();
+      expect(await store.resolveRecordedInstant(time)).toBeUndefined();
       vi.useFakeTimers({ toFake: ["Date"] });
       try {
         vi.setSystemTime(new Date(time));
         const node = await store.nodes.Person.create({ name: "first", age: 1 });
         const first = requireDefined(await store.recordedNow());
-        expect(await store.resolveRecordedAnchor(time)).toBe(first);
+        expect(await store.resolveRecordedInstant(time)).toBe(first);
         await store.nodes.Person.update(node.id, { name: "second" });
         const second = requireDefined(await store.recordedNow());
         expect(first).not.toBe(second);
-        expect(await store.resolveRecordedAnchor(time)).toBe(second);
+        expect(await store.resolveRecordedInstant(time)).toBe(second);
         vi.setSystemTime(new Date("2025-01-01T00:00:00.000Z"));
         await store.nodes.Person.update(node.id, { name: "third" });
         const third = requireDefined(await store.recordedNow());
         expect(recordedInstantWallTime(third)).toBe(time);
-        expect(await store.resolveRecordedAnchor(time)).toBe(third);
+        expect(await store.resolveRecordedInstant(time)).toBe(third);
         expect(
-          await store.resolveRecordedAnchor("2026-06-01T11:59:59.999Z"),
+          await store.resolveRecordedInstant("2026-06-01T11:59:59.999Z"),
         ).toBeUndefined();
         expect(
-          await store.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+          await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
         ).toBe(third);
         await expect(
           store.transaction(async (tx) => {
@@ -1171,14 +1172,14 @@ export function registerRecordedTimeIntegrationTests(
             throw new Error("rollback allocation");
           }),
         ).rejects.toThrow("rollback allocation");
-        expect(await store.resolveRecordedAnchor(time)).toBe(third);
+        expect(await store.resolveRecordedInstant(time)).toBe(third);
         expect(
           await store.asOfRecorded(first).nodes.Person.getById(node.id),
         ).toMatchObject({ name: "first" });
         await store.clear();
-        expect(await store.resolveRecordedAnchor(time)).toBeUndefined();
+        expect(await store.resolveRecordedInstant(time)).toBeUndefined();
         await store.nodes.Person.create({ name: "replacement", age: 1 });
-        expect(await store.resolveRecordedAnchor(time)).not.toBe(third);
+        expect(await store.resolveRecordedInstant(time)).not.toBe(third);
       } finally {
         vi.useRealTimers();
       }
@@ -1194,11 +1195,11 @@ export function registerRecordedTimeIntegrationTests(
         { history: true },
       );
       await expect(
-        unsupported.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+        unsupported.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
       ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
       const store = await createHistoryStore(context);
       await expect(
-        store.resolveRecordedAnchor("2026-01-01"),
+        store.resolveRecordedInstant("2026-01-01"),
       ).rejects.toMatchObject({ name: "ValidationError" });
     });
 
@@ -1208,8 +1209,13 @@ export function registerRecordedTimeIntegrationTests(
         name: "external",
         age: 1,
       });
-      const anchor = requireDefined(await writer.recordedNow());
+      const original = requireDefined(await writer.recordedNow());
       let owner = await writer.allocationOwner();
+      const anchor = recordedInstant({
+        revision: recordedInstantRevision(original),
+        recordedAt: recordedInstantWallTime(original),
+        owner,
+      });
       const backend = context.getBackend();
       const external = createStore(integrationTestGraph, backend, {
         recordedRead: recordedRelation({
@@ -1224,6 +1230,23 @@ export function registerRecordedTimeIntegrationTests(
         ),
       );
       try {
+        expect(await external.allocationOwner()).toEqual(owner);
+        const unconfigured = createStore(integrationTestGraph, backend, {
+          recordedRead: recordedRelation({ schema: writer.revisionSchema }),
+        });
+        await expect(unconfigured.allocationOwner()).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        await expect(
+          unconfigured.asOfRecorded(anchor).nodes.Person.getById(node.id),
+        ).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        await expect(
+          external.rotateAllocationOwner(owner),
+        ).rejects.toMatchObject({ name: "UnsupportedBackendCapabilityError" });
         const view = external.asOfRecorded(anchor);
         expect(await view.nodes.Person.getById(node.id)).toMatchObject({
           name: "external",
@@ -1285,19 +1308,33 @@ export function registerRecordedTimeIntegrationTests(
           sql`DELETE FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
         ),
       );
-      expect(await store.recordedNow()).toBe(old);
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${store.revisionSchema.revisionOriginsTable} WHERE graph_id=${store.graphId}`,
+        ),
+      );
       await expect(
-        store.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+        store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+      await store.allocationOwner();
+      // Minting the lazy origin must not turn an empty answer into a refusal.
+      expect(
+        recordedInstantRevision(requireDefined(await store.recordedNow())),
+      ).toBe(recordedInstantRevision(old));
+      await expect(
+        store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
       ).rejects.toMatchObject({
         details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
       });
       await store.nodes.Person.create({ name: "after-upgrade", age: 2 });
       const current = requireDefined(await store.recordedNow());
       expect(
-        await store.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+        await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
       ).toBe(current);
       await expect(
-        store.resolveRecordedAnchor("1900-01-01T00:00:00.000Z"),
+        store.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
       ).rejects.toMatchObject({
         details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
       });
@@ -1307,7 +1344,9 @@ export function registerRecordedTimeIntegrationTests(
       const store = await createHistoryStore(context);
       await store.nodes.Person.create({ name: "seed", age: 1 });
       const base = context.getBackend();
-      const origin = await store.revisionOriginNow();
+      const origin = await store
+        .allocationOwner()
+        .then((owner) => owner.origin);
       const rows = Array.from(
         { length: 2048 },
         (_, index) =>
@@ -1337,7 +1376,7 @@ export function registerRecordedTimeIntegrationTests(
       );
       reads.length = 0;
       const resolved = requireDefined(
-        await observed.resolveRecordedAnchor("2025-01-01T00:00:01.000Z"),
+        await observed.resolveRecordedInstant("2025-01-01T00:00:01.000Z"),
       );
       expect(recordedInstantRevision(resolved)).toBe(1002);
       expect(reads).toHaveLength(1);
@@ -1387,7 +1426,7 @@ export function registerRecordedTimeIntegrationTests(
         { history: true },
       );
       const resolved = requireDefined(
-        await observed.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+        await observed.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
       );
       expect(resolved).toBe(before);
       expect(lookupReads).toBe(1);

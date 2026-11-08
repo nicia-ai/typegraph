@@ -830,11 +830,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
   rotateAllocationOwner?: (
     expectedOwner: GraphAllocationOwner,
   ) => Promise<GraphAllocationOwner>;
-  resolveRecordedAnchor?: (
+  resolveRecordedInstant?: (
     wallTime: string,
   ) => Promise<RecordedInstant | undefined>;
   revisionNow: () => Promise<RecordedInstant | undefined>;
-  revisionOriginNow: () => Promise<string>;
   view: (coordinate: StoreViewCoordinate) => StoreView<G>;
   snapshot: () => StoreView<G>;
   batch: <
@@ -1001,10 +1000,7 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
 
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
   allocationOwner?: () => Promise<GraphAllocationOwner>;
-  rotateAllocationOwner?: (
-    expectedOwner: GraphAllocationOwner,
-  ) => Promise<GraphAllocationOwner>;
-  resolveRecordedAnchor?: (
+  resolveRecordedInstant?: (
     wallTime: string,
   ) => Promise<RecordedInstant | undefined>;
   withCheckedReads?: <T>(
@@ -1033,7 +1029,14 @@ type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
 type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
   Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
 
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+/** Lifecycle writes are required on concrete Stores, independently of the read boundary. */
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
+  AddedStoreReads<G> &
+  Readonly<{
+    rotateAllocationOwner: (
+      expectedOwner: GraphAllocationOwner,
+    ) => Promise<GraphAllocationOwner>;
+  }>;
 
 /** Schema planning, reconciliation, and lifecycle operations shared by Stores. */
 export interface StoreEvolution<
@@ -1552,13 +1555,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
       revisionOrigin: async (target = this.#backend) => {
-        if (
-          this.#recordedReadBinding?.kind === "external" &&
-          this.#recordedReadBinding.owner !== undefined
-        )
-          return this.#recordedReadBinding.owner(target);
-        const schema = this.#recordedReadBinding?.schema ?? this.#sqlSchema();
-        return readGraphAllocationOwner(target, schema, this.graphId);
+        return this.#readAllocationOwner(target);
       },
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
@@ -3063,10 +3060,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Resolves recorded allocation time with one indexed lookup. Equal timestamps
    * choose the highest revision. A future time returns the latest retained cut;
-   * no retained allocation at or before the input returns undefined. The log
-   * begins when this capability is installed; earlier unlogged cuts are absent.
+   * a cut before the first allocation returns undefined only when complete coverage is known.
+   * Earlier unlogged or pruned cuts refuse rather than implying an empty graph.
    */
-  async resolveRecordedAnchor(
+  async resolveRecordedInstant(
     wallTime: string,
   ): Promise<RecordedInstant | undefined> {
     if (
@@ -3074,7 +3071,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#recordedTimeOwnership !== "typegraph-relations"
     )
       throw new UnsupportedBackendCapabilityError(
-        "resolveRecordedAnchor",
+        "resolveRecordedInstant",
         "recordedAnchorLookup",
         { graphId: this.graphId, dialect: this.#backend.dialect },
       );
@@ -3124,7 +3121,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
-    await this.revisionOriginNow();
+    await this.#ensureAllocationOrigin();
     const recordedAt = await withRecordedRelationsPrecondition(
       readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId),
       { dialect: this.#backend.dialect, surface: "recorded-now" },
@@ -3201,10 +3198,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * @internal
    */
-  async revisionOriginNow(): Promise<string> {
+  async #ensureAllocationOrigin(): Promise<string> {
     if (!this.#revisionTrackingEnabled) {
       throw new ConfigurationError(
-        "revisionOriginNow() requires revisionTracking: true or history: true.",
+        "allocationOwner() requires revisionTracking: true or history: true.",
         { code: "REVISION_ORIGIN_REQUIRES_TRACKING" },
       );
     }
@@ -3216,11 +3213,36 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
+  async #readAllocationOwner(
+    target: Pick<GraphBackend, "execute">,
+  ): Promise<GraphAllocationOwner | undefined> {
+    const binding = this.#recordedReadBinding;
+    if (binding?.kind === "external" && binding.owner !== undefined)
+      return binding.owner(target);
+    return withRecordedRelationsPrecondition(
+      readGraphAllocationOwner(
+        target,
+        binding?.schema ?? this.#sqlSchema(),
+        this.graphId,
+      ),
+      { dialect: this.#backend.dialect, surface: "allocation-owner" },
+    );
+  }
+
   /** Captures the full allocation identity, including on an empty tracked graph. */
   async allocationOwner(): Promise<GraphAllocationOwner> {
+    if (this.#recordedReadBinding?.kind === "external") {
+      const owner = await this.#readAllocationOwner(this.#backend);
+      if (owner === undefined)
+        throw new ConfigurationError(
+          "External recorded relations have no allocation owner.",
+          { code: "EXTERNAL_RECORDED_OWNER_REQUIRED", graphId: this.graphId },
+        );
+      return owner;
+    }
     return recordedAnchorOwner(
       this.#sqlSchema(),
-      await this.revisionOriginNow(),
+      await this.#ensureAllocationOrigin(),
     );
   }
 
@@ -3230,7 +3252,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   ): Promise<GraphAllocationOwner> {
     if (
       !this.revisionTrackingEnabled ||
-      this.#recordedTimeOwnership === "engine-native"
+      this.#recordedTimeOwnership === "engine-native" ||
+      this.#recordedReadBinding?.kind === "external"
     )
       throw new UnsupportedBackendCapabilityError(
         "rotateAllocationOwner",
@@ -5279,7 +5302,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#baseBackend.transaction(async (tx) => doClear(tx))
     : doClear(this.#baseBackend));
 
-    // `revisionOriginNow()` and `computeBaseVersion` both read the origin
+    // `allocationOwner()` and `computeBaseVersion` both read the origin
     // row fresh on every call (no per-Store memo survives this method), so
     // there is nothing here to invalidate.
 

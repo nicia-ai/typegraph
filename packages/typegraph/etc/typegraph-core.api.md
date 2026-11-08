@@ -709,6 +709,13 @@ export type RecordedInstant = string & {
 };
 
 // @public
+export function recordedInstant(coordinate: Readonly<{
+    revision: number;
+    recordedAt: string;
+    owner: GraphAllocationOwner;
+}>): RecordedInstant;
+
+// @public
 export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
 
 // @public

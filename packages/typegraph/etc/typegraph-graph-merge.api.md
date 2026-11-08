@@ -24,8 +24,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     allocationOwner?: () => Promise<GraphAllocationOwner>;
-    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
-    resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -4898,16 +4897,18 @@ export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
 export type MergePlanArtifact = MergePlanArtifactV1 | MergePlanArtifactV2;
 
 // @public (undocumented)
-export type MergePlanArtifactInput = Omit<MergePlanArtifactV2, "digest" | "formatVersion"> & Readonly<{
-    formatVersion: 1 | 2;
-}>;
+export type MergePlanArtifactInput = MergePlanArtifactV1Input | MergePlanArtifactV2Input;
 
 // @public
 export type MergePlanArtifactV1 = Readonly<{
     formatVersion: 1;
     digest: MergePlanDigest;
     mode: "snapshot" | "incremental";
-    target: MergePlanTargetFence;
+    target: Omit<MergePlanTargetFence, "revision"> & Readonly<{
+        revision: Omit<MergePlanRevisionFence, "owner"> & Readonly<{
+            owner?: undefined;
+        }>;
+    }>;
     anchors: MergePlanAnchors;
     proposed: MergePlanProposedSummary;
     writes: MergePlanWrites;
@@ -5173,7 +5174,7 @@ export type MergePlanReview = Readonly<{
 
 // @public (undocumented)
 export type MergePlanRevisionFence = Readonly<{
-    owner?: GraphAllocationOwner | undefined;
+    owner: GraphAllocationOwner;
     origin: string;
     revision: string | null;
 }>;
@@ -7126,8 +7127,10 @@ type ResolvedSqlTableNames = Readonly<{
     reconciliationMarkers?: string;
 }>;
 
-// @public (undocumented)
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+// @public
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+    rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+}>;
 
 // @public
 export type ResolveMap<G extends GraphDef = GraphDef> = Readonly<Partial<{
@@ -7760,9 +7763,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     recordedNow: () => Promise<RecordedInstant | undefined>;
     allocationOwner?: () => Promise<GraphAllocationOwner>;
     rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
-    resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
-    revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
     snapshot: () => StoreView<G>;
     batch: <const Queries extends readonly [

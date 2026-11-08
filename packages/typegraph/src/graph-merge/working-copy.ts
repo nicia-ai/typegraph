@@ -642,8 +642,8 @@ export function forkedWorkingCopyStrategy<
           throw new BranchError(
             "Fork backend does not bind the base's table names: connect() " +
               "returned a backend whose own table bindings disagree with " +
-              "the SQL schema this fork inherits from its base. A fork is " +
-              "the SAME physical database as the base, so a backend bound " +
+              "the SQL schema this fork inherits from its base. A fork carries " +
+              "the base's physical table layout, so a backend bound " +
               "to different (often just the default) table names reads and " +
               "writes through tables the fork's rows were never written to.",
             { details: { inheritedTables, connectedTables } },
@@ -651,6 +651,10 @@ export function forkedWorkingCopyStrategy<
         }
         const forkStore = createStore(baseStore.graph, backend, forkOptions);
         await assertWorkingCopyMatchesBase(forkStore, base);
+        if (forkStore.revisionTrackingEnabled)
+          await forkStore.rotateAllocationOwner(
+            await forkStore.allocationOwner(),
+          );
         return forkStore;
       } catch (error) {
         try {

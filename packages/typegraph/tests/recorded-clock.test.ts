@@ -171,7 +171,7 @@ describe("recorded commit clock", () => {
 
     const owner = await recordedAnchorOwner(
       store.revisionSchema,
-      await store.revisionOriginNow(),
+      await store.allocationOwner().then((owner) => owner.origin),
     );
     expect(firstCommit).toBe(
       createRecordedInstant(1, "2026-06-01T12:00:00.000Z", owner),
@@ -243,7 +243,7 @@ describe("recorded commit clock", () => {
       kind: "typegraph",
       ...(await recordedAnchorOwner(
         store.revisionSchema,
-        await store.revisionOriginNow(),
+        await store.allocationOwner().then((owner) => owner.origin),
       )),
       revision: 2,
       recordedAt: "2026-06-01T12:00:00.000Z",

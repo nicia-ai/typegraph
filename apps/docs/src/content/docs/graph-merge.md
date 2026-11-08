@@ -335,7 +335,7 @@ const writeSet = {
   edges: [],
 };
 const mergePlan = unwrap(await planCandidateWriteSetForEvolution({
-          planningScope: "full",
+  planningScope: "full",
   target,
   evolutionPlan,
   makeBackend: makeIsolatedBackend,

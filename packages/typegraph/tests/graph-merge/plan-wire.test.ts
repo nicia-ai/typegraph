@@ -185,8 +185,8 @@ describe("merge plan V1 wire format", () => {
         owner: { origin: "store-origin", namespace: "a".repeat(32) },
       },
     };
-    const legacy = await finalizeMergePlanArtifact({ ...base, target });
-    expect(parseMergePlanArtifact(legacy).success).toBe(false);
+    const legacy = await finalizeMergePlanArtifact(base);
+    expect(parseMergePlanArtifact({ ...legacy, target }).success).toBe(false);
     const current = await finalizeMergePlanArtifact({
       ...base,
       formatVersion: 2,
@@ -214,6 +214,13 @@ describe("merge plan V1 wire format", () => {
     const current = await constructMergePlanArtifact({
       ...document,
       formatVersion: 2,
+      target: {
+        ...document.target,
+        revision: {
+          ...document.target.revision,
+          owner: { origin: "store-origin", namespace: "a".repeat(32) },
+        },
+      },
     });
     expect(
       (await validateMergePlanArtifact(JSON.parse(JSON.stringify(current))))

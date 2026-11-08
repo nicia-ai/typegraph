@@ -166,7 +166,7 @@ describe("public merge plan lifecycle", () => {
 
   async function rehashTarget(
     artifact: MergePlanArtifact,
-    target: MergePlanArtifact["target"],
+    target: unknown,
   ): Promise<MergePlanArtifact> {
     const { digest: _digest, ...input } = artifact;
     return constructMergePlanArtifact({ ...input, target });

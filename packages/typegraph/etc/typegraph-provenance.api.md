@@ -24,8 +24,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     allocationOwner?: () => Promise<GraphAllocationOwner>;
-    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
-    resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -5426,8 +5425,10 @@ type ResolvedSqlTableNames = Readonly<{
     reconciliationMarkers?: string;
 }>;
 
-// @public (undocumented)
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+// @public
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+    rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+}>;
 
 // @public
 type ResolveNode<G extends GraphDef, K extends string> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<N> : Node : Node;
@@ -5996,9 +5997,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     recordedNow: () => Promise<RecordedInstant | undefined>;
     allocationOwner?: () => Promise<GraphAllocationOwner>;
     rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
-    resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
-    revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
     snapshot: () => StoreView<G>;
     batch: <const Queries extends readonly [

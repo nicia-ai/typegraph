@@ -25,6 +25,9 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  recordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
 } from "../../src";
 import { deriveBackend } from "../../src/backend/derive-backend";
 import { createSqliteTables } from "../../src/backend/drizzle/schema/sqlite";
@@ -465,8 +468,8 @@ describe("forkedWorkingCopyStrategy", () => {
       await baseStore.nodes.Widget.update(widget.id, { name: "v2" });
 
       // The fork's history is intact: it physically carries the base's
-      // recorded relations, so it answers a RECORDED-BEFORE-THE-FORK instant
-      // with the state as of that instant ("v1", before the "v2" update).
+      // recorded relations. The parent's token is retired in the fork, but
+      // the same historical coordinate remains readable under the new owner.
       const forkBranch = unwrap(
         await branch<G>(
           baseStore,
@@ -476,7 +479,20 @@ describe("forkedWorkingCopyStrategy", () => {
         ),
       );
       expect(forkBranch.store.historyEnabled).toBe(true);
-      const forkView = forkBranch.store.asOfRecorded(beforeUpdate);
+      const forkOwner = await forkBranch.store.allocationOwner();
+      expect(forkOwner).not.toEqual(await baseStore.allocationOwner());
+      await expect(
+        forkBranch.store
+          .asOfRecorded(beforeUpdate)
+          .nodes.Widget.getById(widget.id),
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      const forkView = forkBranch.store.asOfRecorded(
+        recordedInstant({
+          revision: recordedInstantRevision(beforeUpdate),
+          recordedAt: recordedInstantWallTime(beforeUpdate),
+          owner: forkOwner,
+        }),
+      );
       const widgetAtForkT0 = await forkView.nodes.Widget.getById(widget.id);
       expect(widgetAtForkT0?.name).toBe("v1");
 
@@ -598,7 +614,10 @@ describe("forkedWorkingCopyStrategy", () => {
       );
       expect(isOk(branchResult)).toBe(true);
       const forkBranch = unwrap(branchResult);
-      expect(await computeBaseVersion(forkBranch.store)).toBe(baseVersion);
+      expect(await computeBaseVersion(forkBranch.store)).not.toBe(baseVersion);
+      expect(await forkBranch.store.allocationOwner()).not.toEqual(
+        await baseStore.allocationOwner(),
+      );
 
       await forkBranch.store.nodes.Widget.update(widget.id, {
         name: "Forked Edit",
@@ -672,7 +691,10 @@ describe("forkedWorkingCopyStrategy", () => {
       );
       expect(isOk(branchResult)).toBe(true);
       const forkBranch = unwrap(branchResult);
-      expect(await computeBaseVersion(forkBranch.store)).toBe(baseVersion);
+      expect(await computeBaseVersion(forkBranch.store)).not.toBe(baseVersion);
+      expect(await forkBranch.store.allocationOwner()).not.toEqual(
+        await baseStore.allocationOwner(),
+      );
 
       await forkBranch.store.nodes.Widget.update(widget.id, {
         name: "Forked Edit",

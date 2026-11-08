@@ -16,9 +16,12 @@ import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
   applyMergePlan,
+  asBranchId,
+  branch,
   createMutationPlanBuilder,
   MutationDocumentSchema,
   planCandidateWriteSet,
+  planMerge,
   planMutations,
 } from "../../../src/graph-merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
@@ -230,6 +233,98 @@ export function registerMutationPlanningIntegrationTests(
         expect(actual?.meta.validFrom).toBe(direct.meta.validFrom);
         expect(actual?.meta.validTo).toBe(direct.meta.validTo);
       }
+    });
+
+    it("preserves plain planMerge validity clearing on nodes and edges", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "plain_clear",
+      });
+      const a = await store.nodes.Item.create(
+        { name: "a" },
+        { id: "a", validTo: "2100-01-01T00:00:00.000Z" },
+      );
+      const b = await store.nodes.Item.create({ name: "b" }, { id: "b" });
+      const edge = await store.edges.links.create(
+        a,
+        b,
+        { label: "old" },
+        { id: "edge", validTo: "2100-01-01T00:00:00.000Z" },
+      );
+      const source = unwrap(
+        await branch(store, () => context.createIsolatedBackend(), {
+          id: asBranchId("plain-clear"),
+        }),
+      );
+      try {
+        await source.store.nodes.Item.update(a.id, {}, { clearValidTo: true });
+        await source.store.edges.links.update(
+          edge.id,
+          {},
+          { clearValidTo: true },
+        );
+        const plan = unwrap(await planMerge(store, [source]));
+        expect(plan.writes.nodeUpserts[0]).toMatchObject({
+          clearValidTo: true,
+        });
+        expect(plan.writes.edgeUpserts[0]).toMatchObject({
+          clearValidTo: true,
+        });
+        unwrap(
+          await applyMergePlan(
+            store,
+            mutationJsonRoundTrip(plan) as typeof plan,
+          ),
+        );
+        const nodeAfter = await store.nodes.Item.getById(a.id);
+        expect(nodeAfter?.meta.validTo).toBeUndefined();
+        const edgeAfter = await store.edges.links.getById(edge.id);
+        expect(edgeAfter?.meta.validTo).toBeUndefined();
+      } finally {
+        await source.close();
+      }
+    });
+
+    it("recreates a node with incident edges using the same native delete and create semantics", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "recreate_with_edges",
+      });
+      const a = await store.nodes.Item.create({ name: "a" }, { id: "a" });
+      const b = await store.nodes.Item.create({ name: "b" }, { id: "b" });
+      const edge = await store.edges.links.create(
+        a,
+        b,
+        { label: "old" },
+        { id: "old" },
+      );
+      const builder = await createMutationPlanBuilder(
+        store,
+        "recreate-incident",
+      );
+      const plan = unwrap(
+        await builder
+          .deleteEdge("links", edge.id)
+          .deleteNode("Item", a.id)
+          .createNode(
+            "Item",
+            a.id,
+            { name: "replacement" },
+            { validFrom: null },
+          )
+          .createEdge("links", "new", a, b, { label: "new" })
+          .plan({ makeBackend }),
+      );
+      unwrap(
+        await applyMergePlan(store, mutationJsonRoundTrip(plan) as typeof plan),
+      );
+      expect(await store.nodes.Item.getById(a.id)).toMatchObject({
+        name: "replacement",
+      });
+      expect(await store.edges.links.getById(edge.id)).toBeUndefined();
+      expect(
+        await store.edges.links.getById(asEdgeId<typeof links>("new")),
+      ).toMatchObject({ label: "new" });
     });
 
     it("round-trips clearing node and edge validity through the mutation document and artifact", async () => {

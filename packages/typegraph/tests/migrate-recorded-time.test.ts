@@ -223,7 +223,7 @@ describe("migrateLegacyRecordedTime", () => {
       history: true,
     });
     await store.nodes.LegacyItem.create({ label: "original" });
-    const origin = await store.revisionOriginNow();
+    const origin = await store.allocationOwner().then((owner) => owner.origin);
     const captured = requireDefined(await store.recordedNow());
     const anchor = captured.replace(/^r2:[^:]+:[^:]+:/u, "r1:");
     await expect(

@@ -397,7 +397,7 @@ async function operateInAllocation<G extends GraphDef>(
   // reads then only ever read it. It holds no allocation lock yet, so a destroy
   // that already committed surfaces here as a missing relation.
   if (store.revisionTrackingEnabled) {
-    await readUnlocked(() => store.revisionOriginNow());
+    await readUnlocked(() => store.allocationOwner().then((owner) => owner.origin));
   }
 
   // One entry per run of the transaction below, so a retried run can never

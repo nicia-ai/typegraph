@@ -415,7 +415,7 @@ if (isErr(applied)) {
 | `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
 | `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
 | `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
-| `MergePlanOriginMismatchError` | `GRAPH_MERGE_PLAN_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `MergePlanOriginMismatchError` | `GRAPH_ALLOCATION_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
 | `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
 | `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
 

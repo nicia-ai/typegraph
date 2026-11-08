@@ -250,7 +250,7 @@ increase that row or statement budget. Index seeks still have the database's nor
 Adjacency cursors bind the durable graph origin, root kind/id, normalized edge-kind filter, direction, valid-time
 mode/instant, and recorded anchor through a SHA-256 scope digest. Changing these dimensions or reusing a cursor
 after `clear()` refuses the retired recorded anchor; changing `candidateLimit` is allowed. A retired or foreign
-origin raises `ConfigurationError` with `details.code: "RECORDED_ANCHOR_ORIGIN_MISMATCH"`, including an origin
+origin raises `GraphAllocationMismatchError` with `code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH"`, including an origin
 change during a page. Within one graph origin, the candidate range ends at the recorded anchor, so later live
 writes cannot change the visible answer, page boundaries, or the remaining number of pages. `clear()` retires
 anchors, preconstructed views, and cursors, including views that have not issued a page yet.
@@ -296,7 +296,7 @@ global clock.
 ### Resolve a wall-clock instant
 
 ```typescript
-const anchor = await store.resolveRecordedAnchor("2026-06-01T12:00:00.000Z");
+const anchor = await store.resolveRecordedInstant("2026-06-01T12:00:00.000Z");
 if (anchor !== undefined) {
   const pinned = store.asOfRecorded(anchor);
   // Compose point reads, scans, and adjacency pages against this same cut.
@@ -874,13 +874,13 @@ const forkOwner = await fork.rotateAllocationOwner(inheritedOwner);
 
 Rotation uses the native schema and graph fences and compares the expected owner
 inside the transaction. It preserves live rows, captured history, and the clock,
-while retiring old anchors, merge fences, and durable request bindings in the copy.
-The allocation log is rebound to the fork's new owner; durable operation outcomes
-retain their old owner and cannot be replayed into the fork. Table-name namespace
+while retiring old anchors and merge fences in the copy.
+The allocation log is rebound to the fork's new owner. Table-name namespace
 hashes distinguish managed prefixed allocations, but cannot detect Neon branches,
 template clones, or file copies with unchanged names. Their provisioning lifecycle
-must call this explicit rotation API. It is not required when restoring a backup
-as the continuation of its original allocation.
+must call this explicit rotation API. `forkedWorkingCopyStrategy()` verifies its
+copied base and rotates automatically before returning a writable fork. Rotation
+is not required when restoring a backup as the continuation of its original allocation.
 
 External recorded relations can supply an owner reader with
 `recordedRelation({ schema, owner: async (session) => externalOwner(session) })`.
@@ -891,3 +891,9 @@ require bound instants too. Legacy `r1:` checkpoints need migration using indepe
 retained origin evidence; fetching today's nonce does not prove a legacy checkpoint's
 origin. Migration rejects coordinates beyond the current clock and checks already-bound
 instants rather than silently passing them through as verified.
+
+Construct external checkpoints with `recordedInstant({ revision, recordedAt, owner })`,
+which validates the public owner-bound token format. The owner reader attests the
+source allocation; the factory itself does not establish that the source exists.
+`allocationOwner()` uses that same external reader. Missing metadata is a typed
+configuration refusal, and TypeGraph cannot rotate externally owned allocations.

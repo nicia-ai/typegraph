@@ -437,7 +437,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       });
       const current = requireDefined(await store.recordedNow());
       expect(
-        await store.resolveRecordedAnchor("9999-01-01T00:00:00.000Z"),
+        await store.resolveRecordedInstant("9999-01-01T00:00:00.000Z"),
       ).toBe(current);
       expect(
         await store.asOfRecorded(current).nodes.Item.getById(root.id),
@@ -552,7 +552,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       const view = observed.asOfRecorded(
         requireDefined(await store.recordedNow()),
       );
-      await observed.revisionOriginNow();
+      await observed.allocationOwner().then((owner) => owner.origin);
       async function measure() {
         reads.length = 0;
         const page = await view.adjacency(root, {

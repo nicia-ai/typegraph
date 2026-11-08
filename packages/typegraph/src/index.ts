@@ -94,6 +94,7 @@ export {
   metaEdge,
   type NodeKinds,
   type RecordedInstant,
+  recordedInstant,
   recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,

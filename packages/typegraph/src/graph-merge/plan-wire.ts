@@ -90,9 +90,9 @@ export async function validateMergePlanArtifact(
   return parsed;
 }
 
-/** Constructs and hashes a V1 wire artifact. */
+/** Validates untrusted plan input and hashes the complete versioned wire artifact. */
 export async function constructMergePlanArtifact(
-  input: MergePlanArtifactInput,
+  input: unknown,
 ): Promise<MergePlanArtifact> {
   const validatedInput = mergePlanArtifactInputSchema.parse(input);
   return finalizeMergePlanArtifact(

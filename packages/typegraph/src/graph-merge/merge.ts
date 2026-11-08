@@ -2667,8 +2667,8 @@ export async function captureMergePlanTargetFence<G extends GraphDef>(
 }
 
 export function sameMergePlanTargetFence(
-  left: MergePlanTargetFence,
-  right: MergePlanTargetFence,
+  left: MergePlanArtifact["target"],
+  right: MergePlanArtifact["target"],
 ): boolean {
   return (
     left.graphId === right.graphId &&
@@ -2790,7 +2790,13 @@ async function resolvedMergeArtifact<G extends GraphDef>(
   const input: MergePlanArtifactInput = {
     formatVersion: 2,
     mode,
-    target: targetFence,
+    target: {
+      ...targetFence,
+      revision: {
+        ...targetFence.revision,
+        owner: requireDefined(targetFence.revision.owner),
+      },
+    },
     anchors,
     proposed: {
       nodes: {
@@ -4733,7 +4739,7 @@ async function assertRecordedForkPointAvailable<G extends GraphDef>(
   }
   const [currentBase, origin, currentRecorded] = await Promise.all([
     computeBaseVersion(target),
-    target.revisionOriginNow(),
+    target.allocationOwner().then((owner) => owner.origin),
     target.recordedNow(),
   ]);
   const currentParts =

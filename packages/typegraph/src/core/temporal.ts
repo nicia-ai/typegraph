@@ -172,6 +172,28 @@ export function optionalRecordedInstantParts(
   return value === undefined ? undefined : parseRecordedInstant(value, path);
 }
 
+/** Construct an owner-bound instant for an externally managed recorded relation. Ownership is attested by its reader. */
+export function recordedInstant(
+  coordinate: Readonly<{
+    revision: number;
+    recordedAt: string;
+    owner: GraphAllocationOwner;
+  }>,
+): RecordedInstant {
+  // JavaScript callers must also refuse a missing owner rather than minting a legacy token.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  if (coordinate.owner === undefined)
+    throw new ValidationError(
+      "A recorded instant requires an allocation owner.",
+      { issues: [{ path: "owner", message: "Expected GraphAllocationOwner" }] },
+    );
+  return createRecordedInstant(
+    coordinate.revision,
+    coordinate.recordedAt,
+    coordinate.owner,
+  );
+}
+
 /** Mints an origin-bound TypeGraph anchor, or an unbound legacy anchor for migration. */
 export function createRecordedInstant(
   revision: number,

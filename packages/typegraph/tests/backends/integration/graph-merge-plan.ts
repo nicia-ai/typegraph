@@ -73,6 +73,47 @@ export function registerGraphMergePlanIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("graph merge plan lifecycle", () => {
+    it("parses a legacy plan but refuses application without changing the graph", async () => {
+      const base = await context.createStore(graph, { revisionTracking: true });
+      const source = await makeBranch(context, base, "legacy");
+      try {
+        await source.store.nodes.Person.create(
+          { name: "legacy", email: "legacy@example.test" },
+          { id: "legacy" },
+        );
+        const current = unwrap(await planMerge(base, [source]));
+        const { digest: _digest, ...input } = current;
+        const { owner: _owner, ...revision } = input.target.revision;
+        const legacy = await constructMergePlanArtifact({
+          ...input,
+          formatVersion: 1,
+          target: { ...input.target, revision },
+        });
+        const before = await base.revisionNow();
+        // Exercise the serialized wire boundary, including legacy parsing before refusal.
+        // eslint-disable-next-line unicorn/prefer-structured-clone
+        const serialized = JSON.parse(JSON.stringify(legacy)) as typeof legacy;
+        const refused = await applyMergePlan(base, serialized);
+        expect(refused).toMatchObject({
+          success: false,
+          error: { details: { code: "RECORDED_ANCHOR_UNBOUND" } },
+        });
+        expect(await base.revisionNow()).toBe(before);
+        expect(
+          await base.nodes.Person.getById(asNodeId("legacy")),
+        ).toBeUndefined();
+        await expect(
+          constructMergePlanArtifact({
+            ...input,
+            formatVersion: 2,
+            target: { ...input.target, revision },
+          }),
+        ).rejects.toThrow();
+      } finally {
+        await source.close();
+      }
+    });
+
     it("preserves multi-source evidence through JSON and applies exactly once", async () => {
       const base = await context.createStore(graph, { revisionTracking: true });
       const left = await makeBranch(context, base, "left");

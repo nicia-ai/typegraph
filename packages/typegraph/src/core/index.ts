@@ -43,6 +43,7 @@ export {
   asRecordedInstant,
   compareRecordedInstants,
   type RecordedInstant,
+  recordedInstant,
   recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,
