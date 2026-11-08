@@ -1576,7 +1576,7 @@ export function registerIdentityIntegrationTests(
           .asOfRecorded(requireDefined(beforeClear))
           .identity.membersOf(person),
       ).rejects.toMatchObject({
-        details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
       });
 
       const recreatedPerson = await store.nodes.Person.create(

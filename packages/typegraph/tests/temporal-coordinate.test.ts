@@ -122,10 +122,10 @@ describe("asRecordedInstant", () => {
           namespace: "a".repeat(32),
         }),
       ),
-    ).toThrow("different graph origins");
+    ).toThrow("different or retired graph allocation");
     expect(() =>
       compareRecordedInstants(first, createRecordedInstant(42, VALID_AT)),
-    ).toThrow("different graph origins");
+    ).toThrow("different or retired graph allocation");
     expect(() =>
       createRecordedInstant(42, VALID_AT, {
         origin: "unsafe:origin",

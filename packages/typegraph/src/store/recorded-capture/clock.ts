@@ -33,6 +33,7 @@ import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import { recordedAnchorOwner } from "../recorded-anchor-origin";
 import { executeStatement } from "./guards";
 
@@ -696,7 +697,7 @@ function requireTypeGraphClockParts(
   return parts;
 }
 
-export async function allocateRecordedCommit(
+async function allocateRecordedCommitInternal(
   target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
@@ -771,4 +772,26 @@ export async function advanceRevisionClock(
     previousRevision,
   );
   return commit.instant;
+}
+
+/** All allocator entry points translate missing upgraded relations consistently. */
+export function allocateRecordedCommit(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+  ownsWriteLock: boolean,
+  previousRevision?: string,
+  retainAnchor = false,
+): Promise<AllocatedRecordedCommit> {
+  return withRecordedRelationsPrecondition(
+    allocateRecordedCommitInternal(
+      target,
+      schema,
+      graphId,
+      ownsWriteLock,
+      previousRevision,
+      retainAnchor,
+    ),
+    { dialect: target.dialect, surface: "recorded-allocation" },
+  );
 }

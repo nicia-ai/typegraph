@@ -9,8 +9,10 @@ import {
   type EngineRecordedRevision,
   type EngineRecordedTimeMembers,
 } from "../../backend/capabilities/recorded-time";
+import { type GraphBackend } from "../../backend/types";
 import { type VectorIndexType, type VectorMetric } from "../../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
+import { type GraphAllocationOwner } from "../../core/allocation-owner";
 import {
   parseRecordedInstant,
   type RecordedInstantParts,
@@ -542,6 +544,12 @@ function typeGraphRelationRecordedReadSource(
 export type ExternalRecordedReadSource = Readonly<{
   kind: "external";
   schema: SqlSchema;
+  /** External adapter ownership, read on the actual session when supplied. */
+  owner?:
+    | ((
+        target: Pick<GraphBackend, "execute">,
+      ) => Promise<GraphAllocationOwner | undefined>)
+    | undefined;
   [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> &
   RecordedReadSource;
@@ -644,15 +652,27 @@ export function createEngineRecordedReadBinding(
 
 export type RecordedRelationOptions = Readonly<{
   schema: SqlSchema;
+  /** Supply when recorded relations are managed without TypeGraph origin metadata. */
+  owner?:
+    | ((
+        target: Pick<GraphBackend, "execute">,
+      ) => Promise<GraphAllocationOwner | undefined>)
+    | undefined;
 }>;
 
 export function recordedRelation(
   options: RecordedRelationOptions,
 ): ExternalRecordedReadSource {
   const schema = requireSqlSchema(options.schema, "recordedRelation schema");
+  if (options.owner !== undefined && typeof options.owner !== "function")
+    throw new ConfigurationError(
+      "External recorded ownership must be a reader function.",
+      { code: "EXTERNAL_RECORDED_OWNER_INVALID" },
+    );
   return Object.freeze({
     kind: "external",
     schema,
+    ...(options.owner === undefined ? {} : { owner: options.owner }),
     [EXTERNAL_RECORDED_READ_SOURCE]: true as const,
     ...typeGraphRelationRecordedReadSource(schema),
   });

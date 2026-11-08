@@ -23,6 +23,8 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
@@ -2374,6 +2376,7 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol;
 type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -2717,6 +2720,12 @@ type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -5985,6 +5994,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
     revisionOriginNow: () => Promise<string>;

@@ -3,6 +3,10 @@
  */
 import { ValidationError } from "../errors";
 import { validateCanonicalIsoDate } from "../utils/date";
+import {
+  assertGraphAllocationOwner,
+  type GraphAllocationOwner,
+} from "./allocation-owner";
 import { type TemporalMode } from "./types";
 
 const RECORDED_INSTANT_VERSION = "r2";
@@ -172,7 +176,7 @@ export function optionalRecordedInstantParts(
 export function createRecordedInstant(
   revision: number,
   recordedAt: string,
-  owner?: Readonly<{ origin: string; namespace: string }>,
+  owner?: GraphAllocationOwner,
 ): RecordedInstant {
   if (
     !Number.isSafeInteger(revision) ||
@@ -242,12 +246,18 @@ export function recordedInstantWallTime(instant: RecordedInstant): string {
   return parseRecordedInstant(instant).recordedAt;
 }
 
-/** Durable TypeGraph graph origin; undefined for legacy and engine-native anchors. */
-export function recordedInstantOrigin(
+/** Full ownership coordinate; raw origin alone is insufficient for comparing allocations. */
+export function recordedInstantOwner(
   instant: RecordedInstant,
-): string | undefined {
+): GraphAllocationOwner | undefined {
   const parts = parseRecordedInstant(instant);
-  return parts.kind === "typegraph" ? parts.origin : undefined;
+  return (
+      parts.kind === "typegraph" &&
+        parts.origin !== undefined &&
+        parts.namespace !== undefined
+    ) ?
+      { origin: parts.origin, namespace: parts.namespace }
+    : undefined;
 }
 
 /**
@@ -299,8 +309,8 @@ export function recordedInstantRevision(instant: RecordedInstant): number {
  * timestamp-only fallback, not a general property of recorded-instant
  * comparison.
  *
- * @throws {ValidationError} when ownership forms, graph origins, or recording
- *   namespaces differ — there is no shared axis to compare them on.
+ * @throws {ValidationError} when ownership forms differ.
+ * @throws {GraphAllocationMismatchError} when allocation owners differ.
  */
 export function compareRecordedInstants(
   left: RecordedInstant,
@@ -322,22 +332,12 @@ export function compareRecordedInstants(
     );
   }
   if (leftParts.kind === "typegraph" && rightParts.kind === "typegraph") {
-    if (
-      leftParts.origin !== rightParts.origin ||
-      leftParts.namespace !== rightParts.namespace
-    ) {
-      throw new ValidationError(
-        "Recorded anchors belong to different graph origins or recording namespaces.",
-        {
-          issues: [
-            {
-              path: "compareRecordedInstants",
-              message: "Compare anchors from the same durable graph origin.",
-            },
-          ],
-        },
-      );
-    }
+    const leftOwner = recordedInstantOwner(left),
+      rightOwner = recordedInstantOwner(right);
+    if (leftOwner !== undefined)
+      assertGraphAllocationOwner(leftOwner, rightOwner);
+    else if (rightOwner !== undefined)
+      assertGraphAllocationOwner(rightOwner, leftOwner);
     if (leftParts.revision < rightParts.revision) return -1;
     if (leftParts.revision > rightParts.revision) return 1;
     return 0;

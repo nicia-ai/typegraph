@@ -1440,6 +1440,22 @@ export class ConfigurationError extends TypeGraphError {
   }
 }
 
+/** A checkpoint, fence, or request names a foreign or retired allocation. */
+export class GraphAllocationMismatchError extends ConfigurationError {
+  override readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+  constructor(details: Readonly<Record<string, unknown>> = {}) {
+    super(
+      "The request belongs to a different or retired graph allocation.",
+      { ...details, code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+      {
+        suggestion:
+          "Use the current allocation owner and reacquire its checkpoints or plans. Rotate an unpublished physical fork before permitting independent writes.",
+      },
+    );
+    this.name = "GraphAllocationMismatchError";
+  }
+}
+
 /** The lock acquisition phase that exhausted the schema-fence wait budget. */
 export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
 

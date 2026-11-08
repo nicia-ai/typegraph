@@ -23,6 +23,8 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
@@ -2998,6 +3000,7 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol;
 type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -3361,6 +3364,12 @@ type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -4722,7 +4731,7 @@ export const MERGE_ERROR_CODES: {
     readonly planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH";
     readonly planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH";
     readonly planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH";
-    readonly planOriginMismatch: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH";
+    readonly planOriginMismatch: "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
     readonly planStale: "GRAPH_MERGE_PLAN_STALE";
     readonly planningStale: "GRAPH_MERGE_PLANNING_STALE";
     readonly candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE";
@@ -5105,7 +5114,7 @@ export type MergePlanNodeUpsert = Readonly<{
 export class MergePlanOriginMismatchError extends InvalidMergePlanError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
-    readonly code: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH";
+    readonly code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
 }
 
 // @public (undocumented)
@@ -5164,6 +5173,7 @@ export type MergePlanReview = Readonly<{
 
 // @public (undocumented)
 export type MergePlanRevisionFence = Readonly<{
+    owner?: GraphAllocationOwner | undefined;
     origin: string;
     revision: string | null;
 }>;
@@ -7748,6 +7758,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
     revisionOriginNow: () => Promise<string>;

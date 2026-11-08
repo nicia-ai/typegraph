@@ -224,7 +224,8 @@ describe("migrateLegacyRecordedTime", () => {
     });
     await store.nodes.LegacyItem.create({ label: "original" });
     const origin = await store.revisionOriginNow();
-    const anchor = "r1:0000000000000001:2026-01-01T00:00:00.000Z";
+    const captured = requireDefined(await store.recordedNow());
+    const anchor = captured.replace(/^r2:[^:]+:[^:]+:/u, "r1:");
     await expect(
       migrateRecordedAnchor({ backend, graphId: GRAPH_ID, anchor }),
     ).rejects.toMatchObject({ details: { code: "RECORDED_ANCHOR_UNBOUND" } });
@@ -234,19 +235,31 @@ describe("migrateLegacyRecordedTime", () => {
       anchor,
       origin,
     });
-    expect(bound).toBe(
-      createRecordedInstant(
-        1,
-        FIRST,
-        await recordedAnchorOwner(store.revisionSchema, origin),
-      ),
-    );
+    expect(bound).toBe(captured);
+    await expect(
+      migrateRecordedAnchor({
+        backend,
+        graphId: GRAPH_ID,
+        anchor: createRecordedInstant(99, "2026-01-01T00:00:00.000Z"),
+        origin,
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "RECORDED_ANCHOR_NOT_RETAINED" },
+    });
+    await expect(
+      migrateRecordedAnchor({
+        backend,
+        graphId: GRAPH_ID,
+        anchor: captured,
+        origin: "wrong-origin",
+      }),
+    ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
     await store.clear();
     await store.nodes.LegacyItem.create({ label: "replacement" });
     await expect(
       migrateRecordedAnchor({ backend, graphId: GRAPH_ID, anchor, origin }),
     ).rejects.toMatchObject({
-      details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+      details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
     });
   });
 

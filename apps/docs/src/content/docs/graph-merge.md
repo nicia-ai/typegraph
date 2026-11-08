@@ -2724,6 +2724,14 @@ const historical = await fork.store
 // Before publication, await fork.abort() to discard an unchanged copy.
 ```
 
+This helper is a lossless copy/restore phase: it preserves the source allocation owner so source
+checkpoints and retry proofs remain usable while the copy is reconciled. A backup restored as the
+same allocation keeps that identity. Before an independently diverging fork accepts writes, finish
+the copy phase and call `fork.store.rotateAllocationOwner(await fork.store.allocationOwner())`.
+Rotation preserves rows, captured history, and the recorded clock, but retires source checkpoints
+and copied durable-operation authorization. It also invalidates the unchanged-copy proof used by
+copy retries and `abort()`; complete or abandon those actions before rotating.
+
 The caller provisions and owns `privateBackend`. It may contain other graph
 namespaces, but it must contain no rows for the source graph. TypeGraph refuses
 a connection to the source database, including an aliased backend object.

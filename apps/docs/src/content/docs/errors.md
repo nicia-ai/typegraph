@@ -1141,6 +1141,22 @@ arm, fire at the specific call that cannot be honored. None of these codes
 are members of `RECORDED_CAPTURE_GUARD_CODES` above — that set stays closed
 to the three TypeGraph-capture guards.
 
+### Recorded allocation ownership and lookup
+
+`GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_ORIGIN_MISMATCH`.
+Merge origin refusals preserve their merge error class and use that same code. Match
+this code to retire checkpoints, plans, or requests after a reset or fork rotation;
+a retry against the same retired owner cannot repair it.
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
+| `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
+| `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
+| `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
+| `EXTERNAL_RECORDED_OWNER_INVALID` | An external recorded relation's `owner` option is not a reader function. |
+| `RECORDED_RELATIONS_MISSING` | Required captured relations or the allocation log are missing; complete base-schema adoption before writing. |
+
 ### `SchemaMismatchError`
 
 Thrown when the database schema doesn't match the expected graph definition.

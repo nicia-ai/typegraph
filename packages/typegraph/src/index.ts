@@ -94,7 +94,7 @@ export {
   metaEdge,
   type NodeKinds,
   type RecordedInstant,
-  recordedInstantOrigin,
+  recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,
   // Vector-slot enumeration for manual provisioning (the boot step
@@ -457,6 +457,7 @@ export {
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,
+  GraphAllocationMismatchError,
   IdentityContradictionError,
   IdentityEndpointValidityError,
   IdentitySeparationViolationError,
@@ -1011,6 +1012,7 @@ export {
 // Utilities
 // ============================================================
 
+export type { GraphAllocationOwner } from "./core/allocation-owner";
 export {
   type DatabaseProjection,
   ExecutableProjectionQuery,

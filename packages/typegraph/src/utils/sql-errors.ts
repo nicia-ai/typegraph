@@ -915,7 +915,7 @@ function historyMissingRecordedRelationsError(
     {
       cause,
       suggestion:
-        "Create the recorded-time relations (typegraph_recorded_nodes, typegraph_recorded_edges, typegraph_recorded_clock) — e.g. re-run the generated migration SQL — on this database before enabling history capture.",
+        "Create the recorded-time relations (typegraph_recorded_nodes, typegraph_recorded_edges, typegraph_recorded_clock, typegraph_recorded_anchors and revision origins) — e.g. re-run the generated migration SQL — on this database before enabling history capture.",
     },
   );
 }

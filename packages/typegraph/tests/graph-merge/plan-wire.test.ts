@@ -176,6 +176,25 @@ describe("merge plan V1 wire format", () => {
     if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
   });
 
+  it("requires version 2 for allocation-bound fences", async () => {
+    const base = planInput();
+    const target = {
+      ...base.target,
+      revision: {
+        ...base.target.revision,
+        owner: { origin: "store-origin", namespace: "a".repeat(32) },
+      },
+    };
+    const legacy = await finalizeMergePlanArtifact({ ...base, target });
+    expect(parseMergePlanArtifact(legacy).success).toBe(false);
+    const current = await finalizeMergePlanArtifact({
+      ...base,
+      formatVersion: 2,
+      target,
+    });
+    expect(parseMergePlanArtifact(current).success).toBe(true);
+  });
+
   it("requires version 2 for validity clearing and recreation", async () => {
     const base = planInput();
     const node = {

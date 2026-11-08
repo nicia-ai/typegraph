@@ -6,6 +6,7 @@ import {
   type CompiledRowsSql,
   type CompiledStatementSql,
   ConfigurationError,
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -20,6 +21,7 @@ import {
   param as parameter,
   type RecordedInstant,
   recordedInstantRevision,
+  recordedRelation,
   searchable,
   type StoreSearch,
   UnsupportedBackendCapabilityError,
@@ -1198,6 +1200,107 @@ export function registerRecordedTimeIntegrationTests(
       await expect(
         store.resolveRecordedAnchor("2026-01-01"),
       ).rejects.toMatchObject({ name: "ValidationError" });
+    });
+
+    it("reads externally owned recorded relations without local origin metadata", async () => {
+      const writer = await createHistoryStore(context);
+      const node = await writer.nodes.Person.create({
+        name: "external",
+        age: 1,
+      });
+      const anchor = requireDefined(await writer.recordedNow());
+      let owner = await writer.allocationOwner();
+      const backend = context.getBackend();
+      const external = createStore(integrationTestGraph, backend, {
+        recordedRead: recordedRelation({
+          schema: writer.revisionSchema,
+          owner: () => Promise.resolve(owner),
+        }),
+      });
+      const hiddenOrigins = `${writer.revisionSchema.tables.revisionOrigins}_hidden`;
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`ALTER TABLE ${writer.revisionSchema.revisionOriginsTable} RENAME TO ${sql.identifier(hiddenOrigins)}`,
+        ),
+      );
+      try {
+        const view = external.asOfRecorded(anchor);
+        expect(await view.nodes.Person.getById(node.id)).toMatchObject({
+          name: "external",
+        });
+        expect(
+          await view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+        ).toHaveLength(1);
+        owner = { ...owner, origin: "replacement-origin" };
+        await expect(view.nodes.Person.getById(node.id)).rejects.toMatchObject({
+          code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+        });
+        await expect(
+          view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+        ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      } finally {
+        await requireDefined(backend.executeStatement)(
+          asCompiledStatementSql(
+            sql`ALTER TABLE ${sql.identifier(hiddenOrigins)} RENAME TO ${writer.revisionSchema.revisionOriginsTable}`,
+          ),
+        );
+      }
+    });
+
+    it("refuses missing upgraded allocation storage with a typed error and rolls the write back", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "before", age: 1 });
+      const before = requireDefined(await store.recordedNow());
+      const backend = context.getBackend();
+      const hiddenAnchors = `${store.revisionSchema.tables.recordedAnchors}_hidden`;
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`ALTER TABLE ${recordedAnchorsTable(store.revisionSchema)} RENAME TO ${sql.identifier(hiddenAnchors)}`,
+        ),
+      );
+      try {
+        await expect(
+          store.nodes.Person.create({ name: "refused", age: 2 }),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        expect(await store.nodes.Person.count()).toBe(1);
+        expect(await store.recordedNow()).toBe(before);
+      } finally {
+        await requireDefined(backend.executeStatement)(
+          asCompiledStatementSql(
+            sql`ALTER TABLE ${sql.identifier(hiddenAnchors)} RENAME TO ${recordedAnchorsTable(store.revisionSchema)}`,
+          ),
+        );
+      }
+    });
+
+    it("refuses unlogged history and distinguishes its coverage gap from an empty graph", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "before-upgrade", age: 1 });
+      const old = requireDefined(await store.recordedNow());
+      const backend = context.getBackend();
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      expect(await store.recordedNow()).toBe(old);
+      await expect(
+        store.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+      await store.nodes.Person.create({ name: "after-upgrade", age: 2 });
+      const current = requireDefined(await store.recordedNow());
+      expect(
+        await store.resolveRecordedAnchor("2099-01-01T00:00:00.000Z"),
+      ).toBe(current);
+      await expect(
+        store.resolveRecordedAnchor("1900-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
     });
 
     it("resolves a large retained anchor log with an indexed one-row range lookup", async () => {

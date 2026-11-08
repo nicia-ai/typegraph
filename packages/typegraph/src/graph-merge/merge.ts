@@ -1,7 +1,14 @@
 import { validateEdgeEndpoints } from "../constraints";
+import {
+  assertGraphAllocationOwner,
+  type GraphAllocationOwner,
+  sameGraphAllocationOwner,
+} from "../core/allocation-owner";
+import { recordedInstantOwner } from "../core/temporal";
 import { parseRecordedInstant } from "../core/temporal";
 import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
+import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
 import type { TransactionContext } from "../store/types";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
@@ -2642,10 +2649,10 @@ export async function captureMergePlanTargetFence<G extends GraphDef>(
   target: Store<G>,
 ): Promise<MergePlanTargetFence> {
   assertPublicPlanCapability(target);
-  const [activeSchema, schemaHash, origin, revision] = await Promise.all([
+  const [activeSchema, schemaHash, owner, revision] = await Promise.all([
     storeBackend(target).getActiveSchema(target.graphId),
     computeSchemaComponent(target),
-    target.revisionOriginNow(),
+    target.allocationOwner(),
     target.revisionNow(),
   ]);
   return {
@@ -2655,7 +2662,7 @@ export async function captureMergePlanTargetFence<G extends GraphDef>(
       version: activeSchema?.version ?? 1,
       hash: activeSchema?.schema_hash ?? schemaHash,
     },
-    revision: { origin, revision: revision ?? null },
+    revision: { origin: owner.origin, owner, revision: revision ?? null },
   };
 }
 
@@ -2668,6 +2675,8 @@ export function sameMergePlanTargetFence(
     left.schema.managed === right.schema.managed &&
     left.schema.version === right.schema.version &&
     left.schema.hash === right.schema.hash &&
+    left.revision.owner !== undefined &&
+    sameGraphAllocationOwner(left.revision.owner, right.revision.owner) &&
     left.revision.origin === right.revision.origin &&
     left.revision.revision === right.revision.revision
   );
@@ -3755,6 +3764,35 @@ function permitsExplicitNodeResurrection(
   );
 }
 
+function assertMergeAllocationOwner(
+  expected: GraphAllocationOwner | undefined,
+  actual: GraphAllocationOwner | undefined,
+  graphId: string,
+): void {
+  if (expected === undefined)
+    throw new MergePlanCapabilityError(
+      "The checkpoint or fence has no bound allocation owner; regenerate it before applying.",
+      {
+        details: {
+          capability: "graphAllocationOwner",
+          code: "RECORDED_ANCHOR_UNBOUND",
+          graphId,
+        },
+      },
+    );
+  try {
+    assertGraphAllocationOwner(expected, actual, { graphId });
+  } catch (error) {
+    throw new MergePlanOriginMismatchError(
+      "The merge checkpoint belongs to a different or retired allocation.",
+      {
+        cause: error,
+        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH", graphId },
+      },
+    );
+  }
+}
+
 async function preflightWireMergeWrites<G extends GraphDef>(
   target: Store<G>,
   nodesApi: TxNodes,
@@ -4084,6 +4122,13 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   const liveOrigin = await readRevisionOrigin(
     txBackend,
     target.revisionSchema,
+    target.graphId,
+  );
+  assertMergeAllocationOwner(
+    artifact.target.revision.owner,
+    liveOrigin === undefined ? undefined : (
+      await recordedAnchorOwner(target.revisionSchema, liveOrigin)
+    ),
     target.graphId,
   );
   if (liveOrigin !== artifact.target.revision.origin) {
@@ -4695,6 +4740,13 @@ async function assertRecordedForkPointAvailable<G extends GraphDef>(
     currentRecorded === undefined ? undefined : (
       parseRecordedInstant(currentRecorded)
     );
+  assertMergeAllocationOwner(
+    recordedInstantOwner(point.recorded),
+    currentRecorded === undefined ? undefined : (
+      recordedInstantOwner(currentRecorded)
+    ),
+    target.graphId,
+  );
   if (
     revisionAnchorOf(point.base) !== point.recorded ||
     revisionOriginOf(point.base) !== origin ||
@@ -5614,6 +5666,11 @@ async function assertForkPointUnchanged<G extends GraphDef>(
       const pointParts = parseRecordedInstant(point.recorded);
       const recordedParts =
         recorded === undefined ? undefined : parseRecordedInstant(recorded);
+      assertMergeAllocationOwner(
+        recordedInstantOwner(point.recorded),
+        recorded === undefined ? undefined : recordedInstantOwner(recorded),
+        target.graphId,
+      );
       if (
         pointParts.kind !== "typegraph" ||
         recordedParts?.kind !== "typegraph" ||

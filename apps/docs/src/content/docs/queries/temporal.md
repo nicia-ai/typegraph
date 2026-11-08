@@ -308,7 +308,9 @@ the transaction. It does not establish the later instant at which COMMIT became
 visible to other connections. Equal timestamps select the highest revision;
 backward clock changes retain the existing non-decreasing timestamp. A future
 request returns the latest retained cut. `undefined` means no retained allocation
-at or before the request, including an empty graph or an earlier unlogged cut.
+at or before the request, including an empty graph or a request before the first known allocation.
+Unlogged history is a coverage gap: the resolver throws `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` instead
+of claiming that the graph was empty.
 The SQL lookup observes one database snapshot; a later commit does not change its
 returned anchor, and a subsequent graph reset makes that anchor refuse reads.
 
@@ -325,7 +327,7 @@ A TypeGraph `r2:` anchor carries its durable origin and a separate digest of the
 physical copy into a different recording-table namespace receives distinct anchors even when it preserves the
 revision-origin row. A backup restored with the same origin and table namespace retains its anchors;
 independently diverging copies must use distinct namespaces or origins. Persist the exact string, use
-`recordedInstantOrigin(anchor)` when you also need its nonce, and compare anchors
+`recordedInstantOwner(anchor)` when you need its complete allocation owner, and compare anchors
 with `compareRecordedInstants`, which refuses different origins. Engine `e1:`
 anchors keep their existing ownership contract.
 
@@ -856,3 +858,36 @@ async function getPreviousVersion(nodeId: string) {
   exact graph an agent saw
 - [Breach Forensics](/examples/breach-forensics) - Traverse a reconstructed
   access graph at the breach instant
+
+### Allocation ownership and physical forks
+
+`await store.allocationOwner()` captures `{ origin, namespace }` even before a
+tracked graph has its first recorded instant. Use the complete owner when
+binding requests or checkpoints; comparing the raw origin component is insufficient.
+A restored backup keeps its owner and can resume its existing checkpoints.
+A copy intended to diverge independently must rotate before publication or writes:
+
+```typescript
+const inheritedOwner = await fork.allocationOwner();
+const forkOwner = await fork.rotateAllocationOwner(inheritedOwner);
+```
+
+Rotation uses the native schema and graph fences and compares the expected owner
+inside the transaction. It preserves live rows, captured history, and the clock,
+while retiring old anchors, merge fences, and durable request bindings in the copy.
+The allocation log is rebound to the fork's new owner; durable operation outcomes
+retain their old owner and cannot be replayed into the fork. Table-name namespace
+hashes distinguish managed prefixed allocations, but cannot detect Neon branches,
+template clones, or file copies with unchanged names. Their provisioning lifecycle
+must call this explicit rotation API. It is not required when restoring a backup
+as the continuation of its original allocation.
+
+External recorded relations can supply an owner reader with
+`recordedRelation({ schema, owner: async (session) => externalOwner(session) })`.
+Use it when the relations have no TypeGraph revision-origin metadata; the reader
+must report the source's actual allocation owner and observe retirement. Transactional
+algorithms pass the actual session to this reader. External TypeGraph-style reads
+require bound instants too. Legacy `r1:` checkpoints need migration using independently
+retained origin evidence; fetching today's nonce does not prove a legacy checkpoint's
+origin. Migration rejects coordinates beyond the current clock and checks already-bound
+instants rather than silently passing them through as verified.

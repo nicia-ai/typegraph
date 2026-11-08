@@ -3,6 +3,8 @@ import {
   type EdgeRow,
   type GraphBackend,
   type NodeRow,
+  type TransactionBackend,
+  type TransactionOptions,
 } from "../backend/types";
 import {
   parseRecordedInstant,
@@ -37,6 +39,7 @@ import { readRecordedAdjacency } from "./recorded-adjacency";
 import {
   assertRecordedAnchorOrigin,
   type RecordedAnchorOwner,
+  requireRecordedAnchorOwner,
 } from "./recorded-anchor-origin";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
@@ -56,7 +59,9 @@ type RecordedReadServiceParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
-  revisionOrigin: () => Promise<RecordedAnchorOwner | undefined>;
+  revisionOrigin: (
+    target?: Pick<GraphBackend, "execute">,
+  ) => Promise<RecordedAnchorOwner | undefined>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
   mapRecordedEdgeRow: (row: Record<string, unknown>) => EdgeRow;
 }>;
@@ -156,43 +161,66 @@ function withRelationsPrecondition<T>(
   );
 }
 
-function createRecordedReadBackend(
-  backend: GraphBackend,
+function recordedReadExecutionMembers(
+  backend: TransactionBackend,
   surface: string,
-  assertOrigin: () => Promise<void>,
-): GraphBackend {
-  // A public AdapterStore backend is frozen. Decorate a fresh allowlist
-  // projection so Proxy invariants do not prevent the execute guards from
-  // replacing non-configurable function properties.
-  const projectedBackend = projectGraphBackend(backend);
-  return deriveBackend(projectedBackend, {
+  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+): Pick<TransactionBackend, "execute" | "executeRaw"> {
+  return {
     execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
-      await assertOrigin();
+      await assertOrigin(backend);
       const rows = await withRelationsPrecondition(
         backend,
         backend.execute<T>(query),
         surface,
       );
-      await assertOrigin();
+      await assertOrigin(backend);
       return rows;
     },
     ...(backend.executeRaw === undefined ?
       {}
     : {
         executeRaw: async <T>(
-          sqlText: string,
+          text: string,
           params: readonly unknown[],
         ): Promise<readonly T[]> => {
-          await assertOrigin();
+          await assertOrigin(backend);
           const rows = await withRelationsPrecondition(
             backend,
-            requireDefined(backend.executeRaw)<T>(sqlText, params),
+            requireDefined(backend.executeRaw)<T>(text, params),
             surface,
           );
-          await assertOrigin();
+          await assertOrigin(backend);
           return rows;
         },
       }),
+  };
+}
+
+function createRecordedReadBackend(
+  backend: GraphBackend,
+  surface: string,
+  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+): GraphBackend {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
+    ...recordedReadExecutionMembers(backend, surface, assertOrigin),
+    transaction: async <T>(
+      fn: (target: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      await assertOrigin(backend);
+      const result = await backend.transaction(async (target) => {
+        await assertOrigin(target);
+        const guarded = deriveBackend(
+          target,
+          recordedReadExecutionMembers(target, surface, assertOrigin),
+        );
+        return fn(guarded);
+      }, options);
+      await assertOrigin(backend);
+      return result;
+    },
   });
 }
 
@@ -379,10 +407,17 @@ export function createRecordedReadService(
     mapRecordedEdgeRow,
   } = params;
 
-  async function assertOrigin(coordinate: ReadCoordinate): Promise<void> {
+  async function assertOrigin(
+    coordinate: ReadCoordinate,
+    target?: Pick<GraphBackend, "execute">,
+  ): Promise<void> {
     const parts = requireRecordedRevision(coordinate);
-    if (parts.kind !== "typegraph") return;
-    assertRecordedAnchorOrigin(parts, await params.revisionOrigin(), graphId);
+    if (requireRecordedAnchorOwner(parts, graphId) === undefined) return;
+    assertRecordedAnchorOrigin(
+      parts,
+      await params.revisionOrigin(target),
+      graphId,
+    );
   }
 
   /**
@@ -615,8 +650,8 @@ export function createRecordedReadService(
     ): GraphBackend {
       if (coordinate.recorded === undefined) return backend;
       requireRecordedReadBinding(recordedReadBinding, surface);
-      return createRecordedReadBackend(backend, surface, () =>
-        assertOrigin(coordinate),
+      return createRecordedReadBackend(backend, surface, (target) =>
+        assertOrigin(coordinate, target),
       );
     },
 

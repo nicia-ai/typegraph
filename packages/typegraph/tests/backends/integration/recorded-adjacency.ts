@@ -283,8 +283,8 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         view.adjacency(root, { after: cursor }),
       ).rejects.toMatchObject({
-        name: "ConfigurationError",
-        details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+        name: "GraphAllocationMismatchError",
+        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
       });
     });
 
@@ -389,8 +389,8 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         observed.asOfRecorded(anchor).adjacency(root),
       ).rejects.toMatchObject({
-        name: "ConfigurationError",
-        details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+        name: "GraphAllocationMismatchError",
+        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
       });
     });
 
@@ -411,7 +411,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         otherStore.asOfRecorded(anchor).nodes.Item.getById(root.id),
       ).rejects.toMatchObject({
-        details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
       });
       const legacy = asRecordedInstant(
         anchor.replace(/^r2:[^:]+:[^:]+:/u, "r1:"),
@@ -419,6 +419,39 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         store.asOfRecorded(legacy).nodes.Item.getById(root.id),
       ).rejects.toMatchObject({ details: { code: "RECORDED_ANCHOR_UNBOUND" } });
+    });
+
+    it("rotates allocation ownership without clearing rows or captured history", async () => {
+      const store = await context.createHistoryStore(graph);
+      const owner = await store.allocationOwner();
+      const root = await store.nodes.Item.create(
+        { label: "original" },
+        { id: "root", validFrom: null },
+      );
+      const old = requireDefined(await store.recordedNow());
+      const next = await store.rotateAllocationOwner(owner);
+      expect(next.origin).not.toBe(owner.origin);
+      expect(next.namespace).toBe(owner.namespace);
+      expect(await store.nodes.Item.getById(root.id)).toMatchObject({
+        label: "original",
+      });
+      const current = requireDefined(await store.recordedNow());
+      expect(
+        await store.resolveRecordedAnchor("9999-01-01T00:00:00.000Z"),
+      ).toBe(current);
+      expect(
+        await store.asOfRecorded(current).nodes.Item.getById(root.id),
+      ).toMatchObject({ label: "original" });
+      await expect(
+        store.asOfRecorded(old).nodes.Item.getById(root.id),
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      await expect(store.rotateAllocationOwner(owner)).rejects.toMatchObject({
+        code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+      });
+      await store.nodes.Item.update(root.id, { label: "updated" });
+      expect(
+        await store.asOfRecorded(current).nodes.Item.getById(root.id),
+      ).toMatchObject({ label: "original" });
     });
 
     it("refuses retired anchors and preconstructed views on every recorded read surface", async () => {
@@ -456,6 +489,12 @@ export function registerRecordedAdjacencyIntegrationTests(
       );
       for (const view of [oldView, store.asOfRecorded(anchor)]) {
         for (const read of [
+          () => view.algorithms.weaklyConnectedComponents({ edges: ["links"] }),
+          () => view.pageRank({ edges: ["links"] }),
+          () => view.labelPropagation({ edges: ["links"] }),
+          () => view.reachable(root.id, { edges: ["links"] }),
+          () => view.shortestPath(root.id, peer.id, { edges: ["links"] }),
+          () => view.subgraph(root, { maxDepth: 1, edges: ["links"] }),
           () => view.nodes.Item.getById(root.id),
           () => view.nodes.Item.getByIds([]),
           () => view.nodes.Item.scan(),
@@ -474,7 +513,7 @@ export function registerRecordedAdjacencyIntegrationTests(
               .execute(),
         ])
           await expect(read()).rejects.toMatchObject({
-            details: { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH" },
+            details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
           });
       }
       expect(

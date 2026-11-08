@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { type GraphAllocationOwner } from "../core/allocation-owner";
 import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
@@ -15,6 +16,7 @@ export type MergePlanSchemaFence = Readonly<{
 }>;
 
 export type MergePlanRevisionFence = Readonly<{
+  owner?: GraphAllocationOwner | undefined;
   origin: string;
   revision: string | null;
 }>;
@@ -288,6 +290,13 @@ const mergePlanSchemaFenceSchema = z
 
 const mergePlanRevisionFenceSchema = z
   .object({
+    owner: z
+      .object({
+        origin: z.string().min(1),
+        namespace: z.string().regex(/^[a-f0-9]{32}$/u),
+      })
+      .strict()
+      .optional(),
     origin: nonEmptyStringSchema,
     revision: nonEmptyStringSchema.nullable(),
   })
@@ -751,6 +760,15 @@ function addSemanticIssues(
       code: "custom",
       path: ["writes", "nodeUpserts"],
       message: "Recreation requires merge plan format 2.",
+    });
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.target.revision.owner !== undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["target", "revision", "owner"],
+      message: "Allocation-bound fences require merge plan format 2.",
     });
   const resurrectionKeys = new Set<string>();
   for (const ref of artifact.guards.nodeResurrections ?? []) {

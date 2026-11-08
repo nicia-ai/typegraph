@@ -1,3 +1,4 @@
+import { assertGraphAllocationOwner } from "../core/allocation-owner";
 /**
  * One-time offline migration from timestamp-only recorded relations to numeric
  * revisions. The durable remap table lets applications translate checkpoints
@@ -24,6 +25,7 @@ import { shortHash } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
+import { readRecordedClock } from "../store/recorded-capture";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { requireCatalog } from "./capabilities/catalog";
 import { resolveRecordedTimeOwnership } from "./capabilities/recorded-time-ownership";
@@ -806,6 +808,45 @@ export async function migrateLegacyRecordedTime(
   });
 }
 
+async function assertMigratedCutRetained(
+  options: MigrateRecordedAnchorOptions,
+  anchor: RecordedInstant,
+): Promise<void> {
+  const tables = resolvedTableNames(options.backend, options.tableNames);
+  const schema = createSqlSchema(tables);
+  const current = await readRecordedClock(
+    options.backend,
+    schema,
+    options.graphId,
+  );
+  const parts = parseRecordedInstant(anchor);
+  const latest =
+    current === undefined ? undefined : parseRecordedInstant(current);
+  if (
+    parts.kind !== "typegraph" ||
+    latest?.kind !== "typegraph" ||
+    parts.revision > latest.revision ||
+    parts.recordedAt > latest.recordedAt ||
+    (parts.revision === latest.revision &&
+      parts.recordedAt !== latest.recordedAt)
+  )
+    throw new ConfigurationError(
+      "The checkpoint does not identify a retained recorded cut.",
+      { code: "RECORDED_ANCHOR_NOT_RETAINED", graphId: options.graphId },
+    );
+  if (
+    parts.origin !== undefined &&
+    parts.namespace !== undefined &&
+    latest.origin !== undefined &&
+    latest.namespace !== undefined
+  )
+    assertGraphAllocationOwner(
+      { origin: parts.origin, namespace: parts.namespace },
+      { origin: latest.origin, namespace: latest.namespace },
+      { graphId: options.graphId },
+    );
+}
+
 async function bindLegacyAnchor(
   options: MigrateRecordedAnchorOptions,
   revision: number,
@@ -827,12 +868,14 @@ async function bindLegacyAnchor(
     typeof storedOrigin === "string" ?
       await recordedAnchorOwner(createSqlSchema(tables), storedOrigin)
     : undefined;
-  if (boundOrigin === undefined || options.origin !== storedOrigin)
-    throw new ConfigurationError(
-      "The legacy checkpoint's attested origin is different or retired.",
-      { code: "RECORDED_ANCHOR_ORIGIN_MISMATCH", graphId: options.graphId },
-    );
-  return createRecordedInstant(revision, recordedAt, boundOrigin);
+  assertGraphAllocationOwner(
+    { origin: options.origin, namespace: boundOrigin?.namespace ?? "" },
+    boundOrigin,
+    { graphId: options.graphId },
+  );
+  const anchor = createRecordedInstant(revision, recordedAt, boundOrigin);
+  await assertMigratedCutRetained(options, anchor);
+  return anchor;
 }
 
 /** Remaps a legacy checkpoint using independently retained origin evidence. */
@@ -847,7 +890,27 @@ export async function migrateRecordedAnchor(
   }
   if (parsed !== undefined) {
     const parts = parseRecordedInstant(parsed);
-    if (parts.kind === "engine" || parts.origin !== undefined) return parsed;
+    if (parts.kind === "engine") {
+      if (options.origin !== undefined)
+        throw new ConfigurationError(
+          "A TypeGraph origin attestation cannot verify an engine-native checkpoint.",
+          {
+            code: "RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED",
+            graphId: options.graphId,
+          },
+        );
+      return parsed;
+    }
+    if (parts.origin !== undefined) {
+      if (options.origin !== undefined)
+        assertGraphAllocationOwner(
+          { origin: options.origin, namespace: parts.namespace ?? "" },
+          { origin: parts.origin, namespace: parts.namespace ?? "" },
+          { graphId: options.graphId },
+        );
+      await assertMigratedCutRetained(options, parsed);
+      return parsed;
+    }
     return bindLegacyAnchor(options, parts.revision, parts.recordedAt);
   }
   const legacyRecordedAt = canonicalLegacyInstant(options.anchor);

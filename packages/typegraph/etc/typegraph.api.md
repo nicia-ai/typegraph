@@ -95,6 +95,8 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
@@ -3586,6 +3588,7 @@ const EXTERNAL_REF_TABLE_KEY: "_externalRefTable";
 export type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -4003,6 +4006,19 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+export class GraphAllocationMismatchError extends ConfigurationError {
+    constructor(details?: Readonly<Record<string, unknown>>);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+}
+
+// @public
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -7243,7 +7259,7 @@ export type RecordedInstant = string & {
 };
 
 // @public
-export function recordedInstantOrigin(instant: RecordedInstant): string | undefined;
+export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
 
 // @public
 type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
@@ -7287,6 +7303,7 @@ type RecordedRelationDdl = Readonly<{
 // @public (undocumented)
 export type RecordedRelationOptions = Readonly<{
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
 }>;
 
 // @public
@@ -8465,6 +8482,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
     resolveRecordedAnchor?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
     revisionOriginNow: () => Promise<string>;
