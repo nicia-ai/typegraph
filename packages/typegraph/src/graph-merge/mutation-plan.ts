@@ -15,6 +15,10 @@ import {
   groupNodeUniquenessProbes,
   nodeClaimEntries,
 } from "../store/claims/node-claims";
+import {
+  assertEdgeIdentityMatches,
+  edgeIdentityFromRow,
+} from "../store/operations/edge-identity";
 import { type ValidityEndMutation } from "../store/types";
 import { requireDefined } from "../utils/presence";
 import { branch } from "./branch";
@@ -469,6 +473,14 @@ async function planMutations<G extends GraphDef>(
           );
       } else {
         const existing = await backend.getEdge(target.graphId, step.id);
+        // Tombstones are absent from staging but still own their edge kind.
+        if (step.deletion && existing !== undefined)
+          assertEdgeIdentityMatches(
+            step.id,
+            { kind: step.kind },
+            edgeIdentityFromRow(existing),
+            "delete",
+          );
         if (step.creation === true && existing?.deleted_at !== undefined) {
           throw new CandidateWriteSetError(
             "An edge create cannot reuse a soft-deleted edge identifier.",

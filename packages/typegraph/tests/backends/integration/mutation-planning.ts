@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asEdgeId,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -245,6 +246,48 @@ export function registerMutationPlanningIntegrationTests(
             .plan({ makeBackend }),
         ),
       ).toBe(true);
+    });
+
+    it("retains edge-kind ownership checks for tombstoned deletes", async () => {
+      const otherLinks = defineEdge("otherLinks", {
+        schema: z.object({ label: z.string() }),
+      });
+      const mixed = defineGraph({
+        id: "mutation_edge_kind",
+        nodes: { Item: { type: Item } },
+        edges: {
+          links: { type: links, from: [Item], to: [Item] },
+          otherLinks: { type: otherLinks, from: [Item], to: [Item] },
+        },
+      });
+      const store = await context.createHistoryStore(mixed);
+      const root = await store.nodes.Item.create({ name: "root" });
+      const peer = await store.nodes.Item.create({ name: "peer" });
+      const edge = await store.edges.links.create(root, peer, {
+        label: "deleted",
+      });
+      await store.edges.links.delete(edge.id);
+      await expect(
+        store.edges.otherLinks.delete(asEdgeId<typeof otherLinks>(edge.id)),
+      ).rejects.toThrow(/belongs to links/u);
+      const before = await store.recordedNow();
+      const builder = await createMutationPlanBuilder(store, "edge-kind");
+      expect(
+        isErr(
+          await builder.deleteEdge("otherLinks", edge.id).plan({ makeBackend }),
+        ),
+      ).toBe(true);
+      expect(
+        isErr(await builder.deleteEdge("links", edge.id).plan({ makeBackend })),
+      ).toBe(false);
+      expect(
+        isErr(
+          await builder
+            .deleteEdge("otherLinks", "missing")
+            .plan({ makeBackend }),
+        ),
+      ).toBe(false);
+      expect(await store.recordedNow()).toBe(before);
     });
 
     it("includes incident edge deletions under cascade and disconnect policies", async () => {
