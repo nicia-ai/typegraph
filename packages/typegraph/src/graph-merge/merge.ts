@@ -3734,6 +3734,19 @@ function invalidPlanForTarget(
   return new InvalidMergePlanError(message, { details });
 }
 
+function permitsExplicitNodeResurrection(
+  artifact: MergePlanArtifactV1,
+  reference: MergePlanEntityRef,
+): boolean {
+  return (
+    artifact.guards.nodeResurrections?.some(
+      (entry) =>
+        mergeKey(entry.kind, entry.id) ===
+        mergeKey(reference.kind, reference.id),
+    ) === true
+  );
+}
+
 async function preflightWireMergeWrites<G extends GraphDef>(
   target: Store<G>,
   nodesApi: TxNodes,
@@ -3840,7 +3853,8 @@ async function preflightWireMergeWrites<G extends GraphDef>(
     );
     if (
       artifact.guards.incremental !== undefined &&
-      current?.meta.deletedAt !== undefined
+      current?.meta.deletedAt !== undefined &&
+      !permitsExplicitNodeResurrection(artifact, upsert)
     ) {
       throw invalidPlanForTarget(
         `The incremental merge plan would resurrect soft-deleted committed node "${upsert.id}".`,
@@ -4820,6 +4834,20 @@ function analyzeRevalidatingWrite(
     stripsCurrentProps:
       canonicalizeProps(normalizedCurrent) !== canonicalizeProps(current),
   };
+}
+
+/** Mutation postimages must survive the existing executor's revalidation unchanged. */
+export function assertStableMergePostimage(
+  schema: PropsSchema | undefined,
+  props: Readonly<Record<string, unknown>>,
+): void {
+  const analysis = analyzeRevalidatingWrite(schema, props, {});
+  if (analysis.status !== "valid" || analysis.storageWouldChange) {
+    throw new MergePlanCapabilityError(
+      "The validated mutation postimage cannot be reapplied unchanged through the native merge wire codec. Use a JSON-round-trip-stable schema.",
+      { details: { capability: "stableMergePostimage" } },
+    );
+  }
 }
 
 export function writeWouldChangeRow(

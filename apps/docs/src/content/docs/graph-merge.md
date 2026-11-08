@@ -2319,6 +2319,76 @@ members report no evidence: `get` and `markDelivered` return `undefined`, `scan`
 returns an empty page (echoing `after`), and `hasUndelivered` returns `false`.
 Re-fork the branch to gain evidence.
 
+### Ordered mutation planning
+
+`createMutationPlanBuilder(store, sourceId)` captures the target's revision fence
+when authoring begins. Pass `{ expectedTarget: savedFence }` as the third argument
+when restoring an externally reviewed batch with a previously persisted native
+target fence; a stale fence refuses instead of choosing a newer base. Its
+immutable, typed methods stage ordered collection operations without writing to
+the target:
+
+```typescript
+import { createMutationPlanBuilder, applyMergePlan, unwrap } from "@nicia-ai/typegraph/graph-merge";
+
+const builder = await createMutationPlanBuilder(store, "edit-42");
+const plan = unwrap(await builder
+  .createNode("Item", "new-item", { name: "New item" })
+  .updateNode("Item", "existing-item", { name: "Updated item" })
+  .deleteEdge("links", "obsolete-link")
+  .deleteNode("Item", "obsolete-item")
+  .plan({ makeBackend }));
+
+// Persist or review the normal MergePlanArtifact before application.
+const report = unwrap(await applyMergePlan(store, plan));
+```
+
+Use kinds and properties from your own graph definition. Create ids are explicit,
+so later operations can reference newly staged rows. `updateNode` and
+`updateEdge` preserve ordinary patch semantics, including removing an optional
+property with `undefined`; `replaceNode` uses ordinary replacement semantics.
+Duplicate creates, missing updates, uniqueness conflicts, endpoint constraints,
+and restricted deletes retain their collection behavior. An intentional create
+of a previously deleted node id is recorded explicitly as an exception to the
+plan's default incremental tombstone refusal. Edge creates still refuse reuse
+of a soft-deleted edge id, matching ordinary edge collection behavior.
+
+The default `planningScope: "candidate"` reads the affected rows, incident edges
+for deleted nodes, constraint owners, cardinality peers, and reachable identity
+components. Work scales with that affected closure and operation count; deleting
+an arbitrarily connected node can still require many rows. An ineligible backend
+or graph receives a typed refusal. Explicitly choose `planningScope: "full"` to
+allow one complete clone instead. Bounded staging observes uniqueness keys,
+loads their committed owners, then validates through the original graph schema.
+If a nondeterministic parser changes those keys on replay, bounded planning
+refuses instead of validating against incomplete peers; full planning validates
+once against the complete copy. `makeBackend` must create an independent disposable
+backend; see the factory requirements above.
+
+Planning validates ordered intermediate states, then delegates their net changes
+to the existing incremental merge planner. Application commits the resulting
+merge writes, rather than replaying each staged operation. Ordinary merge
+identity reconciliation and conflict policies therefore still apply. Planning
+does not invoke the target's application hooks. Property parsers must be deterministic on
+persisted values. Postimages must survive the existing merge wire
+codec and schema revalidation unchanged. Schemas with non-idempotent output
+transforms, or serialized values that their input schema refuses, receive a
+typed `stableMergePostimage` capability refusal in either scope. For date
+properties, use a schema that accepts its persisted representation, such as
+`z.coerce.date()`. Tombstoned durable edge owners excluded from a live-state copy
+are also refused in both scopes. Default validity timestamps are
+resolved while staging, and are retained in the artifact. A concurrent target
+change invalidates authoring, planning, or application instead of silently
+rebasing. Failed application rolls back graph rows and constraint sidecars
+together.
+
+A reproducible SQLite measurement is available with
+`node --import tsx packages/typegraph/scripts/measure-mutation-planning.ts` from
+the repository root. For one patch, create, and delete, target node rows read
+remained 9 at 100, 1,000, and 10,000 existing nodes. Explicit full planning read
+105, 1,005, and 10,005 rows respectively. These are instrumented row counts,
+including snapshot-export transactions, rather than latency guarantees.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient

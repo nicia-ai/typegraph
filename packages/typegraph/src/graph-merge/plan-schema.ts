@@ -106,6 +106,9 @@ export type MergePlanRetype = Readonly<{
 }>;
 
 export type MergePlanGuards = Readonly<{
+  /** Explicit create/replace intent may restore these initially tombstoned rows. */
+  /** Explicit node-create exceptions to the default incremental tombstone refusal. Requires the same target fence. */
+  nodeResurrections?: readonly MergePlanEntityRef[];
   canonicalMappings: readonly MergePlanCanonicalMapping[];
   retypes: readonly MergePlanRetype[];
   deletedNodes: readonly MergePlanEntityRef[];
@@ -268,7 +271,7 @@ const mergePlanRevisionFenceSchema = z
   })
   .strict();
 
-const mergePlanTargetFenceSchema = z
+export const mergePlanTargetFenceSchema = z
   .object({
     graphId: nonEmptyStringSchema,
     schema: mergePlanSchemaFenceSchema,
@@ -401,6 +404,7 @@ const mergePlanGuardsSchema = z
         .strict(),
     ),
     deletedNodes: z.array(mergePlanEntityRefSchema),
+    nodeResurrections: z.array(mergePlanEntityRefSchema).optional(),
     incremental: z
       .object({
         tombstoneResurrection: z.literal("refuse"),

@@ -1333,6 +1333,9 @@ type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export function createMutationPlanBuilder<G extends GraphDef>(target: Store<G>, sourceId: string, options?: MutationAuthoringOptions): Promise<MutationPlanBuilder<G>>;
+
+// @public
 type CreateVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -4985,6 +4988,7 @@ export type MergePlanEntityResolution = Readonly<{
 
 // @public (undocumented)
 export type MergePlanGuards = Readonly<{
+    nodeResurrections?: readonly MergePlanEntityRef[];
     canonicalMappings: readonly MergePlanCanonicalMapping[];
     retypes: readonly MergePlanRetype[];
     deletedNodes: readonly MergePlanEntityRef[];
@@ -5301,6 +5305,37 @@ type MetaEdgeProperties = Readonly<{
     inverse: string | undefined;
     inference: InferenceType;
     description: string | undefined;
+}>;
+
+// @public
+export type MutationAuthoringOptions = Readonly<{
+    expectedTarget?: MergePlanTargetFence;
+}>;
+
+// @public (undocumented)
+export type MutationCreateOptions = Readonly<{
+    validFrom?: string | null;
+    validTo?: string;
+}>;
+
+// @public
+export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
+    target: MergePlanTargetFence;
+    operationCount: number;
+    createNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
+    updateNode: <K extends NodeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["nodes"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
+    replaceNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>) => MutationPlanBuilder<G>;
+    deleteNode: <K extends NodeKinds<G>>(kind: K, id: string) => MutationPlanBuilder<G>;
+    createEdge: <K extends EdgeKinds<G>>(kind: K, id: string, from: Parameters<Store<G>["edges"][K]["create"]>[0], to: Parameters<Store<G>["edges"][K]["create"]>[1], props: z.input<G["edges"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
+    updateEdge: <K extends EdgeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["edges"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
+    deleteEdge: <K extends EdgeKinds<G>>(kind: K, id: string) => MutationPlanBuilder<G>;
+    plan: (options: MutationPlanningOptions) => Promise<Result<MergePlanArtifact, MergeError>>;
+}>;
+
+// @public
+export type MutationPlanningOptions = Readonly<{
+    makeBackend: MakeBackend;
+    planningScope?: "candidate" | "full";
 }>;
 
 // @public

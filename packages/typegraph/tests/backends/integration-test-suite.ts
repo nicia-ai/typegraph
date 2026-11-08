@@ -82,6 +82,7 @@ import {
   registerMultiKindQueryIntegrationTests,
   registerMultiRecursiveTraversalIntegrationTests,
   registerMultiRootSubgraphBatchIntegrationTests,
+  registerMutationPlanningIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -340,6 +341,7 @@ export function createIntegrationTestSuite<
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRecordedAdjacencyIntegrationTests(context);
+    registerMutationPlanningIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);

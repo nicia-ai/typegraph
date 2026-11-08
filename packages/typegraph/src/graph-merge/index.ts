@@ -134,6 +134,13 @@ export {
   planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
+export type {
+  MutationAuthoringOptions,
+  MutationCreateOptions,
+  MutationPlanBuilder,
+  MutationPlanningOptions,
+} from "./mutation-plan";
+export { createMutationPlanBuilder } from "./mutation-plan";
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
 export {
   forkGraphNamespace,
