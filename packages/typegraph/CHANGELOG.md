@@ -1,5 +1,108 @@
 # @nicia-ai/typegraph
 
+## 0.74.0
+
+### Minor Changes
+
+- [#821](https://github.com/nicia-ai/typegraph/pull/821) [`42f2851`](https://github.com/nicia-ai/typegraph/commit/42f2851ecc059516b6ec954034e4187f307d9abd) Thanks [@pdlug](https://github.com/pdlug)! - Add an immutable typed mutation planner for ordered node and edge creates, patches, replacements, and deletes. Eligible graphs plan from affected rows and constraint peers instead of cloning unrelated graph data; unsupported bounded scopes refuse unless full planning is explicitly selected. Plans remain ordinary serializable merge artifacts with revision fences and atomic application.
+  
+  Reviewed batches can supply a persisted `expectedTarget` fence when authoring resumes. Planning refuses postimages that the native wire executor would reject or transform again; use deterministic schemas that accept their persisted JSON representation. This prevents producing an approved artifact that changes the staged value on application.
+  
+  Persist authoring with the versioned JSON mutation document returned by `builder.document`, and resume through `planMutations`. New merge artifacts use format 2 to represent validity clearing and delete/recreate semantics; existing format 1 artifacts remain readable. Recreation resets the complete validity window, and staged collection refusals retain the operation index and original cause.
+  
+  Upgrade `planCandidateWriteSet`, `planCandidateWriteSetReview`, and `revalidateCandidateWriteSetReview` callers that require full cloning to pass `planningScope: "full"`; implicit full-copy fallback is removed. Candidate evolution planning currently requires this explicit scope.
+  
+  Evolution candidate planning now requires `planningScope: "full"` in both its type and runtime contract. Bounded-capability refusals expose `details.capability` and the required planning scope. `PlanningScope`, `MUTATION_DOCUMENT_FORMAT_VERSION`, and `MutationDocumentSchema` are public contracts for authoring and validating persisted documents.
+  
+  Every candidate-planning scope requires revision tracking; choosing full scope does not enable it. Invalid scope diagnostics use `rejectedPlanningScope`, while `planningScope` names a required scope. The public mutation schema rejects duplicate property removals and overlapping sets/removals before consulting graph state.
+  
+  Mutation document validity bounds must be canonical UTC instants with fixed milliseconds. Explicit create windows must have `validFrom <= validTo`; zero-width and unbounded windows remain valid. Invalid planning scope is refused before target capability checks, shared with ordinary merge planning.
+
+- [#803](https://github.com/nicia-ai/typegraph/pull/803) [`2aa9d7f`](https://github.com/nicia-ai/typegraph/commit/2aa9d7f27764827c69725a056fe3e65a6e7dcb7a) Thanks [@pdlug](https://github.com/pdlug)! - Bind the match-key convergence isolation check to the graph that acquired the write fence, so a fence acquired for another graph in the same transaction session is refused rather than accepted on the session match alone.
+  
+  ## Breaking
+  
+  - **`assertGraphCommandConvergenceIsolation(port, graphId, coordination)` takes the graph id.** The helper exported from `@nicia-ai/typegraph/backend` gains a required `graphId` argument between `port` and `coordination`. A custom command port that calls it passes the id of the graph the command targets (`command.plan.params.graphId`).
+
+- [#796](https://github.com/nicia-ai/typegraph/pull/796) [`edde6ba`](https://github.com/nicia-ai/typegraph/commit/edde6bafba9bbfc4f2627c4cffb33af605f3208d) Thanks [@pdlug](https://github.com/pdlug)! - Fix live edges left on deleted nodes.
+  
+  - On PostgreSQL, an edge created concurrently with a delete of one of its endpoints could stay live on the deleted node. The edge write checked endpoint liveness with a plain read and the delete read connected edges with a plain read, so each could miss the other's uncommitted write. Edge writes now lock both endpoint rows `FOR KEY SHARE` when they check liveness — inside the statement on single-statement paths, through a locked read in the same transaction on the portable path — and node deletes (single, bulk, hard, and the closed restrict-delete program) lock their rows `FOR UPDATE` before reading connected edges: the pairing a foreign key makes. Whichever write runs second now waits for the first: an edge write after a delete is refused with `EndpointNotFoundError` (or `TransactionConflictError` above READ COMMITTED), and a delete after an edge write sees the edge and removes or refuses it by its `onDelete` behavior. Both sides lock in (kind, id) code-point order. One case stays open and is documented: a REPEATABLE READ or SERIALIZABLE delete whose snapshot predates the edge write's commit still misses the edge. The safe choices are to delete at READ COMMITTED, or to run both the delete and the edge writers at SERIALIZABLE. SQLite was never affected because writers take the single writer slot; there it pays no lock-only statements, and an import does not re-read nodes it skipped as already live.
+  - Resurrecting a tombstoned edge whose endpoint had since been deleted revived it as a live edge on the deleted node, on every backend and without any concurrency. `getOrCreateByEndpoints()`, `bulkGetOrCreateByEndpoints()` and `bulkUpsertById()` now check both endpoints before a resurrection, under the same lock, and refuse with `EndpointNotFoundError`.
+  - A durable-identity convergence (`matchIdentity`) racing a hard delete of its incumbent edge and endpoint could insert a fresh live edge on the deleted node; the incumbent check now locks the incumbent row, so it re-evaluates after the delete commits.
+  - `importGraph` checks every endpoint it did not write itself under the same lock, on its set-oriented path and on its per-row path for duplicate ids alike.
+  - `store.clear()` now deletes nodes before edges, so an edge committed while the clear waited is removed rather than left live with both endpoints gone. That edge's cardinality claim row can still survive the clear; it names an edge that no longer exists, so the next write on that axis takes it over.
+  - The portable batch node update (`bulkUpsertById` / `bulkReplaceById` update leg) locks its rows `FOR NO KEY UPDATE` instead of `FOR UPDATE`, so it no longer deadlocks with edge writes to the same nodes.
+  
+  Behavior changes to expect:
+  
+  - A resurrection whose endpoint is deleted now throws `EndpointNotFoundError` instead of reviving the edge.
+  - On PostgreSQL, an edge write and a delete of one of its endpoints now wait for each other, and can deadlock when a transaction deletes both endpoints of an edge being created in another order, writes several edges at once, or runs `store.clear()` while an edge write holds one of its endpoints. PostgreSQL aborts one of the two. Inside `store.transaction()` that surfaces as `TransactionConflictError`, retryable with `store.transaction(fn, { retry })`; a direct store call surfaces the driver's deadlock error (SQLSTATE `40P01`).
+  
+  ## Breaking
+  
+  - `GraphBackend` gains a required `lockNodes(graphId, kind, ids, lock)` member, the read the store's portable edge writes check endpoint liveness through and its portable node deletes take their preflight through. Single-statement commands and closed atomic programs take the same locks in their own SQL; a custom command port that reports `created` for `edge.create` or `edge.converge-create` must take the endpoint lock in its liveness check. The contract: return the rows `getNodes(graphId, kind, ids)` returns, live and tombstoned alike, acquired in code-point order of `id`, and held locked until the surrounding transaction ends — `"edgeEndpoint"` with a lock that admits other endpoint locks and ordinary row updates but waits on a delete's lock (PostgreSQL `FOR KEY SHARE`), `"delete"` with a lock that waits on every endpoint lock (PostgreSQL `FOR UPDATE`). On an engine whose writers serialize, the plain ordered read is a complete implementation.
+  
+    **Migrating a custom backend:** the bundled backends already implement `lockNodes` on every driver, so only a hand-written `GraphBackend` needs a change, and it fails to type-check until it has one. On an engine that admits one writer at a time, implement it as your `getNodes` read with the rows sorted by `id`. On an engine with concurrent writers, issue the same read with `ORDER BY id COLLATE "C"` and the lock clause for `lock` (`FOR KEY SHARE` or `FOR UPDATE` on PostgreSQL) inside the caller's transaction; without those locks the store cannot keep a live edge off a deleted endpoint on your backend.
+
+- [#817](https://github.com/nicia-ai/typegraph/pull/817) [`6dbfde1`](https://github.com/nicia-ai/typegraph/commit/6dbfde14edca47acd3c29ccb513e2944ad21a889) Thanks [@pdlug](https://github.com/pdlug)! - Add cursor-paginated recorded-time adjacency returning incident edge/neighbor pairs. Pages bound historical candidates and endpoint reads, preserve parallel edges and self-loops, and bind continuations to the graph origin and both temporal coordinates. Pages may be empty while returning a continuation cursor. Add endpoint paging indexes with base-schema version 6 adoption for existing databases.
+  
+  Use `candidateLimit` to bound selected-kind historical rows per page; superseded and deleted versions can produce empty pages with a continuation. Cursor scope mismatches throw `ValidationError` for `after`. Discard recorded anchors and views after `clear()`.
+  
+  Upgrade note: base-schema version 6 builds two seven-column recorded-edge indexes inline during privileged open, including with `systemIndexes: "skip"`. On large PostgreSQL histories, prebuild the endpoint indexes concurrently outside a transaction before upgrading; see the backend setup guide for exact definitions and validity checks.
+  
+  Custom system-index provisioners must pass an explicit `dialect` to `generateSystemIndexDDL` for declarations with `binaryOrderColumns`; omission now throws `ConfigurationError` with code `SYSTEM_INDEX_DIALECT_REQUIRED`. Existing plain-index calls remain supported.
+
+- [#792](https://github.com/nicia-ai/typegraph/pull/792) [`a8e5778`](https://github.com/nicia-ai/typegraph/commit/a8e5778ad9959b6809e89f08f475baffbb79ac44) Thanks [@pdlug](https://github.com/pdlug)! - Fix recursive traversals silently omitting nodes that share an id with a node of a different kind. Node rows are keyed by kind and id, but a recursive walk that could visit more than one kind detected cycles by id alone, so reaching a node whose id matched an earlier node of another kind on the same path was treated as a revisit: that node and everything beyond it were dropped from the results. Cycle detection now keys on kind and id whenever the walk can visit more than one kind. Single-kind walks compile to the same SQL as before, and `path` output is still an array of bare node ids.
+  
+  Fix recursive walks on SQLite mishandling node ids that contain `|`. SQLite tracks a walk's path as one `|`-delimited string, so an id like `x|y` read as two tokens: a step to node `y` was rejected as a false cycle (PostgreSQL included it), and the `path` output split `x|y` into two ids. The SQLite path seams now percent-escape `%` and `|` in every token, and path output decodes them, so cycle detection and `path` output are exact for any id. This covers `.recursive()` queries and `store.subgraph()`. The PostgreSQL path parser also now honors quoted elements when a driver returns the path array as text, so an id containing `,`, `"`, `{`, `}`, `\` or whitespace comes back whole.
+  
+  ### Breaking
+  
+  - `defineNode()` and `defineGraph()` now reject a node kind name containing U+001F (unit separator) with a `ConfigurationError`, the same way they already reject U+001E. Recursive walks key their cycle-detection tokens as `kind + U+001F + id`, so such a kind could make two distinct nodes spell one token and drop the second as a revisit. Rename any such kind before upgrading.
+
+- [#797](https://github.com/nicia-ai/typegraph/pull/797) [`8c3c53c`](https://github.com/nicia-ai/typegraph/commit/8c3c53ce77093aabad7d9c1f61d1ff84fa4c4533) Thanks [@pdlug](https://github.com/pdlug)! - Fix `store.subgraph()` for graphs where nodes of different kinds share an id. The root is now a `{ kind, id }` reference, and the result is keyed by (kind, id).
+  
+  Node rows are keyed by (kind, id), but `subgraph()` treated a node's id alone as its identity: it seeded the walk by bare id, stepped along every edge whose endpoint id matched without checking the endpoint kind, hydrated every node whose id was in the walk, and keyed its result by id. So with `Show:a → Clip:m → Show:m → Clip:z`, `Clip:m` was reached but replaced by `Show:m` in `nodes`; with `Show:b → Clip:x` and an unconnected `Show:x → Show:y`, the walk from `b` followed `Show:x`'s edges and returned `Show:x` and `Show:y`; and an unconnected `Clip:a` could make `subgraph("a").root` resolve to `Clip:a` instead of `Show:a`.
+  
+  The walk is now keyed on (kind, id) everywhere: the seed, each recursive step in both directions and through `edgeWindows`, cycle detection, the nodes it returns, and the edges it keeps. This applies to direct, transaction, `batchOnce()` (including `shareSubgraphs: true`), `store.asOf()`, and `store.asOfRecorded()` reads. A walk that reaches two same-id nodes of different kinds returns both, each under its own kind, including folded peers on a graph with `identity: { sameIdAcrossKinds: "fold" }` (the walk follows edges, not identity classes). The PostgreSQL step join now uses the leading `(graph_id, from_kind, from_id)` columns of the edge traversal indexes.
+  
+  `store.batchOnce()` no longer overflows the call stack while composing a batch near its 500-read cap. A batch of 500 subgraph reads used to throw `RangeError: Maximum call stack size exceeded` instead of running.
+  
+  ### Breaking
+  
+  - `subgraph(root, options)` takes a `{ kind, id }` reference (`GraphNodeReference<G>`) instead of a node id, on `store`, transactions, `batchOnce()` reads, and `store.asOf()` / `store.asOfRecorded()` views. Pass the node itself (`store.subgraph(run, …)`) or `{ kind: "Run", id: runId }`. A bare id now throws `ValidationError`, and an unregistered kind throws `KindNotFoundError`.
+  - `SubgraphResult` replaces its id-keyed maps with plain arrays, `{ root, nodes, edges }`, and (kind, id) lookups move to the new `indexSubgraph(result)` helper, which returns `{ node, outgoing, incoming }`. The result stays plain data, so it still survives `structuredClone`, `postMessage`, and React Server Component props.
+  
+    | Before | After |
+    | --- | --- |
+    | `nodes: ReadonlyMap<id, node>` | `nodes: readonly node[]` (ordered by kind, then id) |
+    | `nodes.get(id)` / `nodes.has(id)` | `indexSubgraph(sg).node({ kind, id })` / `… !== undefined` |
+    | `nodes.size`, `nodes.values()` | `nodes.length`, `nodes` |
+    | `adjacency.get(fromId)?.get(edgeKind)` | `indexSubgraph(sg).outgoing({ kind, id }, edgeKind)` |
+    | `reverseAdjacency.get(toId)?.get(edgeKind)` | `indexSubgraph(sg).incoming({ kind, id }, edgeKind)` |
+    | iterating `adjacency` for every edge | `edges` (ordered by id) |
+  
+    Every lookup takes a `{ kind, id }` key, so following an edge is `node({ kind: edge.toKind, id: edge.toId })`; a literal kind narrows the returned node and must be a kind the result can hold. `indexSubgraph`, `SubgraphIndex`, `SubgraphNodeKey`, `SubgraphEdgeKey`, `SubgraphNodeLookup`, `SubgraphEdgeLookup`, and `SubgraphKindSelection` are exported.
+
+### Patch Changes
+
+- [#802](https://github.com/nicia-ai/typegraph/pull/802) [`777d44e`](https://github.com/nicia-ai/typegraph/commit/777d44e8b553ec51a0baf9f8e6638aff79d81a56) Thanks [@pdlug](https://github.com/pdlug)! - Fix schema diff ignoring an edge kind's `endpointExistence`. Changing only that field (for example `"notDeleted"` to `"ever"`) changed the schema hash but diffed as "no changes", so `ensureSchema` returned `unchanged` and the stored document kept the old value. The change is now diffed as a `warning` (it only affects which endpoints a write accepts, so existing edges are untouched and it auto-migrates like a cardinality change) and committed as a new schema version.
+
+- [#816](https://github.com/nicia-ai/typegraph/pull/816) [`e98f447`](https://github.com/nicia-ai/typegraph/commit/e98f447e77d539732c9ce9eadc533b97c0273e87) Thanks [@pdlug](https://github.com/pdlug)! - Apply explicit edge deletions before node deletions during graph merge. A merge that removes a connecting edge and its endpoint now succeeds under restricted node deletion, while undeleted edges still block the node removal. Edge upserts continue to follow node writes so newly created endpoints exist, and all writes retain the existing transaction and revision fences.
+  
+  For `cascade` and `disconnect` node policies, explicitly planned edge removals now emit their own edge delete hooks before the node deletion.
+
+- [#788](https://github.com/nicia-ai/typegraph/pull/788) [`bed2e8f`](https://github.com/nicia-ai/typegraph/commit/bed2e8f132329eec2f196320cbf20ce2d1100d70) Thanks [@pdlug](https://github.com/pdlug)! - Keep a transaction committable on the postgres-js driver after TypeGraph recovers a refusal through a savepoint. postgres-js remembers the first failed statement of a transaction and rethrows it at commit unless the statement ran inside one of the driver's own savepoint scopes, so a `UniquenessError` caught inside `store.transaction(...)` after `bulkReplaceById` (or another fused write program) lost a unique key still failed the transaction at commit with the recovered driver error, and an `importGraph` whose per-row edge create was refused by the database (a deferred row losing its durable match identity) rolled back the whole import instead of reporting that row as an error. TypeGraph now runs the recovered work inside a postgres-js savepoint scope nested in its own savepoint, so the caller's transaction commits what it wrote outside the refused write on every PostgreSQL driver. A savepoint recovery that itself fails is reported as one `AggregateError` naming both failures. Savepoint scopes that overlap without nesting on one transaction (concurrent protected writes whose outer scope exits first) poison the session: the driver rolls both savepoints back together, so every later statement, scope entry and scope exit refuses with `OVERLAPPING_SAVEPOINT_SCOPES` rather than running outside any savepoint.
+
+- [#793](https://github.com/nicia-ai/typegraph/pull/793) [`891c091`](https://github.com/nicia-ai/typegraph/commit/891c091ebc9b258bdd49abdb31a6b3bcfc6f88bc) Thanks [@pdlug](https://github.com/pdlug)! - Fix two uniqueness-claim defects that could return or strand the wrong reservation.
+  
+  - `getOrCreateByConstraint()` and `bulkGetOrCreateByConstraint()` no longer return a node whose unique key has moved. An update that changes a unique key releases the old key, and the lookup used to read that released row as a tombstone to revive. Looking up the old key returned the updated node as `found`. With `ifExists: "update"`, it rewrote the node back onto the old key and reported `updated`. A released row now resolves the lookup only while the node it names still holds the key under that node's own declaration of the constraint, at an axis its scope still claims. Any other released row, including rows already in existing databases, is ignored, and a later eligible row still answers; with none, the lookup creates a new node.
+  - On PostgreSQL, a node create refused by one of its uniqueness or disjointness claims no longer leaves part of its write behind. If one claim was held, the create threw `UniquenessError` or `DisjointError`. The claims it was not refused on stayed written, and if the refused claim was an own-kind unique key, so did the node row. A caller who caught the error inside `store.transaction()` and committed kept either a live reservation owned by a node that did not exist, which blocked that key or id for every later write, or a second live node holding a key its constraint declares unique. The fused create statement now reads every claim refusal before it writes anything, so a create refused by a claim that is already held writes nothing.
+
+- [#804](https://github.com/nicia-ai/typegraph/pull/804) [`8dd2ef9`](https://github.com/nicia-ai/typegraph/commit/8dd2ef9cbe87bf12bf68f3c7081bf0a2fb604f21) Thanks [@pdlug](https://github.com/pdlug)! - Behavior change: a transaction handle retained past its callback now refuses writes. `store.transaction` and `store.transactionWithReceipt` seal the handle when the callback settles (commit or rollback) and a later node or edge write, or identity write, through the retained `tx` (or a retained `tx.measure` scope) throws a `ConfigurationError`. Previously this refusal applied only with `history: true`; otherwise the write succeeded, autocommitting on SQLite and appearing in no receipt.
+
+- [#820](https://github.com/nicia-ai/typegraph/pull/820) [`4810907`](https://github.com/nicia-ai/typegraph/commit/4810907b269fb19fe8d984f3fe00849fe1b9d886) Thanks [@pdlug](https://github.com/pdlug)! - Clarify that fulltext search indexes all declared searchable fields on a kind as one document, whereas vector search selects an embedding field. In hybrid search the vector field selector applies only to its leg. Document why post-filtering is not field-restricted fulltext search and preserve the refusal of current-only search indexes on historical views.
+
 ## 0.73.2
 
 ### Patch Changes
