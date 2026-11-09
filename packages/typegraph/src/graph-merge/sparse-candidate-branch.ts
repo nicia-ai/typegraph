@@ -67,9 +67,8 @@ export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
   target: Store<G>,
   writeSet: CandidateWriteSet,
 ): Promise<readonly EdgeRow[] | undefined> {
-  const backend = storeBackend(target);
-  const readOwners = backend.findEdgesByMatchIdentity;
-  if (readOwners === undefined) {
+  const readOwners = matchIdentityOwnerReader(target);
+  if (readOwners === undefined)
     return (
         Object.values(target.graph.edges).some(
           (edge) => edge.matchIdentity !== undefined,
@@ -77,7 +76,6 @@ export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
       ) ?
         undefined
       : [];
-  }
   const identities = new Map<
     string,
     Readonly<{ kind: string; name: string; key: string }>
@@ -114,11 +112,25 @@ export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
     // Let the full-clone/import path own malformed candidate validation.
     return undefined;
   }
-  if (identities.size === 0) return [];
-  return readOwners({
-    graphId: target.graphId,
-    identities: [...identities.values()],
-  });
+  return identities.size === 0 ? [] : readOwners([...identities.values()]);
+}
+
+/** Exact owner read shared by candidate input and validated mutation postimages. */
+export function matchIdentityOwnerReader<G extends GraphDef>(
+  target: Store<G>,
+):
+  | ((
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[],
+    ) => Promise<readonly EdgeRow[]>)
+  | undefined {
+  const readOwners = storeBackend(target).findEdgesByMatchIdentity;
+  return readOwners === undefined ? undefined : (
+      (identities) => readOwners({ graphId: target.graphId, identities })
+    );
 }
 
 /** Whether every returned owner is included in the default clone projection. */
@@ -155,6 +167,7 @@ async function sparseBaseDocument<G extends GraphDef>(
   target: Store<G>,
   writeSet: CandidateWriteSet,
   matchIdentityOwners: readonly EdgeRow[],
+  additionalNodes: readonly EntityReference[] = [],
 ): Promise<
   Readonly<{ document: GraphData; identityScope?: CandidateIdentityScope }>
 > {
@@ -243,6 +256,7 @@ async function sparseBaseDocument<G extends GraphDef>(
     references.set(referenceKey(reference), reference);
   }
   for (const node of writeSet.nodes) add(node);
+  for (const node of additionalNodes) add(node);
   for (const edge of writeSet.edges) {
     add(edge.from);
     add(edge.to);
@@ -392,6 +406,11 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
   writeSet: CandidateWriteSet,
   makeBackend: MakeBackend,
   matchIdentityOwners: readonly EdgeRow[],
+  options: Readonly<{
+    preserveNodeUniqueness?: boolean;
+    captureChanges?: boolean;
+    additionalNodes?: readonly EntityReference[];
+  }> = {},
 ): Readonly<{
   strategy: WorkingCopyStrategy<G>;
   identityScope: () => CandidateIdentityScope | undefined;
@@ -404,6 +423,7 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
           target,
           writeSet,
           matchIdentityOwners,
+          options.additionalNodes,
         );
         scopedIdentity = identityScope;
         const backend = await makeBackend();
@@ -412,10 +432,14 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
         assertIndependentBackend(storeBackend(target), backend);
         try {
           const [store] = await createStoreWithSchema(
-            graphWithoutNodeUniqueness(target.graph),
+            options.preserveNodeUniqueness === true ?
+              target.graph
+            : graphWithoutNodeUniqueness(target.graph),
             backend,
             {
-              revisionTracking: target.revisionTrackingEnabled,
+              ...(options.captureChanges === true ?
+                { history: true as const }
+              : { revisionTracking: target.revisionTrackingEnabled }),
               revisionJournal: false,
             },
           );

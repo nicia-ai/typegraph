@@ -398,5 +398,13 @@
     "kind": "required-member-added",
     "reason": "RecordedStoreViewImplementation is a nominal class with private fields and inherited protected store/coordinate state. Consumers construct views through the exported constructor or Store, or subclass and inherit this method; they cannot structurally author an implementation. Adding the method preserves those construction paths. The internal StoreRuntime port remains optional and a missing reader is refused with a typed error.",
     "issue": "#810"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PlanCandidateWriteSetForEvolutionArgs",
+    "member": "planningScope",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-release correction: evolution planning already refuses without explicit full scope. Require planningScope: full in the authoring type so accepted calls match the runtime cost contract. Upgrade callers as documented in bounded-mutation-plans.md.",
+    "issue": "#811"
   }
 ]

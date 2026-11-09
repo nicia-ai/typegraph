@@ -134,6 +134,20 @@ export {
   planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
+export type {
+  MutationAuthoringOptions,
+  MutationCreateOptions,
+  MutationDocument,
+  MutationOperation,
+  MutationPlanBuilder,
+  MutationPlanningOptions,
+} from "./mutation-plan";
+export {
+  createMutationPlanBuilder,
+  MUTATION_DOCUMENT_FORMAT_VERSION,
+  MutationDocumentSchema,
+  planMutations,
+} from "./mutation-plan";
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
 export {
   forkGraphNamespace,
@@ -144,8 +158,11 @@ export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
   MergePlanAnchors,
   MergePlanArtifact,
+  MergePlanArtifactInput,
   MergePlanArtifactV1,
   MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
@@ -176,6 +193,7 @@ export {
   MERGE_PLAN_DIGEST_ALGORITHM,
   MERGE_PLAN_FORMAT_VERSION,
 } from "./plan-schema";
+export type { PlanningScope } from "./planning-scope";
 export type {
   ProvenanceGraph,
   ProvenanceNode,

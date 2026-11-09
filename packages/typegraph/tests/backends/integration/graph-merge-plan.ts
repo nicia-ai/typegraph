@@ -286,6 +286,7 @@ export function registerGraphMergePlanIntegrationTests(
       };
       const mergePlan = unwrap(
         await planCandidateWriteSetForEvolution({
+          planningScope: "full",
           target,
           evolutionPlan,
           makeBackend: () => context.createIsolatedBackend(),
@@ -358,6 +359,7 @@ export function registerGraphMergePlanIntegrationTests(
       );
       const mergePlan = unwrap(
         await planCandidateWriteSetForEvolution({
+          planningScope: "full",
           target,
           evolutionPlan,
           makeBackend: () => context.createIsolatedBackend(),
@@ -454,6 +456,7 @@ export function registerGraphMergePlanIntegrationTests(
       };
       let advanced = false;
       const planned = await planCandidateWriteSetForEvolution({
+        planningScope: "full",
         target,
         evolutionPlan,
         makeBackend: async () => {

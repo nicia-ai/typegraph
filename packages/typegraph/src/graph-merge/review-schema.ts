@@ -9,7 +9,7 @@ import type {
   MergePlanDigest,
   MergePlanEntityRef,
 } from "./plan-schema";
-import { mergePlanArtifactV1Schema } from "./plan-schema";
+import { mergePlanArtifactSchema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
 /** Default review format, retained for callers that validate V1 artifacts. */
@@ -105,7 +105,7 @@ export const mergeReviewArtifactSchema = z
     writeSet: CandidateWriteSetSchema,
     policy: mergeReviewPolicySchema,
     options: z.json(),
-    plan: mergePlanArtifactV1Schema,
+    plan: mergePlanArtifactSchema,
     baseline: z
       .object({
         rows: z.array(

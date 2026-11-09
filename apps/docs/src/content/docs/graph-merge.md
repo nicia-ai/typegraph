@@ -335,6 +335,7 @@ const writeSet = {
   edges: [],
 };
 const mergePlan = unwrap(await planCandidateWriteSetForEvolution({
+          planningScope: "full",
   target,
   evolutionPlan,
   makeBackend: makeIsolatedBackend,
@@ -451,9 +452,11 @@ any committed rows recalled by configured unique or index sources. Planning
 still fences the target revision before and after these reads. With edge
 match-identity constraints, a backend offering `findEdgesByMatchIdentity`
 seeds the exact durable owners named by the candidate. A missing keyed read,
-an owner excluded from the clone projection, or a target without revision
-tracking uses the complete clone path. A custom backend lacking the optional
-`findActiveEdgesBySourceV1` read also uses that path for `oneActive` graphs.
+or an owner excluded from the clone projection refuses bounded planning.
+Targets without revision tracking refuse every planning scope: enable
+`revisionTracking: true` or `history: true` before planning. A custom backend lacking the optional
+`findActiveEdgesBySourceV1` read also refuses for `oneActive` graphs. Select
+`planningScope: "full"` explicitly to permit a complete clone.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
@@ -2319,6 +2322,92 @@ members report no evidence: `get` and `markDelivered` return `undefined`, `scan`
 returns an empty page (echoing `after`), and `hasUndelivered` returns `false`.
 Re-fork the branch to gain evidence.
 
+### Ordered mutation planning
+
+`createMutationPlanBuilder(store, sourceId)` captures the target's revision fence
+when authoring begins. Pass `{ expectedTarget: savedFence }` as the third argument
+when restoring an externally reviewed batch with a previously persisted native
+target fence; a stale fence refuses instead of choosing a newer base. Its
+immutable, typed methods stage ordered collection operations without writing to
+the target:
+
+```typescript
+import { createMutationPlanBuilder, applyMergePlan, unwrap } from "@nicia-ai/typegraph/graph-merge";
+
+const builder = await createMutationPlanBuilder(store, "edit-42");
+const plan = unwrap(await builder
+  .createNode("Item", "new-item", { name: "New item" })
+  .updateNode("Item", "existing-item", { name: "Updated item" })
+  .deleteEdge("links", "obsolete-link")
+  .deleteNode("Item", "obsolete-item")
+  .plan({ makeBackend }));
+
+// Persist or review the normal MergePlanArtifact before application.
+const report = unwrap(await applyMergePlan(store, plan));
+```
+
+Use kinds and properties from your own graph definition. Create ids are explicit,
+so later operations can reference newly staged rows. `updateNode` and
+`updateEdge` preserve ordinary patch semantics, including removing an optional
+property with `undefined`; `replaceNode` uses ordinary replacement semantics.
+Duplicate creates, missing updates, uniqueness conflicts, endpoint constraints,
+and restricted deletes retain their collection behavior. An intentional create
+of a previously deleted node id is recorded explicitly as an exception to the
+plan's default incremental tombstone refusal. Edge creates still refuse reuse
+of a soft-deleted edge id, matching ordinary edge collection behavior.
+
+The default `planningScope: "candidate"` reads the affected rows, incident edges
+for deleted nodes, constraint owners, cardinality peers, and reachable identity
+components. Work scales with that affected closure and operation count; deleting
+an arbitrarily connected node can still require many rows. An ineligible backend
+or graph receives a typed refusal. Explicitly choose `planningScope: "full"` to
+allow one complete clone instead. Bounded staging observes uniqueness keys,
+loads their committed owners, then validates through the original graph schema.
+If a nondeterministic parser changes those keys on replay, bounded planning
+refuses instead of validating against incomplete peers; full planning validates
+once against the complete copy. `makeBackend` must create an independent disposable
+backend; see the factory requirements above.
+
+Planning validates ordered intermediate states, then delegates their net changes
+to the existing incremental merge planner. Application commits the resulting
+merge writes, rather than replaying each staged operation. Ordinary merge
+identity reconciliation and conflict policies therefore still apply. Planning
+does not invoke the target's application hooks. Property parsers must be deterministic on
+persisted values. Postimages must survive the existing merge wire
+codec and schema revalidation unchanged. Schemas with non-idempotent output
+transforms, or serialized values that their input schema refuses, receive a
+typed `stableMergePostimage` capability refusal in either scope. For date
+properties, use a schema that accepts its persisted representation, such as
+`z.coerce.date()`. Tombstoned durable edge owners excluded from a live-state copy
+are also refused in both scopes. Default validity timestamps are
+resolved while staging, and are retained in the artifact. A concurrent target
+change invalidates authoring, planning, or application instead of silently
+rebasing. Failed application rolls back graph rows and constraint sidecars
+together.
+
+Persist `builder.document`, rather than the builder itself. The document is JSON-safe,
+versioned, and contains the original target fence. Resume validation with
+`planMutations({ target: store, mutations: savedDocument, makeBackend, planningScope: "candidate" })`.
+The builder is a typed authoring convenience over this same boundary. Patch operations
+encode removed properties in `unsetProps`; dates supplied to the builder become ISO strings.
+Edge endpoints in the document are kind/id references, even when authoring passes full nodes.
+Only native collection operations are exposed: node replacement uses the existing
+`bulkReplaceById` semantics; edge collections currently provide patch updates.
+
+New plans use wire format 2. It carries explicit `clearValidTo` and node recreation
+intent, including reset validity windows when deleting and recreating an existing id.
+Version 1 artifacts remain readable with their original contract. A failed staged
+operation reports its zero-based `operationIndex`, operation, and original collection
+error as its cause. Candidate review scope still controls review evidence; it is
+separate from permission to clone a complete graph during planning.
+
+A reproducible SQLite measurement is available with
+`node --import tsx packages/typegraph/scripts/measure-mutation-planning.ts` from
+the repository root. For one patch, create, and delete, target node rows read
+remained 9 at 100, 1,000, and 10,000 existing nodes. Explicit full planning read
+105, 1,005, and 10,005 rows respectively. These are instrumented row counts,
+including snapshot-export transactions, rather than latency guarantees.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient
@@ -2336,11 +2425,12 @@ The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
 properties are refused. A custom backend without the active-only source read
-uses the complete clone path for `oneActive` graphs. A custom backend without
+refuses bounded planning for `oneActive` graphs. A custom backend without
 the keyed match-identity owner read, or a candidate whose owner is excluded
-from the clone projection, also uses that path. Other ineligible graphs use
-the complete clone path so staging
-still checks constraints that can depend on rows beyond the candidate's ids.
+from the clone projection, also refuses bounded planning. Select
+`planningScope: "full"` explicitly for these graphs, including evolution planning,
+so staging can check constraints beyond the candidate's ids. Refusals identify
+`details.capability` and the required `details.planningScope`.
 
 ```typescript
 import {
@@ -2710,7 +2800,7 @@ commit after a partially applied failure:
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |
-| `MergePlanCapabilityError`   | Public planning was requested for a target without the durable revision guarantee needed across processes and time. Enable `revisionTracking` or `history`.                                                                                                                   |
+| `MergePlanCapabilityError` | A required planning guarantee is unavailable. `details.capability` identifies it. Enable native revision tracking when required; only bounded-copy refusals naming `details.planningScope: "full"` can be remedied by selecting full scope. |
 | `MergePlanningStaleError`    | The target moved while planning was reading it. This is an expected retry-and-replan outcome under concurrent writers: no plan was returned, so recapture the target and create a new plan before retrying.                                                                    |
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
 | `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
@@ -2732,3 +2822,10 @@ See [FHIR Graph Merge](/examples/fhir-graph-merge) for a complete runnable
 snapshot merge that reconciles two independently-extracted patient-care branches,
 and [Incremental Merge](/examples/incremental-merge) for live-target ingestion
 against an advancing base with persisted, queryable provenance.
+
+Candidate, mutation, review, and revalidation planning require a tracked target.
+`planningScope` defaults to `"candidate"`; select `"full"` explicitly to permit a
+complete copy when bounded dependency reads are unavailable. Full scope does not
+supply missing revision or transaction guarantees. Evolution planning requires
+explicit full scope. Review and revalidation callers must pass this option on
+each call that needs full copying; `reviewScope` controls evidence independently.

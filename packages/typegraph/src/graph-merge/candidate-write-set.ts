@@ -9,7 +9,11 @@ import {
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { isCanonicalIsoDate } from "../utils/date";
 import { computeSchemaComponent } from "./base-version";
-import { CandidateWriteSetError, MergeError } from "./errors";
+import {
+  CandidateWriteSetError,
+  MergeError,
+  MergePlanCapabilityError,
+} from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
 import {
   ingestionBranch,
@@ -17,6 +21,7 @@ import {
 } from "./ingestion-branch";
 import {
   assertPlanningFenceUnchanged,
+  assertPublicPlanCapability,
   captureMergePlanTargetFence,
   planMergeIncremental,
   planMergeIncrementalForEvolution,
@@ -24,6 +29,7 @@ import {
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
+import { type PlanningScope, resolvePlanningScope } from "./planning-scope";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
 import {
@@ -107,16 +113,20 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
   makeBackend: MakeBackend;
   writeSet: unknown;
   options?: Omit<MergeOptions<G>, "target">;
+  /** Candidate planning refuses unsupported bounded reads; full cloning requires opt-in. */
+  planningScope?: PlanningScope;
 }>;
 
 /** Object-form arguments for candidate planning against a planned evolution. */
 export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<
   PlanCandidateWriteSetArgs<G>,
-  "target"
+  "target" | "planningScope"
 > &
   Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
+    /** Evolution staging currently requires a complete copy. */
+    planningScope: "full";
   }>;
 
 /** Captures the schema identity a candidate write set must name. */
@@ -194,6 +204,14 @@ function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
 export async function planCandidateWriteSet<G extends GraphDef>(
   args: PlanCandidateWriteSetArgs<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
+  const scope = resolvePlanningScope(args.planningScope);
+  if (isErr(scope)) return scope;
+  try {
+    assertPublicPlanCapability(args.target);
+  } catch (error) {
+    if (error instanceof MergePlanCapabilityError) return err(error);
+    throw error;
+  }
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
   if (!parsed.success) {
     return err(
@@ -228,7 +246,8 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
-  let bounded = canUseSparseCandidatePlanning(args.target);
+  let bounded =
+    scope.data === "candidate" && canUseSparseCandidatePlanning(args.target);
   let boundedFence:
     Awaited<ReturnType<typeof captureMergePlanTargetFence>> | undefined;
   let matchIdentityOwners: readonly EdgeRow[] = [];
@@ -255,6 +274,18 @@ export async function planCandidateWriteSet<G extends GraphDef>(
       );
     }
   }
+  if (!bounded && scope.data !== "full")
+    return err(
+      new MergePlanCapabilityError(
+        "This candidate cannot be planned with bounded reads. Explicitly select full planning to permit a complete clone.",
+        {
+          details: {
+            capability: "boundedCandidatePlanning",
+            planningScope: "full",
+          },
+        },
+      ),
+    );
   const sparse =
     bounded ?
       sparseCandidateWorkingCopyStrategy<G>(
@@ -376,6 +407,20 @@ export async function planCandidateWriteSet<G extends GraphDef>(
 export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
   args: PlanCandidateWriteSetForEvolutionArgs<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
+  const scope = resolvePlanningScope(args.planningScope);
+  if (isErr(scope)) return scope;
+  if (scope.data !== "full")
+    return err(
+      new MergePlanCapabilityError(
+        "Candidate evolution planning requires explicit full planning.",
+        {
+          details: {
+            capability: "boundedEvolutionPlanning",
+            planningScope: "full",
+          },
+        },
+      ),
+    );
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
   if (!parsed.success) {
     return err(

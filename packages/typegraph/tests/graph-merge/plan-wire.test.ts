@@ -164,9 +164,9 @@ describe("merge plan V1 wire format", () => {
   });
 
   it("distinguishes unsupported versions from malformed V1 artifacts", async () => {
-    expect(parseMergePlanArtifact({ formatVersion: 2 })).toEqual({
+    expect(parseMergePlanArtifact({ formatVersion: 99 })).toEqual({
       success: false,
-      error: { kind: "unsupported-version", received: 2 },
+      error: { kind: "unsupported-version", received: 99 },
     });
 
     const artifact = await constructMergePlanArtifact(planInput());
@@ -174,6 +174,32 @@ describe("merge plan V1 wire format", () => {
     const parsed = parseMergePlanArtifact(malformed);
     expect(parsed.success).toBe(false);
     if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
+  });
+
+  it("requires version 2 for validity clearing and recreation", async () => {
+    const base = planInput();
+    const node = {
+      kind: "Person",
+      id: "new",
+      setProps: { name: "new" },
+      unsetProps: [],
+      clearValidTo: true as const,
+      recreate: true as const,
+    };
+    const document = {
+      ...base,
+      proposed: { ...base.proposed, nodes: { upserts: 1, deletions: 0 } },
+      writes: { ...base.writes, nodeUpserts: [node] },
+    };
+    await expect(constructMergePlanArtifact(document)).rejects.toThrow();
+    const current = await constructMergePlanArtifact({
+      ...document,
+      formatVersion: 2,
+    });
+    expect(
+      (await validateMergePlanArtifact(JSON.parse(JSON.stringify(current))))
+        .success,
+    ).toBe(true);
   });
 
   it("rejects non-finite evidence numbers", async () => {

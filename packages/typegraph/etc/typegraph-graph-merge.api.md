@@ -1333,6 +1333,9 @@ type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export function createMutationPlanBuilder<G extends GraphDef>(target: Store<G>, sourceId: string, options?: MutationAuthoringOptions): Promise<MutationPlanBuilder<G>>;
+
+// @public
 type CreateVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -4747,7 +4750,7 @@ export const MERGE_OPTION_DEFAULTS: {
 export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
-export const MERGE_PLAN_FORMAT_VERSION: 1;
+export const MERGE_PLAN_FORMAT_VERSION: 2;
 
 // @public
 export const MERGE_REVIEW_FORMAT_VERSION: 1;
@@ -4881,11 +4884,16 @@ export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-export type MergePlanArtifact = MergePlanArtifactV1;
+export type MergePlanArtifact = MergePlanArtifactV1 | MergePlanArtifactV2;
 
 // @public (undocumented)
+export type MergePlanArtifactInput = Omit<MergePlanArtifactV2, "digest" | "formatVersion"> & Readonly<{
+    formatVersion: 1 | 2;
+}>;
+
+// @public
 export type MergePlanArtifactV1 = Readonly<{
-    formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
+    formatVersion: 1;
     digest: MergePlanDigest;
     mode: "snapshot" | "incremental";
     target: MergePlanTargetFence;
@@ -4899,6 +4907,23 @@ export type MergePlanArtifactV1 = Readonly<{
 
 // @public (undocumented)
 export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+
+// @public (undocumented)
+export type MergePlanArtifactV2 = Readonly<{
+    formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
+    digest: MergePlanDigest;
+    mode: "snapshot" | "incremental";
+    target: MergePlanTargetFence;
+    anchors: MergePlanAnchors;
+    proposed: MergePlanProposedSummary;
+    writes: MergePlanWrites;
+    guards: MergePlanGuards;
+    review: MergePlanReview;
+    provenance: MergePlanProvenanceOptions;
+}>;
+
+// @public (undocumented)
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
 
 // @public (undocumented)
 export type MergePlanBranchAnchor = Readonly<{
@@ -4966,6 +4991,7 @@ export type MergePlanEdgeUpsert = Readonly<{
     unsetProps: readonly string[];
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
+    clearValidTo?: true;
 }>;
 
 // @public (undocumented)
@@ -4985,6 +5011,7 @@ export type MergePlanEntityResolution = Readonly<{
 
 // @public (undocumented)
 export type MergePlanGuards = Readonly<{
+    nodeResurrections?: readonly MergePlanEntityRef[];
     canonicalMappings: readonly MergePlanCanonicalMapping[];
     retypes: readonly MergePlanRetype[];
     deletedNodes: readonly MergePlanEntityRef[];
@@ -5068,6 +5095,8 @@ export type MergePlanNodeUpsert = Readonly<{
     unsetProps: readonly string[];
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
+    clearValidTo?: true;
+    recreate?: true;
 }>;
 
 // @public
@@ -5301,6 +5330,182 @@ type MetaEdgeProperties = Readonly<{
     inverse: string | undefined;
     inference: InferenceType;
     description: string | undefined;
+}>;
+
+// @public
+export const MUTATION_DOCUMENT_FORMAT_VERSION: 1;
+
+// @public
+export type MutationAuthoringOptions = Readonly<{
+    expectedTarget?: MergePlanTargetFence;
+}>;
+
+// @public (undocumented)
+export type MutationCreateOptions = Readonly<{
+    validFrom?: string | null | undefined;
+    validTo?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MutationDocument = Readonly<{
+    formatVersion: typeof MUTATION_DOCUMENT_FORMAT_VERSION;
+    sourceId: string;
+    target: MergePlanTargetFence;
+    operations: readonly MutationOperation[];
+}>;
+
+// @public (undocumented)
+export const MutationDocumentSchema: z.ZodObject<{
+    formatVersion: z.ZodLiteral<1>;
+    sourceId: z.ZodString;
+    target: z.ZodObject<{
+        graphId: z.ZodString;
+        schema: z.ZodObject<{
+            managed: z.ZodBoolean;
+            version: z.ZodNumber;
+            hash: z.ZodString;
+        }, z.core.$strict>;
+        revision: z.ZodObject<{
+            origin: z.ZodString;
+            revision: z.ZodNullable<z.ZodString>;
+        }, z.core.$strict>;
+    }, z.core.$strict>;
+    operations: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.create">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        options: z.ZodOptional<z.ZodObject<{
+            validFrom: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.create">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        options: z.ZodOptional<z.ZodObject<{
+            validFrom: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+        from: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strict>;
+        to: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.update">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        unsetProps: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        options: z.ZodOptional<z.ZodUnion<readonly [z.ZodPipe<z.ZodObject<{
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>, z.ZodTransform<{
+            validTo?: never;
+        } | {
+            validTo: string;
+        }, {
+            validTo?: string | undefined;
+        }>>, z.ZodObject<{
+            clearValidTo: z.ZodLiteral<true>;
+        }, z.core.$strict>]>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.update">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        unsetProps: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        options: z.ZodOptional<z.ZodUnion<readonly [z.ZodPipe<z.ZodObject<{
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>, z.ZodTransform<{
+            validTo?: never;
+        } | {
+            validTo: string;
+        }, {
+            validTo?: string | undefined;
+        }>>, z.ZodObject<{
+            clearValidTo: z.ZodLiteral<true>;
+        }, z.core.$strict>]>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.replace">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.delete">;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.delete">;
+    }, z.core.$strict>], "op">>;
+}, z.core.$strict>;
+
+// @public
+export type MutationOperation = Readonly<{
+    kind: string;
+    id: string;
+}> & (Readonly<{
+    op: "node.create";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: MutationCreateOptions | undefined;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "edge.create";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: MutationCreateOptions | undefined;
+    from: MergePlanEntityRef;
+    to: MergePlanEntityRef;
+    unsetProps?: never;
+}> | Readonly<{
+    op: "node.update" | "edge.update";
+    props: Readonly<Record<string, JsonValue>>;
+    unsetProps?: readonly string[] | undefined;
+    options?: ValidityEndMutation | undefined;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "node.replace";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: never;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "node.delete" | "edge.delete";
+    props?: never;
+    options?: never;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}>);
+
+// @public
+export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
+    target: MergePlanTargetFence;
+    operationCount: number;
+    document: MutationDocument;
+    createNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
+    updateNode: <K extends NodeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["nodes"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
+    replaceNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>) => MutationPlanBuilder<G>;
+    deleteNode: <K extends NodeKinds<G>>(kind: K, id: string) => MutationPlanBuilder<G>;
+    createEdge: <K extends EdgeKinds<G>>(kind: K, id: string, from: Parameters<Store<G>["edges"][K]["create"]>[0], to: Parameters<Store<G>["edges"][K]["create"]>[1], props: z.input<G["edges"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
+    updateEdge: <K extends EdgeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["edges"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
+    deleteEdge: <K extends EdgeKinds<G>>(kind: K, id: string) => MutationPlanBuilder<G>;
+    plan: (options: MutationPlanningOptions) => Promise<Result<MergePlanArtifact, MergeError>>;
+}>;
+
+// @public
+export type MutationPlanningOptions = Readonly<{
+    makeBackend: MakeBackend;
+    planningScope?: PlanningScope;
 }>;
 
 // @public
@@ -6000,15 +6205,17 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
+    planningScope?: PlanningScope;
 }>;
 
 // @public
 export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
 
 // @public
-export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target"> & Readonly<{
+export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target" | "planningScope"> & Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
+    planningScope: "full";
 }>;
 
 // @public
@@ -6033,6 +6240,15 @@ export function planMergeForEvolution<G extends GraphDef>(store: Store<G>, evolu
 
 // @public
 export function planMergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export function planMutations<G extends GraphDef>(args: MutationPlanningOptions & Readonly<{
+    target: Store<G>;
+    mutations: unknown;
+}>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export type PlanningScope = "candidate" | "full";
 
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
