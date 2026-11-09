@@ -303,7 +303,8 @@ export async function computeBaseVersion<G extends GraphDef>(
 function mintRevisionOrigin<G extends GraphDef>(
   store: Store<G>,
 ): Promise<string> {
-  if (store.revisionTrackingEnabled) return store.revisionOriginNow();
+  if (store.revisionTrackingEnabled)
+    return store.allocationOwner().then((owner) => owner.origin);
   const backend = storeBackend(store);
   return ensureRevisionOrigin(
     backend,

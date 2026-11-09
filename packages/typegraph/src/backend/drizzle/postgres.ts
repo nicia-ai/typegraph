@@ -100,6 +100,7 @@ import {
   isInsufficientResourcesError,
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
+  isPostgresLockTimeout,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
 import {
@@ -126,6 +127,7 @@ import {
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
+import { resolveNodeRowLockPlan } from "../capabilities/node-row-lock-plan";
 import {
   isOptimisticRetryTier,
   OPTIMISTIC_RETRY_ATTEMPTS,
@@ -137,7 +139,6 @@ import {
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
-  serializesWriters,
   type WriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
@@ -685,13 +686,6 @@ function postgresLockTimeoutMilliseconds(value: string): number | undefined {
       return undefined;
     }
   }
-}
-
-/** Driver errors may wrap PostgreSQL's lock-not-available SQLSTATE. */
-function isPostgresLockTimeout(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  if ("code" in error && error.code === "55P03") return true;
-  return "cause" in error && isPostgresLockTimeout(error.cause);
 }
 
 /**
@@ -1308,6 +1302,8 @@ function buildPostgresEngineProfileInternal(
     recordedNodes: getTableName(tables.recordedNodes),
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
+    recordedAnchors: getTableName(tables.recordedAnchors),
+    storeOperations: getTableName(tables.storeOperations),
     revisionOrigins: getTableName(tables.revisionOrigins),
     revisionChanges: getTableName(tables.revisionChanges),
     identityAssertions: getTableName(tables.identityAssertions),
@@ -1919,6 +1915,11 @@ function buildPostgresEngineProfileInternal(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
+    recordedAnchorsDdl: [
+      generatePgCreateTableSQL(tables.recordedAnchors),
+      ...generatePgCreateIndexSQL(tables.recordedAnchors),
+    ],
     adjacencyIndexDdl: adjacencyIndexAdoptionDdl(
       getTableName(tables.recordedEdges),
       "postgres",
@@ -3485,7 +3486,7 @@ function createPostgresOperationBackend(
         toUniqueRow,
       },
       schemaFenceLockClause: schemaFenceInsertLockClause,
-      writersSerialize: serializesWriters(schemaFenceFusionPlan),
+      nodeRowLocks: resolveNodeRowLockPlan(schemaFenceFusionPlan),
       contributionMaterializer,
       fusion: {
         atomicProgramsAtTransactionScope: true,

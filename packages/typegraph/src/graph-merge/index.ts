@@ -15,9 +15,11 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { GraphAllocationOwner } from "../core/allocation-owner";
 export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export type { CompiledOneStatementRead } from "../query";
 export type { BatchReadBuilder } from "../store";
+export type { TransactionReceipt } from "../store/types";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export type {
@@ -70,6 +72,7 @@ export type {
   DurableBranchOperationRequest,
   DurableOperationCapability,
   DurableOperationOutcome,
+  DurableOperationRequest,
   DurableOperationScan,
   DurableOperationUnsupportedDimension,
 } from "./durable-operation";
@@ -83,6 +86,7 @@ export {
   operateDurableBranch,
   scanDurableOperations,
 } from "./durable-operation";
+export { DURABLE_OPERATION_KEY_MAX_BYTES } from "./durable-operation";
 export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
@@ -93,6 +97,7 @@ export {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
+  DurableOperationOwnerMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
   IdentityMergeConflictError,
@@ -106,12 +111,13 @@ export {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   MergeReviewError,
   SimilarityUnavailableError,
   StaleMergePlanError,
+  StoreOperationError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
 export type {
@@ -226,8 +232,20 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
+export {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  type StoreOperationApply,
+  type StoreOperationEvidence,
+  type StoreOperationLookup,
+  type StoreOperationOutcome,
+  type StoreOperationRequest,
+  type StoreOperationTarget,
+} from "./store-operation";
 export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
 export type {
+  AppliedMergeReport,
   BaseAmbiguity,
   BaseVersion,
   BranchId,

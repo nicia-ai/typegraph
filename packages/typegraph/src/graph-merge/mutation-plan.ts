@@ -1075,6 +1075,13 @@ async function planMutationSteps<G extends GraphDef>(
         data: await finalizeMergePlanArtifact({
           ...artifact,
           formatVersion: 2,
+          target: {
+            ...artifact.target,
+            revision: {
+              ...artifact.target.revision,
+              owner: requireDefined(artifact.target.revision.owner),
+            },
+          },
           proposed: {
             ...artifact.proposed,
             nodes: { ...artifact.proposed.nodes, upserts: nodeUpserts.size },

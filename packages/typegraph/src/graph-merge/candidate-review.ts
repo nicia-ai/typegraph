@@ -380,7 +380,7 @@ function assertOptionsUnchanged(before: unknown, after: unknown): void {
 }
 
 function compareReviewTarget(
-  reviewed: MergePlanTargetFence,
+  reviewed: MergePlanArtifact["target"],
   current: MergePlanTargetFence,
 ): readonly MergeReviewDifference[] {
   return compareFields(

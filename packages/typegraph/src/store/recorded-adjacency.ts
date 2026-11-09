@@ -8,12 +8,16 @@ import {
 import { compileTemporalFilter } from "../query/compiler/temporal";
 import { decodeCursor, encodeCursor } from "../query/cursor";
 import { getDialect } from "../query/dialect";
-import { sql } from "../query/sql-fragment";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { compareCodePoints } from "../utils/compare";
 import { sha256Hex } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
+import {
+  assertRecordedAnchorOrigin,
+  type RecordedAnchorOwner,
+} from "./recorded-anchor-origin";
 import {
   type Edge,
   type RecordedAdjacencyOptions,
@@ -102,7 +106,7 @@ export async function readRecordedAdjacency(
     graphId: string;
     backend: GraphBackend;
     binding: RecordedReadBinding | undefined;
-    origin: () => Promise<string>;
+    origin: () => Promise<RecordedAnchorOwner | undefined>;
     root: Reference;
     coordinate: ReadCoordinate;
     edgeKinds: readonly string[];
@@ -149,6 +153,7 @@ export async function readRecordedAdjacency(
     compareCodePoints(left, right),
   );
   const origin = await params.origin();
+  assertRecordedAnchorOrigin(revision, origin, graphId);
   const scope = await sha256Hex(
     JSON.stringify([
       "recorded-adjacency-v2",
@@ -190,10 +195,7 @@ export async function readRecordedAdjacency(
       tableAlias: alias,
       recordedReadBinding: binding,
     });
-  function nodeVisible(
-    kind: ReturnType<typeof sql>,
-    id: ReturnType<typeof sql>,
-  ) {
+  function nodeVisible(kind: SqlFragment, id: SqlFragment) {
     return sql`
       EXISTS (
             SELECT 1 FROM (
@@ -206,13 +208,7 @@ export async function readRecordedAdjacency(
     `;
   }
   async function finishOriginCheck() {
-    if ((await params.origin()) !== origin)
-      throw new ConfigurationError(
-        "Graph origin changed during recorded adjacency read.",
-        {
-          code: "RECORDED_ADJACENCY_ORIGIN_CHANGED",
-        },
-      );
+    assertRecordedAnchorOrigin(revision, await params.origin(), graphId);
   }
   const empty = {
     data: [],

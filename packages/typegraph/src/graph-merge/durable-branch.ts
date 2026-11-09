@@ -91,7 +91,10 @@ import type {
   RecordedForkPoint,
 } from "./types";
 import { asBranchId } from "./types";
-import { coalescedWorkingCopyClose } from "./working-copy";
+import {
+  coalescedWorkingCopyClose,
+  rotateForkAllocationOwner,
+} from "./working-copy";
 
 /**
  * A strategy-defined, JSON-serializable locator for one PERSISTENT working
@@ -412,7 +415,7 @@ export async function branchDurable<
           cause: error,
           details: { branchId: id, allocationId, strategyType: strategy.type },
           suggestion:
-            "Use the strategy's operator tooling to inspect and recover this allocation id before retrying.",
+            "Use the strategy's operator tooling to inspect and destroy any unsealed allocation before retrying; never adopt it.",
         },
       ),
     );
@@ -424,8 +427,23 @@ export async function branchDurable<
   let definitionHash: string;
   try {
     await assertDurableWorkingCopyMatchesBase(baseStore, created.store, base);
+    // Verify the copied base before rotating: the O(1) physical-fork proof
+    // intentionally compares the parent's owner. Seal only the final owner.
+    const inheritedOwner = await rotateForkAllocationOwner(
+      baseStore,
+      created.store,
+    );
+    // Allocation is unpublished and the strategy contract forbids concurrent
+    // writers until seal. Recapture lineage under the rotated owner rather than
+    // retaining the strategy token, which still names the inherited owner.
     const captured = await readBranchForkState(created.store, false);
-    forkState = { ...captured, forkRevision: created.forkRevision };
+    forkState = {
+      ...captured,
+      forkRevision:
+        inheritedOwner ?
+          await created.store.lineageRevisionNow()
+        : created.forkRevision,
+    };
     definitionHash = await getGraphDefinitionHash(created.store.graph);
   } catch (error) {
     return err(await abandonAllocation(strategy, created, id, error));

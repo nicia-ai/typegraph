@@ -250,7 +250,7 @@ export function registerGraphStorageIntegrationTests(
       await store.materializeIndexes();
       // The durable origin row is minted lazily, the first time a token that
       // carries it is asked for.
-      await store.revisionOriginNow();
+      await store.allocationOwner().then((owner) => owner.origin);
       const evolved = await store.evolve(widgetExtension);
       const removed = await evolved.removeKinds(["Widget"]);
       opened.push(removed);
@@ -363,7 +363,7 @@ export function registerGraphStorageIntegrationTests(
         revisionTracking: true,
       });
       await store.nodes.Note.create({ body: "Journaled." });
-      await store.revisionOriginNow();
+      await store.allocationOwner().then((owner) => owner.origin);
 
       const before = rowsByRelation(await inspectGraphStorage(store));
       expect(before.get("revisionChanges")).toBeGreaterThan(0);
@@ -372,11 +372,12 @@ export function registerGraphStorageIntegrationTests(
       await store.clear({ preserveContributionMaterializations: false });
 
       const after = await inspectGraphStorage(store);
-      // Live revision tracking reseeds its clock in the clear transaction, so
-      // the clock row is rebuilt rather than left over.
+      // Live revision tracking reseeds its clock and durable owner in the clear
+      // transaction; these rows belong to the replacement allocation.
       const retained = new Set<string>([
         ...retainedAfterClear(false),
         "recordedClock",
+        "revisionOrigins",
       ]);
       expect(
         after.relations.filter(
@@ -390,7 +391,7 @@ export function registerGraphStorageIntegrationTests(
         revisionTracking: true,
       });
       await tracking.nodes.Note.create({ body: "Origin minted here." });
-      await tracking.revisionOriginNow();
+      await tracking.allocationOwner().then((owner) => owner.origin);
       expect(
         rowsByRelation(await inspectGraphStorage(tracking)).get(
           "revisionOrigins",

@@ -114,6 +114,8 @@ const CLONE_TABLE_NAMES = {
   recordedNodes: "clone_recorded_nodes",
   recordedEdges: "clone_recorded_edges",
   recordedClock: "clone_recorded_clock",
+  recordedAnchors: "clone_recorded_anchors",
+  storeOperations: "clone_store_operations",
   revisionOrigins: "clone_revision_origins",
   revisionChanges: "clone_revision_changes",
   identityAssertions: "clone_identity_assertions",

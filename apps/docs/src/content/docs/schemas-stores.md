@@ -3314,7 +3314,7 @@ compareRecordedInstants(a: RecordedInstant, b: RecordedInstant): -1 | 0 | 1;
   both at `T`. Chain from `store.asOf(validT)` / `store.view({ mode })` to pin
   the two axes independently.
 - **`T` is a `RecordedInstant`**, a branded canonical string encoded as
-  `r1:<16-digit revision>:<canonical UTC timestamp>`. It comes from
+  `r2:<graph origin>:<namespace digest>:<16-digit revision>:<canonical UTC timestamp>`. It comes from
   `store.recordedNow()` or from `asRecordedInstant(...)` after the exact anchor
   has round-tripped through untyped storage. A raw wall-clock string
   (`new Date().toISOString()`) is a compile error because it cannot distinguish

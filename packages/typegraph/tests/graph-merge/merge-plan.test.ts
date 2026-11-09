@@ -1,6 +1,7 @@
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
   asNodeId,
+  asRecordedInstant,
   createStoreWithSchema,
   defineGraph,
   defineNode,
@@ -15,7 +16,7 @@ import {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   StaleMergePlanError,
@@ -31,7 +32,7 @@ import type { MergePlanArtifact } from "../../src/graph-merge/plan-schema";
 import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { Embedder, GraphBranch } from "../../src/graph-merge/types";
-import { asBranchId } from "../../src/graph-merge/types";
+import { asBaseVersion, asBranchId } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
 
@@ -117,9 +118,55 @@ describe("public merge plan lifecycle", () => {
     return store;
   }
 
+  it("binds empty-graph plan fences to the complete allocation owner", async () => {
+    const target = await makeBase();
+    const owner = await target.allocationOwner();
+    const source = await makeBranch(target, "empty-owner");
+    const artifact = unwrap(await planMerge(target, [source]));
+    expect(artifact.target.revision.owner).toEqual(owner);
+    expect(artifact.target.revision.revision).toBeNull();
+    await target.rotateAllocationOwner(owner);
+    const result = await applyMergePlan(target, artifact);
+    expect(isErr(result)).toBe(true);
+    if (!isErr(result)) throw new Error("Expected retired-fence refusal.");
+    expect(result.error).toMatchObject({
+      code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
+    });
+    expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("refuses unbound and foreign-namespace recorded fork points even for an empty branch", async () => {
+    const target = await makeHistoryBase();
+    await target.nodes.Person.create({ name: "root", group: "g" });
+    const source = await makeBranch(target, "empty-source");
+    const recorded = requireDefined(await target.recordedNow());
+    const foreign = asRecordedInstant(
+      recorded.replace(/^r2:([^:]+):[^:]+:/u, `r2:$1:${"f".repeat(32)}:`),
+    );
+    const legacy = asRecordedInstant(
+      recorded.replace(/^r2:[^:]+:[^:]+:/u, "r1:"),
+    );
+    for (const cut of [foreign, legacy]) {
+      const base = asBaseVersion(source.base.replace(recorded, cut));
+      expect(base).not.toBe(source.base);
+      const result = await planMergeIncremental({
+        target,
+        forkPoint: { recorded: cut, base },
+        branches: [{ ...source, base }],
+      });
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) throw new Error("Expected ownership refusal.");
+      expect(result.error).toMatchObject(
+        cut === foreign ?
+          { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" }
+        : { details: { code: "RECORDED_ANCHOR_UNBOUND" } },
+      );
+    }
+  });
+
   async function rehashTarget(
     artifact: MergePlanArtifact,
-    target: MergePlanArtifact["target"],
+    target: unknown,
   ): Promise<MergePlanArtifact> {
     const { digest: _digest, ...input } = artifact;
     return constructMergePlanArtifact({ ...input, target });
@@ -259,7 +306,7 @@ describe("public merge plan lifecycle", () => {
     const wrongOrigin = await applyMergePlan(base, wrongOriginArtifact);
     expect(isErr(wrongOrigin)).toBe(true);
     if (isErr(wrongOrigin)) {
-      expect(wrongOrigin.error).toBeInstanceOf(MergePlanOriginMismatchError);
+      expect(wrongOrigin.error).toBeInstanceOf(MergePlanOwnerMismatchError);
     }
 
     await base.nodes.Person.create(

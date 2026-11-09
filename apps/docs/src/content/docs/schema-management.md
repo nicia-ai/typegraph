@@ -507,6 +507,7 @@ const upgraded = await migrateRecordedAnchor({
   backend,
   graphId: "event-materializer",
   anchor: oldTimestampOnlyAnchor,
+  origin: independentlyAttestedOrigin,
 });
 await checkpoints.replaceAnchor(oldTimestampOnlyAnchor, upgraded);
 
@@ -537,8 +538,18 @@ The migration dense-ranks distinct legacy commit timestamps independently per
 graph, preserving their exact total order. It rewrites the recorded relations
 and clock atomically and retains a durable old-anchor mapping so downstream
 stores can migrate separately. Re-running it after the cutover is a no-op.
-`migrateRecordedAnchor` also accepts an already-versioned `r1` anchor, making a
-mixed old/new checkpoint pass idempotent.
+`migrateRecordedAnchor` also upgrades an `r1:` anchor when supplied with
+independently retained `origin` evidence, and passes through already-bound `r2:`
+and engine-native `e1:` anchors. For the offline timestamp-only cutover, attest
+which converted graph owns the checkpoints before resuming writers and retain its
+origin with the migration record. Never infer a checkpoint's origin from a graph
+that may have been cleared or recreated. If ownership evidence is unavailable,
+discard the checkpoint and resynchronize instead of rebinding it to current data.
+
+Regenerate persisted merge plans and re-baseline branches whose revision fences
+contain the old anchor format before resuming application. The checkpoint helper
+does not migrate embedded merge fences, artifact digests, or branch metadata; do
+not rewrite those strings in place.
 
 The synchronous `createStore` factory is an attach-only, zero-I/O path, so it
 cannot inspect table shapes during construction. If used with `history: true`,

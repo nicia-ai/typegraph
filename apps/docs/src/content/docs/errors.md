@@ -415,7 +415,7 @@ if (isErr(applied)) {
 | `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
 | `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
 | `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
-| `MergePlanOriginMismatchError` | `GRAPH_MERGE_PLAN_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `MergePlanOwnerMismatchError` | `GRAPH_ALLOCATION_OWNER_MISMATCH` | The plan and target have different allocation owners (origin or namespace), even if their numeric revisions match. |
 | `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
 | `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
 
@@ -1132,7 +1132,7 @@ Every refusal specific to that form carries a stable `details.code`:
 | `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store is constructed with an external `recordedRead` binding against an engine-native backend — there is no TypeGraph recorded relation for one to populate. |
 | `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, is reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
 | `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` is called against an engine-native backend — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
-| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r1:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r2:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
 
 The profile refusal fires at backend construction; the two store-option
 refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
@@ -1140,6 +1140,24 @@ refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
 arm, fire at the specific call that cannot be honored. None of these codes
 are members of `RECORDED_CAPTURE_GUARD_CODES` above — that set stays closed
 to the three TypeGraph-capture guards.
+
+### Recorded allocation ownership and lookup
+
+`GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_OWNER_MISMATCH`.
+Merge owner refusals preserve their merge error class and use that same code. Match
+this code to retire checkpoints, plans, or requests after a reset or fork rotation;
+a retry against the same retired owner cannot repair it.
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
+| `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
+| `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
+| `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
+| `ALLOCATION_OWNER_REQUIRES_TRACKING` | Native owner access or rotation requires the Store option `revisionTracking: true` or TypeGraph-owned `history: true`. |
+| `EXTERNAL_RECORDED_OWNER_REQUIRED` | Public owner capture found no owner for the configured external source. Historical reads without a bound owner instead raise `GraphAllocationMismatchError` with code `GRAPH_ALLOCATION_OWNER_MISMATCH`. |
+| `EXTERNAL_RECORDED_OWNER_INVALID` | An external recorded relation's `owner` option is not a reader function. |
+| `RECORDED_RELATIONS_MISSING` | Required captured relations or the allocation log are missing; complete base-schema adoption before writing. |
 
 ### `SchemaMismatchError`
 
@@ -1483,3 +1501,12 @@ try {
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
 | `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
+
+`recordedReadOwner()` on an external source without an owner raises `ConfigurationError`
+with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Historical reads compare the supplied
+checkpoint owner with the actual source owner and raise `GraphAllocationMismatchError`
+with code `GRAPH_ALLOCATION_OWNER_MISMATCH` if it is absent or different. Missing physical
+relations instead raise `ConfigurationError` with `details.code: "RECORDED_RELATIONS_MISSING"`.
+Native owner access and rotation require the `revisionTracking: true` or TypeGraph-owned
+`history: true` Store option; otherwise they raise `ConfigurationError` with
+`details.code: "ALLOCATION_OWNER_REQUIRES_TRACKING"`.

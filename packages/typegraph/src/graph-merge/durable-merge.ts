@@ -22,7 +22,7 @@ import type { Result } from "./result";
 import { err } from "./result";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { getGraphDefinitionHash } from "./typegraph-internal";
-import type { MergeReport } from "./types";
+import type { AppliedMergeReport } from "./types";
 
 /** Arguments for {@link applyDurableMergePlan}. */
 export type ApplyDurableMergePlanArgs<
@@ -47,7 +47,7 @@ export async function applyDurableMergePlan<
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 >(
   args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>,
-): Promise<Result<MergeReport<G>, MergeError>> {
+): Promise<Result<AppliedMergeReport<G>, MergeError>> {
   const { branch, descriptor, plan, strategy, target } = args;
   const options = args.options ?? {};
   if ("merge" in strategy && strategy.merge !== undefined) {

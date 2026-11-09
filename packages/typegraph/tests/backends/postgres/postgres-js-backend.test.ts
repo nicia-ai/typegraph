@@ -117,6 +117,8 @@ async function clearTestData(): Promise<void> {
               typegraph_node_fulltext,
               typegraph_revision_origins,
               typegraph_recorded_clock,
+              typegraph_recorded_anchors,
+              typegraph_store_operations,
               typegraph_recorded_nodes,
               typegraph_recorded_edges,
               typegraph_recorded_identity_assertions,

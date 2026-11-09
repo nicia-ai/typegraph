@@ -43,6 +43,8 @@ export {
   asRecordedInstant,
   compareRecordedInstants,
   type RecordedInstant,
+  recordedInstant,
+  recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "./temporal";
@@ -76,6 +78,7 @@ export {
 } from "./edge-endpoints";
 
 // Core types
+export type { GraphAllocationOwner } from "./allocation-owner";
 export {
   type AnyEdgeRegistration,
   type AnyEdgeType,

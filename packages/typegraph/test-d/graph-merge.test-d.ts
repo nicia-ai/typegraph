@@ -14,6 +14,7 @@ import {
   applyDurableMergePlan,
   applyMergePlan,
   applyMergePlanInTransaction,
+  type AppliedMergeReport,
   BranchError,
   branchDurable,
   type CandidateDiagnostics,
@@ -151,10 +152,10 @@ expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
 );
 
 declare const mergePlan: MergePlanArtifact;
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyMergePlan(store, mergePlan),
 );
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyDurableMergePlan({
     target: store,
     branch: durableBranch,
@@ -264,7 +265,7 @@ const applyOptions: MergePlanApplyOptions<typeof graph> = {
     expectError((applied.merged.nodes = 2));
   },
 };
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyMergePlan(store, mergePlan, applyOptions),
 );
 expectError(

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { type GraphAllocationOwner } from "../core/allocation-owner";
 import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
@@ -15,6 +16,7 @@ export type MergePlanSchemaFence = Readonly<{
 }>;
 
 export type MergePlanRevisionFence = Readonly<{
+  owner: GraphAllocationOwner;
   origin: string;
   revision: string | null;
 }>;
@@ -250,7 +252,11 @@ export type MergePlanArtifactV1 = Readonly<{
   formatVersion: 1;
   digest: MergePlanDigest;
   mode: "snapshot" | "incremental";
-  target: MergePlanTargetFence;
+  target: Omit<MergePlanTargetFence, "revision"> &
+    Readonly<{
+      revision: Omit<MergePlanRevisionFence, "owner"> &
+        Readonly<{ owner?: undefined }>;
+    }>;
   anchors: MergePlanAnchors;
   proposed: MergePlanProposedSummary;
   writes: MergePlanWrites;
@@ -262,11 +268,8 @@ export type MergePlanArtifactV1 = Readonly<{
 export type MergePlanArtifact = MergePlanArtifactV1 | MergePlanArtifactV2;
 export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
 export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
-export type MergePlanArtifactInput = Omit<
-  MergePlanArtifactV2,
-  "digest" | "formatVersion"
-> &
-  Readonly<{ formatVersion: 1 | 2 }>;
+export type MergePlanArtifactInput =
+  MergePlanArtifactV1Input | MergePlanArtifactV2Input;
 
 const nonEmptyStringSchema = z.string().min(1);
 // Zod 4's number schema rejects NaN and infinities by default.
@@ -288,18 +291,32 @@ const mergePlanSchemaFenceSchema = z
 
 const mergePlanRevisionFenceSchema = z
   .object({
+    owner: z
+      .object({
+        origin: z.string().min(1),
+        namespace: z.string().regex(/^[a-f0-9]{32}$/u),
+      })
+      .strict()
+      .optional(),
     origin: nonEmptyStringSchema,
     revision: nonEmptyStringSchema.nullable(),
   })
   .strict();
 
-export const mergePlanTargetFenceSchema = z
+const legacyMergePlanTargetFenceSchema = z
   .object({
     graphId: nonEmptyStringSchema,
     schema: mergePlanSchemaFenceSchema,
     revision: mergePlanRevisionFenceSchema,
   })
   .strict();
+
+export const mergePlanTargetFenceSchema =
+  legacyMergePlanTargetFenceSchema.extend({
+    revision: mergePlanRevisionFenceSchema.extend({
+      owner: mergePlanRevisionFenceSchema.shape.owner.unwrap(),
+    }),
+  });
 
 const branchAnchorSchema = z
   .object({
@@ -686,7 +703,7 @@ const mergePlanArtifactV1BaseSchema = z
     ]),
     digest: mergePlanDigestSchema,
     mode: z.enum(["snapshot", "incremental"]),
-    target: mergePlanTargetFenceSchema,
+    target: legacyMergePlanTargetFenceSchema,
     anchors: mergePlanAnchorsSchema,
     proposed: mergePlanProposedSummarySchema,
     writes: mergePlanWritesSchema,
@@ -709,6 +726,15 @@ function addSemanticIssues(
   artifact: ParsedMergePlanArtifactV1Input,
   ctx: z.RefinementCtx,
 ): void {
+  if (
+    artifact.formatVersion === 2 &&
+    artifact.target.revision.owner === undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["target", "revision", "owner"],
+      message: "Merge plan format 2 requires an allocation owner.",
+    });
   for (const [role, entries] of Object.entries({
     nodeUpserts: artifact.writes.nodeUpserts,
     edgeUpserts: artifact.writes.edgeUpserts,
@@ -751,6 +777,15 @@ function addSemanticIssues(
       code: "custom",
       path: ["writes", "nodeUpserts"],
       message: "Recreation requires merge plan format 2.",
+    });
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.target.revision.owner !== undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["target", "revision", "owner"],
+      message: "Allocation-bound fences require merge plan format 2.",
     });
   const resurrectionKeys = new Set<string>();
   for (const ref of artifact.guards.nodeResurrections ?? []) {

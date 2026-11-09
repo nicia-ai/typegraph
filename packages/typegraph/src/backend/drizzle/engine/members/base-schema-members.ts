@@ -106,6 +106,10 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   graphIdOrderIndexDdl?: readonly string[];
   /** Version-6 candidate-bounded recorded adjacency indexes. */
   adjacencyIndexDdl?: readonly string[];
+  /** Version-7 retained recorded allocation anchors and their time index. */
+  recordedAnchorsDdl?: readonly string[];
+  /** Version-8 durable ordinary Store operation outcomes. */
+  storeOperationsDdl?: readonly string[];
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -143,6 +147,8 @@ export function createBaseSchemaMembers(
     revisionChangesIndexDdl,
     graphIdOrderIndexDdl = [],
     adjacencyIndexDdl,
+    recordedAnchorsDdl,
+    storeOperationsDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -226,6 +232,28 @@ export function createBaseSchemaMembers(
               { missingDependencies: ["adjacencyIndexDdl"] },
             );
           for (const ddl of adjacencyIndexDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 7,
+        async adopt(): Promise<void> {
+          if (recordedAnchorsDdl === undefined) throw new ConfigurationError(
+            "Base-schema version 7 adoption requires recorded-anchor log DDL.",
+            { missingDependencies: ["recordedAnchorsDdl"] },
+          );
+          for (const ddl of recordedAnchorsDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 8,
+        async adopt(): Promise<void> {
+          if (storeOperationsDdl === undefined) throw new ConfigurationError(
+            "Base-schema version 8 adoption requires durable Store-operation DDL.",
+            { missingDependencies: ["storeOperationsDdl"] },
+          );
+          for (const ddl of storeOperationsDdl) await ensureTable(ddl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },

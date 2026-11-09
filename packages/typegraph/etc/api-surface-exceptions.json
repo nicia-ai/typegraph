@@ -17,6 +17,14 @@
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "nodeRowLockClauses",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy is built only by the two bundled engine builders; an engine profile's `strategy` is non-derivable (absent from DERIVABLE_ENGINE_PROFILE_KEYS) and its opaque bundled `assembly` closes over it, so no external consumer can author or replace this type.",
+    "issue": "#807"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
     "declaration": "GraphBackend",
     "member": "lockNodes",
     "kind": "required-member-added",
@@ -406,5 +414,197 @@
     "kind": "required-member-added",
     "reason": "Intentional pre-release correction: evolution planning already refuses without explicit full scope. Require planningScope: full in the authoring type so accepted calls match the runtime cost contract. Upgrade callers as documented in bounded-mutation-plans.md.",
     "issue": "#811"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "PostgresTableNames",
+    "member": "recordedAnchors",
+    "kind": "required-member-added",
+    "reason": "Intentional storage upgrade: a complete physical namespace map must include the base-schema version 7 retained anchor relation. Defaulting a missing relation to a shared table would violate working-copy isolation. Partial constructor overrides remain supported; custom connectors and complete maps must include recordedAnchors, as documented in the changeset.",
+    "issue": "#814"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "revisionOriginNow",
+    "kind": "member-removed",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: replace raw revisionOriginNow() with allocationOwner() and retain the full origin/namespace owner when binding checkpoints or fences. Origin minting is private so callers cannot substitute a partial identity for the graph allocation contract.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ResolvedStoreCore",
+    "member": "rotateAllocationOwner",
+    "kind": "required-member-added",
+    "reason": "Deliberate lifecycle contract documented in .changeset/origin-bound-recorded-anchors.md: concrete Stores expose fenced allocation rotation separately from their read boundary. Custom concrete Store implementations must implement the operation or refuse unsupported rotation explicitly; the structural StoreCore capability remains optional before resolution.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "MergePlanRevisionFence",
+    "member": "owner",
+    "kind": "required-member-added",
+    "reason": "Deliberate breaking change documented in .changeset/origin-bound-recorded-anchors.md: current fences and format-2 plans require the complete allocation owner. Upgrade appliers before planners and regenerate saved plans; version-1 inspection uses a separate ownerless fence shape.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "MergePlanArtifactV1",
+    "member": "target.revision",
+    "kind": "required-member-added",
+    "reason": "The existing required version-1 target.revision fields are now represented by an inline legacy fence instead of the current owner-bound fence. This preserves the ownerless version-1 inspection grammar; it does not introduce a new wire requirement. Version-1 application is intentionally refused as documented in .changeset/origin-bound-recorded-anchors.md.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "MergePlanOriginMismatchError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "Intentional owner-vocabulary rename documented in origin-bound-recorded-anchors.md: replace the old class with MergePlanOwnerMismatchError and MERGE_ERROR_CODES.planOriginMismatch with planOwnerMismatch. The refusal compares both allocation origin and namespace.",
+    "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "PostgresTableNames",
+    "member": "storeOperations",
+    "kind": "required-member-added",
+    "reason": "Intentional storage upgrade: complete physical namespace maps must include the base-schema version 8 durable operation outcome relation. A shared-table default would let an isolated working copy address another allocation's evidence. Partial constructor overrides remain supported; custom connectors and complete maps must include storeOperations, as documented in the changeset.",
+    "issue": "#813"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableBranchOperationRequest",
+    "member": "idempotencyKey",
+    "kind": "member-removed",
+    "reason": "Alias-only refactor: DurableBranchOperationRequest now aliases the canonical DurableOperationRequest, which retains the identical idempotencyKey, metadata, and mutation fields. The structural request contract is unchanged; the surface inventory does not expand this alias.",
+    "issue": "#813"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableBranchOperationRequest",
+    "member": "metadata",
+    "kind": "member-removed",
+    "reason": "Alias-only refactor: DurableBranchOperationRequest now aliases the canonical DurableOperationRequest, which retains the identical idempotencyKey, metadata, and mutation fields. The structural request contract is unchanged; the surface inventory does not expand this alias.",
+    "issue": "#813"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableBranchOperationRequest",
+    "member": "mutation",
+    "kind": "member-removed",
+    "reason": "Alias-only refactor: DurableBranchOperationRequest now aliases the canonical DurableOperationRequest, which retains the identical idempotencyKey, metadata, and mutation fields. The structural request contract is unchanged; the surface inventory does not expand this alias.",
+    "issue": "#813"
   }
 ]

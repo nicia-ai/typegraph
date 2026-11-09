@@ -434,6 +434,8 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           schema,
           graphId,
           ownsWriteLock,
+          undefined,
+          true,
         );
         recordedByGraph.set(graphId, recordedCommit.instant);
         const nodes = entities.filter(

@@ -489,6 +489,7 @@ describe("finalizeEngineCapabilities", () => {
       { ...deps, writeFenceConflict: "commit-time" },
     );
     expect(commitTimeConflict.execution.unitOfWork).toBe("optimistic-retry");
+    expect(commitTimeConflict.durableStoreOperations).toBe(false);
 
     const nonInteractiveCommitTime = finalizeEngineCapabilities(
       {

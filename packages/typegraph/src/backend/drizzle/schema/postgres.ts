@@ -66,6 +66,8 @@ export type PostgresTableNames = Readonly<{
   recordedNodes: string;
   recordedEdges: string;
   recordedClock: string;
+  recordedAnchors: string;
+  storeOperations: string;
   revisionOrigins: string;
   revisionChanges: string;
   identityAssertions: string;
@@ -259,6 +261,33 @@ export function createPostgresTables(
       recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const recordedAnchors = pgTable(
+    n.recordedAnchors,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      revision: bigint("revision", { mode: "number" }).notNull(),
+      recordedAt: text("recorded_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(t.graphId, t.origin, t.recordedAt, t.revision),
+    ],
+  );
+
+  const storeOperations = pgTable(
+    n.storeOperations,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      scope: text("scope").notNull(),
+      idempotencyKey: text("idempotency_key").notNull(),
+      operationDigest: text("operation_digest").notNull(),
+      evidence: text("evidence").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] })],
   );
 
   const revisionOrigins = pgTable(
@@ -701,6 +730,8 @@ export function createPostgresTables(
     recordedNodes,
     recordedEdges,
     recordedClock,
+    recordedAnchors,
+    storeOperations,
     revisionOrigins,
     revisionChanges,
     identityAssertions,

@@ -436,7 +436,8 @@ describe("recorded read dispatch", () => {
     const backend = new ClosureRawBackend();
     const service = createRecordedReadService({
       graphId: "graph",
-      revisionOrigin: () => Promise.resolve("origin"),
+      revisionOrigin: () =>
+        Promise.resolve({ origin: "origin", namespace: "0".repeat(32) }),
       backend: backend as unknown as GraphBackend,
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
@@ -447,7 +448,7 @@ describe("recorded read dispatch", () => {
         valid: { mode: "current" },
         recorded: {
           asOf: asRecordedInstant(
-            "r1:0000000000000001:2026-01-01T00:00:00.000Z",
+            "r2:origin:00000000000000000000000000000000:0000000000000001:2026-01-01T00:00:00.000Z",
           ),
         },
       },
@@ -612,7 +613,8 @@ describe("backend overlay wrappers", () => {
     const backend = new ClosureGraphBackend();
     const service = createRecordedReadService({
       graphId: "graph",
-      revisionOrigin: () => Promise.resolve("origin"),
+      revisionOrigin: () =>
+        Promise.resolve({ origin: "origin", namespace: "0".repeat(32) }),
       backend: backend as unknown as GraphBackend,
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
@@ -623,7 +625,7 @@ describe("backend overlay wrappers", () => {
         valid: { mode: "current" },
         recorded: {
           asOf: asRecordedInstant(
-            "r1:0000000000000001:2026-01-01T00:00:00.000Z",
+            "r2:origin:00000000000000000000000000000000:0000000000000001:2026-01-01T00:00:00.000Z",
           ),
         },
       },

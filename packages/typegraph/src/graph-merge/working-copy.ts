@@ -54,6 +54,7 @@
  * limitations above apply to it — see its own doc comment.
  */
 
+import { sameGraphAllocationOwner } from "../core/allocation-owner";
 import { computeBaseVersion } from "./base-version";
 import { BranchError } from "./errors";
 import type {
@@ -642,8 +643,8 @@ export function forkedWorkingCopyStrategy<
           throw new BranchError(
             "Fork backend does not bind the base's table names: connect() " +
               "returned a backend whose own table bindings disagree with " +
-              "the SQL schema this fork inherits from its base. A fork is " +
-              "the SAME physical database as the base, so a backend bound " +
+              "the SQL schema this fork inherits from its base. A fork carries " +
+              "the base's physical table layout, so a backend bound " +
               "to different (often just the default) table names reads and " +
               "writes through tables the fork's rows were never written to.",
             { details: { inheritedTables, connectedTables } },
@@ -651,6 +652,7 @@ export function forkedWorkingCopyStrategy<
         }
         const forkStore = createStore(baseStore.graph, backend, forkOptions);
         await assertWorkingCopyMatchesBase(forkStore, base);
+        await rotateForkAllocationOwner(baseStore, forkStore);
         return forkStore;
       } catch (error) {
         try {
@@ -714,4 +716,18 @@ export function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
     nodes: Object.freeze(nodes),
     extension,
   });
+}
+
+/** One owner of whether a newly allocated working copy must retire its inherited write owner. */
+export async function rotateForkAllocationOwner<G extends GraphDef>(
+  base: Store<G>,
+  copy: Store<G>,
+): Promise<boolean> {
+  if (!base.revisionTrackingEnabled || !copy.revisionTrackingEnabled)
+    return false;
+  const owner = await copy.allocationOwner();
+  if (!sameGraphAllocationOwner(await base.allocationOwner(), owner))
+    return false;
+  await copy.rotateAllocationOwner(owner);
+  return true;
 }

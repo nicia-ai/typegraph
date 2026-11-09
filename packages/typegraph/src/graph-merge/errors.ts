@@ -29,7 +29,7 @@ export const MERGE_ERROR_CODES = {
   planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH",
   planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH",
   planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH",
-  planOriginMismatch: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH",
+  planOwnerMismatch: "GRAPH_ALLOCATION_OWNER_MISMATCH",
   planStale: "GRAPH_MERGE_PLAN_STALE",
   planningStale: "GRAPH_MERGE_PLANNING_STALE",
   candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE",
@@ -322,12 +322,12 @@ export class MergePlanSchemaMismatchError extends InvalidMergePlanError {
 }
 
 /** Raised when a plan belongs to an independently-created revision clock. */
-export class MergePlanOriginMismatchError extends InvalidMergePlanError {
-  override readonly code = MERGE_ERROR_CODES.planOriginMismatch;
+export class MergePlanOwnerMismatchError extends InvalidMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planOwnerMismatch;
 
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
-    this.name = "MergePlanOriginMismatchError";
+    this.name = "MergePlanOwnerMismatchError";
   }
 }
 
@@ -388,7 +388,7 @@ export class MatchEvidenceError extends MergeError {
 }
 
 /**
- * Generic operational failure raised while orchestrating a durable-branch
+ * Generic operational failure raised while orchestrating a durable
  * operation, such as a strategy transport or host failure.
  */
 export class DurableOperationError extends MergeError {
@@ -397,6 +397,43 @@ export class DurableOperationError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "DurableOperationError";
+  }
+}
+
+/** Refusal of evidence or mutation authorization from a retired or foreign allocation. */
+export class DurableOperationOwnerMismatchError extends DurableOperationError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
+  constructor(cause: unknown) {
+    super(
+      "The durable operation belongs to a different or retired allocation.",
+      { cause, details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" } },
+    );
+    this.name = "DurableOperationOwnerMismatchError";
+  }
+}
+
+/** Failure of an ordinary Store operation, with certainty scoped to this transaction attempt, never to the caller key. */
+export class StoreOperationError extends DurableOperationError {
+  readonly attemptOutcome: "not-committed" | "unknown";
+  readonly phase: "preflight" | "callback" | "evidence" | "commit";
+  readonly retryable: boolean;
+  constructor(
+    attemptOutcome: StoreOperationError["attemptOutcome"],
+    phase: StoreOperationError["phase"],
+    retryable: boolean,
+    cause: unknown,
+  ) {
+    super(
+      attemptOutcome === "unknown" ?
+        "This attempt's commit outcome is unknown; retry the same persisted request to recover its outcome; a lookup returning absence does not authorize a new request."
+      : "This attempt did not commit; an earlier outcome may exist. Any retry must preserve the same key and payload.",
+      { cause, details: { attemptOutcome, phase, retryable } },
+    );
+    this.name = "StoreOperationError";
+    this.attemptOutcome = attemptOutcome;
+    this.phase = phase;
+    this.retryable = retryable;
   }
 }
 

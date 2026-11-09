@@ -8,7 +8,7 @@
  *
  * `revision()` reports `<origin>:<clock>` as an `EngineRevision`: the
  * graph's durable, random revision-origin nonce ({@link readRevisionOrigin},
- * minted on demand through `store.revisionOriginNow()` — the SAME
+ * minted on demand through `store.allocationOwner()` — the SAME
  * `typegraph_revision_origins` row `base-version.ts`'s revision and engine
  * anchors bind to), joined to the graph's recorded-time clock (the same
  * value `store.revisionNow()` exposes, or the fixed genesis token before
@@ -23,7 +23,7 @@
  * below): `changesSince` parses it back out of `since` and treats a
  * mismatch against the graph's LIVE origin exactly like an unparseable
  * revision — `unbounded`, never a guess. `revision()` resolves the origin
- * entirely through `store.revisionOriginNow()` rather than reading
+ * entirely through `store.allocationOwner()` rather than reading
  * {@link readRevisionOrigin} on `session` itself first: minting a
  * never-before-seen origin is a WRITE (schema DDL plus an insert), and for a
  * capture-enabled store `session` is often the recorded-capture wrapper,
@@ -33,7 +33,7 @@
  * provisions the relation lazily (see `Store.clear()`'s own comment on this)
  * has no such table at all until something ensures it, and `session` (a
  * `LineageSession`) carries no `ensureRevisionOriginsTable` member of its
- * own to do that with. `Store.revisionOriginNow()` already knows both how to
+ * own to do that with. `Store.allocationOwner()` already knows both how to
  * ensure the relation and how to route the read/mint around the
  * recorded-capture wrapper onto the store's raw backend (see its own doc
  * comment), so this module defers to it completely rather than re-deriving
@@ -172,6 +172,7 @@ import {
   type LineageMembers,
   type LineageSession,
 } from "../../backend/types";
+import { type GraphAllocationOwner } from "../../core/allocation-owner";
 import { type GraphDef } from "../../core/define-graph";
 import {
   asRecordedInstant,
@@ -217,7 +218,7 @@ export type RecordedLineageStore<G extends GraphDef = GraphDef> = Readonly<{
   /**
    * Mints (or returns) this graph's durable revision-origin nonce, always
    * through the store's OWN raw backend regardless of which session called
-   * it — see `Store.revisionOriginNow()`'s own doc for why it deliberately
+   * it — see `Store.allocationOwner()`'s own doc for why it deliberately
    * bypasses the recorded-capture wrapper. `revision()` defers to this
    * rather than re-deriving the mint here: a capture-enabled store's
    * wrapped backend refuses raw `executeStatement` outright (it exists to
@@ -226,7 +227,7 @@ export type RecordedLineageStore<G extends GraphDef = GraphDef> = Readonly<{
    * for a history-enabled store, is that very wrapper — would refuse for a
    * reason that has nothing to do with this row.
    */
-  revisionOriginNow: () => Promise<string>;
+  allocationOwner: () => Promise<GraphAllocationOwner>;
   [STORE_RUNTIME]?: StoreRuntime<G>;
 }>;
 
@@ -434,7 +435,7 @@ async function changedEntityKeys(
  * implementation depends on that: it reads correctly on whatever session a
  * future caller hands it, transaction handle included. `revision()`'s
  * ORIGIN resolution (`resolveOrigin`, see its own doc) is the one
- * exception: it always goes through `store.revisionOriginNow()`, never
+ * exception: it always goes through `store.allocationOwner()`, never
  * `session`, for BOTH the mint and the ordinary read — minting is a WRITE,
  * and `session` for a capture-enabled store's `lineage` is the
  * recorded-capture wrapper, which refuses raw `executeStatement` outright,
@@ -443,7 +444,7 @@ async function changedEntityKeys(
  * live-origin comparison (below) DOES read on `session`, unlike
  * `resolveOrigin`: by the time a real `since` token reaches it, some prior
  * `revision()` call already minted this graph's origin through
- * `store.revisionOriginNow()`, so the relation is already physically
+ * `store.allocationOwner()`, so the relation is already physically
  * present for any session sharing that database.
  */
 export function recordedRelationsLineage<G extends GraphDef>(
@@ -481,19 +482,19 @@ export function recordedRelationsLineage<G extends GraphDef>(
 
   /**
    * Resolves this graph's durable revision-origin nonce entirely through
-   * `store.revisionOriginNow()` — never by reading {@link readRevisionOrigin}
+   * `store.allocationOwner()` — never by reading {@link readRevisionOrigin}
    * on `session` first. A direct read on `session` would throw rather than
    * return `undefined` on a backend whose `ensureRevisionOriginsTable`
    * provisions the origins relation lazily (see the module doc's "Revision
    * encoding" section): the relation would not exist yet, and `session` (a
    * `LineageSession`) has no `ensureRevisionOriginsTable` member with which
-   * to create it. `store.revisionOriginNow()` already ensures the relation
+   * to create it. `store.allocationOwner()` already ensures the relation
    * and mints a fresh origin only when none exists, so this function has no
    * ensure-or-mint logic of its own to get out of step with it. Takes no
    * `session`: there is nothing left for one to read.
    */
   function resolveOrigin(): Promise<string> {
-    return store.revisionOriginNow();
+    return store.allocationOwner().then((owner) => owner.origin);
   }
 
   async function revision(session: LineageSession): Promise<EngineRevision> {
@@ -520,7 +521,7 @@ export function recordedRelationsLineage<G extends GraphDef>(
     // directly on `session` (rather than through `resolveOrigin`) is safe
     // here, unlike in `revision()`: a real `since` already came from some
     // earlier `revision()` call, which only ever returns after
-    // `store.revisionOriginNow()` has ensured the origins relation exists.
+    // `store.allocationOwner()` has ensured the origins relation exists.
     const liveOrigin = await readRevisionOrigin(session, schema, graphId);
     if (liveOrigin === undefined || liveOrigin !== parsed.origin) {
       return UNBOUNDED_DELTA;
@@ -573,7 +574,7 @@ function revisionJournalLineage<G extends GraphDef>(
     async revision(session: LineageSession): Promise<EngineRevision> {
       await assertRevisionChangesJournalReady(storeBackend(store));
       const [origin, instant] = await Promise.all([
-        store.revisionOriginNow(),
+        store.allocationOwner().then((owner) => owner.origin),
         readRecordedClock(session, schema, graphId),
       ]);
       return encodeRecordedLineageRevision(origin, instant);

@@ -673,14 +673,21 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // and RecordedAdjacencyPage at the root. The seven Store-bearing secondary
 // entrypoints gain exactly those three transitive names (+3 each); all other
 // entrypoints retain their existing name sets.
+// Allocation ownership adds GraphAllocationOwner to six Store-bearing secondary
+// entrypoints. Removing that single measured symbol reproduces each preceding
+// fingerprint; the root and graph-merge export it directly.
+// Node-row lock clauses become caller-supplied on the engine strategy, so its
+// lock-bearing builders reach RowLockClause and the strategy's own
+// NodeRowLockClauses. Both are dialect SQL plumbing, not authoring contracts,
+// so the engine fingerprint books exactly those two names.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 500,
     sha256: "62e325f352ed2a6ff47081301d548aa1a7a0091d1282028a1aa4c9c3d71116a5",
   },
   "./adapters/drizzle/engine": {
-    count: 338,
-    sha256: "8a3135da686dc142f7a44c5007b0d4e33f9312aca060d16c3da852dc5f485c97",
+    count: 340,
+    sha256: "9a2275bc661deadab03f94d147e225c486cd22d5bf32b60fd8a52f211ae86d8c",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -695,8 +702,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // visible here. Keep that large type graph isolated from the established
   // PostgreSQL adapter and pin its exact symbol set.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 879,
-    sha256: "461324591f2f628d418a3600e5665a3bdf1d792cc66ccf2de6121e45d9125aa6",
+    count: 880,
+    sha256: "325fe11416402e1912454c7b6146690a46d02e826793fb9a226681373c96897a",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 271,
@@ -730,37 +737,39 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
+  // Exact apply receipts expose TransactionReceipt as a named export here:
+  // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 874,
-    sha256: "39ddbf4f7f9ea804c5c28f314b72978f2d740cc307ce05da15288077044d7945",
+    count: 873,
+    sha256: "603e70b572498badb6079e928e8e6eefd6940d51e325949d66e3f6aaa5547ca4",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 858,
-    sha256: "a250bdf327a42f667a2da0209714a489f8701d3b7767263d50aa3b66afc07e14",
+    count: 859,
+    sha256: "1300da0693612bd7fa50abe00225639ac1054b9e1c3144db2c9b2030cec6f2a5",
   },
   "./postgres/pglite": {
-    count: 864,
-    sha256: "0aee05cb5b69fc3849f40b58a59c47ecc28c416bd3bdc3900d5c1576754a246a",
+    count: 865,
+    sha256: "128bb1201a7c17c296c7a90fc9f17a6dba6aed53087af8069521c29a0fa9c132",
   },
   "./profiler": {
-    count: 860,
-    sha256: "de0fd13f72ec08d9ba7b96cd310417d05454f89e13d1f760393555fd0e6d270f",
+    count: 861,
+    sha256: "68398e3f8b194c8f34286fb13deccf9abfc6a4798287421445d9f76ea515ba75",
   },
   "./provenance": {
-    count: 873,
-    sha256: "753c487c6430ba64c2e3c37cb5bfa2d1e91ab313d8075377f09ce5d40a6dfd84",
+    count: 874,
+    sha256: "2a33b39703f60ffae89a52a87de9bbeeeee11665846948af6be9e7c6516f2ecd",
   },
   "./schema": {
     count: 290,
     sha256: "c4030c73857791586eb0134a1947ed4a5c540176d83103437b9d7cbbc2d62a16",
   },
   "./sqlite/local": {
-    count: 864,
-    sha256: "0aee05cb5b69fc3849f40b58a59c47ecc28c416bd3bdc3900d5c1576754a246a",
+    count: 865,
+    sha256: "128bb1201a7c17c296c7a90fc9f17a6dba6aed53087af8069521c29a0fa9c132",
   },
 };
 

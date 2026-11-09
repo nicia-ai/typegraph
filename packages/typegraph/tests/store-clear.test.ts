@@ -303,17 +303,21 @@ describe("store.clear() rotates the durable revision origin", () => {
     backend = createTestBackend();
   });
 
-  it("mints a different revisionOriginNow() after clear(), under history", async () => {
+  it("mints a different allocationOwner() after clear(), under history", async () => {
     const store = createStore(graph, backend, { history: true });
     await store.nodes.Person.create({
       email: "alice@example.com",
       name: "Alice",
     });
-    const originBeforeClear = await store.revisionOriginNow();
+    const originBeforeClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
 
     await store.clear();
 
-    const originAfterClear = await store.revisionOriginNow();
+    const originAfterClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
     // Mutation-proof: the origin row is deleted both by the `revisionOrigins`
     // step of the graph-relation clear sequence and by `clear()`'s own
     // `resetRevisionOrigin` call (`store.ts`, the guarantee for a backend whose
@@ -323,22 +327,26 @@ describe("store.clear() rotates the durable revision origin", () => {
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
 
-  it("mints a different revisionOriginNow() after clear(), under plain revisionTracking (no history)", async () => {
+  it("mints a different allocationOwner() after clear(), under plain revisionTracking (no history)", async () => {
     const store = createStore(graph, backend, { revisionTracking: true });
     await store.nodes.Person.create({
       email: "alice@example.com",
       name: "Alice",
     });
-    const originBeforeClear = await store.revisionOriginNow();
+    const originBeforeClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
 
     await store.clear();
 
-    const originAfterClear = await store.revisionOriginNow();
+    const originAfterClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
 
-  it("rotates the origin even when revisionOriginNow() was never called before the first clear()", async () => {
-    // Proves rotation does not depend on a prior `revisionOriginNow()` call
+  it("rotates the origin even when allocationOwner() was never called before the first clear()", async () => {
+    // Proves rotation does not depend on a prior `allocationOwner()` call
     // having minted the row. It does NOT exercise `ensureRevisionOriginsRelation`'s
     // own lazy-bootstrap path on this fixture: `createTestBackend()`'s local
     // SQLite backend installs the FULL base schema — `typegraph_revision_origins`
@@ -356,9 +364,9 @@ describe("store.clear() rotates the durable revision origin", () => {
     });
 
     await expect(store.clear()).resolves.toBeUndefined();
-    await expect(store.revisionOriginNow()).resolves.toEqual(
-      expect.any(String),
-    );
+    await expect(
+      store.allocationOwner().then((owner) => owner.origin),
+    ).resolves.toEqual(expect.any(String));
   });
 });
 

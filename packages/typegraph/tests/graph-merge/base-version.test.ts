@@ -213,7 +213,7 @@ describe("computeBaseVersion mints the revision origin fresh, never from a per-S
     // Mints storeB's revision origin BEFORE storeA's clear(). Pre-fix, this
     // is exactly what populated `storeB`'s now-removed `#revisionOrigin`
     // memo; post-fix it is just an ordinary read with no lingering effect.
-    await storeB.revisionOriginNow();
+    await storeB.allocationOwner().then((owner) => owner.origin);
 
     // storeA clears the SAME graph, rotating the durable origin row every
     // `base@V` anchor for this graph depends on.
@@ -230,7 +230,7 @@ describe("computeBaseVersion mints the revision origin fresh, never from a per-S
     const result = await merge<PlainGraph>(storeB, [fork], {});
 
     // Mutation-proof: reintroducing a per-Store memo around
-    // `revisionOriginNow()`'s `ensureRevisionOrigin` call (`store.ts`) makes
+    // `allocationOwner()`'s `ensureRevisionOrigin` call (`store.ts`) makes
     // this assertion fail — `storeB`'s memo, populated before `storeA`'s
     // clear(), keeps answering with the pre-clear origin, `branch()` and
     // `merge()`'s outer precondition both mint an anchor from that SAME
