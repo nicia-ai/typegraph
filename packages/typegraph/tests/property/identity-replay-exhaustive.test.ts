@@ -378,7 +378,7 @@ async function expectExhaustiveLineage(
     }
     const instant =
       recordedByRevision.get(revision) ??
-      createRecordedInstant(revision, nowIso());
+      createRecordedInstant(revision, nowIso(), await store.allocationOwner());
     const members = await store.asOfRecorded(instant).identity.membersOf(ref);
     const normalized = members
       .map((member) => `${member.kind} ${member.id}`)

@@ -420,6 +420,8 @@ describe("a schema version this release commits", () => {
         edges: [],
       },
       policy: { id: "schema-hash-representative-policy", context: {} },
+      // The graph declares a composition pair, which bounded planning cannot see.
+      planningScope: "full" as const,
     };
 
     const planned = await planCandidateWriteSetReview(args);

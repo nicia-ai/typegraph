@@ -364,6 +364,8 @@ export async function closeRecordedHardDeletedKind(
     schema,
     graphId,
     ownsWriteLock,
+    undefined,
+    true,
   );
   if (removal.entity === "node") {
     await closeOpenByKind(

@@ -47,7 +47,7 @@ import {
   planMerge,
   planMergeIncremental,
 } from "../../src/graph-merge/merge";
-import type { MergePlanArtifact } from "../../src/graph-merge/plan-schema";
+import type { MergePlanArtifactV3 } from "../../src/graph-merge/plan-schema";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 
@@ -332,7 +332,7 @@ async function rejectionOf(work: Promise<unknown>): Promise<unknown> {
 }
 
 /** A compatible revalidation of `plan`, as `revalidateCandidateWriteSetReview` returns one. */
-function compatibleReviewOf(plan: MergePlanArtifact): CompatibleMergeReview {
+function compatibleReviewOf(plan: MergePlanArtifactV3): CompatibleMergeReview {
   return {
     status: "compatible",
     reviewDigest: { algorithm: "sha256", value: REVIEW_DIGEST },

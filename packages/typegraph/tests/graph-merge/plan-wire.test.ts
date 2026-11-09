@@ -5,8 +5,12 @@ import {
   computeMergePlanDigest,
   finalizeMergePlanArtifact,
 } from "../../src/graph-merge/plan-canonical";
-import type { MergePlanArtifactV2Input } from "../../src/graph-merge/plan-schema";
-import { MERGE_PLAN_FORMAT_VERSION } from "../../src/graph-merge/plan-schema";
+import {
+  LEGACY_MERGE_PLAN_FORMAT_VERSIONS,
+  MERGE_PLAN_FORMAT_VERSION,
+  type MergePlanArtifactInput,
+  type MergePlanArtifactV3Input,
+} from "../../src/graph-merge/plan-schema";
 import {
   constructMergePlanArtifact,
   parseMergePlanArtifact,
@@ -15,14 +19,45 @@ import {
 } from "../../src/graph-merge/plan-wire";
 import { requireDefined } from "../../src/utils/presence";
 
-function planInput(): MergePlanArtifactV2Input {
+const ALLOCATION_OWNER = { origin: "store-origin", namespace: "a".repeat(32) };
+
+/** A legacy-format input built from the current fixture, digested by hand. */
+async function legacyArtifact(
+  formatVersion: 1 | 2,
+  overrides: Readonly<Record<string, unknown>> = {},
+): Promise<unknown> {
+  const { review, target, ...body } = planInput();
+  const { compositionOrphans: _orphans, ...legacyReview } = review;
+  const { owner: _owner, ...unownedRevision } = target.revision;
+  const input = {
+    ...body,
+    formatVersion,
+    target:
+      formatVersion === 1 ? { ...target, revision: unownedRevision } : target,
+    review: legacyReview,
+    ...overrides,
+  } as unknown as MergePlanArtifactInput;
+  return {
+    ...input,
+    digest: {
+      algorithm: "sha256",
+      value: await computeMergePlanDigest(input),
+    },
+  };
+}
+
+function planInput(): MergePlanArtifactV3Input {
   return {
     formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode: "snapshot",
     target: {
       graphId: "care",
       schema: { managed: true, version: 3, hash: "schema-hash" },
-      revision: { origin: "store-origin", revision: "revision-7" },
+      revision: {
+        owner: ALLOCATION_OWNER,
+        origin: "store-origin",
+        revision: "revision-7",
+      },
     },
     anchors: {
       kind: "snapshot",
@@ -71,7 +106,7 @@ function planInput(): MergePlanArtifactV2Input {
   };
 }
 
-function resolutionPlanInput(): MergePlanArtifactV2Input {
+function resolutionPlanInput(): MergePlanArtifactV3Input {
   const input = planInput();
   const evidence = {
     a: { kind: "Patient", id: "a" },
@@ -122,7 +157,7 @@ describe("merge plan wire format", () => {
 
   it("canonicalizes nested object keys before hashing", async () => {
     const left = planInput();
-    const right: MergePlanArtifactV2Input = {
+    const right: MergePlanArtifactV3Input = {
       ...left,
       writes: {
         ...left.writes,
@@ -166,16 +201,13 @@ describe("merge plan wire format", () => {
   });
 
   it("distinguishes unsupported versions from malformed artifacts", async () => {
-    // A stale but genuinely PRE-COMPOSITION artifact: `formatVersion: 1`
-    // (this library's PREVIOUS format, before `review.compositionOrphans`
-    // was added — see the version-bump comment on
-    // `MERGE_PLAN_FORMAT_VERSION`) must be reported as `unsupported-version`,
-    // never as `malformed` — a caller that stored a v1 plan for later
-    // application is told the format moved, not that its payload is corrupt.
-    expect(parseMergePlanArtifact({ formatVersion: 1 })).toEqual({
-      success: false,
-      error: { kind: "unsupported-version", received: 1 },
-    });
+    // A legacy format parses under its own grammar, for inspection, so an
+    // empty legacy artifact is malformed rather than unsupported.
+    for (const legacy of LEGACY_MERGE_PLAN_FORMAT_VERSIONS) {
+      const parsed = parseMergePlanArtifact({ formatVersion: legacy });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
+    }
     expect(
       parseMergePlanArtifact({
         formatVersion: MERGE_PLAN_FORMAT_VERSION + 1,
@@ -193,6 +225,52 @@ describe("merge plan wire format", () => {
     const parsed = parseMergePlanArtifact(malformed);
     expect(parsed.success).toBe(false);
     if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
+  });
+
+  it("parses legacy formats 1 and 2 under their own grammar", async () => {
+    const v1 = await legacyArtifact(1);
+    const v2 = await legacyArtifact(2);
+    expect(parseMergePlanArtifact(v1).success).toBe(true);
+    expect(parseMergePlanArtifact(v2).success).toBe(true);
+    expect((await validateMergePlanArtifact(v2)).success).toBe(true);
+    // Format 1 carries no allocation owner; format 2 requires one.
+    const ownedV1 = await legacyArtifact(1, {
+      target: planInput().target,
+    });
+    expect(parseMergePlanArtifact(ownedV1).success).toBe(false);
+    // Neither legacy format carries the composition-orphan review field.
+    const withOrphans = await legacyArtifact(2, {
+      review: planInput().review,
+    });
+    expect(parseMergePlanArtifact(withOrphans).success).toBe(false);
+  });
+
+  it("requires format 2 or later for validity clearing and recreation", async () => {
+    const base = planInput();
+    const writes = {
+      ...base.writes,
+      nodeUpserts: [
+        {
+          kind: "Patient",
+          id: "new",
+          setProps: { name: "new" },
+          unsetProps: [],
+          clearValidTo: true as const,
+          recreate: true as const,
+        },
+      ],
+    };
+    expect(
+      parseMergePlanArtifact(await legacyArtifact(1, { writes })).success,
+    ).toBe(false);
+    expect(
+      parseMergePlanArtifact(await legacyArtifact(2, { writes })).success,
+    ).toBe(true);
+    const current = await constructMergePlanArtifact({ ...base, writes });
+    expect(
+      (await validateMergePlanArtifact(JSON.parse(JSON.stringify(current))))
+        .success,
+    ).toBe(true);
   });
 
   describe("refuses identity arbitration shapes the merge no longer produces", () => {

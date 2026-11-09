@@ -5,16 +5,16 @@ import {
   CandidateWriteSetSchema,
 } from "./candidate-write-set";
 import type {
-  MergePlanArtifact,
+  MergePlanArtifactV3,
   MergePlanDigest,
   MergePlanEntityRef,
 } from "./plan-schema";
-import { mergePlanArtifactV2Schema } from "./plan-schema";
+import { mergePlanArtifactV3Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
-// A review embeds its plan under the strict plan schema, so a review stored
-// before the plan's own 1 -> 2 bump (`MERGE_PLAN_FORMAT_VERSION`) can never
-// validate. Formats 1 (whole-target baseline) and 2 (candidate-scoped
+// A review embeds its plan under the strict current plan schema, so a review
+// stored before the plan's bump to format 3 (`MERGE_PLAN_FORMAT_VERSION`) can
+// never validate. Formats 1 (whole-target baseline) and 2 (candidate-scoped
 // baseline) embedded a version-1 plan; both evidence modes are numbered past
 // them so a stored one is refused as an unsupported version rather than as
 // malformed.
@@ -83,7 +83,7 @@ export type MergeReviewArtifact = Readonly<{
   writeSet: CandidateWriteSet;
   policy: MergeReviewPolicy;
   options: JsonValue;
-  plan: MergePlanArtifact;
+  plan: MergePlanArtifactV3;
   baseline: MergeReviewBaseline;
 }>;
 
@@ -99,14 +99,14 @@ export type MergeReviewRevalidation =
   | Readonly<{
       status: "compatible";
       reviewDigest: MergePlanDigest;
-      plan: MergePlanArtifact;
+      plan: MergePlanArtifactV3;
     }>
   | Readonly<{
       status: "changed" | "incompatible";
       reviewDigest: MergePlanDigest;
       differences: readonly MergeReviewDifference[];
       /** Present when a fresh plan was computed; it requires a new review. */
-      plan?: MergePlanArtifact;
+      plan?: MergePlanArtifactV3;
     }>;
 
 const digestSchema = z.string().regex(/^[\da-f]{64}$/u);
@@ -131,7 +131,7 @@ export const mergeReviewArtifactSchema = z
     writeSet: CandidateWriteSetSchema,
     policy: mergeReviewPolicySchema,
     options: z.json(),
-    plan: mergePlanArtifactV2Schema,
+    plan: mergePlanArtifactV3Schema,
     baseline: z
       .object({
         rows: z.array(

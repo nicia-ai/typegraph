@@ -90,15 +90,23 @@ const RELEASED_FORK_RELATION_KEYS = [
   "reconciliationMarkers",
 ] as const satisfies readonly GraphRelationKey[];
 
+/** The inventory as the release that named every relation in its digest knew it. */
+const SECOND_RELEASED_FORK_RELATION_KEYS = [
+  ...RELEASED_FORK_RELATION_KEYS,
+  "recordedAnchors",
+  "storeOperations",
+] as const satisfies readonly GraphRelationKey[];
+
 const RELATION_NAMES = resolveGraphRelationNames(defaultPostgresTableNames);
 
 /** The content digest exactly as the released library computed it. */
 async function releasedForkDigest(
   backend: GraphBackend,
   graphId: string,
+  keys: readonly GraphRelationKey[] = RELEASED_FORK_RELATION_KEYS,
 ): Promise<string> {
   const digests: [string, string][] = [];
-  for (const key of RELEASED_FORK_RELATION_KEYS) {
+  for (const key of keys) {
     if (key === "fulltext" && backend.fulltextStrategy === undefined) continue;
     const table = RELATION_NAMES[key];
     const rows = await backend.execute<Readonly<{ row: unknown }>>(
@@ -240,19 +248,27 @@ describe("forkGraphNamespace", () => {
     // A relation added to the graph-scoped inventory after a fork was taken
     // holds no rows for that fork. Its arrival must not change the digest a
     // retry or an abort verifies, or every unpublished fork is stranded by
-    // the upgrade that adds it.
+    // the upgrade that adds it. Two released baselines recorded proofs: the
+    // first release's inventory, and a later one that named every relation it
+    // knew, empty or not. The graph declares no identity, so this release
+    // writes nothing to the transition log neither of them had.
     expect(GRAPH_RELATION_KEYS.slice(0, 19)).toEqual(
       RELEASED_FORK_RELATION_KEYS,
     );
+    expect(GRAPH_RELATION_KEYS.slice(0, 21)).toEqual(
+      SECOND_RELEASED_FORK_RELATION_KEYS,
+    );
     expect(GRAPH_RELATION_KEYS.length).toBeGreaterThan(
-      RELEASED_FORK_RELATION_KEYS.length,
+      SECOND_RELEASED_FORK_RELATION_KEYS.length,
     );
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
-    const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
-      history: true,
-    });
+    const [source] = await createStoreWithSchema(
+      otherGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
     await prepareNamespaceForkTarget(source, targetFixture.backend);
     await source.nodes.Item.create({ name: "kept" });
 
@@ -261,27 +277,19 @@ describe("forkGraphNamespace", () => {
       targetFixture.backend,
       "pre-upgrade-fork",
     );
-    const released = await releasedForkDigest(targetFixture.backend, graph.id);
+    const secondReleased = await releasedForkDigest(
+      targetFixture.backend,
+      otherGraph.id,
+      SECOND_RELEASED_FORK_RELATION_KEYS,
+    );
     console.info("fork digests", {
       recorded: fork.proof.contentDigest,
-      released,
+      secondReleased,
     });
-    expect(fork.proof.contentDigest).toBe(released);
+    expect(fork.proof.contentDigest).toBe(secondReleased);
 
-    // The ledger row as the released library left it.
-    await targetFixture.client.query(
-      "UPDATE typegraph_namespace_fork_operations SET content_digest = $1 WHERE operation_key = $2",
-      [released, "pre-upgrade-fork"],
-    );
-    const retried = await forkGraphNamespace(
-      source,
-      targetFixture.backend,
-      "pre-upgrade-fork",
-    );
-    expect(retried.proof).toEqual(fork.proof);
-
-    // A target the released library prepared has no table for a relation
-    // that did not exist yet. Retry and abort treat it as holding no rows.
+    // A target the first release prepared has no table for a relation that
+    // did not exist yet, and its ledger row holds the first baseline's digest.
     for (const key of GRAPH_RELATION_KEYS.slice(
       RELEASED_FORK_RELATION_KEYS.length,
     )) {
@@ -289,16 +297,28 @@ describe("forkGraphNamespace", () => {
         `DROP TABLE ${RELATION_NAMES[key]} CASCADE`,
       );
     }
-    const retriedWithoutLaterTables = await forkGraphNamespace(
+    const firstReleased = await releasedForkDigest(
+      targetFixture.backend,
+      otherGraph.id,
+      RELEASED_FORK_RELATION_KEYS,
+    );
+    await targetFixture.client.query(
+      "UPDATE typegraph_namespace_fork_operations SET content_digest = $1 WHERE operation_key = $2",
+      [firstReleased, "pre-upgrade-fork"],
+    );
+    const retried = await forkGraphNamespace(
       source,
       targetFixture.backend,
       "pre-upgrade-fork",
     );
-    expect(retriedWithoutLaterTables.proof).toEqual(fork.proof);
-    await retriedWithoutLaterTables.abort();
+    expect(retried.proof).toEqual({
+      ...fork.proof,
+      contentDigest: firstReleased,
+    });
+    await retried.abort();
     const remaining = await targetFixture.client.query<{ count: number }>(
       `SELECT count(*)::int AS count FROM ${RELATION_NAMES.nodes} WHERE graph_id = $1`,
-      [graph.id],
+      [otherGraph.id],
     );
     expect(remaining.rows[0]?.count).toBe(0);
   });

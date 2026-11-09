@@ -31,6 +31,7 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import {
   generateGraphIdOrderIndexDDL,
+  generateSystemIndexDDL,
   graphIdOrderIndexName,
   systemIndexName,
 } from "../src/indexes/system";
@@ -106,7 +107,7 @@ describe("system-index dialect parity", () => {
         .filter((index) => index.table !== fulltextTable)
         .map(
           (index) =>
-            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.columns})`,
+            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.name.includes("_adjacency_") ? index.columns.replaceAll(' COLLATE "C"', "") : index.columns})`,
         )
         .toSorted((a, b) => a.localeCompare(b));
 
@@ -130,10 +131,13 @@ describe("system-index dialect parity", () => {
       generateSqliteDDL(createSqliteTables()).join("\n"),
       generatePostgresDDL(createPostgresTables()).join("\n"),
     ];
-    for (const script of scripts) {
+    for (const [scriptIndex, script] of scripts.entries()) {
       for (const declaration of SYSTEM_INDEX_DECLARATIONS) {
         const columns = declaration.columns
-          .map((column) => `"${column}"`)
+          .map(
+            (column) =>
+              `"${column}"${scriptIndex === 1 && declaration.binaryOrderColumns?.includes(column) === true ? ' COLLATE "C"' : ""}`,
+          )
           .join(", ");
         expect(script).toContain(`(${columns})`);
       }
@@ -517,5 +521,42 @@ describe("materializeSystemIndexes", () => {
     } finally {
       await backend.close();
     }
+  });
+});
+
+describe("collation-sensitive runtime system index DDL", () => {
+  it("requires an explicit dialect for byte ordering and preserves plain-index callers", () => {
+    const adjacency = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (declaration) => declaration.suffix === "adjacency_from_idx",
+      ),
+    );
+    expect(() =>
+      generateSystemIndexDDL(adjacency, "history", { concurrent: false }),
+    ).toThrow(
+      expect.objectContaining({
+        details: { code: "SYSTEM_INDEX_DIALECT_REQUIRED" },
+      }),
+    );
+    expect(
+      generateSystemIndexDDL(adjacency, "history", {
+        concurrent: false,
+        dialect: "postgres",
+      }),
+    ).toContain('"kind" COLLATE "C", "recorded_from"');
+    expect(
+      generateSystemIndexDDL(adjacency, "history", {
+        concurrent: false,
+        dialect: "sqlite",
+      }),
+    ).not.toContain('COLLATE "C"');
+    const plain = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (declaration) => declaration.suffix === "since_idx",
+      ),
+    );
+    expect(
+      generateSystemIndexDDL(plain, "history", { concurrent: false }),
+    ).toContain('"graph_id", "recorded_from"');
   });
 });

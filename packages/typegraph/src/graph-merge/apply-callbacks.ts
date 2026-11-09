@@ -10,7 +10,7 @@ import type { TransactionContext } from "../store/types";
 import { requireDefined } from "../utils/presence";
 import { InvalidMergeOptionsError } from "./errors";
 import { assertOnlyDeclaredKeys } from "./options";
-import type { MergePlanArtifactV2 } from "./plan-schema";
+import type { MergePlanArtifactV3 } from "./plan-schema";
 import type { MergeReviewRevalidation } from "./review-schema";
 import type { MergedCounts } from "./types";
 
@@ -142,7 +142,7 @@ export function assertOnlyDeclaredApplyOptions(
  * is evidence about one plan, never a free-standing label.
  */
 export function reviewDigestForPlan(
-  artifact: MergePlanArtifactV2,
+  artifact: MergePlanArtifactV3,
   review: CompatibleMergeReview | undefined,
 ): string | undefined {
   if (review === undefined) return undefined;

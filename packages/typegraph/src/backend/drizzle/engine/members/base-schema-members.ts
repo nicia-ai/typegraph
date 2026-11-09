@@ -104,9 +104,15 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * index and reads every anchor row without it.
    */
   graphIdOrderIndexDdl?: readonly string[];
+  /** Version-6 candidate-bounded recorded adjacency indexes. */
+  adjacencyIndexDdl?: readonly string[];
+  /** Version-7 retained recorded allocation anchors and their time index. */
+  recordedAnchorsDdl?: readonly string[];
+  /** Version-8 durable ordinary Store operation outcomes. */
+  storeOperationsDdl?: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
-   * statements for the identity transition log, the version-6 adoption
+   * statements for the identity transition log, the version-9 adoption
    * step — rendered once by the caller from its own dialect's DDL
    * generators, the same way `fencesTableDdl` is. A brand-new relation
    * needs no ALTER-shaped migration, so this step's `bootstrap` is
@@ -116,12 +122,12 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
    * relation: a database that predates this release owes it regardless of
    * whether any graph in it has Operational Identity enabled. Older callers
-   * may omit it; version-6 adoption then refuses with a clear error.
+   * may omit it; version-9 adoption then refuses with a clear error.
    */
   identityTransitionsTableDdl?: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` for the transition log's per-graph
-   * retention watermark, the version-6 adoption step's other half.
+   * retention watermark, the version-9 adoption step's other half.
    */
   identityTransitionRetentionTableDdl?: string;
 }>;
@@ -158,8 +164,9 @@ export type BaseSchemaMembers = Readonly<{
  * rows table), version 3 (the recorded-relations' and recorded
  * identity-assertions relation's `since_idx` indexes), version 4 (the
  * revision-changes relation), version 5 (the byte-ordered `graph_id`
- * indexes), and version 6 (the identity transition log plus its retention
- * watermark) all follow the same prepare/adopt-before/adopt-after bootstrap
+ * indexes), version 6 (the recorded adjacency indexes), version 7 (the
+ * recorded-anchor log), version 8 (durable Store outcomes) and version 9 (the
+ * identity transition log plus its retention watermark) all follow the same prepare/adopt-before/adopt-after bootstrap
  * sequencing.
  */
 export function createBaseSchemaMembers(
@@ -179,6 +186,9 @@ export function createBaseSchemaMembers(
     revisionChangesTableDdl,
     revisionChangesIndexDdl,
     graphIdOrderIndexDdl = [],
+    adjacencyIndexDdl,
+    recordedAnchorsDdl,
+    storeOperationsDdl,
     identityTransitionsTableDdl,
     identityTransitionRetentionTableDdl,
   } = deps;
@@ -248,11 +258,41 @@ export function createBaseSchemaMembers(
       {
         version: 6,
         async adopt(): Promise<void> {
+          if (adjacencyIndexDdl === undefined) {
+            throw missingAdoptionDeps(6, { adjacencyIndexDdl });
+          }
+          for (const ddl of adjacencyIndexDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 7,
+        async adopt(): Promise<void> {
+          if (recordedAnchorsDdl === undefined) {
+            throw missingAdoptionDeps(7, { recordedAnchorsDdl });
+          }
+          for (const ddl of recordedAnchorsDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 8,
+        async adopt(): Promise<void> {
+          if (storeOperationsDdl === undefined) {
+            throw missingAdoptionDeps(8, { storeOperationsDdl });
+          }
+          for (const ddl of storeOperationsDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 9,
+        async adopt(): Promise<void> {
           if (
             identityTransitionsTableDdl === undefined ||
             identityTransitionRetentionTableDdl === undefined
           ) {
-            throw missingAdoptionDeps(6, {
+            throw missingAdoptionDeps(9, {
               identityTransitionsTableDdl,
               identityTransitionRetentionTableDdl,
             });

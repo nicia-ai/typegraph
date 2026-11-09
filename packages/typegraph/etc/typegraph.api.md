@@ -95,6 +95,9 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -327,6 +330,8 @@ export function avg<const Alias extends string, const Property extends string>(a
 
 // @public
 export type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
+    durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -3965,6 +3970,7 @@ const EXTERNAL_REF_TABLE_KEY: "_externalRefTable";
 export type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -4382,6 +4388,19 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+export class GraphAllocationMismatchError extends ConfigurationError {
+    constructor(details?: Readonly<Record<string, unknown>>);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
+}
+
+// @public
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -6487,6 +6506,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
     backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
     graphId: string;
     anchor: string;
+    origin?: string;
     tableNames?: Partial<SqlTableNames> | undefined;
     mappingTableName?: string | undefined;
 }>;
@@ -8016,6 +8036,27 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 const RECORDED_POINT_READ_NAMES: readonly ["getById", "getByIds"];
 
 // @public
+export type RecordedAdjacencyEntry<G extends GraphDef, K extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
+    edge: GraphEdgeForKinds<G, K>;
+    neighbor: GraphNodeReference<G>;
+}>;
+
+// @public
+export type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
+    candidateLimit?: number;
+    after?: string;
+    direction?: "out" | "in" | "both";
+    edgeKinds?: readonly K[];
+}>;
+
+// @public
+export type RecordedAdjacencyPage<T> = Readonly<{
+    data: readonly T[];
+    nextCursor: string | undefined;
+    hasNextPage: boolean;
+}>;
+
+// @public
 export type RecordedCaptureGuardCode = (typeof RECORDED_CAPTURE_GUARD_CODES)[number];
 
 // @public
@@ -8026,7 +8067,7 @@ export type RecordedCaptureGuardError<C extends RecordedCaptureGuardCode = Recor
 }>;
 
 // @public (undocumented)
-type RecordedColumn = "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
+type RecordedColumn = "history_id" | "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
 
 // @public (undocumented)
 type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
@@ -8053,6 +8094,16 @@ export type RecordedIdentityTransition<G extends GraphDef> = Readonly<{
 export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
+
+// @public
+export function recordedInstant(coordinate: Readonly<{
+    revision: number;
+    wallTime: string;
+    owner: GraphAllocationOwner;
+}>): RecordedInstant;
+
+// @public
+export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
 
 // @public
 type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
@@ -8096,6 +8147,7 @@ type RecordedRelationDdl = Readonly<{
 // @public (undocumented)
 export type RecordedRelationOptions = Readonly<{
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
 }>;
 
 // @public
@@ -8141,6 +8193,7 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 // @public
 class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
+    adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(root: GraphNodeReferenceInput<G>, options?: RecordedAdjacencyOptions<K>): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
     get asOfRecorded(): RecordedInstant;
     get edges(): RecordedStoreViewEdgeCollections<G>;
     get nodes(): RecordedStoreViewNodeCollections<G>;
@@ -8488,6 +8541,8 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
+    storeOperations?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -8506,8 +8561,10 @@ export type ResolvedSqlTableNames = Readonly<{
     reconciliationMarkers?: string;
 }>;
 
-// @public (undocumented)
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+// @public
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+    rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+}>;
 
 // @public
 export function resolveGraphVectorSlots(graph: GraphDef): readonly VectorSlot[];
@@ -9211,6 +9268,8 @@ export type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
+    storeOperations?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
@@ -9332,8 +9391,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
-    revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
     snapshot: () => StoreView<G>;
     batch: <const Queries extends readonly [
@@ -9476,6 +9538,16 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedNodeScan: <N extends NodeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Node<N>>>;
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
+    recordedAdjacency?: (root: Readonly<{
+        kind: string;
+        id: string;
+    }>, coordinate: ReadCoordinate, edgeKinds: readonly string[], options?: RecordedAdjacencyOptions) => Promise<RecordedAdjacencyPage<Readonly<{
+        edge: Edge;
+        neighbor: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+    }>>>;
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(root: GraphNodeReferenceInput<G>, options: InternalSubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
@@ -10159,6 +10231,7 @@ export type SystemIndexDeclaration = SystemIndexDeclarationFor<"nodes"> | System
 type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
     table: T;
     suffix: string;
+    binaryOrderColumns?: readonly string[];
     columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
 }>;
 
@@ -10495,6 +10568,8 @@ export type TypeGraphErrorOptions = Readonly<{
 // @public
 type TypeGraphRecordedInstantParts = Readonly<{
     kind: "typegraph";
+    origin?: string;
+    namespace?: string;
     revision: number;
     recordedAt: string;
 }>;

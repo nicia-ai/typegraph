@@ -53,7 +53,8 @@ export type CandidatePlanningScopeReason =
   | "missing-match-identity-read"
   | "missing-scoped-identity-reads"
   | "match-identity-owner-not-clone-visible"
-  | "planned-evolution";
+  | "planned-evolution"
+  | "full-requested";
 
 /** The rows candidate planning stages, and why when it is not the candidate's own. */
 export type CandidatePlanningScope =
@@ -252,13 +253,31 @@ async function readMatchIdentityOwners<G extends GraphDef>(
   identities: readonly Readonly<{ kind: string; name: string; key: string }>[],
 ): Promise<readonly EdgeRow[]> {
   if (identities.length === 0) return [];
-  const readOwners = storeBackend(target).findEdgesByMatchIdentity;
+  const readOwners = matchIdentityOwnerReader(target);
   if (readOwners === undefined) {
     throw new CandidateWriteSetError(
       "Candidate planning requires the keyed durable match-identity owner read.",
     );
   }
-  return readOwners({ graphId: target.graphId, identities });
+  return readOwners(identities);
+}
+
+/** Exact owner read shared by candidate input and validated mutation postimages. */
+export function matchIdentityOwnerReader<G extends GraphDef>(
+  target: Store<G>,
+):
+  | ((
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[],
+    ) => Promise<readonly EdgeRow[]>)
+  | undefined {
+  const readOwners = storeBackend(target).findEdgesByMatchIdentity;
+  return readOwners === undefined ? undefined : (
+      (identities) => readOwners({ graphId: target.graphId, identities })
+    );
 }
 
 /** Whether every returned owner is included in the default clone projection. */
@@ -295,6 +314,7 @@ async function sparseBaseDocument<G extends GraphDef>(
   target: Store<G>,
   writeSet: CandidateWriteSet,
   matchIdentityOwners: readonly EdgeRow[],
+  additionalNodes: readonly EntityReference[] = [],
 ): Promise<
   Readonly<{ document: GraphData; identityScope?: CandidateIdentityScope }>
 > {
@@ -383,6 +403,7 @@ async function sparseBaseDocument<G extends GraphDef>(
     references.set(referenceKey(reference), reference);
   }
   for (const node of writeSet.nodes) add(node);
+  for (const node of additionalNodes) add(node);
   for (const edge of writeSet.edges) {
     add(edge.from);
     add(edge.to);
@@ -532,6 +553,11 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
   writeSet: CandidateWriteSet,
   makeBackend: MakeBackend,
   matchIdentityOwners: readonly EdgeRow[],
+  options: Readonly<{
+    preserveNodeUniqueness?: boolean;
+    captureChanges?: boolean;
+    additionalNodes?: readonly EntityReference[];
+  }> = {},
 ): Readonly<{
   strategy: WorkingCopyStrategy<G>;
   identityScope: () => CandidateIdentityScope | undefined;
@@ -544,6 +570,7 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
           target,
           writeSet,
           matchIdentityOwners,
+          options.additionalNodes,
         );
         scopedIdentity = identityScope;
         const backend = await makeBackend();
@@ -552,10 +579,14 @@ export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
         assertIndependentBackend(storeBackend(target), backend);
         try {
           const [store] = await createStoreWithSchema(
-            graphWithoutNodeUniqueness(target.graph),
+            options.preserveNodeUniqueness === true ?
+              target.graph
+            : graphWithoutNodeUniqueness(target.graph),
             backend,
             {
-              revisionTracking: target.revisionTrackingEnabled,
+              ...(options.captureChanges === true ?
+                { history: true as const }
+              : { revisionTracking: target.revisionTrackingEnabled }),
               revisionJournal: false,
             },
           );

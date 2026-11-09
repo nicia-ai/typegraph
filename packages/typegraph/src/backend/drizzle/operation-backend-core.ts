@@ -13,7 +13,7 @@ import {
 } from "../../errors";
 import type { SqlDialect } from "../../query/dialect/types";
 import type { VectorSlot } from "../../query/dialect/vector-strategy";
-import { sql } from "../../query/sql-fragment";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import type {
   CompiledStatementSql,
   CompiledTemporaryStatementSql,
@@ -82,6 +82,11 @@ import type {
   CompiledAtomicSqlStatement,
 } from "../capabilities/atomic-sql-program";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
+import {
+  nodeRowFenceAcquisitions,
+  type NodeRowLockPlan,
+  type NodeRowLockTarget,
+} from "../capabilities/node-row-lock-plan";
 import type { FenceSql } from "../capabilities/write-fence";
 import {
   assertGraphCommandConvergenceIsolation,
@@ -183,6 +188,7 @@ import {
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
+  NO_NODE_ROW_LOCK_CLAUSES,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
 
@@ -785,11 +791,12 @@ type CreateCommonOperationBackendOptions = Readonly<{
   /** Present only on bundled dialect backends that own the fused SQL contract. */
   schemaFenceLockClause?: SQL | undefined;
   /**
-   * The backend's resolved write fence admits one writer at a time
-   * (`serializesWriters`). Statements that would only take row locks — the
-   * closed node-delete program's leading lock slots — are omitted.
+   * How node-row locks are taken, resolved from the backend's write fence by
+   * `resolveNodeRowLockPlan`: the dialect's row-lock clauses inside each
+   * endpoint-guarded or delete-lock statement, fence rows acquired before it,
+   * or nothing when writers serialize.
    */
-  writersSerialize: boolean;
+  nodeRowLocks: NodeRowLockPlan;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   schemaGraphWriteLockNamespace?: string | undefined;
   /**
@@ -1046,6 +1053,7 @@ type AtomicResolvedMutationSlot<TRow> =
   | Readonly<{ kind: "created"; rows: readonly TRow[] }>
   | Readonly<{ kind: "updated"; rows: readonly TRow[] }>
   | Readonly<{ kind: "postimages"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "lock" }>
   | Readonly<{ kind: "projection" }>
   | Readonly<{ kind: "assertion" }>;
 
@@ -1261,6 +1269,8 @@ function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
     updateIds: readonly string[];
     compileCreate: (chunk: readonly TCreate[]) => CompiledAtomicSqlStatement;
     compileUpdate: (updates: readonly TUpdate[]) => CompiledAtomicSqlStatement;
+    /** Lock acquisitions that lead the program, before any row is written. */
+    compiledLocks?: readonly CompiledAtomicSqlStatement[];
     compiledSidecars?: readonly CompiledAtomicSqlStatement[];
     compileAssertion: (
       creates: readonly TCreate[],
@@ -1308,6 +1318,11 @@ function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
   ];
   return {
     slots: [
+      ...(input.compiledLocks ?? []).map((statement) => ({
+        statement,
+        cardinality: "one" as const,
+        decode: () => ({ kind: "lock" as const }),
+      })),
       ...createSlots,
       ...updateSlots,
       ...(input.compiledSidecars ?? []).map((statement) => ({
@@ -2106,6 +2121,109 @@ export function createCommonOperationBackend(
       };
 
   const atomicSqlProgramExecutor = options.atomicSqlProgramExecutor;
+
+  const { nodeRowLocks } = options;
+  const nodeRowLockClauses =
+    nodeRowLocks.kind === "row-lock" ?
+      operationStrategy.nodeRowLockClauses
+    : NO_NODE_ROW_LOCK_CLAUSES;
+  const endpointLock = nodeRowLockClauses.edgeEndpoint;
+
+  /** The fence rows a `fence-row` plan takes on `nodes`; none otherwise. */
+  function nodeRowFences(
+    graphId: string,
+    nodes: readonly NodeRowLockTarget[],
+  ): readonly SqlFragment[] {
+    return nodeRowLocks.kind === "fence-row" ?
+        nodeRowFenceAcquisitions(nodeRowLocks.sql, graphId, nodes)
+      : [];
+  }
+
+  /** {@link nodeRowFences} for both endpoints of every edge in `edges`. */
+  function edgeEndpointFences(
+    graphId: string,
+    edges: readonly Pick<
+      InsertEdgeParams,
+      "fromKind" | "fromId" | "toKind" | "toId"
+    >[],
+  ): readonly SqlFragment[] {
+    return nodeRowFences(
+      graphId,
+      edges.flatMap((edge) => [
+        { kind: edge.fromKind, id: edge.fromId },
+        { kind: edge.toKind, id: edge.toId },
+      ]),
+    );
+  }
+
+  /** Atomic program slots that acquire `fences`, each decoding to `result`. */
+  function fenceSlots<TResult>(
+    fences: readonly SqlFragment[],
+    result: TResult,
+  ): readonly AtomicSqlProgram<TResult, unknown>["slots"][number][] {
+    return fences.map((fence) => ({
+      statement: execution.compile(fence),
+      cardinality: "one" as const,
+      decode: () => result,
+    }));
+  }
+
+  /**
+   * A root session commits each statement on its own, so a `fence-row`
+   * plan's endpoint fences can share an endpoint-guarded statement's
+   * transaction only through an atomic program. Without one, the fused
+   * command reports `endpointPredicate` unsupported and the store's portable
+   * path, which locks through `lockNodes` inside its own transaction, runs
+   * instead.
+   */
+  const endpointFencesNeedUnavailableProgram =
+    nodeRowLocks.kind === "fence-row" &&
+    commandSession === "root" &&
+    atomicSqlProgramExecutor === undefined;
+
+  /**
+   * Runs one endpoint-guarded statement for `params`, after the endpoint
+   * fences a `fence-row` plan takes, in the same transaction: the session's
+   * own on a transaction session, an atomic program on a root session.
+   */
+  async function execEndpointGuardedGet(
+    params: InsertEdgeParams,
+    query: SQL,
+  ): Promise<Record<string, unknown> | undefined> {
+    const fences = edgeEndpointFences(params.graphId, [params]);
+    if (fences.length === 0) {
+      return execution.execGet<Record<string, unknown>>(query);
+    }
+    if (commandSession === "transaction") {
+      for (const fence of fences) await execution.execRun(fence);
+      return execution.execGet<Record<string, unknown>>(query);
+    }
+    const executor = requireDefined(
+      atomicSqlProgramExecutor,
+      "An endpoint-guarded root statement under fence-row locks was admitted without an atomic program.",
+    );
+    const program = {
+      slots: [
+        ...fenceSlots<Readonly<Record<string, unknown>> | undefined>(
+          fences,
+          undefined,
+        ),
+        {
+          statement: execution.compile(query),
+          cardinality: "many" as const,
+          decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+            rows[0],
+        },
+      ],
+      assemble: (
+        results: readonly (Readonly<Record<string, unknown>> | undefined)[],
+      ) => results.at(-1),
+    } satisfies AtomicSqlProgram<
+      Readonly<Record<string, unknown>> | undefined,
+      Readonly<Record<string, unknown>> | undefined
+    >;
+    return executor.execute(program);
+  }
   const atomicNodeBatchMembers =
     (
       atomicSqlProgramExecutor === undefined ||
@@ -3164,10 +3282,14 @@ export function createCommonOperationBackend(
               }
             }
           }
+          const endpointFences = edgeEndpointFences(
+            input.schemaFence.graphId,
+            input.params,
+          );
           if (input.resultMode === "count") {
             const edgeSlotIndexes: number[] = [];
             const slots: AtomicSqlProgram<number, number>["slots"][number][] =
-              [];
+              [...fenceSlots(endpointFences, 0)];
             appendClaimSlots(slots, input.claims, (rows) => rows.length);
             for (const chunk of chunks) {
               edgeSlotIndexes.push(slots.length);
@@ -3178,6 +3300,7 @@ export function createCommonOperationBackend(
                     timestamp,
                     input.schemaFence,
                     atomicSchemaFenceLockClause,
+                    endpointLock,
                   ),
                 ),
                 cardinality: "many",
@@ -3209,7 +3332,9 @@ export function createCommonOperationBackend(
           const slots: AtomicSqlProgram<
             readonly EdgeRow[],
             readonly EdgeRow[]
-          >["slots"][number][] = [];
+          >["slots"][number][] = [
+            ...fenceSlots<readonly EdgeRow[]>(endpointFences, []),
+          ];
           appendClaimSlots(slots, input.claims, decodeNoEdgeRows);
           for (const chunk of chunks) {
             edgeSlotIndexes.push(slots.length);
@@ -3220,6 +3345,7 @@ export function createCommonOperationBackend(
                   timestamp,
                   input.schemaFence,
                   atomicSchemaFenceLockClause,
+                  endpointLock,
                 ),
               ),
               cardinality: "many",
@@ -3361,10 +3487,20 @@ export function createCommonOperationBackend(
               schemaFence: input.schemaFence,
               schemaLockClause: atomicSchemaFenceLockClause,
             };
+            const endpointFenceSlots = fenceSlots<readonly EdgeRow[]>(
+              edgeEndpointFences(
+                input.schemaFence.graphId,
+                input.entries.map((entry) => entry.params),
+              ),
+              [],
+            );
             const program = {
               slots: [
+                ...endpointFenceSlots,
                 {
-                  statement: execution.compile(buildCreate(builderInput)),
+                  statement: execution.compile(
+                    buildCreate(builderInput, endpointLock),
+                  ),
                   cardinality: "many" as const,
                   decode: (
                     rows: readonly Readonly<Record<string, unknown>>[],
@@ -3385,7 +3521,7 @@ export function createCommonOperationBackend(
               assemble(
                 results: readonly (readonly EdgeRow[])[],
               ): readonly AtomicEdgeConvergenceResult[] {
-                const rows = requireDefined(results[0]);
+                const rows = requireDefined(results[endpointFenceSlots.length]);
                 if (rows.length === 0) return [];
                 if (rows.length !== input.entries.length) {
                   throw new CompilerInvariantError(
@@ -3516,19 +3652,27 @@ export function createCommonOperationBackend(
           const orderedIds = [...new Set(input.ids)].toSorted((left, right) =>
             compareCodePoints(left, right),
           );
-          const lockSlots = (
-            options.writersSerialize ?
-              []
-            : chunkArray(orderedIds, chunkSize)).map((ids) => ({
-            statement: execution.compile(
-              operationStrategy.buildLockNodesForAtomicDeleteWithSchemaFence(
-                { ...input, ids },
-                atomicSchemaFenceLockClause,
-              ),
-            ),
-            cardinality: "many" as const,
-            decode: () => ({ kind: "lock" }) as const,
-          }));
+          const lockResult = { kind: "lock" } as const;
+          const lockSlots =
+            nodeRowLocks.kind === "row-lock" ?
+              chunkArray(orderedIds, chunkSize).map((ids) => ({
+                statement: execution.compile(
+                  operationStrategy.buildLockNodesForAtomicDeleteWithSchemaFence(
+                    { ...input, ids },
+                    atomicSchemaFenceLockClause,
+                    nodeRowLockClauses.delete,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: () => lockResult,
+              }))
+            : fenceSlots(
+                nodeRowFences(
+                  input.graphId,
+                  orderedIds.map((id) => ({ kind: input.kind, id })),
+                ),
+                lockResult,
+              );
           const deleteSlots = chunkArray(input.ids, chunkSize).map((ids) => ({
             statement: execution.compile(
               operationStrategy.buildAtomicNodeDeleteBatchWithSchemaFence(
@@ -4086,6 +4230,10 @@ export function createCommonOperationBackend(
               updateChunks: chunkArray(input.updates, statementChunkSize),
               createIds: input.creates.map((entry) => entry.id),
               updateIds: input.updates.map((entry) => entry.existing.id),
+              compiledLocks: edgeEndpointFences(
+                input.schemaFence.graphId,
+                input.creates,
+              ).map((fence) => execution.compile(fence)),
               compileCreate: (chunk) =>
                 execution.compile(
                   operationStrategy.buildInsertEdgesBatchReturningWithSchemaFence(
@@ -4093,6 +4241,7 @@ export function createCommonOperationBackend(
                     timestamp,
                     input.schemaFence,
                     atomicSchemaFenceLockClause,
+                    endpointLock,
                   ),
                 ),
               compileUpdate: (updates) =>
@@ -4273,11 +4422,16 @@ export function createCommonOperationBackend(
         claim: ClaimEdgeCardinalityParams,
       ): Promise<EdgeRow | undefined> {
         assertMatchingFusedEdgeClaim(params, claim);
-        const query = buildEdgeCardinalityInsert(params, claim, nowIso());
+        const query = buildEdgeCardinalityInsert(
+          params,
+          claim,
+          nowIso(),
+          endpointLock,
+        );
         const row = await withEdgeInsertClassification(
           () =>
             withDuplicateKeyClassification(
-              () => execution.execGet<Record<string, unknown>>(query),
+              () => execEndpointGuardedGet(params, query),
               {
                 entity: "edge",
                 relation: operationStrategy.primaryKeyConstraints.edges,
@@ -4483,11 +4637,12 @@ export function createCommonOperationBackend(
     const query = operationStrategy.buildInsertEdgeIfEndpointsLive(
       params,
       nowIso(),
+      endpointLock,
     );
     const row = await withEdgeInsertClassification(
       () =>
         withDuplicateKeyClassification(
-          () => execution.execGet<Record<string, unknown>>(query),
+          () => execEndpointGuardedGet(params, query),
           {
             entity: "edge",
             relation: operationStrategy.primaryKeyConstraints.edges,
@@ -4521,11 +4676,12 @@ export function createCommonOperationBackend(
         nowIso(),
         schemaFence,
         schemaLockClause,
+        endpointLock,
       );
     const row = await withEdgeInsertClassification(
       () =>
         withDuplicateKeyClassification(
-          () => execution.execGet<Record<string, unknown>>(query),
+          () => execEndpointGuardedGet(params, query),
           {
             entity: "edge",
             relation: operationStrategy.primaryKeyConstraints.edges,
@@ -4561,6 +4717,13 @@ export function createCommonOperationBackend(
         outcome: "unsupported",
         entity: "edge",
         dimensions: ["schemaFence", "cardinalityClaim"],
+      };
+    }
+    if (endpointFencesNeedUnavailableProgram) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["endpointPredicate"],
       };
     }
     if (
@@ -4652,22 +4815,32 @@ export function createCommonOperationBackend(
         dimensions: ["convergence"],
       };
     }
+    if (endpointFencesNeedUnavailableProgram) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["convergence", "endpointPredicate"],
+      };
+    }
 
-    const query = operationStrategy.buildConvergeEdgeCreate({
-      params,
-      match: command.match,
-      timestamp: nowIso(),
-      ...(plan.schemaFence === undefined ?
-        {}
-      : {
-          schemaFence: plan.schemaFence,
-          schemaLockClause: requireDefined(options.schemaFenceLockClause),
-        }),
-    });
+    const query = operationStrategy.buildConvergeEdgeCreate(
+      {
+        params,
+        match: command.match,
+        timestamp: nowIso(),
+        ...(plan.schemaFence === undefined ?
+          {}
+        : {
+            schemaFence: plan.schemaFence,
+            schemaLockClause: requireDefined(options.schemaFenceLockClause),
+          }),
+      },
+      endpointLock,
+    );
     const row = await withEdgeInsertClassification(
       () =>
         withDuplicateKeyClassification(
-          () => execution.execGet<Record<string, unknown>>(query),
+          () => execEndpointGuardedGet(params, query),
           {
             entity: "edge",
             relation: operationStrategy.primaryKeyConstraints.edges,
@@ -4935,6 +5108,12 @@ export function createCommonOperationBackend(
       const orderedIds = [...new Set(ids)].toSorted((left, right) =>
         compareCodePoints(left, right),
       );
+      for (const fence of nodeRowFences(
+        graphId,
+        orderedIds.map((id) => ({ kind, id })),
+      )) {
+        await execution.execRun(fence);
+      }
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(
         orderedIds,
@@ -4944,7 +5123,7 @@ export function createCommonOperationBackend(
           graphId,
           kind,
           chunk,
-          lock,
+          nodeRowLockClauses[lock],
         );
         const rows = await execution.execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));

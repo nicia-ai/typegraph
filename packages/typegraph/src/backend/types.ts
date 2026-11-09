@@ -323,6 +323,10 @@ export type {
  * Backend capabilities that vary by dialect.
  */
 export type BackendCapabilities = Readonly<{
+  /** Retains TypeGraph allocation anchors atomically, with an indexed time lookup. */
+  recordedAnchorLookup?: boolean;
+  /** Atomically retains caller-key mutation outcomes in the configured Store operation relation. */
+  durableStoreOperations?: boolean;
   /** How this backend executes work and establishes atomicity. */
   execution: Readonly<{
     /** Whether the backend can hold an interactive callback/session transaction. */
@@ -934,7 +938,9 @@ export type DeleteNodeParams = Readonly<{
  *   commits. PostgreSQL spells it `FOR UPDATE`.
  *
  * An engine that admits one writer at a time (SQLite) already serializes the
- * two writes, so its lock clause is empty.
+ * two writes, so it takes neither lock. An engine with no row locks (declared
+ * `writeFence: { mechanism: "row" }`) takes one keyed fence row per node for
+ * both purposes, before the read and in the same transaction.
  */
 export type NodeRowLock = "edgeEndpoint" | "delete";
 
@@ -1233,7 +1239,8 @@ export type NodeCreateCommand = Readonly<{
  * {@link EdgeConvergeCreateCommand}, has applied the `endpointPredicate`
  * dimension: the statement that inserts checked both endpoints live and took
  * the lock {@link GraphBackend.lockNodes} takes for `"edgeEndpoint"`
- * (PostgreSQL `FOR KEY SHARE`, or equivalent) on both rows, in (kind, id)
+ * (PostgreSQL `FOR KEY SHARE`, a fence row under a `row` write fence, or
+ * equivalent) on both rows, in (kind, id)
  * code-point order, held to the end of the transaction. Without that lock a
  * concurrent endpoint delete can leave the edge live on a deleted node; a port
  * that cannot take it returns `unsupported` with `endpointPredicate`, and the
@@ -2442,8 +2449,9 @@ export type GraphBackend = Readonly<{
    * store's portable edge writes read their endpoints' liveness through this
    * member, and its portable node deletes read their row(s) through it before
    * they read connected edges. Single-statement commands and closed atomic
-   * programs take the same locks inside their own SQL instead (see
-   * {@link EdgeCreateCommand}).
+   * programs take the same locks themselves instead (see
+   * {@link EdgeCreateCommand}): inside the reading statement, or as fence rows
+   * ahead of it in the same transaction under a `row` write fence.
    *
    * Required, because the store has no sound fallback: an unlocked read
    * would let a concurrent edge write and endpoint delete each miss the

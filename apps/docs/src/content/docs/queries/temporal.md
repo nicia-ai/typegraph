@@ -184,7 +184,7 @@ import {
 } from "@nicia-ai/typegraph";
 
 const recorded = store.asOfRecorded(
-  asRecordedInstant("r1:0000000000000042:2024-06-01T12:00:00.000Z"),
+  asRecordedInstant(savedCheckpointString),
 );
 
 const doc = await recorded.nodes.Document.getById(docId);
@@ -213,6 +213,55 @@ Scan cursors are forward-only and bound to the graph, entity kind, and both
 temporal coordinates. Passing a cursor to another collection or recorded-time
 view throws a `ValidationError` instead of silently skipping data. Iterate each
 declared node and edge kind to reconstruct a complete historical graph snapshot.
+
+For resumable one-hop adjacency, use `recorded.adjacency(root, options)`:
+
+```typescript
+let after: string | undefined;
+do {
+  const page = await recorded.adjacency(
+    { kind: "Document", id: docId },
+    { direction: "out", edgeKinds: ["cites"], candidateLimit: 100, ...(after === undefined ? {} : { after }) },
+  );
+  for (const { edge, neighbor } of page.data) {
+    console.log(edge.id, neighbor.kind, neighbor.id);
+  }
+  after = page.nextCursor;
+} while (after !== undefined);
+```
+
+Each entry contains an incident edge and the opposite kind-qualified node reference. Parallel edges remain
+separate. A self-loop appears once with `direction: "both"` (the default). Ordering is outgoing before
+incoming, then edge kind, recorded revision, edge id, and historical row id ascending. Existing `neighbors()`
+continues to return its materialized, deduplicated k-hop result.
+
+`candidateLimit` bounds **historical candidates examined** from the selected edge kinds, including superseded
+versions and deleted edges; it defaults to 100 and accepts integers from 1 through 1,000. A page can be empty and
+still have `nextCursor`: always follow the cursor until it is absent. An empty `edgeKinds` filter returns an empty
+page without a continuation. Each page checks the root's visible version once; an invisible root returns an empty
+page without a continuation. Each page issues at most one indexed edge-window query per selected kind per
+direction, returning at most `candidateLimit + 1` candidates in total, plus constant-size origin checks. The
+recorded anchor already identifies the durable origin. Each candidate performs at most one indexed
+neighbor-version probe, limited
+to one row. Visibility is checked after
+those bounds at the pinned valid and recorded coordinates. Growth in excluded kinds or unrelated endpoints does not
+increase that row or statement budget. Index seeks still have the database's normal index lookup cost.
+
+Adjacency cursors bind the durable graph origin, root kind/id, normalized edge-kind filter, direction, valid-time
+mode/instant, and recorded anchor through a SHA-256 scope digest. Changing these dimensions or reusing a cursor
+after `clear()` refuses the retired recorded anchor; changing `candidateLimit` is allowed. A retired or foreign
+origin raises `GraphAllocationMismatchError` with `code: "GRAPH_ALLOCATION_OWNER_MISMATCH"`, including an origin
+change during a page. Within one graph origin, the candidate range ends at the recorded anchor, so later live
+writes cannot change the visible answer, page boundaries, or the remaining number of pages. `clear()` retires
+anchors, preconstructed views, and cursors, including views that have not issued a page yet.
+
+This API currently requires TypeGraph-managed capture (`history: true`) on SQLite or PostgreSQL. Engine-native and
+externally populated recorded sources refuse with `details.code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE"`, because
+their cursor-origin and indexed candidate contracts are not declared. Base-schema version 6 installs the two
+endpoint paging indexes on fresh and adopted databases. Adoption builds them inline even with `systemIndexes:
+"skip"`; that option only defers lazy index materialization. For large PostgreSQL histories, prebuild the indexes
+concurrently before upgrading. See [version 6 upgrade
+guidance](/backend-setup#base-schema-version-6-recorded-adjacency-indexes).
 
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
 **not** type-check, by design. Wall time does not identify which commit to read
@@ -244,8 +293,53 @@ global clock.
 
 #### Logical revision and physical time
 
+### Resolve a wall-clock instant
+
+```typescript
+const anchor = await store.resolveRecordedInstant("2026-06-01T12:00:00.000Z");
+if (anchor !== undefined) {
+  const pinned = store.asOfRecorded(anchor);
+  // Compose point reads, scans, and adjacency pages against this same cut.
+}
+```
+
+This is one indexed lookup of retained **allocation timestamps**, sampled inside
+the transaction. It does not establish the later instant at which COMMIT became
+visible to other connections. Equal timestamps select the highest revision;
+backward clock changes retain the existing non-decreasing timestamp. A future
+request returns the latest retained cut. `undefined` means no retained allocation
+at or before the request, including an empty graph or a request before the first known allocation.
+Unlogged history is a coverage gap: the resolver throws `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` instead
+of claiming that the graph was empty.
+The SQL lookup observes one database snapshot; a later commit does not change its
+returned anchor, and a subsequent graph reset makes that anchor refuse reads.
+
+Base-schema version 7 installs the log and time index. Coverage begins with
+captured transactions after installation; earlier allocations are not guessed
+from entity rows or timestamps. The log is retained until `clear()`; direct
+editing or partial pruning of TypeGraph history storage is unsupported. A backend
+without `recordedAnchorLookup`, a store without TypeGraph capture, and an
+engine-native history refuse with `UnsupportedBackendCapabilityError`.
+
+### Anchor ownership and checkpoint upgrades
+
+A TypeGraph `r2:` anchor carries its durable origin and a separate digest of the recording namespace. A
+physical copy into a different recording-table namespace receives distinct anchors even when it preserves the
+revision-origin row. A backup restored with the same origin and table namespace retains its anchors;
+independently diverging copies must use distinct namespaces or origins. Persist the exact string, use
+`recordedInstantOwner(anchor)` when you need its complete allocation owner, and compare anchors
+with `compareRecordedInstants`, which refuses different origins. Engine `e1:`
+anchors keep their existing ownership contract.
+
+Legacy `r1:` strings still parse, but reads refuse them with
+`RECORDED_ANCHOR_UNBOUND`. `migrateRecordedAnchor({ backend, graphId, anchor,
+origin })` requires independently retained evidence that the old checkpoint
+belongs to that origin and checks that it is still current. Never attach the
+current origin to an arbitrary old checkpoint. If ownership cannot be proven,
+discard that checkpoint and resynchronize. See the [offline preview migration](/schema-management#migrating-preview-recorded-time).
+
 The canonical encoding is
-`r1:<16-digit revision>:<canonical UTC timestamp>`. Revisions are strict and
+`r2:<durable graph origin>:<namespace digest>:<16-digit revision>:<canonical UTC timestamp>`. Revisions are strict and
 monotonic within one graph. The physical component is sampled from the
 application clock and clamped to the previous anchor only when that clock moves
 backward. It may repeat, but never decreases. TypeGraph does not add one
@@ -262,7 +356,7 @@ The fixed-width revision prefix makes anchors lexicographically sortable within
 a graph and gives each captured transaction a distinct addressable state. Use
 `compareRecordedInstants(a, b)` rather than manually comparing strings, and
 only compare anchors from the same graph. Recorded relations store the revision
-as an integer, so their open interval ceiling is independent of the `r1` API
+as an integer, so their open interval ceiling is independent of the `r2` API
 encoding and PostgreSQL range scans do not depend on text collation. Recorded
 clocks remain per graph, and TypeGraph does not provide one cross-graph recorded
 anchor.
@@ -284,7 +378,7 @@ valid-time view:
 const corrected = store
   .asOf("2024-01-01T00:00:00.000Z")
   .asOfRecorded(
-    asRecordedInstant("r1:0000000000000042:2024-06-01T12:00:00.000Z"),
+    asRecordedInstant(savedCheckpointString),
   );
 
 const asKnownThen = await corrected.nodes.Invoice.getById(invoiceId);
@@ -357,16 +451,16 @@ Under engine-native ownership:
   store would.
 - `RecordedInstant` anchors use the engine form
   `e1:<opaque engine revision>:<ISO instant>` rather than
-  `r1:<16-digit revision>:<ISO instant>`. The revision is an opaque,
+  `r2:<origin>:<namespace digest>:<16-digit revision>:<ISO instant>`. The revision is an opaque,
   engine-assigned token, never parsed as a number, so ordering two `e1:`
   anchors (`compareRecordedInstants`) falls back to the timestamp component
   only — two engine revisions minted within the same millisecond compare
-  equal even though they are distinct commits, unlike a `r1:` anchor's strict
+  equal even though they are distinct commits, unlike a TypeGraph anchor's strict
   per-commit counter. `recordedInstantWallTime(instant)` works for either
   form; `recordedInstantRevision(instant)` throws for an `e1:` anchor, since
   there is no TypeGraph numeric revision to return.
 - `store.asOfRecorded(instant)` requires an instant minted under the SAME
-  store's own ownership form. An engine-native store refuses an `r1:`
+  store's own ownership form. An engine-native store refuses an `r2:`
   instant, and a TypeGraph-owned store refuses an `e1:` instant, both with a
   `ConfigurationError` (`RECORDED_INSTANT_OWNERSHIP_MISMATCH`) — an anchor
   from one ownership form is never valid against the other, even against a
@@ -380,6 +474,8 @@ Under engine-native ownership:
   requested — there is no TypeGraph clock for it to advance; the engine's
   own revision is the only tracking engine-native has, and it is available
   only under `history: true`.
+- `RecordedStoreView.adjacency()` is refused with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`: engine-native sources do
+  not declare the required origin and bounded candidate indexes.
 - Reconstructing identity at a recorded coordinate — `store.identityAtCoordinate`
   at a past instant, and any query that reaches the historical identity
   traversal — is refused: identity history reads TypeGraph's own recorded
@@ -762,3 +858,49 @@ async function getPreviousVersion(nodeId: string) {
   exact graph an agent saw
 - [Breach Forensics](/examples/breach-forensics) - Traverse a reconstructed
   access graph at the breach instant
+
+### Allocation ownership and physical forks
+
+`await store.allocationOwner()` captures `{ origin, namespace }` even before a
+tracked graph has its first recorded instant. Use the complete owner when
+binding requests or checkpoints; comparing the raw origin component is insufficient.
+A restored backup keeps its owner and can resume its existing checkpoints.
+A copy intended to diverge independently must rotate before publication or writes:
+
+```typescript
+const inheritedOwner = await fork.allocationOwner();
+const forkOwner = await fork.rotateAllocationOwner(inheritedOwner);
+```
+
+Rotation uses the native schema and graph fences and compares the expected owner
+inside the transaction. It preserves live rows, captured history, and the clock,
+while retiring old anchors and merge fences in the copy.
+The allocation log is rebound to the fork's new owner. Table-name namespace
+hashes distinguish managed prefixed allocations, but cannot detect Neon branches,
+template clones, or file copies with unchanged names. Their provisioning lifecycle
+must call this explicit rotation API. `forkedWorkingCopyStrategy()` and
+physical copies allocated by `branchDurable()` verify the copied base and rotate
+automatically before returning a writable fork. Rotation
+is not required when restoring a backup as the continuation of its original allocation.
+
+External recorded relations can supply an owner reader with
+`recordedRelation({ schema, owner: async (session) => externalOwner(session) })`.
+Use it when the relations have no TypeGraph revision-origin metadata; the reader
+must report the source's actual allocation owner and observe retirement. Transactional
+algorithms pass the actual session to this reader. External TypeGraph-style reads
+require bound instants too. Legacy `r1:` checkpoints need migration using independently
+retained origin evidence; fetching today's nonce does not prove a legacy checkpoint's
+origin. Migration rejects coordinates beyond the current clock and checks already-bound
+instants rather than silently passing them through as verified.
+
+Construct external checkpoints with `recordedInstant({ revision, wallTime, owner })`,
+which validates the public owner-bound token format. The owner reader attests the
+source allocation; the factory itself does not establish that the source exists.
+`recordedReadOwner()` uses that same external reader; a missing owner produces
+`ConfigurationError` with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`.
+Historical reads with an absent or different source owner instead raise
+`GraphAllocationMismatchError` (`GRAPH_ALLOCATION_OWNER_MISMATCH`); missing physical
+relations raise `ConfigurationError` (`RECORDED_RELATIONS_MISSING`).
+`allocationOwner()` always identifies native writes and merge fences.
+A store with external reads and revision tracking has both owners. Rotation
+changes only its native allocation; external retirement remains the provider's responsibility.

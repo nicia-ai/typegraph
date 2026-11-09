@@ -53,6 +53,8 @@ import {
   type Edge,
   type GraphNodeReferenceInput,
   type Node,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedScanOptions,
   type RecordedScanPage,
   TRANSACTION_RUNTIME,
@@ -162,6 +164,17 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ) => Promise<readonly (Edge<E> | undefined)[]>;
+  /** Optional for structurally authored runtime ports from older versions; recorded views refuse a missing reader with a typed error. */
+  recordedAdjacency?: (
+    root: Readonly<{ kind: string; id: string }>,
+    coordinate: ReadCoordinate,
+    edgeKinds: readonly string[],
+    options?: RecordedAdjacencyOptions,
+  ) => Promise<
+    RecordedAdjacencyPage<
+      Readonly<{ edge: Edge; neighbor: Readonly<{ kind: string; id: string }> }>
+    >
+  >;
   recordedEdgeScan: <E extends AnyEdgeType>(
     kind: string,
     coordinate: ReadCoordinate,
@@ -661,6 +674,28 @@ const transactionStoreOwners = new WeakMap<object, object>();
 const evolvedTransactionOriginalOwners = new WeakMap<object, object>();
 const evolvedTransactionStores = new WeakMap<object, object>();
 const activeTransactionContexts = new WeakSet<object>();
+const scopedTransactionRuntimes = new WeakMap<object, object>();
+
+/**
+ * Binds a `measure` scope's own runtime to the transaction runtime it scopes.
+ * The scope keeps a runtime of its own so its receipt sees its cascaded parts,
+ * but it is the same callback of the same Store: ownership and liveness are
+ * the scoped transaction's, so the scope ends exactly when its callback does.
+ */
+export function bindScopedTransactionRuntime(
+  scope: TransactionRuntimePort,
+  scoped: TransactionRuntimePort,
+): void {
+  scopedTransactionRuntimes.set(
+    requireDefined(scope[TRANSACTION_RUNTIME]),
+    callbackRuntimeOf(requireDefined(scoped[TRANSACTION_RUNTIME])),
+  );
+}
+
+/** The runtime of the callback that owns `runtime`, through any `measure` scopes. */
+function callbackRuntimeOf(runtime: object): object {
+  return scopedTransactionRuntimes.get(runtime) ?? runtime;
+}
 
 /** Binds the hidden context port to the Store that created its collections. */
 export function bindTransactionStore<G extends GraphDef>(
@@ -688,7 +723,9 @@ export function resolveEvolvedTransactionStore<TStore extends object>(
   transaction: TransactionRuntimePort,
   originalStore: TStore,
 ): TStore {
-  const runtime = transaction[TRANSACTION_RUNTIME];
+  const scopeRuntime = transaction[TRANSACTION_RUNTIME];
+  const runtime =
+    scopeRuntime === undefined ? undefined : callbackRuntimeOf(scopeRuntime);
   if (runtime === undefined || !activeTransactionContexts.has(runtime)) {
     throw new ConfigurationError(
       "The merge transaction must belong to an active callback of the target Store.",

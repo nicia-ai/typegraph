@@ -26,6 +26,7 @@ import {
 import {
   asRecordedInstant,
   createRecordedInstant,
+  recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
@@ -1125,7 +1126,11 @@ export function registerIdentityReplayIntegrationTests(
       // step's own revision, from the valid instant the step was recorded at.
       const membersBefore = await store
         .asOfRecorded(
-          createRecordedInstant(retractRevision - 1, retractWallTime),
+          createRecordedInstant(
+            retractRevision - 1,
+            retractWallTime,
+            recordedInstantOwner(retract.transition.recorded),
+          ),
         )
         .identity.membersOf(x);
       const membersAfter = await store

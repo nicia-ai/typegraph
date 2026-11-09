@@ -1008,7 +1008,7 @@ function historyMissingRecordedRelationsError(
     {
       cause,
       suggestion:
-        "Create the recorded-time relations (typegraph_recorded_nodes, typegraph_recorded_edges, typegraph_recorded_clock) — e.g. re-run the generated migration SQL — on this database before enabling history capture.",
+        "Create the recorded-time relations (typegraph_recorded_nodes, typegraph_recorded_edges, typegraph_recorded_clock, typegraph_recorded_anchors and revision origins) — e.g. re-run the generated migration SQL — on this database before enabling history capture.",
     },
   );
 }
@@ -1019,8 +1019,8 @@ const IDENTITY_TRANSITION_RELATIONS_MISSING_CODE =
 /**
  * Converts a missing-relation failure of a write to the identity transition
  * log into an error that names the transition-log relations and the
- * base-schema adoption that creates them. They are base-schema version 6
- * relations, so a database adopted only through version 5 lacks them while
+ * base-schema adoption that creates them. They are base-schema version 9
+ * relations, so a database adopted only through version 8 lacks them while
  * every recorded-time relation exists; the generic recorded-relations error
  * would send its reader after tables that are already there.
  */
@@ -1043,7 +1043,7 @@ export async function withIdentityTransitionRelationsPrecondition<T>(
       {
         cause: error,
         suggestion:
-          "They are base-schema version 6 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker writes. Externally managed DDL applies the version-6 statements and advances the base-schema marker to 6.",
+          "They are base-schema version 9 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker writes. Externally managed DDL applies the version-6 statements and advances the base-schema marker to 6.",
       },
     );
   }
@@ -1111,4 +1111,86 @@ export function parseDimensionMismatch(
     }
   }
   return undefined;
+}
+
+/** Shared lock-not-available classification, including wrapped driver errors. */
+export function isPostgresLockTimeout(error: unknown): boolean {
+  for (const link of errorChain(error))
+    if (canReadProperty(link) && Reflect.get(link, "code") === "55P03")
+      return true;
+  return false;
+}
+
+/** Transient transport, contention, or availability failure; retry only the same durable request. */
+export function databaseRetryDisposition(
+  error: unknown,
+  target?: object,
+): "transient" | "permanent" | "unknown" {
+  const links = [...errorChain(error)];
+  // Known permanent failures take precedence over recovery heuristics, even
+  // when a wrapper also retains a transient failure in its cause chain.
+  for (const link of links) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (
+      code === "08P01" ||
+      code === "57014" ||
+      (code === undefined &&
+        link instanceof Error &&
+        link.message === "Client was closed and is not queryable")
+    )
+      return "permanent";
+  }
+
+  if (
+    isSerializationFailure(error, target) ||
+    isSqliteWriterSlotBusy(error) ||
+    isSqliteStaleSnapshotError(error) ||
+    isPostgresLockTimeout(error)
+  )
+    return "transient";
+  for (const link of links) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    // node-postgres emits these exact codeless transport/pool errors. Do not
+    // classify arbitrary application messages or overwrite a coded refusal.
+    if (
+      code === undefined &&
+      link instanceof Error &&
+      [
+        "Connection terminated",
+        "Connection terminated unexpectedly",
+        "Connection terminated due to connection timeout",
+        "Client has encountered a connection error and is not queryable",
+        "timeout exceeded when trying to connect",
+      ].includes(link.message)
+    )
+      return "transient";
+    if (typeof code !== "string") continue;
+    if (
+      /^08[0-9A-Z]{3}$/u.test(code) ||
+      [
+        "53300",
+        "57P01",
+        "57P02",
+        "57P03",
+        "25P03", // expired transaction: retry from a fresh transaction
+        "57P05", // expired idle connection: acquire a fresh connection
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "ECONNABORTED",
+        "EPIPE",
+        "ETIMEDOUT",
+        "EAI_AGAIN",
+        "CONNECTION_CLOSED",
+        "CONNECTION_ENDED",
+        "CONNECTION_DESTROYED",
+        "CONNECT_TIMEOUT",
+        "SQLITE_BUSY_TIMEOUT",
+        "SQLITE_LOCKED_SHAREDCACHE",
+      ].includes(code)
+    )
+      return "transient";
+  }
+  return "unknown";
 }

@@ -2,11 +2,12 @@
  * The candidate planning scope decision: one case per reason a candidate is
  * planned against the whole target, plus the candidate scope itself.
  *
- * Each case pins three behaviors of `planCandidateWriteSet`: the default call
- * still plans (or fails) exactly as the whole-target path does and reports the
- * decided scope beside the plan; `planningScope: "candidate"` refuses with
- * `CandidatePlanningScopeError` naming the same reason before any staging
- * backend is created; and the static decision agrees with
+ * Each case pins three behaviors of `planCandidateWriteSet`: the default
+ * (`"candidate"`) call plans from the candidate's own rows, or refuses with
+ * `CandidatePlanningScopeError` naming the reason before any staging backend
+ * is created; `planningScope: "full"` always plans against the whole target,
+ * reporting `full-requested`, and produces the plan the candidate scope does
+ * wherever both apply; and the static decision agrees with
  * `candidatePlanningScope` for the causes it can see without the candidate.
  * The cross-row causes (composition, acyclic, target-side cardinality) are
  * also pinned on every backend in the shared review suite.
@@ -31,7 +32,6 @@ import {
   CandidateWriteSetError,
   type CandidateWriteSetPlan,
   captureCandidateWriteSetTarget,
-  InvalidMergeOptionsError,
   MergePlanCapabilityError,
   planCandidateWriteSet,
   planCandidateWriteSetReview,
@@ -119,7 +119,7 @@ const identityGraph = defineGraph({
 
 type PlanArgs = Readonly<{
   makeBackend: MakeBackend;
-  planningScope?: "candidate";
+  planningScope?: "candidate" | "full";
 }>;
 
 /** A target and candidate, closed over so cases with different graphs share one table. */
@@ -408,51 +408,56 @@ describe("candidate planning scope", () => {
   }
 
   describe.each(SCOPE_CASES)("$name", (testCase) => {
-    it("reports the decided scope beside the default plan", async () => {
+    it("plans from the candidate's rows by default, or refuses naming the reason", async () => {
       const subject = await testCase.arrange(sqliteBackend());
       expect(subject.staticScope()).toEqual(
         testCase.decidedStatically ? testCase.expected : { scope: "candidate" },
       );
-
-      const planned = await subject.plan({ makeBackend: stagingBackend() });
-      if (isErr(planned)) throw planned.error;
-      expect(planned.data.planningScope).toEqual(testCase.expected);
-    });
-
-    it("applies or refuses an explicit candidate planning scope", async () => {
-      const subject = await testCase.arrange(sqliteBackend());
       const makeBackend = stagingBackend();
-
-      const scoped = await subject.plan({
-        makeBackend,
-        planningScope: "candidate",
-      });
+      const planned = await subject.plan({ makeBackend });
 
       if (testCase.expected.scope === "candidate") {
-        if (isErr(scoped)) throw scoped.error;
-        const unscoped = await subject.plan({ makeBackend: stagingBackend() });
-        if (isErr(unscoped)) throw unscoped.error;
-        expect(scoped.data.planningScope).toEqual(testCase.expected);
-        expect(canonicalMergePlanJson(scoped.data.plan)).toBe(
-          canonicalMergePlanJson(unscoped.data.plan),
-        );
+        if (isErr(planned)) throw planned.error;
+        expect(planned.data.planningScope).toEqual(testCase.expected);
         return;
       }
-      if (!isErr(scoped)) {
+      if (!isErr(planned)) {
         throw new Error(
-          `expected a planning scope refusal, planned with ${JSON.stringify(scoped.data.planningScope)}`,
+          `expected a planning scope refusal, planned with ${JSON.stringify(planned.data.planningScope)}`,
         );
       }
-      expect(scoped.error).toBeInstanceOf(CandidatePlanningScopeError);
-      expect(scoped.error.code).toBe("GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE");
-      expect(scoped.error.details).toEqual({
+      expect(planned.error).toBeInstanceOf(CandidatePlanningScopeError);
+      expect(planned.error).toBeInstanceOf(MergePlanCapabilityError);
+      expect(planned.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
+      expect(planned.error.details).toEqual({
+        capability: "boundedCandidatePlanning",
+        requiredPlanningScope: "full",
         planningScope: testCase.expected,
       });
       expect(makeBackend).not.toHaveBeenCalled();
     });
+
+    it("plans against the whole target with an explicit full scope", async () => {
+      const subject = await testCase.arrange(sqliteBackend());
+      const full = await subject.plan({
+        makeBackend: stagingBackend(),
+        planningScope: "full",
+      });
+      if (isErr(full)) throw full.error;
+      expect(full.data.planningScope).toEqual({
+        scope: "whole-target",
+        reason: "full-requested",
+      });
+      if (testCase.expected.scope !== "candidate") return;
+      const bounded = await subject.plan({ makeBackend: stagingBackend() });
+      if (isErr(bounded)) throw bounded.error;
+      expect(canonicalMergePlanJson(full.data.plan)).toBe(
+        canonicalMergePlanJson(bounded.data.plan),
+      );
+    });
   });
 
-  it("forwards an explicit candidate planning scope through both review entry points", async () => {
+  it("applies the planning scope through both review entry points", async () => {
     const target = await revisionTrackedTarget(acyclicGraph, sqliteBackend());
     const writeSet: CandidateWriteSet = {
       formatVersion: 1,
@@ -462,6 +467,8 @@ describe("candidate planning scope", () => {
     };
     const policy = { id: "scope-review", context: {} };
     const expected = {
+      capability: "boundedCandidatePlanning",
+      requiredPlanningScope: "full",
       planningScope: { scope: "whole-target", reason: "acyclic-relation" },
     };
 
@@ -471,7 +478,6 @@ describe("candidate planning scope", () => {
       writeSet,
       makeBackend: reviewBackend,
       policy,
-      planningScope: "candidate",
     });
     if (!isErr(refusedReview)) throw new Error("expected a review refusal");
     expect(refusedReview.error).toBeInstanceOf(CandidatePlanningScopeError);
@@ -483,6 +489,7 @@ describe("candidate planning scope", () => {
       writeSet,
       makeBackend: stagingBackend(),
       policy,
+      planningScope: "full",
     });
     if (isErr(review)) throw review.error;
     const revalidateBackend = stagingBackend();
@@ -491,7 +498,6 @@ describe("candidate planning scope", () => {
       review: review.data,
       makeBackend: revalidateBackend,
       policy,
-      planningScope: "candidate",
     });
     if (!isErr(refusedRevalidation))
       throw new Error("expected a revalidation refusal");
@@ -507,7 +513,7 @@ describe("candidate planning scope", () => {
       revisionTracking: false,
     });
     const subject = await arranged(target, PERSON_CANDIDATE);
-    for (const planningScope of [undefined, "candidate"] as const) {
+    for (const planningScope of [undefined, "candidate", "full"] as const) {
       const makeBackend = stagingBackend();
       const refused = await subject.plan({
         makeBackend,
@@ -522,14 +528,14 @@ describe("candidate planning scope", () => {
   });
 
   describe.each(MALFORMED_CASES)("$name", (testCase) => {
-    it("reports the candidate's own validation error with or without the candidate scope", async () => {
+    it("reports the candidate's own validation error under either scope", async () => {
       const subject = await testCase.arrange(sqliteBackend());
       expect(subject.staticScope()).toEqual({ scope: "candidate" });
 
       const unscoped = await subject.plan({ makeBackend: stagingBackend() });
       const scoped = await subject.plan({
         makeBackend: stagingBackend(),
-        planningScope: "candidate",
+        planningScope: "full",
       });
 
       if (!isErr(unscoped) || !isErr(scoped))
@@ -566,8 +572,11 @@ describe("candidate planning scope", () => {
       planningScope: "whole-target" as "candidate",
     });
     if (!isErr(refused)) throw new Error("expected an options refusal");
-    expect(refused.error).toBeInstanceOf(InvalidMergeOptionsError);
-    expect(refused.error.details).toEqual({ planningScope: "whole-target" });
+    expect(refused.error).toBeInstanceOf(MergePlanCapabilityError);
+    expect(refused.error.details).toEqual({
+      capability: "planningScope",
+      rejectedPlanningScope: "whole-target",
+    });
     expect(makeBackend).not.toHaveBeenCalled();
   });
 });

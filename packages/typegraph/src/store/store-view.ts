@@ -37,7 +37,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
-import { ConfigurationError } from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { requireDefined } from "../utils/presence";
@@ -102,6 +102,9 @@ import {
   type Node,
   type NodeCollection,
   type NodeCurrentReads,
+  type RecordedAdjacencyEntry,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedStoreViewEdgeCollection,
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
@@ -1372,6 +1375,42 @@ class RecordedStoreViewImplementation<
         return searchBackstop;
       },
     });
+  }
+
+  /**
+   * Pages incident edge/neighbor pairs, outgoing before incoming and then by
+   * kind/revision/id/history id. The candidateLimit bounds historical candidates examined;
+   * invisible versions can produce an empty page with a continuation.
+   * Self-loops occur once in both-direction mode; parallel edges stay distinct.
+   */
+  async adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(
+    root: GraphNodeReferenceInput<G>,
+    options?: RecordedAdjacencyOptions<K>,
+  ): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>> {
+    const edgeKinds = options?.edgeKinds ?? Object.keys(this.store.graph.edges);
+    if (
+      !Object.hasOwn(this.store.graph.nodes, root.kind) ||
+      edgeKinds.some((kind) => !Object.hasOwn(this.store.graph.edges, kind))
+    ) {
+      throw new ValidationError(
+        "Recorded adjacency requires registered node and edge kinds.",
+        { issues: [{ path: "kind", message: "Unknown graph kind." }] },
+      );
+    }
+    const read = storeRuntime(this.store).recordedAdjacency;
+    if (read === undefined)
+      throw new ConfigurationError(
+        "This store runtime does not support recorded adjacency.",
+        {
+          code: "RECORDED_ADJACENCY_UNSUPPORTED_RUNTIME",
+        },
+      );
+    return (await read(
+      root,
+      this.coordinate,
+      edgeKinds,
+      options,
+    )) as RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>;
   }
 
   /** The recorded/system-time anchor this view reconstructs. */

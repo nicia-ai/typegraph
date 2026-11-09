@@ -3,6 +3,8 @@ import {
   type EdgeRow,
   type GraphBackend,
   type NodeRow,
+  type TransactionBackend,
+  type TransactionOptions,
 } from "../backend/types";
 import {
   parseRecordedInstant,
@@ -33,11 +35,19 @@ import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
+import { readRecordedAdjacency } from "./recorded-adjacency";
+import {
+  assertRecordedAnchorOrigin,
+  type RecordedAnchorOwner,
+  requireRecordedAnchorOwner,
+} from "./recorded-anchor-origin";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
   type Edge,
   type Node,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedScanOptions,
   type RecordedScanPage,
 } from "./types";
@@ -49,6 +59,9 @@ type RecordedReadServiceParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
+  revisionOrigin: (
+    target?: Pick<GraphBackend, "execute">,
+  ) => Promise<RecordedAnchorOwner | undefined>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
   mapRecordedEdgeRow: (row: Record<string, unknown>) => EdgeRow;
 }>;
@@ -74,6 +87,16 @@ type RecordedScanParams<T extends Readonly<{ id: string }>> = Readonly<{
 }>;
 
 export type RecordedReadService = Readonly<{
+  adjacency: (
+    root: Readonly<{ kind: string; id: string }>,
+    coordinate: ReadCoordinate,
+    edgeKinds: readonly string[],
+    options?: RecordedAdjacencyOptions,
+  ) => Promise<
+    RecordedAdjacencyPage<
+      Readonly<{ edge: Edge; neighbor: Readonly<{ kind: string; id: string }> }>
+    >
+  >;
   backendForCoordinate: (
     coordinate: ReadCoordinate,
     surface: string,
@@ -138,30 +161,66 @@ function withRelationsPrecondition<T>(
   );
 }
 
-function createRecordedReadBackend(
-  backend: GraphBackend,
+function recordedReadExecutionMembers(
+  backend: TransactionBackend,
   surface: string,
-): GraphBackend {
-  // A public AdapterStore backend is frozen. Decorate a fresh allowlist
-  // projection so Proxy invariants do not prevent the execute guards from
-  // replacing non-configurable function properties.
-  const projectedBackend = projectGraphBackend(backend);
-  return deriveBackend(projectedBackend, {
-    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> =>
-      withRelationsPrecondition(backend, backend.execute<T>(query), surface),
+  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+): Pick<TransactionBackend, "execute" | "executeRaw"> {
+  return {
+    execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      await assertOrigin(backend);
+      const rows = await withRelationsPrecondition(
+        backend,
+        backend.execute<T>(query),
+        surface,
+      );
+      await assertOrigin(backend);
+      return rows;
+    },
     ...(backend.executeRaw === undefined ?
       {}
     : {
-        executeRaw: <T>(
-          sqlText: string,
+        executeRaw: async <T>(
+          text: string,
           params: readonly unknown[],
-        ): Promise<readonly T[]> =>
-          withRelationsPrecondition(
+        ): Promise<readonly T[]> => {
+          await assertOrigin(backend);
+          const rows = await withRelationsPrecondition(
             backend,
-            requireDefined(backend.executeRaw)<T>(sqlText, params),
+            requireDefined(backend.executeRaw)<T>(text, params),
             surface,
-          ),
+          );
+          await assertOrigin(backend);
+          return rows;
+        },
       }),
+  };
+}
+
+function createRecordedReadBackend(
+  backend: GraphBackend,
+  surface: string,
+  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+): GraphBackend {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
+    ...recordedReadExecutionMembers(backend, surface, assertOrigin),
+    transaction: async <T>(
+      fn: (target: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      await assertOrigin(backend);
+      const result = await backend.transaction(async (target) => {
+        await assertOrigin(target);
+        const guarded = deriveBackend(
+          target,
+          recordedReadExecutionMembers(target, surface, assertOrigin),
+        );
+        return fn(guarded);
+      }, options);
+      await assertOrigin(backend);
+      return result;
+    },
   });
 }
 
@@ -348,6 +407,19 @@ export function createRecordedReadService(
     mapRecordedEdgeRow,
   } = params;
 
+  async function assertOrigin(
+    coordinate: ReadCoordinate,
+    target?: Pick<GraphBackend, "execute">,
+  ): Promise<void> {
+    const parts = requireRecordedRevision(coordinate);
+    if (requireRecordedAnchorOwner(parts, graphId) === undefined) return;
+    assertRecordedAnchorOrigin(
+      parts,
+      await params.revisionOrigin(target),
+      graphId,
+    );
+  }
+
   /**
    * Resolves the recorded relation schema for `revision` — built fresh per
    * coordinate since {@link RecordedReadSource.source} takes the revision
@@ -369,6 +441,7 @@ export function createRecordedReadService(
     read: RecordedGetByIdsParams<T>,
   ): Promise<readonly (T | undefined)[]> {
     const { table, alias, kind, ids, coordinate, toEntity, entity } = read;
+    await assertOrigin(coordinate);
     if (ids.length === 0) return [];
 
     const uniqueIds = [...new Set(ids)];
@@ -398,6 +471,7 @@ export function createRecordedReadService(
       "recorded-point-read",
     );
 
+    await assertOrigin(coordinate);
     const byId = new Map<string, T>();
     for (const rows of chunkResults) {
       for (const row of rows) {
@@ -421,6 +495,7 @@ export function createRecordedReadService(
     scan: RecordedScanParams<T>,
   ): Promise<RecordedScanPage<T>> {
     const { table, alias, kind, coordinate, options, toEntity, entity } = scan;
+    await assertOrigin(coordinate);
     const limit = validateRecordedScanLimit(options?.limit);
     const scope = recordedScanCursorScope(graphId, entity, kind, coordinate);
     const after =
@@ -449,6 +524,7 @@ export function createRecordedReadService(
       ),
       "recorded-scan",
     );
+    await assertOrigin(coordinate);
     const entities = rows.map((row) => toEntity(row));
     for (let index = 1; index < entities.length; index += 1) {
       const previous = requireDefined(entities[index - 1]);
@@ -556,13 +632,27 @@ export function createRecordedReadService(
   }
 
   return {
+    adjacency: (root, coordinate, edgeKinds, options) =>
+      readRecordedAdjacency({
+        graphId,
+        backend,
+        binding: recordedReadBinding,
+        origin: params.revisionOrigin,
+        root,
+        coordinate,
+        edgeKinds,
+        options,
+        toEdge: (row) => rowToEdge(mapRecordedEdgeRow(row)),
+      }),
     backendForCoordinate(
       coordinate: ReadCoordinate,
       surface: string,
     ): GraphBackend {
       if (coordinate.recorded === undefined) return backend;
       requireRecordedReadBinding(recordedReadBinding, surface);
-      return createRecordedReadBackend(backend, surface);
+      return createRecordedReadBackend(backend, surface, (target) =>
+        assertOrigin(coordinate, target),
+      );
     },
 
     async nodeGetById<N extends NodeType>(

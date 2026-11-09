@@ -49,6 +49,9 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -169,7 +172,12 @@ type AndPredicate = Readonly<{
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
-export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>): Promise<Result<MergeReport<G>, MergeError>>;
+export type AppliedMergeReport<G extends GraphDef = GraphDef> = MergeReport<G> & Readonly<{
+    receipt: TransactionReceipt;
+}>;
+
+// @public
+export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>): Promise<Result<AppliedMergeReport<G>, MergeError>>;
 
 // @public
 export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
@@ -182,7 +190,7 @@ export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor exten
 }>;
 
 // @public
-export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<MergeReport<G>, MergeError>>;
+export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<AppliedMergeReport<G>, MergeError>>;
 
 // @public
 export function applyMergePlanInTransaction<G extends GraphDef>(target: Store<G>, tx: TransactionContext<NoInfer<G>>, input: MergePlanArtifact, options?: MergePlanDecisionOptions): Promise<MergeReport<G>>;
@@ -256,6 +264,8 @@ type AssignableNodeTypes<G extends GraphDef, N extends NodeType> = N extends Nod
 
 // @public
 type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
+    durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -735,20 +745,18 @@ export type CandidatePlanningScope = Readonly<{
 }> | WholeTargetPlanningScope;
 
 // @public
-export class CandidatePlanningScopeError extends MergeError {
+export class CandidatePlanningScopeError extends MergePlanCapabilityError {
     constructor(planningScope: WholeTargetPlanningScope);
     // (undocumented)
-    readonly code: "GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE";
-    // (undocumented)
     readonly details: Readonly<{
+        capability: "boundedCandidatePlanning";
+        requiredPlanningScope: "full";
         planningScope: WholeTargetPlanningScope;
     }>;
-    // (undocumented)
-    protected static readonly errorCategory = "user";
 }
 
 // @public
-export type CandidatePlanningScopeReason = "composition" | "acyclic-relation" | "target-side-cardinality" | "missing-active-source-read" | "missing-match-identity-read" | "missing-scoped-identity-reads" | "match-identity-owner-not-clone-visible" | "planned-evolution";
+export type CandidatePlanningScopeReason = "composition" | "acyclic-relation" | "target-side-cardinality" | "missing-active-source-read" | "missing-match-identity-read" | "missing-scoped-identity-reads" | "match-identity-owner-not-clone-visible" | "planned-evolution" | "full-requested";
 
 // @public
 export type CandidateSource = Readonly<{
@@ -777,7 +785,7 @@ export class CandidateWriteSetError extends MergeError {
 
 // @public
 export type CandidateWriteSetPlan = Readonly<{
-    plan: MergePlanArtifact;
+    plan: MergePlanArtifactV3;
     planningScope: CandidatePlanningScope;
 }>;
 
@@ -969,6 +977,9 @@ export function captureCandidateWriteSetTarget<G extends GraphDef>(target: Store
 
 // @public
 export function captureCandidateWriteSetTargetForEvolution<G extends GraphDef>(target: Store<G>, evolutionPlan: EvolutionPlan): CandidateWriteSetTarget;
+
+// @public
+export function captureStoreOperationTarget<G extends GraphDef>(store: Store<G>): Promise<StoreOperationTarget>;
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -1606,6 +1617,9 @@ type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export function createMutationPlanBuilder<G extends GraphDef>(target: Store<G>, sourceId: string, options?: MutationAuthoringOptions): Promise<MutationPlanBuilder<G>>;
+
+// @public
 type CreateVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -1852,6 +1866,9 @@ type DropVectorIndexParams = Readonly<{
 }>;
 
 // @public
+export const DURABLE_OPERATION_KEY_MAX_BYTES = 256;
+
+// @public
 export const DURABLE_OPERATION_SCAN_DEFAULT_LIMIT = 100;
 
 // @public
@@ -1910,11 +1927,7 @@ export type DurableBranchOperationEvidence = Readonly<{
 }>;
 
 // @public
-export type DurableBranchOperationRequest = Readonly<{
-    idempotencyKey: string;
-    metadata: JsonValue;
-    mutation: JsonValue;
-}>;
+export type DurableBranchOperationRequest = DurableOperationRequest;
 
 // @public
 export type DurableBranchOptions = BranchOptions & Readonly<{
@@ -2027,6 +2040,22 @@ export type DurableOperationOutcome = Readonly<{
     DurableOperationUnsupportedDimension,
     ...DurableOperationUnsupportedDimension[]
     ];
+}>;
+
+// @public
+export class DurableOperationOwnerMismatchError extends DurableOperationError {
+    constructor(cause: unknown);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export type DurableOperationRequest = Readonly<{
+    idempotencyKey: string;
+    metadata: JsonValue;
+    mutation: JsonValue;
 }>;
 
 // @public
@@ -3361,6 +3390,7 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol;
 type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -3694,6 +3724,9 @@ type GetNodeType<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K]["ty
 type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
 
 // @public
+export function getStoreOperation<G extends GraphDef>(store: Store<G>, input: StoreOperationLookup | StoreOperationRequest): Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>;
+
+// @public
 type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
     kind: "graduated";
     extras: readonly CapabilityBundleExtra<XId, MExtra>[];
@@ -3724,6 +3757,12 @@ type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -5021,6 +5060,9 @@ type LabelPropagationOptions<G extends GraphDef> = TemporalAlgorithmOptions & It
 }>;
 
 // @public
+export type LegacyMergePlanReview = Omit<MergePlanReview, "compositionOrphans" | "identityConflicts">;
+
+// @public
 type LineageBackend = Pick<GraphBackend, "lineage">;
 
 // @public
@@ -5274,13 +5316,12 @@ export const MERGE_ERROR_CODES: {
     readonly planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH";
     readonly planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH";
     readonly planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH";
-    readonly planOriginMismatch: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH";
+    readonly planOwnerMismatch: "GRAPH_ALLOCATION_OWNER_MISMATCH";
     readonly planStale: "GRAPH_MERGE_PLAN_STALE";
     readonly planningStale: "GRAPH_MERGE_PLANNING_STALE";
     readonly candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE";
     readonly evidence: "GRAPH_MERGE_EVIDENCE";
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
-    readonly candidatePlanningScope: "GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE";
     readonly review: "GRAPH_MERGE_REVIEW";
     readonly operation: "GRAPH_MERGE_OPERATION";
     readonly operationRequest: "GRAPH_MERGE_OPERATION_REQUEST";
@@ -5306,7 +5347,7 @@ export const MERGE_OPTION_DEFAULTS: {
 export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
-export const MERGE_PLAN_FORMAT_VERSION: 2;
+export const MERGE_PLAN_FORMAT_VERSION: 3;
 
 // @public
 export const MERGE_REVIEW_FORMAT_VERSION: 3;
@@ -5448,10 +5489,51 @@ export type MergePlanApplyOptions<G extends GraphDef> = MergePlanDecisionOptions
 }>;
 
 // @public
-export type MergePlanArtifact = MergePlanArtifactV2;
+export type MergePlanArtifact = MergePlanArtifactV1 | MergePlanArtifactV2 | MergePlanArtifactV3;
 
 // @public (undocumented)
+export type MergePlanArtifactInput = MergePlanArtifactV1Input | MergePlanArtifactV2Input | MergePlanArtifactV3Input;
+
+// @public
+export type MergePlanArtifactV1 = Readonly<{
+    formatVersion: 1;
+    digest: MergePlanDigest;
+    mode: "snapshot" | "incremental";
+    target: Omit<MergePlanTargetFence, "revision"> & Readonly<{
+        revision: Omit<MergePlanRevisionFence, "owner"> & Readonly<{
+            owner?: undefined;
+        }>;
+    }>;
+    anchors: MergePlanAnchors;
+    proposed: MergePlanProposedSummary;
+    writes: MergePlanWrites;
+    guards: MergePlanGuards;
+    review: LegacyMergePlanReview;
+    provenance: MergePlanProvenanceOptions;
+}>;
+
+// @public (undocumented)
+export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+
+// @public
 export type MergePlanArtifactV2 = Readonly<{
+    formatVersion: 2;
+    digest: MergePlanDigest;
+    mode: "snapshot" | "incremental";
+    target: MergePlanTargetFence;
+    anchors: MergePlanAnchors;
+    proposed: MergePlanProposedSummary;
+    writes: MergePlanWrites;
+    guards: MergePlanGuards;
+    review: LegacyMergePlanReview;
+    provenance: MergePlanProvenanceOptions;
+}>;
+
+// @public (undocumented)
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
+
+// @public
+export type MergePlanArtifactV3 = Readonly<{
     formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
     digest: MergePlanDigest;
     mode: "snapshot" | "incremental";
@@ -5465,7 +5547,7 @@ export type MergePlanArtifactV2 = Readonly<{
 }>;
 
 // @public (undocumented)
-export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
+export type MergePlanArtifactV3Input = Omit<MergePlanArtifactV3, "digest">;
 
 // @public (undocumented)
 export type MergePlanBranchAnchor = Readonly<{
@@ -5568,6 +5650,7 @@ export type MergePlanEntityResolution = Readonly<{
 
 // @public (undocumented)
 export type MergePlanGuards = Readonly<{
+    nodeResurrections?: readonly MergePlanEntityRef[];
     canonicalMappings: readonly MergePlanCanonicalMapping[];
     retypes: readonly MergePlanRetype[];
     deletedNodes: readonly MergePlanEntityRef[];
@@ -5652,13 +5735,14 @@ export type MergePlanNodeUpsert = Readonly<{
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
     clearValidTo?: true | undefined;
+    recreate?: true | undefined;
 }>;
 
 // @public
-export class MergePlanOriginMismatchError extends InvalidMergePlanError {
+export class MergePlanOwnerMismatchError extends InvalidMergePlanError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
-    readonly code: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH";
+    readonly code: "GRAPH_ALLOCATION_OWNER_MISMATCH";
 }
 
 // @public (undocumented)
@@ -5719,6 +5803,7 @@ export type MergePlanReview = Readonly<{
 
 // @public (undocumented)
 export type MergePlanRevisionFence = Readonly<{
+    owner: GraphAllocationOwner;
     origin: string;
     revision: string | null;
 }>;
@@ -5812,7 +5897,7 @@ export type MergeReviewArtifact = Readonly<{
     writeSet: CandidateWriteSet;
     policy: MergeReviewPolicy;
     options: JsonValue;
-    plan: MergePlanArtifact;
+    plan: MergePlanArtifactV3;
     baseline: MergeReviewBaseline;
 }>;
 
@@ -5856,12 +5941,12 @@ export type MergeReviewPolicy = Readonly<{
 export type MergeReviewRevalidation = Readonly<{
     status: "compatible";
     reviewDigest: MergePlanDigest;
-    plan: MergePlanArtifact;
+    plan: MergePlanArtifactV3;
 }> | Readonly<{
     status: "changed" | "incompatible";
     reviewDigest: MergePlanDigest;
     differences: readonly MergeReviewDifference[];
-    plan?: MergePlanArtifact;
+    plan?: MergePlanArtifactV3;
 }>;
 
 // @public
@@ -5896,6 +5981,186 @@ type MisassignedEdgeEndpointRow = Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+}>;
+
+// @public
+export const MUTATION_DOCUMENT_FORMAT_VERSION: 1;
+
+// @public
+export type MutationAuthoringOptions = Readonly<{
+    expectedTarget?: MergePlanTargetFence;
+}>;
+
+// @public (undocumented)
+export type MutationCreateOptions = Readonly<{
+    validFrom?: string | null | undefined;
+    validTo?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MutationDocument = Readonly<{
+    formatVersion: typeof MUTATION_DOCUMENT_FORMAT_VERSION;
+    sourceId: string;
+    target: MergePlanTargetFence;
+    operations: readonly MutationOperation[];
+}>;
+
+// @public (undocumented)
+export const MutationDocumentSchema: z.ZodObject<{
+    formatVersion: z.ZodLiteral<1>;
+    sourceId: z.ZodString;
+    target: z.ZodObject<{
+        graphId: z.ZodString;
+        schema: z.ZodObject<{
+            managed: z.ZodBoolean;
+            version: z.ZodNumber;
+            hash: z.ZodString;
+        }, z.core.$strict>;
+        revision: z.ZodObject<{
+            origin: z.ZodString;
+            revision: z.ZodNullable<z.ZodString>;
+            owner: z.ZodObject<{
+                origin: z.ZodString;
+                namespace: z.ZodString;
+            }, z.core.$strict>;
+        }, z.core.$strict>;
+    }, z.core.$strict>;
+    operations: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.create">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        options: z.ZodOptional<z.ZodObject<{
+            validFrom: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.create">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        options: z.ZodOptional<z.ZodObject<{
+            validFrom: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+        from: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strict>;
+        to: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.update">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        unsetProps: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        options: z.ZodOptional<z.ZodUnion<readonly [z.ZodPipe<z.ZodObject<{
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>, z.ZodTransform<{
+            validTo?: never;
+        } | {
+            validTo: string;
+        }, {
+            validTo?: string | undefined;
+        }>>, z.ZodObject<{
+            clearValidTo: z.ZodLiteral<true>;
+        }, z.core.$strict>]>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.update">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+        unsetProps: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        options: z.ZodOptional<z.ZodUnion<readonly [z.ZodPipe<z.ZodObject<{
+            validTo: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>, z.ZodTransform<{
+            validTo?: never;
+        } | {
+            validTo: string;
+        }, {
+            validTo?: string | undefined;
+        }>>, z.ZodObject<{
+            clearValidTo: z.ZodLiteral<true>;
+        }, z.core.$strict>]>>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.replace">;
+        props: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"node.delete">;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+        op: z.ZodLiteral<"edge.delete">;
+    }, z.core.$strict>], "op">>;
+}, z.core.$strict>;
+
+// @public
+export type MutationOperation = Readonly<{
+    kind: string;
+    id: string;
+}> & (Readonly<{
+    op: "node.create";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: MutationCreateOptions | undefined;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "edge.create";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: MutationCreateOptions | undefined;
+    from: MergePlanEntityRef;
+    to: MergePlanEntityRef;
+    unsetProps?: never;
+}> | Readonly<{
+    op: "node.update" | "edge.update";
+    props: Readonly<Record<string, JsonValue>>;
+    unsetProps?: readonly string[] | undefined;
+    options?: ValidityEndMutation | undefined;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "node.replace";
+    props: Readonly<Record<string, JsonValue>>;
+    options?: never;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}> | Readonly<{
+    op: "node.delete" | "edge.delete";
+    props?: never;
+    options?: never;
+    unsetProps?: never;
+    from?: never;
+    to?: never;
+}>);
+
+// @public
+export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
+    target: MergePlanTargetFence;
+    operationCount: number;
+    document: MutationDocument;
+    createNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
+    updateNode: <K extends NodeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["nodes"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
+    replaceNode: <K extends NodeKinds<G>>(kind: K, id: string, props: z.input<G["nodes"][K]["type"]["schema"]>) => MutationPlanBuilder<G>;
+    deleteNode: <K extends NodeKinds<G>>(kind: K, id: string) => MutationPlanBuilder<G>;
+    createEdge: <K extends EdgeKinds<G>>(kind: K, id: string, from: Parameters<Store<G>["edges"][K]["create"]>[0], to: Parameters<Store<G>["edges"][K]["create"]>[1], props: z.input<G["edges"][K]["type"]["schema"]>, options?: MutationCreateOptions) => MutationPlanBuilder<G>;
+    updateEdge: <K extends EdgeKinds<G>>(kind: K, id: string, props: Partial<z.input<G["edges"][K]["type"]["schema"]>>, options?: ValidityEndMutation) => MutationPlanBuilder<G>;
+    deleteEdge: <K extends EdgeKinds<G>>(kind: K, id: string) => MutationPlanBuilder<G>;
+    plan: (options: MutationPlanningOptions) => Promise<Result<MergePlanArtifactV3, MergeError>>;
+}>;
+
+// @public
+export type MutationPlanningOptions = Readonly<{
+    makeBackend: MakeBackend;
+    planningScope?: PlanningScope;
 }>;
 
 // @public
@@ -6565,6 +6830,9 @@ export function openProvenanceStore(backend: GraphBackend, targetGraphId: string
 export function operateDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, request: DurableBranchOperationRequest): Promise<Result<DurableOperationOutcome, DurableOperationError>>;
 
 // @public
+export function operateStore<G extends GraphDef>(store: Store<G>, input: StoreOperationRequest, apply: StoreOperationApply<NoInfer<G>>): Promise<Result<StoreOperationOutcome, DurableOperationError>>;
+
+// @public
 type OperationHookContext = HookContext & OperationOutcomeFacts & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
@@ -6698,7 +6966,7 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
-    planningScope?: "candidate";
+    planningScope?: PlanningScope;
 }>;
 
 // @public
@@ -6708,6 +6976,7 @@ export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: Plan
 export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target" | "planningScope"> & Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
+    planningScope: "full";
 }>;
 
 // @public
@@ -6725,13 +6994,22 @@ type PlanEvolutionOptions = Readonly<{
 }>;
 
 // @public
-export function planMerge<G extends GraphDef>(store: Store<G>, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+export function planMerge<G extends GraphDef>(store: Store<G>, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifactV3, MergeError>>;
 
 // @public
-export function planMergeForEvolution<G extends GraphDef>(store: Store<G>, evolutionPlan: EvolutionPlan, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+export function planMergeForEvolution<G extends GraphDef>(store: Store<G>, evolutionPlan: EvolutionPlan, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifactV3, MergeError>>;
 
 // @public
-export function planMergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+export function planMergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<G>): Promise<Result<MergePlanArtifactV3, MergeError>>;
+
+// @public
+export function planMutations<G extends GraphDef>(args: MutationPlanningOptions & Readonly<{
+    target: Store<G>;
+    mutations: unknown;
+}>): Promise<Result<MergePlanArtifactV3, MergeError>>;
+
+// @public
+export type PlanningScope = "candidate" | "full";
 
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
@@ -7254,6 +7532,27 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 const RECORDED_POINT_READ_NAMES: readonly ["getById", "getByIds"];
 
 // @public
+type RecordedAdjacencyEntry<G extends GraphDef, K extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
+    edge: GraphEdgeForKinds<G, K>;
+    neighbor: GraphNodeReference<G>;
+}>;
+
+// @public
+type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
+    candidateLimit?: number;
+    after?: string;
+    direction?: "out" | "in" | "both";
+    edgeKinds?: readonly K[];
+}>;
+
+// @public
+type RecordedAdjacencyPage<T> = Readonly<{
+    data: readonly T[];
+    nextCursor: string | undefined;
+    hasNextPage: boolean;
+}>;
+
+// @public
 export type RecordedForkPoint = Readonly<{
     recorded: RecordedInstant;
     base: BaseVersion;
@@ -7335,6 +7634,7 @@ type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 // @public
 class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
+    adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(root: GraphNodeReferenceInput<G>, options?: RecordedAdjacencyOptions<K>): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
     get asOfRecorded(): RecordedInstant;
     get edges(): RecordedStoreViewEdgeCollections<G>;
     get nodes(): RecordedStoreViewNodeCollections<G>;
@@ -7634,6 +7934,8 @@ type ResolvedSqlTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
+    storeOperations?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -7652,8 +7954,10 @@ type ResolvedSqlTableNames = Readonly<{
     reconciliationMarkers?: string;
 }>;
 
-// @public (undocumented)
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+// @public
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+    rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+}>;
 
 // @public
 export type ResolveMap<G extends GraphDef = GraphDef> = Readonly<Partial<{
@@ -8237,6 +8541,8 @@ type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
+    storeOperations?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
@@ -8325,8 +8631,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
-    revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
     snapshot: () => StoreView<G>;
     batch: <const Queries extends readonly [
@@ -8409,6 +8718,52 @@ type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdenti
 }> : Readonly<Record<never, never>>;
 
 // @public (undocumented)
+export type StoreOperationApply<G extends GraphDef> = (tx: MeasurableTransactionContext<G>, mutation: JsonValue) => Promise<JsonValue>;
+
+// @public
+export class StoreOperationError extends DurableOperationError {
+    constructor(attemptOutcome: StoreOperationError["attemptOutcome"], phase: StoreOperationError["phase"], retryable: boolean, cause: unknown);
+    // (undocumented)
+    readonly attemptOutcome: "not-committed" | "unknown";
+    // (undocumented)
+    readonly phase: "preflight" | "callback" | "evidence" | "commit";
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public
+export type StoreOperationEvidence = StoreOperationRequest & Readonly<{
+    formatVersion: 2;
+    operationDigest: string;
+    result: JsonValue;
+    receipt: TransactionReceipt;
+}>;
+
+// @public (undocumented)
+export type StoreOperationLookup = Readonly<{
+    target: StoreOperationTarget;
+    idempotencyKey: string;
+}>;
+
+// @public (undocumented)
+export type StoreOperationOutcome = Readonly<{
+    outcome: "applied" | "replayed";
+    evidence: StoreOperationEvidence;
+}>;
+
+// @public (undocumented)
+export type StoreOperationRequest = DurableOperationRequest & Readonly<{
+    target: StoreOperationTarget;
+}>;
+
+// @public
+export type StoreOperationTarget = Readonly<{
+    graphId: string;
+    owner: GraphAllocationOwner;
+    scope: string;
+}>;
+
+// @public (undocumented)
 type StorePopulationStatistics = Readonly<{
     snapshot: StoreAnalysisSchemaCoordinate;
     nodes: readonly KindPopulationStatistics[];
@@ -8436,6 +8791,16 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedNodeScan: <N extends NodeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Node<N>>>;
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
+    recordedAdjacency?: (root: Readonly<{
+        kind: string;
+        id: string;
+    }>, coordinate: ReadCoordinate, edgeKinds: readonly string[], options?: RecordedAdjacencyOptions) => Promise<RecordedAdjacencyPage<Readonly<{
+        edge: Edge;
+        neighbor: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+    }>>>;
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(root: GraphNodeReferenceInput<G>, options: InternalSubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
@@ -9163,7 +9528,7 @@ type TransactionOutcome<T> = Readonly<{
 type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & SqlCompilationBackend>;
 
 // @public
-type TransactionReceipt = Readonly<{
+export type TransactionReceipt = Readonly<{
     writes: Readonly<{
         nodes: Readonly<Record<string, number>>;
         edges: Readonly<Record<string, number>>;
@@ -9303,6 +9668,8 @@ type TypeGraphErrorOptions = Readonly<{
 // @public
 type TypeGraphRecordedInstantParts = Readonly<{
     kind: "typegraph";
+    origin?: string;
+    namespace?: string;
     revision: number;
     recordedAt: string;
 }>;

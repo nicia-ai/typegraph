@@ -1038,12 +1038,30 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // GraphBackend/engine strategy surfaces. Internal query-builder aliases are
 // intentionally not re-exported from the backend barrel; the engine's exact
 // transitive forgotten-export set is recorded here.
+// Recorded adjacency exports RecordedAdjacencyOptions, RecordedAdjacencyEntry,
+// and RecordedAdjacencyPage at the root. The seven Store-bearing secondary
+// entrypoints gain exactly those three transitive names (+3 each); all other
+// entrypoints retain their existing name sets.
+// Allocation ownership adds GraphAllocationOwner to six Store-bearing secondary
+// entrypoints. Removing that single measured symbol reproduces each preceding
+// fingerprint; the root and graph-merge export it directly.
+// Node-row lock clauses become caller-supplied on the engine strategy, so its
+// lock-bearing builders reach RowLockClause and the strategy's own
+// NodeRowLockClauses. Both are dialect SQL plumbing, not authoring contracts,
+// so the engine fingerprint books exactly those two names.
 //
 // Every count and fingerprint in the table below is measured on the tree that
 // carries both sets of changes, so it supersedes the per-batch figures quoted
 // above, which describe each side before they met. The review format
 // constants renamed in that merge are exported from `./graph-merge` directly
 // and add no forgotten name.
+// Merging main's recorded adjacency, allocation ownership and node-row lock
+// plan into the ontology branch adds their measured names to the branch's own
+// figures: +4 on each Store-bearing entrypoint that reaches the three
+// adjacency types and GraphAllocationOwner only transitively, +2 on
+// `./graph-merge` (the three adjacency types; it exports the owner and now
+// TransactionReceipt itself, which drops one name), +2 on the engine
+// (RowLockClause, NodeRowLockClauses); the root is unchanged.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Meta-edge removal: removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -1143,8 +1161,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "3e66349f96cd81c5e8d55c528fc268e9bea3acab75d98adcf73f2bccfe6999d1",
   },
   "./adapters/drizzle/engine": {
-    count: 348,
-    sha256: "b8ac23fe80cedc5479e95f29c123b1ef4bbfb20e206ce4eaa18297eda9e23e23",
+    count: 350,
+    sha256: "605840f4b8a629f90b72fe780b8db2a1902d385ca8e4188bbce0148f38d4e340",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -1184,8 +1202,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // 959→960, this one 974→975). `.` exports all three and only loses
   // `BrandedNodeReference`: 559→558.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 975,
-    sha256: "97001492e9575c1800e881956481fdc510ece7ce628b1df203ef5726a409a85b",
+    count: 979,
+    sha256: "7fcd8c0be7bc1ad3b680dd5e2a29f43b8d98cb46267684cb5a4012560913c2c3",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 282,
@@ -1230,29 +1248,31 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
+  // Exact apply receipts expose TransactionReceipt as a named export here:
+  // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 969,
-    sha256: "4e1ebf842a5216a4c4d4be866c70e3bff0273086b3947ca7bb0807becae77366",
+    count: 971,
+    sha256: "101e1f45c296c7fcd8880277497ad18874201879901520c0b2d8adbd4c48608a",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 954,
-    sha256: "c8e56e36e4e4ed648adeb08c656c7bfb544a253cd52161543847957d92d3c132",
+    count: 958,
+    sha256: "0c52d3d58d1a12c05cf81f7956754f4bf125d2960dea5f75908343ab4db7cbf5",
   },
   "./postgres/pglite": {
-    count: 960,
-    sha256: "294c2678dcd090a70d0c1872c3328c9962d0738643f515af10a5a407456f5db2",
+    count: 964,
+    sha256: "792f9bf2297e9a442dfdc32dcf4a7c001ab8c4a729f8f6fd7184ed44279c6b9b",
   },
   "./profiler": {
-    count: 956,
-    sha256: "db95e1bee4f66957e628ac2e57fecdef485f66d25a952a0a7c0ad1c74e74a4e8",
+    count: 960,
+    sha256: "9506a7f06681b5e227f942ee2251d3dbf7aadab9cc96f2efdc3465b11c6e2ed8",
   },
   "./provenance": {
-    count: 969,
-    sha256: "e59692562c333bfdd67d6e27fd1d4cca3889891028ce9f8c51d9fb1fd16bc3b1",
+    count: 973,
+    sha256: "cc0b47a94e67b8d96bf69728b715822e492067f3a1ad9bb4478b645d321b208b",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1268,8 +1288,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "cb84675941b4f1bc7c184d783f28f56d18c5d2e7d0fa36fbbd57fd470a047557",
   },
   "./sqlite/local": {
-    count: 960,
-    sha256: "294c2678dcd090a70d0c1872c3328c9962d0738643f515af10a5a407456f5db2",
+    count: 964,
+    sha256: "792f9bf2297e9a442dfdc32dcf4a7c001ab8c4a729f8f6fd7184ed44279c6b9b",
   },
 };
 

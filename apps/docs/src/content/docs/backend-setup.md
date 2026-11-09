@@ -1147,47 +1147,9 @@ including tombstones. Export the affected edges, hard-delete them, publish the
 new schema, and import them again so every row receives a key under the new
 declaration.
 
-### Base-schema version 5: byte-ordered `graph_id` indexes (PostgreSQL)
+### Base-schema version 9: the identity transition log
 
-Version 5 adds one index to each relation `listGraphIds` seeks (`nodes`, `edges` and
-`schema_versions`), ordering `graph_id` by bytes instead of by the database collation so that a page's
-cursor, prefix and limit bound the walk. SQLite already keeps text indexes in byte order, so its step
-only advances the marker. The index is a single-column `graph_id` index: PostgreSQL deduplicates the
-repeated values, so it stays small (about 7 MB beside a 97 MB `nodes` heap of one million rows) and
-adds 1 to 2% to writes on the relation it lands on (single creates and 1,000-row bulk writes alike).
-
-The privileged open builds the three indexes with a plain `CREATE INDEX`, which blocks writes to the
-table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). This
-happens inline at boot even when `systemIndexes: "skip"` is set: that option only defers system index
-materialization, not base-schema adoption. For a large deployment, build the indexes first with
-`CONCURRENTLY`; the adoption step is `IF NOT EXISTS` and then finds them in place. Run each statement
-outside a transaction, and never run the same concurrent build from two sessions at once. Use the
-adapter's table names throughout:
-
-```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx"
-  ON "typegraph_nodes" ("graph_id" COLLATE "C");
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx"
-  ON "typegraph_edges" ("graph_id" COLLATE "C");
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx"
-  ON "typegraph_schema_versions" ("graph_id" COLLATE "C");
-```
-
-`CREATE INDEX CONCURRENTLY` can leave an invalid index behind if it is interrupted; drop it and rerun.
-`listGraphIds` checks only that each index exists and is valid, not its definition, so an index you
-create by hand under one of these names with a different definition is trusted and makes the walk slow
-rather than wrong. Create them exactly as shown.
-
-Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
-database stamped 5, so roll forward rather than back once any process has adopted it.
-
-Externally managed DDL applies the same statements, then advances the marker to 5 with the
-monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
-correct pages, by reading and de-duplicating the anchor relations instead of walking them.
-
-### Base-schema version 6: the identity transition log
-
-Version 6 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
+Version 9 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
 `store.identity.transitionsOf()` and `store.identity.replay()` read, and
 `typegraph_identity_transition_retention`, the per-graph watermark `pruneIdentityTransitions()`
 advances. Every database gets both, whether or not any graph in it enables identity, the same way
@@ -1204,7 +1166,7 @@ reading the marker; on an identity graph opened with `history: true`, its first 
 an identity transition then fails with `ConfigurationError` and
 `details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`, naming both relations.
 
-Externally managed DDL applies these statements, then advances the marker to 6 with the monotonic
+Externally managed DDL applies these statements, then advances the marker to 9 with the monotonic
 `INSERT ... ON CONFLICT` shown above. For PostgreSQL:
 
 ```sql
@@ -1243,11 +1205,95 @@ SQLite uses the same statements with `INTEGER` for the two revision columns and 
 timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_at`, `assertion_ids`,
 `decision`).
 
-Advancing the marker to 6 is one-way: a library release that knows only version 5 or lower refuses a
-database stamped 6 as newer, so roll forward rather than back once any process has adopted it. A
-PostgreSQL durable working copy carries its own marker; reopening one provisioned under version 5
-adopts version 6 into the allocation in place (see
+Advancing the marker to 9 is one-way: a library release that knows only version 8 or lower refuses a
+database stamped 9 as newer, so roll forward rather than back once any process has adopted it. A
+PostgreSQL durable working copy carries its own marker; reopening one provisioned under an earlier
+version adopts version 9 into the allocation in place (see
 [PostgreSQL table-backed working copies](/graph-merge/#postgresql-table-backed-working-copies)).
+
+### Base-schema version 8: durable Store outcomes
+
+Upgrade storage before enabling durable ordinary mutation outcomes. Version 8
+adds `typegraph_store_operations` (or the configured `storeOperations` name),
+with a primary key over graph, origin, namespace scope, and caller key. These
+structural objects are installed even when optional system indexes are skipped.
+The evidence relation is part of the graph's transactional storage, not a
+separately committed sidecar. Keep request targets with persisted retry requests;
+`clear()` retires both their origin and the evidence. See [durable ordinary
+mutation outcomes](/graph-merge#durable-ordinary-mutation-outcomes).
+
+### Base-schema version 7: retained recorded anchors
+
+Upgrade the base schema before starting the new library against an existing
+installation. Version 7 adds `typegraph_recorded_anchors` (or the configured
+`recordedAnchors` name), its primary key, and a `(graph_id, origin, recorded_at,
+revision)` index. These structural objects are installed even when optional
+system-index materialization is skipped. Captured transactions append their
+allocation anchor atomically; existing historical allocations are not backfilled.
+The resolver refuses unlogged or pruned coverage with `RECORDED_LOOKUP_HISTORY_NOT_LOGGED`;
+it returns `undefined` before the first allocation only when complete coverage is known. Stop older writers
+during cutover, because they cannot append the new log. See [anchor ownership and
+checkpoint upgrades](/queries/temporal#anchor-ownership-and-checkpoint-upgrades).
+
+### Base-schema version 6: recorded adjacency indexes
+
+Version 6 adds two seven-column indexes to the recorded edges relation, ordered by graph, endpoint kind/id, edge
+kind, recorded revision, edge id, and history id. Privileged open adopts them with plain `CREATE INDEX IF NOT
+EXISTS`, which blocks history-recording edge writes while each build runs. This runs inline even with
+`systemIndexes: "skip"`; base-schema adoption is independent of lazy system-index materialization.
+
+For a large PostgreSQL history, prebuild both indexes before upgrading. Run each statement outside a transaction,
+substituting your adapter's table and index names if customized:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx"
+  ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx"
+  ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");
+```
+
+Verify that both indexes are valid and have exactly these definitions before opening the upgraded store. An
+interrupted concurrent build can leave an invalid index; drop that index and rerun its build. `IF NOT EXISTS`
+trusts an existing name and does not repair a wrong definition. SQLite adopts the same column order with its
+default binary text ordering.
+
+### Base-schema version 5: byte-ordered `graph_id` indexes (PostgreSQL)
+
+Version 5 adds one index to each relation `listGraphIds` seeks (`nodes`, `edges` and
+`schema_versions`), ordering `graph_id` by bytes instead of by the database collation so that a page's
+cursor, prefix and limit bound the walk. SQLite already keeps text indexes in byte order, so its step
+only advances the marker. The index is a single-column `graph_id` index: PostgreSQL deduplicates the
+repeated values, so it stays small (about 7 MB beside a 97 MB `nodes` heap of one million rows) and
+adds 1 to 2% to writes on the relation it lands on (single creates and 1,000-row bulk writes alike).
+
+The privileged open builds the three indexes with a plain `CREATE INDEX`, which blocks writes to the
+table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). This
+happens inline at boot even when `systemIndexes: "skip"` is set: that option only defers system index
+materialization, not base-schema adoption. For a large deployment, build the indexes first with
+`CONCURRENTLY`; the adoption step is `IF NOT EXISTS` and then finds them in place. Run each statement
+outside a transaction, and never run the same concurrent build from two sessions at once. Use the
+adapter's table names throughout:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx"
+  ON "typegraph_nodes" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx"
+  ON "typegraph_edges" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx"
+  ON "typegraph_schema_versions" ("graph_id" COLLATE "C");
+```
+
+`CREATE INDEX CONCURRENTLY` can leave an invalid index behind if it is interrupted; drop it and rerun.
+`listGraphIds` checks only that each index exists and is valid, not its definition, so an index you
+create by hand under one of these names with a different definition is trusted and makes the walk slow
+rather than wrong. Create them exactly as shown.
+
+Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
+database stamped 5, so roll forward rather than back once any process has adopted it.
+
+Externally managed DDL applies the same statements, then advances the marker to 5 with the
+monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
+correct pages, by reading and de-duplicating the anchor relations instead of walking them.
 
 ## Drizzle-Free Entrypoints
 
@@ -1826,6 +1872,11 @@ their own SQL. The contract:
   `writeFence: { mechanism: "engine-serialized" }`, or `"caller-serialized"` —
   the plain ordered read is a complete implementation, because no other writer
   can hold either lock.
+- On an engine with no row locks — the backend declares
+  `writeFence: { mechanism: "row" }` — take an exclusive per-node lock before
+  the plain ordered read, in the caller's transaction. The bundled operation
+  layer takes one keyed fence row per id, in the same code-point order, for
+  both purposes.
 
 The bundled backends implement it on every driver. There is no fallback: the
 store calls it unconditionally.
@@ -1833,8 +1884,8 @@ store calls it unconditionally.
 A custom command port carries the same obligation: when it reports `created`
 for `edge.create` or `edge.converge-create`, the statement that inserts must
 check both endpoints live and take the `"edgeEndpoint"` lock on both rows
-(`FOR KEY SHARE` or equivalent), in (kind, id) code-point order, until the
-transaction ends. A port that cannot returns `unsupported` with the
+(`FOR KEY SHARE`, a fence row under a `row` write fence, or equivalent), in
+(kind, id) code-point order, until the transaction ends. A port that cannot returns `unsupported` with the
 `endpointPredicate` dimension, and the store's portable path takes the lock.
 
 ### Validity-end clearing capability
@@ -1941,6 +1992,15 @@ acquire the SAME fence row:
 | --- | --- |
 | `"wait"` | A lock-based engine — the second acquirer's statement blocks until the first commits, exactly like an advisory lock. |
 | `"commit-time"` | An optimistic-concurrency engine — both acquirers proceed and the loser's COMMIT fails. Correctness comes from the retry owner replaying the whole unit, never from waiting, so `conflict: "commit-time"` derives the `"optimistic-retry"` execution tier (see [Backend Capabilities](#backend-capabilities) above) and requires it: declaring it on a non-interactive backend is refused the same way an out-of-place `drain` is. |
+
+TypeGraph cannot check either value. A `row` fence is sound only on an engine that blocks the second
+acquirer of a fence row until the first ends, or fails one of two concurrent acquirers at COMMIT
+whatever value each wrote. An engine that accepts the fence UPSERT but lets both acquirers commit
+satisfies neither and must not declare `row`. Under `"wait"` the engine must also detect a deadlock
+between waiting acquirers and abort one of them. TypeGraph retries that abort only when it recognizes
+it as a serialization failure: PostgreSQL's `40001` and `40P01` are recognized, and an engine that
+reports a deadlock or commit conflict another way declares an `execution.serializationFailure`
+classifier (see [Backend authoring](/backend-authoring#declaring-a-serializationfailure-classifier)).
 
 `"engine-serialized"` and `"caller-serialized"` satisfy every drain site unconditionally — a writer
 slot and an in-process serialization promise are each already a stronger exclusion than any `drain`
@@ -2627,6 +2687,31 @@ Two writes skip the check by design: `importGraph` with
 `validateReferences: false` inserts edges without reading their endpoints,
 and provenance retraction closes a node's currency without touching its edges.
 
+On a backend that declares `writeFence: { mechanism: "row" }` — an engine
+with neither advisory locks nor row locks — the pairing uses fence rows instead
+of row locks. Each edge write and each node delete takes one keyed fence row
+per node it locks, as its own statement before the liveness or connected-edge
+read and in the same transaction, in (kind, id) code-point order. No row-lock
+clause is emitted. Two differences from the row-lock pairing follow:
+
+- A fence row has no shared mode, so concurrent edge writes to one node wait
+  for each other, as an edge write and a delete do.
+- For the same reason, two transactions that each create several edges can
+  deadlock by fencing shared endpoints in opposite orders, where the row-lock
+  pairing's shared locks would not. The engine aborts one; inside
+  `store.transaction()` that surfaces as `TransactionConflictError`, retryable
+  with `store.transaction(fn, { retry })`. A schema-managed store does not
+  reach this order, because under a `row` fence its writers already serialize
+  on the graph's schema fence row.
+- The fence row is a write, so the open cell above closes: a delete above READ
+  COMMITTED whose snapshot predates the edge write's commit fails with
+  `TransactionConflictError` instead of missing the edge. Under
+  `conflict: "commit-time"` the losing transaction's COMMIT fails instead of
+  waiting, and the unit owner retries it.
+
+Which locks a backend takes follows its declared write fence, never its SQL
+dialect; a backend whose writers serialize takes neither.
+
 The pairing rests on [`lockNodes`](#node-row-locks-locknodes), which every
 backend implements.
 
@@ -2672,6 +2757,9 @@ TypeGraph choosing separate query semantics per backend:
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 | Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |
 | Engine-native recorded time (`backend.recordedTime`)    | ✗ (TypeGraph-owned recorded relations via `history`) | ✗ (TypeGraph-owned recorded relations via `history`) | Neither bundled profile declares `recordedTime`, so `resolveRecordedTimeOwnership` derives `"typegraph-relations"` for both — `history: true` captures into TypeGraph's own recorded relations and clock, identically on both dialects, and every recorded-time integration suite and the parity snapshot run unchanged. A backend that supplies `recordedTime` (and the co-required `lineage`) reads and writes recorded time through its own engine instead: no TypeGraph capture, clock, or recorded relations, `RecordedInstant` anchors in the `e1:` form, and several TypeGraph-relation-specific surfaces refused — see [Engine-native recorded time](/queries/temporal#engine-native-recorded-time) and [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime). No bundled backend implements this today; the capability is proven by a PostgreSQL-family simulation (shared by the always-running `tests/backends/postgres/pglite-engine-native-recorded-time.test.ts` and the `POSTGRES_URL`-gated `tests/backends/postgres/engine-native-recorded-time.test.ts`, both built on `engine-native-recorded-time-simulation.ts`) that dresses TypeGraph's own recorded relations as a temporal-table expression, labeled as a simulation rather than a real third engine |
+| Durable ordinary mutation outcomes | ✓ (`revisionTracking` or `history`) | ✓ (`revisionTracking` or `history`) | Atomic caller-key outcomes through `operateStore`; requires `durableStoreOperations`, interactive transactions, and protected revision origins. |
+| Wall-clock recorded-anchor lookup | ✓ (`history: true`) | ✓ (`history: true`) | Indexed retained allocation-time lookup via `resolveRecordedInstant`. Requires `recordedAnchorLookup`; engine-native histories refuse. |
+| Recorded adjacency paging | ✓ (`history: true`) | ✓ (`history: true`) | Candidate-bounded incident edge/neighbor pages. Engine-native and external recorded sources refuse with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`. See [temporal queries](/queries/temporal). |
 
 Identity support also has a **driver** dimension inside each dialect:
 
@@ -2904,9 +2992,10 @@ least-privilege, DML-only database role.
   Deployments that never run `createStoreWithSchema` (manual-DDL boot with
   a plain `createStore` attach) adopt new system indexes by calling
   `store.materializeSystemIndexes()` once under a DDL-capable role after
-  upgrading; deployments that must not run index builds inline at boot
-  (large tables behind a readiness probe) pass `systemIndexes: "skip"` to
-  `createStoreWithSchema` and materialize out-of-band the same way.
+  upgrading. To defer lazy materialization, pass `systemIndexes: "skip"` to
+  `createStoreWithSchema` and materialize out of band the same way. This does
+  not defer base-schema adoption: prebuild required version 5 and version 6
+  indexes concurrently before upgrading a large PostgreSQL installation.
 
 - **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
   It does not create tables, repair DDL, or record that runtime storage

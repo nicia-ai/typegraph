@@ -338,6 +338,7 @@ const writeSet = {
   edges: [],
 };
 const { plan: mergePlan } = unwrap(await planCandidateWriteSetForEvolution({
+  planningScope: "full",
   target,
   evolutionPlan,
   makeBackend: makeIsolatedBackend,
@@ -458,11 +459,14 @@ any committed rows recalled by configured unique or index sources. Planning
 still fences the target revision before and after these reads. With edge
 match-identity constraints, a backend offering `findEdgesByMatchIdentity`
 seeds the exact durable owners named by the candidate. A missing keyed read,
-an owner excluded from the clone projection, or a target without revision
-tracking uses the complete clone path, as does a graph declaring a
-target-side cardinality, an `acyclic` edge or a composition pair. A custom
-backend lacking the optional `findActiveEdgesBySourceV1` read also uses that
-path for `oneActive` graphs.
+an owner excluded from the clone projection, or a graph declaring a
+target-side cardinality, an `acyclic` edge or a composition pair refuses
+bounded planning with `CandidatePlanningScopeError`, whose
+`details.planningScope.reason` names the cause. Targets without revision
+tracking refuse every planning scope: enable `revisionTracking: true` or
+`history: true` before planning. A custom backend lacking the optional
+`findActiveEdgesBySourceV1` read also refuses for `oneActive` graphs. Select
+`planningScope: "full"` explicitly to permit a complete clone.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
@@ -610,11 +614,11 @@ An explicitly requested candidate review scope (`reviewScope: "candidate"`) is
 refused with `details.reason: "candidate-scope-ineligible"` on a graph outside
 the eligibility rules, and `details.planningScope` carries the
 [planning scope](#planning-scope) decision that refused it. Candidate
-write-set planning is not refused for ineligibility unless it is called with
-`planningScope: "candidate"`: `planCandidateWriteSet`, and a review planned
-without `reviewScope`, use the complete-clone, whole-target planner there,
-yield the plan and conflicts that planner yields, and report the reason in
-`planningScope`. Revalidating a
+write-set planning, and a review planned without `reviewScope`, apply the
+default bounded `planningScope` the same way: an ineligible graph is refused
+with `CandidatePlanningScopeError` unless the call states
+`planningScope: "full"`, which plans with the complete-clone, whole-target
+planner and reports `full-requested`. Revalidating a
 stored candidate-scoped review is refused with the same reason when the target
 can no longer be read sparsely, for example after a custom backend loses
 `findActiveEdgesBySourceV1` on a `oneActive` graph.
@@ -1674,7 +1678,7 @@ A branch forked before that clear cannot merge into the post-clear store even
 when its revision clock has the same numeric value.
 
 The origin row is also read fresh on every mint (`computeBaseVersion`,
-`Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
+`Store.allocationOwner()`), never cached on a `Store` instance. Two live
 `Store` objects can legitimately observe the same graph — nothing requires
 that only one `Store` ever exists per database — and only one of them runs
 `clear()` at a time; a stale per-instance cache on the other would keep
@@ -2147,8 +2151,9 @@ base store, never the clone. A fork is never rebuilt through
 `exportGraphStream`/`importGraphStream`, so none of that applies: tombstones,
 `created_at`/`updated_at`, and the `version` column carry over unchanged, and
 — with `history: true` — the fork physically carries the base's recorded
-relations, so `store.asOfRecorded(<an instant before the fork>)` answers from
-that history. A clone-based branch never enables history, so the same call on
+relations. Rotation retires parent instants: reconstruct a checkpoint with the
+fork owner to read copied history using `store.asOfRecorded()`. A clone-based
+branch never enables history, so the same call on
 it refuses outright.
 
 `create()` asserts `computeBaseVersion(forkStore) === base` right after
@@ -2537,7 +2542,9 @@ a `makeBackend` backend, and the cleanup after a failed allocation. The first
 two surface the refusal from `close()`. The cleanup swallows it so the
 allocation's original failure reaches the caller, which leaves the allocation
 behind. Every such orphan is discoverable with `listUnsealedAllocations` and is
-removed by `abortAllocation` once `control` forwards the option.
+removed by `abortAllocation` once `control` forwards the option. An unsealed
+physical fork must be destroyed during recovery, never adopted: rotation or
+sealing may have failed, so it cannot attest a safe independent allocation.
 
 **Destroy fence.** Destroy (and `abortAllocation`) takes the same allocation
 lock. `destroyDurableBranch()` refuses with `DurableEvidenceUndeliveredError`
@@ -2589,6 +2596,262 @@ members report no evidence: `get` and `markDelivered` return `undefined`, `scan`
 returns an empty page (echoing `after`), and `hasUndelivered` returns `false`.
 Re-fork the branch to gain evidence.
 
+### Ordered mutation planning
+
+`createMutationPlanBuilder(store, sourceId)` captures the target's revision fence
+when authoring begins. Pass `{ expectedTarget: savedFence }` as the third argument
+when restoring an externally reviewed batch with a previously persisted native
+target fence; a stale fence refuses instead of choosing a newer base. Its
+immutable, typed methods stage ordered collection operations without writing to
+the target:
+
+```typescript
+import { createMutationPlanBuilder, applyMergePlan, unwrap } from "@nicia-ai/typegraph/graph-merge";
+
+const builder = await createMutationPlanBuilder(store, "edit-42");
+const plan = unwrap(await builder
+  .createNode("Item", "new-item", { name: "New item" })
+  .updateNode("Item", "existing-item", { name: "Updated item" })
+  .deleteEdge("links", "obsolete-link")
+  .deleteNode("Item", "obsolete-item")
+  .plan({ makeBackend }));
+
+// Persist or review the normal MergePlanArtifact before application.
+const report = unwrap(await applyMergePlan(store, plan));
+```
+
+Use kinds and properties from your own graph definition. Create ids are explicit,
+so later operations can reference newly staged rows. `updateNode` and
+`updateEdge` preserve ordinary patch semantics, including removing an optional
+property with `undefined`; `replaceNode` uses ordinary replacement semantics.
+Duplicate creates, missing updates, uniqueness conflicts, endpoint constraints,
+and restricted deletes retain their collection behavior. An intentional create
+of a previously deleted node id is recorded explicitly as an exception to the
+plan's default incremental tombstone refusal. Edge creates still refuse reuse
+of a soft-deleted edge id, matching ordinary edge collection behavior.
+
+The default `planningScope: "candidate"` reads the affected rows, incident edges
+for deleted nodes, constraint owners, cardinality peers, and reachable identity
+components. Work scales with that affected closure and operation count; deleting
+an arbitrarily connected node can still require many rows. An ineligible backend
+or graph receives a typed refusal. Explicitly choose `planningScope: "full"` to
+allow one complete clone instead. Bounded staging observes uniqueness keys,
+loads their committed owners, then validates through the original graph schema.
+If a nondeterministic parser changes those keys on replay, bounded planning
+refuses instead of validating against incomplete peers; full planning validates
+once against the complete copy. `makeBackend` must create an independent disposable
+backend; see the factory requirements above.
+
+Planning validates ordered intermediate states, then delegates their net changes
+to the existing incremental merge planner. Application commits the resulting
+merge writes, rather than replaying each staged operation. Ordinary merge
+identity reconciliation and conflict policies therefore still apply. Planning
+does not invoke the target's application hooks. Property parsers must be deterministic on
+persisted values. Postimages must survive the existing merge wire
+codec and schema revalidation unchanged. Schemas with non-idempotent output
+transforms, or serialized values that their input schema refuses, receive a
+typed `stableMergePostimage` capability refusal in either scope. For date
+properties, use a schema that accepts its persisted representation, such as
+`z.coerce.date()`. Tombstoned durable edge owners excluded from a live-state copy
+are also refused in both scopes. Default validity timestamps are
+resolved while staging, and are retained in the artifact. A concurrent target
+change invalidates authoring, planning, or application instead of silently
+rebasing. Failed application rolls back graph rows and constraint sidecars
+together.
+
+Persist `builder.document`, rather than the builder itself. The document is JSON-safe,
+versioned, and contains the original target fence. Resume validation with
+`planMutations({ target: store, mutations: savedDocument, makeBackend, planningScope: "candidate" })`.
+The builder is a typed authoring convenience over this same boundary. Patch operations
+encode removed properties in `unsetProps`; dates supplied to the builder become ISO strings.
+Edge endpoints in the document are kind/id references, even when authoring passes full nodes.
+Only native collection operations are exposed: node replacement uses the existing
+`bulkReplaceById` semantics; edge collections currently provide patch updates.
+
+New plans use wire format 3. It carries explicit `clearValidTo` and node recreation
+intent, including reset validity windows when deleting and recreating an existing id,
+an allocation-bound target fence, and the review's composition orphans. Format 1 and
+format 2 artifacts remain readable with their original contract for inspection, and
+applying one is refused with `UnsupportedMergePlanVersionError`. A failed staged
+operation reports its zero-based `operationIndex`, operation, and original collection
+error as its cause. Candidate review scope still controls review evidence; it is
+separate from permission to clone a complete graph during planning.
+
+A reproducible SQLite measurement is available with
+`node --import tsx packages/typegraph/scripts/measure-mutation-planning.ts` from
+the repository root. For one patch, create, and delete, target node rows read
+remained 9 at 100, 1,000, and 10,000 existing nodes. Explicit full planning read
+105, 1,005, and 10,005 rows respectively. These are instrumented row counts,
+including snapshot-export transactions, rather than latency guarantees.
+
+### Durable ordinary mutation outcomes
+
+Use `operateStore` when a caller must recover whether an ordinary graph mutation
+committed after a lost response or process restart. It uses the native Store
+transaction and the existing durable-operation digest and evidence vocabulary.
+It does not require a durable branch or branch reopening.
+
+| Contract | Durable branch operations | Ordinary Store operations |
+| --- | --- | --- |
+| Allocation binding | Sealed host allocation origin | Shared allocation owner plus outcome-storage namespace |
+| Payload binding | Canonical `mutation` and `metadata` digest | The same digest owner and payload contract |
+| Atomic owner | Host's mutation/evidence transaction | Store's protected transaction and pre-commit hook |
+| Retry result | `applied` or `replayed` evidence | `applied` or `replayed` evidence, JSON result, and terminal receipt |
+| Lifecycle | Delivery acknowledgement and fenced destruction | Retained until explicit graph `clear()`; no eviction or implicit key reuse |
+
+```typescript
+import {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+import { z } from "zod";
+
+const commandSchema = z.object({ id: z.string(), name: z.string() }).strict();
+const request = {
+  target: await captureStoreOperationTarget(store),
+  idempotencyKey: "request-42",
+  metadata: { commandVersion: 1 },
+  mutation: { id: "item-42", name: "New item" },
+};
+await requests.persist(request); // application-owned storage, before first attempt
+
+const outcome = unwrap(await operateStore(store, request, async (tx, mutation) => {
+  const command = commandSchema.parse(mutation);
+  const node = await tx.nodes.Item.create({ name: command.name }, { id: command.id });
+  return { id: node.id };
+}));
+
+// Reuse the persisted request after a lost response or restart.
+const evidence = unwrap(await getStoreOperation(store, request));
+// undefined means no evidence was visible to this lookup.
+// Retry the same persisted request; absence does not prove an earlier attempt cannot commit.
+```
+
+The target is captured once and persisted with the request. Do not recapture it
+while retrying: `clear()` retires the allocation, and an old request must refuse
+instead of writing into the replacement graph. The namespace binding also keeps
+a physical working copy with a distinct outcome-table namespace from replaying the source allocation's caller
+keys. Independently diverging copies must use distinct namespaces or origins; a backup restored with both
+unchanged retains its evidence.
+New keys are opaque strings containing 1–256 UTF-8 bytes, bounded by the exported
+`DURABLE_OPERATION_KEY_MAX_BYTES`. Oversized new keys refuse before invoking the
+mutation callback. Retained older branch keys remain available for lookup, scan,
+acknowledgement, and replay.
+Keys are shared by callers
+within one allocation; applications can include their own caller prefix.
+
+An identical key and canonical payload returns the stored evidence without
+invoking the callback. A changed mutation or metadata value raises
+`DurableOperationConflictError`. Concurrent identical requests serialize through
+the existing graph-write fence, and only one callback applies. Lookup is one
+indexed read of committed evidence; it does not depend on process memory or
+require the original callback. Pass the full original request to `getStoreOperation` to verify its
+payload digest; changed metadata or mutation refuses. An explicit `{ target, idempotencyKey }`
+lookup retrieves evidence by key without asserting a payload. Partial payloads refuse.
+`operateStore` always verifies the payload on replay.
+
+`StoreOperationEvidence.formatVersion` is 2 and contains the complete allocation owner, including
+its namespace. Capture and persist that owner before attempting a mutation. After completing the
+copy/restore phase, independently diverging forks call `rotateAllocationOwner(expectedOwner)` before
+accepting writes; old requests and copied outcomes then refuse with
+`GRAPH_ALLOCATION_OWNER_MISMATCH`. Backup restoration of the same allocation retains its identity
+and evidence. Earlier evidence formats refuse explicitly rather than silently reapplying their keys.
+
+`StoreOperationError` exposes `attemptOutcome`, `phase`, and `retryable`, describing only the current
+transaction attempt. A deterministic callback failure is `not-committed` at `callback`, preserves its
+cause, and is not automatically retryable. Lost commit or replay responses report `unknown` at `commit`;
+transient contention, expired-session, and transport failures are retryable.
+A failed attempt never proves that the caller key has no committed outcome from an earlier attempt.
+
+When this attempt is known not to have committed, retry classification excludes
+PostgreSQL protocol violations (`08P01`), explicit
+query cancellation or statement timeout (`57014`), and a `pg` client intentionally
+closed by its application. Expired transactions (`25P03`) and idle sessions
+(`57P05`) permit same-request retry using a fresh transaction or connection.
+An `attemptOutcome: "unknown"` is always retryable with the same persisted request,
+even if the driver failure would otherwise be permanent. Repair or replace an
+unusable connection before recovery; retryability never permits a replacement key.
+
+When retrying, always reuse the same persisted target, idempotency key, mutation, and metadata. Never
+choose a new key based on these fields. `retryable` identifies failures suitable for same-request retry,
+not permission to replace the key. Typed request, payload-conflict, allocation, and support refusals
+remain distinct. Optimistic retry profiles refuse this capability; branch-host support negotiation
+retains its existing result envelope and host lifecycle.
+
+The callback receives a measured view of the same native transaction. Use that
+context for all graph writes, and validate the supplied JSON command with your
+application schema. The mutation and metadata snapshots cannot be changed by
+mutating caller-owned objects during execution. The callback's JSON result is
+stored with the receipt; an unserializable result or failed evidence insert
+rolls back graph rows, constraint sidecars, recorded history, and evidence.
+External actions are outside the database transaction and must not be performed
+as though this callback makes them atomic or immune to transaction retries.
+
+For a serialized merge, include the approved artifact in `request.mutation`.
+Read the plan from the callback's supplied `mutation` snapshot, then apply it
+with `applyMergePlanInTransaction(store, tx, plan)`. The native applier validates
+the artifact and its digest before applying it.
+Return a JSON projection such as `{ merged: report.merged }`; the ordinary
+`MergeReport` contains function-backed provenance and is not a JSON outcome.
+Replay checks the committed key before invoking that callback, so retrying an
+already-applied artifact succeeds even though its revision fence is now stale.
+A first application still enforces all native schema, origin, revision, and
+constraint checks.
+
+The evidence receipt includes the exact captured cut when the transaction
+allocated one. Read-only/no-op operations and history-disabled stores do not
+manufacture a recorded anchor. Evidence is immutable and retained until
+`clear()`, which is an explicit destructive retirement of the allocation and
+its outcomes. There is no background expiry, prune API, or delivery-acknowledgement
+workflow for ordinary Store evidence. Archive any outcomes you need before
+clearing; durable branch hosts retain their separate delivery/destruction rules.
+
+Bundled SQLite and PostgreSQL backends support this after base-schema version 8
+is installed. Custom backends must declare and honor
+`capabilities.durableStoreOperations`, including atomic evidence storage and the
+observed transaction/fence guarantees. Unsupported backends refuse before the
+callback. Engine-native stores retain their existing revision-origin refusal;
+this API does not invent a TypeGraph origin for an opaque engine allocation.
+
+### Exact application receipts
+
+`applyMergePlan` returns an `AppliedMergeReport` with the terminal receipt from
+its protected transaction:
+
+```typescript
+const report = unwrap(await applyMergePlan(store, approvedPlan, {
+  async afterApply(tx) {
+    // Any writes here belong to the same receipt and recorded cut.
+  },
+}));
+const recorded = report.receipt.recorded;
+if (recorded !== undefined) {
+  const appliedView = store.asOfRecorded(recorded);
+}
+```
+
+A later writer cannot change that receipt, even if it commits before the apply
+response reaches the caller. Calling `recordedNow()` after application instead
+observes the graph's high-water mark and may identify another writer's cut.
+Receipt counts follow ordinary transaction collection-intent semantics, rather
+than rows affected. A failed or rolled-back application returns no successful
+report. Best-effort provenance persistence runs after the merge commit and has
+no effect on its receipt or recorded anchor.
+
+`receipt.recorded` is absent when history is disabled. Applying an empty plan
+under TypeGraph capture still allocates the revision already requested by the
+merge executor, even with zero collection write intents. Engine-native targets
+keep their existing public merge-plan capability refusal; this addition does
+not synthesize a TypeGraph revision for an opaque engine commit.
+
+For `applyMergePlanInTransaction`, obtain the terminal receipt from the enclosing
+`store.transactionWithReceipt` call. Its in-transaction report cannot promise a
+terminal anchor before the outer capture flush and COMMIT. A receipt returned
+by `applyMergePlan` is an exact outcome for that call; persistence and lookup by
+a caller-supplied retry key are a separate durable-operation contract.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient
@@ -2608,11 +2871,12 @@ The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
 properties are refused. A custom backend without the active-only source read
-uses the complete clone path for `oneActive` graphs. A custom backend without
+refuses bounded planning for `oneActive` graphs. A custom backend without
 the keyed match-identity owner read, or a candidate whose owner is excluded
-from the clone projection, also uses that path. Other ineligible graphs use
-the complete clone path so staging
-still checks constraints that can depend on rows beyond the candidate's ids.
+from the clone projection, also refuses bounded planning. Select
+`planningScope: "full"` explicitly for these graphs, including evolution planning,
+so staging can check constraints beyond the candidate's ids. Refusals identify
+`details.capability` and the required `details.planningScope`.
 
 ```typescript
 import {
@@ -2787,19 +3051,23 @@ type CandidatePlanningScope =
 | `missing-scoped-identity-reads` | An identity graph whose Store runtime lacks the endpoint- and assertion-ID-scoped identity reads |
 | `match-identity-owner-not-clone-visible` | A candidate edge names a durable owner the clone projection excludes |
 | `planned-evolution` | `planCandidateWriteSetForEvolution()` always stages the whole resulting graph |
+| `full-requested` | The caller passed `planningScope: "full"` |
 
-Pass `planningScope: "candidate"` to make the candidate scope a requirement
-rather than a preference, for example to bound planning cost on a large
-target. When the target or candidate needs the whole target, planning is
-refused with `CandidatePlanningScopeError`
-(`GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE`) before any staging backend is
-created, and `details.planningScope.reason` names the cause.
+The default, `planningScope: "candidate"`, bounds planning cost: when the
+target or candidate needs the whole target, planning is refused with
+`CandidatePlanningScopeError` before any staging backend is created. It is a
+`MergePlanCapabilityError` (`GRAPH_MERGE_PLAN_CAPABILITY`) whose details are
+`{ capability: "boundedCandidatePlanning", requiredPlanningScope: "full",
+planningScope }`, and `planningScope.reason` names the cause. Pass
+`planningScope: "full"` to permit the whole-target copy; the result then
+reports `full-requested`. `planMutations()` and
+`planCandidateWriteSetForEvolution()` apply the same rule.
 
 Neither scope changes what is refused for other causes. A target that cannot
 carry a public merge plan (no revision tracking, or no interactive
 transactions) is refused with `MergePlanCapabilityError` before any staging
 backend is created, and a candidate the target's schema refuses reports its own
-`CandidateWriteSetError`, with or without `planningScope: "candidate"`.
+`CandidateWriteSetError` under either scope.
 
 ## Valid-time windows
 
@@ -2944,6 +3212,14 @@ const historical = await fork.store
 // Before publication, await fork.abort() to discard an unchanged copy.
 ```
 
+This helper is a lossless copy/restore phase: it preserves the source allocation owner so source
+checkpoints and retry proofs remain usable while the copy is reconciled. A backup restored as the
+same allocation keeps that identity. Before an independently diverging fork accepts writes, finish
+the copy phase and call `fork.store.rotateAllocationOwner(await fork.store.allocationOwner())`.
+Rotation preserves rows, captured history, and the recorded clock, but retires source checkpoints
+and copied durable-operation authorization. It also invalidates the unchanged-copy proof used by
+copy retries and `abort()`; complete or abandon those actions before rotating.
+
 The caller provisions and owns `privateBackend`. It may contain other graph
 namespaces, but it must contain no rows for the source graph. TypeGraph refuses
 a connection to the source database, including an aliased backend object.
@@ -3023,10 +3299,10 @@ commit after a partially applied failure:
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |
-| `MergePlanCapabilityError`   | Public planning was requested for a target without the durable revision guarantee needed across processes and time. Enable `revisionTracking` or `history`.                                                                                                                   |
+| `MergePlanCapabilityError` | A required planning guarantee is unavailable. `details.capability` identifies it. Enable native revision tracking when required; only bounded-copy refusals naming `details.planningScope: "full"` can be remedied by selecting full scope. |
 | `MergePlanningStaleError`    | The target moved while planning was reading it. This is an expected retry-and-replan outcome under concurrent writers: no plan was returned, so recapture the target and create a new plan before retrying.                                                                    |
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
-| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
+| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/allocation-owner mismatches.                                                                                                                       |
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
 | `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
 | `MergeReviewError`           | Code `GRAPH_MERGE_REVIEW`. Durable review evidence is malformed, unsupported, incomplete, or inconsistent, or review options cannot be represented safely.                                                                                                                     |
@@ -3045,3 +3321,10 @@ See [FHIR Graph Merge](/examples/fhir-graph-merge) for a complete runnable
 snapshot merge that reconciles two independently-extracted patient-care branches,
 and [Incremental Merge](/examples/incremental-merge) for live-target ingestion
 against an advancing base with persisted, queryable provenance.
+
+Candidate, mutation, review, and revalidation planning require a tracked target.
+`planningScope` defaults to `"candidate"`; select `"full"` explicitly to permit a
+complete copy when bounded dependency reads are unavailable. Full scope does not
+supply missing revision or transaction guarantees. Evolution planning requires
+explicit full scope. Review and revalidation callers must pass this option on
+each call that needs full copying; `reviewScope` controls evidence independently.

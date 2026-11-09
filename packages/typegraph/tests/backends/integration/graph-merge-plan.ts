@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   asNodeId,
   createAdapterStoreWithSchema,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -29,7 +30,15 @@ import {
   StaleMergePlanError,
 } from "../../../src/graph-merge/errors";
 import { applyMergePlan, planMerge } from "../../../src/graph-merge/merge";
-import { constructMergePlanArtifact } from "../../../src/graph-merge/plan-wire";
+import { computeMergePlanDigest } from "../../../src/graph-merge/plan-canonical";
+import type {
+  MergePlanArtifact,
+  MergePlanArtifactInput,
+} from "../../../src/graph-merge/plan-schema";
+import {
+  constructMergePlanArtifact,
+  parseMergePlanArtifact,
+} from "../../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../../src/graph-merge/types";
 import { requireDefined } from "../../../src/utils/presence";
@@ -106,6 +115,171 @@ export function registerGraphMergePlanIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("graph merge plan lifecycle", () => {
+    it("parses legacy plans but refuses applying them without changing the graph", async () => {
+      const base = await context.createStore(graph, { revisionTracking: true });
+      const source = await makeBranch(context, base, "legacy");
+      try {
+        await source.store.nodes.Person.create(
+          { name: "legacy", email: "legacy@example.test" },
+          { id: "legacy" },
+        );
+        const current = unwrap(await planMerge(base, [source]));
+        const { digest: _digest, review, ...input } = current;
+        const {
+          compositionOrphans: _orphans,
+          identityConflicts: _conflicts,
+          ...legacyReview
+        } = review;
+        const { owner: _owner, ...revision } = input.target.revision;
+        const legacyInputs = [
+          {
+            ...input,
+            formatVersion: 1,
+            target: { ...input.target, revision },
+            review: legacyReview,
+          },
+          { ...input, formatVersion: 2, review: legacyReview },
+        ] as unknown as readonly MergePlanArtifactInput[];
+        const before = await base.revisionNow();
+        for (const legacyInput of legacyInputs) {
+          const legacy = {
+            ...legacyInput,
+            digest: {
+              algorithm: "sha256",
+              value: await computeMergePlanDigest(legacyInput),
+            },
+          } as MergePlanArtifact;
+          // Exercise the serialized wire boundary: the legacy grammar parses,
+          // and applying it is refused before any write.
+          // eslint-disable-next-line unicorn/prefer-structured-clone
+          const serialized = JSON.parse(
+            JSON.stringify(legacy),
+          ) as typeof legacy;
+          expect(parseMergePlanArtifact(serialized).success).toBe(true);
+          const refused = await applyMergePlan(base, serialized);
+          expect(refused).toMatchObject({
+            success: false,
+            error: {
+              code: "GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED",
+              details: { received: legacyInput.formatVersion },
+            },
+          });
+        }
+        expect(await base.revisionNow()).toBe(before);
+        expect(
+          await base.nodes.Person.getById(asNodeId("legacy")),
+        ).toBeUndefined();
+      } finally {
+        await source.close();
+      }
+    });
+
+    it("returns the exact terminal apply receipt despite a later commit before the response", async () => {
+      const base = await context.createHistoryStore(graph);
+      const node = await base.nodes.Person.create({
+        name: "before",
+        email: "before@example.test",
+      });
+      const source = await makeBranch(context, base, "receipt-source");
+      try {
+        await source.store.nodes.Person.update(node.id, { name: "applied" });
+        const plan = unwrap(await planMerge(base, [source]));
+        const backend = context.getBackend();
+        let armed = false;
+        let advanced = false;
+        const [observed] = await createStoreWithSchema(
+          graph,
+          deriveBackend(backend, {
+            async transaction(callback, options) {
+              const result = await backend.transaction(callback, options);
+              if (armed && !advanced) {
+                advanced = true;
+                await base.nodes.Person.update(node.id, { name: "later" });
+              }
+              return result;
+            },
+          }),
+          { history: true },
+        );
+        armed = true;
+        const report = unwrap(
+          await applyMergePlan(observed, plan, {
+            async afterApply(tx) {
+              await tx.nodes.Person.create(
+                { name: "callback", email: "callback@example.test" },
+                { id: "callback" },
+              );
+            },
+          }),
+        );
+        expect(advanced).toBe(true);
+        const recorded = requireDefined(report.receipt.recorded);
+        expect(await base.recordedNow()).not.toBe(recorded);
+        expect(await base.nodes.Person.getById(node.id)).toMatchObject({
+          name: "later",
+        });
+        const atApply = base.asOfRecorded(recorded);
+        expect(await atApply.nodes.Person.getById(node.id)).toMatchObject({
+          name: "applied",
+        });
+        expect(
+          await atApply.nodes.Person.getById(asNodeId("callback")),
+        ).toMatchObject({ name: "callback" });
+        expect(report.receipt.writes.nodes["Person"]).toBe(2);
+      } finally {
+        await source.close();
+      }
+    });
+
+    it("reports an owned no-op transaction receipt and no recorded anchor when history is disabled", async () => {
+      for (const history of [true, false]) {
+        const base =
+          history ?
+            await context.createHistoryStore(graph)
+          : await context.createStore(graph, { revisionTracking: true });
+        const source = await makeBranch(
+          context,
+          base,
+          `empty-${String(history)}`,
+        );
+        try {
+          const plan = unwrap(await planMerge(base, [source]));
+          const report = unwrap(await applyMergePlan(base, plan));
+          expect(report.receipt.writes.total).toBe(0);
+          expect(report.receipt.recorded !== undefined).toBe(history);
+        } finally {
+          await source.close();
+        }
+      }
+    });
+
+    it("returns no successful apply receipt after callback rollback", async () => {
+      const base = await context.createHistoryStore(graph);
+      const source = await makeBranch(context, base, "rollback-receipt");
+      try {
+        await source.store.nodes.Person.create(
+          { name: "staged", email: "staged@example.test" },
+          { id: "staged" },
+        );
+        const plan = unwrap(await planMerge(base, [source]));
+        const before = await base.recordedNow();
+        const failed = await applyMergePlan(base, plan, {
+          afterApply() {
+            throw new Error("rollback receipt");
+          },
+        });
+        expect(isErr(failed)).toBe(true);
+        expect(await base.recordedNow()).toBe(before);
+        expect(
+          await base.nodes.Person.getById(asNodeId("staged")),
+        ).toBeUndefined();
+        const report = unwrap(await applyMergePlan(base, plan));
+        expect(report.receipt.recorded).toBeDefined();
+      } finally {
+        await source.close();
+      }
+    });
+
     it("preserves multi-source evidence through JSON and applies exactly once", async () => {
       const base = await context.createStore(graph, { revisionTracking: true });
       const left = await makeBranch(context, base, "left");
@@ -318,24 +492,29 @@ export function registerGraphMergePlanIntegrationTests(
         edges: [],
       };
       const scopedBackend = vi.fn(() => context.createIsolatedBackend());
-      const scoped = await planCandidateWriteSetForEvolution({
+      // The evolution planner requires `planningScope: "full"`; an untyped
+      // caller that states the bounded default is refused.
+      const untypedArguments = {
         target,
         evolutionPlan,
         makeBackend: scopedBackend,
         writeSet,
-        // @ts-expect-error the evolution planner declares no planningScope; an untyped caller is refused
         planningScope: "candidate",
-      });
+      } as unknown as Parameters<typeof planCandidateWriteSetForEvolution>[0];
+      const scoped = await planCandidateWriteSetForEvolution(untypedArguments);
       if (!isErr(scoped))
         throw new Error("expected a candidate planning scope refusal");
       expect(scoped.error).toBeInstanceOf(CandidatePlanningScopeError);
       expect(scoped.error.details).toEqual({
+        capability: "boundedCandidatePlanning",
+        requiredPlanningScope: "full",
         planningScope: { scope: "whole-target", reason: "planned-evolution" },
       });
       expect(scopedBackend).not.toHaveBeenCalled();
 
       const { plan: mergePlan, planningScope } = unwrap(
         await planCandidateWriteSetForEvolution({
+          planningScope: "full",
           target,
           evolutionPlan,
           makeBackend: () => context.createIsolatedBackend(),
@@ -412,6 +591,7 @@ export function registerGraphMergePlanIntegrationTests(
       );
       const mergePlan = unwrap(
         await planCandidateWriteSetForEvolution({
+          planningScope: "full",
           target,
           evolutionPlan,
           makeBackend: () => context.createIsolatedBackend(),
@@ -508,6 +688,7 @@ export function registerGraphMergePlanIntegrationTests(
       };
       let advanced = false;
       const planned = await planCandidateWriteSetForEvolution({
+        planningScope: "full",
         target,
         evolutionPlan,
         makeBackend: async () => {

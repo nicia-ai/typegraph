@@ -334,10 +334,10 @@ describe("stored review and plan artifacts stay compatible", () => {
     expect(revalidated.status).toBe("compatible");
   });
 
-  it("a merge that writes identity assertions plans a format-version-2 artifact with no identity review entries", async () => {
+  it("a merge that writes identity assertions plans a format-version-3 artifact with no identity review entries", async () => {
     const { target, source } = await targetWithBranch();
     const artifact = unwrap(await planMerge(target, [source]));
-    expect(MERGE_PLAN_FORMAT_VERSION).toBe(2);
+    expect(MERGE_PLAN_FORMAT_VERSION).toBe(3);
     expect(artifact.formatVersion).toBe(MERGE_PLAN_FORMAT_VERSION);
     expect(artifact.writes.identityAssertions).toHaveLength(1);
     expect(Object.keys(artifact.review)).not.toContain("identityConflicts");

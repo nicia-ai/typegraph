@@ -13,6 +13,10 @@ import {
   createPostgresTables,
 } from "../../../src/backend/postgres";
 import { type RecordedTableNames } from "../../../src/backend/types";
+import { createRecordedInstant } from "../../../src/core/temporal";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
+import { ensureRevisionOriginRow } from "../../../src/store/recorded-capture/clock";
 import { shortHash } from "../../../src/utils/hash";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
@@ -169,13 +173,29 @@ describe.runIf(process.env["POSTGRES_URL"])(
         { column_name: "recorded_from", data_type: "bigint" },
         { column_name: "revision", data_type: "bigint" },
       ]);
+      await backend.ensureRevisionOriginsTable?.();
+      const origin = await ensureRevisionOriginRow(
+        backend,
+        createSqlSchema(backend.tableNames),
+        "pg-legacy",
+      );
       await expect(
         migrateRecordedAnchor({
           backend,
           graphId: "pg-legacy",
           anchor: FIRST,
+          origin,
         }),
-      ).resolves.toBe("r1:0000000000000001:2026-01-01T00:00:00.000Z");
+      ).resolves.toBe(
+        createRecordedInstant(
+          1,
+          FIRST,
+          await recordedAnchorOwner(
+            createSqlSchema(backend.tableNames),
+            origin,
+          ),
+        ),
+      );
 
       await backend.close();
     });

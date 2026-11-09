@@ -13,7 +13,11 @@ import {
   captureMergePlanTargetFence,
   sameMergePlanTargetFence,
 } from "./merge";
-import type { MergePlanArtifact, MergePlanTargetFence } from "./plan-schema";
+import {
+  MERGE_PLAN_FORMAT_VERSION,
+  type MergePlanArtifactV3,
+  type MergePlanTargetFence,
+} from "./plan-schema";
 import { readFormatVersion, validateMergePlanArtifact } from "./plan-wire";
 import { err, isErr, ok, type Result } from "./result";
 import {
@@ -318,6 +322,19 @@ async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
     throw new MergeReviewError("The reviewed execution plan is invalid.", {
       details: { reason: "invalid-plan", error: plan.error },
     });
+  if (plan.artifact.formatVersion !== MERGE_PLAN_FORMAT_VERSION)
+    throw new MergeReviewError(
+      "The reviewed execution plan is a legacy format.",
+      {
+        details: {
+          reason: "invalid-plan",
+          error: {
+            kind: "unsupported-version",
+            received: plan.artifact.formatVersion,
+          },
+        },
+      },
+    );
   const anchors = plan.artifact.anchors;
   if (
     plan.artifact.mode !== "incremental" ||
@@ -377,7 +394,7 @@ function assertCandidateScopeEligible<G extends GraphDef>(
 
 function assertReviewPlanFence(
   fence: MergePlanTargetFence,
-  plan: MergePlanArtifact,
+  plan: MergePlanArtifactV3,
 ): void {
   if (!sameMergePlanTargetFence(fence, plan.target)) {
     throw new MergePlanningStaleError(
@@ -394,7 +411,7 @@ function assertOptionsUnchanged(before: unknown, after: unknown): void {
 }
 
 function compareReviewTarget(
-  reviewed: MergePlanTargetFence,
+  reviewed: MergePlanArtifactV3["target"],
   current: MergePlanTargetFence,
 ): readonly MergeReviewDifference[] {
   return compareFields(
@@ -418,8 +435,8 @@ function compareReviewTarget(
  * or incremental plan is accepted by this protocol. Keep every other field.
  */
 function reviewPlanContent(
-  plan: MergePlanArtifact,
-): Omit<MergePlanArtifact, "digest" | "target" | "anchors"> {
+  plan: MergePlanArtifactV3,
+): Omit<MergePlanArtifactV3, "digest" | "target" | "anchors"> {
   const {
     digest: _digest,
     target: _target,

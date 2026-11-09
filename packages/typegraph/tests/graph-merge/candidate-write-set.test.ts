@@ -20,10 +20,13 @@ import {
 import {
   BaseVersionMismatchError,
   BranchError,
+  CandidatePlanningScopeError,
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
+  planCandidateWriteSetForEvolution,
+  type PlanCandidateWriteSetForEvolutionArgs,
   planCandidateWriteSetReview,
   planMergeIncremental,
   revalidateCandidateWriteSetReview,
@@ -135,6 +138,24 @@ describe("candidate write-set planning", () => {
   });
 
   afterEach(async () => cleanupBase());
+
+  it("refuses untracked targets without suggesting full planning", async () => {
+    const [target] = await createStoreWithSchema(graph, baseBackend);
+    for (const planningScope of [undefined, "full"] as const) {
+      const result = await planCandidateWriteSet({
+        target,
+        makeBackend: () => Promise.reject(new Error("must not clone")),
+        writeSet: {},
+        ...(planningScope === undefined ? {} : { planningScope }),
+      });
+      expect(result).toMatchObject({
+        success: false,
+        error: { details: { capability: "revisionTracking" } },
+      });
+      if (!result.success)
+        expect(result.error.details).not.toHaveProperty("planningScope");
+    }
+  });
 
   async function setup(backend = baseBackend) {
     const [target] = await createStoreWithSchema(graph, backend, {
@@ -422,6 +443,7 @@ describe("candidate write-set planning", () => {
       });
       unwrap(
         await planCandidateWriteSet({
+          planningScope: "full",
           target,
           makeBackend: candidateBackend().makeBackend,
           writeSet,
@@ -827,6 +849,7 @@ describe("candidate write-set planning", () => {
       try {
         const actual = unwrap(
           await planCandidateWriteSet({
+            planningScope: "full",
             target,
             makeBackend: candidateBackend().makeBackend,
             writeSet,
@@ -854,6 +877,7 @@ describe("candidate write-set planning", () => {
           makeBackend: candidateBackend().makeBackend,
           writeSet,
           policy: { id: "legacy-runtime-review", context: {} },
+          planningScope: "full",
         });
         expect(isErr(legacyReview)).toBe(false);
       } finally {
@@ -1496,7 +1520,7 @@ describe("candidate write-set planning", () => {
     expect(after.revisionUnchanged).toBe(true);
   });
 
-  it("falls back to full clone when a durable identity owner is tombstoned", async () => {
+  it("refuses bounded planning for a tombstoned identity owner unless full planning is selected", async () => {
     const [target] = await createStoreWithSchema(
       edgeIdentityGraph,
       baseBackend,
@@ -1552,12 +1576,26 @@ describe("candidate write-set planning", () => {
       writeSet,
     });
     expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
-    // The capability sees the durable tombstone, so planning must use the
-    // same state projection as the full clone rather than seed the tombstone.
-    if (isErr(bounded)) throw bounded.error;
-    expect(bounded.data.planningScope).toEqual({
+    // The capability sees the durable tombstone, so bounded planning would
+    // seed a state the full clone never shows: it is refused, naming why.
+    if (!isErr(bounded)) throw new Error("expected a bounded-planning refusal");
+    expect(bounded.error).toBeInstanceOf(CandidatePlanningScopeError);
+    expect(bounded.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
+    expect(bounded.error.details?.["planningScope"]).toEqual({
       scope: "whole-target",
       reason: "match-identity-owner-not-clone-visible",
+    });
+    const full = unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: candidateBackend().makeBackend,
+        writeSet,
+        planningScope: "full",
+      }),
+    );
+    expect(full.planningScope).toEqual({
+      scope: "whole-target",
+      reason: "full-requested",
     });
   });
 
@@ -2041,5 +2079,28 @@ describe("candidate write-set planning", () => {
       ]);
     }
     expect(backend.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("candidate evolution planning scope", () => {
+  it("refuses missing and candidate scope before touching a target", async () => {
+    for (const planningScope of [undefined, "candidate"]) {
+      const result = await planCandidateWriteSetForEvolution({
+        planningScope,
+      } as unknown as PlanCandidateWriteSetForEvolutionArgs<typeof graph>);
+      expect(result).toMatchObject({
+        success: false,
+        error: {
+          details: {
+            capability: "boundedCandidatePlanning",
+            requiredPlanningScope: "full",
+            planningScope: {
+              scope: "whole-target",
+              reason: "planned-evolution",
+            },
+          },
+        },
+      });
+    }
   });
 });

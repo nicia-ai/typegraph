@@ -3,7 +3,7 @@ import { getTableName, type SQL, sql, type SQLWrapper } from "drizzle-orm";
 import { getDialect } from "../../../query/dialect";
 import type { SqlFragment } from "../../../query/sql-fragment";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
-import type { SqlDialect } from "../../types";
+import type { NodeRowLock, SqlDialect } from "../../types";
 import { toDrizzleSql } from "../execution/types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
@@ -17,6 +17,9 @@ export type Tables = SqliteTables | PostgresTables;
  * renders an empty clause.
  */
 export type RowLockClause = (of?: readonly string[]) => SQL;
+
+/** One {@link RowLockClause} per node-row lock purpose (see `NodeRowLock`). */
+export type NodeRowLockClauses = Readonly<Record<NodeRowLock, RowLockClause>>;
 
 /**
  * The names a relation's PRIMARY KEY constraint can carry, given the relation

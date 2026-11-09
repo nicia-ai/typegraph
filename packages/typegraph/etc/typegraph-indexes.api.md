@@ -142,6 +142,7 @@ export function generateNodeIndexDDL(index: NodeIndexDeclaration, dialect: SqlDi
 // @public
 export function generateSystemIndexDDL(declaration: SystemIndexDeclaration, physicalTableName: string, options: Readonly<{
     concurrent: boolean;
+    dialect?: SqlDialect;
 }>): string;
 
 // @public
@@ -407,7 +408,7 @@ type PointerSegmentsForObject<T, Current extends Depth> = {
 type ProfileEntityType = KindEntity;
 
 // @public (undocumented)
-type RecordedColumn = "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
+type RecordedColumn = "history_id" | "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
 
 // @public (undocumented)
 type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
@@ -437,6 +438,7 @@ export type SystemIndexDeclaration = SystemIndexDeclarationFor<"nodes"> | System
 type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
     table: T;
     suffix: string;
+    binaryOrderColumns?: readonly string[];
     columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
 }>;
 

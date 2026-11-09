@@ -96,6 +96,34 @@ const Document = defineNode("Document", {
 });
 ```
 
+### Search field scope
+
+Fulltext search addresses a node kind's declared searchable fields as one
+indexed document. It has no public field selector. For the `Document` above,
+`store.search.fulltext("Document", { query })` and `d.$fulltext.matches(query)`
+search both `title` and `body`; their ranking is for that combined document.
+
+| Search leg | Field scope |
+| --- | --- |
+| Fulltext | All declared `searchable()` fields on the selected kind |
+| Vector | The embedding field named by `fieldPath` |
+| Hybrid | Kind-wide fulltext plus the vector leg's selected `fieldPath` |
+
+In `store.search.hybrid`, `vector.fieldPath` selects only the vector leg. It does
+not restrict the fulltext leg to that field or to the source text used to produce
+its embedding. An adapter must describe these scopes accurately rather than
+presenting kind-wide matches as field-restricted fulltext results.
+
+Post-filtering fulltext hits by a property does not implement field-restricted
+search: omitted candidates cannot be recovered, scores still describe the
+combined document, and paging and recall change. A future field selector needs
+an explicit backend capability with defined indexing, ranking, and pagination
+semantics; the current API provides no such selector.
+
+Fulltext, vector, and hybrid indexes serve current-state search. Historical
+views continue to refuse these search APIs; pinning a recorded or valid-time
+coordinate does not turn a current index into a historical index.
+
 ### How Indexing Works
 
 TypeGraph stores one fulltext row per node. When you create or update a

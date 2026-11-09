@@ -102,6 +102,7 @@ import {
   registerMultiKindQueryIntegrationTests,
   registerMultiRecursiveTraversalIntegrationTests,
   registerMultiRootSubgraphBatchIntegrationTests,
+  registerMutationPlanningIntegrationTests,
   registerOntologyEquivalenceIntegrationTests,
   registerOntologyTighteningIntegrationTests,
   registerOntologyTypedSubsumptionIntegrationTests,
@@ -113,6 +114,7 @@ import {
   registerQueryTerminalIntegrationTests,
   registerReadEfficiencyIntegrationTests,
   registerReconciledSchemaIntegrationTests,
+  registerRecordedAdjacencyIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveDelimiterIdIntegrationTests,
@@ -129,6 +131,7 @@ import {
   registerSetNodeMutationIntegrationTests,
   registerSetOperationIntegrationTests,
   registerStoreAnalysisIntegrationTests,
+  registerStoreOperationIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerSubgraphSharedIdIntegrationTests,
@@ -371,6 +374,9 @@ export function createIntegrationTestSuite<
     registerOntologyEquivalenceIntegrationTests(context);
     registerOntologyTypedSubsumptionIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
+    registerRecordedAdjacencyIntegrationTests(context);
+    registerMutationPlanningIntegrationTests(context);
+    registerStoreOperationIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);

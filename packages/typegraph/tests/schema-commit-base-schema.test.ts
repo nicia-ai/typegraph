@@ -43,7 +43,7 @@ const petExtension = defineGraphExtension({
   nodes: { Pet: { properties: { name: { type: "string" } } } },
 });
 
-const EARLIER_BASE_SCHEMA_VERSION = 5;
+const EARLIER_BASE_SCHEMA_VERSION = 8;
 
 function rawClient(result: LocalSqliteBackendResult): Database.Database {
   return (result.db as unknown as { $client: Database.Database }).$client;

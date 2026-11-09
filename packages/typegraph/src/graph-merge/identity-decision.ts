@@ -17,7 +17,7 @@ import {
   type MergePlanDecisionOptions,
   reviewDigestForPlan,
 } from "./apply-callbacks";
-import type { MergePlanAnchors, MergePlanArtifactV2 } from "./plan-schema";
+import type { MergePlanAnchors, MergePlanArtifactV3 } from "./plan-schema";
 import type { IdentityDecisionProvenance } from "./typegraph-internal";
 
 /**
@@ -93,7 +93,7 @@ export function mergeIdentityDecision(
  * revalidation of this very plan ({@link reviewDigestForPlan}).
  */
 export function mergeIdentityDecisionFromArtifact(
-  artifact: MergePlanArtifactV2,
+  artifact: MergePlanArtifactV3,
   context: MergePlanDecisionOptions = {},
 ): IdentityDecisionProvenance {
   return mergeIdentityDecision({

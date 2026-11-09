@@ -54,7 +54,8 @@ The `{ kind, id }` a polymorphic read carries for a node of type `N`: a row from
 an alias stated `{ expansion: "subclasses" }` (on any graph, including over a subclass a runtime
 extension adds), a widened edge endpoint (`{ kind: edge.toKind, id: edge.toId }`), or an expanded
 search hit. Every node-reference input accepts it: edge endpoints, `neighbors()`, the bulk edge
-reads, composition `partOf.whole` and `reparent`, `subgraph()`, `getNodeByRef()`, the identity reads
+reads, composition `partOf.whole` and `reparent`, `subgraph()`, the recorded-time `adjacency()` root,
+`getNodeByRef()`, the identity reads
 and the provenance retraction verbs.
 
 ```typescript

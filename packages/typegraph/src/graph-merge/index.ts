@@ -17,9 +17,11 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { GraphAllocationOwner } from "../core/allocation-owner";
 export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export type { CompiledOneStatementRead } from "../query";
 export type { BatchReadBuilder } from "../store";
+export type { TransactionReceipt } from "../store/types";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export type {
@@ -73,6 +75,7 @@ export type {
   DurableBranchOperationRequest,
   DurableOperationCapability,
   DurableOperationOutcome,
+  DurableOperationRequest,
   DurableOperationScan,
   DurableOperationUnsupportedDimension,
 } from "./durable-operation";
@@ -86,6 +89,7 @@ export {
   operateDurableBranch,
   scanDurableOperations,
 } from "./durable-operation";
+export { DURABLE_OPERATION_KEY_MAX_BYTES } from "./durable-operation";
 export type {
   AcyclicityMergeConflictDetails,
   AcyclicityMergeConflictEdge,
@@ -104,6 +108,7 @@ export {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
+  DurableOperationOwnerMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
   IdentityMergeConflictError,
@@ -118,12 +123,13 @@ export {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   MergeReviewError,
   SimilarityUnavailableError,
   StaleMergePlanError,
+  StoreOperationError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
 export type {
@@ -147,6 +153,20 @@ export {
   planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
+export type {
+  MutationAuthoringOptions,
+  MutationCreateOptions,
+  MutationDocument,
+  MutationOperation,
+  MutationPlanBuilder,
+  MutationPlanningOptions,
+} from "./mutation-plan";
+export {
+  createMutationPlanBuilder,
+  MUTATION_DOCUMENT_FORMAT_VERSION,
+  MutationDocumentSchema,
+  planMutations,
+} from "./mutation-plan";
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
 export {
   forkGraphNamespace,
@@ -155,10 +175,16 @@ export {
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
+  LegacyMergePlanReview,
   MergePlanAnchors,
   MergePlanArtifact,
+  MergePlanArtifactInput,
+  MergePlanArtifactV1,
+  MergePlanArtifactV1Input,
   MergePlanArtifactV2,
   MergePlanArtifactV2Input,
+  MergePlanArtifactV3,
+  MergePlanArtifactV3Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
@@ -190,6 +216,7 @@ export {
   MERGE_PLAN_DIGEST_ALGORITHM,
   MERGE_PLAN_FORMAT_VERSION,
 } from "./plan-schema";
+export type { PlanningScope } from "./planning-scope";
 export type {
   ProvenanceGraph,
   ProvenanceNode,
@@ -226,6 +253,17 @@ export type {
   CandidatePlanningScopeReason,
   WholeTargetPlanningScope,
 } from "./sparse-candidate-branch";
+export {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  type StoreOperationApply,
+  type StoreOperationEvidence,
+  type StoreOperationLookup,
+  type StoreOperationOutcome,
+  type StoreOperationRequest,
+  type StoreOperationTarget,
+} from "./store-operation";
 export type {
   IdentityAssertionWriteFacade,
   IdentityDecisionProvenance,
@@ -233,6 +271,7 @@ export type {
   IdentityTransferAssertion,
 } from "./typegraph-internal";
 export type {
+  AppliedMergeReport,
   BaseAmbiguity,
   BaseVersion,
   BranchId,

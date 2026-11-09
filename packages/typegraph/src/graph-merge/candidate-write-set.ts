@@ -13,7 +13,6 @@ import { computeSchemaComponent } from "./base-version";
 import {
   CandidatePlanningScopeError,
   CandidateWriteSetError,
-  InvalidMergeOptionsError,
   MergeError,
 } from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
@@ -30,7 +29,8 @@ import {
   publicPlanCapabilityRefusal,
   sameMergePlanTargetFence,
 } from "./merge";
-import type { MergePlanArtifact } from "./plan-schema";
+import type { MergePlanArtifactV3 } from "./plan-schema";
+import { type PlanningScope, resolvePlanningScope } from "./planning-scope";
 import type { Result } from "./result";
 import { err, isErr, ok } from "./result";
 import {
@@ -117,12 +117,12 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
   writeSet: unknown;
   options?: Omit<MergeOptions<G>, "target">;
   /**
-   * Require planning from the candidate's own rows. Without it, a target or
-   * candidate outside that scope is planned against the whole target; with
-   * it, that case is refused with `CandidatePlanningScopeError` before any
-   * staging store is created.
+   * The target state planning may copy. The default, `"candidate"`, plans
+   * from the candidate's own rows and refuses with
+   * `CandidatePlanningScopeError` (naming the reason) when this target or
+   * candidate needs the whole target; `"full"` permits that whole-target copy.
    */
-  planningScope?: "candidate";
+  planningScope?: PlanningScope;
 }>;
 
 /**
@@ -131,13 +131,14 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
  * plan, so it stays outside the digested artifact.
  */
 export type CandidateWriteSetPlan = Readonly<{
-  plan: MergePlanArtifact;
+  plan: MergePlanArtifactV3;
   planningScope: CandidatePlanningScope;
 }>;
 
 /**
  * Object-form arguments for candidate planning against a planned evolution.
- * It always stages the whole resulting graph, so it takes no `planningScope`.
+ * It always stages the whole resulting graph, so `planningScope` must be
+ * `"full"`.
  */
 export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<
   PlanCandidateWriteSetArgs<G>,
@@ -146,6 +147,8 @@ export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<
   Readonly<{
     target: Store<G>;
     evolutionPlan: EvolutionPlan;
+    /** Evolution staging currently requires a complete copy. */
+    planningScope: "full";
   }>;
 
 /** Captures the schema identity a candidate write set must name. */
@@ -198,19 +201,6 @@ function sameCandidateTarget(
   );
 }
 
-function requestedPlanningScope(
-  args: Readonly<Record<string, unknown>>,
-): Result<"candidate" | undefined, InvalidMergeOptionsError> {
-  const requested = readOwnProperty(args, "planningScope");
-  if (requested === undefined || requested === "candidate")
-    return ok(requested);
-  return err(
-    new InvalidMergeOptionsError("Unsupported candidate planning scope.", {
-      details: { planningScope: requested },
-    }),
-  );
-}
-
 function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
   return {
     formatVersion: FORMAT_VERSION,
@@ -230,7 +220,7 @@ function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
  * The adapter creates no durable branch and never mutates `target`. It stages in
  * a disposable ingestion working copy, delegates to `planMergeIncremental`, and
  * closes that working copy on success, refusal, or throw. The returned `plan`
- * is the ordinary versioned/digested {@link MergePlanArtifact}; no parallel
+ * is the ordinary versioned/digested {@link MergePlanArtifactV3}; no parallel
  * conflict format or scoring implementation exists. `planningScope` reports
  * whether the copy was seeded from the candidate's own rows or the whole
  * target, and why.
@@ -238,7 +228,9 @@ function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
 export async function planCandidateWriteSet<G extends GraphDef>(
   args: PlanCandidateWriteSetArgs<G>,
 ): Promise<Result<CandidateWriteSetPlan, MergeError>> {
-  const requested = requestedPlanningScope(args);
+  const requested = resolvePlanningScope(
+    readOwnProperty(args, "planningScope"),
+  );
   if (isErr(requested)) return requested;
   const capabilityRefusal = publicPlanCapabilityRefusal(args.target);
   if (capabilityRefusal !== undefined) return err(capabilityRefusal);
@@ -282,15 +274,19 @@ export async function planCandidateWriteSet<G extends GraphDef>(
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
   let resolution: CandidatePlanningScopeResolution;
-  try {
-    resolution = await resolveCandidatePlanningScope(args.target, writeSet);
-  } catch (error) {
-    return err(
-      new CandidateWriteSetError(
-        "Unable to read exact durable edge identity owners for candidate planning.",
-        { cause: error },
-      ),
-    );
+  if (requested.data === "full") {
+    resolution = { planningScope: wholeTargetPlanningScope("full-requested") };
+  } else {
+    try {
+      resolution = await resolveCandidatePlanningScope(args.target, writeSet);
+    } catch (error) {
+      return err(
+        new CandidateWriteSetError(
+          "Unable to read exact durable edge identity owners for candidate planning.",
+          { cause: error },
+        ),
+      );
+    }
   }
   const { planningScope } = resolution;
   if (requested.data === "candidate" && planningScope.scope === "whole-target")
@@ -423,16 +419,18 @@ export async function planCandidateWriteSet<G extends GraphDef>(
  * `withEvolvedTransaction()` and `applyMergePlanInTransaction()` can commit
  * schema and accepted candidate writes in one caller transaction and revision.
  * The staging copy is always the whole resulting graph, so the result reports
- * `planned-evolution`, and an untyped `planningScope: "candidate"` is refused
- * with `CandidatePlanningScopeError`.
+ * `planned-evolution`, and an untyped caller that does not state
+ * `planningScope: "full"` is refused with `CandidatePlanningScopeError`.
  */
 export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
   args: PlanCandidateWriteSetForEvolutionArgs<G>,
 ): Promise<Result<CandidateWriteSetPlan, MergeError>> {
-  const requested = requestedPlanningScope(args);
+  const requested = resolvePlanningScope(
+    readOwnProperty(args, "planningScope"),
+  );
   if (isErr(requested)) return requested;
   const planningScope = wholeTargetPlanningScope("planned-evolution");
-  if (requested.data === "candidate")
+  if (requested.data !== "full")
     return err(new CandidatePlanningScopeError(planningScope));
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
   if (!parsed.success) {

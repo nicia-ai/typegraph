@@ -41,6 +41,8 @@ import {
 } from "../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
+import { recordedAnchorOwner } from "../../src/store/recorded-anchor-origin";
+import { readRevisionOrigin } from "../../src/store/recorded-capture";
 import { requireDefined } from "../../src/utils/presence";
 import {
   createTestBackend,
@@ -101,7 +103,15 @@ async function readRecordedClock(
   );
   const row = rows[0];
   if (row === undefined) throw new Error("Recorded clock not written");
-  return recordedInstantFromDriver(row.revision, row.recorded_at);
+  const schema = schemaFor(backend);
+  const origin = requireDefined(
+    await readRevisionOrigin(backend, schema, propertyGraph.id),
+  );
+  return recordedInstantFromDriver(
+    row.revision,
+    row.recorded_at,
+    await recordedAnchorOwner(schema, origin),
+  );
 }
 
 async function readIntervals(

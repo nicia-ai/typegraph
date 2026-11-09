@@ -551,6 +551,7 @@ if (isErr(applied)) {
 | Error | Code | Meaning |
 | --- | --- | --- |
 | `MergePlanCapabilityError` | `GRAPH_MERGE_PLAN_CAPABILITY` | The target cannot supply a durable revision fence for a cross-time plan. Enable `revisionTracking` or `history`; the contiguous `merge()` wrappers retain their documented compatibility behavior. |
+| `CandidatePlanningScopeError` | `GRAPH_MERGE_PLAN_CAPABILITY` | A `MergePlanCapabilityError`: bounded candidate, mutation or evolution planning needs the whole target. `details.planningScope.reason` names why; pass `planningScope: "full"` to permit the whole-target copy. |
 | `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. This is an expected retry-and-replan outcome under concurrency: no artifact is returned, so recapture the target and create a new plan before retrying. |
 | `StaleMergePlanError` | `GRAPH_MERGE_PLAN_STALE` | The target moved after planning, the plan already succeeded, or another concurrent application won. No plan writes committed. |
 | `InvalidMergePlanError` | `GRAPH_MERGE_PLAN_INVALID` | The value failed the versioned plan schema or a semantic invariant. |
@@ -558,7 +559,7 @@ if (isErr(applied)) {
 | `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
 | `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
 | `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
-| `MergePlanOriginMismatchError` | `GRAPH_MERGE_PLAN_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `MergePlanOwnerMismatchError` | `GRAPH_ALLOCATION_OWNER_MISMATCH` | The plan and target have different allocation owners (origin or namespace), even if their numeric revisions match. |
 | `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
 | `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
 
@@ -1457,8 +1458,8 @@ in `result.errors`:
 | `IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING` | An `importGraphStream` header announced a transition restore (`hasTransitions`, or a non-zero `retention`), but the stream ended without an `identity-transitions` chunk. Raised at the end of the stream, after its earlier chunks committed. |
 
 A write that records an identity transition on a database whose transition-log
-relations were never created (base-schema version 6 not yet adopted; see
-[Base-schema version 6](/backend-setup/#base-schema-version-6-the-identity-transition-log))
+relations were never created (base-schema version 9 not yet adopted; see
+[Base-schema version 9](/backend-setup/#base-schema-version-9-the-identity-transition-log))
 throws a `ConfigurationError` whose `details.code` is
 `IDENTITY_TRANSITION_RELATIONS_MISSING` and whose `details.relations` names
 both relations.
@@ -1645,7 +1646,7 @@ Every refusal specific to that form carries a stable `details.code`:
 | `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store is constructed with an external `recordedRead` binding against an engine-native backend — there is no TypeGraph recorded relation for one to populate. |
 | `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, is reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
 | `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` is called against an engine-native backend — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
-| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r1:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r2:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
 
 The profile refusal fires at backend construction; the two store-option
 refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
@@ -1653,6 +1654,24 @@ refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
 arm, fire at the specific call that cannot be honored. None of these codes
 are members of `RECORDED_CAPTURE_GUARD_CODES` above — that set stays closed
 to the three TypeGraph-capture guards.
+
+### Recorded allocation ownership and lookup
+
+`GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_OWNER_MISMATCH`.
+Merge owner refusals preserve their merge error class and use that same code. Match
+this code to retire checkpoints, plans, or requests after a reset or fork rotation;
+a retry against the same retired owner cannot repair it.
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
+| `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
+| `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
+| `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
+| `ALLOCATION_OWNER_REQUIRES_TRACKING` | Native owner access or rotation requires the Store option `revisionTracking: true` or TypeGraph-owned `history: true`. |
+| `EXTERNAL_RECORDED_OWNER_REQUIRED` | Public owner capture found no owner for the configured external source. Historical reads without a bound owner instead raise `GraphAllocationMismatchError` with code `GRAPH_ALLOCATION_OWNER_MISMATCH`. |
+| `EXTERNAL_RECORDED_OWNER_INVALID` | An external recorded relation's `owner` option is not a reader function. |
+| `RECORDED_RELATIONS_MISSING` | Required captured relations or the allocation log are missing; complete base-schema adoption before writing. |
 
 ### `SchemaMismatchError`
 
@@ -2088,7 +2107,6 @@ try {
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps; or, at planning, one branch's composition attachment loses its part or whole to another branch's deletion |
-| `GRAPH_MERGE_CANDIDATE_PLANNING_SCOPE` | `CandidatePlanningScopeError` | user | `planCandidateWriteSet` was called with `planningScope: "candidate"`, but the target or candidate must be planned against the whole target; `details.planningScope.reason` names why |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
@@ -2121,3 +2139,12 @@ try {
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
 | `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
+
+`recordedReadOwner()` on an external source without an owner raises `ConfigurationError`
+with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Historical reads compare the supplied
+checkpoint owner with the actual source owner and raise `GraphAllocationMismatchError`
+with code `GRAPH_ALLOCATION_OWNER_MISMATCH` if it is absent or different. Missing physical
+relations instead raise `ConfigurationError` with `details.code: "RECORDED_RELATIONS_MISSING"`.
+Native owner access and rotation require the `revisionTracking: true` or TypeGraph-owned
+`history: true` Store option; otherwise they raise `ConfigurationError` with
+`details.code: "ALLOCATION_OWNER_REQUIRES_TRACKING"`.

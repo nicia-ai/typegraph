@@ -11,17 +11,20 @@
  * membership.
  */
 import { requireTypeGraphRecordedRevision } from "../backend/capabilities/recorded-time-ownership";
+import { type GraphAllocationOwner } from "../core/allocation-owner";
 import { type GraphDef } from "../core/define-graph";
 import {
   createRecordedInstant,
   RECORDED_FIRST_REVISION,
   recordedDiagonalCoordinate,
   type RecordedInstant,
+  recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,
   type RestoredRecordedInstant,
 } from "../core/temporal";
 import { IdentityReplayError, ValidationError } from "../errors";
+import { readGraphAllocationOwner } from "../store/allocation-owner";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
@@ -158,13 +161,14 @@ function transitionPageCursor(
   reference: PlainNodeRef,
   revision: number,
   recordedAt: string,
+  owner: GraphAllocationOwner | undefined,
 ): TransitionPageCursor {
   // `encodeURIComponent` escapes the separator, so a kind or id containing it
   // can never shift where the instant begins.
   return [
     `${TRANSITION_PAGE_CURSOR_PREFIX}${encodeURIComponent(reference.kind)}`,
     encodeURIComponent(reference.id),
-    createRecordedInstant(revision, recordedAt),
+    createRecordedInstant(revision, recordedAt, owner),
   ].join(TRANSITION_PAGE_CURSOR_SEPARATOR) as TransitionPageCursor;
 }
 
@@ -363,19 +367,29 @@ function transitionFields<G extends GraphDef>(
   };
 }
 
+/**
+ * A native row's instant, bound to this graph's allocation owner so a read
+ * anchored on it is authorized.
+ */
 function recordedTransition<G extends GraphDef>(
   row: IdentityTransitionRow,
+  owner: GraphAllocationOwner | undefined,
 ): RecordedIdentityTransition<G> {
   return {
     ...transitionFields<G>(row),
-    recorded: createRecordedInstant(row.recorded_revision, row.recorded_at),
+    recorded: createRecordedInstant(
+      row.recorded_revision,
+      row.recorded_at,
+      owner,
+    ),
   };
 }
 
 function publicTransition<G extends GraphDef>(
   row: IdentityTransitionRow,
+  owner: GraphAllocationOwner | undefined,
 ): IdentityTransition<G> {
-  if (!isRestoredTransitionRow(row)) return recordedTransition<G>(row);
+  if (!isRestoredTransitionRow(row)) return recordedTransition<G>(row, owner);
   return {
     ...transitionFields<G>(row),
     recorded: createRecordedInstant(
@@ -739,7 +753,11 @@ async function reconstructBefore<G extends GraphDef>(
   return reconstructAt(
     ctx,
     seed,
-    createRecordedInstant(priorRevision, recordedInstantWallTime(boundary)),
+    createRecordedInstant(
+      priorRevision,
+      recordedInstantWallTime(boundary),
+      recordedInstantOwner(boundary),
+    ),
     reading,
   );
 }
@@ -935,6 +953,7 @@ async function memberBoundary<G extends GraphDef>(
   seed: PlainNodeRef,
   readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
+  owner: GraphAllocationOwner | undefined,
 ): Promise<MemberBoundary> {
   const firstNative = rows.find((row) => !isRestoredTransitionRow(row));
   if (firstNative === undefined) return { rows };
@@ -943,6 +962,7 @@ async function memberBoundary<G extends GraphDef>(
   const recordedAsOf = createRecordedInstant(
     firstNative.recorded_revision,
     firstNative.recorded_at,
+    owner,
   );
   const classes: BoundaryClasses = {
     before: await reconstructBefore(ctx, seed, recordedAsOf),
@@ -994,10 +1014,11 @@ async function pageMemberBoundaries<G extends GraphDef>(
   readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
   limit: number,
+  owner: GraphAllocationOwner | undefined,
 ): Promise<MemberBoundaryPage> {
   const boundaries: MemberBoundary[] = [];
   for (const group of groupByBoundary(rows)) {
-    const boundary = await memberBoundary(ctx, seed, readings, group);
+    const boundary = await memberBoundary(ctx, seed, readings, group, owner);
     const first = boundary.rows[0];
     if (first === undefined) continue;
     if (boundaries.length === limit) {
@@ -1007,6 +1028,7 @@ async function pageMemberBoundaries<G extends GraphDef>(
           seed,
           first.recorded_revision,
           first.recorded_at,
+          owner,
         ),
       };
     }
@@ -1105,13 +1127,20 @@ type TransitionRetention = Readonly<{
 function truncatedBeforeFor(
   retention: TransitionRetention,
   fromRevision: number | undefined,
+  owner: GraphAllocationOwner | undefined,
 ): RecordedInstant | undefined {
   return retention.prunedBeforeRevision > (fromRevision ?? 0) ?
-      createRecordedInstant(retention.prunedBeforeRevision, retention.prunedAt)
+      createRecordedInstant(
+        retention.prunedBeforeRevision,
+        retention.prunedAt,
+        owner,
+      )
     : undefined;
 }
 
 type WalkedTransitions = Readonly<{
+  /** This graph's allocation owner, which every instant the page reports is bound to. */
+  owner: GraphAllocationOwner | undefined;
   toRevision: number | undefined;
   retention: TransitionRetention;
   boundaries: readonly MemberBoundary[];
@@ -1153,6 +1182,11 @@ async function walkedTransitionsFor<G extends GraphDef>(
       undefined
     : requireCursorRevision(options.cursor, seed);
   const fromRevision = laterRevision(windowFromRevision, cursorRevision);
+  const owner = await readGraphAllocationOwner(
+    ctx.backend,
+    ctx.schema,
+    ctx.graphId,
+  );
   const start = await lineageWalkStart(ctx, seed);
   const discovered = await walkClassLineage(ctx, start.seeds);
   const unattributedRestored = await unattributedRestoredTransitions(
@@ -1165,6 +1199,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
     membershipReadings(ctx, discovered),
     windowedRows(discovered, fromRevision, toRevision),
     limit,
+    owner,
   );
   const retention = await readTransitionRetentionDetails(
     ctx.backend,
@@ -1172,12 +1207,13 @@ async function walkedTransitionsFor<G extends GraphDef>(
     ctx.graphId,
   );
   return {
+    owner,
     toRevision,
     retention,
     boundaries: page.boundaries,
     completenessFacts: {
       nextCursor: page.nextCursor,
-      truncatedBefore: truncatedBeforeFor(retention, fromRevision),
+      truncatedBefore: truncatedBeforeFor(retention, fromRevision, owner),
       unattributedRestored,
       uncapturedMembers: start.uncapturedMembers,
       pendingTransactionNotes: hasPendingIdentityTransitionNotes(
@@ -1201,7 +1237,7 @@ export async function identityTransitionsOf<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
-  const { boundaries, completenessFacts } = await walkedTransitionsFor(
+  const { owner, boundaries, completenessFacts } = await walkedTransitionsFor(
     ctx,
     ref,
     options,
@@ -1209,7 +1245,7 @@ export async function identityTransitionsOf<G extends GraphDef>(
   const { nextCursor } = completenessFacts;
   return {
     transitions: boundaries.flatMap((boundary) =>
-      boundary.rows.map((row) => publicTransition<G>(row)),
+      boundary.rows.map((row) => publicTransition<G>(row, owner)),
     ),
     ...(nextCursor === undefined ? {} : { nextCursor }),
     completeness: historyCompleteness({
@@ -1246,7 +1282,7 @@ export async function identityReplay<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
-  const { toRevision, retention, boundaries, completenessFacts } =
+  const { owner, toRevision, retention, boundaries, completenessFacts } =
     await walkedTransitionsFor(ctx, ref, options);
 
   const watermark = retention.prunedBeforeRevision;
@@ -1258,7 +1294,7 @@ export async function identityReplay<G extends GraphDef>(
     throw identityReplayHistoryTruncatedError(
       options?.fromRecorded,
       requireDefined(options?.toRecorded),
-      createRecordedInstant(watermark, retention.prunedAt),
+      createRecordedInstant(watermark, retention.prunedAt, owner),
     );
   }
 
@@ -1284,7 +1320,11 @@ export async function identityReplay<G extends GraphDef>(
     );
     for (const row of rows) {
       if (isRestoredTransitionRow(row)) continue;
-      steps.push({ transition: recordedTransition<G>(row), before, after });
+      steps.push({
+        transition: recordedTransition<G>(row, owner),
+        before,
+        after,
+      });
     }
   }
   const pageRows = boundaries.reduce(

@@ -704,7 +704,7 @@ function fixedSchemaBackend(
  *
  * An allocation carries its own base-schema marker, stamped by the release
  * that provisioned it, and a durable allocation outlives that release. A
- * release whose base-schema step adds relations (version 6 adds the identity
+ * release whose base-schema step adds relations (version 9 adds the identity
  * transition log) would otherwise attach to an allocation that lacks them and
  * fail on its first write that reaches one. The connection is the
  * provisioning role (`assertConnectionRole`), which created every relation in

@@ -27,6 +27,7 @@ import {
   asRecordedInstant,
   createRecordedInstant,
   type RecordedInstant,
+  recordedInstantOwner,
   recordedInstantRevision,
 } from "../src/core/temporal";
 import { IdentityReplayError, ValidationError } from "../src/errors";
@@ -174,7 +175,11 @@ describe("identity replay", () => {
       );
       if (index > 0) continue;
       const revision = recordedInstantRevision(step.transition.recorded);
-      const beforeInstant = createRecordedInstant(revision - 1, nowIso());
+      const beforeInstant = createRecordedInstant(
+        revision - 1,
+        nowIso(),
+        recordedInstantOwner(step.transition.recorded),
+      );
       const before = await store
         .asOfRecorded(beforeInstant)
         .identity.membersOf(a);

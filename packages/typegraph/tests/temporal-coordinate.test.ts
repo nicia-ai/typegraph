@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   asRecordedInstant,
+  compareRecordedInstants,
   coordinateContext,
   createRecordedInstant,
   describeCoordinate,
@@ -87,6 +88,50 @@ describe("asRecordedInstant", () => {
       revision: 42,
       recordedAt: VALID_AT,
     });
+  });
+
+  it("round-trips r2 ownership and refuses comparisons across origins", () => {
+    const first = createRecordedInstant(42, VALID_AT, {
+      origin: "origin-a",
+      namespace: "a".repeat(32),
+    });
+    expect(first).toBe(
+      `r2:origin-a:${"a".repeat(32)}:0000000000000042:${VALID_AT}`,
+    );
+    expect(parseRecordedInstant(first)).toEqual({
+      kind: "typegraph",
+      origin: "origin-a",
+      namespace: "a".repeat(32),
+      revision: 42,
+      recordedAt: VALID_AT,
+    });
+    expect(
+      compareRecordedInstants(
+        first,
+        createRecordedInstant(43, VALID_AT, {
+          origin: "origin-a",
+          namespace: "a".repeat(32),
+        }),
+      ),
+    ).toBe(-1);
+    expect(() =>
+      compareRecordedInstants(
+        first,
+        createRecordedInstant(42, VALID_AT, {
+          origin: "origin-b",
+          namespace: "a".repeat(32),
+        }),
+      ),
+    ).toThrow("different or retired graph allocation");
+    expect(() =>
+      compareRecordedInstants(first, createRecordedInstant(42, VALID_AT)),
+    ).toThrow("different or retired graph allocation");
+    expect(() =>
+      createRecordedInstant(42, VALID_AT, {
+        origin: "unsafe:origin",
+        namespace: "a".repeat(32),
+      }),
+    ).toThrow();
   });
 
   it.each([0, -1, 1.5, Number.NaN, RECORDED_MAX_REVISION])(

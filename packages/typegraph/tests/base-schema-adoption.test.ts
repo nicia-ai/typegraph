@@ -1227,10 +1227,10 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-5 PGlite database up to version 6 through adoptBaseSchema() directly, gaining the identity transition log", async () => {
+  it("catches an installed version-8 PGlite database up to version 9 through adoptBaseSchema() directly, gaining the identity transition log", async () => {
     // `adoptBaseSchema()` is the offline path, which never calls
-    // `generateDdl()`, so only the version-6 step body itself can recreate
-    // the relations a real version-5 deployment lacks — including the
+    // `generateDdl()`, so only the version-9 step body itself can recreate
+    // the relations a real version-8 deployment lacks — including the
     // transition log's `restored_at` column, which ships with the table.
     const { backend, client } = await createLocalPgliteBackend({
       vector: false,
@@ -1241,7 +1241,7 @@ describe("deployment-wide base-schema adoption", () => {
         [
           'DROP TABLE "typegraph_identity_transitions"',
           'DROP TABLE "typegraph_identity_transition_retention"',
-          'UPDATE "typegraph_base_schema_versions" SET version = 5 WHERE installation = 1',
+          'UPDATE "typegraph_base_schema_versions" SET version = 8 WHERE installation = 1',
         ].join(";\n"),
       );
 
@@ -1328,7 +1328,7 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-5 SQLite database up to version 6, gaining the identity transition log", async () => {
+  it("catches an installed version-8 SQLite database up to version 9, gaining the identity transition log", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = sqliteClient(db);
     try {
@@ -1337,7 +1337,7 @@ describe("deployment-wide base-schema adoption", () => {
         [
           "DROP TABLE typegraph_identity_transitions",
           "DROP TABLE typegraph_identity_transition_retention",
-          "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
+          "UPDATE typegraph_base_schema_versions SET version = 8 WHERE installation = 1",
         ].join(";\n"),
       );
 
@@ -1368,7 +1368,7 @@ describe("deployment-wide base-schema adoption", () => {
   // have `evolve` call `ensureIdentitySchemaStorage` without adopting base
   // storage first and this rejects with ConfigurationError
   // IDENTITY_STORAGE_MISSING naming the two relations the upgrade adds.
-  it("evolves an identity graph attached to a version-5 SQLite database without a privileged open", async () => {
+  it("evolves an identity graph attached to a version-8 SQLite database without a privileged open", async () => {
     const identityGraph = defineGraph({
       id: "base_schema_adoption_evolve",
       nodes: { Person: { type: Person } },
@@ -1386,7 +1386,7 @@ describe("deployment-wide base-schema adoption", () => {
         [
           "DROP TABLE typegraph_identity_transitions",
           "DROP TABLE typegraph_identity_transition_retention",
-          "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
+          "UPDATE typegraph_base_schema_versions SET version = 8 WHERE installation = 1",
         ].join(";\n"),
       );
 
@@ -1471,4 +1471,58 @@ describe("deployment-wide base-schema adoption", () => {
       await backend.close();
     }
   });
+});
+
+describe("version 6: recorded adjacency indexes", () => {
+  it.each(["sqlite", "pglite"] as const)(
+    "adopts missing endpoint paging indexes from version 5 on %s",
+    async (lane) => {
+      const handle =
+        lane === "sqlite" ?
+          createLocalSqliteBackend()
+        : await createLocalPgliteBackend({ vector: false });
+      const { backend } = handle;
+      try {
+        await createStoreWithSchema(graph, backend);
+        const executeDdl = requireDefined(backend.executeDdl);
+        const executeRaw = requireDefined(backend.executeRaw);
+        for (const suffix of ["from", "to"])
+          await executeDdl(
+            `DROP INDEX "typegraph_recorded_edges_adjacency_${suffix}_idx"`,
+          );
+        await executeDdl(
+          "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
+        );
+        await createStoreWithSchema(graph, backend, { systemIndexes: "skip" });
+        // A second adoption must remain idempotent.
+        await createStoreWithSchema(graph, backend, { systemIndexes: "skip" });
+        const indexes =
+          lane === "sqlite" ?
+            await executeRaw<{ name: string; definition: string }>(
+              "SELECT name, sql AS definition FROM sqlite_master WHERE type = 'index' AND name LIKE '%adjacency_%_idx'",
+              [],
+            )
+          : await executeRaw<{ name: string; definition: string }>(
+              "SELECT indexname AS name, indexdef AS definition FROM pg_indexes WHERE indexname LIKE '%adjacency_%_idx' AND schemaname = current_schema()",
+              [],
+            );
+        expect(indexes.map((index) => index.name).toSorted()).toEqual([
+          "typegraph_recorded_edges_adjacency_from_idx",
+          "typegraph_recorded_edges_adjacency_to_idx",
+        ]);
+        expect(
+          indexes.map(
+            (index) => index.definition.match(/COLLATE "C"/g)?.length ?? 0,
+          ),
+        ).toEqual(lane === "pglite" ? [3, 3] : [0, 0]);
+        const marker = await executeRaw<{ version: number }>(
+          "SELECT version FROM typegraph_base_schema_versions WHERE installation = 1",
+          [],
+        );
+        expect(marker[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      } finally {
+        await backend.close();
+      }
+    },
+  );
 });

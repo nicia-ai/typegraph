@@ -29,7 +29,7 @@ import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 const POOL_CONNECTION_TIMEOUT_MS = 1000;
-const EARLIER_BASE_SCHEMA_VERSION = 5;
+const EARLIER_BASE_SCHEMA_VERSION = 8;
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 

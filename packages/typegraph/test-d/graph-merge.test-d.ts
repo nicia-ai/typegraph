@@ -14,6 +14,7 @@ import {
   applyDurableMergePlan,
   applyMergePlan,
   applyMergePlanInTransaction,
+  type AppliedMergeReport,
   BranchError,
   branchDurable,
   type CandidateDiagnostics,
@@ -26,6 +27,7 @@ import {
   type MakeBackend,
   type MatchEvidence,
   type MergePlanArtifact,
+  type MergePlanArtifactV3,
   type MergePlanApplyOptions,
   type MergePlanApplied,
   type MergePlanReadContext,
@@ -138,10 +140,10 @@ expectType<Promise<Result<void, BranchError>>>(
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   merge(store, branches, options),
 );
-expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
+expectType<Promise<Result<MergePlanArtifactV3, MergeError>>>(
   planMerge(store, branches, options),
 );
-expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
+expectType<Promise<Result<MergePlanArtifactV3, MergeError>>>(
   planMergeIncremental({
     forkPoint: store,
     target: store,
@@ -151,10 +153,10 @@ expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
 );
 
 declare const mergePlan: MergePlanArtifact;
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyMergePlan(store, mergePlan),
 );
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyDurableMergePlan({
     target: store,
     branch: durableBranch,
@@ -232,9 +234,9 @@ expectError(
 );
 declare const revalidation: MergeReviewRevalidation;
 if (revalidation.status === "compatible") {
-  expectType<MergePlanArtifact>(revalidation.plan);
+  expectType<MergePlanArtifactV3>(revalidation.plan);
 } else {
-  expectType<MergePlanArtifact | undefined>(revalidation.plan);
+  expectType<MergePlanArtifactV3 | undefined>(revalidation.plan);
 }
 declare const reviewError: MergeReviewError;
 expectAssignable<MergeError>(reviewError);
@@ -264,7 +266,7 @@ const applyOptions: MergePlanApplyOptions<typeof graph> = {
     expectError((applied.merged.nodes = 2));
   },
 };
-expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+expectType<Promise<Result<AppliedMergeReport<typeof graph>, MergeError>>>(
   applyMergePlan(store, mergePlan, applyOptions),
 );
 expectError(

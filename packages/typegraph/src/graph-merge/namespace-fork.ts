@@ -35,6 +35,7 @@ import {
 import { createStore, type Store } from "../store/store";
 import type { StoreOptions } from "../store/types";
 import { sha256Hex } from "../utils/hash";
+import { requireDefined } from "../utils/presence";
 import {
   computeBaseVersion,
   readActiveSchemaVersion,
@@ -89,13 +90,13 @@ const FORK_LEDGER = "typegraph_namespace_fork_operations";
  * adding to or removing from this list changes the digest of every proof
  * already in a ledger.
  *
- * A relation that joined the inventory later is named in the digest only when
- * it holds rows for the graph ({@link forkContentDigest}). A fork taken before
- * it existed holds none, so its recorded digest keeps verifying across the
+ * A relation outside a baseline is named in the digest only when it holds
+ * rows for the graph ({@link forkContentDigest}). A fork taken before it
+ * existed holds none, so its recorded digest keeps verifying across the
  * upgrade that adds the relation, and the relation is covered from the first
  * row it holds.
  */
-const DIGEST_BASELINE_RELATION_KEYS = [
+const FIRST_DIGEST_BASELINE_RELATION_KEYS = [
   "nodes",
   "edges",
   "recordedNodes",
@@ -117,9 +118,25 @@ const DIGEST_BASELINE_RELATION_KEYS = [
   "reconciliationMarkers",
 ] as const satisfies readonly GraphRelationKey[];
 
-const DIGEST_BASELINE_TABLES: ReadonlySet<string> = new Set(
-  DIGEST_BASELINE_RELATION_KEYS.map((key) => FORK_RELATION_NAMES[key]),
-);
+/**
+ * Every baseline a released library recorded fork proofs under, oldest first.
+ * FROZEN, each one. A release that named every inventory relation in its
+ * digest, empty or not, fixed a baseline of its own: the second entry is the
+ * inventory as that release knew it. New proofs are recorded under the last
+ * baseline; a recorded proof verifies under any of them.
+ */
+const DIGEST_BASELINES: readonly ReadonlySet<string>[] = [
+  FIRST_DIGEST_BASELINE_RELATION_KEYS,
+  [
+    ...FIRST_DIGEST_BASELINE_RELATION_KEYS,
+    "recordedAnchors",
+    "storeOperations",
+  ] as const satisfies readonly GraphRelationKey[],
+].map((keys) => new Set(keys.map((key) => FORK_RELATION_NAMES[key])));
+
+/** The relations every target holds, since the first baseline required them. */
+const REQUIRED_RELATION_TABLES = requireDefined(DIGEST_BASELINES[0]);
+const CURRENT_DIGEST_BASELINE = requireDefined(DIGEST_BASELINES.at(-1));
 
 type QuerySession = Pick<GraphBackend, "execute" | "getActiveSchema">;
 type JsonRow = Readonly<Record<string, unknown>>;
@@ -260,10 +277,10 @@ async function provisionedRelationTables(
 ): Promise<readonly string[]> {
   const present = await presentRelations(
     session,
-    relationTables.filter((table) => !DIGEST_BASELINE_TABLES.has(table)),
+    relationTables.filter((table) => !REQUIRED_RELATION_TABLES.has(table)),
   );
   return relationTables.filter(
-    (table) => DIGEST_BASELINE_TABLES.has(table) || present.has(table),
+    (table) => REQUIRED_RELATION_TABLES.has(table) || present.has(table),
   );
 }
 
@@ -339,16 +356,17 @@ type DigestedRelation = readonly [table: string, rows: readonly JsonRow[]];
  * (hashing the source snapshot) and every verification (hashing the target)
  * assemble it here, so they cannot disagree about which relations it names.
  *
- * A graph-scoped relation outside {@link DIGEST_BASELINE_RELATION_KEYS} is
- * left out while it holds no rows; see that constant for why.
+ * A graph-scoped relation outside `baseline` is left out while it holds no
+ * rows; see {@link FIRST_DIGEST_BASELINE_RELATION_KEYS} for why.
  */
 async function forkContentDigest(
   relations: readonly DigestedRelation[],
   vectors: readonly DigestedRelation[],
+  baseline: ReadonlySet<string> = CURRENT_DIGEST_BASELINE,
 ): Promise<string> {
   const digests: [string, string][] = [];
   for (const [table, rows] of relations) {
-    if (rows.length === 0 && !DIGEST_BASELINE_TABLES.has(table)) continue;
+    if (rows.length === 0 && !baseline.has(table)) continue;
     digests.push([table, await digestRows(rows)]);
   }
   for (const [table, rows] of vectors) {
@@ -391,6 +409,26 @@ async function digestGraph(
     await forkedGraphRows(session, graph, relationTables),
     await vectorGraphRows(session, vectorRelations(graph), graph.id),
   );
+}
+
+/** Whether the forked graph on `session` still hashes to a recorded proof, under any baseline. */
+async function matchesRecordedDigest(
+  session: QuerySession,
+  graph: GraphDef,
+  relationTables: readonly string[],
+  recorded: string,
+): Promise<boolean> {
+  const relations = await forkedGraphRows(session, graph, relationTables);
+  const vectors = await vectorGraphRows(
+    session,
+    vectorRelations(graph),
+    graph.id,
+  );
+  for (const baseline of DIGEST_BASELINES) {
+    if ((await forkContentDigest(relations, vectors, baseline)) === recorded)
+      return true;
+  }
+  return false;
 }
 
 /**
@@ -669,8 +707,12 @@ function namespaceForkResult<G extends GraphDef>(
           ledger[0].graph_id !== proof.graphId ||
           ledgerProof.sourceBase !== proof.sourceBase ||
           ledger[0].content_digest !== proof.contentDigest ||
-          (await digestGraph(targetTx, store.graph, relationTables)) !==
-            proof.contentDigest
+          !(await matchesRecordedDigest(
+            targetTx,
+            store.graph,
+            relationTables,
+            proof.contentDigest,
+          ))
         ) {
           throw new BranchError(
             "Namespace fork abort found a changed target namespace.",
@@ -895,8 +937,12 @@ export async function forkGraphNamespace<G extends GraphDef>(
           "Namespace fork retry found an invalid source base token on target.",
         );
         if (
-          (await digestGraph(targetTx, source.graph, relationTables)) !==
-          proof.contentDigest
+          !(await matchesRecordedDigest(
+            targetTx,
+            source.graph,
+            relationTables,
+            proof.contentDigest,
+          ))
         )
           throw new BranchError(
             "Namespace fork retry found a changed target namespace.",

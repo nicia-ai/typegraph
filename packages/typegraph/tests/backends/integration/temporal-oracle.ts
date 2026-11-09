@@ -96,6 +96,8 @@ import {
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
+import { readRevisionOrigin } from "../../../src/store/recorded-capture";
 import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
 import { recordedInstantFromDriver } from "../../test-utils";
@@ -1247,7 +1249,14 @@ async function readRecordedClock(
   );
   const row = rows[0];
   if (row === undefined) return undefined;
-  return recordedInstantFromDriver(row.revision, row.recorded_at);
+  return recordedInstantFromDriver(
+    row.revision,
+    row.recorded_at,
+    await recordedAnchorOwner(
+      schema,
+      requireDefined(await readRevisionOrigin(backend, schema, graphId)),
+    ),
+  );
 }
 
 /**

@@ -20,6 +20,16 @@ even without those exact words.
 - Combine semantic similarity with graph traversals and standard predicates
 - Automatic vector indexing for fast approximate nearest neighbor search
 
+## Vector fields and fulltext fields
+
+Vector search selects the embedding field named by `fieldPath`. Fulltext search
+instead addresses all of a kind's declared `searchable()` fields as one indexed
+document. In a hybrid request, `vector.fieldPath` selects only the vector leg;
+the fulltext leg remains kind-wide. Neither facade exposes a field-restricted
+fulltext selector. See [search field scope](/fulltext-search#search-field-scope)
+for the ranking and paging implications and why post-filtering is insufficient.
+Historical views refuse current-only fulltext, vector, and hybrid search.
+
 ## Use Cases
 
 ### Retrieval-Augmented Generation (RAG)

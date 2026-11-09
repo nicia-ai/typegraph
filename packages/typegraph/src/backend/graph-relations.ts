@@ -66,6 +66,8 @@ export const GRAPH_RELATION_KEYS = [
   "contributionMaterializations",
   "kindRemovals",
   "reconciliationMarkers",
+  "recordedAnchors",
+  "storeOperations",
   "identityTransitions",
   "identityTransitionRetention",
 ] as const;
@@ -195,6 +197,18 @@ const BEHAVIOR = {
     workingCopyClonePolicy: COPY_GRAPH_ROWS,
   },
   recordedEdges: {
+    clear: { kind: "delete", missingTable: "tolerated" },
+    role: "content",
+    provisionedBy: "base",
+    workingCopyClonePolicy: COPY_GRAPH_ROWS,
+  },
+  storeOperations: {
+    clear: { kind: "delete", missingTable: "tolerated" },
+    role: "content",
+    provisionedBy: "base",
+    workingCopyClonePolicy: COPY_GRAPH_ROWS,
+  },
+  recordedAnchors: {
     clear: { kind: "delete", missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
@@ -339,6 +353,8 @@ const GRAPH_RELATION_CLEAR_ORDER = [
   "contributionMaterializations",
   "schemaVersions",
   "revisionOrigins",
+  "recordedAnchors",
+  "storeOperations",
 ] as const satisfies readonly GraphRelationKey[];
 
 /** Resolves to `Order` only when it names every relation exactly once. */

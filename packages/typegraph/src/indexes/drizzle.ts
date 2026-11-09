@@ -14,6 +14,7 @@ import {
 
 import { toDrizzleSql } from "../backend/drizzle/execution/types";
 import { sql as portableSql, type SqlFragment } from "../query/sql-fragment";
+import { requireDefined } from "../utils/presence";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,
@@ -449,22 +450,26 @@ function resolveSystemIndexColumns<C extends { name: string }>(
 }
 
 /**
- * The two dialect variants do no dialect-specific work (no unique, no
- * where, no expression compilation — unlike the node/edge builder pairs
- * above), so they share one body parameterized by the dialect's index
- * factory.
+ * Plain system indexes share this builder. PostgreSQL applies explicit
+ * binary text collations to the additional ordered text keys below.
  */
 function buildSystemIndexBuilders<C extends { name: string }, B>(
   tableKey: SystemIndexTable,
   physicalTableName: string,
   columns: SystemIndexColumns<C>,
-  indexFactory: (name: string) => { on: (...cols: [C, ...C[]]) => B },
+  indexFactory: (
+    name: string,
+    resolved: readonly [C, ...C[]],
+    declaration: SystemIndexDeclaration,
+  ) => B,
 ): readonly B[] {
   return SYSTEM_INDEX_DECLARATIONS.filter(
     (declaration) => declaration.table === tableKey,
   ).map((declaration) =>
-    indexFactory(systemIndexName(physicalTableName, declaration.suffix)).on(
-      ...resolveSystemIndexColumns(declaration, columns),
+    indexFactory(
+      systemIndexName(physicalTableName, declaration.suffix),
+      resolveSystemIndexColumns(declaration, columns),
+      declaration,
     ),
   );
 }
@@ -478,7 +483,7 @@ export function buildSqliteSystemIndexBuilders(
     tableKey,
     physicalTableName,
     columns,
-    (name) => sqliteIndex(name),
+    (name, resolved) => sqliteIndex(name).on(...resolved),
   );
 }
 
@@ -506,7 +511,14 @@ export function buildPostgresSystemIndexBuilders(
     tableKey,
     physicalTableName,
     columns,
-    (name) => pgIndex(name),
+    (name, resolved, declaration) => {
+      const keys = resolved.map((column) =>
+        declaration.binaryOrderColumns?.includes(column.name) === true ?
+          drizzleSql`${column} COLLATE "C"`
+        : column,
+      );
+      return pgIndex(name).on(requireDefined(keys[0]), ...keys.slice(1));
+    },
   );
 }
 

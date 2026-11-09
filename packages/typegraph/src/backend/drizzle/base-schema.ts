@@ -64,12 +64,32 @@ export const BASE_SCHEMA_RELEASES = [
   },
   {
     version: 6,
+    id: "recorded-adjacency-indexes",
+    orderedShapeDigests: {
+      postgres:
+        "bd58d4009d8b443c35cd8296526dda69e7494cda6917b7f096ae6acd3faa45e6",
+      sqlite:
+        "a4bd95aa94fb0b522538739e1f3b8d2f61a577bc651b75e48889d4c64e8c7aa5",
+    },
+  },
+  {
+    version: 7,
+    id: "recorded-anchor-log",
+    orderedShapeDigests: { postgres: "eb61608f4b1141bb848264da45be69d895b2e0048b16b8cfc797e23c0f7ad81b", sqlite: "f35830b0c0c4de107858bbc5a09b701548e866d0cddd7c3ed535f3bb3c04e621" },
+  },
+  {
+    version: 8,
+    id: "durable-store-operation-outcomes",
+    orderedShapeDigests: { postgres: "3f3ce0cc5077fc1b7c9e414494863e9d7fd036f0f15e63016cda3cf42f6bfd51", sqlite: "4af4a4e35c414a6022745c1178086b424bf9488bc73ca84b5f70c31bdf298b1c" },
+  },
+  {
+    version: 9,
     id: "identity-transition-log",
     orderedShapeDigests: {
       postgres:
-        "6c0977cd0c0fd2a73b685fcbc6b502f429f69704342d795b0f56e9cb790e1492",
+        "a54e3a3e630a761ae69a2c0e2d74a81f5940306970b93fb977cce1736c630a6e",
       sqlite:
-        "37978036648df400a50e0b59337b3c29ca66fdc16f69b927d645b6ec6cba0c0d",
+        "39a3ac60b95bb7e109289d9af54721d6a85cd908181fd5db9cc3a29339d8dfa4",
     },
   },
 ] as const;

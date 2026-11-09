@@ -68,7 +68,7 @@ import {
   resolvedMergeWrites,
 } from "../../src/graph-merge/merge";
 import { mergeKey } from "../../src/graph-merge/node-key";
-import { mergePlanArtifactV2Schema } from "../../src/graph-merge/plan-schema";
+import { mergePlanArtifactV3Schema } from "../../src/graph-merge/plan-schema";
 import { isErr, isOk } from "../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../src/graph-merge/types";
 import { storeBackend } from "../../src/store/runtime-port";
@@ -415,7 +415,7 @@ describe.each(backendMatrix())(
 
       // The replayed-artifact entry point (`applyWireMergeWrites`): the same
       // writes after the wire round trip the artifact's `writes` field takes.
-      const wireWrites = mergePlanArtifactV2Schema.shape.writes.parse(
+      const wireWrites = mergePlanArtifactV3Schema.shape.writes.parse(
         JSON.parse(JSON.stringify(liveWrites)),
       );
       const fromWireArtifact = await requiredExistenceOrphanCandidates(

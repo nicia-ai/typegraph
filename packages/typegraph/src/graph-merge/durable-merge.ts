@@ -17,12 +17,12 @@ import {
 } from "./durable-branch";
 import { describeCause, MergeError } from "./errors";
 import { applyMergePlan, validateMergePlanForTarget } from "./merge";
-import type { MergePlanArtifact, MergePlanArtifactV2 } from "./plan-schema";
+import type { MergePlanArtifact, MergePlanArtifactV3 } from "./plan-schema";
 import type { Result } from "./result";
 import { err } from "./result";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { getGraphDefinitionHash } from "./typegraph-internal";
-import type { MergeReport } from "./types";
+import type { AppliedMergeReport } from "./types";
 
 /** Arguments for {@link applyDurableMergePlan}. */
 export type ApplyDurableMergePlanArgs<
@@ -49,7 +49,7 @@ export async function applyDurableMergePlan<
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 >(
   args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>,
-): Promise<Result<MergeReport<G>, MergeError>> {
+): Promise<Result<AppliedMergeReport<G>, MergeError>> {
   const { branch, descriptor, plan, strategy, target } = args;
   const options = args.options ?? {};
   if ("merge" in strategy && strategy.merge !== undefined) {
@@ -68,7 +68,7 @@ export async function applyDurableMergePlan<
     );
   }
 
-  let artifact: MergePlanArtifactV2;
+  let artifact: MergePlanArtifactV3;
   const descriptorOrigin = durableOriginOfDescriptor(descriptor);
   try {
     artifact = await validateMergePlanForTarget(target, plan);

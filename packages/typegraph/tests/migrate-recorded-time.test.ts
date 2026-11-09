@@ -25,13 +25,16 @@ import {
   type AdapterBackend,
   type RecordedTableNames,
 } from "../src/backend/types";
+import { createRecordedInstant } from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
+import { recordedAnchorOwner } from "../src/store/recorded-anchor-origin";
 import { assertCurrentRecordedSchema } from "../src/store/recorded-capture";
+import { ensureRevisionOriginRow } from "../src/store/recorded-capture/clock";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, recordedRevisionFromDriver } from "./test-utils";
 
@@ -214,6 +217,52 @@ async function createLegacyRecordedSchema(
 }
 
 describe("migrateLegacyRecordedTime", () => {
+  it("requires independent origin evidence before binding an r1 checkpoint", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(legacyGraph, backend, {
+      history: true,
+    });
+    await store.nodes.LegacyItem.create({ label: "original" });
+    const origin = await store.allocationOwner().then((owner) => owner.origin);
+    const captured = requireDefined(await store.recordedNow());
+    const anchor = captured.replace(/^r2:[^:]+:[^:]+:/u, "r1:");
+    await expect(
+      migrateRecordedAnchor({ backend, graphId: GRAPH_ID, anchor }),
+    ).rejects.toMatchObject({ details: { code: "RECORDED_ANCHOR_UNBOUND" } });
+    const bound = await migrateRecordedAnchor({
+      backend,
+      graphId: GRAPH_ID,
+      anchor,
+      origin,
+    });
+    expect(bound).toBe(captured);
+    await expect(
+      migrateRecordedAnchor({
+        backend,
+        graphId: GRAPH_ID,
+        anchor: createRecordedInstant(99, "2026-01-01T00:00:00.000Z"),
+        origin,
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "RECORDED_ANCHOR_NOT_RETAINED" },
+    });
+    await expect(
+      migrateRecordedAnchor({
+        backend,
+        graphId: GRAPH_ID,
+        anchor: captured,
+        origin: "wrong-origin",
+      }),
+    ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
+    await store.clear();
+    await store.nodes.LegacyItem.create({ label: "replacement" });
+    await expect(
+      migrateRecordedAnchor({ backend, graphId: GRAPH_ID, anchor, origin }),
+    ).rejects.toMatchObject({
+      details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
+    });
+  });
+
   it("dense-ranks legacy boundaries and durably remaps external anchors", async () => {
     const backend = createTestBackend();
     await createLegacyRecordedSchema(backend);
@@ -250,18 +299,28 @@ describe("migrateLegacyRecordedTime", () => {
     );
     expect(recordedRevisionFromDriver(clocks[0]?.revision)).toBe(3);
 
+    // The offline migration attests that these checkpoints belong to this allocation.
+    const origin = await ensureRevisionOriginRow(backend, schema, GRAPH_ID);
     const migratedAnchor = await migrateRecordedAnchor({
       backend,
+      origin,
       graphId: GRAPH_ID,
       anchor: SECOND,
     });
-    expect(migratedAnchor).toBe("r1:0000000000000002:2026-01-01T00:00:00.001Z");
+    expect(migratedAnchor).toBe(
+      createRecordedInstant(
+        2,
+        SECOND,
+        await recordedAnchorOwner(schema, origin),
+      ),
+    );
     expect(recordedInstantRevision(migratedAnchor)).toBe(2);
     await expect(
       migrateRecordedAnchor({
         backend,
         graphId: GRAPH_ID,
         anchor: "2026-01-01 00:00:00.001",
+        origin,
       }),
     ).resolves.toBe(migratedAnchor);
     await expect(

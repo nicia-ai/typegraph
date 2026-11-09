@@ -93,6 +93,8 @@ export {
   isSearchableSchema,
   type NodeKinds,
   type RecordedInstant,
+  recordedInstant,
+  recordedInstantOwner,
   recordedInstantRevision,
   recordedInstantWallTime,
   // Vector-slot enumeration for manual provisioning (the boot step
@@ -496,6 +498,7 @@ export {
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,
+  GraphAllocationMismatchError,
   IdentityContradictionError,
   IdentityEndpointValidityError,
   IdentityReplayError,
@@ -611,6 +614,9 @@ export type {
   RebuildFulltextResult,
   ReclaimedVectorFieldEntry,
   ReconciledSchema,
+  RecordedAdjacencyEntry,
+  RecordedAdjacencyOptions,
+  RecordedAdjacencyPage,
   RecordedReadStore,
   RecordedScanOptions,
   RecordedScanPage,
@@ -1116,6 +1122,7 @@ export {
 // Utilities
 // ============================================================
 
+export type { GraphAllocationOwner } from "./core/allocation-owner";
 export {
   type DatabaseProjection,
   ExecutableProjectionQuery,

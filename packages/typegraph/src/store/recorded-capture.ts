@@ -563,6 +563,8 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           schema,
           graphId,
           ownsWriteLock,
+          undefined,
+          true,
         );
         const graphNotes = notesByGraph.get(graphId) ?? [];
         recordedByGraph.set(graphId, {

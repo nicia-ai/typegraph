@@ -5,6 +5,8 @@ export const defaultPostgresTableNames = {
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  recordedAnchors: "typegraph_recorded_anchors",
+  storeOperations: "typegraph_store_operations",
   revisionOrigins: "typegraph_revision_origins",
   revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
