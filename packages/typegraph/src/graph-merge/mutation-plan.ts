@@ -22,6 +22,7 @@ import {
   edgeIdentityFromRow,
 } from "../store/operations/edge-identity";
 import { type ValidityEndMutation } from "../store/types";
+import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
 import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { branch } from "./branch";
@@ -272,15 +273,20 @@ const mutationReferenceSchema = z
   .object({ kind: z.string().min(1), id: z.string().min(1) })
   .strict();
 const mutationPropsSchema = z.record(z.string(), z.json());
+const mutationInstantSchema = z
+  .string()
+  .refine((value) => isCanonicalIsoDate(value), {
+    message: "Expected canonical UTC ISO 8601 with fixed milliseconds.",
+  });
 const mutationCreateSchema = z
   .object({
-    validFrom: z.string().nullable().optional(),
-    validTo: z.string().optional(),
+    validFrom: mutationInstantSchema.nullable().optional(),
+    validTo: mutationInstantSchema.optional(),
   })
   .strict();
 const mutationUpdateSchema = z.union([
   z
-    .object({ validTo: z.string().optional() })
+    .object({ validTo: mutationInstantSchema.optional() })
     .strict()
     .transform(({ validTo }) => (validTo === undefined ? {} : { validTo })),
   z.object({ clearValidTo: z.literal(true) }).strict(),
@@ -330,6 +336,23 @@ export const MutationDocumentSchema = z
   .strict()
   .superRefine((document, context) => {
     for (const [index, operation] of document.operations.entries()) {
+      if (
+        (operation.op === "node.create" || operation.op === "edge.create") &&
+        operation.options !== undefined &&
+        typeof operation.options.validFrom === "string" &&
+        operation.options.validTo !== undefined &&
+        isCanonicalIsoDate(operation.options.validFrom) &&
+        isCanonicalIsoDate(operation.options.validTo) &&
+        isInvertedValidityWindow(
+          operation.options.validFrom,
+          operation.options.validTo,
+        )
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["operations", index, "options", "validTo"],
+          message: "validTo must be at or after validFrom.",
+        });
       const unset =
         "unsetProps" in operation ? (operation.unsetProps ?? []) : [];
       if (

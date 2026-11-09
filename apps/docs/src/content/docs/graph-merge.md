@@ -2800,7 +2800,7 @@ commit after a partially applied failure:
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |
-| `MergePlanCapabilityError`   | Public planning was requested for a target without the durable revision guarantee needed across processes and time. Enable `revisionTracking` or `history`.                                                                                                                   |
+| `MergePlanCapabilityError` | A required planning guarantee is unavailable. `details.capability` identifies it. Enable native revision tracking when required; only bounded-copy refusals naming `details.planningScope: "full"` can be remedied by selecting full scope. |
 | `MergePlanningStaleError`    | The target moved while planning was reading it. This is an expected retry-and-replan outcome under concurrent writers: no plan was returned, so recapture the target and create a new plan before retrying.                                                                    |
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
 | `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
@@ -2823,7 +2823,9 @@ snapshot merge that reconciles two independently-extracted patient-care branches
 and [Incremental Merge](/examples/incremental-merge) for live-target ingestion
 against an advancing base with persisted, queryable provenance.
 
-Candidate write-set planning also defaults to `planningScope: "candidate"`. Unsupported bounded reads,
-including retained identity tombstones that require a complete clone, refuse before staging.
-Select `planningScope: "full"` explicitly for full-copy planning. `planCandidateWriteSetForEvolution()`
-currently requires this explicit full scope. Review helpers inherit the selected planning scope.
+Candidate, mutation, review, and revalidation planning require a tracked target.
+`planningScope` defaults to `"candidate"`; select `"full"` explicitly to permit a
+complete copy when bounded dependency reads are unavailable. Full scope does not
+supply missing revision or transaction guarantees. Evolution planning requires
+explicit full scope. Review and revalidation callers must pass this option on
+each call that needs full copying; `reviewScope` controls evidence independently.

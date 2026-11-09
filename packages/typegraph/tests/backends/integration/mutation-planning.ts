@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   asEdgeId,
   asNodeId,
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -17,6 +18,7 @@ import {
   applyMergePlan,
   createMutationPlanBuilder,
   MutationDocumentSchema,
+  planCandidateWriteSet,
   planMutations,
 } from "../../../src/graph-merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
@@ -54,6 +56,108 @@ export function registerMutationPlanningIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("bounded mutation planning", () => {
+    it("validates canonical mutation instants and graph-independent window ordering", async () => {
+      const store = await context.createHistoryStore(graph);
+      const builder = await createMutationPlanBuilder(store, "dates");
+      const start = "2026-01-01T00:00:00.000Z";
+      const end = "2026-01-02T00:00:00.000Z";
+      const operations = [
+        { op: "node.create", kind: "Item", id: "a", props: { name: "a" } },
+        {
+          op: "edge.create",
+          kind: "links",
+          id: "e",
+          props: { label: "e" },
+          from: { kind: "Item", id: "a" },
+          to: { kind: "Item", id: "b" },
+        },
+        { op: "node.update", kind: "Item", id: "a", props: { name: "a" } },
+        { op: "edge.update", kind: "links", id: "e", props: { label: "e" } },
+      ];
+      for (const operation of operations) {
+        for (const validTo of [
+          "not-a-date",
+          "2026-02-30T00:00:00.000Z",
+          "2026-01-01T00:00:00Z",
+          "2026-01-01T01:00:00.000+01:00",
+        ])
+          expect(
+            MutationDocumentSchema.safeParse({
+              ...builder.document,
+              operations: [{ ...operation, options: { validTo } }],
+            }).success,
+          ).toBe(false);
+        expect(
+          MutationDocumentSchema.safeParse({
+            ...builder.document,
+            operations: [{ ...operation, options: { validTo: end } }],
+          }).success,
+        ).toBe(true);
+      }
+      for (const operation of operations.slice(0, 2)) {
+        for (const options of [
+          { validFrom: end, validTo: start },
+          { validFrom: "not-a-date" },
+        ]) {
+          const document = {
+            ...builder.document,
+            operations: [{ ...operation, options }],
+          };
+          expect(MutationDocumentSchema.safeParse(document).success).toBe(
+            false,
+          );
+          expect(
+            await planMutations({
+              target: store,
+              mutations: document,
+              makeBackend,
+            }),
+          ).toMatchObject({ success: false });
+        }
+        for (const options of [
+          { validFrom: start, validTo: start },
+          { validFrom: null, validTo: start },
+          { validFrom: start },
+          {},
+        ])
+          expect(
+            MutationDocumentSchema.safeParse({
+              ...builder.document,
+              operations: [{ ...operation, options }],
+            }).success,
+          ).toBe(true);
+      }
+    });
+
+    it("rejects invalid scope before tracking prerequisites in both planners", async () => {
+      const tracked = await context.createHistoryStore(graph);
+      const builder = await createMutationPlanBuilder(tracked, "scope");
+      const untracked = createStore(graph, context.getBackend());
+      for (const result of [
+        await planCandidateWriteSet({
+          target: untracked,
+          makeBackend,
+          writeSet: {},
+          planningScope: "bogus" as never,
+        }),
+        await planMutations({
+          target: untracked,
+          makeBackend,
+          mutations: builder.document,
+          planningScope: "bogus" as never,
+        }),
+      ])
+        expect(result).toMatchObject({
+          success: false,
+          error: {
+            details: {
+              capability: "planningScope",
+              rejectedPlanningScope: "bogus",
+            },
+          },
+        });
+    });
+
     it("rejects overlapping or duplicate property removals in the public schema", async () => {
       const store = await context.createHistoryStore(graph);
       const builder = await createMutationPlanBuilder(store, "schema");

@@ -2617,7 +2617,7 @@ type ResolvedMerge<G extends GraphDef> = Readonly<{
   incrementalGuard?: IncrementalCommitGuard<G>;
 }>;
 
-function assertPublicPlanCapability<G extends GraphDef>(
+export function assertPublicPlanCapability<G extends GraphDef>(
   target: Store<G>,
 ): void {
   if (!storeBackend(target).capabilities.execution.interactiveTransactions) {

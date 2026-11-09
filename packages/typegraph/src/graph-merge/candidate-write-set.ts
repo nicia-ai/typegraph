@@ -21,6 +21,7 @@ import {
 } from "./ingestion-branch";
 import {
   assertPlanningFenceUnchanged,
+  assertPublicPlanCapability,
   captureMergePlanTargetFence,
   planMergeIncremental,
   planMergeIncrementalForEvolution,
@@ -203,13 +204,14 @@ function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
 export async function planCandidateWriteSet<G extends GraphDef>(
   args: PlanCandidateWriteSetArgs<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
-  if (!args.target.revisionTrackingEnabled)
-    return err(
-      new MergePlanCapabilityError(
-        "Candidate planning requires revisionTracking: true or history: true, including full planning.",
-        { details: { capability: "revisionTracking" } },
-      ),
-    );
+  const scope = resolvePlanningScope(args.planningScope);
+  if (isErr(scope)) return scope;
+  try {
+    assertPublicPlanCapability(args.target);
+  } catch (error) {
+    if (error instanceof MergePlanCapabilityError) return err(error);
+    throw error;
+  }
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
   if (!parsed.success) {
     return err(
@@ -244,8 +246,6 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
-  const scope = resolvePlanningScope(args.planningScope);
-  if (isErr(scope)) return scope;
   let bounded =
     scope.data === "candidate" && canUseSparseCandidatePlanning(args.target);
   let boundedFence:
