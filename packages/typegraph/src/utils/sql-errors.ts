@@ -1054,11 +1054,3 @@ export function databaseRetryDisposition(
   }
   return "unknown";
 }
-
-/** Internal convenience predicate; Store outcomes also distinguish known permanent refusals. */
-export function isTransientDatabaseError(
-  error: unknown,
-  target?: object,
-): boolean {
-  return databaseRetryDisposition(error, target) === "transient";
-}

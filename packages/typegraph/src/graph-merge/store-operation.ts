@@ -549,8 +549,9 @@ export async function operateStore<G extends GraphDef>(
       isSerializationFailure(error, storeBackend(store));
     const unknown = attemptState.commitBoundary && !conflict;
     const retry = databaseRetryDisposition(error, storeBackend(store));
+    // Unknown commit or replay outcomes always permit same-request recovery.
     const retryable =
-      retry !== "permanent" && (unknown || conflict || retry === "transient");
+      unknown || (retry !== "permanent" && (conflict || retry === "transient"));
     return err(
       new StoreOperationError(
         unknown ? "unknown" : "not-committed",

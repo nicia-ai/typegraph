@@ -16,6 +16,6 @@ For durable branch evidence, the admission cap does not apply to retained keys: 
 
 Store-operation lookups enforce the same key limit as new Store mutations; retained oversized branch keys remain recoverable. Unknown-attempt errors require retrying the same persisted request, and lookup absence never authorizes a replacement key.
 
-PostgreSQL expired transactions (`25P03`) and idle sessions (`57P05`) permit same-request retry on a fresh transaction or connection. Protocol violations (`08P01`), query cancellation (`57014`), and an intentionally closed `pg` client do not trigger automatic retry.
+PostgreSQL expired transactions (`25P03`) and idle sessions (`57P05`) permit same-request retry on a fresh transaction or connection. When this attempt is known not to have committed, protocol violations (`08P01`), query cancellation (`57014`), and an intentionally closed `pg` client do not trigger automatic retry. Unknown outcomes always permit recovery with the same persisted request, using repaired or replacement connections when needed.
 
 Allocation-owner refusals use `DurableOperationOwnerMismatchError` and the shared `GRAPH_ALLOCATION_OWNER_MISMATCH` code. Both origin and namespace belong to the immutable owner binding.

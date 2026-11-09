@@ -23,6 +23,7 @@ import {
 } from "../src/backend/drizzle/operations/shared";
 import { tables as sqliteTables } from "../src/backend/drizzle/sqlite";
 import {
+  databaseRetryDisposition,
   isDuplicatePrimaryKeyError,
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
@@ -33,7 +34,6 @@ import {
   isSqliteMissingEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteStaleSnapshotError,
-  isTransientDatabaseError,
 } from "../src/utils/sql-errors";
 
 /**
@@ -911,7 +911,7 @@ describe("edge match-identity provisioning error classifiers", () => {
   });
 });
 
-describe("transient database failures", () => {
+describe("database retry disposition", () => {
   it.each([
     "55P03",
     "08006",
@@ -927,59 +927,56 @@ describe("transient database failures", () => {
     "40P01",
   ])("recognizes wrapped %s as transient", (code) => {
     expect(
-      isTransientDatabaseError(new Error("query failed", { cause: { code } })),
-    ).toBe(true);
+      databaseRetryDisposition(new Error("query failed", { cause: { code } })),
+    ).toBe("transient");
   });
   it.each([
-    "23505",
-    "42501",
-    "08P01",
-    "57014",
-    "SQLITE_CONSTRAINT",
-    "VALIDATION_ERROR",
-  ])("does not retry permanent %s", (code) => {
-    expect(isTransientDatabaseError({ code })).toBe(false);
+    ["23505", "unknown"],
+    ["42501", "unknown"],
+    ["08P01", "permanent"],
+    ["57014", "permanent"],
+    ["SQLITE_CONSTRAINT", "unknown"],
+    ["VALIDATION_ERROR", "unknown"],
+  ] as const)("classifies %s as %s", (code, disposition) => {
+    expect(databaseRetryDisposition({ code })).toBe(disposition);
   });
-});
-
-describe("codeless transport and existing transient predicates", () => {
   it.each([
     "Connection terminated unexpectedly",
     "Client has encountered a connection error and is not queryable",
     "timeout exceeded when trying to connect",
-  ])("recognizes node-postgres %s", (message) => {
+  ])("recognizes codeless node-postgres %s", (message) => {
     expect(
-      isTransientDatabaseError(
+      databaseRetryDisposition(
         new Error("wrapped", { cause: new Error(message) }),
       ),
-    ).toBe(true);
+    ).toBe("transient");
     expect(
-      isTransientDatabaseError(
+      databaseRetryDisposition(
         Object.assign(new Error(message), { code: "42501" }),
       ),
-    ).toBe(false);
+    ).toBe("unknown");
   });
   it("uses libSQL's numeric stale snapshot evidence", () => {
-    expect(isTransientDatabaseError({ cause: { rawCode: 517 } })).toBe(true);
-    expect(isTransientDatabaseError({ cause: { extendedCode: 517 } })).toBe(
-      true,
+    expect(databaseRetryDisposition({ cause: { rawCode: 517 } })).toBe(
+      "transient",
+    );
+    expect(databaseRetryDisposition({ cause: { extendedCode: 517 } })).toBe(
+      "transient",
     );
   });
+  it("classifies an intentionally closed pg client as permanent", () => {
+    expect(
+      databaseRetryDisposition(
+        new Error("Client was closed and is not queryable"),
+      ),
+    ).toBe("permanent");
+  });
+  it.each(["08P01", "57014"])(
+    "does not let a transient cause override permanent %s",
+    (code) => {
+      expect(databaseRetryDisposition({ code, cause: { code: "40001" } })).toBe(
+        "permanent",
+      );
+    },
+  );
 });
-
-it("does not classify an intentionally closed pg client as transient", () => {
-  expect(
-    isTransientDatabaseError(
-      new Error("Client was closed and is not queryable"),
-    ),
-  ).toBe(false);
-});
-
-it.each(["08P01", "57014"])(
-  "does not let a transient cause override permanent %s",
-  (code) => {
-    expect(isTransientDatabaseError({ code, cause: { code: "40001" } })).toBe(
-      false,
-    );
-  },
-);

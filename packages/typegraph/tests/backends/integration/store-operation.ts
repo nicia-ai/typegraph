@@ -354,7 +354,7 @@ export function registerStoreOperationIntegrationTests(
     );
 
     it.each(["08P01", "57014"])(
-      "requires intervention for permanent %s even after a lost commit response",
+      "permits same-request recovery for %s after a lost commit response",
       async (code) => {
         const backend = context.getBackend();
         let armed = false;
@@ -376,10 +376,19 @@ export function registerStoreOperationIntegrationTests(
         armed = true;
         expect(await operateStore(store, input, applyCreate)).toMatchObject({
           success: false,
-          error: { attemptOutcome: "unknown", retryable: false },
+          error: { attemptOutcome: "unknown", retryable: true },
         });
         armed = false;
         expect(unwrap(await getStoreOperation(store, input))).toBeDefined();
+        expect(
+          unwrap(
+            await operateStore(store, input, () =>
+              Promise.reject(
+                new Error("recovery must replay without mutation"),
+              ),
+            ),
+          ),
+        ).toMatchObject({ outcome: "replayed" });
       },
     );
 

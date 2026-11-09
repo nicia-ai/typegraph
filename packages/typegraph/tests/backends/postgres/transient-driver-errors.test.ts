@@ -9,7 +9,7 @@ import {
   captureStoreOperationTarget,
   operateStore,
 } from "../../../src/graph-merge";
-import { isTransientDatabaseError } from "../../../src/utils/sql-errors";
+import { databaseRetryDisposition } from "../../../src/utils/sql-errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const enabled = process.env["POSTGRES_URL"] !== undefined;
@@ -81,7 +81,7 @@ describe("node-postgres transient errors", () => {
     expect(error).toMatchObject({
       message: "Client was closed and is not queryable",
     });
-    expect(isTransientDatabaseError(error)).toBe(false);
+    expect(databaseRetryDisposition(error)).toBe("permanent");
     await assertStoreRetryable(error, false);
   });
 
@@ -97,7 +97,7 @@ describe("node-postgres transient errors", () => {
         await client.end();
         const error: unknown = await pending;
         expect(error).toMatchObject({ message: "Connection terminated" });
-        expect(isTransientDatabaseError(error)).toBe(true);
+        expect(databaseRetryDisposition(error)).toBe("transient");
         await assertStoreRetryable(error);
       } finally {
         await client.end();
@@ -121,7 +121,7 @@ describe("node-postgres transient errors", () => {
         expect(error).toMatchObject({
           message: "timeout exceeded when trying to connect",
         });
-        expect(isTransientDatabaseError(error)).toBe(true);
+        expect(databaseRetryDisposition(error)).toBe("transient");
         await assertStoreRetryable(error);
       } finally {
         held.release();
@@ -154,7 +154,7 @@ describe("node-postgres transient errors", () => {
           message:
             "Client has encountered a connection error and is not queryable",
         });
-        expect(isTransientDatabaseError(error)).toBe(true);
+        expect(databaseRetryDisposition(error)).toBe("transient");
         await assertStoreRetryable(error);
       } finally {
         await client.end();

@@ -2492,12 +2492,14 @@ cause, and is not automatically retryable. Lost commit or replay responses repor
 transient contention, expired-session, and transport failures are retryable.
 A failed attempt never proves that the caller key has no committed outcome from an earlier attempt.
 
-Retry classification excludes PostgreSQL protocol violations (`08P01`), explicit
+When this attempt is known not to have committed, retry classification excludes
+PostgreSQL protocol violations (`08P01`), explicit
 query cancellation or statement timeout (`57014`), and a `pg` client intentionally
 closed by its application. Expired transactions (`25P03`) and idle sessions
 (`57P05`) permit same-request retry using a fresh transaction or connection.
-A nonretryable failure with `attemptOutcome: "unknown"` requires intervention and
-then recovery using the same persisted request; it never permits a replacement key.
+An `attemptOutcome: "unknown"` is always retryable with the same persisted request,
+even if the driver failure would otherwise be permanent. Repair or replace an
+unusable connection before recovery; retryability never permits a replacement key.
 
 When retrying, always reuse the same persisted target, idempotency key, mutation, and metadata. Never
 choose a new key based on these fields. `retryable` identifies failures suitable for same-request retry,
