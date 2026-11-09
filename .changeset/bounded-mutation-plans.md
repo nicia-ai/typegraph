@@ -11,3 +11,5 @@ Persist authoring with the versioned JSON mutation document returned by `builder
 Upgrade candidate write-set callers that require full cloning to pass `planningScope: "full"`; implicit full-copy fallback is removed. Candidate evolution planning currently requires this explicit scope.
 
 Evolution candidate planning now requires `planningScope: "full"` in both its type and runtime contract. Bounded-capability refusals expose `details.capability` and the required planning scope. `PlanningScope`, `MUTATION_DOCUMENT_FORMAT_VERSION`, and `MutationDocumentSchema` are public contracts for authoring and validating persisted documents.
+
+Every candidate-planning scope requires revision tracking; choosing full scope does not enable it. Invalid scope diagnostics use `rejectedPlanningScope`, while `planningScope` names a required scope. The public mutation schema rejects duplicate property removals and overlapping sets/removals before consulting graph state.

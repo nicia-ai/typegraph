@@ -138,6 +138,24 @@ describe("candidate write-set planning", () => {
 
   afterEach(async () => cleanupBase());
 
+  it("refuses untracked targets without suggesting full planning", async () => {
+    const [target] = await createStoreWithSchema(graph, baseBackend);
+    for (const planningScope of [undefined, "full"] as const) {
+      const result = await planCandidateWriteSet({
+        target,
+        makeBackend: () => Promise.reject(new Error("must not clone")),
+        writeSet: {},
+        ...(planningScope === undefined ? {} : { planningScope }),
+      });
+      expect(result).toMatchObject({
+        success: false,
+        error: { details: { capability: "revisionTracking" } },
+      });
+      if (!result.success)
+        expect(result.error.details).not.toHaveProperty("planningScope");
+    }
+  });
+
   async function setup(backend = baseBackend) {
     const [target] = await createStoreWithSchema(graph, backend, {
       revisionTracking: true,

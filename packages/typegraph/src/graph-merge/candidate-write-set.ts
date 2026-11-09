@@ -203,6 +203,13 @@ function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
 export async function planCandidateWriteSet<G extends GraphDef>(
   args: PlanCandidateWriteSetArgs<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
+  if (!args.target.revisionTrackingEnabled)
+    return err(
+      new MergePlanCapabilityError(
+        "Candidate planning requires revisionTracking: true or history: true, including full planning.",
+        { details: { capability: "revisionTracking" } },
+      ),
+    );
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
   if (!parsed.success) {
     return err(

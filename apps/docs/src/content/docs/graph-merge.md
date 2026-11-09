@@ -452,8 +452,9 @@ any committed rows recalled by configured unique or index sources. Planning
 still fences the target revision before and after these reads. With edge
 match-identity constraints, a backend offering `findEdgesByMatchIdentity`
 seeds the exact durable owners named by the candidate. A missing keyed read,
-an owner excluded from the clone projection, or a target without revision
-tracking refuses bounded planning. A custom backend lacking the optional
+or an owner excluded from the clone projection refuses bounded planning.
+Targets without revision tracking refuse every planning scope: enable
+`revisionTracking: true` or `history: true` before planning. A custom backend lacking the optional
 `findActiveEdgesBySourceV1` read also refuses for `oneActive` graphs. Select
 `planningScope: "full"` explicitly to permit a complete clone.
 

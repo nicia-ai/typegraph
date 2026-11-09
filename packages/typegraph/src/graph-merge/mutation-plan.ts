@@ -327,7 +327,25 @@ export const MutationDocumentSchema = z
     target: mergePlanTargetFenceSchema,
     operations: z.array(mutationOperationSchema),
   })
-  .strict();
+  .strict()
+  .superRefine((document, context) => {
+    for (const [index, operation] of document.operations.entries()) {
+      const unset =
+        "unsetProps" in operation ? (operation.unsetProps ?? []) : [];
+      if (
+        new Set(unset).size !== unset.length ||
+        unset.some((key) =>
+          Object.hasOwn("props" in operation ? operation.props : {}, key),
+        )
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["operations", index, "unsetProps"],
+          message:
+            "Mutation property sets and removals must be disjoint and duplicate-free.",
+        });
+    }
+  });
 
 function jsonMutationProps(props: unknown): Record<string, JsonValue> {
   // Match persisted JSON: Dates become ISO strings, optional object properties disappear.
@@ -551,18 +569,6 @@ export async function planMutations<G extends GraphDef>(
         operation.op.startsWith("node.") ?
           args.target.graph.nodes
         : args.target.graph.edges;
-      const unset =
-        "unsetProps" in operation ? (operation.unsetProps ?? []) : [];
-      if (
-        new Set(unset).size !== unset.length ||
-        unset.some((key) =>
-          Object.hasOwn("props" in operation ? operation.props : {}, key),
-        )
-      )
-        throw new CandidateWriteSetError(
-          "Mutation property sets and removals must be disjoint and duplicate-free.",
-          { details: { operationIndex: index, operation } },
-        );
       if (!Object.hasOwn(kinds, operation.kind))
         throw new CandidateWriteSetError("Unknown mutation kind.", {
           details: { operationIndex: index, operation },
@@ -626,6 +632,7 @@ async function observe<G extends GraphDef>(
     if (delta.kind !== "keys")
       throw new MergePlanCapabilityError(
         "Mutation staging did not produce complete changed keys.",
+        { details: { capability: "completeChangedKeys" } },
       );
     for (const ref of delta.nodes) {
       const row = await backend.getNode(
@@ -651,6 +658,7 @@ async function validateFinalPostimages<G extends GraphDef>(
   if (keys.kind !== "keys")
     throw new MergePlanCapabilityError(
       "Mutation staging requires complete final changed keys.",
+      { details: { capability: "completeChangedKeys" } },
     );
   const backend = storeBackend(candidate.store);
   for (const ref of keys.nodes) {
@@ -875,6 +883,7 @@ async function planMutationSteps<G extends GraphDef>(
       if (readOwners === undefined)
         throw new MergePlanCapabilityError(
           "Mutation planning requires exact durable edge identity reads.",
+          { details: { capability: "durableEdgeIdentityReads" } },
         );
       const owners = await readOwners([
         {
@@ -886,6 +895,7 @@ async function planMutationSteps<G extends GraphDef>(
       if (!matchIdentityOwnersAreCloneVisible(owners))
         throw new MergePlanCapabilityError(
           "A tombstoned durable edge owner cannot be mutation-planned through a live-state working copy.",
+          { details: { capability: "liveDurableEdgeOwner" } },
         );
       edgeRows.push(...owners);
     }
@@ -912,6 +922,7 @@ async function planMutationSteps<G extends GraphDef>(
             )
               throw new MergePlanCapabilityError(
                 "Mutation validation produced a different uniqueness key on replay.",
+                { details: { capability: "stableMutationPostimage" } },
               );
       }
       const expectedEdgeKeys = new Set(
@@ -943,12 +954,14 @@ async function planMutationSteps<G extends GraphDef>(
         )
           throw new MergePlanCapabilityError(
             "Mutation validation produced a different durable edge key on replay.",
+            { details: { capability: "stableMutationPostimage" } },
           );
         if (!bounded) {
           const readOwners = matchIdentityOwnerReader(target);
           if (readOwners === undefined)
             throw new MergePlanCapabilityError(
               "Mutation planning requires exact durable edge identity reads.",
+              { details: { capability: "durableEdgeIdentityReads" } },
             );
           const owners = await readOwners([
             {
@@ -960,6 +973,7 @@ async function planMutationSteps<G extends GraphDef>(
           if (!matchIdentityOwnersAreCloneVisible(owners))
             throw new MergePlanCapabilityError(
               "A tombstoned durable edge owner is excluded from a live-state working copy.",
+              { details: { capability: "liveDurableEdgeOwner" } },
             );
         }
       }

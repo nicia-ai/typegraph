@@ -12,7 +12,7 @@ export function resolvePlanningScope(
   if (scope === "full") return ok("full");
   return err(
     new MergePlanCapabilityError("Unknown planning scope.", {
-      details: { planningScope: scope },
+      details: { capability: "planningScope", rejectedPlanningScope: scope },
     }),
   );
 }

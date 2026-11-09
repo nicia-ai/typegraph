@@ -16,6 +16,7 @@ import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
   applyMergePlan,
   createMutationPlanBuilder,
+  MutationDocumentSchema,
   planMutations,
 } from "../../../src/graph-merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
@@ -53,6 +54,33 @@ export function registerMutationPlanningIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("bounded mutation planning", () => {
+    it("rejects overlapping or duplicate property removals in the public schema", async () => {
+      const store = await context.createHistoryStore(graph);
+      const builder = await createMutationPlanBuilder(store, "schema");
+      for (const unsetProps of [["name"], ["note", "note"]]) {
+        const document = {
+          ...builder.document,
+          operations: [
+            {
+              op: "node.update",
+              kind: "Item",
+              id: "item",
+              props: { name: "new" },
+              unsetProps,
+            },
+          ],
+        };
+        expect(MutationDocumentSchema.safeParse(document).success).toBe(false);
+        expect(
+          await planMutations({
+            target: store,
+            mutations: document,
+            makeBackend,
+          }),
+        ).toMatchObject({ success: false });
+      }
+    });
+
     it("matches collections when deleting and recreating an expired node, including unchanged properties", async () => {
       for (const sameProps of [false, true]) {
         const native = await context.createHistoryStore({
