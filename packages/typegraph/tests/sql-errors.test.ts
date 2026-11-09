@@ -935,3 +935,28 @@ describe("transient database failures", () => {
     },
   );
 });
+
+describe("codeless transport and existing transient predicates", () => {
+  it.each([
+    "Connection terminated unexpectedly",
+    "Client has encountered a connection error and is not queryable",
+    "timeout exceeded when trying to connect",
+  ])("recognizes node-postgres %s", (message) => {
+    expect(
+      isTransientDatabaseError(
+        new Error("wrapped", { cause: new Error(message) }),
+      ),
+    ).toBe(true);
+    expect(
+      isTransientDatabaseError(
+        Object.assign(new Error(message), { code: "42501" }),
+      ),
+    ).toBe(false);
+  });
+  it("uses libSQL's numeric stale snapshot evidence", () => {
+    expect(isTransientDatabaseError({ cause: { rawCode: 517 } })).toBe(true);
+    expect(isTransientDatabaseError({ cause: { extendedCode: 517 } })).toBe(
+      true,
+    );
+  });
+});

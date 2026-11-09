@@ -100,6 +100,7 @@ import {
   isInsufficientResourcesError,
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
+  isPostgresLockTimeout,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
 import {
@@ -685,13 +686,6 @@ function postgresLockTimeoutMilliseconds(value: string): number | undefined {
       return undefined;
     }
   }
-}
-
-/** Driver errors may wrap PostgreSQL's lock-not-available SQLSTATE. */
-function isPostgresLockTimeout(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  if ("code" in error && error.code === "55P03") return true;
-  return "cause" in error && isPostgresLockTimeout(error.cause);
 }
 
 /**

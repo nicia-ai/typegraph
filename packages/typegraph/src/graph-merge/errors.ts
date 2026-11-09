@@ -403,11 +403,11 @@ export class DurableOperationError extends MergeError {
 /** Refusal of evidence or mutation authorization from a retired or foreign allocation. */
 export class DurableOperationOriginMismatchError extends DurableOperationError {
   protected static override readonly errorCategory = "user";
-  override readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+  override readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
   constructor(cause: unknown) {
     super(
       "The durable operation belongs to a different or retired allocation.",
-      { cause, details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" } },
+      { cause, details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" } },
     );
     this.name = "DurableOperationOriginMismatchError";
   }
@@ -426,7 +426,7 @@ export class StoreOperationError extends DurableOperationError {
   ) {
     super(
       attemptOutcome === "unknown" ?
-        "This attempt's commit outcome is unknown; look up or replay the same persisted request before attempting another mutation."
+        "This attempt's commit outcome is unknown; retry the same persisted request to recover its outcome; a lookup returning absence does not authorize a new request."
       : "This attempt did not commit; an earlier outcome may exist. Any retry must preserve the same key and payload.",
       { cause, details: { attemptOutcome, phase, retryable } },
     );

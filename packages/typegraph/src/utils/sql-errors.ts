@@ -973,21 +973,48 @@ export function parseDimensionMismatch(
   return undefined;
 }
 
+/** Shared lock-not-available classification, including wrapped driver errors. */
+export function isPostgresLockTimeout(error: unknown): boolean {
+  for (const link of errorChain(error))
+    if (canReadProperty(link) && Reflect.get(link, "code") === "55P03")
+      return true;
+  return false;
+}
+
 /** Transient transport, contention, or availability failure; retry only the same durable request. */
 export function isTransientDatabaseError(
   error: unknown,
   target?: object,
 ): boolean {
-  if (isSerializationFailure(error, target) || isSqliteWriterSlotBusy(error))
+  if (
+    isSerializationFailure(error, target) ||
+    isSqliteWriterSlotBusy(error) ||
+    isSqliteStaleSnapshotError(error) ||
+    isPostgresLockTimeout(error)
+  )
     return true;
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     const code: unknown = Reflect.get(link, "code");
+    // node-postgres emits these exact codeless transport/pool errors. Do not
+    // classify arbitrary application messages or overwrite a coded refusal.
+    if (
+      code === undefined &&
+      link instanceof Error &&
+      [
+        "Connection terminated",
+        "Connection terminated unexpectedly",
+        "Connection terminated due to connection timeout",
+        "Client has encountered a connection error and is not queryable",
+        "Client was closed and is not queryable",
+        "timeout exceeded when trying to connect",
+      ].includes(link.message)
+    )
+      return true;
     if (typeof code !== "string") continue;
     if (
       /^08[0-9A-Z]{3}$/u.test(code) ||
       [
-        "55P03",
         "53300",
         "57P01",
         "57P02",
@@ -1002,7 +1029,6 @@ export function isTransientDatabaseError(
         "CONNECTION_ENDED",
         "CONNECTION_DESTROYED",
         "CONNECT_TIMEOUT",
-        "SQLITE_BUSY_SNAPSHOT",
         "SQLITE_BUSY_TIMEOUT",
         "SQLITE_LOCKED_SHAREDCACHE",
       ].includes(code)

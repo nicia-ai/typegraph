@@ -1740,7 +1740,7 @@ export class DurableOperationEvidenceError extends DurableOperationError {
 export class DurableOperationOriginMismatchError extends DurableOperationError {
     constructor(cause: unknown);
     // (undocumented)
-    readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
     // (undocumented)
     protected static readonly errorCategory = "user";
 }
@@ -4319,9 +4319,6 @@ export function isOk<T, E>(result: Result<T, E>): result is Readonly<{
     success: true;
     data: T;
 }>;
-
-// @public
-export function isTransientDatabaseError(error: unknown, target?: object): boolean;
 
 // @public (undocumented)
 type IsUnion<T, Whole = T> = T extends Whole ? [

@@ -33,7 +33,7 @@ import {
 import {
   computeDurableOperationDigest,
   type DurableOperationRequest,
-  isDurableOperationKey,
+  isNewDurableOperationKey,
   normalizeDurableOperationRequest,
 } from "./durable-operation";
 import {
@@ -102,7 +102,7 @@ function jsonValueIsValid(value: unknown): value is JsonValue {
 }
 const jsonValueSchema = z.custom<JsonValue>((value) => jsonValueIsValid(value));
 const callerKeySchema = z.custom<string>((value) =>
-  isDurableOperationKey(value),
+  isNewDurableOperationKey(value),
 );
 const countSchema = z.number().int().nonnegative();
 const targetSchema = z
@@ -253,10 +253,7 @@ async function validateLookup(
         "A verified lookup needs the complete original request.",
         { details: { issues: envelope.error.issues } },
       );
-    const normalized = await normalizeDurableOperationRequest(
-      envelope.data,
-      "retained",
-    );
+    const normalized = await normalizeDurableOperationRequest(envelope.data);
     if (!normalized.success) throw normalized.error;
     return {
       target: envelope.data.target,
@@ -270,7 +267,7 @@ async function validateLookup(
     .safeParse(input);
   if (!bare.success)
     throw new DurableOperationRequestError(
-      "A durable lookup needs its persisted allocation target and a nonempty retained caller key.",
+      "A durable lookup needs its persisted allocation target and an admissible caller key.",
       { details: { issues: bare.error.issues } },
     );
   return bare.data;

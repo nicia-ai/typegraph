@@ -2483,7 +2483,7 @@ lookup retrieves evidence by key without asserting a payload. Partial payloads r
 its namespace. Capture and persist that owner before attempting a mutation. After completing the
 copy/restore phase, independently diverging forks call `rotateAllocationOwner(expectedOwner)` before
 accepting writes; old requests and copied outcomes then refuse with
-`GRAPH_ALLOCATION_ORIGIN_MISMATCH`. Backup restoration of the same allocation retains its identity
+`GRAPH_ALLOCATION_OWNER_MISMATCH`. Backup restoration of the same allocation retains its identity
 and evidence. Earlier evidence formats refuse explicitly rather than silently reapplying their keys.
 
 `StoreOperationError` exposes `attemptOutcome`, `phase`, and `retryable`, describing only the current

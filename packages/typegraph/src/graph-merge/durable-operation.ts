@@ -104,12 +104,12 @@ export type DurableBranchOperationRequest = DurableOperationRequest;
 export const DURABLE_OPERATION_KEY_MAX_BYTES = 256;
 
 /** Retained evidence and lookup keys predate the current admission limit. */
-export function isDurableOperationKey(value: unknown): value is string {
+function isDurableOperationKey(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
 /** Admission predicate; shared by every durable mutation API before callbacks. */
-function isNewDurableOperationKey(value: unknown): value is string {
+export function isNewDurableOperationKey(value: unknown): value is string {
   return (
     isDurableOperationKey(value) &&
     value.length <= DURABLE_OPERATION_KEY_MAX_BYTES &&
@@ -358,7 +358,7 @@ export async function normalizeDurableOperationRequest(
   ) {
     return err(
       new DurableOperationRequestError(
-        "Durable operation request is malformed: idempotencyKey must contain 1–256 UTF-8 bytes.",
+        `Durable operation request is malformed: idempotencyKey must contain 1–${DURABLE_OPERATION_KEY_MAX_BYTES} UTF-8 bytes.`,
         { details: { maxBytes: DURABLE_OPERATION_KEY_MAX_BYTES } },
       ),
     );

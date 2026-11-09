@@ -118,7 +118,7 @@ export function registerStoreOperationIntegrationTests(
       ]) {
         expect(result).toMatchObject({
           success: false,
-          error: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+          error: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
         });
       }
       const next = {
@@ -157,6 +157,16 @@ export function registerStoreOperationIntegrationTests(
       let called = false;
       for (const key of ["x".repeat(6000), "é".repeat(129)]) {
         const input = request(target, key);
+        expect(await getStoreOperation(store, input)).toMatchObject({
+          success: false,
+          error: { name: "DurableOperationRequestError" },
+        });
+        expect(
+          await getStoreOperation(store, { target, idempotencyKey: key }),
+        ).toMatchObject({
+          success: false,
+          error: { name: "DurableOperationRequestError" },
+        });
         const result = await operateStore(store, input, async (tx) => {
           called = true;
           return applyCreate(tx, input.mutation);
@@ -471,7 +481,7 @@ export function registerStoreOperationIntegrationTests(
       ]) {
         expect(result).toMatchObject({
           success: false,
-          error: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+          error: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
         });
       }
       const replacement = request(await captureStoreOperationTarget(store));
