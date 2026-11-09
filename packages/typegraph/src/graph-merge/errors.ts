@@ -29,7 +29,7 @@ export const MERGE_ERROR_CODES = {
   planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH",
   planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH",
   planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH",
-  planOriginMismatch: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+  planOriginMismatch: "GRAPH_ALLOCATION_OWNER_MISMATCH",
   planStale: "GRAPH_MERGE_PLAN_STALE",
   planningStale: "GRAPH_MERGE_PLANNING_STALE",
   candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE",

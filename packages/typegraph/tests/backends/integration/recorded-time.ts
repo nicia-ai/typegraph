@@ -1305,7 +1305,10 @@ export function registerRecordedTimeIntegrationTests(
         });
         await expect(
           external.rotateAllocationOwner(owner),
-        ).rejects.toMatchObject({ name: "UnsupportedBackendCapabilityError" });
+        ).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: { code: "ALLOCATION_OWNER_REQUIRES_TRACKING" },
+        });
         const view = external.asOfRecorded(anchor);
         expect(await view.nodes.Person.getById(node.id)).toMatchObject({
           name: "external",
@@ -1315,11 +1318,11 @@ export function registerRecordedTimeIntegrationTests(
         ).toHaveLength(1);
         owner = { ...owner, origin: "replacement-origin" };
         await expect(view.nodes.Person.getById(node.id)).rejects.toMatchObject({
-          code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+          code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
         });
         await expect(
           view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
-        ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+        ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       } finally {
         await requireDefined(backend.executeStatement)(
           asCompiledStatementSql(

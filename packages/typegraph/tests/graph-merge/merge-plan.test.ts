@@ -130,7 +130,7 @@ describe("public merge plan lifecycle", () => {
     expect(isErr(result)).toBe(true);
     if (!isErr(result)) throw new Error("Expected retired-fence refusal.");
     expect(result.error).toMatchObject({
-      code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+      code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
     });
     expect(await target.nodes.Person.count()).toBe(0);
   });
@@ -158,7 +158,7 @@ describe("public merge plan lifecycle", () => {
       if (!isErr(result)) throw new Error("Expected ownership refusal.");
       expect(result.error).toMatchObject(
         cut === foreign ?
-          { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" }
+          { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" }
         : { details: { code: "RECORDED_ANCHOR_UNBOUND" } },
       );
     }

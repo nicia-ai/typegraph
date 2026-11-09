@@ -4012,7 +4012,7 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
 export class GraphAllocationMismatchError extends ConfigurationError {
     constructor(details?: Readonly<Record<string, unknown>>);
     // (undocumented)
-    readonly code = "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
 }
 
 // @public

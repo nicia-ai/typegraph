@@ -253,13 +253,13 @@ describe("migrateLegacyRecordedTime", () => {
         anchor: captured,
         origin: "wrong-origin",
       }),
-    ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+    ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
     await store.clear();
     await store.nodes.LegacyItem.create({ label: "replacement" });
     await expect(
       migrateRecordedAnchor({ backend, graphId: GRAPH_ID, anchor, origin }),
     ).rejects.toMatchObject({
-      details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+      details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
     });
   });
 

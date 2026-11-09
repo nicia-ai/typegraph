@@ -284,7 +284,7 @@ export function registerRecordedAdjacencyIntegrationTests(
         view.adjacency(root, { after: cursor }),
       ).rejects.toMatchObject({
         name: "GraphAllocationMismatchError",
-        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
       });
     });
 
@@ -390,7 +390,7 @@ export function registerRecordedAdjacencyIntegrationTests(
         observed.asOfRecorded(anchor).adjacency(root),
       ).rejects.toMatchObject({
         name: "GraphAllocationMismatchError",
-        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
       });
     });
 
@@ -411,7 +411,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         otherStore.asOfRecorded(anchor).nodes.Item.getById(root.id),
       ).rejects.toMatchObject({
-        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
       });
       const legacy = asRecordedInstant(
         anchor.replace(/^r2:[^:]+:[^:]+:/u, "r1:"),
@@ -444,9 +444,9 @@ export function registerRecordedAdjacencyIntegrationTests(
       ).toMatchObject({ label: "original" });
       await expect(
         store.asOfRecorded(old).nodes.Item.getById(root.id),
-      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       await expect(store.rotateAllocationOwner(owner)).rejects.toMatchObject({
-        code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+        code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
       });
       await store.nodes.Item.update(root.id, { label: "updated" });
       expect(
@@ -513,7 +513,7 @@ export function registerRecordedAdjacencyIntegrationTests(
               .execute(),
         ])
           await expect(read()).rejects.toMatchObject({
-            details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+            details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
           });
       }
       expect(

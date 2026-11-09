@@ -3202,10 +3202,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async #ensureAllocationOrigin(): Promise<string> {
     if (!this.#revisionTrackingEnabled) {
-      throw new UnsupportedBackendCapabilityError(
-        "allocationOwner",
-        "revisionTracking",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
+      throw new ConfigurationError(
+        "allocationOwner() requires revisionTracking: true or history: true.",
+        { code: "ALLOCATION_OWNER_REQUIRES_TRACKING", graphId: this.graphId },
       );
     }
     return ensureRevisionOrigin(
@@ -3262,10 +3261,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       !this.revisionTrackingEnabled ||
       this.#recordedTimeOwnership === "engine-native"
     )
-      throw new UnsupportedBackendCapabilityError(
-        "rotateAllocationOwner",
-        "revisionTracking",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
+      throw new ConfigurationError(
+        "rotateAllocationOwner() requires native revisionTracking: true or history: true.",
+        { code: "ALLOCATION_OWNER_REQUIRES_TRACKING", graphId: this.graphId },
       );
     return rotateGraphAllocationOwner(
       this.#baseBackend,

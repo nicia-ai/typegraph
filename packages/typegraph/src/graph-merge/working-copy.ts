@@ -54,6 +54,7 @@
  * limitations above apply to it — see its own doc comment.
  */
 
+import { sameGraphAllocationOwner } from "../core/allocation-owner";
 import { computeBaseVersion } from "./base-version";
 import { BranchError } from "./errors";
 import type {
@@ -651,10 +652,7 @@ export function forkedWorkingCopyStrategy<
         }
         const forkStore = createStore(baseStore.graph, backend, forkOptions);
         await assertWorkingCopyMatchesBase(forkStore, base);
-        if (forkStore.revisionTrackingEnabled)
-          await forkStore.rotateAllocationOwner(
-            await forkStore.allocationOwner(),
-          );
+        await rotateForkAllocationOwner(baseStore, forkStore);
         return forkStore;
       } catch (error) {
         try {
@@ -718,4 +716,18 @@ export function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
     nodes: Object.freeze(nodes),
     extension,
   });
+}
+
+/** One owner of whether a newly allocated working copy must retire its inherited write owner. */
+export async function rotateForkAllocationOwner<G extends GraphDef>(
+  base: Store<G>,
+  copy: Store<G>,
+): Promise<boolean> {
+  if (!base.revisionTrackingEnabled || !copy.revisionTrackingEnabled)
+    return false;
+  const owner = await copy.allocationOwner();
+  if (!sameGraphAllocationOwner(await base.allocationOwner(), owner))
+    return false;
+  await copy.rotateAllocationOwner(owner);
+  return true;
 }

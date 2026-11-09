@@ -4731,7 +4731,7 @@ export const MERGE_ERROR_CODES: {
     readonly planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH";
     readonly planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH";
     readonly planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH";
-    readonly planOriginMismatch: "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+    readonly planOriginMismatch: "GRAPH_ALLOCATION_OWNER_MISMATCH";
     readonly planStale: "GRAPH_MERGE_PLAN_STALE";
     readonly planningStale: "GRAPH_MERGE_PLANNING_STALE";
     readonly candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE";
@@ -5116,7 +5116,7 @@ export type MergePlanNodeUpsert = Readonly<{
 export class MergePlanOriginMismatchError extends InvalidMergePlanError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
-    readonly code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH";
+    readonly code: "GRAPH_ALLOCATION_OWNER_MISMATCH";
 }
 
 // @public (undocumented)

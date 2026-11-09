@@ -285,6 +285,56 @@ export function registerMutationPlanningIntegrationTests(
       }
     });
 
+    it("applies explicit recreation while native deletion cascades incident edges", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "recreate_incident_cascade",
+        nodes: { Item: { type: Item, onDelete: "cascade" } },
+      });
+      const a = await store.nodes.Item.create(
+        { name: "original" },
+        { id: "a" },
+      );
+      const b = await store.nodes.Item.create({ name: "peer" }, { id: "b" });
+      const edge = await store.edges.links.create(
+        a,
+        b,
+        { label: "old" },
+        { id: "old" },
+      );
+      expect(await store.edges.links.getById(edge.id)).toBeDefined();
+      const builder = await createMutationPlanBuilder(
+        store,
+        "cascade-recreate",
+      );
+      const plan = unwrap(
+        await builder
+          .deleteNode("Item", a.id)
+          .createNode(
+            "Item",
+            a.id,
+            { name: "replacement" },
+            { validFrom: null },
+          )
+          .createEdge("links", "new", a, b, { label: "new" })
+          .plan({ makeBackend }),
+      );
+      expect(
+        plan.writes.nodeUpserts.find((row) => row.id === a.id),
+      ).toMatchObject({ recreate: true });
+      unwrap(
+        await applyMergePlan(store, mutationJsonRoundTrip(plan) as typeof plan),
+      );
+      const applied = await store.nodes.Item.getById(a.id);
+      expect(applied).toMatchObject({ name: "replacement" });
+      expect(applied?.meta.validFrom).toBeUndefined();
+      expect(await store.edges.links.getById(edge.id)).toBeUndefined();
+      expect(
+        await store.edges.links.getById(asEdgeId<typeof links>("new")),
+      ).toMatchObject({ label: "new" });
+      expect(await store.nodes.Item.getById(b.id)).toBeDefined();
+    });
+
     it("recreates a node with incident edges using the same native delete and create semantics", async () => {
       const store = await context.createHistoryStore({
         ...graph,

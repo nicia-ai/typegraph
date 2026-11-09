@@ -64,7 +64,6 @@
  * Backend-specific mechanics remain entirely within the strategy.
  */
 
-import { sameGraphAllocationOwner } from "../core/allocation-owner";
 import { asRecordedInstant } from "../core/temporal";
 import { computeBaseVersion, schemaComponentOf } from "./base-version";
 import { readBranchForkState } from "./branch";
@@ -92,7 +91,10 @@ import type {
   RecordedForkPoint,
 } from "./types";
 import { asBranchId } from "./types";
-import { coalescedWorkingCopyClose } from "./working-copy";
+import {
+  coalescedWorkingCopyClose,
+  rotateForkAllocationOwner,
+} from "./working-copy";
 
 /**
  * A strategy-defined, JSON-serializable locator for one PERSISTENT working
@@ -427,17 +429,12 @@ export async function branchDurable<
     await assertDurableWorkingCopyMatchesBase(baseStore, created.store, base);
     // Verify the copied base before rotating: the O(1) physical-fork proof
     // intentionally compares the parent's owner. Seal only the final owner.
-    const inheritedOwner =
-      baseStore.revisionTrackingEnabled &&
-      created.store.revisionTrackingEnabled &&
-      sameGraphAllocationOwner(
-        await baseStore.allocationOwner(),
-        await created.store.allocationOwner(),
-      );
-    if (inheritedOwner)
-      await created.store.rotateAllocationOwner(
-        await created.store.allocationOwner(),
-      );
+    const inheritedOwner = await rotateForkAllocationOwner(
+      baseStore,
+      created.store,
+    );
+    // Allocation is unpublished and the strategy contract forbids concurrent
+    // writers until seal. Rebind the strategy's cut to the rotated owner here.
     const captured = await readBranchForkState(created.store, false);
     forkState = {
       ...captured,

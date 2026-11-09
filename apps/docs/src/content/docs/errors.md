@@ -415,7 +415,7 @@ if (isErr(applied)) {
 | `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
 | `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
 | `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
-| `MergePlanOriginMismatchError` | `GRAPH_ALLOCATION_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `MergePlanOriginMismatchError` | `GRAPH_ALLOCATION_OWNER_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
 | `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
 | `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
 
@@ -1143,7 +1143,7 @@ to the three TypeGraph-capture guards.
 
 ### Recorded allocation ownership and lookup
 
-`GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_ORIGIN_MISMATCH`.
+`GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_OWNER_MISMATCH`.
 Merge origin refusals preserve their merge error class and use that same code. Match
 this code to retire checkpoints, plans, or requests after a reset or fork rotation;
 a retry against the same retired owner cannot repair it.
@@ -1503,4 +1503,5 @@ try {
 External recorded sources without an owner refuse with `ConfigurationError` and
 `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Configure the source owner reader
 for `recordedReadOwner()` and historical reads. Native allocation ownership and
-rotation require revision tracking and otherwise raise `UnsupportedBackendCapabilityError`.
+rotation require the `revisionTracking: true` or `history: true` Store option and
+otherwise raise `ConfigurationError` with `details.code: "ALLOCATION_OWNER_REQUIRES_TRACKING"`.

@@ -12,10 +12,12 @@ Complete `PostgresTableNames` / `SqliteTableNames` maps must include `recordedAn
 
 Expose the complete owner through `store.allocationOwner()` and `recordedInstantOwner()`. Rotate unpublished same-name physical forks with `store.rotateAllocationOwner(expectedOwner)` before independent writes; backups intended to continue the same allocation retain their owner. Rotation preserves data and captured history while retiring old checkpoints in the fork. External recorded relations without local origin metadata can provide `recordedRelation({ schema, owner })`; legacy unbound sources require explicit checkpoint migration.
 
-Update reset handling to match `GRAPH_ALLOCATION_ORIGIN_MISMATCH`, shared by recorded reads, comparisons, and merge origin refusals. This replaces the earlier adjacency/merge-specific reset codes. Recorded transaction sessions and iterative algorithms enforce the same ownership check. Migration verifies bound inputs and refuses revisions beyond the retained clock.
+Update reset handling to match `GRAPH_ALLOCATION_OWNER_MISMATCH`, shared by recorded reads, comparisons, and merge origin refusals. This replaces the earlier adjacency/merge-specific reset codes. Recorded transaction sessions and iterative algorithms enforce the same ownership check. Migration verifies bound inputs and refuses revisions beyond the retained clock.
 
 Known writable forks created by `forkedWorkingCopyStrategy()` and physical copies allocated by `branchDurable()` rotate their owner automatically after base verification; parent checkpoints must be reacquired under the fork owner. External writers can construct owner-bound checkpoints with `recordedInstant({ revision, wallTime, owner })`; `recordedReadOwner()` uses the configured source owner reader. `allocationOwner()` and rotation refer only to native writes, independently of external reads.
 
 Replace `revisionOriginNow()` callers with `allocationOwner()`. Retain the complete owner for checkpoints and fences rather than comparing only its origin component; raw origin minting is now private.
 
 Custom concrete Store implementations must expose `rotateAllocationOwner(expectedOwner)` as a lifecycle operation, or implement a typed refusal when their ownership cannot be rotated. The structural `StoreCore` capability remains optional before resolution; read-only surfaces do not acquire this write method.
+
+Allocation owner mismatches use `GRAPH_ALLOCATION_OWNER_MISMATCH` for either origin or namespace differences. Native owner access requires the Store revision-tracking option; missing configuration raises `ConfigurationError`, not a backend capability refusal. Physical fork paths share one rotation decision.

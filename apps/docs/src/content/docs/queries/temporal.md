@@ -250,7 +250,7 @@ increase that row or statement budget. Index seeks still have the database's nor
 Adjacency cursors bind the durable graph origin, root kind/id, normalized edge-kind filter, direction, valid-time
 mode/instant, and recorded anchor through a SHA-256 scope digest. Changing these dimensions or reusing a cursor
 after `clear()` refuses the retired recorded anchor; changing `candidateLimit` is allowed. A retired or foreign
-origin raises `GraphAllocationMismatchError` with `code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH"`, including an origin
+origin raises `GraphAllocationMismatchError` with `code: "GRAPH_ALLOCATION_OWNER_MISMATCH"`, including an origin
 change during a page. Within one graph origin, the candidate range ends at the recorded anchor, so later live
 writes cannot change the visible answer, page boundaries, or the remaining number of pages. `clear()` retires
 anchors, preconstructed views, and cursors, including views that have not issued a page yet.

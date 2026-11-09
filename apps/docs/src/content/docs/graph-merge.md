@@ -1418,7 +1418,7 @@ A branch forked before that clear cannot merge into the post-clear store even
 when its revision clock has the same numeric value.
 
 The origin row is also read fresh on every mint (`computeBaseVersion`,
-`Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
+`Store.allocationOwner()`), never cached on a `Store` instance. Two live
 `Store` objects can legitimately observe the same graph — nothing requires
 that only one `Store` ever exists per database — and only one of them runs
 `clear()` at a time; a stale per-instance cache on the other would keep
@@ -1881,8 +1881,9 @@ base store, never the clone. A fork is never rebuilt through
 `exportGraphStream`/`importGraphStream`, so none of that applies: tombstones,
 `created_at`/`updated_at`, and the `version` column carry over unchanged, and
 — with `history: true` — the fork physically carries the base's recorded
-relations, so `store.asOfRecorded(<an instant before the fork>)` answers from
-that history. A clone-based branch never enables history, so the same call on
+relations. Rotation retires parent instants: reconstruct a checkpoint with the
+fork owner to read copied history using `store.asOfRecorded()`. A clone-based
+branch never enables history, so the same call on
 it refuses outright.
 
 `create()` asserts `computeBaseVersion(forkStore) === base` right after

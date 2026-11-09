@@ -3793,7 +3793,7 @@ function assertMergeAllocationOwner(
       "The merge checkpoint belongs to a different or retired allocation.",
       {
         cause: error,
-        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH", graphId },
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH", graphId },
       },
     );
   }

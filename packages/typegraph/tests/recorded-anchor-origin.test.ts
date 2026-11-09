@@ -23,6 +23,7 @@ import {
   reopenDurableBranch,
   unwrap,
 } from "../src/graph-merge";
+import { rotateForkAllocationOwner } from "../src/graph-merge/working-copy";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
@@ -82,9 +83,9 @@ describe("recorded anchor namespace ownership", () => {
       ).toMatchObject({ label: "original" });
       await expect(
         fork.asOfRecorded(original).nodes.Item.getById(node.id),
-      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       await expect(fork.rotateAllocationOwner(owner)).rejects.toMatchObject({
-        code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH",
+        code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
       });
       await fork.nodes.Item.update(node.id, { label: "fork" });
       const reopened = createLocalSqliteBackend({ path: sourcePath });
@@ -96,7 +97,7 @@ describe("recorded anchor namespace ownership", () => {
       const parentCut = requireDefined(await parent.recordedNow());
       await expect(
         fork.asOfRecorded(parentCut).nodes.Item.getById(node.id),
-      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       expect(await fork.nodes.Item.getById(node.id)).toMatchObject({
         label: "fork",
       });
@@ -169,7 +170,7 @@ describe("recorded anchor namespace ownership", () => {
         result.branch.store
           .asOfRecorded(parentCut)
           .nodes.Item.getById(asNodeId("item")),
-      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       await result.branch.close();
       const reopened = unwrap(
         await reopenDurableBranch(graph, result.descriptor, strategy),
@@ -213,11 +214,14 @@ describe("recorded anchor namespace ownership", () => {
       expect(await fork.allocationOwner().then((owner) => owner.origin)).toBe(
         origin,
       );
+      const forkOwner = await fork.allocationOwner();
+      expect(await rotateForkAllocationOwner(source, fork)).toBe(false);
+      expect(await fork.allocationOwner()).toEqual(forkOwner);
       const anchor = requireDefined(await source.recordedNow());
       await expect(
         fork.asOfRecorded(anchor).nodes.Item.getById(asNodeId("item")),
       ).rejects.toMatchObject({
-        details: { code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" },
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
       });
       const own = requireDefined(await fork.recordedNow());
       expect(

@@ -485,7 +485,7 @@ describe("forkedWorkingCopyStrategy", () => {
         forkBranch.store
           .asOfRecorded(beforeUpdate)
           .nodes.Widget.getById(widget.id),
-      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_ORIGIN_MISMATCH" });
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       const forkView = forkBranch.store.asOfRecorded(
         recordedInstant({
           revision: recordedInstantRevision(beforeUpdate),
