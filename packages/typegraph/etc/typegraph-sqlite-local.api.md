@@ -23,6 +23,9 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -181,6 +184,7 @@ type ArrayPredicate = Readonly<{
 
 // @public
 type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -2395,6 +2399,7 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol;
 type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -2735,6 +2740,12 @@ type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -5417,6 +5428,7 @@ type ResolvedSqlTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -5433,8 +5445,10 @@ type ResolvedSqlTableNames = Readonly<{
     reconciliationMarkers?: string;
 }>;
 
-// @public (undocumented)
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+// @public
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+    rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+}>;
 
 // @public
 type ResolveNode<G extends GraphDef, K extends string> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<N> : Node : Node;
@@ -5918,6 +5932,7 @@ type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
@@ -5991,8 +6006,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
-    revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
     snapshot: () => StoreView<G>;
     batch: <const Queries extends readonly [
@@ -6829,6 +6847,8 @@ const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol;
 // @public
 type TypeGraphRecordedInstantParts = Readonly<{
     kind: "typegraph";
+    origin?: string;
+    namespace?: string;
     revision: number;
     recordedAt: string;
 }>;

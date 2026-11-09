@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asRecordedInstant,
   type CompiledRowsSql,
   createStore,
   defineEdge,
@@ -282,8 +283,8 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         view.adjacency(root, { after: cursor }),
       ).rejects.toMatchObject({
-        name: "ValidationError",
-        details: { issues: [{ path: "after" }] },
+        name: "GraphAllocationMismatchError",
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
       });
     });
 
@@ -388,9 +389,138 @@ export function registerRecordedAdjacencyIntegrationTests(
       await expect(
         observed.asOfRecorded(anchor).adjacency(root),
       ).rejects.toMatchObject({
-        name: "ConfigurationError",
-        details: { code: "RECORDED_ADJACENCY_ORIGIN_CHANGED" },
+        name: "GraphAllocationMismatchError",
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
       });
+    });
+
+    it("refuses unbound legacy anchors and coordinates owned by another graph", async () => {
+      const store = await context.createHistoryStore(graph);
+      const root = await store.nodes.Item.create(
+        { label: "original" },
+        { id: "root" },
+      );
+      const anchor = requireDefined(await store.recordedNow());
+      const otherGraph = defineGraph({
+        id: "recorded_other_origin",
+        nodes: graph.nodes,
+        edges: graph.edges,
+      });
+      const otherStore = await context.createHistoryStore(otherGraph);
+      await otherStore.nodes.Item.create({ label: "other" }, { id: "root" });
+      await expect(
+        otherStore.asOfRecorded(anchor).nodes.Item.getById(root.id),
+      ).rejects.toMatchObject({
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
+      });
+      const legacy = asRecordedInstant(
+        anchor.replace(/^r2:[^:]+:[^:]+:/u, "r1:"),
+      );
+      await expect(
+        store.asOfRecorded(legacy).nodes.Item.getById(root.id),
+      ).rejects.toMatchObject({ details: { code: "RECORDED_ANCHOR_UNBOUND" } });
+    });
+
+    it("rotates allocation ownership without clearing rows or captured history", async () => {
+      const store = await context.createHistoryStore(graph);
+      const owner = await store.allocationOwner();
+      const root = await store.nodes.Item.create(
+        { label: "original" },
+        { id: "root", validFrom: null },
+      );
+      const old = requireDefined(await store.recordedNow());
+      const next = await store.rotateAllocationOwner(owner);
+      expect(next.origin).not.toBe(owner.origin);
+      expect(next.namespace).toBe(owner.namespace);
+      expect(await store.nodes.Item.getById(root.id)).toMatchObject({
+        label: "original",
+      });
+      const current = requireDefined(await store.recordedNow());
+      expect(
+        await store.resolveRecordedInstant("9999-01-01T00:00:00.000Z"),
+      ).toBe(current);
+      expect(
+        await store.asOfRecorded(current).nodes.Item.getById(root.id),
+      ).toMatchObject({ label: "original" });
+      await expect(
+        store.asOfRecorded(old).nodes.Item.getById(root.id),
+      ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
+      await expect(store.rotateAllocationOwner(owner)).rejects.toMatchObject({
+        code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
+      });
+      await store.nodes.Item.update(root.id, { label: "updated" });
+      expect(
+        await store.asOfRecorded(current).nodes.Item.getById(root.id),
+      ).toMatchObject({ label: "original" });
+    });
+
+    it("refuses retired anchors and preconstructed views on every recorded read surface", async () => {
+      const store = await context.createHistoryStore(graph);
+      const root = await store.nodes.Item.create(
+        { label: "original" },
+        { id: "root", validFrom: null },
+      );
+      const peer = await store.nodes.Item.create(
+        { label: "peer" },
+        { id: "peer", validFrom: null },
+      );
+      await store.edges.links.create(
+        root,
+        peer,
+        { label: "original" },
+        { id: "edge", validFrom: null },
+      );
+      const anchor = requireDefined(await store.recordedNow());
+      const oldView = store.asOfRecorded(anchor);
+      await store.clear();
+      const replacement = await store.nodes.Item.create(
+        { label: "replacement" },
+        { id: "root", validFrom: null },
+      );
+      const neighbor = await store.nodes.Item.create(
+        { label: "neighbor" },
+        { id: "peer", validFrom: null },
+      );
+      await store.edges.links.create(
+        replacement,
+        neighbor,
+        { label: "replacement" },
+        { id: "edge", validFrom: null },
+      );
+      for (const view of [oldView, store.asOfRecorded(anchor)]) {
+        for (const read of [
+          () => view.algorithms.weaklyConnectedComponents({ edges: ["links"] }),
+          () => view.pageRank({ edges: ["links"] }),
+          () => view.labelPropagation({ edges: ["links"] }),
+          () => view.reachable(root.id, { edges: ["links"] }),
+          () => view.shortestPath(root.id, peer.id, { edges: ["links"] }),
+          () => view.subgraph(root, { maxDepth: 1, edges: ["links"] }),
+          () => view.nodes.Item.getById(root.id),
+          () => view.nodes.Item.getByIds([]),
+          () => view.nodes.Item.scan(),
+          () =>
+            view.edges.links.getById(
+              "edge" as Parameters<typeof view.edges.links.getById>[0],
+            ),
+          () => view.edges.links.scan(),
+          () => view.adjacency(root),
+          () => view.adjacency(root, { edgeKinds: [] }),
+          () =>
+            view
+              .query()
+              .from("Item", "item")
+              .select((ctx) => ctx.item.label)
+              .execute(),
+        ])
+          await expect(read()).rejects.toMatchObject({
+            details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" },
+          });
+      }
+      expect(
+        await store
+          .asOfRecorded(requireDefined(await store.recordedNow()))
+          .nodes.Item.getById(root.id),
+      ).toMatchObject({ label: "replacement" });
     });
 
     it("bounds historical candidates and statement work despite invisible history and unrelated growth", async () => {
@@ -422,7 +552,7 @@ export function registerRecordedAdjacencyIntegrationTests(
       const view = observed.asOfRecorded(
         requireDefined(await store.recordedNow()),
       );
-      await observed.revisionOriginNow();
+      await observed.allocationOwner().then((owner) => owner.origin);
       async function measure() {
         reads.length = 0;
         const page = await view.adjacency(root, {
@@ -502,9 +632,21 @@ export function registerRecordedAdjacencyIntegrationTests(
         base.dialect === "sqlite" ?
           "EXPLAIN QUERY PLAN "
         : "EXPLAIN (ANALYZE, FORMAT JSON) ";
-      const plan = await base.execute(
-        asCompiledRowsSql(sql`${sql.raw(explain)}${candidate.query}`),
+      const explainQuery = asCompiledRowsSql(
+        sql`${sql.raw(explain)}${candidate.query}`,
       );
+      // Tiny fixtures can favor a sequential scan after auto-analyze. Check that
+      // the bounded access path exists independently of that cost estimate.
+      // SET LOCAL stays on this transaction's connection and cannot leak.
+      const plan =
+        base.dialect === "sqlite" ?
+          await base.execute(explainQuery)
+        : await base.transaction(async (transaction) => {
+            await transaction.execute(
+              asCompiledRowsSql(sql`SET LOCAL enable_seqscan = off`),
+            );
+            return transaction.execute(explainQuery);
+          });
       expect(
         JSON.stringify(plan, (_key, value: unknown) =>
           typeof value === "bigint" ? value.toString() : value,

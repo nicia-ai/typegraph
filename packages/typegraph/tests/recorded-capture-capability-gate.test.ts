@@ -166,12 +166,12 @@ describe("recorded-time capture capability gate", () => {
     });
     const store = createStore(graph, backend, { revisionTracking: true });
 
-    await expect(store.revisionOriginNow()).rejects.toThrow(
-      "transient revision-origin DDL failure",
-    );
-    await expect(store.revisionOriginNow()).resolves.toEqual(
-      expect.any(String),
-    );
+    await expect(
+      store.allocationOwner().then((owner) => owner.origin),
+    ).rejects.toThrow("transient revision-origin DDL failure");
+    await expect(
+      store.allocationOwner().then((owner) => owner.origin),
+    ).resolves.toEqual(expect.any(String));
     expect(bootstrapAttempts).toBe(2);
   });
 

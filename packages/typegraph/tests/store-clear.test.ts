@@ -309,11 +309,15 @@ describe("store.clear() rotates the durable revision origin", () => {
       email: "alice@example.com",
       name: "Alice",
     });
-    const originBeforeClear = await store.revisionOriginNow();
+    const originBeforeClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
 
     await store.clear();
 
-    const originAfterClear = await store.revisionOriginNow();
+    const originAfterClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
     // Mutation-proof: the origin row is deleted both by the `revisionOrigins`
     // step of the graph-relation clear sequence and by `clear()`'s own
     // `resetRevisionOrigin` call (`store.ts`, the guarantee for a backend whose
@@ -329,11 +333,15 @@ describe("store.clear() rotates the durable revision origin", () => {
       email: "alice@example.com",
       name: "Alice",
     });
-    const originBeforeClear = await store.revisionOriginNow();
+    const originBeforeClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
 
     await store.clear();
 
-    const originAfterClear = await store.revisionOriginNow();
+    const originAfterClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
 
@@ -356,9 +364,9 @@ describe("store.clear() rotates the durable revision origin", () => {
     });
 
     await expect(store.clear()).resolves.toBeUndefined();
-    await expect(store.revisionOriginNow()).resolves.toEqual(
-      expect.any(String),
-    );
+    await expect(
+      store.allocationOwner().then((owner) => owner.origin),
+    ).resolves.toEqual(expect.any(String));
   });
 });
 

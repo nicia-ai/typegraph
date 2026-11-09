@@ -428,7 +428,7 @@ refuses outright (`ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` — it
 rewrites TypeGraph's own recorded relations, which your backend does not
 have). `RecordedInstant` anchors from a `recordedTime`-declaring store use
 the `e1:<opaque engine revision>:<ISO instant>` form rather than TypeGraph's
-`r1:<16-digit revision>:<ISO instant>` form; `asOfRecorded` refuses an
+`r2:<graph origin>:<namespace digest>:<16-digit revision>:<ISO instant>` form; `asOfRecorded` refuses an
 anchor minted under the other ownership form with
 `RECORDED_INSTANT_OWNERSHIP_MISMATCH`. See [Engine-native recorded
 time](/queries/temporal#engine-native-recorded-time) for the full reader
@@ -450,7 +450,7 @@ contract.
 | `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store was constructed with an external `recordedRead` binding against a backend that declares `recordedTime` — there is no TypeGraph recorded relation for one to populate; engine-native's own recorded reads are sourced from `recordedTime.source` instead. |
 | `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `Store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, was reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
 | `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` was called against a backend that declares `recordedTime` — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
-| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `asOfRecorded(instant)` was called with an instant minted under the OTHER recorded-time ownership form — an `r1:` instant against an engine-native store, or an `e1:` instant against a TypeGraph-owned one. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `asOfRecorded(instant)` was called with an instant minted under the OTHER recorded-time ownership form — an `r2:` instant against an engine-native store, or an `e1:` instant against a TypeGraph-owned one. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |
 

@@ -402,6 +402,12 @@ export function getSearchableMetadata(schema: z.ZodType): SearchableMetadata | u
 const GRAPH_DEF_BRAND: "__graphDef";
 
 // @public
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
+}>;
+
+// @public
 export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
 
 // @public
@@ -701,6 +707,16 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
+
+// @public
+export function recordedInstant(coordinate: Readonly<{
+    revision: number;
+    wallTime: string;
+    owner: GraphAllocationOwner;
+}>): RecordedInstant;
+
+// @public
+export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
 
 // @public
 export function recordedInstantRevision(instant: RecordedInstant): number;

@@ -15,6 +15,7 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { GraphAllocationOwner } from "../core/allocation-owner";
 export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export type { CompiledOneStatementRead } from "../query";
 export type { BatchReadBuilder } from "../store";
@@ -106,7 +107,7 @@ export {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   MergeReviewError,

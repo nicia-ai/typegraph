@@ -1308,6 +1308,7 @@ function buildPostgresEngineProfileInternal(
     recordedNodes: getTableName(tables.recordedNodes),
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
+    recordedAnchors: getTableName(tables.recordedAnchors),
     revisionOrigins: getTableName(tables.revisionOrigins),
     revisionChanges: getTableName(tables.revisionChanges),
     identityAssertions: getTableName(tables.identityAssertions),
@@ -1919,6 +1920,10 @@ function buildPostgresEngineProfileInternal(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    recordedAnchorsDdl: [
+      generatePgCreateTableSQL(tables.recordedAnchors),
+      ...generatePgCreateIndexSQL(tables.recordedAnchors),
+    ],
     adjacencyIndexDdl: adjacencyIndexAdoptionDdl(
       getTableName(tables.recordedEdges),
       "postgres",

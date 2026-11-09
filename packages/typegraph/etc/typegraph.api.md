@@ -95,6 +95,9 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required
 
 // @public (undocumented)
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
@@ -303,6 +306,7 @@ export function avg<const Alias extends string, const Property extends string>(a
 
 // @public
 export type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
@@ -3584,6 +3588,7 @@ const EXTERNAL_REF_TABLE_KEY: "_externalRefTable";
 export type ExternalRecordedReadSource = Readonly<{
     kind: "external";
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
@@ -4001,6 +4006,19 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
     weaklyConnectedComponents: (options: WeaklyConnectedComponentsOptions<G>) => Promise<readonly WeaklyConnectedComponentMembership[]>;
     pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: PersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+}>;
+
+// @public
+export class GraphAllocationMismatchError extends ConfigurationError {
+    constructor(details?: Readonly<Record<string, unknown>>);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
+}
+
+// @public
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
 }>;
 
 // @public
@@ -5882,6 +5900,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
     backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
     graphId: string;
     anchor: string;
+    origin?: string;
     tableNames?: Partial<SqlTableNames> | undefined;
     mappingTableName?: string | undefined;
 }>;
@@ -7240,6 +7259,16 @@ export type RecordedInstant = string & {
 };
 
 // @public
+export function recordedInstant(coordinate: Readonly<{
+    revision: number;
+    wallTime: string;
+    owner: GraphAllocationOwner;
+}>): RecordedInstant;
+
+// @public
+export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
+
+// @public
 type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
 
 // @public
@@ -7281,6 +7310,7 @@ type RecordedRelationDdl = Readonly<{
 // @public (undocumented)
 export type RecordedRelationOptions = Readonly<{
     schema: SqlSchema;
+    owner?: ((target: Pick<GraphBackend, "execute">) => Promise<GraphAllocationOwner | undefined>) | undefined;
 }>;
 
 // @public
@@ -7657,6 +7687,7 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
     revisionOrigins: string;
     revisionChanges?: string;
     identityAssertions: string;
@@ -7673,8 +7704,10 @@ export type ResolvedSqlTableNames = Readonly<{
     reconciliationMarkers?: string;
 }>;
 
-// @public (undocumented)
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+// @public
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+    rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+}>;
 
 // @public
 export function resolveGraphVectorSlots(graph: GraphDef): readonly VectorSlot[];
@@ -8344,6 +8377,7 @@ export type SqlTableNames = Readonly<{
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
     revisionOrigins?: string | undefined;
     revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
@@ -8457,8 +8491,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
+    allocationOwner?: () => Promise<GraphAllocationOwner>;
+    recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+    rotateAllocationOwner?: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
+    resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
     revisionNow: () => Promise<RecordedInstant | undefined>;
-    revisionOriginNow: () => Promise<string>;
     view: (coordinate: StoreViewCoordinate) => StoreView<G>;
     snapshot: () => StoreView<G>;
     batch: <const Queries extends readonly [
@@ -9481,6 +9518,8 @@ export type TypeGraphErrorOptions = Readonly<{
 // @public
 type TypeGraphRecordedInstantParts = Readonly<{
     kind: "typegraph";
+    origin?: string;
+    namespace?: string;
     revision: number;
     recordedAt: string;
 }>;

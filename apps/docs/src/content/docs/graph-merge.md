@@ -335,7 +335,7 @@ const writeSet = {
   edges: [],
 };
 const mergePlan = unwrap(await planCandidateWriteSetForEvolution({
-          planningScope: "full",
+  planningScope: "full",
   target,
   evolutionPlan,
   makeBackend: makeIsolatedBackend,
@@ -1418,7 +1418,7 @@ A branch forked before that clear cannot merge into the post-clear store even
 when its revision clock has the same numeric value.
 
 The origin row is also read fresh on every mint (`computeBaseVersion`,
-`Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
+`Store.allocationOwner()`), never cached on a `Store` instance. Two live
 `Store` objects can legitimately observe the same graph — nothing requires
 that only one `Store` ever exists per database — and only one of them runs
 `clear()` at a time; a stale per-instance cache on the other would keep
@@ -1881,8 +1881,9 @@ base store, never the clone. A fork is never rebuilt through
 `exportGraphStream`/`importGraphStream`, so none of that applies: tombstones,
 `created_at`/`updated_at`, and the `version` column carry over unchanged, and
 — with `history: true` — the fork physically carries the base's recorded
-relations, so `store.asOfRecorded(<an instant before the fork>)` answers from
-that history. A clone-based branch never enables history, so the same call on
+relations. Rotation retires parent instants: reconstruct a checkpoint with the
+fork owner to read copied history using `store.asOfRecorded()`. A clone-based
+branch never enables history, so the same call on
 it refuses outright.
 
 `create()` asserts `computeBaseVersion(forkStore) === base` right after
@@ -2270,7 +2271,9 @@ a `makeBackend` backend, and the cleanup after a failed allocation. The first
 two surface the refusal from `close()`. The cleanup swallows it so the
 allocation's original failure reaches the caller, which leaves the allocation
 behind. Every such orphan is discoverable with `listUnsealedAllocations` and is
-removed by `abortAllocation` once `control` forwards the option.
+removed by `abortAllocation` once `control` forwards the option. An unsealed
+physical fork must be destroyed during recovery, never adopted: rotation or
+sealing may have failed, so it cannot attest a safe independent allocation.
 
 **Destroy fence.** Destroy (and `abortAllocation`) takes the same allocation
 lock. `destroyDurableBranch()` refuses with `DurableEvidenceUndeliveredError`
@@ -2724,6 +2727,14 @@ const historical = await fork.store
 // Before publication, await fork.abort() to discard an unchanged copy.
 ```
 
+This helper is a lossless copy/restore phase: it preserves the source allocation owner so source
+checkpoints and retry proofs remain usable while the copy is reconciled. A backup restored as the
+same allocation keeps that identity. Before an independently diverging fork accepts writes, finish
+the copy phase and call `fork.store.rotateAllocationOwner(await fork.store.allocationOwner())`.
+Rotation preserves rows, captured history, and the recorded clock, but retires source checkpoints
+and copied durable-operation authorization. It also invalidates the unchanged-copy proof used by
+copy retries and `abort()`; complete or abandon those actions before rotating.
+
 The caller provisions and owns `privateBackend`. It may contain other graph
 namespaces, but it must contain no rows for the source graph. TypeGraph refuses
 a connection to the source database, including an aliased backend object.
@@ -2803,7 +2814,7 @@ commit after a partially applied failure:
 | `MergePlanCapabilityError` | A required planning guarantee is unavailable. `details.capability` identifies it. Enable native revision tracking when required; only bounded-copy refusals naming `details.planningScope: "full"` can be remedied by selecting full scope. |
 | `MergePlanningStaleError`    | The target moved while planning was reading it. This is an expected retry-and-replan outcome under concurrent writers: no plan was returned, so recapture the target and create a new plan before retrying.                                                                    |
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
-| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
+| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/allocation-owner mismatches.                                                                                                                       |
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
 | `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
 | `MergeReviewError`           | Code `GRAPH_MERGE_REVIEW`. Durable review evidence is malformed, unsupported, incomplete, or inconsistent, or review options cannot be represented safely.                                                                                                                     |

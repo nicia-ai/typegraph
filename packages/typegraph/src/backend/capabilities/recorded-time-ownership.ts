@@ -63,7 +63,7 @@ export function isEngineNativeRecordedReadBinding(
  * THE one check that an `asOfRecorded` anchor was minted by the SAME
  * ownership form this store reads under: an engine-native store requires an
  * `e1:` instant (one its own `recordedTime.revisionNow` produced), and a
- * TypeGraph-owned store requires an `r1:` instant (one its own capture clock
+ * TypeGraph-owned store requires an `r2:` instant (one its own capture clock
  * produced). Reusing an anchor across ownership forms — or across two
  * differently-configured stores over the same graph — would otherwise
  * silently source rows through the wrong seam, since `RecordedReadSource`
@@ -91,8 +91,8 @@ export function assertRecordedInstantOwnershipMatch(
     {
       suggestion:
         ownership === "engine-native" ?
-          "Pass an e1: instant read from this store's own recordedNow() — an r1: instant belongs to a TypeGraph-owned recorded-time store."
-        : "Pass an r1: instant read from this store's own recordedNow() — an e1: instant belongs to an engine-native recorded-time store.",
+          "Pass an e1: instant read from this store's own recordedNow() — a TypeGraph instant belongs to a TypeGraph-owned recorded-time store."
+        : "Pass an r2: instant read from this store's own recordedNow() — an e1: instant belongs to an engine-native recorded-time store.",
     },
   );
 }
