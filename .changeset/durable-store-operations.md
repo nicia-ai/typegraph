@@ -10,8 +10,12 @@ Complete `PostgresTableNames` / `SqliteTableNames` maps must include `storeOpera
 
 Ordinary Store operations share durable request validation, expose verified full-request lookup as well as explicit key-only lookup, and expose attempt-scoped `StoreOperationError.attemptOutcome` separately from durable key evidence. Evidence format 2 binds the complete allocation owner; divergent physical forks must explicitly rotate it before writes. The Result-based helpers and their errors/types are exported from `/graph-merge`. `DurableOperationRequest` is the canonical request shape; the branch-specific name is an alias.
 
-Caller keys must contain 1–256 UTF-8 bytes; invalid keys refuse before invoking a mutation callback. Always retry using the same persisted target, key, mutation, and metadata. A failed attempt never proves that a key has no earlier committed outcome. Lost replay responses report uncertainty and support same-request recovery, and transient writer-busy failures are retryable.
+New caller keys must contain 1–256 UTF-8 bytes; invalid keys refuse before invoking a mutation callback. Always retry using the same persisted target, key, mutation, and metadata. A failed attempt never proves that a key has no earlier committed outcome. Lost replay responses report uncertainty and support same-request recovery, and transient contention, expired-session, and transport failures are retryable.
 
-The admission cap does not apply to retained evidence: older oversized keys remain available for lookup, scanning, and delivery acknowledgement after upgrade. Do not resubmit an earlier request under a replacement key; its original binding remains authoritative.
+For durable branch evidence, the admission cap does not apply to retained keys: older oversized keys remain available for lookup, scanning, and delivery acknowledgement after upgrade. Do not resubmit an earlier request under a replacement key; its original binding remains authoritative.
 
-Retry classification remains internal and covers node-postgres codeless connection and pool failures as well as shared lock-timeout and stale-snapshot predicates. Store-operation lookups enforce the same key limit as new Store mutations; retained oversized branch keys remain recoverable. Unknown-attempt errors require retrying the same persisted request, and lookup absence never authorizes a replacement key.
+Store-operation lookups enforce the same key limit as new Store mutations; retained oversized branch keys remain recoverable. Unknown-attempt errors require retrying the same persisted request, and lookup absence never authorizes a replacement key.
+
+PostgreSQL expired transactions (`25P03`) and idle sessions (`57P05`) permit same-request retry on a fresh transaction or connection. Protocol violations (`08P01`), query cancellation (`57014`), and an intentionally closed `pg` client do not trigger automatic retry.
+
+Allocation-owner refusals use `DurableOperationOwnerMismatchError` and the shared `GRAPH_ALLOCATION_OWNER_MISMATCH` code. Both origin and namespace belong to the immutable owner binding.

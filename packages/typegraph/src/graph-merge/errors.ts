@@ -401,7 +401,7 @@ export class DurableOperationError extends MergeError {
 }
 
 /** Refusal of evidence or mutation authorization from a retired or foreign allocation. */
-export class DurableOperationOriginMismatchError extends DurableOperationError {
+export class DurableOperationOwnerMismatchError extends DurableOperationError {
   protected static override readonly errorCategory = "user";
   override readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
   constructor(cause: unknown) {
@@ -409,7 +409,7 @@ export class DurableOperationOriginMismatchError extends DurableOperationError {
       "The durable operation belongs to a different or retired allocation.",
       { cause, details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH" } },
     );
-    this.name = "DurableOperationOriginMismatchError";
+    this.name = "DurableOperationOwnerMismatchError";
   }
 }
 

@@ -97,7 +97,7 @@ export {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
-  DurableOperationOriginMismatchError,
+  DurableOperationOwnerMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
   IdentityMergeConflictError,

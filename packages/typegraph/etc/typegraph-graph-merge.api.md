@@ -1737,15 +1737,6 @@ export class DurableOperationEvidenceError extends DurableOperationError {
 }
 
 // @public
-export class DurableOperationOriginMismatchError extends DurableOperationError {
-    constructor(cause: unknown);
-    // (undocumented)
-    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
-    // (undocumented)
-    protected static readonly errorCategory = "user";
-}
-
-// @public
 export type DurableOperationOutcome = Readonly<{
     outcome: "applied" | "replayed";
     evidence: DurableBranchOperationEvidence;
@@ -1756,6 +1747,15 @@ export type DurableOperationOutcome = Readonly<{
     ...DurableOperationUnsupportedDimension[]
     ];
 }>;
+
+// @public
+export class DurableOperationOwnerMismatchError extends DurableOperationError {
+    constructor(cause: unknown);
+    // (undocumented)
+    readonly code = "GRAPH_ALLOCATION_OWNER_MISMATCH";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
 
 // @public
 export type DurableOperationRequest = Readonly<{

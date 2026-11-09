@@ -982,18 +982,34 @@ export function isPostgresLockTimeout(error: unknown): boolean {
 }
 
 /** Transient transport, contention, or availability failure; retry only the same durable request. */
-export function isTransientDatabaseError(
+export function databaseRetryDisposition(
   error: unknown,
   target?: object,
-): boolean {
+): "transient" | "permanent" | "unknown" {
+  const links = [...errorChain(error)];
+  // Known permanent failures take precedence over recovery heuristics, even
+  // when a wrapper also retains a transient failure in its cause chain.
+  for (const link of links) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (
+      code === "08P01" ||
+      code === "57014" ||
+      (code === undefined &&
+        link instanceof Error &&
+        link.message === "Client was closed and is not queryable")
+    )
+      return "permanent";
+  }
+
   if (
     isSerializationFailure(error, target) ||
     isSqliteWriterSlotBusy(error) ||
     isSqliteStaleSnapshotError(error) ||
     isPostgresLockTimeout(error)
   )
-    return true;
-  for (const link of errorChain(error)) {
+    return "transient";
+  for (const link of links) {
     if (!canReadProperty(link)) continue;
     const code: unknown = Reflect.get(link, "code");
     // node-postgres emits these exact codeless transport/pool errors. Do not
@@ -1006,11 +1022,10 @@ export function isTransientDatabaseError(
         "Connection terminated unexpectedly",
         "Connection terminated due to connection timeout",
         "Client has encountered a connection error and is not queryable",
-        "Client was closed and is not queryable",
         "timeout exceeded when trying to connect",
       ].includes(link.message)
     )
-      return true;
+      return "transient";
     if (typeof code !== "string") continue;
     if (
       /^08[0-9A-Z]{3}$/u.test(code) ||
@@ -1019,6 +1034,8 @@ export function isTransientDatabaseError(
         "57P01",
         "57P02",
         "57P03",
+        "25P03", // expired transaction: retry from a fresh transaction
+        "57P05", // expired idle connection: acquire a fresh connection
         "ECONNRESET",
         "ECONNREFUSED",
         "ECONNABORTED",
@@ -1033,7 +1050,15 @@ export function isTransientDatabaseError(
         "SQLITE_LOCKED_SHAREDCACHE",
       ].includes(code)
     )
-      return true;
+      return "transient";
   }
-  return false;
+  return "unknown";
+}
+
+/** Internal convenience predicate; Store outcomes also distinguish known permanent refusals. */
+export function isTransientDatabaseError(
+  error: unknown,
+  target?: object,
+): boolean {
+  return databaseRetryDisposition(error, target) === "transient";
 }

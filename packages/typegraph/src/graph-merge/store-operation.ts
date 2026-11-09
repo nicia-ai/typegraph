@@ -27,8 +27,8 @@ import {
 } from "../store/types";
 import { requireDefined } from "../utils/presence";
 import {
+  databaseRetryDisposition,
   isSerializationFailure,
-  isTransientDatabaseError,
 } from "../utils/sql-errors";
 import {
   computeDurableOperationDigest,
@@ -40,7 +40,7 @@ import {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
-  DurableOperationOriginMismatchError,
+  DurableOperationOwnerMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
   MergePlanCapabilityError,
@@ -311,7 +311,7 @@ function assertTargetOwner(
   try {
     assertGraphAllocationOwner(expected, actual);
   } catch (error) {
-    throw new DurableOperationOriginMismatchError(error);
+    throw new DurableOperationOwnerMismatchError(error);
   }
 }
 
@@ -548,10 +548,9 @@ export async function operateStore<G extends GraphDef>(
       error instanceof TransactionConflictError ||
       isSerializationFailure(error, storeBackend(store));
     const unknown = attemptState.commitBoundary && !conflict;
+    const retry = databaseRetryDisposition(error, storeBackend(store));
     const retryable =
-      unknown ||
-      conflict ||
-      isTransientDatabaseError(error, storeBackend(store));
+      retry !== "permanent" && (unknown || conflict || retry === "transient");
     return err(
       new StoreOperationError(
         unknown ? "unknown" : "not-committed",

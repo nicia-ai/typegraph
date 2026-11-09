@@ -353,6 +353,36 @@ export function registerStoreOperationIntegrationTests(
       },
     );
 
+    it.each(["08P01", "57014"])(
+      "requires intervention for permanent %s even after a lost commit response",
+      async (code) => {
+        const backend = context.getBackend();
+        let armed = false;
+        const [store] = await createStoreWithSchema(
+          graph,
+          deriveBackend(backend, {
+            async transaction(callback, options) {
+              const result = await backend.transaction(callback, options);
+              if (armed)
+                throw Object.assign(new Error("permanent driver refusal"), {
+                  code,
+                });
+              return result;
+            },
+          }),
+          { history: true },
+        );
+        const input = request(await captureStoreOperationTarget(store));
+        armed = true;
+        expect(await operateStore(store, input, applyCreate)).toMatchObject({
+          success: false,
+          error: { attemptOutcome: "unknown", retryable: false },
+        });
+        armed = false;
+        expect(unwrap(await getStoreOperation(store, input))).toBeDefined();
+      },
+    );
+
     it("recovers a committed operation after its response is lost", async () => {
       const backend = context.getBackend();
       let armed = false;

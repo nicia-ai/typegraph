@@ -20,7 +20,10 @@ beforeAll(async () => {
 });
 
 /** Replay the actual driver error through the PostgreSQL Store's transaction boundary. */
-async function assertStoreRetryable(error: unknown): Promise<void> {
+async function assertStoreRetryable(
+  error: unknown,
+  retryable = true,
+): Promise<void> {
   if (!enabled) return;
   const pool = new Pool({ connectionString });
   const backend = createPostgresBackend(drizzle(pool));
@@ -58,7 +61,7 @@ async function assertStoreRetryable(error: unknown): Promise<void> {
       success: false,
       error: {
         name: "StoreOperationError",
-        retryable: true,
+        retryable,
         attemptOutcome: "not-committed",
       },
     });
@@ -69,7 +72,7 @@ async function assertStoreRetryable(error: unknown): Promise<void> {
 }
 
 describe("node-postgres transient errors", () => {
-  it("recognizes the driver's codeless closed-client refusal", async () => {
+  it("does not retry the driver's intentionally closed-client refusal", async () => {
     const client = new Client();
     await client.end();
     const error: unknown = await client
@@ -78,8 +81,8 @@ describe("node-postgres transient errors", () => {
     expect(error).toMatchObject({
       message: "Client was closed and is not queryable",
     });
-    expect(isTransientDatabaseError(error)).toBe(true);
-    await assertStoreRetryable(error);
+    expect(isTransientDatabaseError(error)).toBe(false);
+    await assertStoreRetryable(error, false);
   });
 
   it.skipIf(!enabled)(

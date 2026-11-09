@@ -916,6 +916,8 @@ describe("transient database failures", () => {
     "55P03",
     "08006",
     "57P01",
+    "25P03",
+    "57P05",
     "ECONNRESET",
     "EPIPE",
     "CONNECTION_CLOSED",
@@ -928,12 +930,16 @@ describe("transient database failures", () => {
       isTransientDatabaseError(new Error("query failed", { cause: { code } })),
     ).toBe(true);
   });
-  it.each(["23505", "42501", "SQLITE_CONSTRAINT", "VALIDATION_ERROR"])(
-    "does not retry permanent %s",
-    (code) => {
-      expect(isTransientDatabaseError({ code })).toBe(false);
-    },
-  );
+  it.each([
+    "23505",
+    "42501",
+    "08P01",
+    "57014",
+    "SQLITE_CONSTRAINT",
+    "VALIDATION_ERROR",
+  ])("does not retry permanent %s", (code) => {
+    expect(isTransientDatabaseError({ code })).toBe(false);
+  });
 });
 
 describe("codeless transport and existing transient predicates", () => {
@@ -960,3 +966,20 @@ describe("codeless transport and existing transient predicates", () => {
     );
   });
 });
+
+it("does not classify an intentionally closed pg client as transient", () => {
+  expect(
+    isTransientDatabaseError(
+      new Error("Client was closed and is not queryable"),
+    ),
+  ).toBe(false);
+});
+
+it.each(["08P01", "57014"])(
+  "does not let a transient cause override permanent %s",
+  (code) => {
+    expect(isTransientDatabaseError({ code, cause: { code: "40001" } })).toBe(
+      false,
+    );
+  },
+);
