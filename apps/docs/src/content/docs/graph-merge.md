@@ -2431,8 +2431,8 @@ import {
   captureStoreOperationTarget,
   getStoreOperation,
   operateStore,
-} from "@nicia-ai/typegraph";
-import { unwrap } from "@nicia-ai/typegraph/graph-merge";
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
 import { z } from "zod";
 
 const commandSchema = z.object({ id: z.string(), name: z.string() }).strict();
@@ -2452,7 +2452,8 @@ const outcome = unwrap(await operateStore(store, request, async (tx, mutation) =
 
 // Reuse the persisted request after a lost response or restart.
 const evidence = unwrap(await getStoreOperation(store, request));
-// undefined means that key has no committed outcome in this allocation.
+// undefined means no evidence was visible to this lookup.
+// Retry the same persisted request; absence does not prove an earlier attempt cannot commit.
 ```
 
 The target is captured once and persisted with the request. Do not recapture it
@@ -2461,7 +2462,10 @@ instead of writing into the replacement graph. The namespace binding also keeps
 a physical working copy with a distinct outcome-table namespace from replaying the source allocation's caller
 keys. Independently diverging copies must use distinct namespaces or origins; a backup restored with both
 unchanged retains its evidence.
-Keys are opaque strings containing 1–256 UTF-8 bytes; oversized keys refuse before invoking the mutation callback.
+New keys are opaque strings containing 1–256 UTF-8 bytes, bounded by the exported
+`DURABLE_OPERATION_KEY_MAX_BYTES`. Oversized new keys refuse before invoking the
+mutation callback. Retained older branch keys remain available for lookup, scan,
+acknowledgement, and replay.
 Keys are shared by callers
 within one allocation; applications can include their own caller prefix.
 

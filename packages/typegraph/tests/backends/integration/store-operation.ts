@@ -299,48 +299,62 @@ export function registerStoreOperationIntegrationTests(
       expect(calls).toBe(1);
     });
 
-    it("classifies a busy writer as retryable without changing the caller key", async () => {
-      const backend = context.getBackend();
-      let busy = false;
-      const [store] = await createStoreWithSchema(
-        graph,
-        deriveBackend(backend, {
-          async transaction(callback, options) {
-            if (busy)
-              throw Object.assign(new Error("writer busy"), {
-                code: "SQLITE_BUSY",
-              });
-            return backend.transaction(callback, options);
+    it.each([
+      "SQLITE_BUSY",
+      "55P03",
+      "ECONNRESET",
+      "08006",
+      "CONNECTION_CLOSED",
+    ])(
+      "classifies transient %s as retryable without changing the caller key",
+      async (code) => {
+        const backend = context.getBackend();
+        let busy = false;
+        const [store] = await createStoreWithSchema(
+          graph,
+          deriveBackend(backend, {
+            async transaction(callback, options) {
+              if (busy)
+                throw Object.assign(new Error("writer busy"), {
+                  code,
+                });
+              return backend.transaction(callback, options);
+            },
+          }),
+          { history: true },
+        );
+        const input = request(await captureStoreOperationTarget(store));
+        busy = true;
+        const refused = await operateStore(store, input, () => {
+          throw new Error("busy attempt invoked callback");
+        });
+        expect(refused).toMatchObject({
+          success: false,
+          error: {
+            name: "StoreOperationError",
+            attemptOutcome: "not-committed",
+            retryable: true,
           },
-        }),
-        { history: true },
-      );
-      const input = request(await captureStoreOperationTarget(store));
-      busy = true;
-      const refused = await operateStore(store, input, () => {
-        throw new Error("busy attempt invoked callback");
-      });
-      expect(refused).toMatchObject({
-        success: false,
-        error: {
-          name: "StoreOperationError",
-          attemptOutcome: "not-committed",
-          retryable: true,
-        },
-      });
-      busy = false;
-      expect(
-        unwrap(await operateStore(store, input, applyCreate)).outcome,
-      ).toBe("applied");
-    });
+        });
+        busy = false;
+        expect(
+          unwrap(await operateStore(store, input, applyCreate)).outcome,
+        ).toBe("applied");
+      },
+    );
 
     it("recovers a committed operation after its response is lost", async () => {
       const backend = context.getBackend();
       let armed = false;
+      let disconnected = false;
       const [store] = await createStoreWithSchema(
         graph,
         deriveBackend(backend, {
           async transaction(callback, options) {
+            if (disconnected)
+              throw Object.assign(new Error("connection reset"), {
+                code: "ECONNRESET",
+              });
             const result = await backend.transaction(callback, options);
             if (armed) {
               armed = false;
@@ -362,6 +376,12 @@ export function registerStoreOperationIntegrationTests(
         phase: "commit",
         retryable: true,
       });
+      disconnected = true;
+      expect(await operateStore(store, input, applyCreate)).toMatchObject({
+        success: false,
+        error: { retryable: true, attemptOutcome: "not-committed" },
+      });
+      disconnected = false;
       armed = true;
       const lostReplay = await operateStore(store, input, () => {
         throw new Error("replay invoked callback");

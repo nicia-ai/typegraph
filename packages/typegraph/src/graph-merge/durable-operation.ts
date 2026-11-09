@@ -58,6 +58,7 @@ import {
 } from "./durable-branch";
 import {
   describeCause,
+  DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
   DurableOperationRequestError,
@@ -99,13 +100,21 @@ export type DurableOperationRequest = Readonly<{
 /** Request contract shared by branch hosts and ordinary Stores. */
 export type DurableBranchOperationRequest = DurableOperationRequest;
 
-/** One caller-key predicate for request, lookup, and retained evidence validation: 1–256 UTF-8 bytes. */
+/** Maximum UTF-8 bytes admitted for a new caller key. Retained keys remain readable. */
+export const DURABLE_OPERATION_KEY_MAX_BYTES = 256;
+
+/** Retained evidence and lookup keys predate the current admission limit. */
 export function isDurableOperationKey(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Admission predicate; shared by every durable mutation API before callbacks. */
+function isNewDurableOperationKey(value: unknown): value is string {
   return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 256 &&
-    new TextEncoder().encode(value).byteLength <= 256
+    isDurableOperationKey(value) &&
+    value.length <= DURABLE_OPERATION_KEY_MAX_BYTES &&
+    new TextEncoder().encode(value).byteLength <=
+      DURABLE_OPERATION_KEY_MAX_BYTES
   );
 }
 
@@ -309,6 +318,7 @@ function assertDurableOperationPayload(
 /** Validates JSON safety and shape of a caller-supplied operation request. */
 export async function normalizeDurableOperationRequest(
   input: unknown,
+  keyUse: "new" | "retained" = "new",
 ): Promise<Result<DurableBranchOperation, DurableOperationRequestError>> {
   let rawRequest: unknown;
   try {
@@ -341,11 +351,15 @@ export async function normalizeDurableOperationRequest(
     );
   }
   const request = rawRequest as DurableOperationRequest;
-  if (!isDurableOperationKey(request.idempotencyKey)) {
+  if (
+    !(keyUse === "new" ?
+      isNewDurableOperationKey(request.idempotencyKey)
+    : isDurableOperationKey(request.idempotencyKey))
+  ) {
     return err(
       new DurableOperationRequestError(
         "Durable operation request is malformed: idempotencyKey must contain 1–256 UTF-8 bytes.",
-        { details: { idempotencyKey: request.idempotencyKey } },
+        { details: { maxBytes: DURABLE_OPERATION_KEY_MAX_BYTES } },
       ),
     );
   }
@@ -394,7 +408,7 @@ async function normalizeStoredEvidence(
   if (!isDurableOperationKey(record["idempotencyKey"])) {
     return err(
       new DurableOperationEvidenceError(
-        "Durable operation evidence needs an idempotency key containing 1–256 UTF-8 bytes.",
+        "Durable operation evidence needs a nonempty idempotency key.",
         { details: { expectedKey: expectedIdempotencyKey } },
       ),
     );
@@ -680,7 +694,10 @@ export async function operateDurableBranch<
 ): Promise<Result<DurableOperationOutcome, DurableOperationError>> {
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
-  const normalized = await normalizeDurableOperationRequest(request);
+  const normalized = await normalizeDurableOperationRequest(
+    request,
+    "retained",
+  );
   if (isErr(normalized)) return normalized;
 
   if (strategy.operations === undefined) {
@@ -691,6 +708,32 @@ export async function operateDurableBranch<
   }
 
   try {
+    if (!isNewDurableOperationKey(normalized.data.idempotencyKey)) {
+      // Old keys may replay retained evidence, but must never enter mutation.
+      const retained = await getDurableOperation(
+        descriptor,
+        strategy,
+        normalized.data.idempotencyKey,
+      );
+      if (isErr(retained)) return retained;
+      if (retained.data === undefined)
+        return err(
+          new DurableOperationRequestError(
+            "New durable operation keys exceed the admission limit.",
+            { details: { maxBytes: DURABLE_OPERATION_KEY_MAX_BYTES } },
+          ),
+        );
+      if (retained.data.operationDigest !== normalized.data.operationDigest)
+        return err(
+          new DurableOperationConflictError(
+            "The retained key is bound to a different payload.",
+          ),
+        );
+      return await normalizeOperationOutcome(
+        { outcome: "replayed", evidence: retained.data },
+        normalized.data,
+      );
+    }
     const outcome: unknown = await strategy.operations.operate({
       descriptor: descriptor.store,
       descriptorVersion: descriptor.version,
@@ -731,7 +774,7 @@ export async function getDurableOperation<
   if (!isDurableOperationKey(idempotencyKey))
     return err(
       new DurableOperationRequestError(
-        "A durable operation lookup or acknowledgement requires a caller key containing 1–256 UTF-8 bytes.",
+        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
       ),
     );
   const owner = requireDescriptorOwner(descriptor, strategy);
@@ -886,7 +929,7 @@ export async function markDurableOperationDelivered<
   if (!isDurableOperationKey(idempotencyKey))
     return err(
       new DurableOperationRequestError(
-        "A durable operation lookup or acknowledgement requires a caller key containing 1–256 UTF-8 bytes.",
+        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
       ),
     );
   const owner = requireDescriptorOwner(descriptor, strategy);

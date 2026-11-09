@@ -251,6 +251,51 @@ const descriptor = {
 };
 
 describe("durable branch operations", () => {
+  it("reads, pages and acknowledges oversized evidence retained before admission limits", async () => {
+    const host = createRecordingHost();
+    const key = "é".repeat(300);
+    const request = { idempotencyKey: key, metadata: {}, mutation: {} };
+    const operation = {
+      ...request,
+      operationDigest: await computeDurableOperationDigest(request),
+    };
+    // Seed through the host to model evidence committed by the previous version.
+    const operations = host.strategy.operations;
+    if (operations === undefined) throw new Error("missing host operations");
+    await operations.operate({
+      descriptor: DESCRIPTOR,
+      descriptorVersion: 1,
+      expectedOrigin: FIXED_ORIGIN,
+      request: operation,
+    });
+    expect(
+      isOk(await getDurableOperation(descriptor, host.strategy, key)),
+    ).toBe(true);
+    const page = await scanDurableOperations(descriptor, host.strategy, {
+      limit: 1,
+    });
+    expect(page).toMatchObject({
+      success: true,
+      data: { operations: [{ idempotencyKey: key }] },
+    });
+    expect(
+      isOk(await markDurableOperationDelivered(descriptor, host.strategy, key)),
+    ).toBe(true);
+    expect(
+      await operateDurableBranch(descriptor, host.strategy, request),
+    ).toMatchObject({ success: true, data: { outcome: "replayed" } });
+    expect(
+      await operateDurableBranch(descriptor, host.strategy, {
+        ...request,
+        mutation: { changed: true },
+      }),
+    ).toMatchObject({
+      success: false,
+      error: { name: "DurableOperationConflictError" },
+    });
+    expect(host.appliedMutations()).toHaveLength(1);
+  });
+
   it("applies the mutation once and returns immutable evidence with coordinates", async () => {
     const host = createRecordingHost();
     const result = await operateDurableBranch(
@@ -418,14 +463,18 @@ describe("durable branch operations", () => {
     expect(host.appliedMutations()).toHaveLength(0);
   });
 
-  it("uses the shared UTF-8 key limit for apply, lookup, and acknowledgement", async () => {
+  it("caps new requests while rejecting empty lookup and acknowledgement keys", async () => {
     const host = createRecordingHost();
     const results = [];
     for (const key of ["", "x".repeat(6000), "é".repeat(129)]) {
       results.push(
         await operateDurableBranch(descriptor, host.strategy, request(key)),
-        await getDurableOperation(descriptor, host.strategy, key),
-        await markDurableOperationDelivered(descriptor, host.strategy, key),
+        ...(key === "" ?
+          [
+            await getDurableOperation(descriptor, host.strategy, key),
+            await markDurableOperationDelivered(descriptor, host.strategy, key),
+          ]
+        : []),
       );
     }
     for (const result of results) {

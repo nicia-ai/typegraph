@@ -33,6 +33,7 @@ import {
   isSqliteMissingEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteStaleSnapshotError,
+  isTransientDatabaseError,
 } from "../src/utils/sql-errors";
 
 /**
@@ -908,4 +909,29 @@ describe("edge match-identity provisioning error classifiers", () => {
       ),
     ).toBe(false);
   });
+});
+
+describe("transient database failures", () => {
+  it.each([
+    "55P03",
+    "08006",
+    "57P01",
+    "ECONNRESET",
+    "EPIPE",
+    "CONNECTION_CLOSED",
+    "SQLITE_BUSY",
+    "SQLITE_BUSY_SNAPSHOT",
+    "40001",
+    "40P01",
+  ])("recognizes wrapped %s as transient", (code) => {
+    expect(
+      isTransientDatabaseError(new Error("query failed", { cause: { code } })),
+    ).toBe(true);
+  });
+  it.each(["23505", "42501", "SQLITE_CONSTRAINT", "VALIDATION_ERROR"])(
+    "does not retry permanent %s",
+    (code) => {
+      expect(isTransientDatabaseError({ code })).toBe(false);
+    },
+  );
 });

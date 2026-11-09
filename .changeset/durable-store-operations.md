@@ -12,4 +12,4 @@ Ordinary Store operations share durable request validation, expose verified full
 
 Caller keys must contain 1–256 UTF-8 bytes; invalid keys refuse before invoking a mutation callback. Always retry using the same persisted target, key, mutation, and metadata. A failed attempt never proves that a key has no earlier committed outcome. Lost replay responses report uncertainty and support same-request recovery, and transient writer-busy failures are retryable.
 
-Before upgrading durable branch integrations, recover or finish outstanding requests whose keys exceed 256 UTF-8 bytes using the previous version. The limit also applies to lookup and retained evidence validation. Do not resubmit an earlier request under a replacement key; its original binding remains authoritative.
+The admission cap does not apply to retained evidence: older oversized keys remain available for lookup, scanning, and delivery acknowledgement after upgrade. Do not resubmit an earlier request under a replacement key; its original binding remains authoritative.

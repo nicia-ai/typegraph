@@ -1572,6 +1572,9 @@ type DropVectorIndexParams = Readonly<{
 }>;
 
 // @public
+export const DURABLE_OPERATION_KEY_MAX_BYTES = 256;
+
+// @public
 export const DURABLE_OPERATION_SCAN_DEFAULT_LIMIT = 100;
 
 // @public
@@ -4316,6 +4319,9 @@ export function isOk<T, E>(result: Result<T, E>): result is Readonly<{
     success: true;
     data: T;
 }>;
+
+// @public
+export function isTransientDatabaseError(error: unknown, target?: object): boolean;
 
 // @public (undocumented)
 type IsUnion<T, Whole = T> = T extends Whole ? [

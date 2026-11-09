@@ -28,7 +28,7 @@ import {
 import { requireDefined } from "../utils/presence";
 import {
   isSerializationFailure,
-  isSqliteWriterSlotBusy,
+  isTransientDatabaseError,
 } from "../utils/sql-errors";
 import {
   computeDurableOperationDigest,
@@ -253,7 +253,10 @@ async function validateLookup(
         "A verified lookup needs the complete original request.",
         { details: { issues: envelope.error.issues } },
       );
-    const normalized = await normalizeDurableOperationRequest(envelope.data);
+    const normalized = await normalizeDurableOperationRequest(
+      envelope.data,
+      "retained",
+    );
     if (!normalized.success) throw normalized.error;
     return {
       target: envelope.data.target,
@@ -267,7 +270,7 @@ async function validateLookup(
     .safeParse(input);
   if (!bare.success)
     throw new DurableOperationRequestError(
-      "A durable lookup needs its persisted allocation target and a caller key containing 1–256 UTF-8 bytes.",
+      "A durable lookup needs its persisted allocation target and a nonempty retained caller key.",
       { details: { issues: bare.error.issues } },
     );
   return bare.data;
@@ -548,7 +551,10 @@ export async function operateStore<G extends GraphDef>(
       error instanceof TransactionConflictError ||
       isSerializationFailure(error, storeBackend(store));
     const unknown = attemptState.commitBoundary && !conflict;
-    const retryable = unknown || conflict || isSqliteWriterSlotBusy(error);
+    const retryable =
+      unknown ||
+      conflict ||
+      isTransientDatabaseError(error, storeBackend(store));
     return err(
       new StoreOperationError(
         unknown ? "unknown" : "not-committed",

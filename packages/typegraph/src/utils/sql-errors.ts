@@ -972,3 +972,42 @@ export function parseDimensionMismatch(
   }
   return undefined;
 }
+
+/** Transient transport, contention, or availability failure; retry only the same durable request. */
+export function isTransientDatabaseError(
+  error: unknown,
+  target?: object,
+): boolean {
+  if (isSerializationFailure(error, target) || isSqliteWriterSlotBusy(error))
+    return true;
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (typeof code !== "string") continue;
+    if (
+      /^08[0-9A-Z]{3}$/u.test(code) ||
+      [
+        "55P03",
+        "53300",
+        "57P01",
+        "57P02",
+        "57P03",
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "ECONNABORTED",
+        "EPIPE",
+        "ETIMEDOUT",
+        "EAI_AGAIN",
+        "CONNECTION_CLOSED",
+        "CONNECTION_ENDED",
+        "CONNECTION_DESTROYED",
+        "CONNECT_TIMEOUT",
+        "SQLITE_BUSY_SNAPSHOT",
+        "SQLITE_BUSY_TIMEOUT",
+        "SQLITE_LOCKED_SHAREDCACHE",
+      ].includes(code)
+    )
+      return true;
+  }
+  return false;
+}
