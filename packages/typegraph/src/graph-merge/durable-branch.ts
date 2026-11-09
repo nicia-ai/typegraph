@@ -415,7 +415,7 @@ export async function branchDurable<
           cause: error,
           details: { branchId: id, allocationId, strategyType: strategy.type },
           suggestion:
-            "Use the strategy's operator tooling to inspect and recover this allocation id before retrying.",
+            "Use the strategy's operator tooling to inspect and destroy any unsealed allocation before retrying; never adopt it.",
         },
       ),
     );
@@ -434,7 +434,8 @@ export async function branchDurable<
       created.store,
     );
     // Allocation is unpublished and the strategy contract forbids concurrent
-    // writers until seal. Rebind the strategy's cut to the rotated owner here.
+    // writers until seal. Recapture lineage under the rotated owner rather than
+    // retaining the strategy token, which still names the inherited owner.
     const captured = await readBranchForkState(created.store, false);
     forkState = {
       ...captured,

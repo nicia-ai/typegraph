@@ -16,7 +16,7 @@ import {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   StaleMergePlanError,
@@ -306,7 +306,7 @@ describe("public merge plan lifecycle", () => {
     const wrongOrigin = await applyMergePlan(base, wrongOriginArtifact);
     expect(isErr(wrongOrigin)).toBe(true);
     if (isErr(wrongOrigin)) {
-      expect(wrongOrigin.error).toBeInstanceOf(MergePlanOriginMismatchError);
+      expect(wrongOrigin.error).toBeInstanceOf(MergePlanOwnerMismatchError);
     }
 
     await base.nodes.Person.create(

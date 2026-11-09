@@ -896,7 +896,11 @@ instants rather than silently passing them through as verified.
 Construct external checkpoints with `recordedInstant({ revision, wallTime, owner })`,
 which validates the public owner-bound token format. The owner reader attests the
 source allocation; the factory itself does not establish that the source exists.
-`recordedReadOwner()` uses that same external reader; missing metadata is a typed
-configuration refusal. `allocationOwner()` always identifies native writes and merge
-fences. A store with external reads and revision tracking has both owners. Rotation
+`recordedReadOwner()` uses that same external reader; a missing owner produces
+`ConfigurationError` with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`.
+Historical reads with an absent or different source owner instead raise
+`GraphAllocationMismatchError` (`GRAPH_ALLOCATION_OWNER_MISMATCH`); missing physical
+relations raise `ConfigurationError` (`RECORDED_RELATIONS_MISSING`).
+`allocationOwner()` always identifies native writes and merge fences.
+A store with external reads and revision tracking has both owners. Rotation
 changes only its native allocation; external retirement remains the provider's responsibility.

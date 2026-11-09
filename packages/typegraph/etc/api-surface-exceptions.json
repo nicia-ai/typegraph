@@ -558,5 +558,13 @@
     "kind": "required-member-added",
     "reason": "The existing required version-1 target.revision fields are now represented by an inline legacy fence instead of the current owner-bound fence. This preserves the ownerless version-1 inspection grammar; it does not introduce a new wire requirement. Version-1 application is intentionally refused as documented in .changeset/origin-bound-recorded-anchors.md.",
     "issue": "#818"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "MergePlanOriginMismatchError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "Intentional owner-vocabulary rename documented in origin-bound-recorded-anchors.md: replace the old class with MergePlanOwnerMismatchError and MERGE_ERROR_CODES.planOriginMismatch with planOwnerMismatch. The refusal compares both allocation origin and namespace.",
+    "issue": "#818"
   }
 ]

@@ -107,7 +107,7 @@ export {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   MergeReviewError,

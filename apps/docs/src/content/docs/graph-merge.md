@@ -2271,7 +2271,9 @@ a `makeBackend` backend, and the cleanup after a failed allocation. The first
 two surface the refusal from `close()`. The cleanup swallows it so the
 allocation's original failure reaches the caller, which leaves the allocation
 behind. Every such orphan is discoverable with `listUnsealedAllocations` and is
-removed by `abortAllocation` once `control` forwards the option.
+removed by `abortAllocation` once `control` forwards the option. An unsealed
+physical fork must be destroyed during recovery, never adopted: rotation or
+sealing may have failed, so it cannot attest a safe independent allocation.
 
 **Destroy fence.** Destroy (and `abortAllocation`) takes the same allocation
 lock. `destroyDurableBranch()` refuses with `DurableEvidenceUndeliveredError`
@@ -2812,7 +2814,7 @@ commit after a partially applied failure:
 | `MergePlanCapabilityError` | A required planning guarantee is unavailable. `details.capability` identifies it. Enable native revision tracking when required; only bounded-copy refusals naming `details.planningScope: "full"` can be remedied by selecting full scope. |
 | `MergePlanningStaleError`    | The target moved while planning was reading it. This is an expected retry-and-replan outcome under concurrent writers: no plan was returned, so recapture the target and create a new plan before retrying.                                                                    |
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
-| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
+| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/allocation-owner mismatches.                                                                                                                       |
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
 | `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
 | `MergeReviewError`           | Code `GRAPH_MERGE_REVIEW`. Durable review evidence is malformed, unsupported, incomplete, or inconsistent, or review options cannot be represented safely.                                                                                                                     |

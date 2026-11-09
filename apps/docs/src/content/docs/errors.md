@@ -415,7 +415,7 @@ if (isErr(applied)) {
 | `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
 | `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
 | `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
-| `MergePlanOriginMismatchError` | `GRAPH_ALLOCATION_OWNER_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `MergePlanOwnerMismatchError` | `GRAPH_ALLOCATION_OWNER_MISMATCH` | The plan and target have different allocation owners (origin or namespace), even if their numeric revisions match. |
 | `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
 | `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
 
@@ -1144,7 +1144,7 @@ to the three TypeGraph-capture guards.
 ### Recorded allocation ownership and lookup
 
 `GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_OWNER_MISMATCH`.
-Merge origin refusals preserve their merge error class and use that same code. Match
+Merge owner refusals preserve their merge error class and use that same code. Match
 this code to retire checkpoints, plans, or requests after a reset or fork rotation;
 a retry against the same retired owner cannot repair it.
 
@@ -1154,6 +1154,8 @@ a retry against the same retired owner cannot repair it.
 | `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
 | `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
 | `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
+| `ALLOCATION_OWNER_REQUIRES_TRACKING` | Native owner access or rotation requires the Store option `revisionTracking: true` or TypeGraph-owned `history: true`. |
+| `EXTERNAL_RECORDED_OWNER_REQUIRED` | Public owner capture found no owner for the configured external source. Historical reads without a bound owner instead raise `GraphAllocationMismatchError` with code `GRAPH_ALLOCATION_OWNER_MISMATCH`. |
 | `EXTERNAL_RECORDED_OWNER_INVALID` | An external recorded relation's `owner` option is not a reader function. |
 | `RECORDED_RELATIONS_MISSING` | Required captured relations or the allocation log are missing; complete base-schema adoption before writing. |
 
@@ -1500,8 +1502,11 @@ try {
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
 | `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
 
-External recorded sources without an owner refuse with `ConfigurationError` and
-`details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Configure the source owner reader
-for `recordedReadOwner()` and historical reads. Native allocation ownership and
-rotation require the `revisionTracking: true` or `history: true` Store option and
-otherwise raise `ConfigurationError` with `details.code: "ALLOCATION_OWNER_REQUIRES_TRACKING"`.
+`recordedReadOwner()` on an external source without an owner raises `ConfigurationError`
+with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Historical reads compare the supplied
+checkpoint owner with the actual source owner and raise `GraphAllocationMismatchError`
+with code `GRAPH_ALLOCATION_OWNER_MISMATCH` if it is absent or different. Missing physical
+relations instead raise `ConfigurationError` with `details.code: "RECORDED_RELATIONS_MISSING"`.
+Native owner access and rotation require the `revisionTracking: true` or TypeGraph-owned
+`history: true` Store option; otherwise they raise `ConfigurationError` with
+`details.code: "ALLOCATION_OWNER_REQUIRES_TRACKING"`.

@@ -115,7 +115,7 @@ import {
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,
   MergePlanningStaleError,
-  MergePlanOriginMismatchError,
+  MergePlanOwnerMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   StaleMergePlanError,
@@ -3789,7 +3789,7 @@ function assertMergeAllocationOwner(
   try {
     assertGraphAllocationOwner(expected, actual, { graphId });
   } catch (error) {
-    throw new MergePlanOriginMismatchError(
+    throw new MergePlanOwnerMismatchError(
       "The merge checkpoint belongs to a different or retired allocation.",
       {
         cause: error,
@@ -4138,7 +4138,7 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
     target.graphId,
   );
   if (liveOrigin !== artifact.target.revision.origin) {
-    throw new MergePlanOriginMismatchError(
+    throw new MergePlanOwnerMismatchError(
       "The merge plan belongs to a different target revision origin.",
       {
         details: {
