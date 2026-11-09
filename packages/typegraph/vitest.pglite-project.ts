@@ -41,6 +41,7 @@ export const PGLITE_TEST_FILES = [
   "tests/materialize-trigram-extension.test.ts",
   "tests/node-claim-write-fusion.test.ts",
   "tests/node-fulltext-write-fusion.test.ts",
+  "tests/node-row-lock-plan.test.ts",
   "tests/node-vector-write-fusion.test.ts",
   "tests/optimistic-tier.test.ts",
   "tests/recorded-capture-write-parity.test.ts",

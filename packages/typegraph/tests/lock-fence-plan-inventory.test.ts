@@ -250,10 +250,10 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/sqlite.ts",
-    line: "writersSerialize: serializesWriters(resolveWriteFencePlan(fenceTarget)),",
+    line: "nodeRowLocks: resolveNodeRowLockPlan(resolveWriteFencePlan(fenceTarget)),",
     site: "J23",
     reason:
-      "The SQLite operation layer resolves the plan to learn whether its writers serialize; under engine-serialized (every bundled SQLite driver) the closed node-delete program omits its leading row-lock slots, which would lock nothing. PostgreSQL reads the same fact off J16's plan.",
+      "The SQLite operation layer resolves the plan into its node-row lock plan (`resolveNodeRowLockPlan`); under engine-serialized (every bundled SQLite driver) it takes no node-row locks, so the closed node-delete program omits its leading lock slots, which would lock nothing. PostgreSQL resolves the same decision off J16's plan.",
   },
   {
     file: "store/operations/node-operations.ts",
