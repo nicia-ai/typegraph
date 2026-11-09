@@ -62,6 +62,7 @@ export const GRAPH_RELATION_KEYS = [
   "kindRemovals",
   "reconciliationMarkers",
   "recordedAnchors",
+  "storeOperations",
 ] as const;
 
 export type GraphRelationKey = (typeof GRAPH_RELATION_KEYS)[number];
@@ -187,6 +188,12 @@ const BEHAVIOR = {
   },
   recordedEdges: {
     clear: { kind: "delete", order: 3, missingTable: "tolerated" },
+    role: "content",
+    provisionedBy: "base",
+    workingCopyClonePolicy: COPY_GRAPH_ROWS,
+  },
+  storeOperations: {
+    clear: { kind: "delete", order: 21, missingTable: "tolerated" },
     role: "content",
     provisionedBy: "base",
     workingCopyClonePolicy: COPY_GRAPH_ROWS,

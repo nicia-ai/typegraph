@@ -50,6 +50,7 @@ export type SqliteTableNames = Readonly<{
   recordedEdges: string;
   recordedClock: string;
   recordedAnchors: string;
+  storeOperations: string;
   revisionOrigins: string;
   revisionChanges: string;
   identityAssertions: string;
@@ -93,6 +94,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   recordedAnchors: "typegraph_recorded_anchors",
+  storeOperations: "typegraph_store_operations",
   revisionOrigins: "typegraph_revision_origins",
   revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
@@ -262,6 +264,19 @@ export function createSqliteTables(
       primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
       index(systemIndexName(n.recordedAnchors, "time_idx")).on(t.graphId, t.origin, t.recordedAt, t.revision),
     ],
+  );
+
+  const storeOperations = sqliteTable(
+    n.storeOperations,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      scope: text("scope").notNull(),
+      idempotencyKey: text("idempotency_key").notNull(),
+      operationDigest: text("operation_digest").notNull(),
+      evidence: text("evidence").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] })],
   );
 
   const revisionOrigins = sqliteTable(
@@ -649,6 +664,7 @@ export function createSqliteTables(
     recordedEdges,
     recordedClock,
     recordedAnchors,
+    storeOperations,
     revisionOrigins,
     revisionChanges,
     identityAssertions,

@@ -11,6 +11,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
     "supported": true,
   },
   "durableEdgeMatchIdentity": true,
+  "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "root",
     "interactiveTransactions": true,
@@ -244,6 +245,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
     "supported": true,
   },
   "durableEdgeMatchIdentity": true,
+  "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "root",
     "interactiveTransactions": true,
@@ -452,6 +454,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
     "supported": true,
   },
   "durableEdgeMatchIdentity": true,
+  "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "none",
     "interactiveTransactions": true,
@@ -659,6 +662,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
     "supported": true,
   },
   "durableEdgeMatchIdentity": true,
+  "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "none",
     "interactiveTransactions": true,
@@ -1098,6 +1102,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_store_operations" (
+  "graph_id" TEXT NOT NULL,
+  "origin" TEXT NOT NULL,
+  "scope" TEXT NOT NULL,
+  "idempotency_key" TEXT NOT NULL,
+  "operation_digest" TEXT NOT NULL,
+  "evidence" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "origin", "scope", "idempotency_key")
+);",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_origins" (
   "graph_id" TEXT NOT NULL,
   "origin" TEXT NOT NULL,
@@ -1493,6 +1509,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       7,
       "<<TIMESTAMP>>",
       7,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      8,
+      "<<TIMESTAMP>>",
+      8,
+      "<<TIMESTAMP>>",
+      8,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -2555,6 +2588,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_store_operations" (
+  "graph_id" TEXT NOT NULL,
+  "origin" TEXT NOT NULL,
+  "scope" TEXT NOT NULL,
+  "idempotency_key" TEXT NOT NULL,
+  "operation_digest" TEXT NOT NULL,
+  "evidence" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "origin", "scope", "idempotency_key")
+);",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_origins" (
   "graph_id" TEXT NOT NULL,
   "origin" TEXT NOT NULL,
@@ -2950,6 +2995,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       7,
       "<<TIMESTAMP>>",
       7,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      8,
+      "<<TIMESTAMP>>",
+      8,
+      "<<TIMESTAMP>>",
+      8,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -3566,6 +3628,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_store_operations" (
+  "graph_id" TEXT NOT NULL,
+  "origin" TEXT NOT NULL,
+  "scope" TEXT NOT NULL,
+  "idempotency_key" TEXT NOT NULL,
+  "operation_digest" TEXT NOT NULL,
+  "evidence" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "origin", "scope", "idempotency_key")
+);",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_origins" (
   "graph_id" TEXT NOT NULL,
   "origin" TEXT NOT NULL,
@@ -3945,6 +4019,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       7,
       "<<TIMESTAMP>>",
       7,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      8,
+      "<<TIMESTAMP>>",
+      8,
+      "<<TIMESTAMP>>",
+      8,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },
@@ -4811,6 +4902,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_store_operations" (
+  "graph_id" TEXT NOT NULL,
+  "origin" TEXT NOT NULL,
+  "scope" TEXT NOT NULL,
+  "idempotency_key" TEXT NOT NULL,
+  "operation_digest" TEXT NOT NULL,
+  "evidence" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "origin", "scope", "idempotency_key")
+);",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_origins" (
   "graph_id" TEXT NOT NULL,
   "origin" TEXT NOT NULL,
@@ -5190,6 +5293,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       7,
       "<<TIMESTAMP>>",
       7,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      8,
+      "<<TIMESTAMP>>",
+      8,
+      "<<TIMESTAMP>>",
+      8,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },

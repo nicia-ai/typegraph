@@ -71,6 +71,17 @@ import {
   type TransactionReceipt,
   type TransactionReadBackend,
 } from "..";
+import {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  type StoreOperationTarget,
+  type StoreOperationRequest,
+  type StoreOperationOutcome,
+  type StoreOperationEvidence,
+  type DurableOperationError,
+  type Result,
+} from "../dist/graph-merge";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -1341,3 +1352,16 @@ function classifyExtensionError(error: GraphExtensionError): string {
   return "unknown";
 }
 expectType<(error: GraphExtensionError) => string>(classifyExtensionError);
+
+// Ordinary durable outcomes are accessible without importing branch lifecycle APIs.
+expectType<Promise<StoreOperationTarget>>(captureStoreOperationTarget(store));
+declare const persistedOperationRequest: StoreOperationRequest;
+expectType<
+  Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>
+>(getStoreOperation(store, persistedOperationRequest));
+expectType<Promise<Result<StoreOperationOutcome, DurableOperationError>>>(
+  operateStore(store, persistedOperationRequest, (tx, mutation) => {
+    void tx.nodes;
+    return Promise.resolve(mutation);
+  }),
+);

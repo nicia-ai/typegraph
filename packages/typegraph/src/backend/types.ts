@@ -322,6 +322,8 @@ export type {
 export type BackendCapabilities = Readonly<{
   /** Retains TypeGraph allocation anchors atomically, with an indexed time lookup. */
   recordedAnchorLookup?: boolean;
+  /** Atomically retains caller-key mutation outcomes in the configured Store operation relation. */
+  durableStoreOperations?: boolean;
   /** How this backend executes work and establishes atomicity. */
   execution: Readonly<{
     /** Whether the backend can hold an interactive callback/session transaction. */

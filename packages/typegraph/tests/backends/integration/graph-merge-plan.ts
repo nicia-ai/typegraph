@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   asNodeId,
   createAdapterStoreWithSchema,
+  createStoreWithSchema,
   defineGraph,
   defineNode,
   type Store,
@@ -109,6 +110,112 @@ export function registerGraphMergePlanIntegrationTests(
             target: { ...input.target, revision },
           }),
         ).rejects.toThrow();
+      } finally {
+        await source.close();
+      }
+    });
+
+    it("returns the exact terminal apply receipt despite a later commit before the response", async () => {
+      const base = await context.createHistoryStore(graph);
+      const node = await base.nodes.Person.create({
+        name: "before",
+        email: "before@example.test",
+      });
+      const source = await makeBranch(context, base, "receipt-source");
+      try {
+        await source.store.nodes.Person.update(node.id, { name: "applied" });
+        const plan = unwrap(await planMerge(base, [source]));
+        const backend = context.getBackend();
+        let armed = false;
+        let advanced = false;
+        const [observed] = await createStoreWithSchema(
+          graph,
+          deriveBackend(backend, {
+            async transaction(callback, options) {
+              const result = await backend.transaction(callback, options);
+              if (armed && !advanced) {
+                advanced = true;
+                await base.nodes.Person.update(node.id, { name: "later" });
+              }
+              return result;
+            },
+          }),
+          { history: true },
+        );
+        armed = true;
+        const report = unwrap(
+          await applyMergePlan(observed, plan, {
+            async afterApply(tx) {
+              await tx.nodes.Person.create(
+                { name: "callback", email: "callback@example.test" },
+                { id: "callback" },
+              );
+            },
+          }),
+        );
+        expect(advanced).toBe(true);
+        const recorded = requireDefined(report.receipt.recorded);
+        expect(await base.recordedNow()).not.toBe(recorded);
+        expect(await base.nodes.Person.getById(node.id)).toMatchObject({
+          name: "later",
+        });
+        const atApply = base.asOfRecorded(recorded);
+        expect(await atApply.nodes.Person.getById(node.id)).toMatchObject({
+          name: "applied",
+        });
+        expect(
+          await atApply.nodes.Person.getById(asNodeId("callback")),
+        ).toMatchObject({ name: "callback" });
+        expect(report.receipt.writes.nodes["Person"]).toBe(2);
+      } finally {
+        await source.close();
+      }
+    });
+
+    it("reports an owned no-op transaction receipt and no recorded anchor when history is disabled", async () => {
+      for (const history of [true, false]) {
+        const base =
+          history ?
+            await context.createHistoryStore(graph)
+          : await context.createStore(graph, { revisionTracking: true });
+        const source = await makeBranch(
+          context,
+          base,
+          `empty-${String(history)}`,
+        );
+        try {
+          const plan = unwrap(await planMerge(base, [source]));
+          const report = unwrap(await applyMergePlan(base, plan));
+          expect(report.receipt.writes.total).toBe(0);
+          expect(report.receipt.recorded !== undefined).toBe(history);
+        } finally {
+          await source.close();
+        }
+      }
+    });
+
+    it("returns no successful apply receipt after callback rollback", async () => {
+      const base = await context.createHistoryStore(graph);
+      const source = await makeBranch(context, base, "rollback-receipt");
+      try {
+        await source.store.nodes.Person.create(
+          { name: "staged", email: "staged@example.test" },
+          { id: "staged" },
+        );
+        const plan = unwrap(await planMerge(base, [source]));
+        const before = await base.recordedNow();
+        const failed = await applyMergePlan(base, plan, {
+          afterApply() {
+            throw new Error("rollback receipt");
+          },
+        });
+        expect(isErr(failed)).toBe(true);
+        expect(await base.recordedNow()).toBe(before);
+        expect(
+          await base.nodes.Person.getById(asNodeId("staged")),
+        ).toBeUndefined();
+        const report = unwrap(await applyMergePlan(base, plan));
+        expect(report.receipt.recorded).toBeDefined();
       } finally {
         await source.close();
       }

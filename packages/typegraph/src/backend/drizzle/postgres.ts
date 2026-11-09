@@ -100,6 +100,7 @@ import {
   isInsufficientResourcesError,
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
+  isPostgresLockTimeout,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
 import {
@@ -685,13 +686,6 @@ function postgresLockTimeoutMilliseconds(value: string): number | undefined {
       return undefined;
     }
   }
-}
-
-/** Driver errors may wrap PostgreSQL's lock-not-available SQLSTATE. */
-function isPostgresLockTimeout(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  if ("code" in error && error.code === "55P03") return true;
-  return "cause" in error && isPostgresLockTimeout(error.cause);
 }
 
 /**
@@ -1309,6 +1303,7 @@ function buildPostgresEngineProfileInternal(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     recordedAnchors: getTableName(tables.recordedAnchors),
+    storeOperations: getTableName(tables.storeOperations),
     revisionOrigins: getTableName(tables.revisionOrigins),
     revisionChanges: getTableName(tables.revisionChanges),
     identityAssertions: getTableName(tables.identityAssertions),
@@ -1920,6 +1915,7 @@ function buildPostgresEngineProfileInternal(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
     recordedAnchorsDdl: [
       generatePgCreateTableSQL(tables.recordedAnchors),
       ...generatePgCreateIndexSQL(tables.recordedAnchors),

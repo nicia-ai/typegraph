@@ -58,6 +58,7 @@ import {
 } from "./durable-branch";
 import {
   describeCause,
+  DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
   DurableOperationRequestError,
@@ -90,11 +91,32 @@ export type DurableOperationUnsupportedDimension =
  * `mutation` is the host's opaque, JSON-safe description of the graph change;
  * `metadata` is opaque, JSON-safe host evidence TypeGraph never interprets.
  */
-export type DurableBranchOperationRequest = Readonly<{
+export type DurableOperationRequest = Readonly<{
   idempotencyKey: string;
   metadata: JsonValue;
   mutation: JsonValue;
 }>;
+
+/** Request contract shared by branch hosts and ordinary Stores. */
+export type DurableBranchOperationRequest = DurableOperationRequest;
+
+/** Maximum UTF-8 bytes admitted for a new caller key. Retained keys remain readable. */
+export const DURABLE_OPERATION_KEY_MAX_BYTES = 256;
+
+/** Retained evidence and lookup keys predate the current admission limit. */
+function isDurableOperationKey(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Admission predicate; shared by every durable mutation API before callbacks. */
+export function isNewDurableOperationKey(value: unknown): value is string {
+  return (
+    isDurableOperationKey(value) &&
+    value.length <= DURABLE_OPERATION_KEY_MAX_BYTES &&
+    new TextEncoder().encode(value).byteLength <=
+      DURABLE_OPERATION_KEY_MAX_BYTES
+  );
+}
 
 /**
  * The canonical operation handed to the strategy: the request plus the
@@ -286,11 +308,37 @@ function requireDescriptorOwner<
   return { ok: true, origin: durableOriginOfDescriptor(descriptor) };
 }
 
+function assertDurableOperationPayload(
+  request: Readonly<{ metadata: unknown; mutation: unknown }>,
+): void {
+  assertJsonValue(request.metadata, "metadata", "Durable operation");
+  assertJsonValue(request.mutation, "mutation", "Durable operation");
+}
+
 /** Validates JSON safety and shape of a caller-supplied operation request. */
-async function normalizeOperationRequest(
-  request: DurableBranchOperationRequest,
+export async function normalizeDurableOperationRequest(
+  input: unknown,
+  keyUse: "new" | "retained" = "new",
 ): Promise<Result<DurableBranchOperation, DurableOperationRequestError>> {
-  const rawRequest: unknown = request;
+  let rawRequest: unknown;
+  try {
+    // Validate before cloning: structuredClone erases user-defined class prototypes.
+    if (typeof input === "object" && input !== null && !Array.isArray(input)) {
+      const original = input as Readonly<Record<string, unknown>>;
+      assertDurableOperationPayload({
+        metadata: original["metadata"],
+        mutation: original["mutation"],
+      });
+    }
+    rawRequest = structuredClone(input);
+  } catch (error) {
+    return err(
+      new DurableOperationRequestError(
+        "Durable operation request must be serializable data.",
+        { cause: error },
+      ),
+    );
+  }
   if (
     typeof rawRequest !== "object" ||
     rawRequest === null ||
@@ -302,20 +350,21 @@ async function normalizeOperationRequest(
       ),
     );
   }
+  const request = rawRequest as DurableOperationRequest;
   if (
-    typeof request.idempotencyKey !== "string" ||
-    request.idempotencyKey.length === 0
+    !(keyUse === "new" ?
+      isNewDurableOperationKey(request.idempotencyKey)
+    : isDurableOperationKey(request.idempotencyKey))
   ) {
     return err(
       new DurableOperationRequestError(
-        "Durable operation request is malformed: idempotencyKey must be a non-empty string.",
-        { details: { idempotencyKey: request.idempotencyKey } },
+        `Durable operation request is malformed: idempotencyKey must contain 1–${DURABLE_OPERATION_KEY_MAX_BYTES} UTF-8 bytes.`,
+        { details: { maxBytes: DURABLE_OPERATION_KEY_MAX_BYTES } },
       ),
     );
   }
   try {
-    assertJsonValue(request.metadata, "metadata", "Durable operation");
-    assertJsonValue(request.mutation, "mutation", "Durable operation");
+    assertDurableOperationPayload(request);
   } catch (error) {
     return err(
       new DurableOperationRequestError(
@@ -356,13 +405,10 @@ async function normalizeStoredEvidence(
     );
   }
   const record = evidence as Readonly<Record<string, unknown>>;
-  if (
-    typeof record["idempotencyKey"] !== "string" ||
-    record["idempotencyKey"].length === 0
-  ) {
+  if (!isDurableOperationKey(record["idempotencyKey"])) {
     return err(
       new DurableOperationEvidenceError(
-        "Durable operation evidence needs a non-empty idempotency key.",
+        "Durable operation evidence needs a nonempty idempotency key.",
         { details: { expectedKey: expectedIdempotencyKey } },
       ),
     );
@@ -648,7 +694,10 @@ export async function operateDurableBranch<
 ): Promise<Result<DurableOperationOutcome, DurableOperationError>> {
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
-  const normalized = await normalizeOperationRequest(request);
+  const normalized = await normalizeDurableOperationRequest(
+    request,
+    "retained",
+  );
   if (isErr(normalized)) return normalized;
 
   if (strategy.operations === undefined) {
@@ -659,6 +708,32 @@ export async function operateDurableBranch<
   }
 
   try {
+    if (!isNewDurableOperationKey(normalized.data.idempotencyKey)) {
+      // Old keys may replay retained evidence, but must never enter mutation.
+      const retained = await getDurableOperation(
+        descriptor,
+        strategy,
+        normalized.data.idempotencyKey,
+      );
+      if (isErr(retained)) return retained;
+      if (retained.data === undefined)
+        return err(
+          new DurableOperationRequestError(
+            "New durable operation keys exceed the admission limit.",
+            { details: { maxBytes: DURABLE_OPERATION_KEY_MAX_BYTES } },
+          ),
+        );
+      if (retained.data.operationDigest !== normalized.data.operationDigest)
+        return err(
+          new DurableOperationConflictError(
+            "The retained key is bound to a different payload.",
+          ),
+        );
+      return await normalizeOperationOutcome(
+        { outcome: "replayed", evidence: retained.data },
+        normalized.data,
+      );
+    }
     const outcome: unknown = await strategy.operations.operate({
       descriptor: descriptor.store,
       descriptorVersion: descriptor.version,
@@ -696,6 +771,12 @@ export async function getDurableOperation<
 ): Promise<
   Result<DurableBranchOperationEvidence | undefined, DurableOperationError>
 > {
+  if (!isDurableOperationKey(idempotencyKey))
+    return err(
+      new DurableOperationRequestError(
+        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
+      ),
+    );
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
   if (strategy.operations === undefined) {
@@ -845,6 +926,12 @@ export async function markDurableOperationDelivered<
 ): Promise<
   Result<DurableBranchOperationEvidence | undefined, DurableOperationError>
 > {
+  if (!isDurableOperationKey(idempotencyKey))
+    return err(
+      new DurableOperationRequestError(
+        "A durable operation lookup or acknowledgement requires a nonempty caller key.",
+      ),
+    );
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
   if (strategy.operations === undefined) {

@@ -14,6 +14,7 @@
 
 import type { RecordedInstant } from "../core/temporal";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
+import type { TransactionReceipt } from "../store/types";
 import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type {
   EdgeId,
@@ -673,10 +674,11 @@ export type MergedCounts = Readonly<{
   identity: Readonly<{ asserted: number; retracted: number }>;
 }>;
 
-/**
- * The full result of a {@link merge}: counts, every resolution/conflict/
- * reconciliation/drop, and the report-only provenance index.
- */
+/** Successful application through an owned transaction, with its terminal receipt. */
+export type AppliedMergeReport<G extends GraphDef = GraphDef> = MergeReport<G> &
+  Readonly<{ receipt: TransactionReceipt }>;
+
+/** Counts, resolutions, conflicts, and provenance for a merge; in-transaction reports do not claim a terminal receipt. */
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
   merged: MergedCounts;
   resolutions: readonly EntityResolution[];

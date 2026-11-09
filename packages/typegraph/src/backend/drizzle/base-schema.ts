@@ -77,6 +77,11 @@ export const BASE_SCHEMA_RELEASES = [
     id: "recorded-anchor-log",
     orderedShapeDigests: { postgres: "eb61608f4b1141bb848264da45be69d895b2e0048b16b8cfc797e23c0f7ad81b", sqlite: "f35830b0c0c4de107858bbc5a09b701548e866d0cddd7c3ed535f3bb3c04e621" },
   },
+  {
+    version: 8,
+    id: "durable-store-operation-outcomes",
+    orderedShapeDigests: { postgres: "3f3ce0cc5077fc1b7c9e414494863e9d7fd036f0f15e63016cda3cf42f6bfd51", sqlite: "4af4a4e35c414a6022745c1178086b424bf9488bc73ca84b5f70c31bdf298b1c" },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {

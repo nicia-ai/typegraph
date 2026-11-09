@@ -23,6 +23,7 @@ import {
 } from "../src/backend/drizzle/operations/shared";
 import { tables as sqliteTables } from "../src/backend/drizzle/sqlite";
 import {
+  databaseRetryDisposition,
   isDuplicatePrimaryKeyError,
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
@@ -908,4 +909,74 @@ describe("edge match-identity provisioning error classifiers", () => {
       ),
     ).toBe(false);
   });
+});
+
+describe("database retry disposition", () => {
+  it.each([
+    "55P03",
+    "08006",
+    "57P01",
+    "25P03",
+    "57P05",
+    "ECONNRESET",
+    "EPIPE",
+    "CONNECTION_CLOSED",
+    "SQLITE_BUSY",
+    "SQLITE_BUSY_SNAPSHOT",
+    "40001",
+    "40P01",
+  ])("recognizes wrapped %s as transient", (code) => {
+    expect(
+      databaseRetryDisposition(new Error("query failed", { cause: { code } })),
+    ).toBe("transient");
+  });
+  it.each([
+    ["23505", "unknown"],
+    ["42501", "unknown"],
+    ["08P01", "permanent"],
+    ["57014", "permanent"],
+    ["SQLITE_CONSTRAINT", "unknown"],
+    ["VALIDATION_ERROR", "unknown"],
+  ] as const)("classifies %s as %s", (code, disposition) => {
+    expect(databaseRetryDisposition({ code })).toBe(disposition);
+  });
+  it.each([
+    "Connection terminated unexpectedly",
+    "Client has encountered a connection error and is not queryable",
+    "timeout exceeded when trying to connect",
+  ])("recognizes codeless node-postgres %s", (message) => {
+    expect(
+      databaseRetryDisposition(
+        new Error("wrapped", { cause: new Error(message) }),
+      ),
+    ).toBe("transient");
+    expect(
+      databaseRetryDisposition(
+        Object.assign(new Error(message), { code: "42501" }),
+      ),
+    ).toBe("unknown");
+  });
+  it("uses libSQL's numeric stale snapshot evidence", () => {
+    expect(databaseRetryDisposition({ cause: { rawCode: 517 } })).toBe(
+      "transient",
+    );
+    expect(databaseRetryDisposition({ cause: { extendedCode: 517 } })).toBe(
+      "transient",
+    );
+  });
+  it("classifies an intentionally closed pg client as permanent", () => {
+    expect(
+      databaseRetryDisposition(
+        new Error("Client was closed and is not queryable"),
+      ),
+    ).toBe("permanent");
+  });
+  it.each(["08P01", "57014"])(
+    "does not let a transient cause override permanent %s",
+    (code) => {
+      expect(databaseRetryDisposition({ code, cause: { code: "40001" } })).toBe(
+        "permanent",
+      );
+    },
+  );
 });

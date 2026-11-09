@@ -1129,6 +1129,17 @@ including tombstones. Export the affected edges, hard-delete them, publish the
 new schema, and import them again so every row receives a key under the new
 declaration.
 
+### Base-schema version 8: durable Store outcomes
+
+Upgrade storage before enabling durable ordinary mutation outcomes. Version 8
+adds `typegraph_store_operations` (or the configured `storeOperations` name),
+with a primary key over graph, origin, namespace scope, and caller key. These
+structural objects are installed even when optional system indexes are skipped.
+The evidence relation is part of the graph's transactional storage, not a
+separately committed sidecar. Keep request targets with persisted retry requests;
+`clear()` retires both their origin and the evidence. See [durable ordinary
+mutation outcomes](/graph-merge#durable-ordinary-mutation-outcomes).
+
 ### Base-schema version 7: retained recorded anchors
 
 Upgrade the base schema before starting the new library against an existing
@@ -2516,6 +2527,7 @@ TypeGraph choosing separate query semantics per backend:
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 | Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |
 | Engine-native recorded time (`backend.recordedTime`)    | ✗ (TypeGraph-owned recorded relations via `history`) | ✗ (TypeGraph-owned recorded relations via `history`) | Neither bundled profile declares `recordedTime`, so `resolveRecordedTimeOwnership` derives `"typegraph-relations"` for both — `history: true` captures into TypeGraph's own recorded relations and clock, identically on both dialects, and every recorded-time integration suite and the parity snapshot run unchanged. A backend that supplies `recordedTime` (and the co-required `lineage`) reads and writes recorded time through its own engine instead: no TypeGraph capture, clock, or recorded relations, `RecordedInstant` anchors in the `e1:` form, and several TypeGraph-relation-specific surfaces refused — see [Engine-native recorded time](/queries/temporal#engine-native-recorded-time) and [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime). No bundled backend implements this today; the capability is proven by a PostgreSQL-family simulation (shared by the always-running `tests/backends/postgres/pglite-engine-native-recorded-time.test.ts` and the `POSTGRES_URL`-gated `tests/backends/postgres/engine-native-recorded-time.test.ts`, both built on `engine-native-recorded-time-simulation.ts`) that dresses TypeGraph's own recorded relations as a temporal-table expression, labeled as a simulation rather than a real third engine |
+| Durable ordinary mutation outcomes | ✓ (`revisionTracking` or `history`) | ✓ (`revisionTracking` or `history`) | Atomic caller-key outcomes through `operateStore`; requires `durableStoreOperations`, interactive transactions, and protected revision origins. |
 | Wall-clock recorded-anchor lookup | ✓ (`history: true`) | ✓ (`history: true`) | Indexed retained allocation-time lookup via `resolveRecordedInstant`. Requires `recordedAnchorLookup`; engine-native histories refuse. |
 | Recorded adjacency paging | ✓ (`history: true`) | ✓ (`history: true`) | Candidate-bounded incident edge/neighbor pages. Engine-native and external recorded sources refuse with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`. See [temporal queries](/queries/temporal). |
 
