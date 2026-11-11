@@ -1257,14 +1257,6 @@
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "MergePlanReview",
-    "member": "compositionOrphans",
-    "kind": "required-member-added",
-    "reason": "`MergePlanReview` gains `compositionOrphans`, the review section a version-2 plan artifact carries. The library produces the review inside the artifact; a consumer reads it. Declared in .changeset/composition.md under \"Breaking\".",
-    "issue": "#637"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "MetaEdgeProperties",
     "member": "transitive",
     "kind": "member-removed",
@@ -6736,14 +6728,6 @@
     "issue": "#637"
   },
   {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "KindRegistry",
     "member": "compositionEdgePopulation",
@@ -6795,14 +6779,6 @@
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "StoreRuntime",
     "member": "applyImportedNodeWindowEnd",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#637"
@@ -6864,14 +6840,6 @@
     "issue": "#637"
   },
   {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "KindRegistry",
     "member": "compositionEdgePopulation",
@@ -6923,14 +6891,6 @@
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "StoreRuntime",
     "member": "applyImportedNodeWindowEnd",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#637"
@@ -6992,14 +6952,6 @@
     "issue": "#637"
   },
   {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "KindRegistry",
     "member": "compositionEdgePopulation",
@@ -7051,14 +7003,6 @@
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "StoreRuntime",
     "member": "applyImportedNodeWindowEnd",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#637"
@@ -7120,14 +7064,6 @@
     "issue": "#637"
   },
   {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
     "entrypoint": "typegraph.api.md",
     "declaration": "KindRegistry",
     "member": "compositionEdgePopulation",
@@ -7179,14 +7115,6 @@
     "entrypoint": "typegraph.api.md",
     "declaration": "StoreRuntime",
     "member": "applyImportedNodeWindowEnd",
-    "kind": "required-member-added",
-    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
-    "issue": "#637"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "StoreRuntime",
-    "member": "readIdentityRestoreBaselineAtTarget",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#637"
@@ -7461,6 +7389,142 @@
     "member": "provenance",
     "kind": "required-member-added",
     "reason": "Deliberate breaking change declared in .changeset/composition.md: merge plans move to format 3, whose review carries composition orphans, so `MergePlanArtifact` gains the `MergePlanArtifactV3` arm and every new artifact is written in it. Callers obtain artifacts from the planners and pass them back unchanged; nobody authors one by hand. Formats 1 and 2 keep their own declarations and still parse for inspection; applying them is refused with UnsupportedMergePlanVersionError.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-core.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingValue",
+    "member": "[EMBEDDING_BRAND]",
+    "kind": "member-removed",
+    "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "markEffects",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `markEffects` so an in-transaction merge apply that rolls back to its savepoint can discard the hook outcomes and receipt counts buffered since the mark. The checker reaches it contravariantly only because `Store<G>` and its transaction context appear in parameter position on public functions, which over-approximates a hand-authored value.",
     "issue": "#637"
   }
 ]
